@@ -81,7 +81,7 @@
     {
       "file": "src/klayout_tools/cli/extract_cmd.py",
       "function": "_print_text",
-      "complexity": 24
+      "complexity": 25
     },
     {
       "file": "src/klayout_tools/cli/functional_verification_cmd.py",
@@ -149,14 +149,9 @@
       "complexity": 21
     },
     {
-      "file": "src/klayout_tools/drc.py",
+      "file": "src/klayout_tools/drc_klayout_engine.py",
       "function": "_parse_klayout_rdb_report",
       "complexity": 13
-    },
-    {
-      "file": "src/klayout_tools/drc.py",
-      "function": "run_drc",
-      "complexity": 47
     },
     {
       "file": "src/klayout_tools/economy.py",
@@ -164,7 +159,7 @@
       "complexity": 14
     },
     {
-      "file": "src/klayout_tools/equiv.py",
+      "file": "src/klayout_tools/equiv_sequential.py",
       "function": "_confirm_sequential_counterexample",
       "complexity": 11
     },
@@ -174,7 +169,7 @@
       "complexity": 11
     },
     {
-      "file": "src/klayout_tools/equiv.py",
+      "file": "src/klayout_tools/equiv_sequential.py",
       "function": "_run_sequential",
       "complexity": 18
     },
@@ -190,13 +185,13 @@
     },
     {
       "file": "src/klayout_tools/erc.py",
-      "function": "_validate_stackup",
-      "complexity": 13
-    },
-    {
-      "file": "src/klayout_tools/erc.py",
       "function": "run_erc",
       "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/erc_spec.py",
+      "function": "_validate_stackup",
+      "complexity": 13
     },
     {
       "file": "src/klayout_tools/eval.py",
@@ -216,12 +211,7 @@
     {
       "file": "src/klayout_tools/extract.py",
       "function": "run_extract",
-      "complexity": 63
-    },
-    {
-      "file": "src/klayout_tools/extract.py",
-      "function": "run_extract_klayout_engine",
-      "complexity": 13
+      "complexity": 67
     },
     {
       "file": "src/klayout_tools/extract_abstract.py",
@@ -246,7 +236,7 @@
     {
       "file": "src/klayout_tools/extract_parasitics.py",
       "function": "_inject_parasitics",
-      "complexity": 17
+      "complexity": 20
     },
     {
       "file": "src/klayout_tools/extract_passive_regions.py",
@@ -514,7 +504,7 @@
       "complexity": 13
     },
     {
-      "file": "src/klayout_tools/lvs.py",
+      "file": "src/klayout_tools/lvs_gate_level.py",
       "function": "_apply_gate_level_port_aliases",
       "complexity": 12
     },
@@ -541,7 +531,7 @@
     {
       "file": "src/klayout_tools/lvs.py",
       "function": "run_lvs",
-      "complexity": 60
+      "complexity": 61
     },
     {
       "file": "src/klayout_tools/lvs_mismatch.py",
@@ -645,28 +635,8 @@
     },
     {
       "file": "src/klayout_tools/place_and_route.py",
-      "function": "_stage_script_lines",
-      "complexity": 15
-    },
-    {
-      "file": "src/klayout_tools/place_and_route.py",
-      "function": "_validate_constraints",
-      "complexity": 13
-    },
-    {
-      "file": "src/klayout_tools/place_and_route.py",
-      "function": "_validate_macros",
-      "complexity": 17
-    },
-    {
-      "file": "src/klayout_tools/place_and_route.py",
-      "function": "_validate_power",
-      "complexity": 28
-    },
-    {
-      "file": "src/klayout_tools/place_and_route.py",
-      "function": "run_place_and_route",
-      "complexity": 27
+      "function": "_run_single_corner",
+      "complexity": 19
     },
     {
       "file": "src/klayout_tools/place_and_route_gds_merge.py",
@@ -677,6 +647,26 @@
       "file": "src/klayout_tools/place_and_route_gds_merge.py",
       "function": "_stamp_single_pin_def_net_names",
       "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/place_and_route_request.py",
+      "function": "_validate_constraints",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/place_and_route_request.py",
+      "function": "_validate_macros",
+      "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/place_and_route_request.py",
+      "function": "_validate_power",
+      "complexity": 28
+    },
+    {
+      "file": "src/klayout_tools/place_and_route_script.py",
+      "function": "_stage_script_lines",
+      "complexity": 14
     },
     {
       "file": "src/klayout_tools/place_and_route_sta.py",
@@ -750,6 +740,11 @@
     },
     {
       "file": "src/klayout_tools/sim.py",
+      "function": "_prepare_sim_request",
+      "complexity": 24
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
       "function": "_rollup_measurements",
       "complexity": 15
     },
@@ -766,7 +761,7 @@
     {
       "file": "src/klayout_tools/sim.py",
       "function": "_run_sim_corners",
-      "complexity": 54
+      "complexity": 28
     },
     {
       "file": "src/klayout_tools/sim.py",
@@ -779,7 +774,7 @@
       "complexity": 12
     },
     {
-      "file": "src/klayout_tools/size.py",
+      "file": "src/klayout_tools/size_topology.py",
       "function": "_parse_topology_log",
       "complexity": 13
     },
@@ -789,7 +784,7 @@
       "complexity": 26
     },
     {
-      "file": "src/klayout_tools/size.py",
+      "file": "src/klayout_tools/size_topology.py",
       "function": "_run_topology_size",
       "complexity": 18
     },
@@ -852,6 +847,11 @@
       "file": "src/klayout_tools/yield_analysis.py",
       "function": "run_yield",
       "complexity": 11
+    },
+    {
+      "file": "tests/helpers/extract_klayout_oracle.py",
+      "function": "run_extract_klayout_engine",
+      "complexity": 13
     },
     {
       "file": "tests/helpers/magic_oracle.py",

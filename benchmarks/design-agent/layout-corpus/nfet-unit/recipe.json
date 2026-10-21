@@ -1,0 +1,19 @@
+{
+  "schema": "klt.design_agent_benchmark.layout_recipe/1",
+  "pdk": "sky130A",
+  "steps": [
+    {
+      "id": "cell",
+      "verb": "gen",
+      "generator": "mos_array",
+      "cell_name": "nfet_unit",
+      "params": {
+        "rows": 1,
+        "cols": 1,
+        "dummy": 0,
+        "w_um": 2,
+        "l_um": 0.5
+      }
+    }
+  ]
+}

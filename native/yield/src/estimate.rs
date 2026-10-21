@@ -2039,6 +2039,54 @@ mod tests {
         assert!(m.yield_.empirical.confidence_interval.is_finite());
     }
 
+    fn assert_degenerate(xs: Vec<f64>, min: f64, max: f64) {
+        let req = request(
+            xs,
+            Limits {
+                min: Some(min),
+                max: Some(max),
+                target_yield: None,
+                ..Default::default()
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert!(m.yield_.normal.is_none());
+        assert!(m.capability.cp.is_none());
+        assert!(m.capability.cpk.is_none());
+        assert!(m.capability.sigma_to_spec.is_none());
+        assert_eq!(m.distribution.normality.verdict, "degenerate");
+    }
+
+    #[test]
+    fn a_bit_identical_sample_set_with_a_rounding_residue_is_degenerate() {
+        // 100 x 1.800306041: sum/n is not exactly the sample, so the naive
+        // stddev is ~1e-16, not 0.0 (issue #2909).
+        assert_degenerate(vec![1.800306041; 100], 1.764, 1.836);
+        assert_degenerate(vec![1.800306041; 2], 1.764, 1.836);
+    }
+
+    #[test]
+    fn a_tiny_but_real_relative_spread_is_not_degenerate() {
+        let xs: Vec<f64> = (0..100)
+            .map(|i| 1.8 * (1.0 + 1e-9 * (i % 7) as f64))
+            .collect();
+        let req = request(
+            xs,
+            Limits {
+                min: Some(1.764),
+                max: Some(1.836),
+                target_yield: None,
+                ..Default::default()
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        assert_ne!(
+            resp.measurements[0].distribution.normality.verdict,
+            "degenerate"
+        );
+    }
+
     #[test]
     fn a_non_normal_sample_set_is_flagged() {
         // A flat uniform grid: normality must be rejected, and the warning

@@ -93,7 +93,10 @@ Resolution rules, in one place so the contract is unambiguous:
   predictability: the caller took control of this net's plane, so silently
   moving it to a third one would make the drawn layer unpredictable — and is
   ill-defined when the two roles name one metal. A net that genuinely needs two
-  planes says so with a per-leg override instead. `legs[].layer_role` follows
+  planes says so with a per-leg override instead (and a leg that changes plane
+  *mid-route* says so per waypoint — see
+  [`gen-compose-plane-bearing-waypoints.md`](gen-compose-plane-bearing-waypoints.md),
+  #2930). `legs[].layer_role` follows
   the same rule for the one leg it names — and, because a leg (unlike a net) is
   also a candidate the spanning-tree search would otherwise re-pick, the rule
   extends there: a layer-pinned leg rejected on the plane it named is left

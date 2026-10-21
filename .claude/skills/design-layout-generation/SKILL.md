@@ -51,14 +51,15 @@ during #196's bring-up:
   pattern: place blocks so a connection only ever needs to reach the
   *nearer* (outer) same-row pin of its target, and pass
   `"add_guard_ring": false` to any block an external net reaches into.
-- **A composed circuit's connectivity nets are not addressable from `klt
-  sim`.** `klt gen-compose` draws no net labels, so `klt extract`'s
-  pin-promotion keeps only the deck's one globally-connected net (the
-  substrate tie) as a real `.SUBCKT` pin — every other net, including the
-  ones `klt gen-compose` just wired, is unreachable from a `klt sim`
-  testbench (#200). Loop B (DRC/LVS) is unaffected; **post-extraction `klt
-  sim` bias/measurement is still blocked** for a composed circuit's own
-  gates/bias/supply nodes until #200 closes.
+- **Label every net a testbench must reach.** `klt gen-compose` now drops
+  one `kdb.Text` net label per routed net on the PDK label layer paired with
+  the routing layer (#200, fixed), so `klt extract`'s pin-promotion keeps
+  those nets as named `.SUBCKT` pins instead of anonymous `$N` nets. A
+  single-pin node (a device gate, a bias/supply pad) cannot be routed, so
+  promote it with `pins[]` (#210). A `routing.layer_role` with no PDK
+  label-layer counterpart (e.g. `"poly"`) still routes but gets no label —
+  check `drc_hints.notes[]`. See `docs/cli/gen-compose.md` ("Net labels",
+  "Top-level pins without routing").
 
 ## Contract (design doc §2, S7)
 
@@ -85,6 +86,10 @@ during #196's bring-up:
    for the law, where to source the process's real matching constants, and
    the worked spec-to-parameter conversion (including the
    `topology="common_centroid"` vs. plain-`"array"` choice).
+   For a MOS capacitor (decoupling, compensation) use `mos_array` with
+   `mos_cap: true` and `add_guard_ring: true` (gf180mcu): S/D tied into one
+   `U<i>_SD` port, marker layer drawn, width floor taken from the deck's COMP
+   min-width rule (`docs/cli/gen.md`).
 2. **Compose multiple generated blocks into one placed-and-routed
    circuit.** `klt gen-compose <request.json>` places a row of already-
    generated blocks and routes two-pin *and* >2-pin (shared rail, fanout)

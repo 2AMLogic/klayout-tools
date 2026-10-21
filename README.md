@@ -107,6 +107,8 @@ klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
 klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene checks
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
+klt keepout-check design.gds --forbidden '[[67,20]]' --margin 10 --cells SPIRAL  # nothing on the forbidden layers within a margin of a cell
+klt tap-distance design.gds --subject '65/20' --taps '65/44' --max-distance-um 15  # every diffusion point within a Euclidean distance of a tap
 klt components design.gds --conductors '[{"name":"m1","layer":[68,20]}]'  # connected components, no deck
 klt clip design.gds --cell SUBCELL -o subcell.gds  # write a bbox region or named cell's subtree out as its own stream
 klt stats design.gds --per-layer         # densities, bbox, polygon counts
@@ -117,8 +119,10 @@ klt sim request.json                     # SPICE PVT corner sweep (ngspice), JSO
 klt size request.json                    # gm/Id sizing (single device or coupled diff-pair+mirror+tail), ngspice-scored
 klt yield mc.json --limits spec.json     # MC sample set + spec limits -> yield estimate with CIs, Cpk, sample-size verdict (Rust core)
 klt yield-samples mc.json --negative-control bad.json --format json  # two MC sim reports -> yield sample set carrying a negative control
+klt yield-csv trials.csv --group-by metric --value result --format json  # per-draw MC CSV -> yield sample set (hash-citable)
 klt yield-campaign spec.json             # launch + manage the MC campaign itself, sharded via klt sim, then yield's own pipeline unmodified
 klt yield-sensitivity campaign.json      # campaign parameter draws + output values -> ranked contribution to the spread (Rust core)
+klt yield-threshold records.json         # comparator/latch (stimulus, binary outcome) records -> probit threshold mu/sigma with CIs, per corner
 klt design-centering request.json        # yield-sensitivity ranking + sized device -> re-centering candidates
 klt layout-metrics design.gds            # normalized layout.json per block
 klt kb search bandgap                    # query the circuit-design knowledge base
@@ -150,6 +154,7 @@ klt deck hash --deck sky130              # the deck content hash this build will
 klt deck info --deck gf180mcu            # this install's own deck hash, device coverage, release status -- no input layout needed
 klt deck rules --deck sky130 --rule poly.width.1  # the numbers a deck enforces (rule id -> value in um), pinned to its content hash
 klt deck devices --deck gf180mcu --class diode_pd2nw_06v0  # what a layout must DRAW for a device class to be recognised (marker + requires/excludes)
+klt deck path --deck asap7              # installed path of the ASAP7 DRC-DSL script, for `klt drc --engine klayout --deck-file`
 klt env-provenance emit                  # committable environment provenance: repo-relative paths, pseudonymous host id, no login
 klt env-provenance scan records/*.md     # flag home-directory absolute paths leaked into committed evidence records
 klt env-provenance lint-envelope r.json  # flag ANY absolute host path in a committed JSON envelope, by field

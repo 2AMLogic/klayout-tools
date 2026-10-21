@@ -41,22 +41,42 @@ see ``docs/cli/sim.md``'s "Operating-point lint" section.
 
 import argparse
 import sys
+from typing import Any
 
 from ..env_provenance import render_path_field
 from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
-from ..sim import SimError, run_sim
+from ..sim import SimError, load_request, run_sim
+from ..sim_batch_async import read_job_status
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, run_sim_set
-from .output import EXIT_USAGE_ERROR, emit_error, emit_success
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
 
 EXIT_PASS = 0
 EXIT_MEASUREMENT_FAILED = 3
 EXIT_CORNER_ERRORED = 4
 
 
-def run(args: argparse.Namespace) -> int:
-    if getattr(args, "batch_set", None) is not None:
-        return _run_batch_set(args)
+def _print_dry_run_text(report: dict[str, Any]) -> None:
+    print(
+        f"klt sim --dry-run: valid ({report['unit_count']} unit(s), "
+        f"engine={report['engine']}, backend={report['backend']})"
+    )
+    for unit in report["units"]:
+        seeds = "".join(
+            f" {key}={unit[key]}"
+            for key in ("rndseed", "process_seed", "mismatch_seed")
+            if key in unit
+        )
+        print(f"  {unit['corner_id']}{seeds}")
+    for staged in report["staged_files"]:
+        print(f"  stage: {staged['name']} ({staged['kind']})")
+    for warning in report["warnings"]:
+        print(f"  warning: {warning}")
+
+
+def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
+    """Usage failures of the single-request form of ``klt sim`` (``None`` =
+    the arguments are fine)."""
     if args.request is None:
         # Keep the pre---batch-set contract: a bare ``klt sim`` is an
         # argparse-style usage failure (stderr message, SystemExit(2)).
@@ -65,16 +85,35 @@ def run(args: argparse.Namespace) -> int:
             "request (or --batch-set REQUEST...)\n"
         )
         raise SystemExit(2)
-    if getattr(args, "max_in_flight", None) is not None:
+    for flag, name in (
+        ("max_in_flight", "--max-in-flight"),
+        ("capacity_retries", "--capacity-retries"),
+    ):
+        if getattr(args, flag, None) is None:
+            continue
         return emit_error(
             "sim",
-            "--max-in-flight only applies with --batch-set",
+            f"{name} only applies with --batch-set",
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
+    return None
+
+
+def run(args: argparse.Namespace) -> int:
+    if getattr(args, "batch_set", None) is not None:
+        return _run_batch_set(args)
+    misuse = _reject_single_request_misuse(args)
+    if misuse is not None:
+        return misuse
     if getattr(args, "op_lint", False):
         return _run_op_lint(args)
+    if getattr(args, "job_status", None) is not None:
+        return _run_job_status(args)
+    return _run_sweep(args)
 
+
+def _run_sweep(args: argparse.Namespace) -> int:
     try:
         report = run_sim(
             args.request,
@@ -87,15 +126,38 @@ def run(args: argparse.Namespace) -> int:
             plot_dir=args.plot,
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
+            max_units_per_job=args.max_units_per_job,
+            max_concurrent_jobs=args.max_concurrent_jobs,
+            dry_run=getattr(args, "dry_run", False),
+            submit_only=getattr(args, "submit_only", False),
+            attach_job_id=getattr(args, "attach_job_id", None),
+            capacity_wait_s=getattr(args, "wait_for_capacity", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
     except OutputLockError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
+    write_failure = _write_report_out(report, args)
+    if write_failure is not None:
+        return write_failure
+    if report.get("status") == "submitted" and getattr(args, "submit_only", False):
+        # Issue #3073: submitted, not run -- there is no verdict to grade.
+        emit_success(report, args.format, _print_submitted_text)
+        return EXIT_PASS
+
+    if report.get("dry_run"):
+        # Issue #3064: a dry run reaching here passed every pre-dispatch
+        # check (a failure raised SimError above -> exit 1).
+        emit_success(report, args.format, _print_dry_run_text)
+        return EXIT_PASS
+
     deck_mode = report.get("mode") == "decks"
     emit_success(report, args.format, _print_deck_text if deck_mode else _print_text)
+    return _exit_code_for(report, deck_mode)
 
+
+def _exit_code_for(report: dict, deck_mode: bool) -> int:
     if deck_mode:
         # Issue #2804: deck-list requests carry no graded measurements, so
         # the 3 ("ran, a limit missed") outcome cannot arise -- the deck
@@ -114,6 +176,82 @@ def run(args: argparse.Namespace) -> int:
     return EXIT_PASS
 
 
+def _write_report_out(report: dict, args: argparse.Namespace) -> int | None:
+    """Write the ``--report-out`` file copy; return an exit code only on failure.
+
+    Issue #2975: an additive file copy of the envelope; stdout is unchanged.
+    Written before emitting so an unwritable path fails cleanly with the error
+    envelope rather than after a full report.
+    """
+    report_out = getattr(args, "report_out", None)
+    if not report_out:
+        return None
+    try:
+        write_json_file(report, report_out)
+    except OSError as exc:
+        return emit_error(
+            "sim",
+            f"could not write report to '{report_out}': {exc}",
+            args.format,
+        )
+    return None
+
+
+def _run_job_status(args: argparse.Namespace) -> int:
+    """``klt sim REQUEST --job-status JOB_ID``: one state read (issue #3073).
+
+    Exit ``0`` whenever the read succeeded -- whatever state the *job* is in
+    (``failed`` included): the exit code reports this read, the ``state``
+    field reports the job. ``1`` for an unknown job id or a transport error.
+    """
+    if getattr(args, "submit_only", False):
+        return emit_error(
+            "sim",
+            "--job-status cannot be combined with --submit-only",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
+    if getattr(args, "wait_for_capacity", None) is not None:
+        return emit_error(
+            "sim",
+            "--job-status cannot be combined with --wait-for-capacity: it "
+            "launches nothing",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
+    if args.backend not in (None, "batch"):
+        return emit_error(
+            "sim",
+            f"--job-status reads a batch job (got --backend {args.backend})",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
+    try:
+        status = read_job_status(load_request(args.request), args.job_status)
+    except SimError as exc:
+        return emit_error("sim", str(exc), args.format, code=exc.code)
+    emit_success(status, args.format, _print_job_status_text)
+    return EXIT_PASS
+
+
+def _print_submitted_text(report: dict) -> None:
+    print(f"submitted: {report['job_id']}  units: {report['unit_count']}")
+    print(f"job: {report['job_uri']}  launched_at: {report['launched_at']}")
+    print(f"poll with: klt sim <request> --job-status {report['job_id']}")
+
+
+def _print_job_status_text(status: dict) -> None:
+    print(f"job: {status['job_id']}  state: {status['state']}")
+    for key in ("detail", "elapsed_seconds", "updated_at"):
+        if key in status:
+            print(f"{key}: {status[key]}")
+    instance = status.get("instance") or {}
+    if instance:
+        kind = instance.get("instance_type", "-")
+        where = instance.get("availability_zone", "-")
+        print(f"instance: {kind} ({instance.get('lifecycle', '-')}, {where})")
+
+
 def _run_batch_set(args: argparse.Namespace) -> int:
     """``klt sim --batch-set``: submit a set of requests (issue #2869).
 
@@ -127,11 +265,14 @@ def _run_batch_set(args: argparse.Namespace) -> int:
         flag
         for flag, value in (
             ("a positional request", args.request),
-            ("--resume", args.resume),
+            ("--attach", getattr(args, "attach_job_id", None)),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
+            ("--submit-only", getattr(args, "submit_only", False)),
+            ("--job-status", getattr(args, "job_status", None)),
+            ("--wait-for-capacity", getattr(args, "wait_for_capacity", None)),
         )
-        if value
+        if value is not None and value is not False and value != ""
     ]
     if conflicts:
         return emit_error(
@@ -156,9 +297,11 @@ def _run_batch_set(args: argparse.Namespace) -> int:
                 if args.max_in_flight is not None
                 else DEFAULT_MAX_IN_FLIGHT
             ),
+            capacity_retries=args.capacity_retries or 0,
             max_workers=args.max_workers,
             hosts=args.hosts,
             budget_s=args.budget_s,
+            resume=args.resume,
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
         )
@@ -279,6 +422,29 @@ def _print_pdk(report: dict) -> None:
         )
 
 
+def _print_worker_pdk(report: dict) -> None:
+    """Surface the batch runner's PDK stamp comparison in text output (issue
+    #3946). Which library the simulator read used to be JSON-only
+    (`environment.remote.worker_environment`), so a run on a different PDK
+    revision than the one the client resolved read like a run on the client's.
+    No-op for a report without a worker capture (non-batch backends)."""
+    remote = (report.get("environment") or {}).get("remote") or {}
+    worker = remote.get("worker_environment")
+    if not isinstance(worker, dict):
+        return
+    comparison = worker.get("pdk_stamp_comparison")
+    if isinstance(comparison, dict) and comparison.get("status"):
+        line = f"pdk_stamp: {comparison['status']}"
+        if comparison.get("reason"):
+            line += f" ({comparison['reason']})"
+        print(line)
+        if comparison.get("warning"):
+            print(f"warning: {comparison['warning']}")
+    pdk = worker.get("pdk")
+    if isinstance(pdk, dict):
+        print(f"models_staged: {str(pdk.get('models_staged') is True).lower()}")
+
+
 def _print_deck_text(report: dict) -> None:
     """Text courtesy rendering for a deck-list report (issue #2804): one
     line per unit -- id, status, exit code, and where its streams landed --
@@ -296,6 +462,8 @@ def _print_deck_text(report: dict) -> None:
     env = report["environment"]
     print(f"engine: {env['engine']} {env['engine_version'] or '-'}")
     print(f"outdir: {report['outdir']}")
+    if env.get("resume"):
+        print(f"resume: skipped {env['resume']['resumed_units']} complete unit(s)")
     if env.get("remote"):
         remote = env["remote"]
         provider = remote.get("provider", "remote")
@@ -303,8 +471,9 @@ def _print_deck_text(report: dict) -> None:
         print(f"remote: {provider} {instance}")
     for unit in report["units"]:
         exit_desc = "-" if unit["exit_code"] is None else str(unit["exit_code"])
+        resumed_tag = " (resumed)" if unit.get("resumed") else ""
         print(
-            f"  {unit['id']} [{unit['status']}] exit={exit_desc} "
+            f"  {unit['id']} [{unit['status']}]{resumed_tag} exit={exit_desc} "
             f"duration={unit['duration_s']}s  {unit['stdout']}"
         )
         for diagnostic in unit["diagnostics"]:
@@ -343,6 +512,7 @@ def _print_text(report: dict) -> None:
     # the repo prints `<outside repo>`, never an absolute home path.
     print(f"models_lib: {render_path_field(env['models_lib'])}")
     _print_pdk(report)
+    _print_worker_pdk(report)
 
     budget = env.get("budget")
     if budget is not None:

@@ -265,7 +265,7 @@ Nothing is fabricated and nothing silently substitutes for it:
     "top": "adder4"
   },
   "gate": {
-    "sources": [".klt/synthesize/adder4_synth.v"],
+    "sources": [".klt/synthesize/adder4-v1/adder4_synth.v"],
     "top": "adder4",
     "liberty": "/path/to/sky130_fd_sc_hd__tt_025C_1v80.lib"
   },
@@ -276,10 +276,12 @@ Nothing is fabricated and nothing silently substitutes for it:
 }
 ```
 
+`gate.sources` here assumes the synthesize request pinned `"run_id": "adder4-v1"`; without a pinned `run_id` the directory is a generated `run-<UUID hex>`, so use the `netlist_path` from the synthesize response instead (see [`synthesize.md`](synthesize.md#artifacts-written-to-kltsynthesizerun_id)).
+
 | Field | Type | Description |
 | --- | --- | --- |
 | `gold` / `gate` | object | The two sides to compare. Required. |
-| `gold.sources` / `gate.sources` | array\<string\> | RTL/gate-level Verilog source file paths (`read_verilog` inputs), resolved relative to the request's own directory. Required, non-empty. |
+| `gold.sources` / `gate.sources` | array\<string\> | RTL/gate-level Verilog source file paths (`read_verilog` inputs), resolved relative to the request's own directory. Required, non-empty. `.sv`/`.svh` sources (case-insensitive) are read with `read_verilog -sv`; other extensions use plain `read_verilog`. SystemVerilog coverage is that of Yosys's `-sv` front end (issue #3797). |
 | `gold.top` / `gate.top` | string | That side's top module name. The two sides may legally use the *same* top module name (e.g. both `"top"`) — each is elaborated in its own namespace before comparison. Required. |
 | `gold.liberty` / `gate.liberty` | string \| omitted | A standard-cell liberty file, read via `read_liberty -ignore_miss_func` (no `-lib`, so each cell's liberty `function` string becomes real logic, not a blackbox) before that side's `sources`. **Required for a post-synthesis gate-level netlist** (e.g. `klt synthesize`'s own `netlist_path` output) — without it, the netlist's standard-cell instances have no logic definition and elaboration fails outright. Omit for self-contained RTL. |
 | `port_map` | object\<string,string\> \| null | The **I/O mapping** between the two sides, `{"<gate_port_name>": "<gold_port_name>"}` — only needed when a port was renamed between the two representations (e.g. by a synthesis or netlist-rewriting step that does not preserve top-level port names). Ports not listed are assumed identically named on both sides. Omit (or `null`) when both sides already share the same port names — the common case. |

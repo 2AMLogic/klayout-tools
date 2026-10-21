@@ -254,7 +254,7 @@ def test_render_text_lines_is_leak_free(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 _AUDITED_RECORD_LINE = (
-    "  - PDK: volare `gf180mcuD`, open_pdks `c6d73a3` "
+    "  - PDK: volare `gf180mcuD`, open_pdks `f6eeac7` "
     "(/Users/rwalters/.volare/gf180mcuD, found via search_root:~/.volare)"
 )
 

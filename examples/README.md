@@ -21,13 +21,23 @@ directory has its own README, start there.
   terminal" unit MOS device for `W` below `mos_array`/`diff_pair`'s
   `UNIT_MIN_W_UM` contact-fit floor, composed beside a real `klt gen
   mos_array` unit device in one cell (issue #1574). See its README.
+- [`row-mix-gf180/`](row-mix-gf180/) — a generic mixed-device, shared-diffusion,
+  fixed-pitch gf180mcu cell (inverter → transmission gate → NOR3 → inverter) with
+  an independent reference netlist, executed `klt drc`/`extract`/`lvs` receipts,
+  and a README separating committed source from receipts and listing what was
+  not run (issue #3969). See its README.
+- [`reset-coverage/`](reset-coverage/) — a `klt reset-coverage` worked example: a
+  tiny netlist exercising every reason code against stand-in cell models
+  (issue #2998). See its README.
 - [`drc/`](drc/) — minimal `klt drc` input: `generate.py` writes both
   `example.gds` and `example.drc.json`, the resulting violation report.
 - [`em/`](em/) — `klt mom` electromagnetic worked examples: block coupling,
   interconnect coupling, patch antenna, and spiral inductor fixtures.
 - [`functional-verification/`](functional-verification/) — `klt
   functional-verification` request files plus the RTL (`gcd.v`) and cocotb
-  test (`test_gcd.py`) they run, including a Verilator coverage variant.
+  test (`test_gcd.py`) they run, including a Verilator coverage variant and an
+  [`initial-state/`](functional-verification/initial-state/) gate-level
+  power-up-state example (`options.initial_state`).
 - [`kb/`](kb/) — knowledge-base worked examples (bandgap, LDO, oscillator,
   spiral inductor). See its README.
 - [`signoff/`](signoff/) — a minimal, runnable block manifest for `klt

@@ -321,6 +321,51 @@ Exit codes: `0` derived (document on stdout); `1` could not derive (any
 error above; JSON error envelope on stderr under `--format json`, stdout
 empty); `2` usage error (argparse — e.g. `--negative-control` missing).
 
+### Deriving a sample set from a per-draw CSV (`klt yield-csv`)
+
+A Monte Carlo harness that is not a `klt sim` request (a shell-driven ngspice
+campaign, say) usually persists one CSV row per draw. `klt yield-csv` turns
+that file into the sample-set document above, so nobody hand-writes (and
+quietly diverges on) the converter
+([#2931](https://github.com/2AMLogic/klayout-tools/issues/2931)). **Shape
+chosen: a derive step, mirroring `klt yield-samples`** — `klt yield`'s input
+contract is unchanged, the sample-set document stays the single internal shape
+into the estimator, and the ingest needs no native extension.
+
+```bash
+klt yield-csv trials.csv --group-by metric --value result \
+    --status-col status --pass-value ok --draw-col draw_index \
+    --unit V --min 1.15 --max 1.25 --format json > samples.json
+klt yield samples.json --format json > yield.json
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--group-by COL` | Each distinct value becomes one measurement (named after it), in first-seen order. |
+| `--value COL` | The draw's value. |
+| `--status-col COL --pass-value V` | Given together. A row whose status is not `V` counts `errored`; its value cell is not read. |
+| `--draw-col COL` | Optional. A repeated (group, draw) pair is rejected. Without it duplicates are accepted as separate draws. |
+| `--unit U`, `--min`, `--max`, `--target-yield` | Optional, applied to every measurement (`--limits` on `klt yield` still wins). |
+
+Rules: the file is read once and the same bytes are hashed and parsed (UTF-8,
+BOM and CRLF accepted). A passing row whose value is empty, non-numeric or
+non-finite (`nan`, `inf`) counts `errored` — never dropped, never a sample.
+Samples keep file order; the counts `klt yield` grades do not depend on it. A
+missing column, empty file, header-only file or a group with no usable draw is
+exit `1` with the JSON error envelope on stderr and stdout empty.
+
+The `--format json` output is the sample-set document plus `schema_version` and
+a `derivation.csv` block: `path` (as given; pass a repo-relative path if the
+document is committed), `content_hash` (`sha256:` of the CSV bytes), `rows`,
+and the column mapping used.
+
+**What `klt signoff` hashes.** Same as the two-report flow above: the pin is
+the hash of the **derived `samples.json`**, not the CSV. Re-deriving after the
+CSV changes moves the pin; editing the CSV without re-deriving is not
+re-checked (`derivation.csv.content_hash` is an audit trail, not live
+verification). Re-run `klt yield-csv` whenever the CSV changes. A runnable
+example lives in [`examples/yield/`](../../examples/yield/README.md).
+
 ### Spec-limits file (`--limits`)
 
 The statement of what the design is being held to. It **wins** over whatever
@@ -380,7 +425,7 @@ value `0.787`:
 | `consistent` | The sample set is not inconsistent with a normal. |
 | `rejected` | `A2*` exceeds the critical value — a warning says so, and the parametric estimate and Cpk should be treated as indicative only. |
 | `insufficient_samples` | `N < 8`, below where the critical values apply; normality was **not** tested. |
-| `degenerate` | Zero sample spread; the statistic is undefined. |
+| `degenerate` | Zero sample spread; the statistic is undefined. A bit-identical sample set, or one whose sample standard deviation is at or below `1e-12 * max(abs(mean), tiny)` (a floating-point rounding residue, e.g. 100 copies of `1.800306041`), counts as zero spread. A genuine relative spread of `1e-9` does not. |
 
 ### Two yield estimates, side by side
 
@@ -412,7 +457,7 @@ past where it is informative.
 | `sigma_to_spec_confidence_interval` | `3 ×` the `cpk` interval. |
 | `limiting_side` | `"lower"` or `"upper"` — which limit `cpk` is measured against. |
 
-All are `null` when the sample spread is zero (the fit is degenerate).
+All are `null` when the sample spread is zero (the fit is degenerate), using the same relative floor (`stddev <= 1e-12 * max(abs(mean), tiny)`) as the `degenerate` normality verdict.
 
 ### Sample-size verdict
 

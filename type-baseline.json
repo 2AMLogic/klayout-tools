@@ -1,0 +1,2784 @@
+{
+  "schema_version": 1,
+  "generated_by": "scripts/check_type_baseline.py --update-baseline (mypy 2.4.0 (compiled: yes))",
+  "diagnostics": [
+    {
+      "file": "src/klayout_tools/arith_gen.py",
+      "code": "index",
+      "message": "Value of type \"tuple[tuple[int, int], tuple[int, int]] | None\" is not indexable",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/characterize.py",
+      "code": "arg-type",
+      "message": "Argument \"output_pin\" to \"DerivedArc\" has incompatible type \"Any | None\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/characterize.py",
+      "code": "arg-type",
+      "message": "Argument \"related_pin\" to \"DerivedArc\" has incompatible type \"Any | None\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/characterize.py",
+      "code": "arg-type",
+      "message": "Argument \"related_pin\" to \"_side_inputs_from_request\" has incompatible type \"Any | None\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/characterize_arcs.py",
+      "code": "arg-type",
+      "message": "Argument \"measured_sense\" to \"DerivedArc\" has incompatible type \"tuple[str, bool]\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/characterize_arcs.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"tuple[str, bool]\", variable has type \"tuple[tuple[str, bool], ...]\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/characterize_arcs.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"tuple[tuple[tuple[str, bool], ...], str]\", variable has type \"tuple[tuple[str, bool], ...] | None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/cells_cmd.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"render_table\" has incompatible type \"list[tuple[str, Any, str, str, str, str, str, str]]\"; expected \"list[tuple[str, ...]]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/components_cmd.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"render_table\" has incompatible type \"list[tuple[Any, Any, str, str, str, str, str]]\"; expected \"list[tuple[str, ...]]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/economy_cmd.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"render_table\" has incompatible type \"list[tuple[Any, str, str, str]]\"; expected \"list[tuple[str, ...]]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/kb_cmd.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"render_table\" has incompatible type \"list[tuple[Any | str, Any | str, Any | str]]\"; expected \"list[tuple[str, ...]]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/layers_cmd.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"tuple[str, str, str, str, str, str, str, str]\", variable has type \"tuple[str, str, str, str, str]\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/layers_cmd.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"tuple[str, str, str, str, str, str, str]\", variable has type \"tuple[str, str, str, str, str]\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/pdk_cmd.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"render_table\" has incompatible type \"list[tuple[Any, Any | str, str, str]]\"; expected \"list[tuple[str, ...]]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/pdk_cmd.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"render_table\" has incompatible type \"list[tuple[Any, str, str]]\"; expected \"list[tuple[str, ...]]\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/cli/pdk_cmd.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"render_table\" has incompatible type \"list[tuple[Any, str]]\"; expected \"list[tuple[str, ...]]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/pdk_cmd.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"tuple[Any, str, str, str]\", variable has type \"tuple[Any, str, str]\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/pdk_cmd.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"tuple[str, str, str, str]\", variable has type \"tuple[str, str, str]\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/ring_check_cmd.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"render_table\" has incompatible type \"list[tuple[Any, Any, Any, str, Any]]\"; expected \"list[tuple[str, ...]]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/stats_cmd.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"render_table\" has incompatible type \"list[tuple[str, str, Any | str, str, str, str, str, str]]\"; expected \"list[tuple[str, ...]]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/cli/synthesize_cmd.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"render_table\" has incompatible type \"list[tuple[Any, str, str, str, str, str, str, Any | str]]\"; expected \"list[tuple[str, ...]]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/coverage.py",
+      "code": "union-attr",
+      "message": "Item \"None\" of \"Any | None\" has no attribute \"__iter__\" (not iterable)",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/coverage.py",
+      "code": "var-annotated",
+      "message": "Need type annotation for \"identities\" (hint: \"identities: list[<type>] = ...\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/__init__.py",
+      "code": "attr-defined",
+      "message": "\"object\" has no attribute \"flavour_option\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"replace\" of \"ExtractionDeck\" has incompatible type \"**dict[str, object]\"; expected \"RuleProvenance | None\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"replace\" of \"ExtractionDeck\" has incompatible type \"**dict[str, object]\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"replace\" of \"ExtractionDeck\" has incompatible type \"**dict[str, object]\"; expected \"tuple[BipolarDevice, ...]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"replace\" of \"ExtractionDeck\" has incompatible type \"**dict[str, object]\"; expected \"tuple[CapacitorDevice, ...]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"replace\" of \"ExtractionDeck\" has incompatible type \"**dict[str, object]\"; expected \"tuple[DiodeDevice, ...]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"replace\" of \"ExtractionDeck\" has incompatible type \"**dict[str, object]\"; expected \"tuple[MOSFlavour, ...]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"replace\" of \"ExtractionDeck\" has incompatible type \"**dict[str, object]\"; expected \"tuple[MomCapacitorDevice, ...]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"replace\" of \"ExtractionDeck\" has incompatible type \"**dict[str, object]\"; expected \"tuple[ResistorDevice, ...]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"replace\" of \"ExtractionDeck\" has incompatible type \"**dict[str, object]\"; expected \"tuple[int, int] | None\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"replace\" of \"ExtractionDeck\" has incompatible type \"**dict[str, object]\"; expected \"tuple[int, int]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"replace\" of \"ExtractionDeck\" has incompatible type \"**dict[str, object]\"; expected \"tuple[tuple[int, int] | None, ...]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"replace\" of \"ExtractionDeck\" has incompatible type \"**dict[str, object]\"; expected \"tuple[tuple[int, int], ...]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "attr-defined",
+      "message": "\"object\" has no attribute \"flavour_option\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "attr-defined",
+      "message": "\"object\" has no attribute \"flavours\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "code": "attr-defined",
+      "message": "\"object\" has no attribute \"name\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/design_centering.py",
+      "code": "operator",
+      "message": "Unsupported left operand type for * (\"None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/design_centering.py",
+      "code": "operator",
+      "message": "Unsupported operand types for * (\"None\" and \"float\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/design_centering.py",
+      "code": "operator",
+      "message": "Unsupported operand types for * (\"float\" and \"None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/drc.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"list[list[int]] | None\", variable has type \"list[list[Any]]\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/drc.py",
+      "code": "union-attr",
+      "message": "Item \"None\" of \"DerivedLayer | None\" has no attribute \"mode\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/drc_klayout_engine.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"Element[str] | None\", variable has type \"Element[str]\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/equiv.py",
+      "code": "return-value",
+      "message": "Incompatible return value type (got \"str | None\", expected \"str\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/equiv.py",
+      "code": "union-attr",
+      "message": "Item \"None\" of \"Any | None\" has no attribute \"get\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/equiv_sequential.py",
+      "code": "arg-type",
+      "message": "Argument \"resume_block\" to \"_resume_report_from_committed_stage1\" has incompatible type \"dict[str, Any] | None\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/erc.py",
+      "code": "index",
+      "message": "Invalid index type \"str | None\" for \"dict[str, str]\"; expected type \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/erc.py",
+      "code": "index",
+      "message": "Value of type \"dict[str, Any] | None\" is not indexable",
+      "count": 6
+    },
+    {
+      "file": "src/klayout_tools/eval.py",
+      "code": "index",
+      "message": "Invalid index type \"Any | None\" for \"dict[str, Any]\"; expected type \"str\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"connect\" of \"LayoutToNetlist\" has incompatible type \"Region | None\"; expected \"Region\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"create_model_binding_delegate\" has incompatible type \"Mapping[str, Any] | dict[str, DeviceBinding]\"; expected \"dict[str, DeviceBinding]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"connect\" of \"LayoutToNetlist\" has incompatible type \"Region | None\"; expected \"Region\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"extract_devices\" of \"LayoutToNetlist\" has incompatible type \"dict[str, Region]\"; expected \"dict[str, ShapeCollection]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"Net | None\", variable has type \"Net\")",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/extract_abstract.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"Net | None\", variable has type \"Net\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/extract_abstract.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"str | None\", variable has type \"str\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/extract_finfet.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"bool\", variable has type \"None\")",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/extract_finfet.py",
+      "code": "misc",
+      "message": "Property \"supports_parallel_combination\" defined in \"DeviceClass\" is read-only",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/extract_finfet.py",
+      "code": "misc",
+      "message": "Property \"supports_serial_combination\" defined in \"DeviceClass\" is read-only",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/extract_parasitics.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"float | None\", variable has type \"float\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/extract_parasitics.py",
+      "code": "call-overload",
+      "message": "No overload variant of \"enlarged\" of \"Box\" matches argument type \"Point\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/extract_parasitics.py",
+      "code": "operator",
+      "message": "Unsupported operand types for - (\"Region\" and \"None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/functional_verification.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_resolve_one\" of \"MutationVariantPlan\" has incompatible type \"_ProposalRecord\"; expected \"MutationProposal\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/functional_verification.py",
+      "code": "arg-type",
+      "message": "Argument 5 to \"_apply_sdf_physical_only_drop\" has incompatible type \"list[tuple[str, str, str]]\"; expected \"list[tuple[str, int, str]]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/functional_verification_sdf.py",
+      "code": "call-overload",
+      "message": "No overload variant of \"list\" matches argument type \"object\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/functional_verification_sdf.py",
+      "code": "union-attr",
+      "message": "Item \"None\" of \"Match[str] | None\" has no attribute \"group\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen.py",
+      "code": "return-value",
+      "message": "Incompatible return value type (got \"LibraryBase\", expected \"Library\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_geometry_for_layer\" has incompatible type \"tuple[int, int] | None\"; expected \"tuple[int, int]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_override_label_layer\" has incompatible type \"tuple[int, int] | None\"; expected \"tuple[int, int]\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"float\" has incompatible type \"Any | None\"; expected \"str | Buffer | SupportsFloat | SupportsIndex\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"get\" of \"dict\" has incompatible type \"tuple[int, int] | None\"; expected \"tuple[int, int]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"None\", variable has type \"Callable[[str], dict[str, dict[str, Any] | None]]\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "code": "call-overload",
+      "message": "No overload variant of \"Trans\" matches argument type \"Point\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "code": "index",
+      "message": "Value of type \"dict[str, Any] | None\" is not indexable",
+      "count": 5
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "code": "operator",
+      "message": "Unsupported operand types for * (\"int\" and \"None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_compose_routing.py",
+      "code": "no-redef",
+      "message": "Name \"ladder\" already defined on line 525",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_describe.py",
+      "code": "index",
+      "message": "Value of type \"tuple[int, int] | None\" is not indexable",
+      "count": 16
+    },
+    {
+      "file": "src/klayout_tools/gen_layer_params.py",
+      "code": "misc",
+      "message": "Expected iterable as variadic argument",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"TypeBoolean\"",
+      "count": 5
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"TypeDouble\"",
+      "count": 6
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"TypeInt\"",
+      "count": 4
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"TypeLayer\"",
+      "count": 8
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"TypeString\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"active_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"add_collector_ring\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"bjt_mark_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"bjt_mark_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"cols\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"contact_fixed_size_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"contact_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"dummy\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"dummy_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"dummy_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"emitter_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"metal_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"mfg_grid_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"ring_gap_offset_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"ring_gap_side\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"ring_gap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"ring_implant_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"ring_implant_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"ring_implant_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"rows\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"tap_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"topology\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"well_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "code": "attr-defined",
+      "message": "\"_BjtArrayPCell\" has no attribute \"well_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bond_pad.py",
+      "code": "attr-defined",
+      "message": "\"_BondPadPCell\" has no attribute \"TypeDouble\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bond_pad.py",
+      "code": "attr-defined",
+      "message": "\"_BondPadPCell\" has no attribute \"TypeLayer\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bond_pad.py",
+      "code": "attr-defined",
+      "message": "\"_BondPadPCell\" has no attribute \"TypeString\"",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bond_pad.py",
+      "code": "attr-defined",
+      "message": "\"_BondPadPCell\" has no attribute \"bond_type\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bond_pad.py",
+      "code": "attr-defined",
+      "message": "\"_BondPadPCell\" has no attribute \"enclosure_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bond_pad.py",
+      "code": "attr-defined",
+      "message": "\"_BondPadPCell\" has no attribute \"opening_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bond_pad.py",
+      "code": "attr-defined",
+      "message": "\"_BondPadPCell\" has no attribute \"pad_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bond_pad.py",
+      "code": "attr-defined",
+      "message": "\"_BondPadPCell\" has no attribute \"top_metal_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"TypeBoolean\"",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"TypeDouble\"",
+      "count": 8
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"TypeInt\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"TypeLayer\"",
+      "count": 5
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"cap_bottom_plate_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"cap_bottom_plate_margin_min_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"cap_min_spacing_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"cap_top_plate_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"cap_top_via_fixed_size_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"cap_top_via_layer\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"cap_top_via_metal_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"cap_top_via_metal_min_w_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"cap_top_via_metal_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"cap_top_via_min_w_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"cap_top_via_present\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"num\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"plate_h_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"plate_w_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/cap_array.py",
+      "code": "attr-defined",
+      "message": "\"_CapArrayPCell\" has no attribute \"spacing_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"TypeBoolean\"",
+      "count": 8
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"TypeDouble\"",
+      "count": 16
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"TypeInt\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"TypeLayer\"",
+      "count": 10
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"TypeString\"",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"active_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"add_guard_ring\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"bottom_endcap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"contact_fixed_size_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"contact_gate_offset_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"contact_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"flavor\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"gate_contact\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"gate_pad_clearance_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"l_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"metal_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"mfg_grid_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"poly_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"ring_gap_offset_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"ring_gap_side\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"ring_gap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"ring_implant_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"ring_implant_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"ring_implant_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"ring_padding_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"ring_well_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"row_spacing_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"sd_implant_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"sd_implant_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"sd_implant_present\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"splits\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"tap_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"top_endcap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"voltage_flavor_mark_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"voltage_flavor_mark_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"voltage_flavor_mark_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"w_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"well_layer\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"well_present\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"TypeBoolean\"",
+      "count": 7
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"TypeDouble\"",
+      "count": 12
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"TypeInt\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"TypeLayer\"",
+      "count": 9
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"TypeString\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"active_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"add_guard_ring\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"bottom_endcap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"contact_fixed_size_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"contact_gate_offset_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"contact_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"esd_mark_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"esd_mark_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"finger_width_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"fingers\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"gate_contact\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"l_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"metal_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"mfg_grid_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"poly_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"ring_gap_offset_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"ring_gap_side\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"ring_gap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"ring_implant_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"ring_implant_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"ring_implant_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"ring_padding_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"salicide_block\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"salicide_block_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"salicide_block_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"sd_implant_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"sd_implant_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"sd_implant_present\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"tap_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"top_endcap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"TypeBoolean\"",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"TypeDouble\"",
+      "count": 9
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"TypeInt\"",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"TypeLayer\"",
+      "count": 5
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"TypeString\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"add_well\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"contact_fixed_size_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"contact_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"contacts_per_side\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"contacts_per_side_ew\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"contacts_per_side_ns\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"inner_height_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"inner_width_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"metal_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"mfg_grid_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"ring_gap_offset_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"ring_gap_side\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"ring_gap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"ring_implant_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"ring_implant_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"ring_implant_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"ring_well_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"ring_width_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"tap_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"well_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"well_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"TypeBoolean\"",
+      "count": 11
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"TypeDouble\"",
+      "count": 18
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"TypeInt\"",
+      "count": 4
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"TypeLayer\"",
+      "count": 13
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"TypeString\"",
+      "count": 5
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"active_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"add_guard_ring\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"bottom_endcap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"cols\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"contact_fixed_size_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"contact_gate_offset_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"contact_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"dummy\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"dummy_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"dummy_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"finger_topology\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"fingers\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"flavor\"",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"gate_contact\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"gate_pad_clearance_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"interior_channel_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"l_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"metal_label_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"metal_label_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"metal_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"mfg_grid_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"pitch_x_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"pitch_y_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"poly_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"ring_gap_offset_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"ring_gap_side\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"ring_gap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"ring_implant_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"ring_implant_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"ring_implant_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"ring_padding_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"ring_well_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"rows\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"sd_implant_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"sd_implant_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"sd_implant_present\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"tap_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"top_endcap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"topology\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"voltage_flavor_mark_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"voltage_flavor_mark_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"voltage_flavor_mark_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"w_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"well_layer\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"well_present\"",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"well_tap_implant_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"well_tap_implant_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"TypeBoolean\"",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"TypeDouble\"",
+      "count": 11
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"TypeInt\"",
+      "count": 4
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"TypeLayer\"",
+      "count": 6
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"TypeString\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"contact_fixed_size_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"contact_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"dummy\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"dummy_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"dummy_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"end_contact_h_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"end_contact_w_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"flavor\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"length_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"metal_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"metal_level\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"metal_res_via_enclosure_min_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"metal_res_via_min_w_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"metal_res_via_space_min_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"mfg_grid_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"num\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"poly_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"res_mark_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"res_mark_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"rows\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"spacing_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "code": "attr-defined",
+      "message": "\"_ResArrayPCell\" has no attribute \"width_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/resistor_strip.py",
+      "code": "attr-defined",
+      "message": "\"_ResistorStripPCell\" has no attribute \"TypeDouble\"",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/resistor_strip.py",
+      "code": "attr-defined",
+      "message": "\"_ResistorStripPCell\" has no attribute \"TypeInt\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/resistor_strip.py",
+      "code": "attr-defined",
+      "message": "\"_ResistorStripPCell\" has no attribute \"TypeLayer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/resistor_strip.py",
+      "code": "attr-defined",
+      "message": "\"_ResistorStripPCell\" has no attribute \"length_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/resistor_strip.py",
+      "code": "attr-defined",
+      "message": "\"_ResistorStripPCell\" has no attribute \"num\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/resistor_strip.py",
+      "code": "attr-defined",
+      "message": "\"_ResistorStripPCell\" has no attribute \"spacing_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/resistor_strip.py",
+      "code": "attr-defined",
+      "message": "\"_ResistorStripPCell\" has no attribute \"width_um\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"TypeBoolean\"",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"TypeDouble\"",
+      "count": 11
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"TypeInt\"",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"TypeLayer\"",
+      "count": 6
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"TypeList\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"TypeString\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"contact_fixed_size_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"contact_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"contacts_per_side\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"contacts_per_side_ew\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"contacts_per_side_ns\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"inner_height_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"inner_width_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"metal_label_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"metal_label_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"metal_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"mfg_grid_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"net\"",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"ring_gap_offset_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"ring_gap_side\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"ring_gap_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"ring_implant_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"ring_width_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"tap_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"well_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"well_margin_resolved_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"well_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"well_tap_implant_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/well_island.py",
+      "code": "attr-defined",
+      "message": "\"_WellIslandPCell\" has no attribute \"well_tap_implant_present\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/ir_solver.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"float | None\", variable has type \"float\")",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/layout_plan.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"get\" of \"dict\" has incompatible type \"str | None\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/layout_plan.py",
+      "code": "dict-item",
+      "message": "Dict entry 0 has incompatible type \"str\": \"str | None\"; expected \"str\": \"str\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/layout_plan.py",
+      "code": "operator",
+      "message": "Unsupported operand types for + (\"str\" and \"None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/layout_plan_execute.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"float\" has incompatible type \"Any | None\"; expected \"str | Buffer | SupportsFloat | SupportsIndex\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/layout_plan_execute.py",
+      "code": "operator",
+      "message": "Unsupported operand types for < (\"int\" and \"None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/lef_abstract.py",
+      "code": "misc",
+      "message": "List comprehension has incompatible type List[Box]; expected List[PolygonWithProperties]",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"dict[str, Any]\", variable has type \"str\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
+      "code": "attr-defined",
+      "message": "\"str\" has no attribute \"get\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
+      "code": "index",
+      "message": "Invalid index type \"str\" for \"str\"; expected type \"SupportsIndex | slice[SupportsIndex | None, SupportsIndex | None, SupportsIndex | None]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/lvs_combine.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"bool\", variable has type \"None\")",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/lvs_combine.py",
+      "code": "misc",
+      "message": "Property \"supports_parallel_combination\" defined in \"DeviceClass\" is read-only",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/lvs_combine.py",
+      "code": "misc",
+      "message": "Property \"supports_serial_combination\" defined in \"DeviceClass\" is read-only",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/lvs_finfet.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"float\" has incompatible type \"Any | None\"; expected \"str | Buffer | SupportsFloat | SupportsIndex\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/lvs_gate_level.py",
+      "code": "union-attr",
+      "message": "Item \"None\" of \"Any | None\" has no attribute \"each_circuit\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/lvs_mismatch.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"frozenset\" has incompatible type \"set[tuple[tuple[Any | None, str], tuple[Any | None, str]]]\"; expected \"Iterable[tuple[tuple[int, str], tuple[int, str]]]\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/mcp_server.py",
+      "code": "call-arg",
+      "message": "Unexpected keyword argument \"meta\" for \"CallToolResult\"; did you mean \"_meta\"?",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/netlist_capacitor_recovery.py",
+      "code": "override",
+      "message": "Argument 6 of \"element\" is incompatible with supertype \"klayout.dbcore.NetlistSpiceReaderDelegate\"; supertype defines the argument type as \"Sequence[Net]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/netlist_normalize.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_format_um\" has incompatible type \"float | None\"; expected \"float\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/netlist_normalize.py",
+      "code": "operator",
+      "message": "Unsupported left operand type for * (\"None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/netlist_normalize.py",
+      "code": "operator",
+      "message": "Unsupported left operand type for + (\"None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/netlist_normalize.py",
+      "code": "operator",
+      "message": "Unsupported operand types for * (\"None\" and \"float\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/netlist_normalize.py",
+      "code": "operator",
+      "message": "Unsupported operand types for * (\"float\" and \"None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/netlist_normalize.py",
+      "code": "operator",
+      "message": "Unsupported operand types for + (\"None\" and \"float\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/netlist_normalize.py",
+      "code": "operator",
+      "message": "Unsupported operand types for + (\"float\" and \"None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/parasitic_integrity.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_cap_details\" has incompatible type \"list[str]\"; expected \"list[dict[str, Any]]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/pdk_capabilities.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_owner_problem\" has incompatible type \"Decision | None\"; expected \"Decision\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/pex.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_own_pex_root\" has incompatible type \"ExitStack[bool | None] | None\"; expected \"ExitStack[bool | None]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
+      "code": "arg-type",
+      "message": "Argument \"checkpoint_in\" to \"_post_route_spef_metrics\" has incompatible type \"str | None\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_own_stage_root\" has incompatible type \"ExitStack[bool | None] | None\"; expected \"ExitStack[bool | None]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"row_rail_fallback_warning\" has incompatible type \"str | None\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"str | None\", variable has type \"str\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/place_and_route_pdn_fit.py",
+      "code": "attr-defined",
+      "message": "\"object\" has no attribute \"__iter__\"; maybe \"__dir__\" or \"__str__\"? (not iterable)",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/remote_fleet.py",
+      "code": "exit-return",
+      "message": "\"bool\" is invalid as return type for \"__exit__\" that always returns False",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/remote_launcher.py",
+      "code": "arg-type",
+      "message": "Argument \"ami_id\" to \"build_run_instances_args\" has incompatible type \"str | Any | None\"; expected \"str\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/remote_launcher.py",
+      "code": "arg-type",
+      "message": "Argument \"instance_type\" to \"build_run_instances_args\" has incompatible type \"str | None\"; expected \"str\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/remote_launcher.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"estimate_cost\" has incompatible type \"str | None\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/remote_launcher.py",
+      "code": "exit-return",
+      "message": "\"bool\" is invalid as return type for \"__exit__\" that always returns False",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/remote_launcher.py",
+      "code": "index",
+      "message": "Value of type \"dict[str, str | None] | None\" is not indexable",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/render.py",
+      "code": "call-overload",
+      "message": "No overload variant of \"load_layout\" of \"LayoutViewBase\" matches argument types \"str\", \"int\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 1 has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_critical_metric_blockers\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_critical_metric_detail\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_erc_passed\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_functional_verification_passed\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"_FunctionalVerificationEnvelope\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_is_sdf_annotated\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_nothing_checked_detail\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_sdf_metadata\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_sta_timing_passed\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_sta_worst_corner\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"_coverage_refusal\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"_drc_coverage_disclosure\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"_pex_body_bias_disclosure\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"_resolve_relative_to_spec\" has incompatible type \"Mapping[str, Any]\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"_yield_campaign_disclosure\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"dict[str, Any]\", target has type \"list[str]\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"str | None\", target has type \"list[str]\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"str\", target has type \"list[str]\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "attr-defined",
+      "message": "\"object\" has no attribute \"get\"",
+      "count": 8
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "index",
+      "message": "Value of type \"dict[str, Any] | None\" is not indexable",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_DrcEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_ErcEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_ErrorEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_ExtractEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_FunctionalVerificationEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_GenericEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_LefAbstractEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_LvsEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_PexEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_PowerEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_SimEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_SocketCheckEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_SynthesizeEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_YieldEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "union-attr",
+      "message": "Item \"object\" of \"object | Any\" has no attribute \"get\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/signoff_power_delivery.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"_lef_pin_matches\" has incompatible type \"list[dict[str, Any]] | None\"; expected \"list[dict[str, Any]]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff_power_delivery.py",
+      "code": "index",
+      "message": "Value of type \"dict[str, Any] | None\" is not indexable",
+      "count": 3
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_own_persistent_roots\" has incompatible type \"ExitStack[bool | None] | None\"; expected \"ExitStack[bool | None]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
+      "code": "arg-type",
+      "message": "Argument 3 to \"CornerPoint\" has incompatible type \"Any | None\"; expected \"float\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"list[str | None]\", target has type \"list[str] | float | list[dict[str, Any]] | dict[str, Any] | str | None\")",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
+      "code": "operator",
+      "message": "Cannot call function of unknown type",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
+      "code": "operator",
+      "message": "Unsupported operand types for < (\"float\" and \"None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
+      "code": "return-value",
+      "message": "Incompatible return value type (got \"str | None\", expected \"str\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
+      "code": "var-annotated",
+      "message": "Need type annotation for \"measurement\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_batch.py",
+      "code": "union-attr",
+      "message": "Item \"None\" of \"Match[str] | None\" has no attribute \"group\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_decks.py",
+      "code": "arg-type",
+      "message": "Argument \"region\" to \"RemoteLauncher\" has incompatible type \"Any | None\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_decks.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"_resolve_local_path\" has incompatible type \"Any | None\"; expected \"str\"",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/sim_decks.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"cleanup_job\" has incompatible type \"**dict[str, Any | str]\"; expected \"Callable[[list[str], float], CompletedProcess[str]] | None\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_decks.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"cleanup_job\" has incompatible type \"**dict[str, Any | str]\"; expected \"float\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_decks.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"cleanup_job\" has incompatible type \"**dict[str, Any | str]\"; expected \"int\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_decks.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"run_remote_job\" has incompatible type \"**dict[str, Any | str]\"; expected \"Callable[[list[str], float], CompletedProcess[str]] | None\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_decks.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"run_remote_job\" has incompatible type \"**dict[str, Any | str]\"; expected \"int\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_decks.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"float\", variable has type \"int\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_remote.py",
+      "code": "arg-type",
+      "message": "Argument \"region\" to \"RemoteLauncher\" has incompatible type \"Any | None\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_remote.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"artifacts_root\" has incompatible type \"str | None\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_remote.py",
+      "code": "misc",
+      "message": "\"None\" object is not iterable",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_set.py",
+      "code": "union-attr",
+      "message": "Item \"None\" of \"Any | list[Any | dict[Any, Any]] | None\" has no attribute \"__iter__\" (not iterable)",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_staging.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"_ModelRoot | None\", variable has type \"_ModelRoot\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_staging.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"str | None\", variable has type \"str\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/size.py",
+      "code": "index",
+      "message": "Value of type \"dict[str, Any] | None\" is not indexable",
+      "count": 11
+    },
+    {
+      "file": "src/klayout_tools/socket_check.py",
+      "code": "index",
+      "message": "Value of type \"Any | None\" is not indexable",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/stats.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"Cell | None\", variable has type \"Cell\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/synthesize.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"isabs\" has incompatible type \"str | None\"; expected \"str | bytes | PathLike[str] | PathLike[bytes]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/synthesize.py",
+      "code": "arg-type",
+      "message": "Argument 2 to \"join\" has incompatible type \"str | None\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/synthesize.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"str | None\", variable has type \"str\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/synthesize_arithmetic.py",
+      "code": "operator",
+      "message": "Unsupported operand types for >= (\"float\" and \"None\")",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/synthesize_arithmetic.py",
+      "code": "var-annotated",
+      "message": "Need type annotation for \"default_row\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/verilog_netlist.py",
+      "code": "arg-type",
+      "message": "Argument 1 to \"join\" of \"str\" has incompatible type \"object\"; expected \"Iterable[str]\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/verilog_netlist.py",
+      "code": "attr-defined",
+      "message": "\"object\" has no attribute \"__iter__\"; maybe \"__dir__\" or \"__str__\"? (not iterable)",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/verilog_netlist.py",
+      "code": "call-overload",
+      "message": "No overload variant of \"dict\" matches argument type \"object\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/verilog_netlist.py",
+      "code": "call-overload",
+      "message": "No overload variant of \"zip\" matches argument types \"object\", \"list[dict[str, str]]\", \"bool\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/verilog_netlist.py",
+      "code": "misc",
+      "message": "Key expression in dictionary comprehension has incompatible type \"object\"; expected type \"str\"",
+      "count": 1
+    }
+  ]
+}
