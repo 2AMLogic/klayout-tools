@@ -2617,6 +2617,7 @@ def launch_job(
     sleep: Callable[[float], None] | None = None,
     monotonic: Callable[[], float] | None = None,
     jitter: Callable[[], float] | None = None,
+    on_refusal: Callable[[BatchError, int], None] | None = None,
 ) -> None:
     """Shell out to 2am's ``batch-fleet-provision.sh launch --job <id>
     --apply --profile <profile>`` -- exactly one invocation per job, unless
@@ -2653,6 +2654,10 @@ def launch_job(
     ``jitter`` are injectable for tests; ``None`` resolves to
     :func:`time.sleep`/:func:`time.monotonic`/:func:`random.random` at call
     time.
+
+    ``on_refusal`` (issue #4018) is called with each refusal being waited out
+    and the attempt count, just before the backoff sleep -- how a sharded run
+    reports "waiting for capacity" across all its shards.
     """
     run = runner if runner is not None else _run_subprocess
     sleep = sleep if sleep is not None else time.sleep
@@ -2693,6 +2698,8 @@ def launch_job(
                     f"exhausted after {attempts} launch attempt(s))",
                     code=exc.code,
                 ) from exc
+            if on_refusal is not None:
+                on_refusal(exc, attempts)
             sleep(min(_capacity_backoff_s(attempts - 1, jitter), remaining))
 
 
@@ -4049,6 +4056,25 @@ class _ShardManifest:
                 entry[field] = datetime.now(timezone.utc).isoformat()
             self._flush_locked()
 
+    def unlaunch(self, index: int) -> None:
+        """Roll shard ``index`` back from ``launching`` to ``submitted`` after
+        a refused launch (issue #4018): the provisioner creates no instance on
+        a refusal, so the job is exactly "submitted, never launched" and
+        ``--resume`` must launch it rather than poll for a ``status.json``
+        that will never appear."""
+        key = str(index)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                prior = self.prior.get(key)
+                if prior is None:
+                    return
+                entry = self._entries[key] = dict(prior)
+            if entry.get("state") != "launching":
+                return
+            entry["state"] = "submitted"
+            self._flush_locked()
+
     def unlaunched(self) -> int:
         """Shards this run left submitted but never launched."""
         with self._lock:
@@ -4146,6 +4172,24 @@ def _ignore_phase(state: str) -> None:
     """The ``on_phase`` default: no shard map to tell."""
 
 
+def _launch_noting_refusal(
+    config: BatchConfig,
+    job_id: str,
+    runner: remote_transport.CommandRunner | None,
+    notify: Callable[[str], None],
+    launch_kwargs: dict[str, Any] | None,
+) -> None:
+    """:func:`launch_job`, telling ``notify`` ``"launch_refused"`` when the
+    fleet refused for capacity (issue #4018): such a launch created nothing,
+    so the shard map must show the job as never launched."""
+    try:
+        launch_job(config, job_id, runner=runner, **(launch_kwargs or {}))
+    except BatchError as exc:
+        if exc.code in _RETRYABLE_LAUNCH_CODES:
+            notify("launch_refused")
+        raise
+
+
 def _launch_attached_if_unlaunched(
     config: BatchConfig,
     job_id: str,
@@ -4153,6 +4197,7 @@ def _launch_attached_if_unlaunched(
     runner: remote_transport.CommandRunner | None,
     now: Callable[[], str],
     notify: Callable[[str], None],
+    launch_kwargs: dict[str, Any] | None = None,
 ) -> str | None:
     """Launch a re-attached job the shard map says was never launched (issue
     #3896), but only while the fleet has published no ``status.json`` -- one
@@ -4164,7 +4209,7 @@ def _launch_attached_if_unlaunched(
         notify("launched")
         return None
     notify("launching")
-    launch_job(config, job_id, runner=runner)
+    _launch_noting_refusal(config, job_id, runner, notify, launch_kwargs)
     launched_at = now()
     notify("launched")
     sys.stderr.write(
@@ -4196,6 +4241,7 @@ def _run_batch_job(
     receipt_name: str | None = None,
     on_phase: Callable[[str], None] | None = None,
     launch_if_unlaunched: bool = False,
+    launch_kwargs: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """Submit, wait for, and collect **one** batch job's worth of corners --
     the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
@@ -4224,7 +4270,10 @@ def _run_batch_job(
     but only while the fleet has published no ``status.json`` -- one that
     exists means a launch already happened, and a second would double-bill.
     ``on_phase`` is told ``"submitted"``, ``"launching"`` and ``"launched"``
-    as the job reaches each, so a shard map can record them durably.
+    as the job reaches each, so a shard map can record them durably; a launch
+    the fleet refused for capacity is told ``"launch_refused"`` (issue #4018).
+    ``launch_kwargs`` is forwarded to :func:`launch_job` (``sleep``,
+    ``on_refusal``).
 
     The returned environment also carries client-observed wall-clock
     timestamps (``client_submitted_at``, ``client_launched_at``,
@@ -4248,7 +4297,12 @@ def _run_batch_job(
         }
         if launch_if_unlaunched:
             attach_timestamps["client_launched_at"] = _launch_attached_if_unlaunched(
-                config, job_id, runner=runner, now=now, notify=notify
+                config,
+                job_id,
+                runner=runner,
+                now=now,
+                notify=notify,
+                launch_kwargs=launch_kwargs,
             )
         return _poll_and_collect(
             config=config,
@@ -4284,7 +4338,7 @@ def _run_batch_job(
     notify("submitted")
     _report_progress(job_id, "submitted")
     notify("launching")
-    launch_job(config, job_id, runner=runner)
+    _launch_noting_refusal(config, job_id, runner, notify, launch_kwargs)
     timestamps["client_launched_at"] = now()
     notify("launched")
     # Issue #2978: name the job on stderr the moment it exists, so a caller
@@ -4670,6 +4724,279 @@ def _warn_unlaunched(manifest: _ShardManifest | None, hosts: int) -> None:
     )
 
 
+class _CapacityWatch:
+    """Fleet-wide view of shards waiting out a capacity refusal (issue #4018).
+
+    Each shard's :func:`launch_job` retries on its own thread; this folds
+    their refusals into one stderr line -- ``K of M shards pending`` and the
+    last refusal's code -- printed when the number of waiting shards changes
+    and otherwise at most once per :data:`BATCH_HEARTBEAT_INTERVAL_S`.
+    """
+
+    def __init__(
+        self,
+        total: int,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        emit: Callable[[str], None] = _progress,
+    ) -> None:
+        self._total = total
+        self._monotonic = monotonic
+        self._emit = emit
+        self._lock = threading.Lock()
+        self._waiting: set[int] = set()
+        self._finished = 0
+        self._last_emit: float | None = None
+        self._last_waiting = 0
+
+    def refused(self, index: int, exc: BatchError) -> None:
+        with self._lock:
+            self._waiting.add(index)
+            now = self._monotonic()
+            if (
+                self._last_emit is not None
+                and len(self._waiting) == self._last_waiting
+                and now - self._last_emit < BATCH_HEARTBEAT_INTERVAL_S
+            ):
+                return
+            self._last_emit = now
+            self._last_waiting = len(self._waiting)
+            reason = exc.code or str(exc).splitlines()[0]
+            self._emit(
+                "klt sim: waiting for capacity: "
+                f"{self._total - self._finished} of {self._total} shards "
+                f"pending, {len(self._waiting)} waiting on a launch "
+                f"(last refusal: {reason})"
+            )
+
+    def launched(self, index: int) -> None:
+        with self._lock:
+            self._waiting.discard(index)
+
+    def finished(self, index: int) -> None:
+        with self._lock:
+            self._waiting.discard(index)
+            self._finished += 1
+
+
+def _abortable_sleep(abort: threading.Event) -> Callable[[float], None]:
+    """A ``sleep`` that raises :class:`BatchClientInterrupted` once ``abort``
+    is set, in slices of at most one second, so a shard thread left behind by
+    an absorbed interrupt exits promptly instead of holding the process open
+    for its whole poll interval (issue #4018)."""
+
+    def _sleep(seconds: float) -> None:
+        remaining = seconds
+        while True:
+            if abort.is_set():
+                raise BatchClientInterrupted(
+                    "client interrupted; shard abandoned (its job, if "
+                    "launched, keeps running -- the fleet has no cancel)",
+                    job_id="",
+                    signum=signal.SIGINT,
+                )
+            if remaining <= 0:
+                return
+            step = min(1.0, remaining)
+            time.sleep(step)
+            remaining -= step
+
+    return _sleep
+
+
+_ShardResult = tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]
+
+
+def _raise_client_interrupted(signum: int, _frame: Any) -> None:
+    raise BatchClientInterrupted(
+        f"client terminated by {signal.Signals(signum).name}",
+        job_id="",
+        signum=signum,
+    )
+
+
+class _BatchFleetRun:
+    """The per-shard half of :func:`_run_batch_fleet`: runs one shard's job
+    (submit, or re-attach under ``--resume``) and carries the run-wide state
+    the shards share -- the capacity-wait deadline, the abort flag, and the
+    "waiting for capacity" progress line.
+
+    Issue #4018: ``capacity_wait_s`` bounds the whole sharded run -- the fleet
+    caps are shared, so every shard competes for the same slots -- not each
+    shard's launch separately.
+    """
+
+    def __init__(
+        self,
+        *,
+        config: BatchConfig,
+        manifest: _ShardManifest | None,
+        shard_indexes: dict[str, int],
+        netlist_path: str,
+        timeout_s: float,
+        keep_artifacts: bool,
+        want_waveforms: bool,
+        artifacts_dir: str,
+        request: dict[str, Any],
+        measurements_spec: list[dict[str, Any]],
+        request_dir: str | None,
+    ) -> None:
+        self.config = config
+        self.manifest = manifest
+        self.shard_indexes = shard_indexes
+        self.netlist_path = netlist_path
+        self.timeout_s = timeout_s
+        self.keep_artifacts = keep_artifacts
+        self.want_waveforms = want_waveforms
+        self.artifacts_dir = artifacts_dir
+        self.request = request
+        self.measurements_spec = measurements_spec
+        self.request_dir = request_dir
+        self.started = time.monotonic()
+        self.abort = threading.Event()
+        self.budget_spent = threading.Event()
+        self.watch = _CapacityWatch(len(shard_indexes))
+        self.abortable_sleep = _abortable_sleep(self.abort)
+
+    def shard_config(self) -> BatchConfig:
+        if self.config.capacity_wait_s <= 0:
+            return self.config
+        remaining = self.config.capacity_wait_s - (time.monotonic() - self.started)
+        if remaining <= 0:
+            self.budget_spent.set()  # one attempt, no waiting
+        return replace(self.config, capacity_wait_s=max(remaining, 0.0))
+
+    def _phase_hook(self, index: int | None) -> Callable[[str], None]:
+        def _on_phase(state: str) -> None:
+            if self.manifest is None or index is None:
+                return
+            if state == "launch_refused":
+                self.manifest.unlaunch(index)
+            else:
+                self.manifest.mark(index, state)
+            if state == "launched":
+                self.watch.launched(index)
+
+        return _on_phase
+
+    def _launch_kwargs(
+        self, shard_config: BatchConfig, index: int | None
+    ) -> dict[str, Any] | None:
+        # Sleep and refusal hooks only matter when a refusal is waited out.
+        if shard_config.capacity_wait_s <= 0:
+            return None
+        on_refusal = (
+            None
+            if index is None
+            else lambda exc, _attempts: self.watch.refused(index, exc)
+        )
+        return {"sleep": self.abortable_sleep, "on_refusal": on_refusal}
+
+    def _run_job(
+        self,
+        shard_points: list[CornerPoint],
+        job_id: str,
+        *,
+        attach: bool,
+        index: int | None = None,
+        launch_if_unlaunched: bool = False,
+    ) -> _ShardResult:
+        # The job id doubles as the shard's artifacts subdirectory, so
+        # per-shard artifact trees never collide and each one is traceable
+        # back to the S3 prefix it was collected from.
+        shard_artifacts_dir = (
+            os.path.join(self.artifacts_dir, job_id)
+            if self.keep_artifacts
+            else self.artifacts_dir
+        )
+        shard_config = self.shard_config()
+        return _run_batch_job(
+            config=shard_config,
+            job_id=job_id,
+            corner_points=shard_points,
+            netlist_path=self.netlist_path,
+            timeout_s=self.timeout_s,
+            keep_artifacts=self.keep_artifacts,
+            want_waveforms=self.want_waveforms,
+            artifacts_dir=shard_artifacts_dir,
+            request=self.request,
+            measurements_spec=self.measurements_spec,
+            explicit_points=shard_points,
+            request_dir=self.request_dir,
+            receipt_name=f"batch-receipt-{job_id}.json",
+            attach=attach,
+            launch_if_unlaunched=launch_if_unlaunched,
+            on_phase=self._phase_hook(index),
+            sleep=self.abortable_sleep,
+            launch_kwargs=self._launch_kwargs(shard_config, index),
+        )
+
+    def run_shard_points(self, shard_points: list[CornerPoint]) -> _ShardResult:
+        index = self.shard_indexes[_units_digest(shard_points)]
+        try:
+            return self._run_one_shard(shard_points, index)
+        except BatchError as exc:
+            # The lost-shard diagnostic carries the refusal code.
+            if exc.code in _RETRYABLE_LAUNCH_CODES:
+                raise BatchError(
+                    f"{exc}{self._budget_note(exc)} [{exc.code}]", code=exc.code
+                ) from exc
+            raise
+        finally:
+            self.watch.finished(index)
+
+    def _budget_note(self, exc: BatchError) -> str:
+        if self.budget_spent.is_set() and "exhausted" not in str(exc):
+            return (
+                f" (run-wide capacity wait budget of "
+                f"{self.config.capacity_wait_s:g}s exhausted)"
+            )
+        return ""
+
+    def _run_one_shard(
+        self, shard_points: list[CornerPoint], index: int
+    ) -> _ShardResult:
+        manifest = self.manifest
+        digest = _units_digest(shard_points)
+        prior = manifest.prior.get(str(index)) if manifest is not None else None
+        job_id = None if manifest is None else manifest.planned_job_id(index)
+        if prior is not None and prior["units_sha256"] == digest:
+            result = _try_reattach_shard(
+                lambda: self._run_job(
+                    shard_points,
+                    str(prior["job_id"]),
+                    attach=True,
+                    index=index,
+                    # Only an entry that says "submitted" (launch never
+                    # started) is launched; older maps carry no state.
+                    launch_if_unlaunched=prior.get("state") == "submitted",
+                ),
+                job_id=str(prior["job_id"]),
+            )
+            if result is not None:
+                _mark_collected(manifest, index, result)
+                return _mark_resumed(result, True)
+            job_id = None
+        if job_id is None:
+            job_id = new_job_id()
+            if manifest is not None:
+                manifest.record(index, job_id, digest)
+        result = self._run_job(shard_points, job_id, attach=False, index=index)
+        _mark_collected(manifest, index, result)
+        return _mark_resumed(result, False)
+
+    def on_interrupt(self, exc: BaseException) -> str | None:
+        if not isinstance(exc, (KeyboardInterrupt, BatchClientInterrupted)):
+            return None
+        self.abort.set()
+        _progress(
+            "klt sim: interrupted; reporting the shards that finished and "
+            "marking the rest lost (re-run with --resume to finish them; "
+            "launched jobs keep running -- the fleet has no cancel)"
+        )
+        return "interrupted by client before this shard finished"
+
+
 def _run_batch_fleet(
     *,
     corner_points: list[CornerPoint],
@@ -4755,81 +5082,35 @@ def _run_batch_fleet(
 
     _prerecord_shards(manifest, shard_indexes)
 
-    def _run_shard(
-        shard_points: list[CornerPoint],
-        job_id: str,
-        *,
-        attach: bool,
-        index: int | None = None,
-        launch_if_unlaunched: bool = False,
-    ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-        # The job id doubles as the shard's artifacts subdirectory, so
-        # per-shard artifact trees never collide and each one is traceable
-        # back to the S3 prefix it was collected from.
-        shard_artifacts_dir = (
-            os.path.join(artifacts_dir, job_id) if keep_artifacts else artifacts_dir
-        )
-        return _run_batch_job(
-            config=config,
-            job_id=job_id,
-            corner_points=shard_points,
-            netlist_path=netlist_path,
-            timeout_s=timeout_s,
-            keep_artifacts=keep_artifacts,
-            want_waveforms=want_waveforms,
-            artifacts_dir=shard_artifacts_dir,
-            request=request,
-            measurements_spec=measurements_spec,
-            explicit_points=shard_points,
-            request_dir=request_dir,
-            receipt_name=f"batch-receipt-{job_id}.json",
-            attach=attach,
-            launch_if_unlaunched=launch_if_unlaunched,
-            on_phase=None
-            if manifest is None or index is None
-            else lambda state: manifest.mark(index, state),
-        )
+    fleet = _BatchFleetRun(
+        config=config,
+        manifest=manifest,
+        shard_indexes=shard_indexes,
+        netlist_path=netlist_path,
+        timeout_s=timeout_s,
+        keep_artifacts=keep_artifacts,
+        want_waveforms=want_waveforms,
+        artifacts_dir=artifacts_dir,
+        request=request,
+        measurements_spec=measurements_spec,
+        request_dir=request_dir,
+    )
 
-    def _shard_runner(
-        shard_points: list[CornerPoint],
-    ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-        digest = _units_digest(shard_points)
-        index = shard_indexes[digest]
-        prior = manifest.prior.get(str(index)) if manifest is not None else None
-        job_id = None if manifest is None else manifest.planned_job_id(index)
-        if prior is not None and prior["units_sha256"] == digest:
-            result = _try_reattach_shard(
-                lambda: _run_shard(
-                    shard_points,
-                    str(prior["job_id"]),
-                    attach=True,
-                    index=index,
-                    # Only an entry that says "submitted" (launch never
-                    # started) is launched; older maps carry no state.
-                    launch_if_unlaunched=prior.get("state") == "submitted",
-                ),
-                job_id=str(prior["job_id"]),
-            )
-            if result is not None:
-                _mark_collected(manifest, index, result)
-                return _mark_resumed(result, True)
-            job_id = None
-        if job_id is None:
-            job_id = new_job_id()
-            if manifest is not None:
-                manifest.record(index, job_id, digest)
-        result = _run_shard(shard_points, job_id, attach=False, index=index)
-        _mark_collected(manifest, index, result)
-        return _mark_resumed(result, False)
-
+    prev_handlers: dict[int, Any] = {}
+    in_main = threading.current_thread() is threading.main_thread()
+    if in_main:
+        _signal_handlers_install(prev_handlers, _raise_client_interrupted)
     try:
         corners, engine_version, environment = _run_sharded(
-            shard_runner=_shard_runner,
+            shard_runner=fleet.run_shard_points,
             corner_points=corner_points,
             hosts=hosts,
             measurements_spec=measurements_spec,
             max_concurrent=config.max_concurrent_jobs,
+            on_interrupt=fleet.on_interrupt,
         )
+        if fleet.abort.is_set():
+            environment = {**(environment or {}), "interrupted": True}
         if environment is not None and config.max_concurrent_jobs is not None:
             environment = {
                 **environment,
@@ -4837,6 +5118,8 @@ def _run_batch_fleet(
             }
         return corners, engine_version, environment
     finally:
+        if in_main:
+            _signal_handlers_restore(prev_handlers)
         _warn_unlaunched(manifest, hosts)
 
 
