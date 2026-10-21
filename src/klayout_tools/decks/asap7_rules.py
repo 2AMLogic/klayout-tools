@@ -666,6 +666,24 @@ UNCHECKED_AREAS: dict[str, tuple[int, int, str]] = {
 }
 
 
+#: Boundary-sensitive rules surfaced as ``coverage.isolation_only_rules`` by
+#: ``klt drc --engine klayout`` when the packaged deck runs on a layout with
+#: shapes on the layer (#4029): ``{id: (layer, datatype, description)}``.
+#: ``klt drc`` judges the top cell in free space, so a width or spacing rule
+#: on a shape that ends at the cell outline fires for a cell built to be
+#: abutted (the shipped-cell gate places each cell between two ``INVx1``
+#: neighbours for this reason). The five are the horizontal width / pitch
+#: rules the shipped cells trip in isolation; the vertical rules and the
+#: other select layers are not listed until a cell is shown to trip them.
+ISOLATION_ONLY_RULES: dict[str, tuple[int, int, str]] = {
+    "FIN.W.2": (2, 0, "min horizontal FIN width 108 nm"),
+    "GATE.S.3": (7, 0, "every GATE needs another GATE within 54 nm horizontally"),
+    "NSELECT.W.1": (12, 0, "min horizontal NSELECT width 108 nm"),
+    "PSELECT.W.1": (13, 0, "min horizontal PSELECT width 108 nm"),
+    "WELL.W.1": (1, 0, "min horizontal WELL width 108 nm"),
+}
+
+
 @dataclass(frozen=True)
 class Asap7CellDeviation:
     """One shipped standard cell that violates one implemented rule as the

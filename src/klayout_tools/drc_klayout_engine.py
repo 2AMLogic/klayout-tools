@@ -1109,14 +1109,16 @@ def _unmodeled_rules_for_deck(deck_file: str) -> list[str]:
     return sorted({gap.id for gap in NOT_IMPLEMENTED})
 
 
-def _packaged_asap7_unchecked_rules(
-    deck_file: str, layout: Any
+def _packaged_asap7_layer_rules(
+    deck_file: str,
+    layout: Any,
+    areas: dict[str, tuple[int, int, str]],
+    extra: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
-    """``coverage.unchecked_rules`` for a run of the packaged ASAP7 deck
-    (issue #3807): areas the deck knowingly does not check (PAD), named only
-    when the layout has shapes on the layer, like the curated engine's
-    ``unchecked_rules``. A different deck file yields none -- its content
-    must match the packaged deck byte for byte."""
+    """``{rule, layer, description}`` entries for the ``areas`` table whose
+    layer has shapes in ``layout``, for a run of the packaged ASAP7 deck. A
+    different deck file yields none -- its content must match the packaged
+    deck byte for byte."""
     from .decks import asap7_rules
 
     if sha256_file(deck_file) != sha256_file(str(asap7_rules.DECK_PATH)):
@@ -1129,12 +1131,45 @@ def _packaged_asap7_unchecked_rules(
         if any(not cell.shapes(index).is_empty() for cell in layout.each_cell())
     }
     return [
-        {"rule": rule, "layer": f"{layer}/{datatype}", "description": description}
-        for rule, (layer, datatype, description) in sorted(
-            asap7_rules.UNCHECKED_AREAS.items()
-        )
+        {
+            "rule": rule,
+            "layer": f"{layer}/{datatype}",
+            "description": description,
+            **(extra or {}),
+        }
+        for rule, (layer, datatype, description) in sorted(areas.items())
         if (layer, datatype) in present
     ]
+
+
+def _packaged_asap7_unchecked_rules(
+    deck_file: str, layout: Any
+) -> list[dict[str, str]]:
+    """``coverage.unchecked_rules`` for a run of the packaged ASAP7 deck
+    (issue #3807): areas the deck knowingly does not check (PAD), named only
+    when the layout has shapes on the layer, like the curated engine's
+    ``unchecked_rules``."""
+    from .decks import asap7_rules
+
+    return _packaged_asap7_layer_rules(deck_file, layout, asap7_rules.UNCHECKED_AREAS)
+
+
+def _packaged_asap7_isolation_only_rules(
+    deck_file: str, layout: Any
+) -> list[dict[str, str]]:
+    """``coverage.isolation_only_rules`` for a run of the packaged ASAP7 deck
+    (issue #4029): rules whose verdict depends on the top cell being judged in
+    free space, so a boundary artifact of a cell built to be abutted is not
+    mistaken for a real violation. Informational; the marker describes the
+    check, not its outcome."""
+    from .decks import asap7_rules
+
+    return _packaged_asap7_layer_rules(
+        deck_file,
+        layout,
+        asap7_rules.ISOLATION_ONLY_RULES,
+        {"reason": "isolation_only"},
+    )
 
 
 def _klayout_engine_coverage(
@@ -1143,6 +1178,7 @@ def _klayout_engine_coverage(
     coverage_assertion: dict[str, Any] | None,
     unchecked_rules: list[dict[str, str]] | None = None,
     unmodeled_rules: list[str] | None = None,
+    isolation_only_rules: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """The klayout engine's ``coverage`` block. Categories are declarations,
     not execution instrumentation, unless the caller's satisfied
@@ -1178,6 +1214,7 @@ def _klayout_engine_coverage(
         "unchecked_rules": unchecked_rules or [],
         "deck_scope": [],
         "unmodeled_rules": unmodeled_rules or [],
+        "isolation_only_rules": isolation_only_rules or [],
         **build_check_coverage(checked=checked, unknown=unknown),
     }
 
@@ -1692,6 +1729,7 @@ def run_drc_klayout_engine(
         coverage_assertion,
         _packaged_asap7_unchecked_rules(deck_file, layout),
         _unmodeled_rules_for_deck(deck_file),
+        _packaged_asap7_isolation_only_rules(deck_file, layout),
     )
     deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
