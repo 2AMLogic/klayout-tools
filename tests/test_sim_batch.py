@@ -7358,10 +7358,19 @@ def test_max_concurrent_jobs_interrupt_cancels_queued_shards(tmp_path, monkeypat
 
     monkeypatch.setattr(sim_remote, "as_completed", _interrupting)
 
-    with pytest.raises(KeyboardInterrupt):
-        _run_capped_fleet(tmp_path, units=10, hosts=10, max_concurrent_jobs=1)
+    # Issue #4018: the interrupt is absorbed into a partial report.
+    corners, _, environment = _run_capped_fleet(
+        tmp_path, units=10, hosts=10, max_concurrent_jobs=1
+    )
 
     assert state["calls"] < 10
+    assert environment["interrupted"] is True
+    assert len(corners) == 10
+    finished = [c for c in corners if not c.get("diagnostics")]
+    lost = [c for c in corners if c.get("diagnostics")]
+    assert finished and lost
+    assert all(c["diagnostics"][0]["code"] == "lost_shard" for c in lost)
+    assert "interrupted by client" in lost[0]["diagnostics"][0]["message"]
 
 
 def test_max_concurrent_jobs_one_is_serial(tmp_path, monkeypatch):
@@ -7471,3 +7480,124 @@ def test_text_summary_pdk_stamp_silent_without_worker_capture(capsys):
     _print_worker_pdk({"environment": {"remote": None}})
     _print_worker_pdk({"environment": {}})
     assert capsys.readouterr().out == ""
+
+
+# --------------------------------------------------------------------------- #
+# Sharded capacity wait: one run-wide budget, progress line, partial report
+# (issue #4018)
+# --------------------------------------------------------------------------- #
+
+
+def _capacity_fleet(tmp_path, monkeypatch, *, hosts, refusals, wait_s, refusal=None):
+    """Run a ``hosts``-shard batch fleet whose first ``refusals`` launches the
+    fake provisioner refuses; returns ``(runner, clock, result)``."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report(corner_ids=("tt_1.800_0",))}
+    clock = _FakeClock()
+    monkeypatch.setattr(sb, "_run_subprocess", runner)
+    monkeypatch.setattr(sb.time, "sleep", clock.sleep)
+    monkeypatch.setattr(sb.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(sb.random, "random", lambda: 1.0)
+    for _ in range(refusals):
+        runner.queue(
+            "launch", fake_completed(returncode=1, stderr=refusal or _CAP_REFUSAL)
+        )
+    batch = {
+        "bucket": FAKE_BUCKET,
+        "provision_script_path": str(_provision_script(tmp_path)),
+        "poll_interval_s": 0.0,
+        "max_concurrent_jobs": 1,
+    }
+    if wait_s:
+        batch["capacity_wait_s"] = wait_s
+    result = sb._run_batch_fleet(
+        corner_points=_corner_points(hosts),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice", "batch": batch},
+        hosts=hosts,
+        measurements_spec=_measurements_spec(),
+        shard_fingerprint="fp-4018",
+    )
+    return runner, clock, result
+
+
+def test_fleet_capacity_wait_retries_a_refused_shard(tmp_path, monkeypatch, capsys):
+    runner, clock, (corners, _, environment) = _capacity_fleet(
+        tmp_path, monkeypatch, hosts=2, refusals=3, wait_s=3600
+    )
+
+    assert not any(c.get("diagnostics") for c in corners)
+    assert len(corners) == 2
+    assert len(environment["fleet"]) == 2
+    assert all(entry is not None for entry in environment["fleet"])
+    assert len(runner.argvs_matching("launch")) == 5  # 3 refused + 2 launched
+    assert "interrupted" not in environment
+    err = capsys.readouterr().err
+    assert "klt sim: waiting for capacity: 2 of 2 shards pending" in err
+    assert "batch_concurrency_cap" in err
+
+
+def test_fleet_capacity_wait_budget_is_shared_across_shards(tmp_path, monkeypatch):
+    # Every launch is refused. With a per-shard budget two shards would sleep
+    # ~100s each (200s); one run-wide budget caps the total at ~100s.
+    runner, clock, (corners, _, environment) = _capacity_fleet(
+        tmp_path, monkeypatch, hosts=2, refusals=50, wait_s=100
+    )
+
+    assert [c["diagnostics"][0]["code"] for c in corners] == ["lost_shard"] * 2
+    for corner in corners:
+        message = corner["diagnostics"][0]["message"]
+        assert "batch_concurrency_cap" in message
+        assert "capacity wait budget" in message
+    assert environment is None
+    assert sum(clock.sleeps) == pytest.approx(100.0, abs=1.0)
+
+
+def test_fleet_without_capacity_wait_is_one_attempt(tmp_path, monkeypatch, capsys):
+    runner, clock, (corners, _, _) = _capacity_fleet(
+        tmp_path, monkeypatch, hosts=2, refusals=1, wait_s=0
+    )
+
+    codes = [
+        c["diagnostics"][0]["code"] if c.get("diagnostics") else None for c in corners
+    ]
+    assert sorted(codes, key=str) == [None, "lost_shard"]
+    # ``time.sleep`` is patched module-wide, so short poll-loop sleeps from
+    # other threads are recorded too; a capacity backoff is never below
+    # _CAPACITY_BACKOFF_BASE_S / 2, so any sleep that long would be one.
+    assert [s for s in clock.sleeps if s >= sb._CAPACITY_BACKOFF_BASE_S / 2] == []
+    assert "waiting for capacity" not in capsys.readouterr().err
+
+
+def test_refused_shard_rolls_back_to_submitted_for_resume(tmp_path, monkeypatch):
+    _capacity_fleet(tmp_path, monkeypatch, hosts=2, refusals=1, wait_s=0)
+
+    shards = json.loads((tmp_path / "artifacts" / "batch-shards.json").read_text())[
+        "shards"
+    ]
+    # The refused shard is "submitted" (resume launches it); the other,
+    # launched and collected, is not.
+    assert sorted(entry["state"] for entry in shards) == ["collected", "submitted"]
+
+
+def test_capacity_watch_throttles_to_the_heartbeat_interval():
+    now = [0.0]
+    lines: list[str] = []
+    watch = sb._CapacityWatch(3, monotonic=lambda: now[0], emit=lines.append)
+    exc = sb.BatchError("refused", code="batch_no_capacity")
+
+    watch.refused(0, exc)
+    watch.refused(0, exc)  # same waiting count, no time passed: suppressed
+    now[0] += sb.BATCH_HEARTBEAT_INTERVAL_S
+    watch.refused(0, exc)  # interval elapsed: printed
+    watch.refused(1, exc)  # waiting count changed: printed
+    watch.finished(0)
+
+    assert len(lines) == 3
+    assert "3 of 3 shards pending" in lines[0]
+    assert "(last refusal: batch_no_capacity)" in lines[0]

@@ -262,23 +262,46 @@ def _await_shards(
     future_to_index: dict[Any, int],
     results: list[Any],
     lost_reasons: list[str | None],
+    on_interrupt: Callable[[BaseException], str | None] | None = None,
 ) -> None:
     """Collect shard futures into ``results`` / ``lost_reasons`` as they finish.
 
     An interrupt while waiting cancels the not-yet-started futures first: with
     a ``max_concurrent_jobs`` cap, the pool's implicit ``shutdown(wait=True)``
     would otherwise launch every still-queued shard as a new billable job.
+
+    ``on_interrupt`` (issue #4018) is told the interrupting exception; when it
+    returns a reason string the interrupt is *absorbed*: shards that already
+    finished keep their results, every other shard is reported lost with that
+    reason, and the caller gets a partial merge instead of an exception.
+    Returning ``None`` re-raises, as without a hook.
     """
     try:
         for future in as_completed(future_to_index):
-            index = future_to_index[future]
-            try:
-                results[index] = future.result()
-            except Exception as exc:  # noqa: BLE001 - "shard never returned"
-                lost_reasons[index] = str(exc)
-    except BaseException:
+            _collect_shard(future, future_to_index[future], results, lost_reasons)
+    except BaseException as exc:
         pool.shutdown(wait=False, cancel_futures=True)
-        raise
+        reason = None if on_interrupt is None else on_interrupt(exc)
+        if reason is None:
+            raise
+        for future, index in future_to_index.items():
+            if future.done() and not future.cancelled():
+                _collect_shard(future, index, results, lost_reasons)
+            else:
+                lost_reasons[index] = reason
+
+
+def _collect_shard(
+    future: Any,
+    index: int,
+    results: list[Any],
+    lost_reasons: list[str | None],
+) -> None:
+    try:
+        results[index] = future.result()
+        lost_reasons[index] = None
+    except Exception as exc:  # noqa: BLE001 - "shard never returned"
+        lost_reasons[index] = str(exc)
 
 
 def _run_sharded(
@@ -288,6 +311,7 @@ def _run_sharded(
     hosts: int,
     measurements_spec: list[dict[str, Any]],
     max_concurrent: int | None = None,
+    on_interrupt: Callable[[BaseException], str | None] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The fleet shard/merge engine: slice ``corner_points`` into ``hosts``
     contiguous shards (:func:`_shard_corner_points`), run each shard through
@@ -311,6 +335,10 @@ def _run_sharded(
     once -- the pool size becomes ``min(hosts, max_concurrent)`` and the
     remaining shards start as earlier ones finish; ``None`` runs every shard
     at once, as before.
+
+    ``on_interrupt`` (issue #4018) is :func:`_await_shards`' hook: an
+    interrupt it absorbs yields the partial merge, every unfinished shard
+    reported lost with the hook's reason.
 
     ``engine_version`` is derived the same "last non-``None`` wins, in
     corner-list order" way every backend already computes it -- shards are
@@ -349,7 +377,9 @@ def _run_sharded(
         future_to_index = {
             pool.submit(_run_one, shard): index for index, shard in enumerate(shards)
         }
-        _await_shards(pool, future_to_index, results, lost_reasons)
+        _await_shards(
+            pool, future_to_index, results, lost_reasons, on_interrupt=on_interrupt
+        )
 
     corners: list[dict[str, Any]] = []
     engine_version: str | None = None
