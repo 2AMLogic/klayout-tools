@@ -3417,6 +3417,30 @@ later expression may reference an earlier one's name:
 ]
 ```
 
+### `expr` after a `tran` analysis: `analysis.linearize`
+
+A transient analysis stores its waveform on the solver's adaptive timestep
+grid, so a time-weighted sum (a Fourier coefficient, a cycle mean) over it is
+biased by how densely the solver happened to step. Setting
+`analysis.linearize: true` on a scalar `tran` analysis makes the generated
+`.control` block run ngspice's `linearize` (resample onto a uniform grid) right
+after the analysis, before the `expr` lets:
+
+```json
+"analysis": { "kind": "tran", "args": "5u 5m", "linearize": true },
+"measurements": [
+  { "name": "a1", "expr": "mean(v(out)*cos(2*pi*1k*time))*2", "unit": "V" }
+]
+```
+
+The `linearize` line comes after the `options.waveforms` rawfile `write`, so
+the written waveform is still the solver's own points. Without the field the
+deck is byte-identical to before. `linearize` is refused (exit 1, naming the
+field) on a non-`tran` analysis, inside `analysis_steps[]`, for a non-boolean
+value, and with `engine: "xyce"`. The `batch` backend replays the same deck, so
+it needs no extra support. There is no generic `let`/control-line passthrough:
+express derived quantities as `expr` measurements.
+
 ### `expr` after a `noise` analysis
 
 ngspice leaves the *integrated* plot current after `noise` (`noise2`:
