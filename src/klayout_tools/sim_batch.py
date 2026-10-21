@@ -3143,6 +3143,98 @@ def _compare_pdk_stamps(
     }
 
 
+def _compare_staged_model_inputs(
+    client_inputs: Any,
+    worker_inputs: Any,
+    client_stamp: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """``pdk_stamp_comparison`` for a run whose models were staged (issue
+    #4020): the worker's ``pdk.stamp_*`` then describes the image tree, not
+    the executed files, so compare the digests of the files the client shipped
+    (``environment.staged_model_inputs``) with the digests the worker hashed
+    in ``$EDA_INPUT_DIR`` (``model_inputs``). ``match`` proves those files are
+    byte-identical, not that the whole model closure is. ``client_stamp``
+    (the submitter's ``SOURCES`` stamp, when readable) is carried so a caller
+    can pin the revision."""
+    result: dict[str, Any] = {"basis": "staged_model_inputs"}
+    if client_stamp is not None:
+        result["client_stamp"] = client_stamp
+    clients = [
+        entry
+        for entry in (client_inputs if isinstance(client_inputs, list) else [])
+        if isinstance(entry, dict) and entry.get("name") and entry.get("sha256")
+    ]
+    if not clients:
+        return {
+            **result,
+            "status": "not_comparable",
+            "reason": "client_staged_inputs_unavailable",
+        }
+    if not isinstance(worker_inputs, list):
+        return {
+            **result,
+            "status": "not_comparable",
+            "reason": "worker_model_inputs_unavailable",
+        }
+    if len(clients) > WORKER_CAPTURE_MODEL_INPUTS_MAX:
+        return {
+            **result,
+            "status": "not_comparable",
+            "reason": "worker_model_inputs_truncated",
+        }
+    worker_digests: dict[str, set[str | None]] = {}
+    for entry in worker_inputs:
+        worker_digests.setdefault(entry.get("name"), set()).add(entry.get("sha256"))
+    differing = sorted(
+        {
+            entry["name"]
+            for entry in clients
+            if worker_digests.get(entry["name"]) != {entry["sha256"]}
+        }
+    )
+    if not differing:
+        return {**result, "status": "match"}
+    return {
+        **result,
+        "status": "mismatch",
+        "differing": differing[:WORKER_CAPTURE_MODEL_INPUTS_MAX],
+        "warning": (
+            "the model files the worker read differ from the ones the submitter "
+            f"staged ({', '.join(differing[:5])}"
+            f"{', ...' if len(differing) > 5 else ''}); results may differ "
+            "from a local run"
+        ),
+    }
+
+
+def attach_staged_model_comparison(
+    remote_environment: dict[str, Any] | None,
+    staged_model_inputs: list[dict[str, Any]] | None,
+    request: dict[str, Any] | None,
+) -> None:
+    """Replace ``pdk_stamp_comparison`` with the staged-model-inputs
+    comparison on each ``worker_environment`` block (single job or
+    ``fleet[]`` member, each compared independently) whose capture says
+    ``pdk.models_staged``, in place (issue #4020). Other blocks keep the
+    stamp-based comparison unchanged."""
+    if not isinstance(remote_environment, dict):
+        return
+    entries = [remote_environment]
+    fleet = remote_environment.get("fleet")
+    if isinstance(fleet, list):
+        entries = [entry for entry in fleet if isinstance(entry, dict)]
+    client_stamp = _client_pdk_stamp(request)
+    for entry in entries:
+        worker_env = entry.get("worker_environment")
+        if not isinstance(worker_env, dict):
+            continue
+        pdk = worker_env.get("pdk")
+        if isinstance(pdk, dict) and pdk.get("models_staged") is True:
+            worker_env["pdk_stamp_comparison"] = _compare_staged_model_inputs(
+                staged_model_inputs, worker_env.get("model_inputs"), client_stamp
+            )
+
+
 def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | None:
     """The worker-reported ``model_inputs`` list, re-validated and bounded.
     ``None`` (not ``[]``) when the capture carries no list at all."""
@@ -3262,6 +3354,11 @@ def _read_worker_environment(
             "stamp_sha256": _bounded_str(pdk_in.get("stamp_sha256"), 64),
             "stamp_text": _bounded_str(pdk_in.get("stamp_text"), 1000),
             "models_staged": pdk_in.get("models_staged") is True,
+            # Issue #4020: ``stamp_*`` always describes the worker image's
+            # tree; under staged models that is not what the job executed.
+            "stamp_scope": "image"
+            if pdk_in.get("models_staged") is True
+            else "executed",
         }
         manifest_in = doc.get("image_manifest")
         manifest: dict[str, Any] | None = None

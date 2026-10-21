@@ -7482,6 +7482,93 @@ def test_text_summary_pdk_stamp_silent_without_worker_capture(capsys):
     assert capsys.readouterr().out == ""
 
 
+def _staged_capture(model_inputs):
+    doc = json.loads(_capture())
+    doc["pdk"]["models_staged"] = True
+    doc["model_inputs"] = model_inputs
+    return json.dumps(doc)
+
+
+def _staged_comparison(
+    tmp_path, monkeypatch, model_inputs, client_inputs, request=None
+):
+    env = _worker_env(
+        tmp_path,
+        monkeypatch,
+        {"worker_environment.json": _staged_capture(model_inputs)},
+        request=request,
+    )
+    sb.attach_staged_model_comparison(env, client_inputs, request)
+    return env["worker_environment"]
+
+
+def test_staged_models_stamp_scope_and_digest_match(tmp_path, monkeypatch):
+    request = _local_pdk(tmp_path, monkeypatch)
+    worker = [{"name": "top.lib", "sha256": "1" * 64}]
+    client = [{"name": "top.lib", "sha256": "1" * 64, "field": "lib"}]
+    env = _staged_comparison(tmp_path, monkeypatch, worker, client, request)
+    assert env["pdk"]["stamp_scope"] == "image"
+    comparison = env["pdk_stamp_comparison"]
+    assert comparison["status"] == "match"
+    assert comparison["basis"] == "staged_model_inputs"
+    assert comparison["client_stamp"]["stamp_scheme"] == "sources-sha256"
+
+
+def test_staged_models_digest_mismatch_and_missing_warn(tmp_path, monkeypatch):
+    client = [
+        {"name": "a.lib", "sha256": "1" * 64},
+        {"name": "b.lib", "sha256": "2" * 64},
+    ]
+    worker = [{"name": "a.lib", "sha256": "9" * 64}]
+    comparison = _staged_comparison(tmp_path, monkeypatch, worker, client)[
+        "pdk_stamp_comparison"
+    ]
+    assert comparison["status"] == "mismatch"
+    assert comparison["differing"] == ["a.lib", "b.lib"]
+    assert "warning" in comparison and "client_stamp" not in comparison
+
+
+def test_staged_models_not_comparable_reasons(tmp_path, monkeypatch):
+    client = [{"name": "a.lib", "sha256": "1" * 64}]
+    no_worker = _staged_comparison(tmp_path, monkeypatch, None, client)
+    assert no_worker["pdk_stamp_comparison"] == {
+        "basis": "staged_model_inputs",
+        "status": "not_comparable",
+        "reason": "worker_model_inputs_unavailable",
+    }
+    for empty in (None, []):
+        no_client = _staged_comparison(
+            tmp_path, monkeypatch, [{"name": "a.lib", "sha256": "1" * 64}], empty
+        )
+        assert no_client["pdk_stamp_comparison"]["reason"] == (
+            "client_staged_inputs_unavailable"
+        )
+    many = [{"name": f"m{i}.lib", "sha256": "1" * 64} for i in range(65)]
+    truncated = _staged_comparison(tmp_path, monkeypatch, [], many)
+    assert truncated["pdk_stamp_comparison"]["reason"] == (
+        "worker_model_inputs_truncated"
+    )
+
+
+def test_non_staged_comparison_unchanged_by_staged_attach(tmp_path, monkeypatch):
+    env = _worker_env(tmp_path, monkeypatch, {"worker_environment.json": _capture()})
+    before = json.loads(json.dumps(env["worker_environment"]["pdk_stamp_comparison"]))
+    sb.attach_staged_model_comparison(env, [{"name": "a", "sha256": "1" * 64}], None)
+    assert env["worker_environment"]["pdk_stamp_comparison"] == before
+    assert env["worker_environment"]["pdk"]["stamp_scope"] == "executed"
+
+
+def test_text_summary_prints_pdk_stamp_basis(capsys):
+    from klayout_tools.cli.sim_cmd import _print_worker_pdk
+
+    _print_worker_pdk(
+        _worker_report({"status": "match", "basis": "staged_model_inputs"}, True)
+    )
+    assert capsys.readouterr().out.splitlines()[0] == (
+        "pdk_stamp: match [basis: staged_model_inputs]"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Sharded capacity wait: one run-wide budget, progress line, partial report
 # (issue #4018)
