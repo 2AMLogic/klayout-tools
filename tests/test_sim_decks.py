@@ -1263,6 +1263,71 @@ class TestBatchDispatch:
         assert diagnostic["runner_code"] == "bad_request"
         assert "the runner refused the request" in diagnostic["message"]
 
+    def test_preflight_reject_envelope_and_identity_reach_the_units(
+        self, tmp_path, monkeypatch
+    ):
+        write_stub_engine(tmp_path)
+        fleet = _FakeFleet({"state": "failed", "exit_code": "87"})
+
+        def collect_preflight_reject(config, job_id, local_dir, **kwargs):
+            with open(
+                os.path.join(local_dir, sb.BATCH_REPORT_FILENAME),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                json.dump(
+                    {
+                        "schema_version": 1,
+                        "error": {
+                            "command": "sim",
+                            "code": "batch_runner_version_mismatch",
+                            "message": "runner klt 0.5.0 does not match client",
+                        },
+                    },
+                    handle,
+                )
+            with open(
+                os.path.join(local_dir, sb.BATCH_RUNNER_IDENTITY_FILENAME),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                json.dump({"runner_klt_version": "0.5.0"}, handle)
+
+        fleet.collect = collect_preflight_reject  # type: ignore[method-assign]
+        install_fake_batch(monkeypatch, fleet)
+        report = run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
+        for unit in report["units"]:
+            diagnostic = unit["diagnostics"][0]
+            assert diagnostic["runner_code"] == "batch_runner_version_mismatch"
+            assert "runner klt 0.5.0 does not match client" in diagnostic["message"]
+        remote = report["environment"]["remote"]
+        assert remote["runner_klt_version"] == "0.5.0"
+        assert remote["runner_compatibility"] == "mismatch"
+
+    def test_job_command_captures_stderr_from_the_first_line(self):
+        cmd = sd._deck_batch_command("enforce")
+        assert cmd.startswith(sb._job_stderr_capture_prefix())
+        assert cmd.count('> "$EDA_OUTPUT_DIR/report.json"') == 1
+
+    @pytest.mark.parametrize(("deck_count", "goes_to_fleet"), [(1, False), (2, True)])
+    def test_host_default_batch_keeps_a_single_deck_local(
+        self, tmp_path, monkeypatch, deck_count, goes_to_fleet
+    ):
+        fleet = install_fake_batch(
+            monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"})
+        )
+        monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+        request = batch_deck_request(tmp_path)
+        del request["backend"]
+        request["decks"] = request["decks"][:deck_count]
+        write_request(tmp_path, request)
+        report = sim.run_sim(
+            str(tmp_path / "request.json"), artifacts_dir=str(tmp_path / "out")
+        )
+        assert report["status"] == "pass"
+        assert (report["backend"] == "batch") is goes_to_fleet
+        assert (fleet.spec is not None) is goes_to_fleet
+
     def test_poll_timeout_reports_every_unit(self, tmp_path, monkeypatch):
         write_stub_engine(tmp_path)
 

@@ -2494,9 +2494,13 @@ def _dispatch_deck_request(
             f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
         )
     # A deck request's engine is always ngspice (plan_deck_units
-    # enforces it), so the host-default's ngspice-only condition holds.
+    # enforces it), so the host-default's ngspice-only condition holds. A
+    # single deck is one unit: like a one-corner request it stays local
+    # under a host default rather than waiting on a Spot instance.
     resolved_backend = _yield_host_default_backend(
-        resolved_backend, from_host_default, reason_ok=True
+        resolved_backend,
+        from_host_default,
+        reason_ok=len(request.get(sim_decks.DECKS_FIELD) or ()) > 1,
     )
     # Issue #3958: a deck list is one batch job with one job id, so
     # --submit-only / --attach apply -- under the corner path's own
