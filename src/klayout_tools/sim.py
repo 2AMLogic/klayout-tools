@@ -162,6 +162,7 @@ from .sim_batch import (
     _run_batch_fleet,
     _validate_batch_models_lib,
     attach_engine_build_comparison,
+    attach_staged_model_comparison,
 )
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE
@@ -4001,6 +4002,12 @@ def _run_sim_corners(
     engine_build = _engine_build_with_comparison(
         ngspice_binary, remote_environment, backend
     )
+    if remote_environment is not None and backend == "batch":
+        attach_staged_model_comparison(
+            remote_environment,
+            staged_model_environment.get("staged_model_inputs"),
+            request,
+        )
 
     environment: dict[str, Any] = {
         "engine": engine,

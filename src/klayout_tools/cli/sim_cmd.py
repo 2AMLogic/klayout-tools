@@ -437,6 +437,8 @@ def _print_worker_pdk(report: dict) -> None:
         line = f"pdk_stamp: {comparison['status']}"
         if comparison.get("reason"):
             line += f" ({comparison['reason']})"
+        if comparison.get("basis"):
+            line += f" [basis: {comparison['basis']}]"
         print(line)
         if comparison.get("warning"):
             print(f"warning: {comparison['warning']}")

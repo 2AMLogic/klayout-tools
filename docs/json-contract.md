@@ -540,6 +540,12 @@ observations are `null` (never the client's values) and `capture` is `ok`,
 `absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
 environment" for the field names and limits.
 
+Under `options.stage_model_inputs` the worker's `pdk.stamp_*` still describes
+the image tree; `pdk.stamp_scope` (`image` / `executed`) says so, and
+`pdk_stamp_comparison` gains `basis: "staged_model_inputs"` (plus optional
+`client_stamp`, `differing`) comparing the staged file digests. Additive
+fields only; no `schema_version` bump (issue #4020).
+
 **No bucket in batch reports (issue #3777).** `environment.remote` (and each
 `fleet[]` member) no longer carries `bucket` on any batch verb. The bucket name
 embeds the fleet's AWS account number and reports are committed as evidence.
