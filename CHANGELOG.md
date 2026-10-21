@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt interface-check`** (issue #4024, documented in
+  [`docs/cli/interface-check.md`](docs/cli/interface-check.md)): new verb.
+  Pairs the labelled pins of two committed streams at a declared `--place`
+  and reports per pin the pad-to-pad `offset_um` / `gap_um` and a
+  `status` of `ok`, `misaligned` or `no_partner`. Exit `0` all ok, `3` any
+  misaligned/no_partner, `1` unreadable input or no label matched `--pins`.
+  `schema_version` 1.
+
 - **`klt pex` `pin_order_mismatch`** (issue #2890, documented in
   [`docs/cli/pex.md`](docs/cli/pex.md) "Pin order must match"): additive. A new
   top-level `pin_order_mismatch` block fires when the schematic and extracted

@@ -219,6 +219,14 @@
         "klayout_tools.gen_compose_routing"
       ]
     },
+    "interface_check": {
+      "kind": "verb",
+      "description": "`klt interface_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.interface_check_cmd",
+        "klayout_tools.interface_check"
+      ]
+    },
     "kb": {
       "kind": "verb",
       "description": "`klt kb` implementation: core modules plus CLI adapter.",
@@ -851,6 +859,11 @@
       "consumer": "gen_compose",
       "exporter": "gen",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "interface_check",
+      "exporter": "cli-infra",
+      "reason": "Verb adapter uses the shared output envelope (issue #4024), as every verb does."
     },
     {
       "consumer": "kb",
