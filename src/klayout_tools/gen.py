@@ -614,6 +614,34 @@ def _grid_snapped(dbu: float, *values_um: float) -> bool:
     return any(_snapped(v) for v in values_um)
 
 
+def _mfg_grid_neighbours(
+    grid_um: float, value_um: float, multiple: int = 1
+) -> tuple[float, float] | None:
+    """The nearest values below and above ``value_um`` that are exact
+    multiples of ``multiple * grid_um`` (issue #2933), or ``None`` when
+    ``value_um`` already is one -- or when ``grid_um`` is ``0.0`` (the
+    family's curated deck declares no ``"ongrid"`` rule, see
+    :func:`~klayout_tools.gen_layer_params.mfg_grid_um`), so there is
+    nothing to check against.
+
+    ``multiple`` is for a quantity built from ``multiple`` equal on-grid
+    parts (e.g. a ``diff_pair`` device's total width, ``splits`` unit
+    widths): the representable set is then the multiples of
+    ``multiple * grid_um``, not of ``grid_um``. Unlike :func:`_grid_snapped`
+    this checks against the PDK *manufacturing* grid, never the dbu."""
+    if grid_um <= 0 or multiple < 1:
+        return None
+    step = grid_um * multiple
+    count = value_um / step
+    nearest = round(count)
+    if abs(count - nearest) <= 1e-6:
+        return None
+    below = math.floor(count)
+    # Round away float noise so the reported values read as the grid
+    # multiples they are (e.g. 4.635, not 4.635000000000001).
+    return (round(below * step, 9), round((below + 1) * step, 9))
+
+
 def _sd_pad_gate_offset_um(l_um: float, extra_offset_um: float = 0.0) -> float:
     """Extra clearance (um) :func:`_mos_finger_positions` inserts on *each*
     side of every gate stripe, between it and the adjacent S/D segment
