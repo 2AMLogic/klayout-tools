@@ -124,7 +124,9 @@ klt yield mc.json --limits spec-limits.json --format json
   always grades without one. To grade a control from a second, known-bad
   campaign, derive a sample set from both reports with
   [`klt yield-samples`](#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples)
-  — never by hand-editing a committed response.
+  — never by hand-editing a committed response. A
+  [`klt yield-campaign`](yield-campaign.md#negative-control) spec can declare
+  the control itself (`negative_control`) and run both campaigns in one call.
 
 ### Sample-set document
 
