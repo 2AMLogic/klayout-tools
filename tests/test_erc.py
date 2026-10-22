@@ -8985,3 +8985,123 @@ def test_cli_accepts_pdk_ihp_sg13g2(tmp_path, capsys):
 
     assert code in (0, 3)
     assert json.loads(capsys.readouterr().out)["pdk"] == "ihp-sg13g2"
+
+
+# --- klt erc --validate-spec (issue #4034) ----------------------------------
+
+
+def _validate_spec_path(tmp_path, mutate=None):
+    spec_path = tmp_path / "spec.json"
+    _basic_spec(spec_path)
+    if mutate is not None:
+        spec = json.loads(spec_path.read_text())
+        mutate(spec)
+        _write_spec(spec_path, spec)
+    return spec_path
+
+
+def test_cli_validate_spec_valid_needs_no_layout(tmp_path, capsys):
+    spec_path = _validate_spec_path(tmp_path)
+
+    assert main(["erc", "--validate-spec", str(spec_path), "--format", "json"]) == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["schema_version"] == 1
+    assert data["status"] == "valid"
+    assert data["spec"] == str(spec_path)
+    assert data["counts"] == {
+        "stackup": 4,
+        "vias": 3,
+        "nets": 0,
+        "ties": 0,
+        "devices": 0,
+    }
+    assert "erc_status" not in data
+    assert captured.err == ""
+
+    assert main(["erc", "--validate-spec", str(spec_path)]) == 0
+    assert "status: valid" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "mutate, message",
+    [
+        (lambda spec: spec.update(bogus=1), "unknown field 'bogus'"),
+        (
+            lambda spec: spec["vias"][0].update(between=["poly", "nope"]),
+            "nope",
+        ),
+        (
+            lambda spec: spec.update(
+                ties=[
+                    {
+                        "name": "nwell_tie",
+                        "well_layer": "10/0",
+                        "tap_layer": "11/0",
+                        "tap_is_dedicated": True,
+                        "connect_to": "nope",
+                        "net": "VDD",
+                    }
+                ]
+            ),
+            "connect_to",
+        ),
+        (
+            lambda spec: spec.update(
+                nets=[{"name": "A", "same_net_as": "MISSING"}],
+            ),
+            "same_net_as names 'MISSING'",
+        ),
+        (
+            lambda spec: spec.update(
+                devices=[{"name": "r", "body_layer": "62/0", "on": "nope"}]
+            ),
+            "nope",
+        ),
+    ],
+)
+def test_cli_validate_spec_rejects_what_run_erc_rejects(
+    tmp_path, capsys, mutate, message
+):
+    spec_path = _validate_spec_path(tmp_path, mutate)
+    gds = tmp_path / "layout.gds"
+    _basic_fixture(gds)
+
+    assert main(["erc", "--validate-spec", str(spec_path)]) == 1
+    validate_err = capsys.readouterr().err
+    assert message in validate_err
+
+    with pytest.raises(ErcError) as excinfo:
+        run_erc(str(gds), str(spec_path))
+    assert str(excinfo.value) in validate_err
+
+
+def test_cli_validate_spec_missing_or_invalid_file_is_a_clean_error(tmp_path, capsys):
+    assert main(["erc", "--validate-spec", str(tmp_path / "nope.json")]) == 1
+    assert "nope.json" in capsys.readouterr().err
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    assert main(["erc", "--validate-spec", str(bad)]) == 1
+
+
+def test_cli_validate_spec_conflicts_are_clear_errors(tmp_path, capsys):
+    spec_path = _validate_spec_path(tmp_path)
+    spec = str(spec_path)
+
+    for flags in (
+        ["--top", "TOP"],
+        ["--pdk", "sky130"],
+        ["--deck", "sky130"],
+        ["--findings-only"],
+        ["--omit-antenna-tables"],
+        ["--compact"],
+        ["--rerun"],
+    ):
+        assert main(["erc", "--validate-spec", spec, *flags]) == 1
+        assert flags[0] in capsys.readouterr().err
+
+    for extra in (["layout.gds"], ["--check", "report.json"]):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["erc", "--validate-spec", spec, *extra])
+        assert excinfo.value.code == 2

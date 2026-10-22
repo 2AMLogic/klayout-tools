@@ -3276,6 +3276,75 @@ def _extract_connectivity(
     return l2n, circuit, layer_index, tie_layers
 
 
+def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
+    """Load and validate ``spec_path`` -- the layout-independent half of
+    :func:`run_erc` (issue #4034), shared with :func:`validate_erc_spec` so
+    the two entry points cannot drift.
+
+    Returns ``(spec, stackup, stackup_names, vias, nets_decl, ties,
+    ties_disclosure, devices)``; raises :class:`ErcError` on any defect.
+    """
+    spec = _load_spec_json(spec_path, ErcError)
+    _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", ErcError)
+    stackup = _validate_stackup(spec, spec_path)
+    stackup_names = [entry["name"] for entry in stackup]
+    vias = _validate_vias(spec, spec_path, stackup_names)
+    nets_decl = _validate_nets(spec, spec_path, stackup_names)
+    ties = _validate_ties(spec, spec_path, stackup_names)
+    # `ties` first, deliberately: #2541's `undeclared_classes` is validated
+    # against the declared tie names, so a spec that declares and discloses
+    # the same class is rejected as the self-contradiction it is.
+    ties_disclosure = _validate_ties_disclosure(
+        spec, spec_path, [tie["name"] for tie in ties]
+    )
+    # The `devices[]` fragment is shared verbatim with `klt power` (issue
+    # #2260), so it lives in `_devices.py` and takes the flat list of
+    # conductor role names -- `stackup` first, then `vias` -- this module
+    # would otherwise assemble internally.
+    devices = _validate_devices(
+        spec,
+        spec_path,
+        stackup_names + [via["name"] for via in vias],
+        ErcError,
+    )
+    return (
+        spec,
+        stackup,
+        stackup_names,
+        vias,
+        nets_decl,
+        ties,
+        ties_disclosure,
+        devices,
+    )
+
+
+def validate_erc_spec(spec_path: str) -> dict[str, Any]:
+    """Validate a ``klt erc`` spec file without reading any layout (issue
+    #4034).
+
+    Runs exactly the schema and cross-reference checks :func:`run_erc` runs
+    before it opens a layout, and returns a ``status: "valid"`` payload with
+    per-section declaration counts. No verdict is produced. Raises
+    :class:`ErcError` (with the same field-path message ``run_erc`` gives)
+    for a missing/unreadable file or any malformed declaration.
+    """
+    _, stackup, _, vias, nets_decl, ties, _, devices = _parse_erc_spec(spec_path)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "mode": "validate_spec",
+        "status": "valid",
+        "spec": spec_path,
+        "counts": {
+            "stackup": len(stackup),
+            "vias": len(vias),
+            "nets": len(nets_decl),
+            "ties": len(ties),
+            "devices": len(devices),
+        },
+    }
+
+
 def run_erc(
     file: str,
     spec_path: str,
@@ -3481,29 +3550,16 @@ def run_erc(
     antenna_limits = _resolve_antenna_limits(pdk)
     deck_obj = _resolve_deck(deck)
 
-    spec = _load_spec_json(spec_path, ErcError)
-    _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", ErcError)
-    stackup = _validate_stackup(spec, spec_path)
-    stackup_names = [entry["name"] for entry in stackup]
-    vias = _validate_vias(spec, spec_path, stackup_names)
-    nets_decl = _validate_nets(spec, spec_path, stackup_names)
-    ties = _validate_ties(spec, spec_path, stackup_names)
-    # `ties` first, deliberately: #2541's `undeclared_classes` is validated
-    # against the declared tie names, so a spec that declares and discloses
-    # the same class is rejected as the self-contradiction it is.
-    ties_disclosure = _validate_ties_disclosure(
-        spec, spec_path, [tie["name"] for tie in ties]
-    )
-    # The `devices[]` fragment is shared verbatim with `klt power` (issue
-    # #2260), so it lives in `_devices.py` and takes the flat list of
-    # conductor role names -- `stackup` first, then `vias` -- this module
-    # would otherwise assemble internally.
-    devices = _validate_devices(
+    (
         spec,
-        spec_path,
-        stackup_names + [via["name"] for via in vias],
-        ErcError,
-    )
+        stackup,
+        stackup_names,
+        vias,
+        nets_decl,
+        ties,
+        ties_disclosure,
+        devices,
+    ) = _parse_erc_spec(spec_path)
 
     layout = load_layout(file, ErcError)
     top_cells = select_top_cells(layout, top, ErcError)
