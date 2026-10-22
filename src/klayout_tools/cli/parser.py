@@ -28,6 +28,7 @@ from . import (
     equiv_cmd,
     erc_cmd,
     eval_cmd,
+    evidence_cmd,
     extract_cmd,
     functional_verification_cmd,
     gen_cmd,
@@ -282,6 +283,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_pdk_parser(subparsers)
     _add_deck_parser(subparsers)
     _add_env_provenance_parser(subparsers)
+    _add_evidence_parser(subparsers)
     _add_version_parser(subparsers)
 
     _add_extract_parser(subparsers)
@@ -5172,6 +5174,85 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(devices_parser)
     devices_parser.set_defaults(func=deck_cmd.run_devices)
+
+
+def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``evidence`` verb with a nested ``record`` subcommand
+    (issue #4044): the writer side of the ``evidence-record/1`` convention in
+    docs/design/sim-evidence-discipline-spike.md.
+    """
+    evidence_parser = subparsers.add_parser(
+        "evidence",
+        help="write an evidence-record/1 file around a finished klt sim / "
+        "klt pex report",
+        description=(
+            "Evidence records around finished `klt sim` / `klt pex` runs. "
+            "`record` wraps the untouched report with git provenance, a "
+            "dirty-inputs flag, pins, environment provenance and the "
+            "per-corner deck/log snapshot. Never overwrites a record."
+        ),
+    )
+    evidence_sub = evidence_parser.add_subparsers(
+        dest="evidence_command", metavar="<subcommand>"
+    )
+    evidence_parser.set_defaults(func=_no_subcommand_handler(evidence_parser))
+
+    record_parser = evidence_sub.add_parser(
+        "record",
+        help="write one evidence-record/1 file",
+        description=(
+            "Write <root>/evidence/sim/<block>/<scope>/<YYYYMMDD>-<HHMMSS>-"
+            "<short-sha>.json (UTC time, git short SHA of --root) plus a "
+            "<id>.d/ sidecar with per-corner corner.cir and log copied from "
+            "the report's artifacts. Exits 1 if the record exists (no "
+            "--force), --root is not a git work tree, or the wrapper "
+            "metadata would carry a local identifier."
+        ),
+    )
+    record_parser.add_argument(
+        "report", help="raw klt sim / klt pex JSON report (the -o file)"
+    )
+    record_parser.add_argument(
+        "--request", required=True, help="request JSON the report was produced from"
+    )
+    record_parser.add_argument("--block", required=True, help="design under test")
+    record_parser.add_argument(
+        "--scope", required=True, help="evidence scope slug (e.g. full-pvt)"
+    )
+    record_parser.add_argument(
+        "--subset-reason",
+        default=None,
+        help="why this run is a subset of the full corner matrix",
+    )
+    record_parser.add_argument(
+        "--supersedes",
+        action="append",
+        metavar="PATH",
+        default=None,
+        help="an existing record this one supersedes (repeatable)",
+    )
+    record_parser.add_argument(
+        "--root",
+        default=".",
+        help="git work tree the record is written into (default: cwd)",
+    )
+    record_parser.add_argument(
+        "--extensions",
+        metavar="FILE.json",
+        default=None,
+        help="opaque JSON object stored verbatim under `extensions`",
+    )
+    record_parser.add_argument(
+        "--input",
+        dest="inputs",
+        action="append",
+        metavar="PATH",
+        default=None,
+        help="extra input (e.g. the netlist) included in the dirty_inputs "
+        "check (repeatable)",
+    )
+    _add_format_arg(record_parser)
+    record_parser.set_defaults(func=evidence_cmd.run_record)
 
 
 def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
