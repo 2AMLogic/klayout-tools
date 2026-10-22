@@ -1339,6 +1339,14 @@ def _require_parasitics_for_resistance_graph(
         raise ExtractError("--resistance-graph requires --parasitics")
 
 
+def _require_resistance_graph_for_emit(
+    emit_selected_resistance: bool, resistance_graph: bool
+) -> None:
+    """``emit_selected_resistance`` (issue #4037) reads the graph result."""
+    if emit_selected_resistance and not resistance_graph:
+        raise ExtractError("emit_selected_resistance requires resistance_graph")
+
+
 def _validate_resistance_graph_r_cut(
     resistance_graph: bool, r_cut_ohm: float | None
 ) -> None:
@@ -2793,8 +2801,7 @@ def run_extract(
     # `parasitics.nets[]` entries, so it needs `--parasitics`.
     _require_parasitics_for_resistance_graph(resistance_graph, parasitics)
     _validate_resistance_graph_r_cut(resistance_graph, resistance_graph_r_cut_ohm)
-    if emit_selected_resistance and not resistance_graph:
-        raise ExtractError("emit_selected_resistance requires resistance_graph")
+    _require_resistance_graph_for_emit(emit_selected_resistance, resistance_graph)
 
     # `--distributed-rc` (issue #977) requires `--critical-net`: it reuses
     # that flag's own net set as the "which nets get the ladder" scope

@@ -2541,6 +2541,18 @@ def _device_only_parity(
     }
 
 
+def _reject_resistance_graph_with_distributed_rc(
+    resistance_graph: bool, distributed_rc: bool
+) -> None:
+    """Issue #4037: the ladder keeps the legacy per-level resistance."""
+    if resistance_graph and distributed_rc:
+        raise PexError(
+            "--resistance-graph cannot be combined with --distributed-rc: the "
+            "ladder keeps the legacy per-level resistance, so a critical net "
+            "would mix resistance sources"
+        )
+
+
 def _reject_device_only_in_command_mode(
     device_only_leg: bool, command_mode: bool
 ) -> None:
@@ -2936,12 +2948,7 @@ def run_pex(
     )
     command_mode = command is not None
     _reject_device_only_in_command_mode(device_only_leg, command_mode)
-    if resistance_graph and distributed_rc:
-        raise PexError(
-            "--resistance-graph cannot be combined with --distributed-rc: the "
-            "ladder keeps the legacy per-level resistance, so a critical net "
-            "would mix resistance sources"
-        )
+    _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
 
     # Issue #1261: every input-path field this run's own JSON response
     # echoes (`layout`/`netlist`/`reference_netlist`, each `testbenches[]`

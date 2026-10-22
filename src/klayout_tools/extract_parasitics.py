@@ -2379,6 +2379,22 @@ def _attach_network_integrity(
     return integrity
 
 
+def _lumped_resistance_ohm(entry: dict[str, Any], emit_selected: bool) -> float:
+    """A net's lumped R (issue #4037): the terminal-aware
+    ``selected_resistance_ohm`` when ``emit_selected`` and the net's
+    ``resistance_source`` is ``"graph"`` (and no MoM-RLC override), else
+    ``resistance_ohm``."""
+    graph_report = entry.get("resistance_graph")
+    if (
+        emit_selected
+        and graph_report is not None
+        and graph_report.get("resistance_source") == "graph"
+        and not entry.get("mom_rlc_r_override")
+    ):
+        return graph_report["selected_resistance_ohm"]
+    return entry["resistance_ohm"]
+
+
 def _inject_parasitics(
     kdb: Any,
     circuit: kdb.Circuit,
@@ -2670,16 +2686,10 @@ def _inject_parasitics(
             if dup_count == 0
             else f"{base_instance_name}_dup{dup_count}"
         )
-        entry_r_ohm = entry["resistance_ohm"]
-        graph_report = entry.get("resistance_graph")
-        if (
-            emit_selected_resistance
-            and graph_report is not None
-            and graph_report.get("resistance_source") == "graph"
-            and not entry.get("mom_rlc_r_override")
-        ):
-            entry_r_ohm = graph_report["selected_resistance_ohm"]
-        r_total_ohm = max(entry_r_ohm, _MIN_PARASITIC_R_OHM)
+        r_total_ohm = max(
+            _lumped_resistance_ohm(entry, emit_selected_resistance),
+            _MIN_PARASITIC_R_OHM,
+        )
         c_farad = entry["capacitance_ff"] * 1e-15
         net_escaped = spice_safe_net_name(entry["net"])
         drop_r = variants is not None and variants.drops_r(net_escaped)
