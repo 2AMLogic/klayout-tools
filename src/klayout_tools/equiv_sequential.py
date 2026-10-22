@@ -5,8 +5,10 @@ Register-correspondence sequential equivalence via ``equiv_make`` /
 fallback (stage 2) to extract a confirmable counterexample when stage 1 leaves
 cells unproven. See :mod:`klayout_tools.equiv`'s own docstring, "Engine:
 yosys-sequential", for the full rationale. Split out of ``equiv.py`` (#3694);
-behaviour and JSON output are unchanged. Helpers shared with the combinational
-path stay in ``equiv.py`` and are imported lazily to avoid an import cycle.
+behaviour and JSON output are unchanged. The replay and stage-record helpers
+live in ``equiv_replay.py`` / ``equiv_stage.py`` (#4032); the few helpers still
+in ``equiv.py`` (script/yosys-output helpers) are imported at module level here,
+so ``equiv.py`` loads this module lazily to avoid an import cycle.
 """
 
 from __future__ import annotations
@@ -24,33 +26,37 @@ from ._provenance import (
     build_provenance,
 )
 from .equiv import (
-    _EQUIV_ALL_PROVEN_RE,
-    _SIM_BACKEND_FOUR_STATE,
-    _SIM_BACKEND_LABEL,
-    _SIM_ENGINE_LABEL,
-    _STAGE1_ALL_PROVEN,
-    _STAGE1_UNPROVEN_CELLS,
-    _UNPROVEN_EQUIV_RE,
-    DEFAULT_SIM_BACKEND,
     SCHEMA_VERSION,
-    EquivError,
     _classify_sat_result,
-    _compare_replay_outputs,
-    _cross_check_block,
     _decode_bin,
-    _diverging_names,
-    _load_committed_stage1,
-    _record_cross_check_agreement,
-    _replay_backends,
-    _replay_evidence_is_untrustworthy,
-    _run_replay_backend,
     _side_prep_lines,
-    _sim_backend_version,
-    _stage_fingerprint,
-    _stage_record_path,
-    _write_partial_stage_record,
-    _write_stage_record,
     _yosys_error_message,
+)
+from .equiv_errors import EquivError
+from .equiv_replay import (
+    DEFAULT_SIM_BACKEND,
+    SIM_BACKEND_FOUR_STATE,
+    SIM_BACKEND_LABEL,
+    SIM_ENGINE_LABEL,
+    compare_replay_outputs,
+    cross_check_block,
+    diverging_names,
+    record_cross_check_agreement,
+    replay_backends,
+    replay_evidence_is_untrustworthy,
+    run_replay_backend,
+    sim_backend_version,
+)
+from .equiv_stage import (
+    EQUIV_ALL_PROVEN_RE,
+    STAGE1_ALL_PROVEN,
+    STAGE1_UNPROVEN_CELLS,
+    UNPROVEN_EQUIV_RE,
+    load_committed_stage1,
+    stage_fingerprint,
+    stage_record_path,
+    write_partial_stage_record,
+    write_stage_record,
 )
 
 #: `equiv_make`'s own degenerate-case line: zero `$equiv` cells were even
@@ -363,7 +369,7 @@ def _parse_unproven_equiv_signals(stdout: str) -> set[str]:
     renames or repurposes.
     """
     names: set[str] = set()
-    for match in _UNPROVEN_EQUIV_RE.finditer(stdout):
+    for match in UNPROVEN_EQUIV_RE.finditer(stdout):
         for token in match.group(1).split():
             token = token.lstrip("\\")
             for suffix in ("_gold", "_gate"):
@@ -519,7 +525,7 @@ def _build_sequential_testbench(
     a single vector) through ``gold``/``gate`` (as written by
     ``write_verilog`` to the stage-1 ``netlist_path``) and ``$display``s
     both modules' output values after each cycle -- the sequential
-    generalisation of :func:`_build_testbench`.
+    generalisation of :func:`build_testbench`.
 
     Every recorded input value is driven directly, cycle by cycle
     (including any clock signal -- the real, still-``posedge``-clocked
@@ -605,7 +611,7 @@ def _confirm_sequential_counterexample(
     request_doc: dict[str, Any],
     request_dir: str,
 ) -> None:
-    """Multi-cycle counterpart of :func:`_confirm_counterexample`:
+    """Multi-cycle counterpart of :func:`confirm_counterexample`:
     independently re-runs ``counterexample``'s entire captured trace through
     the flattened ``gold``/``gate`` netlists via the selected replay backend
     (``iverilog``/``vvp`` by default -- see this module's docstring,
@@ -613,8 +619,8 @@ def _confirm_sequential_counterexample(
 
     Mutates ``counterexample`` in place (``confirmed_by_simulation``,
     ``simulation``); appends to ``diagnostics`` on any degradation, exactly
-    as :func:`_confirm_counterexample` does. ``request_doc``/``request_dir``
-    (issue #2423) are threaded down to :func:`_run_replay_backend` the same
+    as :func:`confirm_counterexample` does. ``request_doc``/``request_dir``
+    (issue #2423) are threaded down to :func:`run_replay_backend` the same
     way.
 
     **Confirmed if the reported divergence reproduces anywhere in the
@@ -626,7 +632,7 @@ def _confirm_sequential_counterexample(
     Requiring only that the *same output signal* diverges *at some* replayed
     cycle -- not literally the solver's own cycle index -- is the same
     "confirm the reported divergence is real, not the solver's exact
-    bookkeeping" bar :func:`_confirm_counterexample` already applies to the
+    bookkeeping" bar :func:`confirm_counterexample` already applies to the
     combinational engine's single-vector case, generalised for the
     additional timing degree of freedom a multi-cycle trace introduces.
     """
@@ -657,9 +663,9 @@ def _confirm_sequential_counterexample(
         )
         return
 
-    canonical_backend, cross_backend = _replay_backends(sim_backend)
+    canonical_backend, cross_backend = replay_backends(sim_backend)
 
-    stdout, failure, canonical_binaries = _run_replay_backend(
+    stdout, failure, canonical_binaries = run_replay_backend(
         backend=canonical_backend,
         netlist_path=netlist_path,
         tb_path=tb_path,
@@ -681,14 +687,14 @@ def _confirm_sequential_counterexample(
     sim_cycle_entries, sim_diverging_union = _parse_sequential_replay_outputs(stdout)
 
     counterexample["simulation"] = {
-        "engine": _SIM_ENGINE_LABEL[canonical_backend],
-        "engine_version": _sim_backend_version(
+        "engine": SIM_ENGINE_LABEL[canonical_backend],
+        "engine_version": sim_backend_version(
             canonical_backend, canonical_binaries.get("iverilog_binary")
         ),
-        "four_state": _SIM_BACKEND_FOUR_STATE[canonical_backend],
+        "four_state": SIM_BACKEND_FOUR_STATE[canonical_backend],
         "cycles": sim_cycle_entries,
         "diverging_outputs": sorted(sim_diverging_union),
-        # Issue #2423: see `_confirm_counterexample`'s identical comment.
+        # Issue #2423: see `confirm_counterexample`'s identical comment.
         **canonical_binaries,
     }
 
@@ -702,7 +708,7 @@ def _confirm_sequential_counterexample(
                 "code": "counterexample_not_reproduced",
                 "message": "re-running the solver's counterexample trace "
                 "through the flattened netlists via "
-                f"{_SIM_BACKEND_LABEL[canonical_backend]} did not "
+                f"{SIM_BACKEND_LABEL[canonical_backend]} did not "
                 "reproduce a diverging output on any replayed cycle -- "
                 "treat this counterexample with suspicion",
             }
@@ -711,7 +717,7 @@ def _confirm_sequential_counterexample(
     if cross_backend is None:
         return
 
-    cross_stdout, cross_failure, _cross_binaries = _run_replay_backend(
+    cross_stdout, cross_failure, _cross_binaries = run_replay_backend(
         backend=cross_backend,
         netlist_path=netlist_path,
         tb_path=tb_path,
@@ -721,7 +727,7 @@ def _confirm_sequential_counterexample(
         request_dir=request_dir,
     )
     if cross_stdout is None:
-        counterexample["simulation_cross_check"] = _cross_check_block(
+        counterexample["simulation_cross_check"] = cross_check_block(
             cross_backend, sequential=True
         )
         diagnostics.append(
@@ -737,7 +743,7 @@ def _confirm_sequential_counterexample(
     cross_cycle_entries, cross_diverging_union = _parse_sequential_replay_outputs(
         cross_stdout
     )
-    cross_check = _cross_check_block(cross_backend, sequential=True)
+    cross_check = cross_check_block(cross_backend, sequential=True)
     cross_check["cycles"] = cross_cycle_entries
     cross_check["diverging_outputs"] = sorted(cross_diverging_union)
 
@@ -748,7 +754,7 @@ def _confirm_sequential_counterexample(
         canonical_cycle = canonical_by_time.get(time_value, {})
         cross_cycle = cross_by_time.get(time_value, {})
         mismatches.extend(
-            _compare_replay_outputs(
+            compare_replay_outputs(
                 canonical={
                     "gold": canonical_cycle.get("gold_outputs", {}),
                     "gate": canonical_cycle.get("gate_outputs", {}),
@@ -757,12 +763,12 @@ def _confirm_sequential_counterexample(
                     "gold": cross_cycle.get("gold_outputs", {}),
                     "gate": cross_cycle.get("gate_outputs", {}),
                 },
-                cross_four_state=_SIM_BACKEND_FOUR_STATE[cross_backend],
+                cross_four_state=SIM_BACKEND_FOUR_STATE[cross_backend],
                 cycle=time_value,
             )
         )
 
-    _record_cross_check_agreement(
+    record_cross_check_agreement(
         counterexample=counterexample,
         cross_check=cross_check,
         canonical_backend=canonical_backend,
@@ -794,7 +800,7 @@ def _parse_sequential_replay_outputs(
     for time_value in sorted(sim_cycles):
         gold_outputs = sim_cycles[time_value]["gold"]
         gate_outputs = sim_cycles[time_value]["gate"]
-        diverging = _diverging_names(gold_outputs, gate_outputs)
+        diverging = diverging_names(gold_outputs, gate_outputs)
         sim_diverging_union.update(diverging)
         sim_cycle_entries.append(
             {
@@ -968,7 +974,7 @@ def _load_stage1_record_for_resume(
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
     """The resume-only record load for :func:`_run_sequential`:
     ``(record, resume_diagnostics)`` -- ``record`` is what
-    :func:`_load_committed_stage1` adopted (``None`` unless ``--resume``
+    :func:`load_committed_stage1` adopted (``None`` unless ``--resume``
     was requested), and ``resume_diagnostics`` carries the
     ``resume_stage_record_discarded`` warning when a record existed but
     was rejected. A rejected record is never silently ignored: the
@@ -976,7 +982,7 @@ def _load_stage1_record_for_resume(
     commit on disk did not satisfy the resume contract (issue #2280)."""
     if resume_block is None:
         return None, []
-    record, discard_reason = _load_committed_stage1(
+    record, discard_reason = load_committed_stage1(
         record_path, fingerprint, log_path=log_path, netlist_path=netlist_path
     )
     if record is None and discard_reason is not None:
@@ -1020,7 +1026,7 @@ def _resume_report_from_committed_stage1(
     re-running Yosys. The loader has already corroborated the recorded
     classification against the committed log's own bytes, which is what
     makes this reconstruction safe to trust (see
-    :func:`_load_committed_stage1`).
+    :func:`load_committed_stage1`).
 
     Returns ``(report, blacklisted, refinements, active_blacklist_path)``
     where ``report`` is the final ``"equivalent"`` envelope when the
@@ -1044,7 +1050,7 @@ def _resume_report_from_committed_stage1(
         refinements, blacklisted
     )
 
-    if stage1_record["classification"] != _STAGE1_ALL_PROVEN:
+    if stage1_record["classification"] != STAGE1_ALL_PROVEN:
         # classification == unproven_cells: fall through to stage 2,
         # exactly as a live stage-1 run that left cells unproven would.
         return None, blacklisted, refinements, active_blacklist_path
@@ -1107,11 +1113,11 @@ def _run_sequential(
     netlist_path = os.path.join(output_dir, "equiv_seq_netlist.v")
     log1_path = os.path.join(output_dir, "equiv_seq_stage1.log")
     blacklist_path = os.path.join(output_dir, "equiv_seq_blacklist.txt")
-    record_path = _stage_record_path(output_dir, 1)
+    record_path = stage_record_path(output_dir, 1)
 
     int_timeout = max(1, round(effective_timeout_s))
     engine_version = _yosys_version(yosys_binary)
-    fingerprint = _stage_fingerprint(
+    fingerprint = stage_fingerprint(
         gold=gold,
         gate=gate,
         port_map=port_map,
@@ -1208,7 +1214,7 @@ def _run_sequential(
                 stage1.timed_out
                 or stage1.returncode != 0
                 or _EQUIV_NONE_FOUND_RE.search(stage1.stdout)
-                or _EQUIV_ALL_PROVEN_RE.search(stage1.stdout)
+                or EQUIV_ALL_PROVEN_RE.search(stage1.stdout)
                 or refinements >= _MAX_STAGE1_REFINEMENTS
                 or effective_timeout_s - total_elapsed_s <= 0
             ):
@@ -1232,8 +1238,8 @@ def _run_sequential(
             # Stage 1 never reached a classified outcome, so nothing is
             # committed for a later resume (issue #2280): the on-disk record is
             # (re)written as a `partial: true` marker documenting the failed
-            # attempt -- which `_load_committed_stage1` can never adopt.
-            _write_partial_stage_record(
+            # attempt -- which `load_committed_stage1` can never adopt.
+            write_partial_stage_record(
                 record_path, fingerprint, reason="process_timeout"
             )
             return _build_sequential_report(
@@ -1276,14 +1282,14 @@ def _run_sequential(
             # engine exists specifically *for* sequential designs), so a
             # nonzero return here is always a genuine elaboration/build error,
             # never the combinational engine's own scope-rejection shape.
-            _write_partial_stage_record(record_path, fingerprint, reason="yosys_error")
+            write_partial_stage_record(record_path, fingerprint, reason="yosys_error")
             message = _yosys_error_message(
                 stage1.stdout, stage1.stderr, stage1.returncode
             )
             raise EquivError(message)
 
         if _EQUIV_NONE_FOUND_RE.search(stage1.stdout):
-            _write_partial_stage_record(
+            write_partial_stage_record(
                 record_path, fingerprint, reason="no_equiv_cells"
             )
             raise EquivError(
@@ -1298,14 +1304,14 @@ def _run_sequential(
         # instead of re-running the (potentially multi-pass, minutes-long)
         # induction proof. Atomic write; `partial` forced false; see the
         # "Resumable runs" module-docstring section.
-        stage1_all_proven = bool(_EQUIV_ALL_PROVEN_RE.search(stage1.stdout))
-        _write_stage_record(
+        stage1_all_proven = bool(EQUIV_ALL_PROVEN_RE.search(stage1.stdout))
+        write_stage_record(
             record_path,
             {
                 "stage": 1,
                 "fingerprint": fingerprint,
                 "classification": (
-                    _STAGE1_ALL_PROVEN if stage1_all_proven else _STAGE1_UNPROVEN_CELLS
+                    STAGE1_ALL_PROVEN if stage1_all_proven else STAGE1_UNPROVEN_CELLS
                 ),
                 "blacklist": sorted(blacklisted),
                 "refinements": refinements,
@@ -1493,7 +1499,7 @@ def _run_sequential(
     # silently preferred over the other's.
     status3 = (
         "inconclusive"
-        if _replay_evidence_is_untrustworthy(counterexample)
+        if replay_evidence_is_untrustworthy(counterexample)
         else "counterexample"
     )
 
