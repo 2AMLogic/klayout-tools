@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt evidence record`** (issue #4044, documented in
+  [`docs/cli/evidence.md`](docs/cli/evidence.md)): new verb. Writes one
+  `evidence-record/1` file (id `<YYYYMMDD>-<HHMMSS>-<short-sha>`, never
+  overwritten) around a finished `klt sim` / `klt pex` report, with git
+  provenance, a `dirty_inputs` flag, derived pins, environment provenance
+  and the per-corner deck/log snapshot. Schema and writer live in
+  `klayout_tools.evidence_record`. `schema_version` 1.
+
 - **`klt interface-check`** (issue #4024, documented in
   [`docs/cli/interface-check.md`](docs/cli/interface-check.md)): new verb.
   Pairs the labelled pins of two committed streams at a declared `--place`

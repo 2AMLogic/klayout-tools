@@ -162,6 +162,13 @@
         "klayout_tools.eval"
       ]
     },
+    "evidence": {
+      "kind": "verb",
+      "description": "`klt evidence` implementation: CLI adapter for the evidence-record/1 writer.",
+      "modules": [
+        "klayout_tools.cli.evidence_cmd"
+      ]
+    },
     "extract": {
       "kind": "verb",
       "description": "`klt extract` implementation: core modules plus CLI adapter.",
@@ -459,6 +466,7 @@
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
         "klayout_tools.design_evidence_tiers",
+        "klayout_tools.evidence_record",
         "klayout_tools.lef_header",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
@@ -825,6 +833,11 @@
       "consumer": "eval",
       "exporter": "trajectory",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "evidence",
+      "exporter": "cli-infra",
+      "reason": "`klt evidence` adapter uses the shared CLI output envelope helpers (emit_success/emit_error), like every verb adapter."
     },
     {
       "consumer": "extract",
@@ -1308,6 +1321,12 @@
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.evidence_record",
+      "exporter": "klayout_tools.env_provenance",
+      "symbol": "_assert_no_leaks",
+      "reason": "Issue #4044: the evidence-record wrapper leak scan must match the provenance scrub exactly rather than duplicating its absolute-path/secret scanner."
+    },
     {
       "consumer": "klayout_tools.corner_matrix",
       "exporter": "klayout_tools._paths",

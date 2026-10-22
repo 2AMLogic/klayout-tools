@@ -40,6 +40,7 @@ docs/
     drc.md
     economy.md
     env-provenance.md
+    evidence.md
     equiv.md
     erc.md
     eval.md
