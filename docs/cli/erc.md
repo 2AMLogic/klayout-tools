@@ -2981,6 +2981,41 @@ failed to verify (missing/invalid report, or the rerun itself errored); `2` —
 usage error. These are the `--check` meanings only; a normal run keeps the
 table in "Exit codes" below.
 
+## `--validate-spec` (issue #4034)
+
+Check a spec file on its own, before any layout exists:
+
+```
+klt erc --validate-spec spec.json
+```
+
+It runs exactly the schema and cross-reference checks a normal run performs
+before it opens a layout (the same code path: unknown keys, `stackup`/`vias`/
+`nets`/`ties`/`ties_disclosure`/`devices` shape, and role references such as
+`vias[].between`, `ties[].connect_to`, `nets[].same_net_as` and
+`devices[].on`). It reads no layout, produces no `status`/`erc_status`
+verdict, and emits no label-layer warning. A defect is the same exit-1
+field-path error a normal run gives.
+
+`--validate-spec` is mutually exclusive with the positional `<file>` and with
+`--check` (argparse usage error, exit 2). The layout-only flags `--top`,
+`--pdk`, `--deck`, `--findings-only`, `--omit-antenna-tables`, `--compact`
+and `--rerun` are rejected with a clean exit-1 error rather than ignored.
+
+```json
+{
+  "schema_version": 1,
+  "mode": "validate_spec",
+  "status": "valid",
+  "spec": "spec.json",
+  "counts": {"stackup": 4, "vias": 3, "nets": 0, "ties": 0, "devices": 0}
+}
+```
+
+`status` is always `"valid"` on success (a spec that fails to validate exits
+`1` with the error envelope instead). **Exit codes:** `0` valid; `1` invalid
+or unreadable spec, or a conflicting flag; `2` usage error.
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                              |

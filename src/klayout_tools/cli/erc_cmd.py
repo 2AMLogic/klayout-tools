@@ -36,6 +36,11 @@ reproduces, as ``klt drc``/``klt lvs`` do -- see ``docs/cli/erc.md``,
 ``spec``. Cheap mode re-hashes the recorded layout and spec; ``--rerun``
 re-runs ERC from the echoed inputs and diffs verdict-bearing fields. Both
 report ``status: "match"`` (exit 0) or ``"drifted"`` (exit 3).
+
+``--validate-spec <spec>`` (issue #4034) checks a spec file's schema and
+cross-references without reading any layout and without producing a verdict:
+``status: "valid"`` (exit 0) or the ordinary exit-1 error. It is mutually
+exclusive with ``file``/``--check`` and refuses the layout-only flags.
 """
 
 import argparse
@@ -46,6 +51,7 @@ from ..erc import (
     check_erc_report,
     rerun_erc_report,
     run_erc,
+    validate_erc_spec,
 )
 from .output import emit_error, emit_success, render_rerun_drift
 
@@ -64,6 +70,9 @@ _EXIT_CODE_BY_STATUS = {
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.validate_spec is not None:
+        return _run_validate_spec(args)
+
     if args.check is not None:
         # `file` is in `--check`'s mutually exclusive argparse group
         # (parser.py), and `spec` cannot be given without it -- so
@@ -93,6 +102,44 @@ def run(args: argparse.Namespace) -> int:
 
     emit_success(report, args.format, _print_text)
     return _EXIT_CODE_BY_STATUS[report["status"]]
+
+
+def _run_validate_spec(args: argparse.Namespace) -> int:
+    # `file` and `--check` are in `--validate-spec`'s mutually exclusive
+    # argparse group (parser.py), so those combinations are usage errors
+    # (exit 2). The remaining flags are not positional, so they are refused
+    # here rather than silently ignored.
+    layout_only = {
+        "--top": args.top is not None,
+        "--pdk": args.pdk is not None,
+        "--deck": args.deck is not None,
+        "--findings-only": args.findings_only,
+        "--omit-antenna-tables": args.omit_antenna_tables,
+        "--compact": args.compact,
+        "--rerun": args.rerun,
+    }
+    conflicts = [flag for flag, given in layout_only.items() if given]
+    if conflicts:
+        return emit_error(
+            "erc",
+            f"--validate-spec reads no layout and runs no check, so it cannot "
+            f"be combined with {', '.join(conflicts)}",
+            args.format,
+        )
+    try:
+        result = validate_erc_spec(args.validate_spec)
+    except ErcError as exc:
+        return emit_error("erc", str(exc), args.format)
+
+    emit_success(result, args.format, _print_validate_spec_text)
+    return 0
+
+
+def _print_validate_spec_text(result: dict) -> None:
+    print(f"spec: {result['spec']}")
+    print(f"status: {result['status']}")
+    for section, count in result["counts"].items():
+        print(f"  {section}: {count}")
 
 
 def _run_check(args: argparse.Namespace) -> int:

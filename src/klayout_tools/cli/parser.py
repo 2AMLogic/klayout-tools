@@ -6919,6 +6919,21 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "'--check / --rerun'"
         ),
     )
+    erc_input_group.add_argument(
+        "--validate-spec",
+        default=None,
+        metavar="SPEC",
+        help=(
+            "validate the JSON spec file SPEC (schema, unknown keys, and "
+            "cross-references such as ties[].connect_to, vias[].between, "
+            "nets[].same_net_as and devices[].on) without reading any "
+            "layout and without producing a verdict (issue #4034). Exits 0 "
+            "with status 'valid', or 1 with the usual field-path error. "
+            "Mutually exclusive with 'file' and --check; the layout-only "
+            "flags (--top, --pdk, --deck, --findings-only, "
+            "--omit-antenna-tables, --compact, --rerun) are rejected"
+        ),
+    )
     erc_parser.add_argument(
         "--rerun",
         action="store_true",
