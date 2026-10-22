@@ -137,6 +137,7 @@ docs/
     scgallery-zerosoc-survey.md
     sdf-annotate-feasibility-spike.md
     sequential-equivalence-survey.md
+    shared-sim-harness-survey.md
     sico-survey.md
     siliconcompiler-core-survey.md
     sim-corner-reached-s.md
