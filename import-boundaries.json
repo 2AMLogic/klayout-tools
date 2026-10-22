@@ -60,6 +60,14 @@
         "klayout_tools.components"
       ]
     },
+    "corner_matrix": {
+      "kind": "verb",
+      "description": "`klt corner-matrix` implementation: core module plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.corner_matrix_cmd",
+        "klayout_tools.corner_matrix"
+      ]
+    },
     "congestion": {
       "kind": "verb",
       "description": "`klt congestion` implementation: core modules plus CLI adapter.",
@@ -661,6 +669,16 @@
     }
   },
   "allowed_group_edges": [
+    {
+      "consumer": "corner_matrix",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope, as every verb does (issue #4045)."
+    },
+    {
+      "consumer": "corner_matrix",
+      "exporter": "sim",
+      "reason": "Issue #4045: `klt corner-matrix` must check the grid exactly as `klt sim` expands it, so it calls sim's expander and catches SimError rather than duplicating the expansion."
+    },
     {
       "consumer": "keepout_check",
       "exporter": "cli-infra",
@@ -1308,6 +1326,18 @@
       "exporter": "klayout_tools.env_provenance",
       "symbol": "_assert_no_leaks",
       "reason": "Issue #4044: the evidence-record wrapper leak scan must match the provenance scrub exactly rather than duplicating its absolute-path/secret scanner."
+    },
+    {
+      "consumer": "klayout_tools.corner_matrix",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #4045: loads the request JSON with the same error handling as sim/characterize; promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.corner_matrix",
+      "exporter": "klayout_tools.sim",
+      "symbol": "_expand_corners",
+      "reason": "Issue #4045: the checker's whole contract is that its grid ids match what `klt sim` expands; reusing the private expander guarantees that. Make it public or move it to a shared module when sim is next split."
     },
     {
       "consumer": "klayout_tools.place_and_route_portable",

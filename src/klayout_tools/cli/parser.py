@@ -18,6 +18,7 @@ from . import (
     characterize_cmd,
     clip_cmd,
     components_cmd,
+    corner_matrix_cmd,
     deck_cmd,
     design_centering_cmd,
     diff_cmd,
@@ -273,6 +274,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_lef_abstract_parser(subparsers)
 
     _add_ring_check_parser(subparsers)
+    _add_corner_matrix_parser(subparsers)
     _add_keepout_check_parser(subparsers)
     _add_tap_distance_parser(subparsers)
 
@@ -7029,3 +7031,38 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(erc_parser)
     erc_parser.set_defaults(func=erc_cmd.run)
+
+
+def _add_corner_matrix_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``corner-matrix`` verb: declared-vs-observed corner grid check."""
+    matrix_parser = subparsers.add_parser(
+        "corner-matrix",
+        help="check a klt sim request or report against a declared corner matrix",
+        description=(
+            "Mechanical check of a repo-committed corner matrix (process / "
+            "supply_v / temperature_c / params axes plus exclude[]) against a "
+            "klt sim request (conformance: missing/extra/duplicate tuples) or "
+            "a klt sim report (completeness: every tuple once, simulated, "
+            "finite, in limits). Reports, does not judge: the repo owns which "
+            "matrix is full and any subset_reason policy. See "
+            "docs/cli/corner-matrix.md."
+        ),
+    )
+    matrix_sub = matrix_parser.add_subparsers(
+        dest="corner_matrix_command", required=True
+    )
+    check_parser = matrix_sub.add_parser(
+        "check",
+        help="diff a declared matrix against a request or a report",
+        description="Diff a declared corner matrix against a request or a report.",
+    )
+    check_parser.add_argument("matrix", help="path to the matrix JSON file")
+    source = check_parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--request", help="klt sim request JSON to check for conformance"
+    )
+    source.add_argument(
+        "--report", help="klt sim report JSON to check for completeness"
+    )
+    _add_format_arg(check_parser)
+    check_parser.set_defaults(func=corner_matrix_cmd.run_check)

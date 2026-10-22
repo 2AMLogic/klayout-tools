@@ -19,7 +19,9 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 import jsonschema
 import pytest
@@ -849,6 +851,20 @@ class _FakeClock:
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
         self.now += seconds
+
+
+class _SbTime:
+    """Stands in for ``sim_batch.time`` only, so the fake clock sees the code
+    under test's sleeps and nothing else. Patching ``sb.time.sleep`` would patch
+    the process-wide ``time`` module, and stdlib callers (``subprocess`` waits,
+    on any thread) would then add their own sleeps to the fake clock."""
+
+    def __init__(self, clock: _FakeClock) -> None:
+        self.sleep = clock.sleep
+        self.monotonic = clock.monotonic
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
 
 
 def _queue_refusals(runner: _FakeRunner, count: int) -> None:
@@ -7735,8 +7751,7 @@ def _capacity_fleet(tmp_path, monkeypatch, *, hosts, refusals, wait_s, refusal=N
     runner.outputs = {"report.json": _sim_report(corner_ids=("tt_1.800_0",))}
     clock = _FakeClock()
     monkeypatch.setattr(sb, "_run_subprocess", runner)
-    monkeypatch.setattr(sb.time, "sleep", clock.sleep)
-    monkeypatch.setattr(sb.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(sb, "time", _SbTime(clock))
     monkeypatch.setattr(sb.random, "random", lambda: 1.0)
     for _ in range(refusals):
         runner.queue(

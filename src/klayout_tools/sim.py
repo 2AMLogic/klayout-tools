@@ -1163,6 +1163,11 @@ _PREREQUISITE_MESSAGES: dict[str, str] = {
 #: pinned build. Distinct from :data:`UNSUPPORTED_ANALYSIS_CODE`.
 ENGINE_VERSION_UNMET_CODE = "engine_version_unmet"
 
+#: ``SimError.code`` for a request whose ``models.pdk_version`` pin the
+#: installed PDK does not satisfy (issue #4046): the *PDK* drifted from the
+#: pinned revision, or could not be identified.
+PDK_VERSION_UNMET_CODE = "pdk_version_unmet"
+
 #: ``SimError.code`` for an analysis kind `klt sim` has no implementation for
 #: (issue #3041): the *capability* is absent, whatever engine build is pinned.
 UNSUPPORTED_ANALYSIS_CODE = "unsupported_analysis"
@@ -1258,6 +1263,70 @@ def _check_offhost_engine_version_pin(
         return
     _check_engine_version_pin(
         pin, engine_version, engine, where=f"the {backend} runner's report"
+    )
+
+
+def _validate_pdk_version_pin(models: Any) -> str | None:
+    """The request's ``models.pdk_version`` pin (issue #4046), ``None`` when
+    unset. Same value forms as ``klt pdk check --expect-version``."""
+    if not isinstance(models, dict):
+        return None
+    pin = models.get("pdk_version")
+    if pin is None:
+        return None
+    if not isinstance(pin, str) or not pin.strip():
+        raise SimError(
+            f"request.models.pdk_version must be a non-empty string (got {pin!r})"
+        )
+    return pin.strip()
+
+
+def _check_pdk_version_pin(pin: str | None, models: Any, backend: str) -> None:
+    """Enforce ``models.pdk_version`` before any corner runs (issue #4046).
+
+    Local backends resolve the PDK the way ``provenance.pdk`` does and fail
+    closed (``pdk_version_unmet``) on ``mismatch``/``unknown`` or when no PDK
+    resolves. Off-host backends reject the field: the worker-side comparison
+    is tracked in #3462, and silently passing would hide drift."""
+    if pin is None:
+        return
+    if backend in _OFFHOST_BACKENDS:
+        raise SimError(
+            f"models.pdk_version is not supported for backend {backend!r}: "
+            "the PDK is resolved on the runner, and the worker-side pin check "
+            "is not implemented yet (see issue #3462) -- use backend 'local' "
+            "or 'local-parallel', or drop the pin"
+        )
+    variant = models.get("pdk")
+    root = models.get("pdk_root")
+    if not (variant or root):
+        raise SimError(
+            f"models.pdk_version pins {pin!r} but no PDK is named: set "
+            "models.pdk and/or models.pdk_root so the installed revision can "
+            "be checked",
+            code=PDK_VERSION_UNMET_CODE,
+        )
+    try:
+        found = find_pdk(variant=variant, root=root, expect_version=pin)
+    except PdkNotFoundError as exc:
+        raise SimError(
+            f"models.pdk_version pins {pin!r} but the PDK could not be resolved: {exc}",
+            code=PDK_VERSION_UNMET_CODE,
+        ) from exc
+    expectation = found.get("version_expectation") or {}
+    status = expectation.get("status")
+    if status == "match":
+        return
+    installed = expectation.get("installed")
+    if status == "mismatch":
+        detail = f"installed PDK is {installed!r}"
+    elif installed:
+        detail = f"installed PDK {installed!r} could not be compared"
+    else:
+        detail = "installed PDK identity could not be determined"
+    raise SimError(
+        f"pinned PDK unavailable: request requires {pin!r}; {detail}",
+        code=PDK_VERSION_UNMET_CODE,
     )
 
 
@@ -3023,6 +3092,9 @@ def _prepare_sim_request(
     _check_local_engine_version_pin(
         engine_version_pin, backend, engine, ngspice_binary or XYCE_BINARY
     )
+    # Issue #4046: a `models.pdk_version` pin is checked the same way, before
+    # any corner runs; off-host backends reject it rather than pass silently.
+    _check_pdk_version_pin(_validate_pdk_version_pin(models), models, backend)
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
     # Issue #3337: the complex-vector sidecar is the result, so declared
     # vectors force artifacts on (validated in full below).
