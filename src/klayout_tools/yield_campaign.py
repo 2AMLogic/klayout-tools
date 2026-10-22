@@ -475,7 +475,7 @@ def run_campaign(
 
     analysis_path = sample_set_path
     control_echo = None
-    if control_request is not None:
+    if negative_control is not None and control_request is not None:
         control_dir = os.path.join(out_dir, "control")
         os.makedirs(control_dir, exist_ok=True)
         control_request_path = os.path.join(control_dir, "sim-request.json")
