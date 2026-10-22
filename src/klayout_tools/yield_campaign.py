@@ -70,7 +70,7 @@ from typing import Any
 
 from . import sim
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
-from .yield_analysis import YieldError, run_yield
+from .yield_analysis import YieldError, derive_sample_set, run_yield
 
 #: A campaign spec is a `klt sim` request with a mandatory `monte_carlo`
 #: block -- these are the fields `sim.load_request` itself already requires
@@ -106,6 +106,11 @@ _YIELD_ONLY_FIELDS = ("confidence", "target_ci_halfwidth", "min_samples")
 #: campaign spec's limits is a real spec bug, and `klt sim`'s coverage skip
 #: is exactly the report that should surface it.
 _YIELD_ONLY_LIMIT_KEYS = ("target_yield", "target_sigma", "min_converged_samples")
+
+#: Keys a campaign spec's optional ``negative_control`` object may carry
+#: (issue #4047). Closed so a typo is a spec error, not a silently ignored
+#: control.
+_NEGATIVE_CONTROL_KEYS = ("description", "monte_carlo")
 
 
 class CampaignError(Exception):
@@ -151,7 +156,13 @@ def _campaign_identity_json(spec: dict[str, Any]) -> str:
     how they are dispatched.
     """
     identity = copy.deepcopy(spec)
-    for key in ("backend", "remote", "options", *_YIELD_ONLY_FIELDS):
+    for key in (
+        "backend",
+        "remote",
+        "options",
+        "negative_control",
+        *_YIELD_ONLY_FIELDS,
+    ):
         identity.pop(key, None)
     mc = dict(identity.get("monte_carlo") or {})
     mc.pop("seed", None)
@@ -171,6 +182,83 @@ def _default_campaign_seed(spec: dict[str, Any]) -> int:
     per-sample seed, so this module introduces no second hashing scheme.
     """
     return sim._derive_mc_seed(0, "yield-campaign", _campaign_identity_json(spec))
+
+
+def _merge_overrides(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Recursive dict merge: ``overrides`` wins, nested dicts merge."""
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_overrides(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _parse_negative_control(spec: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate the spec's optional ``negative_control`` object (issue
+    #4047), returning ``{"description": ..., "overrides": {...}}`` or
+    ``None`` when the spec declares no control."""
+    raw = spec.get("negative_control")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise CampaignError("campaign spec 'negative_control' must be an object")
+    unknown = sorted(set(raw) - set(_NEGATIVE_CONTROL_KEYS))
+    if unknown:
+        raise CampaignError(
+            f"campaign spec 'negative_control' has unknown field(s) "
+            f"{', '.join(unknown)} (allowed: {', '.join(_NEGATIVE_CONTROL_KEYS)})"
+        )
+    overrides = raw.get("monte_carlo")
+    if not isinstance(overrides, dict) or not overrides:
+        raise CampaignError(
+            "campaign spec 'negative_control.monte_carlo' must be a non-empty "
+            "object of monte_carlo overrides (e.g. {'mismatch_scale': 2.5})"
+        )
+    seed = overrides.get("seed")
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+        raise CampaignError(
+            "campaign spec 'negative_control.monte_carlo.seed' must be an integer"
+        )
+    description = raw.get("description")
+    if description is not None and not isinstance(description, str):
+        raise CampaignError(
+            "campaign spec 'negative_control.description' must be a string"
+        )
+    return {"description": description, "overrides": overrides}
+
+
+def _resolve_control_request(
+    request: dict[str, Any], control: dict[str, Any], nominal_seed: int
+) -> tuple[dict[str, Any], int, str]:
+    """Build the negative-control `klt sim` request: the resolved nominal
+    ``request`` with the control's ``monte_carlo`` overrides merged in.
+
+    The control is independently seeded (`docs/cli/sim.md`): an omitted seed
+    is derived from the merged content under its own salt, and a seed equal
+    to the nominal one is refused.
+    """
+    merged_mc = _merge_overrides(request["monte_carlo"], control["overrides"])
+    if control["overrides"].get("seed") is not None:
+        seed, source = control["overrides"]["seed"], "spec"
+    else:
+        identity = dict(request)
+        identity["monte_carlo"] = {k: v for k, v in merged_mc.items() if k != "seed"}
+        seed = sim._derive_mc_seed(
+            0,
+            "yield-campaign-negative-control",
+            json.dumps(identity, sort_keys=True, default=str),
+        )
+        source = "derived"
+    if seed == nominal_seed:
+        raise CampaignError(
+            f"negative control seed {seed} equals the nominal campaign seed -- "
+            "the control must be independently seeded; set a different "
+            "'negative_control.monte_carlo.seed' or omit it to derive one"
+        )
+    merged_mc["seed"] = seed
+    return {**copy.deepcopy(request), "monte_carlo": merged_mc}, seed, source
 
 
 def _absolutize_paths(request: dict[str, Any], spec_dir: str) -> dict[str, Any]:
@@ -304,6 +392,7 @@ def _resolve_request(
     mc["seed"] = resolved_seed
     request["monte_carlo"] = mc
 
+    request.pop("negative_control", None)
     yield_defaults = {key: request.pop(key, None) for key in _YIELD_ONLY_FIELDS}
     yield_limits = _strip_yield_only_limits(request)
 
@@ -342,11 +431,18 @@ def run_campaign(
     the resulting sample set.
     """
     spec = _load_spec(spec_path)
+    negative_control = _parse_negative_control(spec)
     spec_dir = os.path.dirname(os.path.abspath(spec_path))
     request, yield_defaults, yield_limits, resolved_seed, seed_source = (
         _resolve_request(spec, spec_dir=spec_dir, seed_override=seed)
     )
     mc = request["monte_carlo"]
+
+    control_request = None
+    if negative_control is not None:
+        control_request, control_seed, control_seed_source = _resolve_control_request(
+            request, negative_control, resolved_seed
+        )
 
     if out_dir is None:
         out_dir = os.path.join(spec_dir, ".klt", "yield-campaign")
@@ -377,9 +473,59 @@ def run_campaign(
         json.dump(sim_report, handle, indent=2)
         handle.write("\n")
 
+    analysis_path = sample_set_path
+    control_echo = None
+    if negative_control is not None and control_request is not None:
+        control_dir = os.path.join(out_dir, "control")
+        os.makedirs(control_dir, exist_ok=True)
+        control_request_path = os.path.join(control_dir, "sim-request.json")
+        with open(control_request_path, "w", encoding="utf-8") as handle:
+            json.dump(control_request, handle, indent=2)
+            handle.write("\n")
+        try:
+            control_report = sim.run_sim(
+                control_request_path,
+                artifacts_dir=os.path.join(control_dir, "artifacts"),
+                backend=backend,
+                hosts=hosts,
+            )
+        except sim.SimError as exc:
+            raise CampaignError(f"negative-control dispatch failed: {exc}") from exc
+        control_report_path = os.path.join(control_dir, "sample-set.json")
+        with open(control_report_path, "w", encoding="utf-8") as handle:
+            json.dump(control_report, handle, indent=2)
+            handle.write("\n")
+
+        # Same derivation `klt yield-samples` applies, so a non-converged
+        # control draw is disclosed (errored/inconclusive), never dropped.
+        try:
+            derived = derive_sample_set(
+                sample_set_path,
+                control_report_path,
+                description=negative_control["description"],
+                measurements=measurements,
+            )
+        except YieldError as exc:
+            raise CampaignError(str(exc)) from exc
+        analysis_path = os.path.join(out_dir, "derived-sample-set.json")
+        with open(analysis_path, "w", encoding="utf-8") as handle:
+            json.dump(derived, handle, indent=2)
+            handle.write("\n")
+        control_echo = {
+            "seed": control_seed,
+            "seed_source": control_seed_source,
+            "description": negative_control["description"],
+            "overrides": negative_control["overrides"],
+            "sim_status": control_report.get("status"),
+            "derivation": derived["derivation"]["measurements"],
+            "sim_report_path": control_report_path,
+            "request_path": control_request_path,
+            "sample_set_path": analysis_path,
+        }
+
     try:
         yield_report = run_yield(
-            sample_set_path,
+            analysis_path,
             confidence=(
                 confidence if confidence is not None else yield_defaults["confidence"]
             ),
@@ -419,4 +565,6 @@ def run_campaign(
         "sim_report_path": sample_set_path,
         "request_path": request_path,
     }
+    if control_echo is not None:
+        payload["campaign"]["negative_control"] = control_echo
     return payload
