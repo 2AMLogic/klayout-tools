@@ -41,6 +41,7 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#3440**: gf180mcu MIM option A: live verification against PDK pcell and runset (follow-up to #2920 / PR #3358)
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin
 - **#3805**: release: `klt signoff --attest` (#2844) is not in any PyPI release; latest 0.7.0 rejects it
+- **#3930**: Live-verify klt place-and-route io.pin_constraints against real OpenROAD (N/E/S/W)
 
 ## In Progress
 
@@ -50,12 +51,19 @@ Issues currently being built (`loom:building`).
 - **#3027**: Layout-flow benchmark phase 4: comparison reporting and bounded CI
 - **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests
 - **#3776**: Live-verify klt sta set_driving_cell/set_load syntax and *NAME_MAP SPEF annotation against OpenROAD/OpenSTA
+- **#3874**: Live-verify place-and-route portable_paths against a real route-stage response (follow-up to #3820)
+- **#4042**: Proposal: one shared chip sim harness in klt (six per-chip sim/harness forks are drifting apart)
+- **#4044**: klt gap: evidence-record writer for sim runs (G2)
+- **#4045**: klt gap: declared corner matrix and completeness check (G3)
+- **#4046**: klt gap: toolchain/PDK pin and drift check before a run (G4)
+- **#4047**: klt gap: Monte Carlo negative-control campaign shape (G5)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#4048**: docs: survey six forked chip sim harnesses against klt
+- **#4049**: feat(sim): add models.pdk_version pin checked before simulating
 
 ## Approved (Awaiting Merge)
 
@@ -103,6 +111,11 @@ Issues carrying `loom:curated`.
 - **#4001**: gf180mcu deck: disclose the DRM §9.2 bond-pad guidelines (PAD.1, PAD.2, PAD.5–20) as not evaluated *(curated)*
 - **#4002**: Make gf180mcu's native sign-off deck runnable from klt drc --engine klayout (assemble rule_decks + run_drc.py) *(curated)*
 - **#4003**: erc: add a gf180mcu antenna-ratio limit table (--pdk gf180mcu), mirroring the sg13g2 table from #3784 *(curated)*
+- **#4042**: Proposal: one shared chip sim harness in klt (six per-chip sim/harness forks are drifting apart) *(curated)*
+- **#4044**: klt gap: evidence-record writer for sim runs (G2) *(curated)*
+- **#4045**: klt gap: declared corner matrix and completeness check (G3) *(curated)*
+- **#4046**: klt gap: toolchain/PDK pin and drift check before a run (G4) *(curated)*
+- **#4047**: klt gap: Monte Carlo negative-control campaign shape (G5) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -125,11 +138,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 6 |
 | Very important | 0 |
 | Important | 1 |
-| Ready (`loom:issue`) | 11 |
-| In Progress (`loom:building`) | 4 |
-| PRs awaiting review | 0 |
+| Ready (`loom:issue`) | 12 |
+| In Progress (`loom:building`) | 10 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 6 |
-| Curated | 31 |
+| Curated | 36 |
 | Architect / Hermit proposals | 6 |
 | Active epics | 2 |
 <!-- guide:plan-body:end -->
