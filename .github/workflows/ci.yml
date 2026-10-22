@@ -1705,10 +1705,18 @@ jobs:
 
       - name: Install the klayout binary
         # Same bounded, mirror-tolerant apt wrapper as the `test` job's
-        # ngspice step (issues #1204, #1219).
-        timeout-minutes: 5
+        # ngspice step (issues #1204, #1219). The apt `klayout` package
+        # pulls Qt5 widgets libs, so the bare 90s per-command cap killed a
+        # slow-but-live mirror mid-download on every retry (issue #4059).
+        # Same sizing as the Yosys-deps step (#2662): two full-length
+        # attempts fit (60 + 150 + 5 backoff + 150 = 365s <= 380s) inside
+        # the 420s (`timeout-minutes: 7`) backstop. Only a degraded-mirror
+        # day pays the worst case; a normal run is unchanged (~30s).
+        timeout-minutes: 7
         env:
           DEBIAN_FRONTEND: noninteractive
+          CI_APT_DEADLINE: "380"
+          CI_APT_PER_CMD_TIMEOUT: "150"
         run: scripts/ci-apt-install.sh klayout
 
       - name: ASAP7 deck fixtures
