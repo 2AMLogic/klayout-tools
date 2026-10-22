@@ -64,7 +64,6 @@ Issues currently being built (`loom:building`).
 - **#2983**: extract resistance graph increment 4: substitute the two-terminal cross-level scalar
 - **#3027**: Layout-flow benchmark phase 4: comparison reporting and bounded CI
 - **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests
-- **#3655**: Reconcile epic #1519 acceptance and documentation criteria before closing
 - **#3776**: Live-verify klt sta set_driving_cell/set_load syntax and *NAME_MAP SPEF annotation against OpenROAD/OpenSTA
 
 ## PRs Awaiting Review
@@ -92,7 +91,6 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 - **#3313**: ci: publish report-only Python coverage from the 3.12 test leg
 - **#3467**: ci: fetch the PDK with ciel pinned to open_pdks f6eeac7
 - **#3635**: feat: select graph-derived two-terminal resistance as an additive extract field
-- **#3658**: docs: reconcile mom CLI and validation docs with shipped winding support
 - **#3903**: test: add live OpenROAD klt sta tests for write_spef NAME_MAP and driving cell/load
 - **#3913**: feat(benchmark): add report-layout for ledger-only layout comparison reports
 
@@ -133,7 +131,6 @@ Issues carrying `loom:curated`.
 - **#3516**: klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249) *(curated)*
 - **#3522**: Verify OMP_NUM_THREADS pinning on the batch fleet (follow-up to #3502) *(curated)*
 - **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests *(curated)*
-- **#3655**: Reconcile epic #1519 acceptance and documentation criteria before closing *(curated)*
 - **#3776**: Live-verify klt sta set_driving_cell/set_load syntax and *NAME_MAP SPEF annotation against OpenROAD/OpenSTA *(curated)*
 - **#3805**: release: `klt signoff --attest` (#2844) is not in any PyPI release; latest 0.7.0 rejects it *(curated)*
 - **#3871**: Live batch-fleet verification of runner-resolved osdi_preload (PR #3853) *(curated)*
@@ -161,10 +158,10 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 2 |
 | Ready (`loom:issue`) | 14 |
-| In Progress (`loom:building`) | 6 |
+| In Progress (`loom:building`) | 5 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 18 |
-| Curated | 38 |
+| Approved PRs awaiting merge | 17 |
+| Curated | 37 |
 | Architect / Hermit proposals | 4 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
