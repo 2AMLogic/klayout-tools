@@ -13985,6 +13985,86 @@ def test_engine_version_unmet_fails_before_simulating(tmp_path, monkeypatch):
     assert sims == []
 
 
+_PDK_SHA = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
+
+
+def _pdk_pin_request(
+    tmp_path: Path, monkeypatch, sources="open_pdks " + _PDK_SHA, **models
+):
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    root = tmp_path / "pdkroot"
+    variant = root / "sky130A"
+    (variant / "libs.tech" / "ngspice").mkdir(parents=True)
+    if sources is not None:
+        (variant / "SOURCES").write_text(sources, encoding="utf-8")
+    base = {"pdk": "sky130A", "pdk_root": str(root)}
+    base.update(models)
+    return _pin_request(tmp_path, models=base)
+
+
+def test_pdk_version_match_proceeds_to_simulation(tmp_path, monkeypatch):
+    request = _pdk_pin_request(tmp_path, monkeypatch, pdk_version=_PDK_SHA[:12])
+    sims = _fake_engine_probe(monkeypatch, "** ngspice-42\n")
+    with pytest.raises(AssertionError, match="no simulation may run"):
+        sim.run_sim(str(request), backend="local")
+    assert len(sims) == 1  # got past the pin check and reached the engine
+
+
+def test_pdk_version_mismatch_fails_before_simulating(tmp_path, monkeypatch):
+    request = _pdk_pin_request(tmp_path, monkeypatch, pdk_version="c6d73a35f524070e")
+    sims = _fake_engine_probe(monkeypatch, "** ngspice-42\n")
+    with pytest.raises(sim.SimError, match="requires 'c6d73a35f524070e'") as exc:
+        sim.run_sim(str(request), backend="local")
+    assert exc.value.code == "pdk_version_unmet"
+    assert sims == []
+
+
+def test_pdk_version_unknown_identity_fails_closed(tmp_path, monkeypatch):
+    request = _pdk_pin_request(
+        tmp_path, monkeypatch, sources=None, pdk_version=_PDK_SHA
+    )
+    sims = _fake_engine_probe(monkeypatch, "** ngspice-42\n")
+    with pytest.raises(sim.SimError, match="pinned PDK unavailable") as exc:
+        sim.run_sim(str(request), backend="local")
+    assert exc.value.code == "pdk_version_unmet"
+    assert sims == []
+
+
+def test_pdk_version_without_resolvable_pdk_fails_closed(tmp_path, monkeypatch):
+    _fake_engine_probe(monkeypatch, "** ngspice-42\n")
+    request = _pin_request(tmp_path, models={"pdk_version": _PDK_SHA})
+    with pytest.raises(sim.SimError, match="no PDK is named") as exc:
+        sim.run_sim(str(request), backend="local")
+    assert exc.value.code == "pdk_version_unmet"
+    request = _pin_request(
+        tmp_path,
+        models={
+            "pdk": "sky130A",
+            "pdk_root": str(tmp_path / "nope"),
+            "pdk_version": _PDK_SHA,
+        },
+    )
+    with pytest.raises(sim.SimError, match="could not be resolved") as exc:
+        sim.run_sim(str(request), backend="local")
+    assert exc.value.code == "pdk_version_unmet"
+
+
+def test_pdk_version_rejected_off_host(tmp_path, monkeypatch):
+    request = _pdk_pin_request(tmp_path, monkeypatch, pdk_version=_PDK_SHA)
+    for backend in ("remote", "batch"):
+        with pytest.raises(sim.SimError, match="#3462") as exc:
+            sim.run_sim(str(request), backend=backend)
+        assert exc.value.code is None
+
+
+def test_pdk_version_must_be_non_empty_string(tmp_path):
+    request = _pin_request(tmp_path, models={"pdk_version": 5})
+    with pytest.raises(sim.SimError, match="non-empty string"):
+        sim.run_sim(str(request), backend="local")
+
+
 def test_engine_version_pin_unparseable_probe_fails_closed(tmp_path, monkeypatch):
     _fake_engine_probe(monkeypatch, "no banner here\n")
     request = _pin_request(tmp_path, engine_version="42")

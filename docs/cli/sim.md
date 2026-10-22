@@ -141,6 +141,19 @@ front. `remote` and `batch` have no pre-submit probe, so the pin is checked
 against the version in the runner's report once the run returns; the job has
 already run by then. Unset, behaviour is unchanged.
 
+**Pinning the PDK revision (`models.pdk_version`, issue #4046).** The
+request's `models` block may carry an optional `models.pdk_version` string,
+sibling of `models.pdk` / `models.pdk_root`, with the same value forms as
+`klt pdk check --expect-version` (a hex SHA, an `open_pdks <sha>` stamp, or a
+lambdapdk release; see [`pdk.md`](pdk.md) "Asserting a pin"). On `local` and
+`local-parallel`, `klt sim` resolves the PDK exactly as `provenance.pdk` does
+and compares the installed identity *before simulating*; a `mismatch`, an
+`unknown` identity, a PDK that cannot be resolved, or a pin with neither
+`models.pdk` nor `models.pdk_root` set exits 1 with
+`error.code: "pdk_version_unmet"`. `remote` and `batch` reject the field with a
+request error (no silent pass): the worker-side check is tracked in #3462.
+Unset, behaviour is unchanged.
+
 **Supported analyses (issue #3041).** `analysis.kind` (and each
 `analysis_steps[]` step) is a control-block analysis such as `op`, `dc`, `ac`,
 `tran`, `noise`. Periodic small-signal/noise analyses — `pss`, `pnoise`,
