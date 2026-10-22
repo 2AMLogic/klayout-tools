@@ -28,6 +28,11 @@ Wrapper fields: `schema`, `recorded_at`, `block`, `scope`, `request_path`
 (`env_provenance.environment_provenance()`), `artifacts`, `extensions`
 (opaque `--extensions` object) and `result` — the report, unmodified.
 
+> **Deliberate deviation from #4044:** the issue asks for `result` as
+> "byte-identical embedded JSON". The wrapper embeds the report as a parsed
+> object, so `result` is *equal when parsed*, not byte-for-byte identical to the
+> report file (key order and whitespace may differ). No value is altered.
+
 ## Guarantees
 
 - **Never overwrites** — an existing record exits 1 with

@@ -252,6 +252,46 @@ def _snapshot_artifacts(
 # --------------------------------------------------------------------------- #
 
 
+def _load_inputs(
+    report_path: str,
+    request_path: str,
+    root: str,
+    extensions_path: str | None,
+    supersedes: Iterable[str],
+    extra_inputs: Iterable[str],
+) -> tuple[dict[str, Any], dict[str, Any], list[str], list[str]]:
+    """Load and validate the writer's inputs.
+
+    Returns ``(result, extensions, supersedes_rel, input_rels)``;
+    ``input_rels[0]`` is the request path relative to ``root``.
+    """
+    result = _load_json(report_path, "report")
+    if not isinstance(result, dict):
+        raise EvidenceRecordError("report must be a JSON object")
+    request_rel = _rel_to_root(request_path, root, "--request")
+    if not os.path.isfile(request_path):
+        raise EvidenceRecordError(f"cannot read --request {request_path!r}")
+    extensions = (
+        _load_json(extensions_path, "--extensions")
+        if extensions_path is not None
+        else {}
+    )
+    if not isinstance(extensions, dict):
+        raise EvidenceRecordError("--extensions must be a JSON object")
+
+    supersedes_rel: list[str] = []
+    for item in supersedes:
+        resolved = item if os.path.isabs(item) else os.path.join(root, item)
+        if not os.path.isfile(resolved):
+            raise EvidenceRecordError(f"--supersedes path does not exist: {item!r}")
+        supersedes_rel.append(_rel_to_root(resolved, root, "--supersedes"))
+
+    input_rels = [request_rel] + [
+        _rel_to_root(p, root, "--input") for p in extra_inputs
+    ]
+    return result, extensions, supersedes_rel, input_rels
+
+
 def write_record(
     report_path: str,
     request_path: str,
@@ -278,30 +318,10 @@ def write_record(
     short_sha = head[:RECORD_ID_SHA_LENGTH]
     record_id = mint_record_id(now, short_sha)
 
-    result = _load_json(report_path, "report")
-    if not isinstance(result, dict):
-        raise EvidenceRecordError("report must be a JSON object")
-    request_rel = _rel_to_root(request_path, root, "--request")
-    if not os.path.isfile(request_path):
-        raise EvidenceRecordError(f"cannot read --request {request_path!r}")
-    extensions = (
-        _load_json(extensions_path, "--extensions")
-        if extensions_path is not None
-        else {}
+    result, extensions, supersedes_rel, input_rels = _load_inputs(
+        report_path, request_path, root, extensions_path, supersedes, extra_inputs
     )
-    if not isinstance(extensions, dict):
-        raise EvidenceRecordError("--extensions must be a JSON object")
-
-    supersedes_rel: list[str] = []
-    for item in supersedes:
-        resolved = item if os.path.isabs(item) else os.path.join(root, item)
-        if not os.path.isfile(resolved):
-            raise EvidenceRecordError(f"--supersedes path does not exist: {item!r}")
-        supersedes_rel.append(_rel_to_root(resolved, root, "--supersedes"))
-
-    input_rels = [request_rel] + [
-        _rel_to_root(p, root, "--input") for p in extra_inputs
-    ]
+    request_rel = input_rels[0]
 
     if evidence_dir is None:
         evidence_dir = os.path.join(root, *DEFAULT_EVIDENCE_DIR, block, scope)
@@ -402,12 +422,25 @@ def validate_record_shape(record: Any) -> list[str]:
     """
     if not isinstance(record, Mapping):
         return ["record must be a JSON object"]
-    problems: list[str] = []
-    for name in REQUIRED_FIELDS:
-        if name not in record:
-            problems.append(f"missing field {name!r}")
+    problems = [
+        f"missing field {name!r}" for name in REQUIRED_FIELDS if name not in record
+    ]
     if problems:
         return problems
+    return [
+        *_wrapper_problems(record),
+        *_pin_problems(record),
+        *_git_problems(record),
+        *(
+            []
+            if isinstance(record["result"], Mapping)
+            else ["'result' must be an object"]
+        ),
+    ]
+
+
+def _wrapper_problems(record: Mapping[str, Any]) -> list[str]:
+    problems: list[str] = []
     if record["schema"] != SCHEMA:
         problems.append(f"schema must be {SCHEMA!r}, got {record['schema']!r}")
     for name in ("block", "scope", "request_path"):
@@ -421,16 +454,22 @@ def validate_record_shape(record: Any) -> list[str]:
         problems.append("'subset_reason' must be a string or null")
     if not isinstance(record["supersedes"], list):
         problems.append("'supersedes' must be a list")
+    return problems
+
+
+def _pin_problems(record: Mapping[str, Any]) -> list[str]:
     pin = record["pdk_pin"]
     if not isinstance(pin, Mapping) or not pin.get("expected_deck_content_hash"):
-        problems.append("'pdk_pin.expected_deck_content_hash' is required")
+        return ["'pdk_pin.expected_deck_content_hash' is required"]
+    return []
+
+
+def _git_problems(record: Mapping[str, Any]) -> list[str]:
     git = record["git"]
     if (
         not isinstance(git, Mapping)
         or not re.fullmatch(r"[0-9a-f]{40}", str(git.get("commit")))
         or not isinstance(git.get("dirty_inputs"), bool)
     ):
-        problems.append("'git' needs a 40-hex 'commit' and boolean 'dirty_inputs'")
-    if not isinstance(record["result"], Mapping):
-        problems.append("'result' must be an object")
-    return problems
+        return ["'git' needs a 40-hex 'commit' and boolean 'dirty_inputs'"]
+    return []
