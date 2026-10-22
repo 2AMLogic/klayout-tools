@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-22
 
+- **PR #4038**: feat(pex): consume terminal-aware selected resistance with --resistance-graph
+- **Issue #4037** (closed): klt pex: cannot consume the terminal-aware resistance graph (selected_resistance_ohm) from klt extract
+- **PR #4036**: feat(erc): add --validate-spec for layout-free spec validation
+- **Issue #4034** (closed): klt erc: no spec-only validation mode (spec can only be checked by running against a layout)
 - **Issue #4035** (closed): bug: klt gen guard_ring emits sky130 licon1 cuts off the 0.005um manufacturing grid (flagged by klt drc --deck sky130 since 8ad59bff4)
 - **PR #4033**: refactor(equiv): move replay and stage-record helpers into sibling modules
 - **Issue #4032** (closed): Split equiv.py: move shared replay and stage-record helpers into sibling modules (equiv_sequential imports ~25 private names)
