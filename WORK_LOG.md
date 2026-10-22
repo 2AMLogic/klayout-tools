@@ -2,8 +2,114 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-22
+
+- **Issue #4035** (closed): bug: klt gen guard_ring emits sky130 licon1 cuts off the 0.005um manufacturing grid (flagged by klt drc --deck sky130 since 8ad59bff4)
+- **PR #4033**: refactor(equiv): move replay and stage-record helpers into sibling modules
+- **Issue #4032** (closed): Split equiv.py: move shared replay and stage-record helpers into sibling modules (equiv_sequential imports ~25 private names)
+- **PR #4031**: chore(loom): resync installed Loom to v0.19.1205
+- **Issue #3871** (closed): Live batch-fleet verification of runner-resolved osdi_preload (PR #3853)
+- **Issue #2725** (closed): klt sim: no first-class design-parameter axis (and no per-unit .nodeset); supply_v alter is the only hook
+- **Issue #2458** (closed): klt extract --parasitics sums a net's per-level lumped R in series, so via-stitched strapping raises the reported resistance instead of lowering it
+
+### 2026-10-21
+
+- **PR #4030**: feat(drc): flag isolation-only ASAP7 rules in coverage
+- **Issue #4029** (closed): drc asap7: standalone single-pitch cell flagged by width/gate-spacing rules that are clean when abutted; no abutment-context mode
+- **PR #4027**: Bump Repo Skills 0.24.3 -> 0.24.7
+- **PR #4026**: chore(loom): resync installed Loom to v0.19.1201
+- **PR #4025**: feat: add klt interface-check for cell-to-cell pin/pad alignment
+- **Issue #4024** (closed): Friction: no cell-to-cell pin/pad alignment check before assembly
+- **PR #4023**: fix(sim): surface preflight evidence when a deck-list batch job fails
+- **Issue #4022** (closed): klt sim batch: opaque 'job command exited 87' with no runner stderr surfaced
+- **PR #4021**: feat(sim): compare staged model digests for pdk_stamp_comparison
+- **Issue #4020** (closed): sim batch: report the PDK revision actually used when stage_model_inputs ships client models
+- **PR #4019**: feat(sim): share one capacity-wait budget across batch shards, keep partial reports on interrupt
+- **Issue #4018** (closed): klt sim batch: sharded run starves on shared fleet caps; lost_shard is terminal and --wait-for-capacity stalls without a report
+- **PR #4016**: feat(sim): add analysis.linearize for scalar tran analyses
+- **Issue #4014** (closed): klt sim: support ngspice 'let'/'linearize' control steps (derived quantities) in batch requests
+- **PR #4013**: test: cover --batch-set --resume at the set level
+- **Issue #4009** (closed): test(sim): set-level --batch-set --resume test re-attaching finished shards
+- **PR #3270**: gen: warn when mos_array/diff_pair w_um/l_um is off the PDK manufacturing grid
+- **Issue #2933** (closed): gen: mos_array/diff_pair silently accept a w_um that is not representable on the PDK manufacturing grid
+
+### 2026-10-20
+
+- **PR #4017**: feat(signoff): grade klt synthesize responses as T1 item 1 digital evidence
+- **Issue #4015** (closed): klt signoff: no gradeable evidence kind for klt synthesize (item 1, digital)
+- **PR #4012**: refactor: split route_two_pin into per-check helpers
+- **PR #4011**: docs: document reproducing a run under a pinned deck hash
+- **Issue #4010** (closed): drc: curated deck content hash changes between releases, with no way to run a previously pinned deck revision
+- **PR #4008**: docs: add CHANGELOG entry for klt pex pin_order_mismatch
+- **PR #4007**: refactor: lift route_two_pin's nested closures to module-level helpers
+- **PR #4006**: feat(sim): allow --resume with --batch-set, forwarded per request
+- **Issue #4005** (closed): Friction: --batch-set cannot resume a sharded request after one Spot-reclaimed shard; whole request must be re-submitted
+- **Issue #4004** (closed): Split route_two_pin (1,600 lines) in gen_compose_routing.py into per-check helpers
+- **PR #3997**: feat(sim): bind a .param to the grid temperature via corners.temperature_param
+- **PR #3996**: fix(sim): separate feature-gate if-blocks so batch job cmd parses
+- **Issue #3995** (closed): klt sim: support ngspice 'let' vector steps (or a sum-of-sources measure) in analysis blocks
+- **Issue #3994** (closed): klt sim: no batch path for decks that rebind a .param per temperature point, or that run noise/.control-script analyses
+- **Issue #3993** (closed): klt sim --batch-set: batch job exits 2 in seconds with no recoverable diagnostics (runner version unknown)
+- **PR #3992**: fix(lvs): take klayout-runset verdict from the .lvsdb on non-zero runset exit
+- **PR #3991**: fix(lvs): report basename klayout_binary in portable klayout-runset responses
+- **PR #3990**: docs(lvs): document convert_subckts/scale deck_vars for xschem sky130 netlists
+- **Issue #3989** (closed): docs(lvs): sky130 runset needs convert_subckts=true and scale=true deck_vars for xschem-exported netlists; omitting either looks like a total mismatch
+- **Issue #3988** (closed): lvs klayout-runset: envelope embeds absolute host paths (layout, reference, deck_file, klayout_binary), so committed reports fail lint-envelope
+- **Issue #3987** (closed): lvs klayout-runset: a PDK runset that exits non-zero on a mismatch yields an error with no mismatch detail, and the .lvsdb is discarded
+- **PR #3986**: feat(version): add reinstall_spec to klt version for reproducing dev-build pins
+- **Issue #3985** (closed): A '.devN+g<sha>' klt build recorded as a provenance pin cannot be re-installed to reproduce a result
+- **PR #3984**: refactor(size): move coupled-topology solver into size_topology module
+- **Issue #3983** (closed): Split size.py: move topology (coupled multi-device) sizing cluster (~1060 lines) into a sibling module
+- **PR #3982**: docs: condense pyproject.toml comments to current constraints
+- **Issue #3981** (closed): Trim pyproject.toml comments: ~100 lines of removed-marker and repeated-rationale history
+- **PR #3980**: chore(loom): resync installed Loom to v0.19.1196
+- **PR #3979**: feat: add routing_pitch_bound width+space lower-bound helper
+- **PR #3978**: feat(drc): cross-check curated and native engines with --engine both
+- **PR #3977**: docs(examples): add generic mixed-device shared-diffusion gf180mcu row example
+- **PR #3976**: feat(gen-compose): place pins at caller-requested coordinates via pins[].request
+- **PR #3975**: feat(cli): add klt layout-plan execute shell verb
+- **PR #3974**: feat(deck): disclose gf180mcu wide-metal and end-of-line rules as unmodeled
+- **Issue #3973** (closed): Compare curated and PDK-native DRC results with explicit coverage differences
+- **Issue #3972** (closed): Define a conservative rules-derived routing-pitch helper
+- **Issue #3971** (closed): Add explicit port-coordinate requests to the custom gen-compose path
+- **Issue #3970** (closed): Expose the existing layout-plan execution library through a headless CLI
+- **Issue #3969** (closed): Prepare a generic mixed-device layout worked example with provenance
+- **Issue #3968** (closed): Disclose missing GF180 Metal1–5 wide-metal and narrow-line end-of-line DRC coverage
+- **PR #3966**: fix(netlist): fail on unresolved xschem symbol (IS MISSING marker)
+- **PR #3965**: fix(sim): drop save_mode netlist hint when an engine error explains the missing value
+- **Issue #3964** (closed): klt netlist: no ERC pass and no xschem diagnostics, so an unresolved symbol exports as status=generated
+- **Issue #3963** (closed): klt sim: options.save_mode "netlist" no-value hint is attached to every measurement error, including corners whose cause is already a timeout or timestep_too_small
+- **PR #3961**: docs: add custom transistor-level layout design study
+- **PR #3960**: feat(sim): support --submit-only and --attach for batch deck-list requests
+- **PR #3959**: feat(sim): resume deck-list runs from per-unit completion records
+- **Issue #3958** (closed): klt sim: deck-list requests cannot use --submit-only / --attach on the batch backend
+- **Issue #3957** (closed): klt sim: resume/skip by pre-existing valid result for a seeded deck, with detached long-run support
+- **Issue #3922** (closed): Friction (3rd instance): no netlist→placed/routed layout verb; a ~100-device fixed-pitch block needed a bespoke 1,100-line generator
+- **PR #3635**: feat: select graph-derived two-terminal resistance as an additive extract field
+- **PR #3313**: ci: publish report-only Python coverage from the 3.12 test leg
+- **Issue #3273** (closed): docs: add CHANGELOG entry for klt pex pin_order_mismatch (#2890)
+- **PR #3269**: feat(pex): pin_order_mismatch pre-flight diagnostic
+- **PR #3265**: fix(yield): classify bit-identical sample sets as degenerate (#2909)
+- **Issue #3223** (closed): ci: measure Python test coverage (report-only) on one CI leg to expose skip-masked gaps
+- **PR #3199**: docs: reconcile design-stage skills and ROADMAP with shipped RC parasitics / klt pex (#3179)
+- **PR #3198**: test(toolchain-pins): enforce exact Verilator/Icarus pin only on CI or pinned installs (#3072)
+- **PR #3188**: fix(lvs): don't destroy interior top circuit when pruning wrappers (#2852)
+- **Issue #3180** (closed): Guard decision review: scope an allowance for orchestration checkpoint writes
+- **Issue #3179** (closed): docs: design-extraction skill and ROADMAP still claim RC parasitics are unshipped (#217 closed)
+- **PR #3174**: klt sim: analysis_aborted diagnostic and reject {param} braces in analysis.args
+- **Issue #3072** (closed): test: verilator pin check fails preflight on hosts with Verilator 5.052 (pinned 5.050)
+- **Issue #2983** (closed): extract resistance graph increment 4: substitute the two-terminal cross-level scalar
+- **Issue #2909** (closed): Friction: klt yield reports a bit-identical sample set as non-degenerate (rounding stddev -> normality rejected, Cpk ~1e13)
+- **Issue #2890** (closed): klt pex: extracted .SUBCKT pins are written alphabetically, but a testbench instantiates its DUT positionally; no reconciliation or diagnostic
+- **Issue #2852** (closed): klt lvs crashes ("Object has been destroyed already") when reference.top is a subcircuit that another subcircuit in the same reference file instantiates
+- **Issue #2846** (closed): klt sim: an aborted analysis is reported only as per-measurement 'no value' (and .param braces in analysis.args silently abort it)
+
 ### 2026-10-19
 
+- **PR #3952**: docs: rewrite mom geometry Next steps as shipped-history record
+- **Issue #3951** (closed): docs: refresh stale 'Next steps' in mom-general-conductor-geometry.md after increments (i)/(ii) and winding support shipped
+- **Issue #2351** (closed): gf180mcu curated DRC deck checks no implant or tap rule (NP/PP, DF.12, DF.13/14) and CO.1 only as a minimum, and --engine klayout cannot resolve the gf180mcu split-table runset
+- **Issue #1519** (closed): MoM increment (iii): mixed-axis winding geometry and series-path solves
 - **PR #3950**: build(deps): Bump mcp from 2.2.0 to 2.3.0 in the uv-minor-patch group across 1 directory
 - **PR #3658**: docs: reconcile mom CLI and validation docs with shipped winding support
 - **Issue #3655** (closed): Reconcile epic #1519 acceptance and documentation criteria before closing
