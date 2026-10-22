@@ -489,7 +489,7 @@ def replay_backends_disagreed(counterexample: dict[str, Any]) -> bool:
     """Whether a ``sim_backend: "both"`` run's two replay backends
     disagreed -- the caller's signal to downgrade ``status``."""
     cross_check = counterexample.get("simulation_cross_check")
-    return bool(cross_check) and cross_check.get("agreement") == "disagree"
+    return bool(cross_check is not None and cross_check.get("agreement") == "disagree")
 
 
 def replay_evidence_is_untrustworthy(counterexample: dict[str, Any]) -> bool:

@@ -131,7 +131,10 @@
       "modules": [
         "klayout_tools.cli.equiv_cmd",
         "klayout_tools.equiv",
-        "klayout_tools.equiv_sequential"
+        "klayout_tools.equiv_errors",
+        "klayout_tools.equiv_replay",
+        "klayout_tools.equiv_sequential",
+        "klayout_tools.equiv_stage"
       ]
     },
     "erc": {
@@ -1351,6 +1354,18 @@
       "consumer": "klayout_tools.equiv_sequential",
       "exporter": "klayout_tools._provenance",
       "symbol": "_yosys_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv_stage",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_combined_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv_stage",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
