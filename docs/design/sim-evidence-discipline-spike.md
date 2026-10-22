@@ -387,6 +387,13 @@ smaller by design, not a subset). The convention:
   disallowed too, so `subset_reason` can't be padded onto a full run and
   ignored later).
 
+**Update (issue #4045, survey gap G3):** the split is now explicit. `klt` owns
+the *mechanical* check — [`klt corner-matrix check`](../cli/corner-matrix.md)
+diffs a repo-committed matrix file against a request or report and emits
+`matrix_size`, `observed_count`, `missing[]`, `extra[]`, `duplicate[]`. The
+repo still owns *which* matrix is full and the `subset_reason` policy; the
+check reports, it does not judge.
+
 This check needs no pex-specific variant: `klt pex` emits a top-level
 `corner_count` of its own (the number of distinct `corner_id` values across
 `delta[]` — [`pex.md`](../cli/pex.md) → "Top-level fields"), so

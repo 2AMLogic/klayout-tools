@@ -7032,6 +7032,9 @@ supersession chains, PDK-pin enforcement, subset-reason requirements, and
 cross-corner spread checks on top of the existing per-corner data — is
 decided in
 [`docs/design/sim-evidence-discipline-spike.md`](../design/sim-evidence-discipline-spike.md).
+The mechanical declared-vs-observed corner check is shipped as
+[`klt corner-matrix check`](corner-matrix.md); the repo still commits the matrix.
+
 Short version: four of those five are entirely a documented repo-level
 convention built from fields `klt sim` already emits (the same
 report-not-judge precedent `measurements[].limits` already sets); one — a
