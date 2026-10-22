@@ -47,7 +47,7 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import _paths as paths_module
-from klayout_tools import equiv, equiv_sequential
+from klayout_tools import equiv, equiv_sequential, equiv_stage
 from klayout_tools.cli import main
 from klayout_tools.equiv import (
     EquivError,
@@ -309,7 +309,7 @@ def test_committed_record_roundtrips(tmp_path):
     """A record the committing path wrote (`partial` forced false, all
     fields present) with a corroborating log loads back intact."""
     record_path = _commit_record(tmp_path, fingerprint="fp")
-    record, reason = equiv._load_committed_stage1(
+    record, reason = equiv_stage.load_committed_stage1(
         record_path,
         "fp",
         log_path=_committed_log_path(tmp_path),
@@ -323,7 +323,7 @@ def test_committed_record_roundtrips(tmp_path):
 def test_absent_record_is_not_a_discard(tmp_path):
     """No record on disk is the ordinary first-run shape: ``(None, None)`` --
     no diagnostic owed, stage 1 just runs."""
-    record, reason = equiv._load_committed_stage1(
+    record, reason = equiv_stage.load_committed_stage1(
         str(tmp_path / "nope.commit.json"), "fp", log_path="x", netlist_path="x"
     )
     assert record is None
@@ -350,7 +350,7 @@ def test_malformed_records_are_never_loaded(tmp_path, record_kwargs):
     never best-effort interpreted (issue #2280's negative-control
     property)."""
     record_path = _commit_record(tmp_path, fingerprint="fp", **record_kwargs)
-    record, reason = equiv._load_committed_stage1(
+    record, reason = equiv_stage.load_committed_stage1(
         record_path,
         "fp",
         log_path=_committed_log_path(tmp_path),
@@ -364,7 +364,7 @@ def test_fingerprint_mismatch_discards_record(tmp_path):
     """A record committed by a *different* request says nothing about this
     one -- discarded, named as a fingerprint mismatch."""
     record_path = _commit_record(tmp_path, fingerprint="old-request")
-    record, reason = equiv._load_committed_stage1(
+    record, reason = equiv_stage.load_committed_stage1(
         record_path,
         "new-request",
         log_path=_committed_log_path(tmp_path),
@@ -377,7 +377,7 @@ def test_fingerprint_mismatch_discards_record(tmp_path):
 def test_missing_committed_log_discards_record(tmp_path):
     record_path = _commit_record(tmp_path, fingerprint="fp")
     os.unlink(_committed_log_path(tmp_path))
-    record, reason = equiv._load_committed_stage1(
+    record, reason = equiv_stage.load_committed_stage1(
         record_path, "fp", log_path="does-not-exist", netlist_path="unused"
     )
     assert record is None
@@ -394,7 +394,7 @@ def test_all_proven_classification_requires_proven_log(tmp_path):
         classification="all_proven",
         log_text=_UNPROVEN_LOG,
     )
-    record, reason = equiv._load_committed_stage1(
+    record, reason = equiv_stage.load_committed_stage1(
         record_path,
         "fp",
         log_path=_committed_log_path(tmp_path),
@@ -413,7 +413,7 @@ def test_unproven_classification_requires_unproven_log(tmp_path):
         classification="unproven_cells",
         log_text=_ALL_PROVEN_LOG,
     )
-    record, reason = equiv._load_committed_stage1(
+    record, reason = equiv_stage.load_committed_stage1(
         record_path,
         "fp",
         log_path=_committed_log_path(tmp_path),
@@ -433,7 +433,7 @@ def test_unproven_cells_record_requires_the_netlist(tmp_path):
         classification="unproven_cells",
         log_text=_UNPROVEN_LOG,
     )
-    record, reason = equiv._load_committed_stage1(
+    record, reason = equiv_stage.load_committed_stage1(
         record_path,
         "fp",
         log_path=_committed_log_path(tmp_path),
@@ -445,11 +445,11 @@ def test_unproven_cells_record_requires_the_netlist(tmp_path):
 
 def test_partial_record_never_clobbers_a_commit(tmp_path):
     """A later, killed run's partial marker must not destroy the one valid
-    commit an earlier run left (the guard in `_write_partial_stage_record`)."""
+    commit an earlier run left (the guard in `write_partial_stage_record`)."""
     out_dir = tmp_path / ".klt" / "equiv"
     out_dir.mkdir(parents=True)
     record_path = str(out_dir / "stage1.commit.json")
-    equiv._write_stage_record(
+    equiv_stage.write_stage_record(
         record_path,
         {
             "stage": 1,
@@ -459,7 +459,7 @@ def test_partial_record_never_clobbers_a_commit(tmp_path):
             "refinements": 0,
         },
     )
-    equiv._write_partial_stage_record(record_path, "fp", reason="process_timeout")
+    equiv_stage.write_partial_stage_record(record_path, "fp", reason="process_timeout")
     with open(record_path, encoding="utf-8") as handle:
         data = json.load(handle)
     assert data["partial"] is False
@@ -472,7 +472,7 @@ def test_stage_record_writer_forces_partial_false(tmp_path):
     out_dir = tmp_path / ".klt" / "equiv"
     out_dir.mkdir(parents=True)
     record_path = str(out_dir / "stage1.commit.json")
-    equiv._write_stage_record(
+    equiv_stage.write_stage_record(
         record_path,
         {
             "stage": 1,
@@ -535,7 +535,7 @@ def test_stage1_timeout_writes_partial_record(tmp_path, monkeypatch):
 
     # And the structural negative control: that partial record can never
     # satisfy the resume.
-    loaded, reason = equiv._load_committed_stage1(
+    loaded, reason = equiv_stage.load_committed_stage1(
         _record_path(tmp_path),
         record["fingerprint"],
         log_path=os.path.join(_equiv_dir(tmp_path), "equiv_seq_stage1.log"),
