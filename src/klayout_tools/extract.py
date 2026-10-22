@@ -1386,6 +1386,7 @@ def run_extract(
     parasitics_top_cell_only: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    emit_selected_resistance: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
     resistance_path_max_nodes: int | None = None,
@@ -1851,6 +1852,12 @@ def run_extract(
     diagnostics. Purely additive -- ``resistance_ohm``, the ladder and every
     other field are unchanged, and ``False`` (the default) adds no key.
     Requires ``parasitics=True``. See :func:`_compute_parasitics`.
+
+    ``emit_selected_resistance`` (internal, issue #4037; set only by
+    ``klt pex``, never exposed on ``klt extract``) writes each net's
+    ``selected_resistance_ohm`` as its lumped R in the emitted netlist where
+    ``resistance_source == "graph"``; requires ``resistance_graph=True``.
+    ``False`` keeps the legacy-scalar netlist.
 
     ``resistance_graph_r_cut_ohm`` (``--resistance-graph-r-cut``, issue #2983)
     supplies the per-cut via/contact resistance the shipped decks do not
@@ -2786,6 +2793,8 @@ def run_extract(
     # `parasitics.nets[]` entries, so it needs `--parasitics`.
     _require_parasitics_for_resistance_graph(resistance_graph, parasitics)
     _validate_resistance_graph_r_cut(resistance_graph, resistance_graph_r_cut_ohm)
+    if emit_selected_resistance and not resistance_graph:
+        raise ExtractError("emit_selected_resistance requires resistance_graph")
 
     # `--distributed-rc` (issue #977) requires `--critical-net`: it reuses
     # that flag's own net set as the "which nets get the ladder" scope
@@ -3346,6 +3355,7 @@ def run_extract(
             for matched_entry in matched_entries:
                 if mom_rlc_resistance_ohm is not None:
                     matched_entry["resistance_ohm"] = mom_rlc_resistance_ohm
+                    matched_entry["mom_rlc_r_override"] = True
                 if mom_rlc_capacitance_ff is not None:
                     matched_entry["capacitance_ff"] = mom_rlc_capacitance_ff
             mom_rlc_override_report = {
@@ -3385,6 +3395,7 @@ def run_extract(
                 # `False` (every other run) writes no property at all.
                 record_slice_topology=subcircuit_cell is not None,
                 variants=variants,
+                emit_selected_resistance=emit_selected_resistance,
             )
         else:
             parasitics_report = {
