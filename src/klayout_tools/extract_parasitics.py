@@ -646,11 +646,9 @@ def _boundary_sides(box: kdb.Box, region: kdb.Region) -> list[kdb.Box]:
     """The sides of ``box`` (as zero-width boxes, longest first, ties
     left/right/bottom/top) that lie entirely on ``region``'s outline.
 
-    The graph builder attaches a port to every piece its patch touches, so a
-    port in the *interior* of a conductor would sit in parallel with the
-    in-plane edge it cuts and double the conductance there. It is specified
-    for ports on the conductor's boundary (Stage 3.D4's end-edge ports), so
-    the adapter only ever attaches a contact/via there (issue #2982)."""
+    A contact/via with such a side shared by all its roles attaches along it
+    (Stage 3.D4's end-edge ports, issue #2982); one with none is attached by
+    its full bounding box instead (issue #4061)."""
     import klayout.db as kdb
 
     outline = region.merged().edges()
@@ -680,16 +678,18 @@ def _graph_landings_and_ports(
     vias: list[kdb.Region],
     dbu: float,
     r_cut_ohm: float | None,
-) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
-    """The ``LandingInput`` / terminal ``PortInput`` lists for one net, plus
-    the contacts/vias that could not be placed on a conductor boundary.
+) -> tuple[list[Any], list[Any]]:
+    """The ``LandingInput`` / terminal ``PortInput`` lists for one net.
 
     A contact/via polygon whose two sides are both modelled roles becomes a
     landing; one with a single modelled side is where current leaves the
     modelled conductor (into a device diffusion, or a level the deck has no
     coefficient for), so it becomes a terminal on that side. Device-body cut
     edges (drawn-layer interfaces) are terminals too. Every ordering is by
-    integer geometry, so repeated equivalent requests are byte-identical."""
+    integer geometry, so repeated equivalent requests are byte-identical.
+
+    A contact/via with no side on the conductor outline (a landing in the
+    interior of a strap) is attached by its whole bounding box."""
     import klayout.db as kdb
 
     from .extract_resistance_graph import LandingInput, PortInput
@@ -702,7 +702,6 @@ def _graph_landings_and_ports(
 
     landings: list[Any] = []
     terminals: dict[str, tuple[str, kdb.Box]] = {}
-    interior: list[dict[str, Any]] = []
     for cut_region, lower_names, upper_name in joins:
         for polygon in cut_region.merged().each():
             probe = kdb.Region(polygon)
@@ -726,27 +725,20 @@ def _graph_landings_and_ports(
                 continue
             sides = [_boundary_sides(box, region_of[r]) for r in attached]
             shared = [side for side in sides[0] if all(side in s for s in sides)]
-            if not shared:
-                interior.append(
-                    {
-                        "roles": attached,
-                        "x_um": box.center().x * dbu,
-                        "y_um": box.center().y * dbu,
-                    }
-                )
-            elif lower is not None and upper is not None:
+            patch = shared[0] if shared else box
+            if lower is not None and upper is not None:
                 landings.append(
                     LandingInput(
                         lower,
                         upper,
-                        shared[0],
+                        patch,
                         max(polygon.area() * dbu * dbu, 1e-12),
                         r_cut_ohm,
                     )
                 )
             else:
                 terminals.setdefault(
-                    _graph_port_name("via", box, dbu), (attached[0], shared[0])
+                    _graph_port_name("via", box, dbu), (attached[0], patch)
                 )
     for name, _rs, region, drawn in roles:
         for box in _cut_edge_boxes(region, drawn):
@@ -769,7 +761,7 @@ def _graph_landings_and_ports(
             lnd.box.right,
         )
     )
-    return landings, ports, interior
+    return landings, ports
 
 
 class _ResistanceGraphCollector:
@@ -882,32 +874,7 @@ def _resistance_graph_report(
         terminal_resistance_matrix,
     )
 
-    landings, ports, interior = _graph_landings_and_ports(
-        roles, contacts, vias, dbu, r_cut_ohm
-    )
-    if interior:
-        # Coverage gap, reported rather than solved with a wrong attachment.
-        return _with_selected_resistance(
-            {
-                "status": "unsupported",
-                "terminals": [],
-                "pair_resistance_ohm": [],
-                "legacy_resistance_ohm": legacy_resistance_ohm,
-                "nodes": 0,
-                "edges": 0,
-                "diagnostics": [
-                    {
-                        "code": "unsupported_geometry",
-                        "message": (
-                            f"{len(interior)} contact/via landing(s) lie in the "
-                            "interior of a conductor; ports are only attached at "
-                            "conductor edges"
-                        ),
-                        "detail": {"interior_landings": interior},
-                    }
-                ],
-            }
-        )
+    landings, ports = _graph_landings_and_ports(roles, contacts, vias, dbu, r_cut_ohm)
     role_inputs = [
         RoleInput(name, sheet_res, tuple(region.merged().each()))
         for name, sheet_res, region, _drawn in roles
