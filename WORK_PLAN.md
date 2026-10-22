@@ -50,7 +50,6 @@ Issues currently being built (`loom:building`).
 - **#3027**: Layout-flow benchmark phase 4: comparison reporting and bounded CI
 - **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests
 - **#3776**: Live-verify klt sta set_driving_cell/set_load syntax and *NAME_MAP SPEF annotation against OpenROAD/OpenSTA
-- **#4037**: klt pex: cannot consume the terminal-aware resistance graph (selected_resistance_ohm) from klt extract
 
 ## PRs Awaiting Review
 
@@ -104,7 +103,6 @@ Issues carrying `loom:curated`.
 - **#4001**: gf180mcu deck: disclose the DRM §9.2 bond-pad guidelines (PAD.1, PAD.2, PAD.5–20) as not evaluated *(curated)*
 - **#4002**: Make gf180mcu's native sign-off deck runnable from klt drc --engine klayout (assemble rule_decks + run_drc.py) *(curated)*
 - **#4003**: erc: add a gf180mcu antenna-ratio limit table (--pdk gf180mcu), mirroring the sg13g2 table from #3784 *(curated)*
-- **#4037**: klt pex: cannot consume the terminal-aware resistance graph (selected_resistance_ohm) from klt extract *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -128,10 +126,10 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 1 |
 | Ready (`loom:issue`) | 11 |
-| In Progress (`loom:building`) | 5 |
+| In Progress (`loom:building`) | 4 |
 | PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 6 |
-| Curated | 32 |
+| Curated | 31 |
 | Architect / Hermit proposals | 6 |
 | Active epics | 2 |
 <!-- guide:plan-body:end -->
