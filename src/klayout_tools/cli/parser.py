@@ -32,10 +32,12 @@ from . import (
     functional_verification_cmd,
     gen_cmd,
     gen_compose_cmd,
+    interface_check_cmd,
     kb_cmd,
     keepout_check_cmd,
     layers_cmd,
     layout_metrics_cmd,
+    layout_plan_cmd,
     lef_abstract_cmd,
     lvs_cmd,
     mcp_cmd,
@@ -263,6 +265,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_precheck_parser(subparsers)
 
     _add_socket_check_parser(subparsers)
+    _add_interface_check_parser(subparsers)
 
     _add_reset_coverage_parser(subparsers)
 
@@ -309,6 +312,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_gen_parser(subparsers)
 
     _add_gen_compose_parser(subparsers)
+
+    _add_layout_plan_parser(subparsers)
 
     _add_draw_parser(subparsers)
 
@@ -664,7 +669,7 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "identity (job_id, bucket, region, launched_at, request_sha256) "
             "and exit 0 immediately -- no polling, no collection (issue "
             "#3073). Read the job later with --job-status. One job only: "
-            "refused with --hosts > 1, --resume, --plot, a deck request, or "
+            "refused with --hosts > 1, --resume, --plot, or "
             "a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
         ),
     )
@@ -811,7 +816,13 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "resume from a matching on-disk checkpoint (--outdir/"
             "checkpoint.json), skipping corners already completed by a "
             "prior interrupted run of this same request; overrides the "
-            "request's own `options.resume` when given. See docs/cli/sim.md."
+            "request's own `options.resume` when given. For a `decks` "
+            "request, skips each unit whose <outdir>/<id>/unit.json "
+            "completion record still matches and verifies (local, "
+            "local-parallel, batch). With --batch-set, forwarded to every "
+            "request: a sharded request re-attaches to the shard jobs "
+            "recorded in its own directory and resubmits only the lost "
+            "ones. See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -2438,6 +2449,21 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "legacy value. Requires --parasitics. Off by default -- "
             "byte-identical to today's behavior. See docs/cli/extract.md's "
             "'--resistance-graph' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--resistance-graph-r-cut",
+        dest="resistance_graph_r_cut",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "per-cut via/contact resistance for --resistance-graph (issue "
+            "#2983); 0 is an ideal via. The shipped decks curate none, so "
+            "without this a net with a cross-level landing is `unsupported` "
+            "and `resistance_graph.selected_resistance_ohm` falls back to the "
+            "legacy scalar. Must be >= 0. Requires --resistance-graph. See "
+            "docs/cli/extract.md's '--resistance-graph' section."
         ),
     )
     extract_parser.add_argument(
@@ -4481,6 +4507,44 @@ def _add_flow_verify_args(
     )
 
 
+def _add_layout_plan_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``layout-plan`` verb with a nested ``execute`` subcommand,
+    mirroring ``wave``'s grouped-verb pattern (see ``_add_wave_parser``).
+
+    A shell wrapper over ``layout_plan_execute.execute_layout_plan_document``;
+    see docs/cli/layout-plan-execute.md.
+    """
+    layout_plan_parser = subparsers.add_parser(
+        "layout-plan",
+        help="execute a netlist-driven klt.layout_plan.request/1 document",
+        description=(
+            "Execute a validated `klt.layout_plan.request/1` document onto "
+            "`klt gen` + `klt gen-compose`, producing a generated/placed/"
+            "routed GDS. Takes a request-document path. See "
+            "docs/cli/layout-plan-execute.md."
+        ),
+    )
+    layout_plan_sub = layout_plan_parser.add_subparsers(
+        dest="layout_plan_command", metavar="<subcommand>"
+    )
+    layout_plan_parser.set_defaults(func=_no_subcommand_handler(layout_plan_parser))
+
+    execute_parser = layout_plan_sub.add_parser(
+        "execute",
+        help="execute a layout-plan request into a composed GDS",
+        description=(
+            "Run a klt.layout_plan.request/1 document: resolve per-group "
+            "params from the netlist, place, route and write the GDS. Exit "
+            "3 when placed but some nets are unrouted or unmapped."
+        ),
+    )
+    execute_parser.add_argument(
+        "request", help="path to a klt.layout_plan.request/1 JSON file"
+    )
+    _add_format_arg(execute_parser)
+    execute_parser.set_defaults(func=layout_plan_cmd.run_execute)
+
+
 def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``wave`` verb with nested ``build``/``query``
     subcommands (Epic #1585, issue #1601), mirroring ``pdk``/``deck``'s
@@ -5787,9 +5851,12 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     drc_parser.add_argument(
         "--engine",
-        choices=("curated", "klayout"),
+        choices=("curated", "klayout", "both"),
         default="curated",
         help=(
+            "'both' (issue #3973): run the curated deck (--deck) and the "
+            "PDK-native deck on the same layout and report where they "
+            "differ; an unavailable native run is not_checked, never clean. "
             "'curated' (default): klt's own pip-only Region-primitive deck "
             "(--deck required). 'klayout' (issue #565, opt-in): shells out "
             "to a standalone klayout binary on PATH to run a PDK-native "
@@ -6213,6 +6280,64 @@ def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(socket_check_parser)
     socket_check_parser.set_defaults(func=socket_check_cmd.run)
+
+
+def _add_interface_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``interface-check`` verb: do two blocks' pins mate?"""
+    parser = subparsers.add_parser(
+        "interface-check",
+        help="check that block A's labelled pins land on block B's pads at a placement",
+        description=(
+            "Check that two separately generated blocks mate: pair the text "
+            "labels of A and B whose string fully matches --pins, translate "
+            "B by --place into A's frame (in memory; no assembled layout is "
+            "written), and report per pin the offset between A's and B's "
+            "pad on the pin layer. A pin is ok when the pads overlap or are "
+            "within --tol-um, misaligned otherwise, and no_partner when it "
+            "exists in only one stream. See docs/cli/interface-check.md."
+        ),
+    )
+    parser.add_argument("a", help="path to block A (GDSII or OASIS)")
+    parser.add_argument("b", help="path to block B (GDSII or OASIS)")
+    parser.add_argument(
+        "--place",
+        required=True,
+        metavar="DX,DY",
+        help="translation of B into A's frame in micrometres, e.g. '120.5,0'",
+    )
+    parser.add_argument(
+        "--pins",
+        required=True,
+        metavar="REGEX",
+        help="regex that must fully match a label string for it to be checked",
+    )
+    parser.add_argument(
+        "--pin-layer-a",
+        default=None,
+        metavar="L/D",
+        help="layer of A's pads (default: each label's own layer)",
+    )
+    parser.add_argument(
+        "--pin-layer-b",
+        default=None,
+        metavar="L/D",
+        help="layer of B's pads (default: each label's own layer)",
+    )
+    parser.add_argument(
+        "--tol-um",
+        type=float,
+        default=0.0,
+        metavar="UM",
+        help="largest pad-to-pad gap still counted as mated (default 0: overlap/touch)",
+    )
+    parser.add_argument(
+        "--top-a", default=None, help="top cell of A (required if several)"
+    )
+    parser.add_argument(
+        "--top-b", default=None, help="top cell of B (required if several)"
+    )
+    _add_format_arg(parser)
+    parser.set_defaults(func=interface_check_cmd.run)
 
 
 def _add_tap_distance_parser(subparsers: argparse._SubParsersAction) -> None:

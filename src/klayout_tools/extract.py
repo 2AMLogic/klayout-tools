@@ -1339,6 +1339,23 @@ def _require_parasitics_for_resistance_graph(
         raise ExtractError("--resistance-graph requires --parasitics")
 
 
+def _validate_resistance_graph_r_cut(
+    resistance_graph: bool, r_cut_ohm: float | None
+) -> None:
+    if r_cut_ohm is None:
+        return
+    if not resistance_graph:
+        raise ExtractError("--resistance-graph-r-cut requires --resistance-graph")
+    if isinstance(r_cut_ohm, bool) or not (
+        isinstance(r_cut_ohm, (int, float))
+        and math.isfinite(r_cut_ohm)
+        and r_cut_ohm >= 0
+    ):
+        raise ExtractError(
+            "--resistance-graph-r-cut must be a finite number >= 0 (0 = ideal via)"
+        )
+
+
 @_timed
 def run_extract(
     path: str,
@@ -1368,6 +1385,7 @@ def run_extract(
     strict_net_patterns: bool = False,
     parasitics_top_cell_only: bool = False,
     resistance_graph: bool = False,
+    resistance_graph_r_cut_ohm: float | None = None,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
     resistance_path_max_nodes: int | None = None,
@@ -1833,6 +1851,12 @@ def run_extract(
     diagnostics. Purely additive -- ``resistance_ohm``, the ladder and every
     other field are unchanged, and ``False`` (the default) adds no key.
     Requires ``parasitics=True``. See :func:`_compute_parasitics`.
+
+    ``resistance_graph_r_cut_ohm`` (``--resistance-graph-r-cut``, issue #2983)
+    supplies the per-cut via/contact resistance the shipped decks do not
+    curate (``0`` = ideal via). ``None`` (the default) keeps a net with a
+    cross-level landing ``unsupported`` and on the legacy scalar. Requires
+    ``resistance_graph=True``.
 
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
@@ -2761,6 +2785,7 @@ def run_extract(
     # `--resistance-graph` (issue #2982) attaches to the same per-net
     # `parasitics.nets[]` entries, so it needs `--parasitics`.
     _require_parasitics_for_resistance_graph(resistance_graph, parasitics)
+    _validate_resistance_graph_r_cut(resistance_graph, resistance_graph_r_cut_ohm)
 
     # `--distributed-rc` (issue #977) requires `--critical-net`: it reuses
     # that flag's own net set as the "which nets get the ladder" scope
@@ -2909,6 +2934,7 @@ def run_extract(
         net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
         resistance_graph=resistance_graph,
+        resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         # Issue #2854: rename each surviving promoted pin net to its
@@ -4913,6 +4939,7 @@ def extract_netlist_from_layout(
     net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
     resistance_graph: bool = False,
+    resistance_graph_r_cut_ohm: float | None = None,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -5363,6 +5390,7 @@ def extract_netlist_from_layout(
         net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
         resistance_graph=resistance_graph,
+        resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         rename_declared_pins=rename_declared_pins,
@@ -8486,6 +8514,7 @@ def _extract_netlist(
     net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
     resistance_graph: bool = False,
+    resistance_graph_r_cut_ohm: float | None = None,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -10670,6 +10699,7 @@ def _extract_netlist(
             parasitics_nets=parasitics_nets,
             parasitics_top_cell_only=parasitics_top_cell_only,
             resistance_graph=resistance_graph,
+            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
             # Per-fragment square counting (issue #2359): `via_index` lets
             # the parasitics pass read each net's own via landings back
             # through `polygons_of_net`, so it can tell where current enters

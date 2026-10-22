@@ -2094,7 +2094,7 @@ family/variant split the resolver doesn't have. The response's
 | `device_count` | integer | Number of unit instances placed (`resistor_strip`'s `num`). |
 | `ports` | array\<object\> | Named terminals for downstream connection — see below. |
 | `drc_hints` | object | DRC-relevant metadata the generator itself already knows — see below. Advisory only; `klt drc` remains the actual authority on rule compliance. |
-| `warnings` | array\<string\> | Non-fatal generator notes (e.g. a requested dimension was snapped to the technology grid). Always present, empty when there is nothing to report. |
+| `warnings` | array\<string\> | Non-fatal generator notes (e.g. a requested dimension was snapped to the technology grid). Always present, empty when there is nothing to report. `mos_array`/`diff_pair` also warn when `w_um`/`l_um` is not a multiple of the resolved family's manufacturing grid (read from the curated deck's `ongrid` rule; none for a family without one), naming the nearest representable values -- for `diff_pair` `splits` (and parallel `mos_array` `fingers`) the total width must be a multiple of `splits x grid` (issue #2933). |
 | `provenance` | object | The shared `provenance` block (issue #2035) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). A generator request involves no rule/model deck and no single input layout stream (the request is parameters, not a layout file), so `provenance.deck`/`provenance.input` are always `null`; `provenance.pdk` mirrors the top-level `pdk` field's identity. |
 
 #### `ports[]` entries

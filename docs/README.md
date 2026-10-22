@@ -69,6 +69,7 @@ docs/
     signoff.md
     sim.md
     size.md
+    interface-check.md
     socket-check.md
     sta.md
     stats.md

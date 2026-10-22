@@ -248,6 +248,29 @@ engine's behaviour has not been verified for this finding, so the field is
 never emitted for `engine: "xyce"`. See also "Monte Carlo sampling" below,
 whose `unseeded_sources` disclosure scans the same sources.
 
+#### How a per-unit seed reaches a transient-noise stream (measured, [#3957](https://github.com/2AMLogic/klayout-tools/issues/3957))
+
+**`trnoise` is not replayable through any of ngspice-42's seeding routes.**
+Measured 2026-10-20 on a local `ngspice-42` with `ngspice -b` (deck:
+`V1 n 0 dc 0 trnoise(1m 1u 0 0)` + `R1 n 0 1k`, `.tran 1u 200u`,
+`.meas tran rm RMS v(n)`; each variant run twice with seed 1 and once with
+seed 2):
+
+| Seeding route | seed=1 run A | seed=1 run B | seed=2 |
+| --- | --- | --- | --- |
+| `.spiceinit` containing `setseed N` | 7.70e-04 | 8.63e-04 | 8.21e-04 |
+| `setseed N` first in `.control` | 8.33e-04 | 9.26e-04 | 8.15e-04 |
+| `.options seed=N` | 8.37e-04 | 8.28e-04 | 8.59e-04 |
+
+The same seed gave a different RMS in every route. **Caveat: n=1 pair per
+route, one ngspice build.** Not measured: `trrandom`, other ngspice builds,
+the batch fleet's build. So klt cannot promise independent, replayable
+per-seed streams for `trnoise`, and deck-list requests have no `seed` field:
+a seed written into a deck is just deck bytes (it keys `--resume`, see
+"Resuming a deck run"), not a statement that the stream replays. What the
+per-unit `rndseed` of Monte Carlo corner mode *does* cover is
+`agauss`/`gauss`/`random()` sampling only (see "Monte Carlo sampling").
+
 ### Measurement output precision (`measureprec` / `numdgt`)
 
 ngspice prints a measurement with a fixed number of digits, and `klt sim`
@@ -418,7 +441,8 @@ run SPICE grids itself sets it in its daemon environment (2am#1004: the AWS
 dispatch workers run with `KLT_SIM_BACKEND=batch`), so every sweep's grid
 goes to the batch fleet with no per-repo request edit. It is a *preference*:
 when it names an off-host backend (`batch`/`remote`) it steps back to `local`
-for a single-unit run (one corner does not repay a Spot boot), an
+for a single-unit run (one corner, or a `decks[]` list of one deck, does not
+repay a Spot boot), an
 `engine: "xyce"` request (the off-host toolchain pins ngspice), and
 `options.resume`. An explicit flag or request field is never overridden —
 pass `--backend local` to keep a multi-corner run on the host on purpose.
@@ -827,11 +851,11 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
 | `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
-| `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
+| `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit. Any other value is rejected before any S3 write. |
 | `batch.max_units_per_job` | integer ≥ 1 | Opt-in cap on the units of one job ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)); `--max-units-per-job` overrides it. With `remote.hosts: 1` the request is split into `ceil(units / N)` balanced jobs, even when it would have fit one. Rejected before any S3 write with `error.code: "batch_max_units_per_job_invalid"` when not a positive integer, when combined with `job_ceiling_check: "enforce"`, or when the resulting jobs would still exceed the ceiling. |
-| `batch.max_concurrent_jobs` | integer ≥ 1 | Opt-in bound on the shard jobs in flight at once for a sharded run (`remote.hosts > 1`, or a split) ([#3914](https://github.com/2AMLogic/klayout-tools/issues/3914)); `--max-concurrent-jobs` overrides it. Unset submits every shard at once, as before. With a cap of K, at most K jobs sit between submit and collected; the remaining shards start as earlier ones finish, and the merge order, `fleet[]`, `batch-shards.json` and `--resume` are unchanged. The effective value is echoed as `environment.remote.max_concurrent_jobs` only when set. Use it to stay under the fleet's instance cap (`BATCH_MAX_CONCURRENT_INSTANCES`) instead of letting refused shards come back as `lost_shard`; it composes with `capacity_wait_s` (a retry of a refused launch, per job) and with `--resume`, which re-submits only the `lost_shard` / failed units. Rejected before any S3 write with `error.code: "batch_max_concurrent_jobs_invalid"` when not a positive integer. |
+| `batch.max_concurrent_jobs` | integer ≥ 1 | Opt-in bound on the shard jobs in flight at once for a sharded run (`remote.hosts > 1`, or a split) ([#3914](https://github.com/2AMLogic/klayout-tools/issues/3914)); `--max-concurrent-jobs` overrides it. Unset submits every shard at once, as before. With a cap of K, at most K jobs sit between submit and collected; the remaining shards start as earlier ones finish, and the merge order, `fleet[]`, `batch-shards.json` and `--resume` are unchanged. The effective value is echoed as `environment.remote.max_concurrent_jobs` only when set. Use it to stay under the fleet's instance cap (`BATCH_MAX_CONCURRENT_INSTANCES`) instead of letting refused shards come back as `lost_shard`; it composes with `capacity_wait_s` (a retry of a refused launch, drawing on the run-wide budget) and with `--resume`, which re-submits only the `lost_shard` / failed units. Rejected before any S3 write with `error.code: "batch_max_concurrent_jobs_invalid"` when not a positive integer. |
 
 ### Asynchronous submit and status (`--submit-only`, `--job-status`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073))
 
@@ -855,14 +879,20 @@ collects:
 | `job_id`, `bucket`, `region`, `jobs_prefix`, `job_uri` | Where the job lives |
 | `launched_at` | UTC time the launch returned |
 | `request_sha256` | Digest of the request document, to tie a later read back to it |
-| `unit_count` | Corners × Monte Carlo samples in the job |
-| `job_ceiling` | The pre-submit whole-job-ceiling assessment (same object as `environment.remote.job_ceiling`) |
+| `unit_count` | Corners × Monte Carlo samples in the job (the number of `decks` for a deck-list request) |
+| `job_ceiling` | The pre-submit whole-job-ceiling assessment (same object as `environment.remote.job_ceiling`); `null` for a deck-list request, which does not assess one |
 
 It is one job only. Anything it cannot represent as one job fails **before any
 S3 write** with `error.code: "submit_only_unsupported"`: a non-`batch`
 backend, `--hosts`/`remote.hosts` > 1 (a sharded run would need one job id per
-shard), `--plot`, or a deck-list request. `--resume` is already refused on the
-batch backend.
+shard), or `--plot`. `--resume` is already refused on the batch backend.
+
+A **deck-list request** (`decks`, [#3958](https://github.com/2AMLogic/klayout-tools/issues/3958))
+is one job with one job id, so it supports the same flow: `--submit-only`
+uploads and launches the single deck job and returns the payload above
+(`unit_count` = number of decks, `job_ceiling: null`), `--job-status` reads its
+state, and `--attach` (below) collects the deck report. A long seeded deck
+campaign can therefore detach from the launching session and be collected later.
 
 `--job-status JOB_ID` makes one `status.json` read (the positional request only
 supplies the bucket/region/profile) and exits `0` whatever the *job's* state —
@@ -922,8 +952,12 @@ job was submitted from — the request supplies the unit list and the
 measurement limits; it is not re-uploaded. A job id with no `job.json` in the
 bucket fails with exit `1` and `error.code: "batch_unknown_job"`. `--attach`
 applies to a single-job `batch` run only: it is refused for other backends,
-for sharded (`hosts > 1`) runs, for deck-list requests, and with
-`--batch-set` or `--submit-only`.
+for sharded (`hosts > 1`) runs, and with `--batch-set` or `--submit-only`.
+For a deck-list request, `--attach` returns the same deck report a blocking
+run would (unit trees installed under the outdir, `environment.remote` filled
+in); the request must declare the same decks the job ran, or it fails with
+`error.code: "attach_request_mismatch"`. `--resume` and `--wait-for-capacity`
+are refused with either flag.
 
 ### Capacity refusal and `batch_no_capacity`
 
@@ -978,11 +1012,25 @@ made. Things worth knowing:
   before any record is opened), and 2am's own Spot-interruption `reconcile`
   already re-launches under an existing job id. The uploaded `job.json` and
   `inputs/` are reused, never re-uploaded.
-- **The budget is per `launch` call.** A sharded run (`remote.hosts > 1`) launches one
-  job per shard, so each shard waits on its own `capacity_wait_s` budget,
-  concurrently. A shard whose budget runs out is reported as a `lost_shard`
-  (see "Fleet sharding" below) like any other launch failure, not as a
-  request-level `error.code` — its sibling shards' results are kept.
+- **The budget is per `launch` call for a single job, and per run for a sharded
+  one** ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). The
+  fleet's instance and vCPU caps are shared with every other client, so a
+  sharded run (`remote.hosts > 1`) launches one job per shard and all shards
+  draw on **one** `capacity_wait_s` deadline measured from the start of the
+  run; a shard that starts after it is spent makes a single launch attempt. A
+  shard whose budget runs out is reported as a `lost_shard` (see "Fleet
+  sharding" below) whose message carries the refusal code (e.g.
+  `[batch_concurrency_cap]`), not a request-level `error.code` — its sibling
+  shards' results are kept. While any shard waits, stderr (never stdout)
+  carries `klt sim: waiting for capacity: K of M shards pending, W waiting on
+  a launch (last refusal: <code>)` whenever W changes and at least every 5
+  minutes.
+- **Interrupting a sharded run still reports.** SIGINT/SIGTERM while shards
+  run (or wait) writes the report for the shards that finished; every other
+  shard is a `lost_shard` ("interrupted by client"), `environment.remote.interrupted`
+  is `true`, and `batch-shards.json` stays resumable. A shard whose launch was
+  refused is recorded as `submitted`, so `--resume` launches it instead of
+  polling for a `status.json` that never appears.
 - **Fan-out:** several requests can be submitted at once with `--batch-set`
   (below).
 - **`--wait-for-capacity SECONDS`** ([#3564](https://github.com/2AMLogic/klayout-tools/issues/3564))
@@ -1047,8 +1095,22 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   unchanged.
 - **Batch only, never local.** The backend is forced to `batch` (`--backend`
   other than `batch` is a usage error, exit `2`); a refused or failed request is
-  reported, never re-run on local ngspice. `--resume`, `--plot` and
-  `--op-lint` cannot be combined with it.
+  reported, never re-run on local ngspice. `--plot` and `--op-lint` cannot be
+  combined with it.
+- **Resuming a set (`--resume`).** `--resume` is forwarded to every request and
+  each one resumes from its own directory, `<outdir>/<request-stem>/`. Re-run
+  the same set with the same `-o`: a sharded request re-attaches to the shard
+  jobs recorded in its `batch-shards.json` (`fleet[].resumed: true`) and
+  resubmits only the shards it cannot collect; a request with no prior
+  directory runs fresh. A non-sharded or deck-list request resumes through its
+  own checkpoint (the set always runs on `batch`, which supports `--resume`
+  for both). A request whose resume is refused -- a shard map written for a
+  different request or hosts count (`resume_fingerprint_mismatch`), or an
+  unreadable one -- becomes an ordinary `error` entry, as it does for a single
+  request, and its siblings still run. A shard
+  still `interrupted` is re-polled first, so resuming it can wait up to another
+  `batch.interrupted_grace_s` (default 1800 s) before its replacement is
+  submitted. The aggregate envelope is unchanged.
 - **Per-request reports.** Each request writes its full single-request report
   to `report.json` in its own directory, `<outdir>/<request-stem>/` (without
   `-o`: `.klt/sim/<request-stem>/` next to the request file).
@@ -1821,12 +1883,12 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `capture` | `ok`, `absent` (older worker, no artifact, poll timeout) or `malformed`. When not `ok`, all observations are `null` -- never the client's values. |
 | `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). |
 | `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. |
-| `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree). Stamp fields are `null` when `SOURCES` is absent. |
+| `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true: `stamp_*` then describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when `SOURCES` is absent. |
 | `cpu_model` | First `model name` from the worker's `/proc/cpuinfo`, else `null`. CPU count stays `physical_cores` / `concurrency` from `status.json`. |
 | `omp_num_threads` | The worker's effective `OMP_NUM_THREADS`, `null` when unset. |
 | `image_manifest` | Allowlisted fields of a worker-local manifest (`$KLT_IMAGE_MANIFEST`, `/etc/klt-image-manifest.json`, `/opt/klt/image-manifest.json`), or `null` when none exists. This is the worker's own file, not the submitter's AMI selection metadata (`ami_id`, `data/remote-sim-ami-manifest.json`); a selected image is not evidence of the model bytes executed. Whether an image pins its PDK revision is reported only if the worker manifest says so (`pdk_pinned`); otherwise unknown. |
 | `diagnostics` | Bounded list of capture problems (missing binary, unreadable stamp, ...). |
-| `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable` (with `reason`: `worker_stamp_unavailable`, `client_stamp_unavailable`, `variant_differs` or `scheme_differs`). |
+| `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable` (with `reason`: `worker_stamp_unavailable`, `client_stamp_unavailable`, `variant_differs` or `scheme_differs`). Under `models_staged` the comparison is `basis: "staged_model_inputs"` instead -- see below. |
 | `engine_build_comparison` | Issue #3095. `status` of `match`, `mismatch` (with `warning`) or `not_comparable`: the worker's `simulator.version_banner` against the local `environment.engine_build.version_banner` (whitespace-normalised). `not_comparable` when either side has no banner — never a proven mismatch. A match proves the same banner, not identical build options. |
 
 `pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp the
@@ -1838,6 +1900,18 @@ submitter has no readable local `SOURCES` (set `models.pdk` and
 `models.pdk_root` / `$PDK_ROOT`); `worker_stamp_unavailable` means the runner
 reported no stamp (older worker or absent capture); `variant_differs` /
 `scheme_differs` mean the two sides name different variants or stamp schemes.
+When `pdk.models_staged` is true the image stamp says nothing about the
+executed models, so `pdk_stamp_comparison` instead compares the client's
+`environment.staged_model_inputs` digests with the worker's `model_inputs`
+(`basis: "staged_model_inputs"`, each `fleet[]` member independently): `match`
+when every staged file has a worker entry with the same name and sha256;
+`mismatch` (with `warning` and the `differing` names) when a digest differs or
+is missing; `not_comparable` with `reason` `client_staged_inputs_unavailable`,
+`worker_model_inputs_unavailable` or `worker_model_inputs_truncated` (more
+staged files than the bounded worker list). `client_stamp` carries the
+submitter's own `SOURCES` stamp (`variant`, `stamp_scheme`, `stamp_sha256`)
+when readable, so a caller can pin the PDK revision. klt does not fail the run
+on a mismatch; the caller decides.
 The text summary prints `pdk_stamp: <status> (<reason>)` (plus the `mismatch`
 warning) and `models_staged: <bool>` for batch runs; set
 `options.stage_model_inputs` to execute the submitter's model files
@@ -2094,8 +2168,13 @@ A deck-list request must not also declare `netlist`, `corners`, `analysis`,
 should run, so it is rejected by name.
 
 The corner-only CLI knobs are likewise refused for deck requests:
-`--hosts`, `--resume`, `--budget-s`, `--plot`, `--fail-fast-probe`, and
-`--fail-on-diagnostic`.
+`--hosts`, `--budget-s`, `--plot`, `--fail-fast-probe`, and
+`--fail-on-diagnostic`. `--resume` (`options.resume`) is **accepted** on
+`local`, `local-parallel` and `batch` with deck-specific semantics — see
+"Resuming a deck run" below — and refused on `remote`. `--submit-only` and
+`--attach <job_id>` apply to a deck list on the `batch` backend (one job, one
+job id; see "Asynchronous submit and status"); they cannot be combined with
+`--resume`.
 
 ### Preservation and isolation
 
@@ -2117,11 +2196,13 @@ The corner-only CLI knobs are likewise refused for deck requests:
   file and is left alone; any other `.lib` shape (no arguments, more than
   two, unbalanced quotes) is rejected by name.
 - **Units are isolated.** Each unit runs in its own directory
-  (`<outdir>/<id>/`), recreated fresh every run. Its deck, declared
+  (`<outdir>/<id>/`), recreated fresh every run (except a unit `--resume`
+  skips, which is left untouched). Its deck, declared
   inputs, and staged closure are copied there under the declared names, so
   two units may share filenames freely. `stdout.bin` and `stderr.bin` at
   the unit root are reserved for the captured streams: no deck, input,
-  staged include, or declared output may claim them. `ngspice -b <deck>`
+  staged include, or declared output may claim them; so does `unit.json`,
+  the completion record `--resume` reads. `ngspice -b <deck>`
   runs with the unit directory as `cwd` — the invocation a local `ngspice -b` in the
   caller's own harness would be.
 - **Streams are evidence, untouched.** Each unit's engine stdout and
@@ -2158,8 +2239,56 @@ directory of the request is left alone.
 | `status` | `"pass"` when every unit exited 0 within its timeout; `"error"` otherwise. klt never grades the deck's electrical result. |
 | `unit_count` / `passed` / `errored` / `timed_out` | Counts over `units[]`. |
 | `units[]` | One entry per deck, in request order: `id`, `status` (`"pass"` / `"error"` / `"timeout"`), `exit_code` (`null` when the engine never launched), `timed_out`, `duration_s`, `engine_version` (best-effort from the engine's own stdout banner — recorded per unit and top-level as engine identity), `deck` (unit-relative name as run), `deck_sha256`, `stdout`, `stderr`, `outputs`, `missing_outputs`, `host_resolved` (include targets left to the executing host), `diagnostics[]` (`timeout`, `engine_exit`, `engine_not_found`; off-host job failures carry `batch_job_failed` / `batch_job_timeout` / `batch_poll_timeout`, with the job's own klt error envelope attached where one was recoverable, or `remote_job_failed` when the `remote` backend's SSH run fails — the unit trees already written on the instance are pulled back before teardown, so `stdout`/`stderr`/`outputs` point at whatever evidence was recovered and the message says which streams came back). |
+| `units[].resumed` | Present only under `--resume` (additive): `true` for a unit skipped because a valid earlier result was found (its other fields are that earlier run's, verbatim), `false` for a unit that ran. |
 | `outdir` | Absolute path of the artifacts directory on the reporting host. |
+| `environment.resume` | Present only under `--resume` (additive): `{"resumed_units": <count skipped>, "resumed_ids": [...]}`. |
 | `environment` | `engine`, `engine_version`, `ngspice_binary`, `engine_host` (`"local"`/`"worker"`; off-host runs also `client_ngspice_binary`, and `ngspice_binary` is then the worker's, see "Which machine ran it"), `klt_version`, `max_workers`; off-host runs add `remote` — the same block corner reports carry (`provider`, `instance_id`/`instance_type`, `job_id`/`region` for batch, `runner_klt_version` identity, ...). |
+
+### Resuming a deck run (`--resume`, [#3957](https://github.com/2AMLogic/klayout-tools/issues/3957))
+
+A long seeded campaign (many CPU-minutes per unit) can be re-issued after an
+interruption — or from another session — without re-simulating what already
+finished. Every unit, on every backend, writes `<outdir>/<id>/unit.json`
+**atomically** (temp file + rename, after its streams and outputs are on
+disk), so an interrupted run leaves either no record or a whole one. With
+`--resume` (or `options.resume: true`) on `local`, `local-parallel` or
+`batch`, a unit is **skipped** only when all of these hold:
+
+- `unit.json` exists, parses, and has the current record version;
+- its recorded key equals the unit's current key: `deck_sha256`, the content
+  hashes of the declared `inputs[]` and staged `.include`/`.lib` closure,
+  declared `outputs[]`, `timeout_s`, and `engine_version` (probed from the
+  local `ngspice --version`; **not compared on `batch`**, where the fleet's
+  engine cannot be probed before submit — a unit produced by a different
+  engine build is still skipped there);
+- it recorded `status: "pass"` with no `missing_outputs`;
+- every declared output still exists with its recorded SHA-256, and
+  `stdout.bin`/`stderr.bin` exist.
+
+Anything else — no record, a truncated or unparseable one, a changed deck,
+include, `timeout_s` or engine version, a non-`pass` status, a deleted or
+edited output — means "not complete": that unit re-runs and its directory is
+replaced, and **nothing else is touched or aborted** (units not in the
+request, and units that verify, are left alone; stale records are never
+deleted on their own). Skipped units appear in `units[]` with `resumed: true`
+and the earlier run's recorded streams/outputs paths, and
+`environment.resume.resumed_units` counts them. On `batch`, only the
+non-skipped units are submitted; if every unit is skipped nothing is
+submitted. Units that never came back from the fleet (`lost_shard`, a failed
+job) have no record and re-run.
+
+There is no separate seed field. A seed the caller bakes into the deck (a
+`.param`, a `trrandom` seed argument, a referenced source file) is part of
+`deck_sha256`, so "same deck and seed set" is the key. To reuse results from
+an earlier session, pass its directory as `--outdir`.
+
+**Detachment.** klt provides no local detached runner (the AWS dispatch
+workers forbid `nohup`/`setsid`-style launchers; the batch fleet is the
+sanctioned detached path). For deck-list requests today, `--backend batch`
+blocks until the job is collected, `--submit-only` and `--attach` are
+**refused** (they exist for corner requests only), and `--resume` re-issues
+only the units without a valid record. Detached deck submission is a
+separate gap, tracked in [#3958](https://github.com/2AMLogic/klayout-tools/issues/3958).
 
 ### Runner support for `decks[]` on the batch backend (issue #3303)
 
@@ -2368,7 +2497,7 @@ not just equivalent.
   launch, cost gate, or teardown to run here. `hosts` may not exceed the
   unit count, for the same reason. A shard whose job fails to submit,
   launch, or collect is a `lost_shard` exactly as above (a capacity refusal
-  included, once that shard's own `batch.capacity_wait_s` budget is spent); a shard whose job
+  included, once the run's `batch.capacity_wait_s` budget is spent); a shard whose job
   *ran* and failed reports `batch_job_failed`/`batch_job_timeout` per unit
   instead (see "Failure classification" below).
 
@@ -3304,6 +3433,30 @@ later expression may reference an earlier one's name:
   { "name": "vmid_mv", "expr": "vmid * 1e3",  "unit": "mV" }
 ]
 ```
+
+### `expr` after a `tran` analysis: `analysis.linearize`
+
+A transient analysis stores its waveform on the solver's adaptive timestep
+grid, so a time-weighted sum (a Fourier coefficient, a cycle mean) over it is
+biased by how densely the solver happened to step. Setting
+`analysis.linearize: true` on a scalar `tran` analysis makes the generated
+`.control` block run ngspice's `linearize` (resample onto a uniform grid) right
+after the analysis, before the `expr` lets:
+
+```json
+"analysis": { "kind": "tran", "args": "5u 5m", "linearize": true },
+"measurements": [
+  { "name": "a1", "expr": "mean(v(out)*cos(2*pi*1k*time))*2", "unit": "V" }
+]
+```
+
+The `linearize` line comes after the `options.waveforms` rawfile `write`, so
+the written waveform is still the solver's own points. Without the field the
+deck is byte-identical to before. `linearize` is refused (exit 1, naming the
+field) on a non-`tran` analysis, inside `analysis_steps[]`, for a non-boolean
+value, and with `engine: "xyce"`. The `batch` backend replays the same deck, so
+it needs no extra support. There is no generic `let`/control-line passthrough:
+express derived quantities as `expr` measurements.
 
 ### `expr` after a `noise` analysis
 
@@ -4477,7 +4630,8 @@ error, exit 1).
     (case-insensitive).
   - `analysis.kind` must be one of `op`, `dc`, `ac`, `tran`, `noise`, `sp`,
     `tf`, `pz`, or `sens`. A kind may repeat across steps.
-  - `analysis.args` is a single-line string.
+  - `analysis.args` is a single-line string with no `{...}` brace
+    references (see "Failure classification" below).
 - **`alter`** maps a top-level source or passive element (`V`/`I`/`R`/`C`/`L`
   name) to a finite number. The overrides are applied as `alter` commands
   before that step's solve, in declaration order.
@@ -5474,6 +5628,30 @@ a corner grid. A stock ngspice without the module still produces the
     echo the dispatched `corner_id` and `params`, otherwise the request fails
     with error code `params_unsupported_worker` and reports no result. Update
     the runner image, or use a local backend.
+- **`corners.temperature_param`** (`string`, optional, [#3994](https://github.com/2AMLogic/klayout-tools/issues/3994))
+  — binds a top-level `.param` to the grid temperature. For every point the deck
+  gets `alterparam <name>=<temperature_c>` next to any `corners.params` row, before
+  the single `reset`, so a deck that reads `temp_c` (per-instance `dtemp` offsets,
+  temperature-coefficient measures) sees the point's temperature. It adds no axis
+  and no cross product: `temperature_c: [-40, 27, 125]` with
+  `temperature_param: "temp_c"` is three points.
+
+  ```json
+  {"corners": {"temperature_c": [-40, 27, 125], "temperature_param": "temp_c"}}
+  ```
+
+  - **Rules.** The name follows the `corners.params` rules (lowercased, not `mc_*`)
+    and may not also be a `corners.params` or `corners.supply_v` key, nor be
+    combined with `corners.units`. An undeclared name is a `SimError` before
+    dispatch, `engine: "xyce"` is refused, and the bound parameter appears in each
+    corner's `params` and `corner_id` exactly like a `corners.params` entry. A
+    request without the field is unchanged. It rides the batch/remote path through
+    the same `params` echo check as `corners.params`.
+  - **The other asks in the same report are already covered:** a `.noise`
+    analysis is `analysis.noise` on `kind: "twoport"` (#3339), a seeded Monte
+    Carlo is `monte_carlo.seed` (no `setseed` needed), and a `batch_concurrency_cap`
+    refusal is retried with `batch.capacity_wait_s` / `--wait-for-capacity`
+    (default off).
 - **`corners.options`** (`object`, optional, [#3125](https://github.com/2AMLogic/klayout-tools/issues/3125))
   — a solver-tolerance axis: ngspice `.options` names mapped to equal-length,
   nonempty arrays of finite numbers, zipped by index and expanded innermost
@@ -6382,6 +6560,15 @@ is what tells `klt sim` the difference.
 
 ## Failure classification: from the log, never the exit code
 
+**`{name}` references in `analysis.args` are rejected (ngspice).** The
+analysis is emitted as a `.control` command, where ngspice does not expand
+`.param` braces (`tran 2e-06 {stop_s}` aborts with `TSTOP is invalid`), and
+`klt` does not expand them either: the request fails validation (exit 1)
+with a message to write the numeric value literally. This applies to the
+scalar `analysis` and to every `analysis_steps[]` step. Xyce is unaffected:
+its analysis is a `.tran` dot card, where braces are valid, so they are
+passed through.
+
 `ngspice -b` reliably exits `0` even when a `.meas` fails or the matrix is
 singular (verified empirically against ngspice 46 while building this
 command — see the spike's "Failure signalling" survey row). Every corner's
@@ -6399,6 +6586,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
 | `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |
+| `analysis_aborted` | The engine's own abort trailer (`... simulation(s) aborted`; Xyce: `Simulation aborted due to error`) is in the log: the analysis never completed. The message quotes the engine's error line(s) (e.g. `Error: TSTOP is invalid, must be greater than zero.`), and it is reported *in addition to* the per-measurement `measurement` diagnostics, so a harness can tell "the simulator never ran" from "the event never happened" (issue #2846). Always `severity: "error"`, even if some or all `measurements[]` values were parsed before the abort: the trailer means no trustworthy result. A corner whose singular-matrix/nonconvergence narration was recovered by stepping (issue #205) has no trailer and so never gets this code. |
 | `timeout`          | The per-corner `options.timeout_s` budget was exceeded; the process is killed. |
 | `engine_killed`    | The engine process died from a signal the harness did not send (OOM killer, host reaper, reclaimed worker). `corners[].engine_killed_by_signal` names it (issue #2848). Always `error`; accepted by `options.fail_on_diagnostic`. A harness `timeout` is never reported this way. The message quotes the last ~20 lines of engine output (issue #3067). |
 | `engine_aborted`   | The engine exited with a non-zero code (`corners[].engine_exit_code`) without a classifiable cause in its log. (A clean exit that wrote no log, or a non-zero exit with no log file at all, is reported as `unknown` with the exit status and output tail, issue #3016.) Always `error`; accepted by `options.fail_on_diagnostic`. The message carries the exit code and the last ~20 lines of engine stderr/stdout/log, also with `keep_artifacts: false` and on the batch backend. When a corner carries `engine_aborted` or `engine_killed`, its per-measurement `measurement ... produced no value` diagnostics are omitted (the measurement results stay `error`), so `diagnostics[0]` names the cause (issue #3067). |

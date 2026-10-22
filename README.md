@@ -145,6 +145,7 @@ klt equiv request.json                   # combinational equivalence (Yosys mite
 klt eval descriptor.json --candidate '{"layout": "..."}'  # score a candidate: valid + one objective
 klt gen-compose plan.json                # place + wire generated blocks into one circuit
 klt socket-check design.gds --socket socket.json  # pins/outline/budgets vs a socket descriptor
+klt interface-check a.gds b.gds --place=-10,100 --pins 'OUT\[\d+\]'  # do block A's pins land on block B's pads?
 klt lef-abstract design.gds --socket socket.json --macro-name m --cell-library sky130_fd_sc_hd  # layout+socket -> LEF MACRO abstract
 klt report result.json                   # render a klt JSON report as markdown summary
 klt signoff drc.json lvs.json            # aggregate drc/lvs/extract/sim JSON into one pass/fail verdict

@@ -1490,8 +1490,12 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "hvtr.1",
         "hvtr.2",
         "hvtr.2_a",
+        "m1.3ab",
         "m1.5",
+        "m2.3ab",
         "m2.5",
+        "m3.3ab",
+        "m4.5ab",
         "n/psdm.10a",
         "n/psdm.10b",
         "n/psdm.5a",
@@ -9142,7 +9146,10 @@ def test_request_document_format_flag_is_not_an_input_flag(tmp_path, capsys):
         ('{"file": 3}', "must be a string"),
         ('{"file": "x.gds", "timeout_s": "soon"}', "must be a number"),
         ('{"file": "x.gds", "deck_vars": ["FEOL=true"]}', "must be a JSON object"),
-        ('{"file": "x.gds", "engine": "nope"}', "must be 'curated' or 'klayout'"),
+        (
+            '{"file": "x.gds", "engine": "nope"}',
+            "must be 'curated', 'klayout' or 'both'",
+        ),
         ('{"file": "x.gds", "deck_vars": {"A=B": "1"}}', "cannot represent one"),
         ('{"file": "x.gds",', "neither an existing file"),
         ('{"not": "an object"', "neither an existing file"),
@@ -10991,6 +10998,9 @@ def test_run_drc_gf180mcu_coverage_names_unmodeled_thick_metal_families(tmp_path
 
     assert {"MT30.1a", "MT30.2", "MT30.3", "MT30.4", "MSLOT.1"} <= set(unmodeled)
     assert "MT30.1a" not in run_drc(str(path), "sky130")["coverage"]["unmodeled_rules"]
+    # Issue #3968: wide-metal / narrow-line end-of-line ids are disclosed too.
+    assert {"M2.2b", "CO.6a", "CO.6b", "V2.3c", "V2.4c"} <= set(unmodeled)
+    assert "M2.2b" not in run_drc(str(path), "sky130")["coverage"]["unmodeled_rules"]
 
 
 def _make_sky130_marker_layout(*, marker: bool) -> kdb.Layout:

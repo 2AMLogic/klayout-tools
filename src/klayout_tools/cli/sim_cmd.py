@@ -265,7 +265,6 @@ def _run_batch_set(args: argparse.Namespace) -> int:
         flag
         for flag, value in (
             ("a positional request", args.request),
-            ("--resume", args.resume),
             ("--attach", getattr(args, "attach_job_id", None)),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
@@ -302,6 +301,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             max_workers=args.max_workers,
             hosts=args.hosts,
             budget_s=args.budget_s,
+            resume=args.resume,
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
         )
@@ -437,6 +437,8 @@ def _print_worker_pdk(report: dict) -> None:
         line = f"pdk_stamp: {comparison['status']}"
         if comparison.get("reason"):
             line += f" ({comparison['reason']})"
+        if comparison.get("basis"):
+            line += f" [basis: {comparison['basis']}]"
         print(line)
         if comparison.get("warning"):
             print(f"warning: {comparison['warning']}")
@@ -462,6 +464,8 @@ def _print_deck_text(report: dict) -> None:
     env = report["environment"]
     print(f"engine: {env['engine']} {env['engine_version'] or '-'}")
     print(f"outdir: {report['outdir']}")
+    if env.get("resume"):
+        print(f"resume: skipped {env['resume']['resumed_units']} complete unit(s)")
     if env.get("remote"):
         remote = env["remote"]
         provider = remote.get("provider", "remote")
@@ -469,8 +473,9 @@ def _print_deck_text(report: dict) -> None:
         print(f"remote: {provider} {instance}")
     for unit in report["units"]:
         exit_desc = "-" if unit["exit_code"] is None else str(unit["exit_code"])
+        resumed_tag = " (resumed)" if unit.get("resumed") else ""
         print(
-            f"  {unit['id']} [{unit['status']}] exit={exit_desc} "
+            f"  {unit['id']} [{unit['status']}]{resumed_tag} exit={exit_desc} "
             f"duration={unit['duration_s']}s  {unit['stdout']}"
         )
         for diagnostic in unit["diagnostics"]:

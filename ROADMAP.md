@@ -52,13 +52,17 @@ gen-compose` (place + wire generated blocks), and `klt draw` (primitive
 stream writing). A `pyo3`-backed Rust core remains later-and-only-where-
 measured, per the rewrite rule.
 
-## Phase 4 — extract & verify (shipped — `klt extract` / `klt lvs`; RC parasitics open, #217)
+## Phase 4 — extract & verify (shipped — `klt extract` / `klt lvs` / `klt extract --parasitics` / `klt pex`)
 
 `klt lvs` and netlist/parasitic extraction, headless with structured
 output — KLayout's LVS engine first, open-PDK decks (sky130). This is the
 bridge from layout back to the electrical world: without an extracted
 netlist there is nothing to simulate, so this phase gates the
-simulation-verified end of the loop.
+simulation-verified end of the loop. First-order lumped RC parasitics
+(`klt extract --parasitics`, #217) and the schematic-vs-extracted
+post-layout delta (`klt pex`, Epic #709) have shipped; raising the RC
+model's fidelity is sequenced in
+[docs/design/extract-fidelity-roadmap.md](docs/design/extract-fidelity-roadmap.md).
 
 ## Phase 5 — agent surface (partial — gallery + MCP server live; reasoning module outstanding)
 

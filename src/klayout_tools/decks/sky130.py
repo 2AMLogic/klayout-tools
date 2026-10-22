@@ -1132,7 +1132,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=300,  # 0.3 um
         # sky130A_mr.drc rule "m3.2": non_huge_m3.space(0.3, euclidian)
         # -> "m3.2 : min. m3 spacing : 0.3um"
-        # (the wide-metal 0.4um exception, "m3.3cd", is not modelled here --
+        # (the wide-metal 0.4um exception, "m3.3ab", is not modelled here --
         # the same approximation met1.space.1/met2.space.1 above already
         # make for their own wide-metal exceptions.)
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
@@ -2086,8 +2086,12 @@ UNMODELED_RULES: tuple[str, ...] = (
     "hvtr.1",
     "hvtr.2",
     "hvtr.2_a",
+    "m1.3ab",
     "m1.5",
+    "m2.3ab",
     "m2.5",
+    "m3.3ab",
+    "m4.5ab",
     "n/psdm.10a",
     "n/psdm.10b",
     "n/psdm.5a",

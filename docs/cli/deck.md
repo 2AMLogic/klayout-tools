@@ -156,6 +156,39 @@ already have (or fetch) the full klayout-tools git history — which
 reintroduces, just automated, the exact friction this command exists to
 remove for a PyPI/wheel install that has no such history available at all.
 
+## Reproducing a run under a pinned deck
+
+**A deck `content_hash` is stable only for a fixed `klayout-tools` package
+version.** Any release may change a built-in deck's bytes (rules are added or
+adjusted), and therefore its hash; there is no cross-release stability
+guarantee, and `klt drc` has no option to select a previous deck revision
+(that was rejected in #623 — see above). To re-run an old flow with the deck
+held constant, pin the **version**, not just the hash:
+
+1. Resolve the pinned hash to the release that shipped it:
+
+   ```bash
+   klt deck resolve --content-hash sha256:<pinned> --format json
+   # -> "package_version": "X.Y.Z"
+   ```
+
+2. Run the verb from that release in a throwaway environment (works without a
+   writable tool environment):
+
+   ```bash
+   uvx --from "klayout-tools==X.Y.Z" klt drc layout.gds --engine curated --deck sky130 --format json
+   ```
+
+3. Confirm `provenance.deck.content_hash` in that report equals the pinned
+   hash (or compare against `uvx --from "klayout-tools==X.Y.Z" klt deck hash
+   --deck sky130`).
+
+If `klt deck resolve` exits 1 (the hash is unreleased, a dev-edited deck, or
+predates the table), no release can reproduce it — re-review and re-pin the
+coverage disclosure against the new deck rather than guessing a version.
+Releases note every change to a built-in deck's hash in `CHANGELOG.md` with
+the literal phrase `deck hash changes` (search for it).
+
 ## `klt deck resolve` output
 
 ```json
@@ -293,7 +326,9 @@ klt deck info --deck gf180mcu # one deck only
   transcribe (issue #3796), the same static list `klt drc` reports as
   `coverage.unmodeled_rules`; `[]` for a deck that declares none. For gf180mcu
   this is the thick-MetalTop `MT30.*`, `MT.2b`/`MT.3`/`MT.4` and `MSLOT.*`
-  families (the example above is abbreviated). Additive and optional for
+  families, plus the Metal1–5 wide-metal `M1.2b`–`M5.2b` and the narrow-line
+  end-of-line `CO.6a`/`CO.6b`/`Vn.3c`/`Vn.3d`/`Vn.4b`/`Vn.4c` ids (issue #3968) (the example above is abbreviated). A clean `klt drc` result covers only the
+  modeled rules, not full native-runset coverage. Additive and optional for
   consumers.
 
 - `drc_deck` — present only for a deck that ships a standalone KLayout DRC

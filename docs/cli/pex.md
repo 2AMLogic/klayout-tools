@@ -487,6 +487,33 @@ DUT in a matching `.SUBCKT ... .ENDS` (with the same top-level pin list
 reused unmodified on both sides — the same convention `pin_count_mismatch`
 already requires.
 
+### Pin order must match: `pin_order_mismatch`
+
+The testbench's positional `X...` line is reused on both legs, so the
+*order* of the pins matters as well as their count. `klt extract` writes its
+`.SUBCKT <top>` header deterministically (real ports first, then parasitic
+references, each alphabetical); a schematic DUT declares pins in symbol
+order. When both headers declare the top subcircuit with the same number of
+pins and the same pin set (compared case-insensitively) but a different
+sequence, `pin_count_mismatch` and `flat_dut_mismatch` are both `null` and
+the extracted leg would otherwise simulate with signals on the wrong pins and
+report meaningless deltas.
+
+`klt pex` detects this statically, before either leg simulates, and reports
+a top-level `pin_order_mismatch` block in the same shape as
+`pin_count_mismatch` (`subcircuit`, `schematic`/`extracted` per-side detail
+with `pins` in declared order, `ngspice_message` — always `null`, no engine
+is invoked — and `detail`). It is mutually exclusive with `pin_count_mismatch`
+and `flat_dut_mismatch`, and always `null` in `--measure-command` mode.
+
+**Exit behaviour.** Identical to its siblings: the extracted leg is skipped,
+`delta[]` rows carry `extracted_value: null` and `status: "error"`, the
+report `status` is `"error"`, and the exit code is `4`. Fix by wrapping the
+schematic DUT in a `.SUBCKT` that declares the pins in the extracted order
+(shown in the block), so one instantiation line is valid for both legs.
+Rewriting the testbench instance by pin name, or reordering the extracted
+header, is not done by `klt pex`.
+
 ## The extracted side carries its own substrate DC reference (issue #1263)
 
 The extraction `klt pex` runs is `--parasitics`, so every net's ground
@@ -977,7 +1004,7 @@ indistinguishable from a real measurement failure.
 
 ### Two diagnostics are inapplicable here
 
-`pin_count_mismatch` and `flat_dut_mismatch` are always `null` in this mode.
+`pin_count_mismatch`, `flat_dut_mismatch` and `pin_order_mismatch` are always `null` in this mode.
 Both exist because testbench mode re-runs the testbench's **own unmodified
 `X...` instantiation line** against both netlists, so a pin-list or
 flat-vs-wrapped difference silently breaks the extracted-side deck. A
@@ -1230,6 +1257,7 @@ full `repo`/`external`/`absent` scope meanings.
     "nothing_checked_reasons": []
   },
   "pin_count_mismatch": null,
+  "pin_order_mismatch": null,
   "backend_failure": null,
   "flat_dut_mismatch": null,
   "model_mismatch": null,
@@ -1267,6 +1295,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `pin_count_mismatch` | object \| null    | `null` on every run whose extracted side simulated (issue #1030 — additive field). Non-`null` names the schematic/extracted top-level pin-list mismatch that made the extracted-side deck unrunnable: `subcircuit`, a `schematic` and an `extracted` object (each `netlist`, `subcircuit`, `pin_count`, `pins` — `null` pin data when the header could not be read), `ngspice_message` (ngspice's own line, `null` when no per-corner log was kept), and a human-readable `detail`. See "The pin lists must match" above. |
 | `backend_failure`    | object \| null    | `null` unless an extracted-side `klt sim` call raised something other than a pin-count mismatch (issue #2990 — additive field), e.g. a batch-fleet capacity refusal. Non-`null` is `{testbench, side, message, code}` for the first such failure (`side` is always `"extracted"`; `code` is the underlying `SimError.code`, e.g. `batch_no_capacity`, or `null`). The run does **not** abort: that testbench's `delta[]` rows are `status: "error"` with the schematic value intact and `extracted_value: null`, and its `testbenches[].sides.schematic` evidence (including a remote job id) is kept, so only the extracted side needs re-running. A caller can retry mechanically on `code`. A schematic-side failure still aborts (nothing completed), but its error envelope now carries `error.code` too. |
 | `flat_dut_mismatch`  | object \| null    | `null` unless the schematic DUT is netlisted flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction (issue #1255, Gap 2 — additive field). Same shape as `pin_count_mismatch` (`subcircuit`, `schematic`/`extracted` objects, `ngspice_message` — always `null` here, no engine is ever invoked — and `detail`); mutually exclusive with `pin_count_mismatch` (the extracted side is never attempted when this fires). See "Flat schematic DUT vs `.SUBCKT`-wrapped extraction" above. |
+| `pin_order_mismatch` | object \| null    | `null` unless both sides declare the top subcircuit with the same pin set in a different order (issue #2890 — additive field). Same shape as `flat_dut_mismatch` (`ngspice_message` always `null`); mutually exclusive with `pin_count_mismatch`/`flat_dut_mismatch`; `null` in `--measure-command` mode. The extracted leg is skipped and the run exits `4`. See "Pin order must match" above. |
 | `model_mismatch`     | object \| null    | `null` when the reference (schematic) and extracted netlists' `M`/`X`/`Q`/`D` device cards instantiate the same models/`.subckt`s the same number of times (issue #2402 — additive field). Non-`null` names the divergence: `kind` (`model_set` or `count_only`, issue #3054), `reference_only`/`extracted_only` (model names unique to one side, by instance count), `counts` (each side's full per-model instance count), and a human-readable `detail`. Unlike `pin_count_mismatch`/`flat_dut_mismatch`, computed unconditionally (independent of whether the top-level pin lists match) and never skips the extracted-side simulation — it never changes `status`. See "A device-model divergence invalidates the comparison too" above. |
 | `flatten_schematic`  | boolean           | Issue #2889 (additive, always present). Echo of `--flatten-schematic` — `false` when not given. |
 | `schematic_flatten`  | object \| null    | Issue #2889 (additive). `null` unless `--flatten-schematic` was given. Otherwise the flattened schematic DUT the schematic leg ran: `netlist` (`{path, scope}`), `netlist_sha256` (`sha256:<hex>` of its exact bytes), `subckts` (root `.subckt` names kept), `inlined_instances`, `inlined_subckts`, `external_subckts` (undefined `X` targets kept as leaf devices — audit these) and `already_flat`. See "Flattening a hierarchical schematic DUT" above. |
@@ -1351,7 +1380,7 @@ ownership".
 | `0`       | At least one actual comparison ran and every `delta[]` row passed.                                                                   |
 | `1`       | Failed to run at all — bad layout/testbench, unresolvable deck/PDK, a testbench with no `.include`/`.inc` DUT reference **or more than one** or one that does not plausibly name the DUT (issue #1255, Gap 1), testbenches disagreeing on their schematic DUT, or an extraction/simulation failure. For a `--measure-command` run (issue #2478): also a mis-combined invocation (`--measure-command` with a `<testbench>`, or without `--reference-netlist`; `--reference-netlist`/`--measure-timeout-s` without `--measure-command`), a `--reference-netlist` that is missing or is not a DUT, and any measurement-command failure — unrunnable, non-zero exit, timeout, non-JSON stdout, or a malformed measurement document. With `--flatten-schematic` (issue #2889): a schematic DUT the flattener refuses (cycle, `X`-call pin-count mismatch, unsupported card, unbalanced `.subckt`), classified as `error.code` `schematic_flatten_*`. Documented error shape on stderr (`--format json`). |
 | `3`       | Ran successfully; at least one `delta[]` row's `status` is `"fail"`.                           |
-| `4`       | No actual comparison ran (`status: "not_checked"`), or at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`, and a flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which reports a named `flat_dut_mismatch` block the same way (issue #1255, Gap 2), and an extracted-side backend failure, which reports a named `backend_failure` field (issue #2990). |
+| `4`       | No actual comparison ran (`status: "not_checked"`), or at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`, and a flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which reports a named `flat_dut_mismatch` block the same way (issue #1255, Gap 2), and a same-pins-different-order mismatch, which reports a named `pin_order_mismatch` block the same way (issue #2890), and an extracted-side backend failure, which reports a named `backend_failure` field (issue #2990). |
 
 (`2` is reserved for argparse usage errors, as with every other `klt`
 subcommand. Exit codes `3`/`4` mirror `klt sim`'s own precedent — see

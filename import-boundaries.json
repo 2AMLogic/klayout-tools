@@ -105,6 +105,7 @@
       "modules": [
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.drc",
+        "klayout_tools.drc_crosscheck",
         "klayout_tools.drc_klayout_engine"
       ]
     },
@@ -130,7 +131,10 @@
       "modules": [
         "klayout_tools.cli.equiv_cmd",
         "klayout_tools.equiv",
-        "klayout_tools.equiv_sequential"
+        "klayout_tools.equiv_errors",
+        "klayout_tools.equiv_replay",
+        "klayout_tools.equiv_sequential",
+        "klayout_tools.equiv_stage"
       ]
     },
     "erc": {
@@ -214,7 +218,16 @@
         "klayout_tools.cli.gen_compose_cmd",
         "klayout_tools.gen_compose",
         "klayout_tools.gen_compose_port_access",
+        "klayout_tools.gen_compose_port_request",
         "klayout_tools.gen_compose_routing"
+      ]
+    },
+    "interface_check": {
+      "kind": "verb",
+      "description": "`klt interface_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.interface_check_cmd",
+        "klayout_tools.interface_check"
       ]
     },
     "kb": {
@@ -253,6 +266,7 @@
       "kind": "verb",
       "description": "`klt layout_plan` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli.layout_plan_cmd",
         "klayout_tools.layout_plan",
         "klayout_tools.layout_plan_execute"
       ]
@@ -442,6 +456,7 @@
         "klayout_tools.op_sanity",
         "klayout_tools.output_lock",
         "klayout_tools.resistor_mesh",
+        "klayout_tools.routing_pitch",
         "klayout_tools.touchstone",
         "klayout_tools.verilog_netlist"
       ]
@@ -511,7 +526,8 @@
       "description": "`klt size` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.size_cmd",
-        "klayout_tools.size"
+        "klayout_tools.size",
+        "klayout_tools.size_topology"
       ]
     },
     "reset_coverage": {
@@ -646,6 +662,11 @@
       "consumer": "tap_distance",
       "exporter": "cli-infra",
       "reason": "CLI adapter uses the shared output envelope and --region parser, as every verb does."
+    },
+    {
+      "consumer": "layout_plan",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope, as every verb does."
     },
     {
       "consumer": "tap_distance",
@@ -841,6 +862,11 @@
       "consumer": "gen_compose",
       "exporter": "gen",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "interface_check",
+      "exporter": "cli-infra",
+      "reason": "Verb adapter uses the shared output envelope (issue #4024), as every verb does."
     },
     {
       "consumer": "kb",
@@ -1328,6 +1354,18 @@
       "consumer": "klayout_tools.equiv_sequential",
       "exporter": "klayout_tools._provenance",
       "symbol": "_yosys_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv_stage",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_combined_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv_stage",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
@@ -2259,6 +2297,12 @@
       },
       {
         "consumer": "klayout_tools.size",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_models_lib",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.size_topology",
         "exporter": "klayout_tools.sim",
         "symbol": "_resolve_models_lib",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."

@@ -243,7 +243,9 @@ split" section for the full derivation.
 per-entry shape, absent unless asked for.** Issue #2982's `klt extract
 --resistance-graph` adds `resistance_graph` (`status`, `terminals`,
 `pair_resistance_ohm`, `legacy_resistance_ohm`, `nodes`, `edges`,
-`diagnostics`) to each `parasitics.nets[]` entry. Without the flag the key does
+`diagnostics`, and the additive scalar-selection provenance
+`selected_resistance_ohm`, `resistance_source`, `resistance_source_reason`;
+issue #2983) to each `parasitics.nets[]` entry. Without the flag the key does
 not exist and the output is byte-identical to before; with it, every existing
 field (`resistance_ohm`, `terminals[]`, `by_layer`, the ladder) keeps its
 meaning and value. A consumer must treat the key as optional. No field is
@@ -537,6 +539,12 @@ additively as `environment.remote.worker_environment` (and in each
 observations are `null` (never the client's values) and `capture` is `ok`,
 `absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
 environment" for the field names and limits.
+
+Under `options.stage_model_inputs` the worker's `pdk.stamp_*` still describes
+the image tree; `pdk.stamp_scope` (`image` / `executed`) says so, and
+`pdk_stamp_comparison` gains `basis: "staged_model_inputs"` (plus optional
+`client_stamp`, `differing`) comparing the staged file digests. Additive
+fields only; no `schema_version` bump (issue #4020).
 
 **No bucket in batch reports (issue #3777).** `environment.remote` (and each
 `fleet[]` member) no longer carries `bucket` on any batch verb. The bucket name

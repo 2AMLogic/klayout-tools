@@ -395,6 +395,78 @@ def test_job_cmd_is_valid_bash_syntax(tmp_path):
         assert proc.returncode == 0, proc.stderr
 
 
+def _bash_n(script):
+    import shutil
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    return subprocess.run([bash, "-n", "-c", script], capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("enforce", [True, False])
+@pytest.mark.parametrize(
+    "features",
+    [
+        pytest.param(("measurements[].expr",), id="one"),
+        pytest.param(tuple(sb._RUNNER_REQUEST_FEATURES), id="all"),
+    ],
+)
+def test_runner_preflight_with_required_features_is_valid_bash(features, enforce):
+    """Issue #3993: the feature gate's per-feature `if ...; fi` snippets must be
+    `;`-separated, or a request using any gated feature fails to parse."""
+    script = sb._runner_preflight_script(
+        "0.7.1.dev2264+gcba5e957d9ed", enforce=enforce, required_features=features
+    )
+    proc = _bash_n(script)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_job_cmd_with_gated_request_features_is_valid_bash(tmp_path):
+    """Issue #3993: ngspice_init + measurement expr is the reporter's shape."""
+    for keep in (False, True):
+        spec = sb._build_batch_job_spec(
+            {
+                "models": {},
+                "options": {"ngspice_init": "x"},
+                "measurements": [{"name": "a", "expr": "1"}],
+                "analysis": {"kind": "op"},
+            },
+            str(_write_body(tmp_path)),
+            corner_count=1,
+            timeout_s=30.0,
+            keep_artifacts=keep,
+            client_version="0.7.1.dev2264+gcba5e957d9ed",
+        )
+        proc = _bash_n(spec.cmd)
+        assert proc.returncode == 0, proc.stderr
+
+
+def test_job_cmd_with_gated_features_refuses_an_older_runner(tmp_path):
+    """Issue #3993: with the parse error fixed, the preflight actually runs and
+    names the feature an older runner predates."""
+    spec = sb._build_batch_job_spec(
+        {
+            "models": {},
+            "options": {"ngspice_init": "x"},
+            "measurements": [{"name": "a", "expr": "1"}],
+            "analysis_steps": [],
+        },
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+        client_version="0.7.1.dev2264+gcba5e957d9ed",
+    )
+    klt = '#!/bin/bash\nif [ "$1" = "--version" ]; then echo "klt 0.7.0"; exit 0; fi\n'
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(tmp_path, spec, klt)
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT, proc.stderr
+    report = json.loads((out_dir / "report.json").read_text())
+    assert report["error"]["code"] == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "analysis_steps" in report["error"]["message"]
+    assert not marker.exists()
+
+
 def test_job_cmd_exit_trap_writes_envelope_when_klt_leaves_no_report(tmp_path):
     """Issue #3818: a job that exits non-zero with an empty report.json and no
     klt envelope still tells the submitter why, in report.json."""
@@ -5231,6 +5303,71 @@ def test_cli_batch_set_all_pass_exits_zero_and_refuses_other_backend(
     assert exc.value.code == 2
 
 
+def test_sim_set_forwards_resume_to_every_request(tmp_path):
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 3)
+    seen: list[tuple[str, object, str]] = []
+
+    def fake_run(path, **kwargs):
+        seen.append((path, kwargs.get("resume"), kwargs["artifacts_dir"]))
+        return _fake_report()
+
+    sim_set.run_sim_set(paths, outdir=str(tmp_path / "out"), run=fake_run, resume=True)
+    assert [p for p, _, _ in seen] == paths
+    assert all(resume is True for _, resume, _ in seen)
+    # Each request resumes from its own directory (where batch-shards.json lives).
+    assert [d for _, _, d in seen] == [
+        str(tmp_path / "out" / f"req{i}") for i in range(3)
+    ]
+
+    seen.clear()
+    sim_set.run_sim_set(paths, outdir=str(tmp_path / "out2"), run=fake_run)
+    assert all(not resume for _, resume, _ in seen)
+
+
+def test_cli_batch_set_accepts_resume_and_forwards_it(tmp_path, monkeypatch, capsys):
+    from klayout_tools import sim_set
+    from klayout_tools.cli import main
+
+    seen: list[object] = []
+
+    def fake_run(path, **kwargs):
+        seen.append(kwargs.get("resume"))
+        return _fake_report()
+
+    monkeypatch.setattr(
+        sim_set.run_sim_set,
+        "__kwdefaults__",
+        {**sim_set.run_sim_set.__kwdefaults__, "run": fake_run},
+    )
+    paths = _write_set(tmp_path, 2)
+
+    code = main(["sim", "--batch-set", *paths, "--resume", "--format", "json"])
+
+    assert code == 0
+    assert seen == [True, True]
+    assert json.loads(capsys.readouterr().out)["status"] == "pass"
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--attach", "job-1"],
+        ["--plot", "plots"],
+        ["--op-lint"],
+        ["--submit-only"],
+        ["--job-status", "job-1"],
+        ["--wait-for-capacity", "5"],
+    ],
+)
+def test_cli_batch_set_still_refuses_other_single_request_flags(tmp_path, flags):
+    from klayout_tools.cli import main
+
+    paths = _write_set(tmp_path, 1)
+    assert main(["sim", "--batch-set", *paths, "--resume", *flags]) == 2
+
+
 # --------------------------------------------------------------------------- #
 # measurements[].crossings through the batch fleet (issue #2868)
 # --------------------------------------------------------------------------- #
@@ -6938,6 +7075,158 @@ def test_resume_submits_only_the_shard_whose_job_is_gone(tmp_path, monkeypatch):
     assert rewritten["shards"][1]["job_id"] != gone
 
 
+_SET_MEASUREMENT = {
+    "name": "vout",
+    "expr": "v(out)",
+    "unit": "V",
+    "limits": {"min": 0.0},
+}
+
+
+def _graded_report_document(document: dict) -> dict:
+    """Rename a fixture report's corners to the request's real ids
+    (`default/1.800V/<T>C`, which resume keys its checkpoint on, not the
+    fixture's `tt_1.800_<T>`) and give each a passing, limit-checked `vout`, so
+    a set entry grades `pass` rather than `not_checked` (nothing measured)."""
+    for corner in document["corners"]:
+        temperature = re.search(r"(\d+)C?$", corner["corner_id"]).group(1)
+        corner["corner_id"] = f"default/1.800V/{temperature}C"
+        corner["measurements"] = [
+            {"name": "vout", "value": 1.0, "unit": "V", "status": "pass", "margin": 1.0}
+        ]
+    return document
+
+
+def _grade_shard_reports(runner, monkeypatch, *, fail_upload: int | None = None):
+    """Wrap the shard-fixture transport so every shard report is graded
+    (`_graded_report_document`), and the `fail_upload`-th shard job uploaded
+    (0-based) ends `failed` -- the run leaves its shard map behind, as an
+    interrupted one does."""
+    inner = sb._run_subprocess
+    uploads: list[str] = []
+
+    def graded(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            destination = argv[argv.index("cp") + 2]
+            uploads.append(job_id_of(destination))
+            if fail_upload is not None and len(uploads) == fail_upload + 1:
+                runner.queue(
+                    f"{uploads[-1]}/status.json",
+                    fake_completed(_status("failed", exit_code="1")),
+                )
+        result = inner(argv, timeout_s)
+        for files in runner.outputs_by_job.values():
+            files["report.json"] = json.dumps(
+                _graded_report_document(json.loads(files["report.json"]))
+            )
+        return result
+
+    monkeypatch.setattr(sb, "_run_subprocess", graded)
+
+
+def _sharded_set_request(tmp_path: Path, name: str, **overrides) -> str:
+    """A 4-unit, 2-host batch request file (units differ by temperature, so
+    the fixture's per-shard reports line up with the real corner ids)."""
+    request = _batch_request(
+        tmp_path,
+        corners={"supply_v": {"vdd": [1.8]}, "temperature_c": [0, 1, 2, 3]},
+        measurements=[_SET_MEASUREMENT],
+        remote={"hosts": 2},
+        **overrides,
+    )
+    path = tmp_path / name
+    path.write_text(json.dumps(request))
+    return str(path)
+
+
+def test_sim_set_resume_reattaches_finished_shards_and_resubmits_the_missing_one(
+    tmp_path, monkeypatch
+):
+    from klayout_tools import sim_set
+
+    runner, _, _ = _shard_resume_fixture(tmp_path, monkeypatch)
+    _grade_shard_reports(runner, monkeypatch, fail_upload=1)
+    _write_body(tmp_path)
+    paths = [_sharded_set_request(tmp_path, "req0.json")]
+    outdir = str(tmp_path / "out")
+
+    first = sim_set.run_sim_set(paths, outdir=outdir)
+    assert [entry["status"] for entry in first["requests"]] == ["error"]
+    manifest_path = tmp_path / "out" / "req0" / sb.BATCH_SHARDS_FILENAME
+    assert manifest_path.exists()  # one shard never completed: map retained
+    launches_before = len(_launches(runner))
+    assert launches_before == 2
+
+    # The failed job is still failed on the fleet when the set is re-run.
+    failed = json.loads(manifest_path.read_text())["shards"][1]["job_id"]
+    runner.queue(
+        f"{failed}/status.json", fake_completed(_status("failed", exit_code="1"))
+    )
+    resumed = sim_set.run_sim_set(paths, outdir=outdir, resume=True)
+
+    assert len(_launches(runner)) == launches_before + 1
+    entry = resumed["requests"][0]
+    assert entry["status"] == "pass"
+    assert resumed["status"] == "pass"
+    report = json.loads(Path(entry["report"]).read_text())
+    fleet = report["environment"]["remote"]["fleet"]
+    assert [shard["resumed"] for shard in fleet] == [True, False]
+    assert not manifest_path.exists()  # swept clean: nothing left to re-attach
+
+
+def test_sim_set_resume_error_entry_does_not_sink_a_resuming_sibling(
+    tmp_path, monkeypatch
+):
+    """Under ``--batch-set --resume`` the only per-request resume refusal on the
+    batch backend is a shard map that belongs to another request; a non-sharded
+    sibling resumes (here: runs fresh) and completes. One entry's error is an
+    ordinary ``error`` entry and the set is ``error``, never an exception."""
+    from klayout_tools import sim_set
+
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {
+        "report.json": json.dumps(
+            _graded_report_document(
+                json.loads(_sim_report(corner_ids=("tt_1.800_0", "tt_1.800_1")))
+            )
+        )
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    sharded = _sharded_set_request(tmp_path, "req0.json")
+    single = tmp_path / "req1.json"
+    single.write_text(
+        json.dumps(
+            _batch_request(
+                tmp_path,
+                corners={"supply_v": {"vdd": [1.8]}, "temperature_c": [0, 1]},
+                measurements=[_SET_MEASUREMENT],
+            )
+        )
+    )
+    outdir = tmp_path / "out"
+    foreign_map = outdir / "req0" / sb.BATCH_SHARDS_FILENAME
+    foreign_map.parent.mkdir(parents=True)
+    foreign_map.write_text(
+        json.dumps({"schema_version": 1, "fingerprint": "someone-else", "hosts": 2})
+    )
+
+    report = sim_set.run_sim_set(
+        [sharded, str(single)], outdir=str(outdir), resume=True
+    )
+
+    refused, sibling = report["requests"]
+    assert refused["status"] == "error"
+    assert refused["report"] is None
+    assert refused["error"]["code"] == sb.BATCH_SHARD_MANIFEST_CODE
+    assert refused["error"]["message"]
+    assert sibling["status"] == "pass"
+    assert sibling["error"] is None
+    assert report["status"] == "error"
+    assert len(_launches(runner)) == 1  # only the sibling reached the fleet
+
+
 def test_resume_resubmits_a_shard_whose_job_terminally_failed(tmp_path, monkeypatch):
     runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
     fleet()
@@ -7221,10 +7510,19 @@ def test_max_concurrent_jobs_interrupt_cancels_queued_shards(tmp_path, monkeypat
 
     monkeypatch.setattr(sim_remote, "as_completed", _interrupting)
 
-    with pytest.raises(KeyboardInterrupt):
-        _run_capped_fleet(tmp_path, units=10, hosts=10, max_concurrent_jobs=1)
+    # Issue #4018: the interrupt is absorbed into a partial report.
+    corners, _, environment = _run_capped_fleet(
+        tmp_path, units=10, hosts=10, max_concurrent_jobs=1
+    )
 
     assert state["calls"] < 10
+    assert environment["interrupted"] is True
+    assert len(corners) == 10
+    finished = [c for c in corners if not c.get("diagnostics")]
+    lost = [c for c in corners if c.get("diagnostics")]
+    assert finished and lost
+    assert all(c["diagnostics"][0]["code"] == "lost_shard" for c in lost)
+    assert "interrupted by client" in lost[0]["diagnostics"][0]["message"]
 
 
 def test_max_concurrent_jobs_one_is_serial(tmp_path, monkeypatch):
@@ -7334,3 +7632,211 @@ def test_text_summary_pdk_stamp_silent_without_worker_capture(capsys):
     _print_worker_pdk({"environment": {"remote": None}})
     _print_worker_pdk({"environment": {}})
     assert capsys.readouterr().out == ""
+
+
+def _staged_capture(model_inputs):
+    doc = json.loads(_capture())
+    doc["pdk"]["models_staged"] = True
+    doc["model_inputs"] = model_inputs
+    return json.dumps(doc)
+
+
+def _staged_comparison(
+    tmp_path, monkeypatch, model_inputs, client_inputs, request=None
+):
+    env = _worker_env(
+        tmp_path,
+        monkeypatch,
+        {"worker_environment.json": _staged_capture(model_inputs)},
+        request=request,
+    )
+    sb.attach_staged_model_comparison(env, client_inputs, request)
+    return env["worker_environment"]
+
+
+def test_staged_models_stamp_scope_and_digest_match(tmp_path, monkeypatch):
+    request = _local_pdk(tmp_path, monkeypatch)
+    worker = [{"name": "top.lib", "sha256": "1" * 64}]
+    client = [{"name": "top.lib", "sha256": "1" * 64, "field": "lib"}]
+    env = _staged_comparison(tmp_path, monkeypatch, worker, client, request)
+    assert env["pdk"]["stamp_scope"] == "image"
+    comparison = env["pdk_stamp_comparison"]
+    assert comparison["status"] == "match"
+    assert comparison["basis"] == "staged_model_inputs"
+    assert comparison["client_stamp"]["stamp_scheme"] == "sources-sha256"
+
+
+def test_staged_models_digest_mismatch_and_missing_warn(tmp_path, monkeypatch):
+    client = [
+        {"name": "a.lib", "sha256": "1" * 64},
+        {"name": "b.lib", "sha256": "2" * 64},
+    ]
+    worker = [{"name": "a.lib", "sha256": "9" * 64}]
+    comparison = _staged_comparison(tmp_path, monkeypatch, worker, client)[
+        "pdk_stamp_comparison"
+    ]
+    assert comparison["status"] == "mismatch"
+    assert comparison["differing"] == ["a.lib", "b.lib"]
+    assert "warning" in comparison and "client_stamp" not in comparison
+
+
+def test_staged_models_not_comparable_reasons(tmp_path, monkeypatch):
+    client = [{"name": "a.lib", "sha256": "1" * 64}]
+    no_worker = _staged_comparison(tmp_path, monkeypatch, None, client)
+    assert no_worker["pdk_stamp_comparison"] == {
+        "basis": "staged_model_inputs",
+        "status": "not_comparable",
+        "reason": "worker_model_inputs_unavailable",
+    }
+    for empty in (None, []):
+        no_client = _staged_comparison(
+            tmp_path, monkeypatch, [{"name": "a.lib", "sha256": "1" * 64}], empty
+        )
+        assert no_client["pdk_stamp_comparison"]["reason"] == (
+            "client_staged_inputs_unavailable"
+        )
+    many = [{"name": f"m{i}.lib", "sha256": "1" * 64} for i in range(65)]
+    truncated = _staged_comparison(tmp_path, monkeypatch, [], many)
+    assert truncated["pdk_stamp_comparison"]["reason"] == (
+        "worker_model_inputs_truncated"
+    )
+
+
+def test_non_staged_comparison_unchanged_by_staged_attach(tmp_path, monkeypatch):
+    env = _worker_env(tmp_path, monkeypatch, {"worker_environment.json": _capture()})
+    before = json.loads(json.dumps(env["worker_environment"]["pdk_stamp_comparison"]))
+    sb.attach_staged_model_comparison(env, [{"name": "a", "sha256": "1" * 64}], None)
+    assert env["worker_environment"]["pdk_stamp_comparison"] == before
+    assert env["worker_environment"]["pdk"]["stamp_scope"] == "executed"
+
+
+def test_text_summary_prints_pdk_stamp_basis(capsys):
+    from klayout_tools.cli.sim_cmd import _print_worker_pdk
+
+    _print_worker_pdk(
+        _worker_report({"status": "match", "basis": "staged_model_inputs"}, True)
+    )
+    assert capsys.readouterr().out.splitlines()[0] == (
+        "pdk_stamp: match [basis: staged_model_inputs]"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Sharded capacity wait: one run-wide budget, progress line, partial report
+# (issue #4018)
+# --------------------------------------------------------------------------- #
+
+
+def _capacity_fleet(tmp_path, monkeypatch, *, hosts, refusals, wait_s, refusal=None):
+    """Run a ``hosts``-shard batch fleet whose first ``refusals`` launches the
+    fake provisioner refuses; returns ``(runner, clock, result)``."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report(corner_ids=("tt_1.800_0",))}
+    clock = _FakeClock()
+    monkeypatch.setattr(sb, "_run_subprocess", runner)
+    monkeypatch.setattr(sb.time, "sleep", clock.sleep)
+    monkeypatch.setattr(sb.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(sb.random, "random", lambda: 1.0)
+    for _ in range(refusals):
+        runner.queue(
+            "launch", fake_completed(returncode=1, stderr=refusal or _CAP_REFUSAL)
+        )
+    batch = {
+        "bucket": FAKE_BUCKET,
+        "provision_script_path": str(_provision_script(tmp_path)),
+        "poll_interval_s": 0.0,
+        "max_concurrent_jobs": 1,
+    }
+    if wait_s:
+        batch["capacity_wait_s"] = wait_s
+    result = sb._run_batch_fleet(
+        corner_points=_corner_points(hosts),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice", "batch": batch},
+        hosts=hosts,
+        measurements_spec=_measurements_spec(),
+        shard_fingerprint="fp-4018",
+    )
+    return runner, clock, result
+
+
+def test_fleet_capacity_wait_retries_a_refused_shard(tmp_path, monkeypatch, capsys):
+    runner, clock, (corners, _, environment) = _capacity_fleet(
+        tmp_path, monkeypatch, hosts=2, refusals=3, wait_s=3600
+    )
+
+    assert not any(c.get("diagnostics") for c in corners)
+    assert len(corners) == 2
+    assert len(environment["fleet"]) == 2
+    assert all(entry is not None for entry in environment["fleet"])
+    assert len(runner.argvs_matching("launch")) == 5  # 3 refused + 2 launched
+    assert "interrupted" not in environment
+    err = capsys.readouterr().err
+    assert "klt sim: waiting for capacity: 2 of 2 shards pending" in err
+    assert "batch_concurrency_cap" in err
+
+
+def test_fleet_capacity_wait_budget_is_shared_across_shards(tmp_path, monkeypatch):
+    # Every launch is refused. With a per-shard budget two shards would sleep
+    # ~100s each (200s); one run-wide budget caps the total at ~100s.
+    runner, clock, (corners, _, environment) = _capacity_fleet(
+        tmp_path, monkeypatch, hosts=2, refusals=50, wait_s=100
+    )
+
+    assert [c["diagnostics"][0]["code"] for c in corners] == ["lost_shard"] * 2
+    for corner in corners:
+        message = corner["diagnostics"][0]["message"]
+        assert "batch_concurrency_cap" in message
+        assert "capacity wait budget" in message
+    assert environment is None
+    assert sum(clock.sleeps) == pytest.approx(100.0, abs=1.0)
+
+
+def test_fleet_without_capacity_wait_is_one_attempt(tmp_path, monkeypatch, capsys):
+    runner, clock, (corners, _, _) = _capacity_fleet(
+        tmp_path, monkeypatch, hosts=2, refusals=1, wait_s=0
+    )
+
+    codes = [
+        c["diagnostics"][0]["code"] if c.get("diagnostics") else None for c in corners
+    ]
+    assert sorted(codes, key=str) == [None, "lost_shard"]
+    # ``time.sleep`` is patched module-wide, so short poll-loop sleeps from
+    # other threads are recorded too; a capacity backoff is never below
+    # _CAPACITY_BACKOFF_BASE_S / 2, so any sleep that long would be one.
+    assert [s for s in clock.sleeps if s >= sb._CAPACITY_BACKOFF_BASE_S / 2] == []
+    assert "waiting for capacity" not in capsys.readouterr().err
+
+
+def test_refused_shard_rolls_back_to_submitted_for_resume(tmp_path, monkeypatch):
+    _capacity_fleet(tmp_path, monkeypatch, hosts=2, refusals=1, wait_s=0)
+
+    shards = json.loads((tmp_path / "artifacts" / "batch-shards.json").read_text())[
+        "shards"
+    ]
+    # The refused shard is "submitted" (resume launches it); the other,
+    # launched and collected, is not.
+    assert sorted(entry["state"] for entry in shards) == ["collected", "submitted"]
+
+
+def test_capacity_watch_throttles_to_the_heartbeat_interval():
+    now = [0.0]
+    lines: list[str] = []
+    watch = sb._CapacityWatch(3, monotonic=lambda: now[0], emit=lines.append)
+    exc = sb.BatchError("refused", code="batch_no_capacity")
+
+    watch.refused(0, exc)
+    watch.refused(0, exc)  # same waiting count, no time passed: suppressed
+    now[0] += sb.BATCH_HEARTBEAT_INTERVAL_S
+    watch.refused(0, exc)  # interval elapsed: printed
+    watch.refused(1, exc)  # waiting count changed: printed
+    watch.finished(0)
+
+    assert len(lines) == 3
+    assert "3 of 3 shards pending" in lines[0]
+    assert "(last refusal: batch_no_capacity)" in lines[0]

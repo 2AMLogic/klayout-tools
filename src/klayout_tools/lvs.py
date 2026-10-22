@@ -1012,11 +1012,7 @@ def run_lvs(
     if engine == RUNSET_ENGINE:
         # Issue #2849: the PDK's own runset does extraction and compare; the
         # verdict is read back from its .lvsdb (see lvs_runset.py).
-        return _finish_response(
-            run_lvs_klayout_runset(request, request_dir),
-            portable=portable_paths,
-            request_dir=request_dir,
-        )
+        return _run_runset_response(request, request_dir, portable_paths)
 
     # `layout.deck_options` (issue #600) mirrors `klt extract --deck-option`'s
     # resolved `{key: value}` mapping, one layer down: this is a JSON object
@@ -2772,6 +2768,25 @@ def _validate_portable_paths(value: Any) -> bool:
     if not isinstance(value, bool):
         raise LvsError("request.portable_paths must be a boolean")
     return value
+
+
+def _run_runset_response(
+    request: dict[str, Any], request_dir: str, portable_paths: bool
+) -> dict[str, Any]:
+    """Run the ``klayout-runset`` engine and finish its response.
+
+    Issue #3988: under ``portable_paths`` the tool's identity (its basename)
+    is kept for ``environment.klayout_binary`` instead of the generic
+    external-path object; the version is recorded separately in
+    ``engine_version``."""
+    runset_report = run_lvs_klayout_runset(request, request_dir)
+    binary = runset_report.get("environment", {}).get("klayout_binary")
+    response = _finish_response(
+        runset_report, portable=portable_paths, request_dir=request_dir
+    )
+    if portable_paths and isinstance(binary, str):
+        response["environment"]["klayout_binary"] = os.path.basename(binary)
+    return response
 
 
 def _finish_response(
@@ -4779,7 +4794,9 @@ def _prune_extra_top_circuits(netlist: kdb.Netlist, keep: kdb.Circuit) -> None:
     is the design under comparison). Left in place, each would surface as
     its own spurious top-level circuit mismatch. Safe to prune: by
     definition, a *top* circuit is not referenced by anything else in the
-    netlist, so removing one never affects ``keep``'s own hierarchy.
+    netlist. ``keep`` may also be an interior circuit (instantiated by a
+    wrapper); wrappers and unrelated circuits are dropped, while ``keep`` and
+    its descendants survive (issue #2852).
 
     Compares circuits by identity (``is not``) rather than ``cell_index``:
     a netlist read directly from SPICE/Verilog text (``kdb.NetlistSpiceReader``
@@ -4788,9 +4805,25 @@ def _prune_extra_top_circuits(netlist: kdb.Netlist, keep: kdb.Circuit) -> None:
     -- making a ``cell_index`` comparison always false and silently pruning
     nothing (issue #1657).
     """
-    for circuit in list(netlist.top_circuits()):
-        if circuit is not keep:
-            netlist.purge_circuit(circuit)
+    # Issue #2852: ``keep`` may itself be instantiated by another circuit
+    # (a leaf plus a wrapper in one file). ``purge_circuit`` on that wrapper
+    # recursively deletes its children -- including ``keep`` -- leaving a
+    # destroyed handle. Instead, keep ``keep`` plus everything reachable from
+    # it, and non-recursively ``remove`` every other circuit.
+    reachable: set[str] = set()
+    stack = [keep]
+    while stack:
+        current = stack.pop()
+        for subcircuit in current.each_subcircuit():
+            child = subcircuit.circuit_ref()
+            if child is not None and child.name not in reachable:
+                reachable.add(child.name)
+                stack.append(child)
+    reachable.add(keep.name)
+    for circuit in list(netlist.each_circuit()):
+        if circuit is keep or circuit.name in reachable:
+            continue
+        netlist.remove(circuit)
 
 
 # --------------------------------------------------------------------------- #

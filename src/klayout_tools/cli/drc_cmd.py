@@ -68,6 +68,7 @@ from ..drc import (
     run_drc,
     run_drc_klayout_engine,
 )
+from ..drc_crosscheck import crosscheck_exit_code, run_drc_crosscheck
 from . import _request_document as reqdoc
 from .output import emit_error, emit_success, render_rerun_drift
 
@@ -105,6 +106,10 @@ def run(args: argparse.Namespace) -> int:
         return emit_error("drc", str(exc), args.format, code=exc.code)
     except pdk_module.PdkNotFoundError as exc:
         return emit_error("drc", str(exc), args.format)
+
+    if report.get("mode") == "crosscheck":
+        emit_success(report, args.format, _print_crosscheck_text)
+        return crosscheck_exit_code(report)
 
     emit_success(report, args.format, _print_text)
 
@@ -254,10 +259,10 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
 
     timeout_s = reqdoc.get_number(request, "timeout_s", verb="drc", error_cls=DrcError)
     engine = _str("engine")
-    if engine is not None and engine not in ("curated", "klayout"):
+    if engine is not None and engine not in ("curated", "klayout", "both"):
         raise DrcError(
-            f"`klt drc` request field 'engine' must be 'curated' or "
-            f"'klayout' (got {engine!r})"
+            f"`klt drc` request field 'engine' must be 'curated', "
+            f"'klayout' or 'both' (got {engine!r})"
         )
 
     return argparse.Namespace(
@@ -332,7 +337,47 @@ def _expect_rule_categories(request: dict) -> int | None:
     return value
 
 
+def _run_crosscheck(args: argparse.Namespace) -> dict:
+    """``--engine both`` (issue #3973): both engines, one comparison report."""
+    for flag, value in (
+        ("--rules", args.rules),
+        ("--waivers", args.waivers),
+    ):
+        if value is not None:
+            raise DrcError(
+                f"{flag} is not supported with --engine both: the cross-check "
+                "compares each engine's whole-deck report unchanged (see "
+                "docs/cli/drc.md, 'Cross-check')"
+            )
+    if not args.deck:
+        raise DrcError("argument --deck is required for --engine both")
+    deck_file = args.deck_file
+    if deck_file is None:
+        deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
+    return run_drc_crosscheck(
+        args.file,
+        args.deck,
+        deck_file,
+        top=args.top,
+        pdk_variant=args.pdk,
+        pdk_root=args.pdk_root,
+        native_kwargs={
+            "timeout_s": args.timeout_s,
+            "deck_vars": _parse_deck_vars(args.deck_var),
+            "allow_deck_errors": args.allow_deck_errors,
+            "allow_missing_host_tools": args.allow_missing_host_tools,
+            "expected_rule_categories": args.expect_rule_categories,
+            "min_klayout_version": args.min_klayout_version,
+            "expected_rule_category_names": _expected_rule_category_names(args),
+            "negative_control": args.negative_control,
+            "negative_control_categories": _negative_control_categories(args),
+        },
+    )
+
+
 def _run(args: argparse.Namespace) -> dict:
+    if args.engine == "both":
+        return _run_crosscheck(args)
     if args.engine == "klayout":
         if args.waivers is not None:
             raise DrcError(
@@ -601,6 +646,28 @@ def _print_text(report: dict) -> None:
             f"({bbox['left']},{bbox['bottom']})-({bbox['right']},{bbox['top']})  "
             f"{entry['description']}"
         )
+
+
+def _print_crosscheck_text(report: dict) -> None:
+    comparison = report["comparison"]
+    print(f"file: {report['file']}")
+    print(f"status: {report['status']}")
+    print(f"comparison: {comparison['state']}")
+    error = comparison.get("error")
+    if error:
+        print(f"  native run did not complete: {error['message']}")
+    for engine in ("curated", "native"):
+        sub = report["reports"][engine]
+        if sub is None:
+            print(f"{engine}: not run")
+        else:
+            print(f"{engine}: {sub['status']} ({sub['violation_count']} violations)")
+    for group in comparison["groups"]:
+        print(f"  group {group['id']}: {group['state']}")
+    unmapped = comparison["unmapped"]
+    for engine in ("curated", "native"):
+        if unmapped[engine]:
+            print(f"unmapped {engine} rules: {len(unmapped[engine])}")
 
 
 def _print_check_text(result: dict) -> None:

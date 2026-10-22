@@ -11353,6 +11353,174 @@ def test_no_supported_generator_path_draws_topvia1_and_compose_floor_holds():
         ) == pytest.approx(0.42)
 
 
+# --------------------------------------------------------------------------- #
+# Issue #2933: off-manufacturing-grid w_um/l_um warnings (mos_array/diff_pair)
+# --------------------------------------------------------------------------- #
+
+
+def _mfg_grid_warnings_of(report):
+    return [w for w in report["warnings"] if "manufacturing grid" in w]
+
+
+def _gen_mos(tmp_path, root, generator, variant="sky130A", **params):
+    return generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": variant, "root": str(root)},
+            "params": params,
+            "options": {"output": str(tmp_path / f"{generator}_grid.gds")},
+        }
+    )
+
+
+def test_mfg_grid_neighbours_helper():
+    assert gen._mfg_grid_neighbours(0.005, 4.634) == (4.63, 4.635)
+    assert gen._mfg_grid_neighbours(0.005, 4.635) is None
+    # Total of 2 units: representable totals are multiples of 0.01um.
+    assert gen._mfg_grid_neighbours(0.005, 4.634, multiple=2) == (4.63, 4.64)
+    assert gen._mfg_grid_neighbours(0.005, 4.64, multiple=2) is None
+    assert gen._mfg_grid_neighbours(0.0, 4.634) is None
+
+
+def test_mos_array_off_mfg_grid_width_warns(tmp_path, pdk_root):
+    """`w_um=4.634` is on the 1nm dbu grid but off sky130's 5nm
+    manufacturing grid: warned, naming the grid and both neighbours, while
+    `drc_hints.snapped_to_grid` (dbu-based) keeps its meaning."""
+    report = _gen_mos(
+        tmp_path, pdk_root, "mos_array", w_um=4.634, l_um=0.3, rows=1, cols=1, dummy=0
+    )
+    assert report["drc_hints"]["snapped_to_grid"] is False
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "params.w_um=4.634um" in warning
+    assert "0.005um" in warning
+    assert "4.63um (below)" in warning
+    assert "4.635um (above)" in warning
+    # fingers=1: no total-width clause.
+    assert "total width" not in warning
+
+
+@pytest.mark.parametrize("w_um", [4.635, 4.64])
+def test_mos_array_on_mfg_grid_width_no_warning(tmp_path, pdk_root, w_um):
+    report = _gen_mos(
+        tmp_path, pdk_root, "mos_array", w_um=w_um, l_um=0.3, rows=1, cols=1, dummy=0
+    )
+    assert _mfg_grid_warnings_of(report) == []
+
+
+def test_mos_array_off_mfg_grid_length_warns(tmp_path, pdk_root):
+    report = _gen_mos(tmp_path, pdk_root, "mos_array", w_um=1.0, l_um=0.302)
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "params.l_um=0.302um" in warning
+    assert "0.3um (below)" in warning
+    assert "0.305um (above)" in warning
+
+
+def test_mos_array_parallel_fingers_report_total_width_basis(tmp_path, pdk_root):
+    report = _gen_mos(tmp_path, pdk_root, "mos_array", w_um=2.317, l_um=0.3, fingers=2)
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "2.315um (below)" in warning
+    assert "2.32um (above)" in warning
+    assert "must be a multiple of 2 x 0.005um = 0.01um" in warning
+    assert "totals 4.63um (below) or 4.64um (above)" in warning
+
+
+def test_mos_array_series_fingers_report_no_total_width(tmp_path, pdk_root):
+    """ "series" fingers are separate devices -- no shared total width."""
+    report = _gen_mos(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        w_um=2.317,
+        l_um=0.3,
+        fingers=2,
+        finger_topology="series",
+    )
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "total width" not in warning
+
+
+def test_diff_pair_off_mfg_grid_width_splits_basis(tmp_path, pdk_root):
+    report = _gen_mos(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        w_um=2.317,
+        l_um=0.3,
+        splits=2,
+        mirror=True,
+        flavor="pfet",
+    )
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "generator 'diff_pair'" in warning
+    assert "2.315um (below) or 2.32um (above)" in warning
+    assert "params.splits=2" in warning
+    assert "must be a multiple of 2 x 0.005um = 0.01um" in warning
+    assert "totals 4.63um (below) or 4.64um (above)" in warning
+
+
+def test_diff_pair_splits_one_reports_no_total_width(tmp_path, pdk_root):
+    report = _gen_mos(tmp_path, pdk_root, "diff_pair", w_um=2.317, l_um=0.3, splits=1)
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "total width" not in warning
+
+
+def test_diff_pair_on_mfg_grid_width_no_warning(tmp_path, pdk_root):
+    report = _gen_mos(tmp_path, pdk_root, "diff_pair", w_um=2.32, l_um=0.3, splits=2)
+    assert _mfg_grid_warnings_of(report) == []
+
+
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair"])
+def test_no_ongrid_rule_family_emits_no_mfg_grid_warning(
+    tmp_path, both_pdk_root, generator, monkeypatch
+):
+    """A family whose curated deck declares no `ongrid` rule (grid 0.0) earns
+    no mfg-grid warning for an arbitrary width. No shipped deck is rule-less
+    any more (gf180mcu gained a 0.005um `ongrid` rule), so pin the lookup."""
+    from klayout_tools import gen_describe
+
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    report = _gen_mos(
+        tmp_path, both_pdk_root, generator, variant="gf180mcuD", w_um=2.317, l_um=0.302
+    )
+    assert _mfg_grid_warnings_of(report) == []
+
+
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair"])
+def test_gf180mcu_off_grid_width_warns(tmp_path, both_pdk_root, generator):
+    """gf180mcu's curated deck now declares a 0.005um `ongrid` rule, so an
+    off-grid width warns like sky130."""
+    assert (
+        gen.mfg_grid_um("gf180mcu", gen._PDK_ROLE_LAYERS["gf180mcu"]["active"]) == 0.005
+    )
+    report = _gen_mos(
+        tmp_path, both_pdk_root, generator, variant="gf180mcuD", w_um=2.317, l_um=0.3
+    )
+    assert len(_mfg_grid_warnings_of(report)) == 1
+
+
+def test_off_mfg_grid_warning_keeps_exit_code(tmp_path, pdk_root, capsys):
+    output = tmp_path / "cli_grid.gds"
+    code = main(
+        [
+            "gen",
+            "mos_array",
+            "--params",
+            '{"w_um":4.634,"l_um":0.3,"rows":1,"cols":1,"dummy":0}',
+            "--pdk",
+            "sky130A",
+            "--pdk-root",
+            str(pdk_root),
+            "-o",
+            str(output),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(_mfg_grid_warnings_of(payload)) == 1
+
+
 @pytest.mark.parametrize("gate_contact", (True, False))
 @pytest.mark.parametrize("l_um", (0.15, 0.28, 0.3, 0.41, 0.42, 0.5))
 def test_sky130_short_gate_pad_and_ring_well_clear_magic_rules(

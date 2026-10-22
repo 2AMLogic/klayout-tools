@@ -1263,6 +1263,13 @@ _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 9,
 #: behaviour change this tightening does not make.
 _ITEMS_REQUIRING_ATTESTED_EVIDENCE: frozenset[int] = frozenset({1, 9, 10})
 
+#: Native kinds a **digital** partition may cite for an otherwise
+#: attested-only item, in addition to ``"generic"`` (issue #4015): item 1's
+#: netlist-evidence half is a `klt synthesize` response. An analog partition
+#: has no RTL flow, so it keeps ``{"generic"}`` and a synthesize citation
+#: renders ``wrong_kind`` there. See :data:`_ITEMS_ACCEPTING_SYNTHESIZE_EVIDENCE`.
+_DIGITAL_EXTRA_KINDS_BY_ITEM: dict[int, set[str]] = {1: {"synthesize"}}
+
 #: T1 item ids a ``"power"``-kind citation (issue #1321, see this module's
 #: "`klt power` (IR-drop/EM) evidence ingestion" docstring section) may
 #: satisfy in :func:`build_tier_report`/:func:`build_fleet_report`.
@@ -1303,6 +1310,14 @@ _ITEMS_ACCEPTING_SOCKET_CHECK_EVIDENCE: frozenset[int] = frozenset({11})
 #: own pass (a structurally sound LEF) proves nothing about any other item.
 _ITEMS_ACCEPTING_LEF_ABSTRACT_EVIDENCE: frozenset[int] = frozenset({11})
 
+#: T1 item ids a ``"synthesize"``-kind citation (issue #4015) may satisfy:
+#: item 1 alone (Design sources -- the netlist-evidence half for an RTL-flow
+#: digital partition). Its verdict is the response's structural netlist
+#: counts, which say nothing about layout, corners, testbenches or hygiene.
+#: The digital-only restriction is enforced by :func:`_allowed_kinds_for`
+#: (:data:`_DIGITAL_EXTRA_KINDS_BY_ITEM`).
+_ITEMS_ACCEPTING_SYNTHESIZE_EVIDENCE: frozenset[int] = frozenset({1})
+
 #: Every **opt-in** kind, mapped to the T1 item ids that accept it -- the
 #: single table :func:`_build_tier_item` consults, so a new opt-in kind is
 #: one entry here rather than a fourth near-identical branch there. A kind
@@ -1320,6 +1335,7 @@ _OPT_IN_KIND_ITEMS: dict[str, frozenset[int]] = {
     "place-and-route": _ITEMS_ACCEPTING_PLACE_AND_ROUTE_EVIDENCE,
     "socket-check": _ITEMS_ACCEPTING_SOCKET_CHECK_EVIDENCE,
     "lef-abstract": _ITEMS_ACCEPTING_LEF_ABSTRACT_EVIDENCE,
+    "synthesize": _ITEMS_ACCEPTING_SYNTHESIZE_EVIDENCE,
 }
 
 #: T1 item ids graded by the dedicated **compound** evidence path
@@ -2456,7 +2472,8 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                     "kind": "drc" | "lvs" | "extract" | "sim" | "yield" | "pex"
                             | "power" | "sta" | "functional-verification"
                             | "erc" | "place-and-route" | "socket-check"
-                            | "lef-abstract" | "generic" | "error",
+                            | "lef-abstract" | "synthesize" | "generic"
+                            | "error",
                     "status": <str> | None,
                     "passed": <bool>,
                     "detail": {...},  # kind-specific summary, see _detail()
@@ -2753,9 +2770,9 @@ def _raise_unclassified(envelope: Mapping[str, Any], source: str) -> NoReturn:
         f"envelope '{source}' has an unrecognized shape (schema_version="
         f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
         "yield/pex/power/sta/functional-verification/erc/place-and-route/"
-        "socket-check/lef-abstract success or error envelope, and not a "
+        "socket-check/lef-abstract/synthesize success or error envelope, and not a "
         'generic evidence envelope ("kind": "generic") either -- klt '
-        "signoff aggregates those thirteen "
+        "signoff aggregates those fourteen "
         "verbs' output plus opt-in generic evidence today (see "
         "docs/cli/signoff.md)"
     )
@@ -2811,6 +2828,20 @@ def _is_socket_check_shape(envelope: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_synthesize_shape(envelope: Mapping[str, Any]) -> bool:
+    # `klt synthesize` (issue #4015; docs/cli/synthesize.md): a top-level
+    # `structural` object plus the `netlist_sha256` string and `netlist_path`
+    # are emitted unconditionally by `run_synthesize` and, together, by no
+    # other verb (`klt extract` carries the latter two but no `structural`).
+    # Recognised so T1 item 1's netlist-evidence half can cite it -- see
+    # `_ITEMS_ACCEPTING_SYNTHESIZE_EVIDENCE`.
+    return (
+        isinstance(envelope.get("structural"), dict)
+        and isinstance(envelope.get("netlist_sha256"), str)
+        and "netlist_path" in envelope
+    )
+
+
 def _is_lef_abstract_shape(envelope: Mapping[str, Any]) -> bool:
     # `klt lef-abstract` (issue #2839; docs/cli/lef-abstract.md): a
     # top-level `macro_name` plus a `pins` list and the `self_check` block
@@ -2831,6 +2862,7 @@ _STRUCTURAL_KINDS: tuple[tuple[str, Callable[[Mapping[str, Any]], bool]], ...] =
     ("place-and-route", _is_place_and_route_shape),
     ("socket-check", _is_socket_check_shape),
     ("lef-abstract", _is_lef_abstract_shape),
+    ("synthesize", _is_synthesize_shape),
 )
 
 
@@ -2972,10 +3004,11 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     elif isinstance(envelope.get("tests"), list) and "test_count" in envelope:
         kind = "functional-verification"
 
-    # `klt erc`, `klt place-and-route`, `klt socket-check` and `klt
-    # lef-abstract`: matched through one table (`_STRUCTURAL_KINDS`, which
-    # carries each shape's own recognition rationale) so a new kind is one
-    # table entry rather than another branch here (issue #2839).
+    # `klt erc`, `klt place-and-route`, `klt socket-check`, `klt
+    # lef-abstract` and `klt synthesize`: matched through one table
+    # (`_STRUCTURAL_KINDS`, which carries each shape's own recognition
+    # rationale) so a new kind is one table entry rather than another branch
+    # here (issue #2839).
     elif (structural_kind := _structural_kind(envelope)) is not None:
         kind = structural_kind
 
@@ -3511,6 +3544,19 @@ _PASSING_STATUS_BY_KIND: dict[str, str] = {
 }
 
 
+def _synthesize_structural_clean(envelope: Mapping[str, Any]) -> bool:
+    """Whether a `klt synthesize` response's ``structural`` block reports no
+    unexpected latch, combinational loop or multiply-driven net (issue
+    #4015). A missing or non-integer count fails closed."""
+    structural = envelope.get("structural")
+    if not isinstance(structural, dict):
+        return False
+    return all(
+        type(structural.get(key)) is int and structural[key] == 0
+        for key in ("unexpected_latches", "comb_loops", "multi_driven")
+    )
+
+
 def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     """Whether this one check counts as passing.
 
@@ -3649,6 +3695,10 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
       whose port-accessibility grading reads their additive
       ``power_ports``/``power_pins`` blocks rather than these verdicts
       alone.
+    - ``synthesize`` (issue #4015) passes on ``status == "ok"`` **and** zero
+      ``structural.unexpected_latches``/``comb_loops``/``multi_driven``;
+      ``status`` alone cannot fail, so the counts are the verdict. Opt-in,
+      scoped to T1 item 1.
     - ``generic`` (issue #1152) passes on ``status == "pass"`` -- the
       envelope's own, caller-asserted verdict; unlike every native kind
       above, nothing here re-derives that verdict from any other field,
@@ -3687,6 +3737,13 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
         passed = _functional_verification_passed(envelope)
     elif kind == "erc":
         passed = _erc_passed(envelope)
+    elif kind == "synthesize":
+        # Issue #4015: `status` is only ever "ok" (a failed run raises
+        # `SynthesizeError`), so the structural netlist counts are the
+        # real verdict.
+        passed = envelope.get("status") == "ok" and _synthesize_structural_clean(
+            envelope
+        )
     elif kind == "lef-abstract":
         # Issue #2839: no top-level `status`; the structural self-check of
         # the LEF read back from disk is the verb's verdict of record.
@@ -4359,7 +4416,7 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "sdf_corner": sdf.get("corner"),
         }
     elif kind in _DETAIL_BUILDERS:
-        # erc/place-and-route/socket-check/lef-abstract: one builder each,
+        # erc/place-and-route/socket-check/lef-abstract/synthesize: one builder each,
         # looked up rather than branched on (issue #2839).
         detail = _DETAIL_BUILDERS[kind](envelope)
     elif kind == "generic":
@@ -4463,6 +4520,24 @@ def _socket_check_detail(envelope: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _synthesize_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``"synthesize"`` excerpt (issue #4015)."""
+    structural = envelope.get("structural") or {}
+    return {
+        "netlist_path": envelope.get("netlist_path"),
+        "netlist_sha256": envelope.get("netlist_sha256"),
+        "structural": {
+            key: structural.get(key)
+            for key in (
+                "unexpected_latches",
+                "comb_loops",
+                "multi_driven",
+                "has_critical",
+            )
+        },
+    }
+
+
 def _lef_abstract_detail(envelope: dict[str, Any]) -> dict[str, Any]:
     """:func:`_detail`'s ``"lef-abstract"`` excerpt (issue #2839)."""
     return {
@@ -4480,6 +4555,7 @@ _DETAIL_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "place-and-route": _place_and_route_detail,
     "socket-check": _socket_check_detail,
     "lef-abstract": _lef_abstract_detail,
+    "synthesize": _synthesize_detail,
 }
 
 
@@ -5467,6 +5543,8 @@ def _allowed_kinds_for(item_id: int, partition_kind: str) -> set[str] | None:
     *loosen* an item's evidence requirement.
     """
     if item_id in _ITEMS_REQUIRING_ATTESTED_EVIDENCE:
+        if partition_kind == "digital":
+            return {"generic"} | _DIGITAL_EXTRA_KINDS_BY_ITEM.get(item_id, set())
         return {"generic"}
     by_partition_kind = _ITEM_ALLOWED_KINDS.get(item_id)
     if by_partition_kind is None:

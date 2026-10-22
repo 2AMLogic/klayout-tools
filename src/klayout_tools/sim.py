@@ -162,6 +162,7 @@ from .sim_batch import (
     _run_batch_fleet,
     _validate_batch_models_lib,
     attach_engine_build_comparison,
+    attach_staged_model_comparison,
 )
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE
@@ -286,6 +287,8 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "unsupported_model_level",
         "osdi_abi_mismatch",
         "osdi_load_failed",
+        # The analysis never completed (engine abort trailer), issue #2846.
+        "analysis_aborted",
         # Per-corner run outcomes synthesized by `_run_corner` itself.
         "timeout",
         "engine_killed",
@@ -1381,6 +1384,41 @@ def load_request(request_path: str) -> dict[str, Any]:
     return request
 
 
+def _reject_linearize_in_steps(request: dict[str, Any]) -> None:
+    """Issue #4014: ``linearize`` is a scalar-``tran``-only field."""
+    holders = [("analysis", request.get("analysis"))]
+    holders.extend(
+        (f"analysis_steps[{i}]", step)
+        for i, step in enumerate(request.get("analysis_steps") or [])
+    )
+    for where, holder in holders:
+        if isinstance(holder, dict) and "linearize" in holder:
+            raise SimError(
+                f"{where}.linearize is not supported with analysis_steps[]: "
+                "`linearize` is only available on a scalar `tran` analysis "
+                '(analysis: {"kind": "tran", ..., "linearize": true})'
+            )
+
+
+def _validate_linearize(analysis: dict[str, Any]) -> None:
+    """Issue #4014: ``analysis.linearize`` must be a boolean on a ``tran``."""
+    if "linearize" not in analysis:
+        return
+    value = analysis["linearize"]
+    if not isinstance(value, bool):
+        raise SimError(
+            f"analysis.linearize must be a boolean (got {value!r}); "
+            "set true to resample the transient waveforms onto a uniform "
+            "time grid before the expr measurements are evaluated"
+        )
+    if value and str(analysis.get("kind", "")).lower() != "tran":
+        raise SimError(
+            'analysis.linearize requires analysis.kind "tran" '
+            f"(got {analysis.get('kind')!r}): `linearize` resamples a "
+            "transient waveform and has no meaning for other analyses"
+        )
+
+
 def _resolve_analysis_and_measurements(
     request: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -1393,6 +1431,7 @@ def _resolve_analysis_and_measurements(
     :func:`klayout_tools.sim_steps.resolve_analysis_steps`.
     """
     if request.get("analysis_steps") is not None:
+        _reject_linearize_in_steps(request)
         return sim_steps.resolve_analysis_steps(request)
     analysis = request.get("analysis") or {}
     # Issue #3338: `kind: "twoport"` compiles to an `ac` analysis; resolved
@@ -1404,6 +1443,7 @@ def _resolve_analysis_and_measurements(
     # Issue #3159: `analysis.passes` (AC only) is validated and normalised
     # here, before any engine launch; absent `passes` returns `analysis` as is.
     analysis = sim_passes.resolve_analysis(analysis)
+    _validate_linearize(analysis)
     measurements_spec = request.get("measurements", [])
     # Issue #2533: `spice` (a verbatim top-level `.meas` card) and `expr` (an
     # expression evaluated after the analysis, inside the generated
@@ -1443,6 +1483,24 @@ def _resolve_analysis_and_measurements(
     # lines) so everything downstream treats it as one.
     sim_noise.validate_noise_context(measurements_spec, analysis)
     return analysis, sim_noise.lower_measurements(measurements_spec, analysis)
+
+
+def _reject_param_braces(analysis: dict[str, Any], engine: str) -> None:
+    """Reject a ``{...}`` brace reference in a scalar ``analysis.args``
+    (issue #2846). ngspice emits the analysis as a ``.control`` command and
+    does not expand ``.param`` braces in control mode, so ``tran 2e-06
+    {stop_s}`` aborts the analysis. Xyce emits a ``.tran`` dot card where
+    braces are valid, so this check is skipped for ``engine == "xyce"``."""
+    args = analysis.get("args")
+    if engine != "xyce" and isinstance(args, str) and re.search(r"[{}]", args):
+        raise SimError(
+            f"request.analysis.args {args!r} contains a '{{...}}' brace "
+            "reference: ngspice runs the analysis as a .control command, "
+            "which does not expand .param braces (the analysis aborts with "
+            "'TSTOP is invalid'), and klt does not expand them. Write the "
+            "numeric value literally in analysis.args (or use engine 'xyce', "
+            "whose .tran card accepts braces)"
+        )
 
 
 def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
@@ -2093,9 +2151,9 @@ def run_sim(
     - **Deck-list requests** (issue #2804): a ``decks`` list of
       caller-composed ngspice decks, transported -- never composed,
       parsed, or graded -- to the selected backend. Same parameters,
-      minus the corner-only ones: ``--hosts``/``--resume``/
-      ``--budget-s``/``--plot``/``--fail-fast-probe``/
-      ``--fail-on-diagnostic`` are refused by name (see
+      minus the corner-only ones: ``--hosts``/``--budget-s``/``--plot``/
+      ``--fail-fast-probe``/``--fail-on-diagnostic`` (and ``--resume`` on
+      ``remote``) are refused by name (see
       :func:`klayout_tools.sim_decks.run_deck_request` and
       docs/cli/sim.md's "Pre-composed decks" section, which also
       documents the deck report's shape).
@@ -2300,8 +2358,10 @@ def run_sim(
     one ``batch`` job, then returns its identity (``job_id``, ``bucket``,
     ``launched_at``, ...) *instead of the report*, without polling or
     collecting; read it later with :func:`sim_batch_async.read_job_status`.
+    A deck-list request is one job too (issue #3958): ``submit_only`` and
+    ``attach_job_id`` apply to it on ``batch`` with ``job_ceiling: null``.
     Anything it cannot represent as one job (another backend, ``hosts > 1``,
-    ``resume``, ``plot_dir``, a deck-list request) raises :class:`SimError`
+    ``resume``, ``plot_dir``) raises :class:`SimError`
     with code ``submit_only_unsupported`` before any S3 write.
 
     **Output-directory ownership (issue #2770).** A run that writes
@@ -2329,8 +2389,6 @@ def run_sim(
     # corner dir and ngspice would never find its deck. Absolutise once here.
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
-    if attach_job_id is not None and sim_decks.DECKS_FIELD in request:
-        raise SimError("--attach does not apply to deck-list requests")
     if capacity_wait_s is not None and sim_decks.DECKS_FIELD in request:
         raise SimError("--wait-for-capacity does not apply to deck-list requests")
     if sim_decks.DECKS_FIELD in request:
@@ -2338,11 +2396,6 @@ def run_sim(
             raise SimError(
                 "--dry-run does not apply to deck-list requests (`decks`); "
                 "it validates corner/Monte Carlo requests only"
-            )
-        if submit_only:
-            raise SimError(
-                "--submit-only is not supported for deck-list requests",
-                code=SUBMIT_ONLY_UNSUPPORTED_CODE,
             )
         return _dispatch_deck_request(
             request,
@@ -2356,6 +2409,8 @@ def run_sim(
             plot_dir=plot_dir,
             fail_fast_probe=fail_fast_probe,
             fail_on_diagnostic=fail_on_diagnostic,
+            submit_only=submit_only,
+            attach_job_id=attach_job_id,
             _ownership=_ownership,
         )
     return _run_sim_corners(
@@ -2379,49 +2434,14 @@ def run_sim(
     )
 
 
-def _dispatch_deck_request(
-    request: dict[str, Any],
-    *,
-    request_path: str,
-    backend: str | None,
-    max_workers: int | None,
-    hosts: int | None,
-    artifacts_dir: str | None,
-    resume: bool | None,
+def _refuse_corner_only_deck_flags(
     budget_s: float | None,
     plot_dir: str | None,
     fail_fast_probe: bool | None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None,
-    _ownership: contextlib.ExitStack | None = None,
-) -> dict[str, Any]:
-    """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
-    resolving the backend exactly as the corner path does (flag >
-    request field > ``$KLT_SIM_BACKEND``, host defaults stepping
-    aside) and refusing the corner-only flags by name: a deck request
-    has no corner machinery for them to act on, so silently ignoring
-    one would mislead the caller about what ran."""
-    resolved_backend, from_host_default = resolve_backend(backend, request)
-    if resolved_backend not in SUPPORTED_BACKENDS:
-        source = f" (from ${BACKEND_ENV})" if from_host_default else ""
-        raise SimError(
-            f"unsupported backend '{resolved_backend}'{source} "
-            f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
-        )
-    # A deck request's engine is always ngspice (plan_deck_units
-    # enforces it), so the host-default's ngspice-only condition holds.
-    resolved_backend = _yield_host_default_backend(
-        resolved_backend, from_host_default, reason_ok=True
-    )
-    if hosts is not None and hosts != 1:
-        raise SimError(
-            "--hosts/remote.hosts sharding is not supported for "
-            "deck-list requests -- one off-host job runs the whole deck "
-            "list across its own worker pool (options.max_workers)"
-        )
-    if resume:
-        raise SimError(
-            "--resume/options.resume is not supported for deck-list requests"
-        )
+) -> None:
+    """Refuse, by name, the corner-only flags a deck-list request has no
+    machinery for (see :func:`_dispatch_deck_request`)."""
     if budget_s is not None:
         raise SimError(
             "--budget-s/options.wall_clock_budget_s is not supported for "
@@ -2442,11 +2462,80 @@ def _dispatch_deck_request(
             "--fail-on-diagnostic grades corner diagnostics, which "
             "deck-list requests do not produce"
         )
+
+
+def _dispatch_deck_request(
+    request: dict[str, Any],
+    *,
+    request_path: str,
+    backend: str | None,
+    max_workers: int | None,
+    hosts: int | None,
+    artifacts_dir: str | None,
+    resume: bool | None,
+    budget_s: float | None,
+    plot_dir: str | None,
+    fail_fast_probe: bool | None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+    submit_only: bool = False,
+    attach_job_id: str | None = None,
+    _ownership: contextlib.ExitStack | None = None,
+) -> dict[str, Any]:
+    """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
+    resolving the backend exactly as the corner path does (flag >
+    request field > ``$KLT_SIM_BACKEND``, host defaults stepping
+    aside) and refusing the corner-only flags by name: a deck request
+    has no corner machinery for them to act on, so silently ignoring
+    one would mislead the caller about what ran."""
+    resolved_backend, from_host_default = resolve_backend(backend, request)
+    if resolved_backend not in SUPPORTED_BACKENDS:
+        source = f" (from ${BACKEND_ENV})" if from_host_default else ""
+        raise SimError(
+            f"unsupported backend '{resolved_backend}'{source} "
+            f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
+        )
+    # A deck request's engine is always ngspice (plan_deck_units
+    # enforces it), so the host-default's ngspice-only condition holds. A
+    # single deck is one unit: like a one-corner request it stays local
+    # under a host default rather than waiting on a Spot instance.
+    resolved_backend = _yield_host_default_backend(
+        resolved_backend,
+        from_host_default,
+        reason_ok=len(request.get(sim_decks.DECKS_FIELD) or ()) > 1,
+    )
+    # Issue #3958: a deck list is one batch job with one job id, so
+    # --submit-only / --attach apply -- under the corner path's own
+    # refusals, all before the first S3 write.
+    if submit_only:
+        _refuse_unsupported_submit_only(
+            resolved_backend, 1 if hosts is None else hosts, resume, plot_dir
+        )
+    _apply_attach(
+        {}, attach_job_id, resolved_backend, 1 if hosts is None else hosts, submit_only
+    )
+    if hosts is not None and hosts != 1:
+        raise SimError(
+            "--hosts/remote.hosts sharding is not supported for "
+            "deck-list requests -- one off-host job runs the whole deck "
+            "list across its own worker pool (options.max_workers)"
+        )
+    if resume is None:
+        resume = bool((request.get("options") or {}).get("resume", False))
+    if resume and resolved_backend == "remote":
+        raise SimError(
+            "--resume/options.resume is not yet supported for deck-list "
+            "requests on backend 'remote' -- use backend 'local', "
+            "'local-parallel' or 'batch'"
+        )
+    _refuse_corner_only_deck_flags(
+        budget_s, plot_dir, fail_fast_probe, fail_on_diagnostic
+    )
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #3168: a deck run always writes (and a remote/batch pull replaces)
     # unit trees under its outdir, so it owns that root unconditionally --
     # after the flag checks above, which must fail without locking anything.
-    if _ownership is not None:
+    # A submit-only run collects nothing, so it owns no unit trees.
+    if _ownership is not None and not submit_only:
         _own_persistent_roots(
             _ownership,
             sim_decks.resolve_deck_outdir(artifacts_dir, request_dir),
@@ -2459,6 +2548,9 @@ def _dispatch_deck_request(
         backend=resolved_backend,
         max_workers=max_workers,
         artifacts_dir=artifacts_dir,
+        resume=bool(resume),
+        submit_only=submit_only,
+        attach_job_id=attach_job_id,
     )
 
 
@@ -2845,6 +2937,7 @@ def _prepare_sim_request(
     # `analysis_steps[]` sequence, resolved -- every structural error raised
     # -- here, before any corner is dispatched.
     analysis, measurements_spec = _resolve_analysis_and_measurements(request)
+    _reject_param_braces(analysis, engine)
     for spec in measurements_spec:
         if spec.get("spice") is not None:
             _validate_meas_card(spec["name"], spec["spice"])
@@ -3093,6 +3186,7 @@ def _prepare_sim_request(
         nodeset_declared=bool(nodeset_rules),
         initial_conditions_declared=bool(ic_rules),
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
+        linearize_declared=analysis.get("linearize") is True,
         crossings_declared=bool(
             sim_crossings.crossings_measurements(measurements_spec)
         ),
@@ -3910,7 +4004,11 @@ def _run_sim_corners(
     status = graded["status"]
 
     engine_build = _engine_build_with_comparison(
-        ngspice_binary, remote_environment, backend
+        ngspice_binary,
+        remote_environment,
+        backend,
+        staged_model_environment.get("staged_model_inputs"),
+        request,
     )
 
     environment: dict[str, Any] = {
@@ -5080,6 +5178,48 @@ def _normalize_param_row(
     return dict(sorted(row.items()))
 
 
+def _temperature_param_name(corners_spec: dict[str, Any]) -> str | None:
+    """The validated, lowercased ``corners.temperature_param`` name (issue
+    #3994), or ``None`` when the request does not bind one. It is refused if
+    ``corners.params`` or ``corners.supply_v`` already uses the name."""
+    raw = corners_spec.get("temperature_param")
+    if raw is None:
+        return None
+    if "units" in corners_spec:
+        raise SimError(
+            "corners.temperature_param cannot be combined with corners.units: "
+            "put the parameter in each unit's `params` instead"
+        )
+    name = _validate_param_name(raw, "corners.temperature_param")
+    declared = {str(key).lower() for key in (corners_spec.get("params") or {})}
+    if name in declared:
+        raise SimError(
+            f"corners.temperature_param name {name!r} is also a corners.params "
+            "key: a name may be bound by only one of the two"
+        )
+    supply = {str(key).lower() for key in (corners_spec.get("supply_v") or {})}
+    if name in supply:
+        raise SimError(
+            f"corners.temperature_param name {name!r} is also a "
+            "corners.supply_v key: a name may be in only one of the two maps"
+        )
+    return name
+
+
+def _bind_temperature_param(
+    param_row: dict[str, int | float],
+    temperature_param: str | None,
+    temperature_c: float,
+) -> dict[str, int | float]:
+    """``param_row`` with the grid temperature bound to ``temperature_param``
+    (issue #3994), name-sorted like every params row; ``param_row`` unchanged
+    when the request binds no temperature parameter."""
+    if not temperature_param:
+        return param_row
+    bound = {**param_row, temperature_param: _normalize_param_value(temperature_c)}
+    return dict(sorted(bound.items()))
+
+
 def _expand_param_axis(
     corners_spec: dict[str, Any],
 ) -> list[dict[str, int | float]]:
@@ -5552,7 +5692,8 @@ def _expand_corners(
     # Issue #3035: the innermost axis. Its rows are validated before the
     # exclusion rules so a selector can be checked against the declared names.
     param_rows = _expand_param_axis(corners_spec)
-    declared_params = set(param_rows[0])
+    temperature_param = _temperature_param_name(corners_spec)
+    declared_params = set(param_rows[0]).union(filter(None, [temperature_param]))
     _validate_exclude_params(exclude_spec, declared_params)
     # Issue #3125: the solver-option axis, innermost of all.
     option_rows = _expand_options_axis(corners_spec)
@@ -5567,6 +5708,9 @@ def _expand_corners(
                     for param_row, option_row in itertools.product(
                         param_rows, option_rows
                     ):
+                        param_row = _bind_temperature_param(
+                            param_row, temperature_param, temperature_c
+                        )
                         point = CornerPoint(
                             process,
                             point_supply,
@@ -7462,9 +7606,10 @@ def _refuse_xyce_params_axis(corners_spec: dict[str, Any]) -> None:
     """The ``engine: "xyce"`` refusal for ``corners.params``. Split out of
     :func:`_enforce_xyce_support_boundary` to keep that gate under the
     complexity limit."""
-    if corners_spec.get("params"):
+    if corners_spec.get("params") or corners_spec.get("temperature_param"):
         raise SimError(
-            "engine 'xyce' does not support corners.params: the parameter "
+            "engine 'xyce' does not support corners.params or "
+            "corners.temperature_param: the parameter "
             "axis is applied with ngspice's `alterparam` + `reset` control "
             "commands, which Xyce has no netlist equivalent of -- use engine "
             "'ngspice'"
@@ -7507,6 +7652,17 @@ def _refuse_xyce_nodeset(declared: bool) -> None:
         )
 
 
+def _refuse_xyce_linearize(declared: bool) -> None:
+    """Issue #4014: `linearize` is an ngspice control command; the Xyce deck
+    has no `.control` block to carry it."""
+    if declared:
+        raise SimError(
+            "analysis.linearize is not supported for engine 'xyce': it is an "
+            "ngspice `.control` command, which the Xyce deck does not have; "
+            "use engine 'ngspice' or drop the field"
+        )
+
+
 def _refuse_xyce_options_axis(corners_spec: dict[str, Any]) -> None:
     """The ``engine: "xyce"`` refusal for ``corners.options`` (issue #3125):
     the axis is a generated ngspice ``.options`` card."""
@@ -7533,6 +7689,7 @@ def _enforce_xyce_support_boundary(
     nodeset_declared: bool = False,
     initial_conditions_declared: bool = False,
     analysis_steps_declared: bool = False,
+    linearize_declared: bool = False,
     crossings_declared: bool = False,
     cycle_mean_declared: bool = False,
     energy_declared: bool = False,
@@ -7550,6 +7707,7 @@ def _enforce_xyce_support_boundary(
     """
     if engine != "xyce":
         return
+    _refuse_xyce_linearize(linearize_declared)
     if analysis_steps_declared:
         # Issue #2482: an ordered step sequence is `alter`/analysis/`let`
         # commands inside one ngspice `.control` block. The Xyce deck has no
@@ -9515,7 +9673,7 @@ def _run_corner(
             analysis=analysis,
             log_text=log_text,
             is_xyce=is_xyce,
-            save_mode=save_mode,
+            save_mode=_effective_save_mode(save_mode, diagnostics),
             crossings=crossings,
             energy=energy,
             cycle_means=cycle_means,
@@ -9568,6 +9726,15 @@ def _run_corner(
             }
         )
 
+    # Issue #2846: the engine's abort trailer gets its own analysis-level
+    # diagnostic, always at `severity: "error"`, reported alongside (not
+    # instead of) the per-measurement ones. Appended before
+    # `disqualifying` is sampled so `fail_on_diagnostic` can name it.
+    aborted_re = _XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE
+    aborted_diagnostic = _analysis_aborted_diagnostic(log_text, aborted_re)
+    if aborted_diagnostic is not None:
+        diagnostics.append(aborted_diagnostic)
+
     # A recovered `singular_matrix`/`nonconvergence` classification (the
     # engine's own stepping-recovery narration -- routine noise on the way
     # to a *successful* analysis, not evidence the run failed) does not
@@ -9598,7 +9765,7 @@ def _run_corner(
         measurements_spec,
         measurement_results,
         log_text,
-        aborted_re=(_XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE),
+        aborted_re=aborted_re,
         waveform_complete=waveform_complete,
     ):
         _downgrade_stepping_diagnostics(diagnostics, bool(measurements_spec))
@@ -10574,6 +10741,24 @@ def _harvest_measurement_value(
     return value
 
 
+def _effective_save_mode(save_mode: str, diagnostics: list[dict[str, Any]]) -> str:
+    """The save mode the no-value wording should assume (issue #3963).
+
+    The ``save_mode: "netlist"`` hint blames a signal the netlist's ``.save``
+    cards no longer retain. When the corner already carries an error-severity
+    engine diagnostic (``timeout``, ``engine_killed``, ``timestep_too_small``,
+    ...), the missing value has a known cause and the hint would mislead, so
+    the default wording is used instead. ``no_such_vector`` is exempt: it is
+    the retention symptom the hint exists to explain. The diagnostics
+    themselves are kept."""
+    if any(
+        d.get("severity") == "error" and d.get("code") != "no_such_vector"
+        for d in diagnostics
+    ):
+        return DEFAULT_SAVE_MODE
+    return save_mode
+
+
 def _no_value_message(
     spec: dict[str, Any], *, save_mode: str = DEFAULT_SAVE_MODE
 ) -> str:
@@ -11026,6 +11211,12 @@ def _corner_deck_control_lines(
     lines.append(f"{analysis['kind']} {_ic_analysis_args(point, analysis['args'])}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
+    if analysis.get("linearize") is True:
+        # Issue #4014: resample onto a uniform grid, after any rawfile
+        # `write` (which keeps the solver's own points) and before the
+        # `expr` lets, so time-weighted sums are not biased by the
+        # adaptive timestep distribution.
+        lines.append("linearize")
     expr_specs = _expr_measurements(measurements_spec)
     if expr_specs and analysis["kind"] == "noise":
         # Issue #2893: after `noise`, ngspice's current plot is the integrated
@@ -11129,12 +11320,16 @@ def _engine_build_with_comparison(
     ngspice_binary: str | None,
     remote_environment: dict[str, Any] | None,
     backend: str,
+    staged_model_inputs: list[dict[str, Any]] | None = None,
+    request: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Probe the local build and, for a batch sweep, compare it with each
-    worker's build in ``remote_environment`` (issue #3095)."""
+    worker's build in ``remote_environment`` (issue #3095), and the staged
+    model digests with what each worker hashed (issue #4020)."""
     engine_build = _probe_engine_build(ngspice_binary)
     if remote_environment is not None and backend == "batch":
         attach_engine_build_comparison(remote_environment, engine_build)
+        attach_staged_model_comparison(remote_environment, staged_model_inputs, request)
     return engine_build
 
 
@@ -12121,6 +12316,42 @@ def _recovered_from_stepping(
     if aborted_re.search(log_text):
         return False
     return True
+
+
+_ABORT_CONTEXT_LINES = 12
+_ABORT_MAX_QUOTED = 4
+_ABORT_ERROR_LINE_RE = re.compile(r"\b(?:error|fatal)\b", re.IGNORECASE)
+
+
+def _analysis_aborted_diagnostic(
+    log_text: str,
+    aborted_re: re.Pattern[str],
+) -> dict[str, str] | None:
+    """The analysis-level ``analysis_aborted`` diagnostic (issue #2846), or
+    ``None`` when the engine's abort trailer is absent.
+
+    Quotes the engine's own error line(s) preceding the trailer. Always
+    ``severity: "error"``: the trailer means the analysis never produced a
+    trustworthy result regardless of which measurement values happen to be
+    parseable -- the same rule :func:`_recovered_from_stepping` applies
+    (issue #205). A stepping-recovered corner has no trailer, so it never
+    gets this diagnostic at all.
+    """
+    match = aborted_re.search(log_text or "")
+    if match is None:
+        return None
+    lines = log_text[: match.end()].splitlines()
+    window = lines[-_ABORT_CONTEXT_LINES:]
+    quoted = [ln.strip() for ln in window if _ABORT_ERROR_LINE_RE.search(ln)]
+    trailer = lines[-1].strip() if lines else ""
+    if trailer and trailer not in quoted:
+        quoted.append(trailer)
+    quoted = quoted[-_ABORT_MAX_QUOTED:]
+    return {
+        "severity": "error",
+        "code": "analysis_aborted",
+        "message": "analysis aborted by the engine: " + " | ".join(quoted),
+    }
 
 
 def _capture_only_waveform_complete(

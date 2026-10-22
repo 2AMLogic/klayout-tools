@@ -14,6 +14,65 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt interface-check`** (issue #4024, documented in
+  [`docs/cli/interface-check.md`](docs/cli/interface-check.md)): new verb.
+  Pairs the labelled pins of two committed streams at a declared `--place`
+  and reports per pin the pad-to-pad `offset_um` / `gap_um` and a
+  `status` of `ok`, `misaligned` or `no_partner`. Exit `0` all ok, `3` any
+  misaligned/no_partner, `1` unreadable input or no label matched `--pins`.
+  `schema_version` 1.
+
+- **`klt pex` `pin_order_mismatch`** (issue #2890, documented in
+  [`docs/cli/pex.md`](docs/cli/pex.md) "Pin order must match"): additive. A new
+  top-level `pin_order_mismatch` block fires when the schematic and extracted
+  headers for the top subcircuit have the same pin count and the same pin set
+  (compared case-insensitively) but a different order, which would silently
+  mis-wire the testbench's positional `X...` line on the extracted leg. Same
+  shape as `pin_count_mismatch` (`subcircuit`, `schematic`/`extracted`,
+  `ngspice_message` always `null`, `detail`); mutually exclusive with
+  `pin_count_mismatch` and `flat_dut_mismatch`; `null` in `--measure-command`
+  mode. The extracted leg is skipped, `status` is `"error"` and the exit code
+  is `4`. Purely additive: no `schema_version` bump.
+
+- **`klt gen-compose` `pins[].request`** (issue #3971, documented in
+  `docs/cli/gen-compose.md` "Requested port coordinates"): additive. A `pins[]`
+  entry may carry `request: {x_um?, y_um?, layer_role?}` to place the pin at a
+  caller-selected composed-frame coordinate via a short stub on the port's own
+  layer. `pins[]` / `ports[]` entries gain `requested` / `achieved` only when a
+  request was made; requests without the field are unchanged. Infeasible
+  requests fail (exit 1) with distinct `error.code`s: `port_request_invalid`,
+  `port_request_unsupported_layer`, `port_request_off_grid`,
+  `port_request_out_of_bounds`, `port_request_conflict`,
+  `port_request_on_connectivity_port`.
+
+- **gf180mcu discloses wide-metal and narrow-line end-of-line coverage gaps**
+  (issue #3968, documented in `docs/cli/drc.md` and `docs/cli/deck.md`):
+  additive. `coverage.unmodeled_rules`, `klt deck info` and `klt deck rules`
+  now also list `M1.2b`–`M5.2b`, `CO.6a`/`CO.6b` and `V1`–`V4`
+  `.3c`/`.3d`/`.4b`/`.4c`. Disclosure only: no rule is enforced, and
+  `status`, exit codes and `schema_version` are unchanged.
+
+- **`klt sim --resume` for deck-list requests** (issue #3957, documented in
+  `docs/cli/sim.md`): additive. Every deck unit now writes an atomic
+  `<outdir>/<id>/unit.json` completion record; with `--resume` /
+  `options.resume` on `local`, `local-parallel` or `batch`, a unit whose record
+  matches its deck/include/input hashes, `timeout_s` and engine version and
+  whose outputs still verify is skipped (`units[].resumed: true`,
+  `environment.resume.resumed_units`). `remote` still refuses it. `unit.json`
+  is now a reserved unit-relative name. No `decks[].seed` field was added:
+  the documented seeding measurements show `trnoise` is not replayable on
+  ngspice-42.
+- **`klt sim` deck-list `--submit-only` / `--attach`** (issue #3958,
+  documented in `docs/cli/sim.md`): a `decks` request on the `batch` backend
+  is one job with one job id, so it can now be detached and re-attached like a
+  corner request. `--submit-only` returns the existing `status: "submitted"`
+  payload with `unit_count` = number of decks and `job_ceiling: null` (the deck
+  path assesses none) and writes the same `batch-receipt.json`; `--attach
+  <job_id>` polls and collects that job into the usual deck report, with
+  `error.code: "batch_unknown_job"` for an unknown id and the new
+  `"attach_request_mismatch"` when the request's decks differ from the job's.
+  Previously both were refused for deck lists. Additive; no `schema_version`
+  bump.
 - **`batch.max_concurrent_jobs` / `klt sim --max-concurrent-jobs`** (issue
   #3914, documented in `docs/cli/sim.md`): additive, opt-in bound on the shard
   jobs a sharded `batch` run keeps in flight at once, so a large split no

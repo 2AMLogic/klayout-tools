@@ -176,8 +176,9 @@ What is deliberately **not** weakened:
   measured rows -- so a reader of the evidence can tell a `klt sim`-measured
   record from an externally-measured one, and reproduce the latter.
 
-Two testbench-swap diagnostics are inapplicable here and are reported as
-``null``: ``pin_count_mismatch`` and ``flat_dut_mismatch`` both exist
+Three testbench-swap diagnostics are inapplicable here and are reported as
+``null``: ``pin_count_mismatch``, ``flat_dut_mismatch`` and
+``pin_order_mismatch`` (issue #2890) all exist
 because testbench mode reuses the testbench's own unmodified ``X...``
 instantiation line against both netlists, which a caller-supplied command
 does not do (it builds each side's deck itself). ``model_mismatch`` is
@@ -778,6 +779,85 @@ def _pin_count_mismatch(
             "netlist's `.SUBCKT` pin list -- klt pex re-runs that line "
             "unmodified against both the schematic DUT and the extracted "
             "netlist, so the two must declare the same number of pins"
+        ),
+    }
+
+
+def _no_preflight_mismatch(*diagnostics: dict[str, Any] | None) -> bool:
+    """True when none of the pre-flight mismatch diagnostics fired, i.e. the
+    extracted-side simulation is worth attempting."""
+    return all(d is None for d in diagnostics)
+
+
+def _pin_order_preflight(
+    command_mode: bool,
+    earlier: tuple[dict[str, Any] | None, ...],
+    **kwargs: Any,
+) -> dict[str, Any] | None:
+    """The ``pin_order_mismatch`` pre-flight (issue #2890), gated: ``None`` in
+    ``--measure-command`` mode, and once an earlier (mutually exclusive)
+    pre-flight diagnostic has fired; otherwise :func:`_pin_order_mismatch`."""
+    if command_mode or not _no_preflight_mismatch(*earlier):
+        return None
+    return _pin_order_mismatch(**kwargs)
+
+
+def _pin_order_mismatch(
+    *,
+    reference_netlist: str,
+    extracted_netlist: str,
+    top_cell: str,
+) -> dict[str, Any] | None:
+    """The structured ``pin_order_mismatch`` diagnostic (issue #2890), or
+    ``None``.
+
+    `klt pex` reuses the testbench's own positional ``X...`` instantiation
+    line on both legs, but `klt extract` writes the ``.SUBCKT`` header pins
+    in a deterministic order (real ports first, then parasitic references,
+    each alphabetical) while a schematic DUT declares them in symbol order.
+    When both sides declare ``top_cell`` with the same number of pins and the
+    same pin *set* (case-insensitively) but a different *sequence*,
+    :func:`_pin_count_mismatch` stays silent and the extracted leg simulates
+    with signals wired to the wrong pins. Same shape as
+    :func:`_pin_count_mismatch` (``ngspice_message`` is always ``None``: no
+    engine is consulted). Differing counts or pin sets are
+    :func:`_pin_count_mismatch`'s territory; a flat schematic DUT is
+    :func:`_flat_dut_mismatch`'s.
+    """
+    schematic_interface = _subckt_interfaces(_read_text(reference_netlist) or "").get(
+        top_cell.lower()
+    )
+    extracted_interface = _subckt_interfaces(_read_text(extracted_netlist) or "").get(
+        top_cell.lower()
+    )
+    if schematic_interface is None or extracted_interface is None:
+        return None
+    schematic_pins = [pin.lower() for pin in schematic_interface[1]]
+    extracted_pins = [pin.lower() for pin in extracted_interface[1]]
+    if len(schematic_pins) != len(extracted_pins):
+        return None
+    if sorted(schematic_pins) != sorted(extracted_pins):
+        return None
+    if schematic_pins == extracted_pins:
+        return None
+    return {
+        "subcircuit": extracted_interface[0],
+        "schematic": _mismatch_side(reference_netlist, schematic_interface),
+        "extracted": _mismatch_side(extracted_netlist, extracted_interface),
+        "ngspice_message": None,
+        "detail": (
+            f"the schematic DUT declares `.SUBCKT {schematic_interface[0]}` "
+            f"with pins in the order ({', '.join(schematic_interface[1])}) "
+            "but the extracted netlist declares the same pins in the order "
+            f"({', '.join(extracted_interface[1])}) -- klt pex reuses the "
+            "testbench's positional subcircuit instantiation line "
+            "unmodified on both legs, so the extracted leg would wire "
+            "signals and supplies to the wrong pins and report meaningless "
+            "deltas. The extracted order is deterministic (real ports "
+            "first, then parasitic references, each alphabetical); wrap the "
+            "schematic DUT in a `.SUBCKT` that declares the pins in the "
+            "extracted order so one instantiation line is valid for both "
+            "legs"
         ),
     }
 
@@ -2739,9 +2819,9 @@ def run_pex(
     documents; the caller supplies measurements, never a finished
     comparison. ``measure_timeout_s`` caps one invocation
     (:data:`MEASURE_COMMAND_TIMEOUT_S` by default). The whole mode is
-    disclosed in the report's ``measurement`` block. ``pin_count_mismatch``
-    and ``flat_dut_mismatch`` are always ``null`` in this mode -- both
-    diagnose the testbench-`X...`-line-reuse contract, which a
+    disclosed in the report's ``measurement`` block. ``pin_count_mismatch``,
+    ``flat_dut_mismatch`` and ``pin_order_mismatch`` are always ``null`` in
+    this mode -- all diagnose the testbench-`X...`-line-reuse contract, which a
     caller-supplied command does not use -- while ``model_mismatch``,
     ``extraction``, ``body_bias`` and ``provenance`` are computed exactly as
     in testbench mode. See this module's "Measuring with a caller-supplied
@@ -3117,6 +3197,19 @@ def run_pex(
             subcircuit=extract_report["top"],
         )
 
+    # Issue #2890: same pins in a different order. Pre-flight like the two
+    # diagnostics above, mutually exclusive with both (counts must be equal,
+    # and the schematic must declare the subcircuit), and `None` in
+    # `--measure-command` mode for the same reason. It skips the extracted
+    # leg and yields `status: "error"` / exit 4, like its siblings.
+    pin_order_mismatch = _pin_order_preflight(
+        command_mode,
+        (flat_dut_mismatch, pin_count_mismatch),
+        reference_netlist=reference_netlist_path,
+        extracted_netlist=extracted_netlist_path,
+        top_cell=extract_report["top"],
+    )
+
     # `--measure-command` mode (issue #2478): `testbench_paths` is empty (it
     # is validated so above), so the per-testbench loop below is a no-op and
     # the two legs are measured here instead -- once per side, by the
@@ -3183,7 +3276,9 @@ def run_pex(
         # simulation attempt could add either way. Skip it entirely and fall
         # through to the `extracted_report is None` branch below, exactly as
         # an unrunnable extracted side already does.
-        if flat_dut_mismatch is None and pin_count_mismatch is None:
+        if _no_preflight_mismatch(
+            flat_dut_mismatch, pin_count_mismatch, pin_order_mismatch
+        ):
             try:
                 extracted_request_path = _prepare_extracted_request(
                     testbench_path=testbench_path,
@@ -3435,6 +3530,11 @@ def run_pex(
         # simulation is even attempted, so `pin_count_mismatch` above stays
         # `None`.
         "flat_dut_mismatch": flat_dut_mismatch,
+        # Additive field (issue #2890): `None` unless both sides declare the
+        # top subcircuit with the same pin set in a different order (see
+        # `_pin_order_mismatch`); when it fires the extracted leg is skipped
+        # exactly as for the two diagnostics above.
+        "pin_order_mismatch": pin_order_mismatch,
         # Additive field (issue #2402): `None` on every run whose reference
         # (schematic) and extracted netlists instantiate the same device
         # models/`.subckt`s the same number of times -- byte-identical to

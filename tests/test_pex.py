@@ -48,6 +48,7 @@ from klayout_tools.pex import (
     _normalize_measurement_document,
     _pin_count_mismatch,
     _pin_count_mismatch_from_report,
+    _pin_order_mismatch,
     _prepare_extracted_request,
     _reference_is_hierarchical,
     _rewrite_dut_include,
@@ -1799,6 +1800,124 @@ def test_run_pex_flat_dut_mismatch_skips_extracted_side_entirely(
     assert mismatch["subcircuit"] == "RES"
     assert mismatch["schematic"]["netlist"] == dut
     assert mismatch["schematic"]["pin_count"] is None
+    assert mismatch["extracted"]["pins"] == ["RA", "RB"]
+
+
+def test_pin_order_mismatch_reports_same_set_different_order(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["b", "a", "vdd"], ["a", "b", "vdd"])
+    mismatch = _pin_order_mismatch(
+        reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+    )
+    assert mismatch is not None
+    assert mismatch["subcircuit"] == "RES"
+    assert mismatch["schematic"]["pins"] == ["b", "a", "vdd"]
+    assert mismatch["extracted"]["pins"] == ["a", "b", "vdd"]
+    assert mismatch["ngspice_message"] is None
+    assert "(b, a, vdd)" in mismatch["detail"]
+    assert "(a, b, vdd)" in mismatch["detail"]
+
+
+def test_pin_order_mismatch_none_when_order_agrees(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["a", "b"], ["a", "b"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_pin_order_mismatch_ignores_case_only_differences(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["RA", "RB"], ["ra", "rb"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+    schematic, extracted = _write_pair(tmp_path, ["RB", "RA"], ["ra", "rb"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is not None
+    )
+
+
+def test_pin_order_mismatch_none_when_counts_or_sets_differ(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["b", "a"], ["a", "b", "vsub"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+    assert (
+        _pin_count_mismatch(reference_netlist=schematic, extracted_netlist=extracted)
+        is not None
+    )
+    schematic, extracted = _write_pair(tmp_path, ["b", "a"], ["a", "c"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_pin_order_mismatch_none_for_flat_schematic(tmp_path):
+    dut = _write_flat_dut(tmp_path)
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(".SUBCKT RES RA RB\nR1 RA RB 1\n.ENDS RES\n")
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=dut, extracted_netlist=str(extracted), top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_run_pex_pin_order_mismatch_skips_extracted_side(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #2890: same pins, different order -> flagged pre-flight, the
+    extracted leg is never simulated, rows error (exit 4 path)."""
+    import klayout_tools.pex as pex_module
+
+    calls = {"n": 0}
+
+    def _fake_run_sim(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "corners": [
+                    {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
+                ],
+                "corner_count": 1,
+                "measurements": [{"name": "vout"}],
+            }
+        raise AssertionError("extracted leg must not run on pin_order_mismatch")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(".SUBCKT RES RB RA\nR1 RA RB 289.2\n.ENDS RES\n")
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(
+        f'.include "{dut}"\n.model res_generic_po r\n'
+        "Vdd RA 0 DC 1.8\nXres RB RA RES\nRload RB 0 1k\n"
+    )
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert calls["n"] == 1
+    assert report["status"] == "error"
+    assert all(row["status"] == "error" for row in report["delta"])
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+    mismatch = report["pin_order_mismatch"]
+    assert mismatch is not None
+    assert mismatch["schematic"]["pins"] == ["RB", "RA"]
     assert mismatch["extracted"]["pins"] == ["RA", "RB"]
 
 

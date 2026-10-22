@@ -81,6 +81,7 @@ from .gen_layer_params import (
     _role_layer_info,
     _sd_implant_margin_um,
     _voltage_flavor_mark_layer,
+    mfg_grid_um,
 )
 
 
@@ -492,6 +493,67 @@ def _sd_implant_hints(
     }
 
 
+def _fmt_um(value_um: float) -> str:
+    return f"{value_um:.12g}um"
+
+
+def _mfg_grid_warnings(
+    generator: str,
+    family: str,
+    params: dict[str, Any],
+    multiple: int = 1,
+    multiple_label: str = "",
+) -> list[str]:
+    """Top-level ``warnings[]`` entries for a MOS generator's ``w_um``/
+    ``l_um`` that is not an exact multiple of the resolved family's
+    *manufacturing* grid (issue #2933) -- read from the curated deck's own
+    ``"ongrid"`` rule via :func:`mfg_grid_um` (``w_um`` on the ``active``
+    role, ``l_um`` on ``poly``), so this never disagrees with ``klt drc``.
+    A family whose deck declares no such rule (grid ``0.0``) yields ``[]``.
+
+    Advisory only: the geometry is drawn exactly as requested (``klt drc``
+    remains the authority), and the dbu-based ``drc_hints.snapped_to_grid``
+    keeps its meaning. ``multiple``/``multiple_label`` describe a device
+    whose total width is ``multiple`` unit widths of ``w_um`` each (e.g.
+    ``diff_pair``'s ``splits``): every unit must be on-grid, so the total is
+    representable only as a multiple of ``multiple x grid`` -- the nearest
+    such totals are reported alongside the unit-width neighbours."""
+    from .gen import _mfg_grid_neighbours
+
+    roles = _PDK_ROLE_LAYERS[family]
+    warnings: list[str] = []
+    for param, role in (("w_um", "active"), ("l_um", "poly")):
+        grid_um = mfg_grid_um(family, roles.get(role))
+        value_um = params[param]
+        neighbours = _mfg_grid_neighbours(grid_um, value_um)
+        if neighbours is None:
+            continue
+        below, above = neighbours
+        message = (
+            f"generator '{generator}': params.{param}={_fmt_um(value_um)} is "
+            f"not a multiple of the '{family}' manufacturing grid "
+            f"({_fmt_um(grid_um)}) and is drawn off-grid -- expect *.ongrid.* "
+            f"DRC findings; nearest representable params.{param}: "
+            f"{_fmt_um(below)} (below) or {_fmt_um(above)} (above)"
+        )
+        if param == "w_um" and multiple > 1:
+            total_below, total_above = (
+                round(below * multiple, 9),
+                round(above * multiple, 9),
+            )
+            message += (
+                f"; each unit must be on-grid, so the total width "
+                f"({multiple_label}={multiple} x params.w_um = "
+                f"{_fmt_um(round(value_um * multiple, 9))}) must be a multiple "
+                f"of {multiple} x {_fmt_um(grid_um)} = "
+                f"{_fmt_um(round(grid_um * multiple, 9))}: nearest "
+                f"representable totals {_fmt_um(total_below)} (below) or "
+                f"{_fmt_um(total_above)} (above)"
+            )
+        warnings.append(message)
+    return warnings
+
+
 def _mos_cap_ports(
     port_cells: list[tuple[str, dict[str, Any]]],
     unit: dict[str, Any],
@@ -840,7 +902,16 @@ def _mos_array_describe(
             if snapped
             else []
         )
-        + pitch_warnings,
+        + pitch_warnings
+        + _mfg_grid_warnings(
+            "mos_array",
+            family,
+            params,
+            # "parallel" fingers fold into one device of width
+            # `fingers * w_um`; "series" fingers are separate devices.
+            multiple=1 if series_fingers else params["fingers"],
+            multiple_label="params.fingers",
+        ),
     }
 
 
@@ -2245,9 +2316,18 @@ def _diff_pair_describe(
             **sd_implant_hints,
         },
         "warnings": (
-            ["one or more dimensions were rounded to the technology grid"]
-            if snapped
-            else []
+            (
+                ["one or more dimensions were rounded to the technology grid"]
+                if snapped
+                else []
+            )
+            + _mfg_grid_warnings(
+                "diff_pair",
+                family,
+                params,
+                multiple=params["splits"],
+                multiple_label="params.splits",
+            )
         ),
     }
 

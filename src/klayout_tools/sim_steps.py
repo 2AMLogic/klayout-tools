@@ -323,6 +323,13 @@ def _resolve_step_analysis(analysis: Any, step: str) -> tuple[str, str]:
             f"step {step!r}: analysis.args must be a single-line string (it is "
             "emitted verbatim as one control command)"
         )
+    if "{" in args or "}" in args:
+        raise SimError(
+            f"step {step!r}: analysis.args {args!r} contains a '{{...}}' "
+            "brace reference; the step is emitted as an ngspice .control "
+            "command, which does not expand .param braces and klt does not "
+            "expand them -- write the numeric value literally"
+        )
     return kind.lower(), args
 
 
