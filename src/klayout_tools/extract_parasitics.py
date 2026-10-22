@@ -2379,6 +2379,22 @@ def _attach_network_integrity(
     return integrity
 
 
+def _lumped_resistance_ohm(entry: dict[str, Any], emit_selected: bool) -> float:
+    """A net's lumped R (issue #4037): the terminal-aware
+    ``selected_resistance_ohm`` when ``emit_selected`` and the net's
+    ``resistance_source`` is ``"graph"`` (and no MoM-RLC override), else
+    ``resistance_ohm``."""
+    graph_report = entry.get("resistance_graph")
+    if (
+        emit_selected
+        and graph_report is not None
+        and graph_report.get("resistance_source") == "graph"
+        and not entry.get("mom_rlc_r_override")
+    ):
+        return graph_report["selected_resistance_ohm"]
+    return entry["resistance_ohm"]
+
+
 def _inject_parasitics(
     kdb: Any,
     circuit: kdb.Circuit,
@@ -2390,6 +2406,7 @@ def _inject_parasitics(
     record_slice_topology: bool = False,
     variants: ParasiticVariants | None = None,
     substrate_tie_ohms: float | None = None,
+    emit_selected_resistance: bool = False,
 ) -> dict[str, Any]:
     """Inject a star-topology parasitic RC per net (or a distributed
     multi-segment ladder for a caller-declared subset, see below), plus one
@@ -2397,6 +2414,14 @@ def _inject_parasitics(
     vertical-overlap and/or (``--critical-net``-scoped) lateral coupling
     capacitance, into ``circuit`` and return the JSON ``parasitics`` summary
     block (issue #592, extended by issues #760, #976, and #977).
+
+    ``emit_selected_resistance`` (issue #4037, internal -- only ``klt pex``
+    sets it) writes the terminal-aware ``resistance_graph.selected_resistance_ohm``
+    as a net's lumped R wherever that net's ``resistance_source`` is
+    ``"graph"``; every other net (``legacy`` source, no ``resistance_graph``
+    block, or a ``--mom-rlc-resistance-ohm`` override) keeps
+    ``resistance_ohm``. ``False`` (the default, and what ``klt extract``
+    always passes) is the legacy-scalar netlist.
 
     ``mom_rlc_inductor`` (``(net_name, inductance_nh)``, issue #988, Epic
     #709 Phase 3a) -- ``None`` unless ``--mom-rlc-net`` was given together
@@ -2661,7 +2686,10 @@ def _inject_parasitics(
             if dup_count == 0
             else f"{base_instance_name}_dup{dup_count}"
         )
-        r_total_ohm = max(entry["resistance_ohm"], _MIN_PARASITIC_R_OHM)
+        r_total_ohm = max(
+            _lumped_resistance_ohm(entry, emit_selected_resistance),
+            _MIN_PARASITIC_R_OHM,
+        )
         c_farad = entry["capacitance_ff"] * 1e-15
         net_escaped = spice_safe_net_name(entry["net"])
         drop_r = variants is not None and variants.drops_r(net_escaped)

@@ -6286,3 +6286,150 @@ def test_signoff_refuses_extract_only_report_as_evidence(tmp_path, resistor_layo
 
     assert check["passed"] is False
     assert check["detail"]["nothing_checked_reasons"] == ["no_delta_rows"]
+
+
+# ---------------------------------------------------------------------------
+# --resistance-graph (issue #4037): pex consumes the selected scalar
+# ---------------------------------------------------------------------------
+
+_STRAP_GDS = Path(__file__).parent / "fixtures" / "resistance_graph_strap"
+
+
+def _netlist_resistors(path) -> list[float]:
+    """Every ``R`` card's value in a written SPICE netlist."""
+    values = []
+    for line in Path(path).read_text().splitlines():
+        parts = line.split()
+        if parts and parts[0].upper().startswith("R") and len(parts) >= 4:
+            value = float(parts[3])
+            if value < 1e9:  # skip the 1 TOhm substrate-isolation card
+                values.append(value)
+    return values
+
+
+def _pex_strapped(tmp_path, name, label, **kwargs):
+    out = tmp_path / f"{label}.spice"
+    report = run_pex(
+        str(_STRAP_GDS / f"{name}.gds"),
+        [],
+        "sky130",
+        output=str(out),
+        artifacts_dir=str(tmp_path / f"art_{label}"),
+        extract_only=True,
+        **kwargs,
+    )
+    return report, out
+
+
+def test_run_pex_resistance_graph_writes_selected_resistance(tmp_path):
+    """The strapped conductor's pex-written R is the graph value (smaller than
+    the legacy series sum), the envelope echoes the source, and without the
+    flag the netlist and report carry neither."""
+    base, base_out = _pex_strapped(tmp_path, "strapped", "base")
+    graph, graph_out = _pex_strapped(
+        tmp_path,
+        "strapped",
+        "graph",
+        resistance_graph=True,
+        resistance_graph_r_cut_ohm=0.0,
+    )
+
+    assert "resistance_graph" not in base["extraction"]
+    echo = graph["extraction"]["resistance_graph"]
+    assert echo["r_cut_ohm"] == 0.0
+    (net,) = echo["nets"]
+    assert net["resistance_source"] == "graph"
+    assert net["selected_resistance_ohm"] < net["legacy_resistance_ohm"]
+    assert sum(_netlist_resistors(base_out)) == pytest.approx(
+        net["legacy_resistance_ohm"], rel=1e-3
+    )
+    assert sum(_netlist_resistors(graph_out)) == pytest.approx(
+        net["selected_resistance_ohm"], rel=1e-3
+    )
+    assert graph["extraction"]["netlist_sha256"] != base["extraction"]["netlist_sha256"]
+
+
+def test_run_pex_resistance_graph_legacy_net_keeps_legacy_value(tmp_path):
+    """Without a per-cut resistance the strapped net is `unsupported`: the
+    source stays `legacy` and the written netlist is unchanged."""
+    base, _ = _pex_strapped(tmp_path, "strapped", "base")
+    graph, _ = _pex_strapped(tmp_path, "strapped", "graph", resistance_graph=True)
+
+    (net,) = graph["extraction"]["resistance_graph"]["nets"]
+    assert net["resistance_source"] == "legacy"
+    assert net["selected_resistance_ohm"] == net["legacy_resistance_ohm"]
+    assert graph["extraction"]["netlist_sha256"] == base["extraction"]["netlist_sha256"]
+
+
+def test_run_pex_resistance_graph_r_cut_zero_is_forwarded(tmp_path, monkeypatch):
+    calls = _capture_run_extract_kwargs(monkeypatch)
+    _pex_strapped(
+        tmp_path,
+        "single_level",
+        "g",
+        resistance_graph=True,
+        resistance_graph_r_cut_ohm=0,
+    )
+    assert calls[0]["resistance_graph"] is True
+    assert calls[0]["resistance_graph_r_cut_ohm"] == 0
+    assert calls[0]["emit_selected_resistance"] is True
+
+
+def test_run_pex_resistance_graph_default_passes_no_graph_request(
+    tmp_path, monkeypatch
+):
+    calls = _capture_run_extract_kwargs(monkeypatch)
+    _pex_strapped(tmp_path, "single_level", "d")
+    assert calls[0]["resistance_graph"] is False
+    assert calls[0]["emit_selected_resistance"] is False
+
+
+def test_run_pex_resistance_graph_r_cut_requires_graph_flag(tmp_path):
+    with pytest.raises(PexError, match="--resistance-graph-r-cut requires"):
+        _pex_strapped(tmp_path, "strapped", "x", resistance_graph_r_cut_ohm=1.0)
+    with pytest.raises(PexError, match="finite number >= 0"):
+        _pex_strapped(
+            tmp_path,
+            "strapped",
+            "y",
+            resistance_graph=True,
+            resistance_graph_r_cut_ohm=-1.0,
+        )
+
+
+def test_run_pex_resistance_graph_rejects_distributed_rc(tmp_path):
+    with pytest.raises(PexError, match="cannot be combined with --distributed-rc"):
+        _pex_strapped(
+            tmp_path,
+            "strapped",
+            "z",
+            resistance_graph=True,
+            critical_nets=["S"],
+            distributed_rc=True,
+        )
+
+
+def test_cli_pex_resistance_graph_extract_only_json(tmp_path, capsys):
+    out = tmp_path / "cli.spice"
+    code = main(
+        [
+            "pex",
+            str(_STRAP_GDS / "strapped.gds"),
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "--resistance-graph",
+            "--resistance-graph-r-cut",
+            "0",
+            "-o",
+            str(out),
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 4  # extract-only: nothing checked
+    report = json.loads(capsys.readouterr().out)
+    (net,) = report["extraction"]["resistance_graph"]["nets"]
+    assert net["resistance_source"] == "graph"

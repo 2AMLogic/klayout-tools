@@ -7305,7 +7305,10 @@ plus the via; overlap without a landing adds no path.
 **Ladder.** `--distributed-rc` keeps redistributing the legacy
 `resistance_ohm` total; it does not consume `selected_resistance_ohm`, so the
 ladder is not topology-correct for a strapped net. Graph-aware ladders are out
-of scope here.
+of scope here. `klt extract`'s own netlist always stays on the legacy scalar;
+[`klt pex --resistance-graph`](pex.md) (issue #4037) is the consumer of
+`selected_resistance_ohm`, writing it as the lumped R for `graph`-sourced nets
+(and rejecting the `--distributed-rc` combination).
 
 ### Curated-coefficient gaps: `metals_without_coefficient` (issue #547)
 

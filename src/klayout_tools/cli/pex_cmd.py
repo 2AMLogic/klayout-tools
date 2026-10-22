@@ -110,6 +110,10 @@ def run(args: argparse.Namespace) -> int:
             # every `--critical-net`-named net. `False` when the flag was
             # never given, unchanged from every call site that predates it.
             distributed_rc=args.distributed_rc,
+            # `--resistance-graph[-r-cut]` (issue #4037): `False`/`None` when
+            # never given, unchanged from every call site that predates them.
+            resistance_graph=args.resistance_graph,
+            resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
             # `--substrate-tie-ohms` (issue #3089): `None` when never given.
             substrate_tie_ohms=args.substrate_tie_ohms,
             # `--mom-rlc-net`/`--mom-rlc-resistance-ohm`/
@@ -318,6 +322,16 @@ def _print_text(report: dict) -> None:
     # Additive (issue #977): only printed when --distributed-rc was given.
     if extraction.get("distributed_rc"):
         print("distributed_rc: on")
+    # Additive (issue #4037): only printed when --resistance-graph was given.
+    resistance_graph = extraction.get("resistance_graph")
+    if resistance_graph is not None:
+        graph_nets = [
+            n for n in resistance_graph["nets"] if n["resistance_source"] == "graph"
+        ]
+        print(
+            f"resistance_graph: on  graph_nets={len(graph_nets)}/"
+            f"{len(resistance_graph['nets'])}"
+        )
     # Additive (issue #988): only printed when --mom-rlc-net was given.
     mom_rlc_override = extraction.get("mom_rlc_override")
     if mom_rlc_override is not None:

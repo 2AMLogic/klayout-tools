@@ -441,6 +441,30 @@ def _parasitic_integrity_report(
     return {**summary, "nets": nets}
 
 
+def _resistance_graph_echo(
+    parasitics: Mapping[str, Any], r_cut_ohm: float | None
+) -> dict[str, Any]:
+    """The ``extraction.resistance_graph`` block (issue #4037): the request
+    (``r_cut_ohm``) and, per net with a graph result, which scalar the
+    extracted netlist's lumped R used (``resistance_source``) next to both
+    candidate values. ``klt extract`` is the source of every value."""
+    nets = []
+    for entry in parasitics.get("nets") or []:
+        graph = entry.get("resistance_graph") if isinstance(entry, dict) else None
+        if not isinstance(graph, dict):
+            continue
+        nets.append(
+            {
+                "net": entry.get("net"),
+                "net_id": entry.get("net_id"),
+                "resistance_source": graph.get("resistance_source"),
+                "selected_resistance_ohm": graph.get("selected_resistance_ohm"),
+                "legacy_resistance_ohm": graph.get("legacy_resistance_ohm"),
+            }
+        )
+    return {"r_cut_ohm": r_cut_ohm, "nets": nets}
+
+
 def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
     """Normalise one input-path field for this module's own JSON response
     (issue #1261) -- a thin, module-local wrapper over
@@ -2517,6 +2541,18 @@ def _device_only_parity(
     }
 
 
+def _reject_resistance_graph_with_distributed_rc(
+    resistance_graph: bool, distributed_rc: bool
+) -> None:
+    """Issue #4037: the ladder keeps the legacy per-level resistance."""
+    if resistance_graph and distributed_rc:
+        raise PexError(
+            "--resistance-graph cannot be combined with --distributed-rc: the "
+            "ladder keeps the legacy per-level resistance, so a critical net "
+            "would mix resistance sources"
+        )
+
+
 def _reject_device_only_in_command_mode(
     device_only_leg: bool, command_mode: bool
 ) -> None:
@@ -2643,6 +2679,8 @@ def run_pex(
     critical_net_all: bool = False,
     critical_net_excludes: Sequence[str] | None = None,
     distributed_rc: bool = False,
+    resistance_graph: bool = False,
+    resistance_graph_r_cut_ohm: float | None = None,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
@@ -2709,6 +2747,18 @@ def run_pex(
     extracted-side testbench (and the resulting `delta[]` rows) reflect it.
     ``None``/empty (the default) skips it entirely -- byte-identical to
     before this feature existed. ``critical_net_patterns``/
+    ``resistance_graph``/``resistance_graph_r_cut_ohm`` (``klt pex
+    --resistance-graph [--resistance-graph-r-cut OHM]``, issue #4037) forward
+    to ``klt extract``'s terminal-aware resistance graph and make the
+    extracted netlist use each ``resistance_source == "graph"`` net's
+    ``selected_resistance_ohm`` as its lumped R (``legacy`` nets keep the
+    legacy scalar). ``extraction.resistance_graph`` echoes the request and one
+    ``{net, net_id, resistance_source, selected_resistance_ohm,
+    legacy_resistance_ohm}`` entry per net, only when the flag was given --
+    otherwise the report and netlist are byte-identical. Combining it with
+    ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
+    legacy scalar, so a critical net would mix resistance sources).
+
     ``critical_net_all``/``critical_net_excludes`` (``klt pex
     --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
     issue #2974) are the glob / all-nets forms of ``critical_nets``, passed
@@ -2898,6 +2948,7 @@ def run_pex(
     )
     command_mode = command is not None
     _reject_device_only_in_command_mode(device_only_leg, command_mode)
+    _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
 
     # Issue #1261: every input-path field this run's own JSON response
     # echoes (`layout`/`netlist`/`reference_netlist`, each `testbenches[]`
@@ -2935,6 +2986,11 @@ def run_pex(
             critical_net_all=critical_net_all,
             critical_net_excludes=critical_net_excludes,
             distributed_rc=distributed_rc,
+            # Issue #4037: `False`/`None` whenever the flags were never given,
+            # which is the exact `run_extract` call made before they existed.
+            resistance_graph=resistance_graph,
+            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+            emit_selected_resistance=resistance_graph,
             parasitic_variants=parasitic_variants,
             substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
@@ -3469,6 +3525,17 @@ def run_pex(
             **(
                 {"parasitic_variant": parasitics["parasitic_variant"]}
                 if "parasitic_variant" in parasitics
+                else {}
+            ),
+            # Additive field (issue #4037): present only with
+            # `--resistance-graph`.
+            **(
+                {
+                    "resistance_graph": _resistance_graph_echo(
+                        parasitics, resistance_graph_r_cut_ohm
+                    )
+                }
+                if resistance_graph
                 else {}
             ),
         },

@@ -3611,6 +3611,32 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--resistance-graph",
+        dest="resistance_graph",
+        action="store_true",
+        help=(
+            "pass `klt extract --resistance-graph` through and write each "
+            "net's terminal-aware `selected_resistance_ohm` as its lumped R in "
+            "the extracted netlist where `resistance_source` is `graph` "
+            "(issue #4037); other nets keep the legacy scalar. Echoed under "
+            "`extraction.resistance_graph`. Cannot be combined with "
+            "--distributed-rc. Off by default -- byte-identical to today's "
+            "behavior. See docs/cli/pex.md."
+        ),
+    )
+    pex_parser.add_argument(
+        "--resistance-graph-r-cut",
+        dest="resistance_graph_r_cut",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "per-cut via/contact resistance for --resistance-graph, passed "
+            "through to `klt extract --resistance-graph-r-cut`; must be >= 0. "
+            "Requires --resistance-graph."
+        ),
+    )
+    pex_parser.add_argument(
         "--parasitic-variant",
         dest="parasitic_variants",
         type=_parasitic_variant_arg,
