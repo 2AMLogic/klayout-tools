@@ -2091,3 +2091,51 @@ class TestRunnerDecksGate:
         message = report["units"][0]["diagnostics"][0]["message"]
         assert "missing required field: netlist" in message
         assert "predates decks[] support" in message
+
+
+class TestDecksRequestFeatureReport:
+    """`environment.remote.runner_request_features` covers `decks[]` (#4109)."""
+
+    @staticmethod
+    def _identity(tmp_path, monkeypatch, runner, request):
+        monkeypatch.setattr(sb._provenance, "_klt_version", lambda: "0.7.1.dev500")
+        if runner is not None:
+            (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
+                json.dumps({"runner_klt_version": runner}), encoding="utf-8"
+            )
+        return sb._read_runner_identity(str(tmp_path), request)
+
+    def test_old_runner_is_unsupported_though_compatibility_matches(
+        self, tmp_path, monkeypatch
+    ):
+        fields = self._identity(tmp_path, monkeypatch, "0.7.0", {"decks": [{"a": 1}]})
+        assert fields["runner_compatibility"] == "match"
+        assert fields["runner_request_features"] == {
+            "required": ["decks"],
+            "missing": ["decks"],
+            "status": "unsupported",
+        }
+        assert "decks" in fields["runner_compatibility_warning"]
+
+    def test_supporting_runner_is_supported(self, tmp_path, monkeypatch):
+        fields = self._identity(
+            tmp_path, monkeypatch, "0.7.1.dev500+gabc", {"decks": [{"a": 1}]}
+        )
+        assert fields["runner_request_features"] == {
+            "required": ["decks"],
+            "missing": [],
+            "status": "supported",
+        }
+        assert "runner_compatibility_warning" not in fields
+
+    def test_unknown_runner_is_unknown(self, tmp_path, monkeypatch):
+        fields = self._identity(tmp_path, monkeypatch, None, {"decks": [{"a": 1}]})
+        assert fields["runner_request_features"] == {
+            "required": ["decks"],
+            "missing": None,
+            "status": "unknown",
+        }
+
+    def test_request_without_decks_is_unchanged(self, tmp_path, monkeypatch):
+        fields = self._identity(tmp_path, monkeypatch, "0.7.0", {"decks": []})
+        assert "runner_request_features" not in fields

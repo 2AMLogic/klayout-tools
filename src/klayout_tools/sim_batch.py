@@ -221,6 +221,9 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     "corners.process[].sections[] (object form)": "0.7.0",
     # 1b51954f options.ngspice_init (#2530); first in v0.7.0.
     "options.ngspice_init": "0.7.0",
+    # 7849a377c corners.params parameter axis (#3035); first in v0.7.0
+    # (`git tag --contains 7849a377c`).
+    "corners.params": "0.7.0",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
@@ -762,6 +765,9 @@ def _uses_option(name: str) -> Any:
 _RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
     "measurements[].expr": _uses_measurement_expr,
     "corners.process[].sections[]": _uses_process_section_objects,
+    "corners.params": lambda request: bool(
+        (request.get("corners") or {}).get("params")
+    ),
     "options.ngspice_init": _uses_option("ngspice_init"),
     "options.osdi_preload": _uses_option("osdi_preload"),
     "options.stage_model_inputs": _uses_option("stage_model_inputs"),
@@ -1785,6 +1791,36 @@ def _validate_batch_models_lib(request: dict[str, Any]) -> None:
     )
 
 
+#: ``SimError.code`` for a ``models.pdk_root`` that is a directory on the
+#: submitting host (issue #4097).
+BATCH_MODELS_PDK_ROOT_HOST_PATH_CODE = "models_pdk_root_host_path"
+
+
+def _validate_batch_pdk_root(request: dict[str, Any]) -> None:
+    """Refuse a ``models.pdk_root`` that exists on this host **before** any S3
+    write (issue #4097). The value is forwarded verbatim to the runner, where
+    a submitter-local path is absent, so the job would launch and die with
+    ``no supported-layout PDK install``. A path that is not a directory here
+    is assumed runner-valid and passes; ``models.pdk``-only requests are
+    unaffected."""
+    from .sim import SimError
+
+    models = request.get("models")
+    root = models.get("pdk_root") if isinstance(models, dict) else None
+    if not isinstance(root, str) or not root.strip() or "$" in root:
+        return
+    if not os.path.isdir(os.path.expanduser(root)):
+        return
+    raise SimError(
+        f"backend 'batch': models.pdk_root {root!r} is a directory on the "
+        "submitting host, but it is forwarded to the runner verbatim, where "
+        "that path does not exist. Drop models.pdk_root and name the variant "
+        "with models.pdk (the runner uses its own PDK install); nothing was "
+        "submitted",
+        code=BATCH_MODELS_PDK_ROOT_HOST_PATH_CODE,
+    )
+
+
 def _validate_batch_pdk_variant(request: dict[str, Any], region: str | None) -> None:
     """Refuse a ``models.pdk`` variant the fleet image does not ship,
     **before** any S3 write (issue #3251).
@@ -1857,6 +1893,7 @@ def _resolve_batch_config(
 
     _validate_batch_pdk(request)
     _validate_batch_models_lib(request)
+    _validate_batch_pdk_root(request)
     batch_spec = request.get("batch") or {}
     provision_script = _resolve_provision_script(batch_spec)
     fleet = _read_fleet_config(provision_script)
@@ -2501,6 +2538,13 @@ _CAPACITY_REFUSAL_MARKER = "no capacity in any of the"
 #: opened (issue #2917).
 _CONCURRENCY_CAP_MARKER = "exceeds BATCH_MAX_CONCURRENT_INSTANCES"
 
+#: The fragment of the same script's shared vCPU-budget refusal (``fail "N
+#: vCPU already running + K instance(s) of up to M vCPU exceeds
+#: BATCH_MAX_VCPU=V ... the spot quota is shared with ci-spot"``). Transient
+#: shared-quota exhaustion, so it is classified with the Spot capacity refusal
+#: (issue #4103).
+_VCPU_BUDGET_MARKER = "exceeds BATCH_MAX_VCPU"
+
 #: The refusal codes :func:`submit_launch` waits out under ``capacity_wait_s``.
 _RETRYABLE_LAUNCH_CODES = frozenset(
     {BATCH_NO_CAPACITY_CODE, BATCH_CONCURRENCY_CAP_CODE}
@@ -2509,8 +2553,8 @@ _RETRYABLE_LAUNCH_CODES = frozenset(
 
 def _classify_launch_failure(stderr: str) -> str | None:
     """:data:`BATCH_NO_CAPACITY_CODE` when a failed ``launch``'s stderr is
-    the provisioner's Spot capacity refusal,
-    :data:`BATCH_CONCURRENCY_CAP_CODE` when it is the shared-fleet
+    the provisioner's Spot capacity refusal or its shared vCPU-budget
+    refusal, :data:`BATCH_CONCURRENCY_CAP_CODE` when it is the shared-fleet
     concurrency-cap refusal, else ``None``.
 
     **Coupling:** this is a text match against 2am's
@@ -2526,6 +2570,8 @@ def _classify_launch_failure(stderr: str) -> str | None:
         return BATCH_NO_CAPACITY_CODE
     if _CONCURRENCY_CAP_MARKER in stderr:
         return BATCH_CONCURRENCY_CAP_CODE
+    if _VCPU_BUDGET_MARKER in stderr:
+        return BATCH_NO_CAPACITY_CODE
     return None
 
 
@@ -3391,6 +3437,36 @@ def _read_worker_environment(
         return {**unknown, "capture": "malformed"}
 
 
+def _runner_feature_report(
+    request: dict[str, Any] | None, runner: str | None
+) -> dict[str, Any] | None:
+    """The ``runner_request_features`` block, or ``None`` if nothing is required.
+
+    ``decks`` (issue #4109) is judged by :func:`_runner_supports_decks`; the
+    rest are plain min-version entries in :data:`_RUNNER_REQUEST_FEATURES`.
+    ``missing`` is ``None`` (status ``unknown``) when the runner is unknown.
+    """
+    features = _request_features(request) if request else []
+    uses_decks = bool(request and request.get("decks"))
+    if uses_decks:
+        features.append("decks")
+    if not features:
+        return None
+    registry = [name for name in features if name != "decks"]
+    missing = _missing_runner_features(registry, runner) if registry else []
+    if uses_decks:
+        decks_ok = _runner_supports_decks(runner) if runner else None
+        if decks_ok is None:
+            missing = None
+        elif not decks_ok and missing is not None:
+            missing = [*missing, "decks"]
+    if missing is None:
+        status = "unknown"
+    else:
+        status = "unsupported" if missing else "supported"
+    return {"required": features, "missing": missing, "status": status}
+
+
 def _read_runner_identity(
     local_dir: str | None, request: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -3412,7 +3488,9 @@ def _read_runner_identity(
     carry ``runner_request_features`` (issue #3249): ``required`` names,
     ``missing`` names (``null`` when the runner version is unknown) and a
     ``status`` of ``supported`` / ``unsupported`` / ``unknown``; see
-    docs/cli/sim.md.
+    docs/cli/sim.md. A non-empty ``decks[]`` (issue #4109) adds ``decks``
+    to ``required``, judged by :func:`_runner_supports_decks` since it is
+    not a plain min-version entry.
     """
     client = _provenance._klt_version()
     runner: str | None = None
@@ -3450,20 +3528,10 @@ def _read_runner_identity(
         "client_klt_version": client,
         "runner_compatibility": status,
     }
-    features = _request_features(request) if request else []
-    if features:
-        missing = _missing_runner_features(features, runner)
-        fields["runner_request_features"] = {
-            "required": features,
-            "missing": missing,
-            "status": (
-                "unknown"
-                if missing is None
-                else "unsupported"
-                if missing
-                else "supported"
-            ),
-        }
+    report = _runner_feature_report(request, runner)
+    if report is not None:
+        fields["runner_request_features"] = report
+        missing = report["missing"]
         if missing:
             fields["request_feature_diagnostic"] = _feature_diagnostic(
                 missing, str(runner), client, "runner"

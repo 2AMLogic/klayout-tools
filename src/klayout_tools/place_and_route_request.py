@@ -27,7 +27,7 @@ import re
 from typing import Any
 
 from .lef_header import read_lef_header
-from .pdk import lef_files
+from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 
 #: Valid ``request.macros[].orientation`` values -- OpenROAD's own
@@ -491,7 +491,81 @@ def _validate_floorplan(floorplan: Any) -> dict[str, Any]:
                     "[llx, lly, urx, ury]"
                 )
 
+    if floorplan.get("tracks") is not None:
+        _validate_floorplan_tracks(floorplan["tracks"])
+
     return dict(floorplan)
+
+
+_TRACK_KEYS = ("x_offset_um", "x_pitch_um", "y_offset_um", "y_pitch_um")
+
+
+def _validate_floorplan_tracks(tracks: Any) -> None:
+    """Issue #4088: validate ``request.floorplan.tracks``, the optional
+    per-layer ``make_tracks`` definitions that replace the bare
+    ``make_tracks`` (which aborts on a tech LEF with a negative ``OFFSET``)."""
+
+    if not isinstance(tracks, list) or not tracks:
+        raise PlaceAndRouteError(
+            "request.floorplan.tracks must be a non-empty array of objects"
+        )
+    seen: set[str] = set()
+    for index, entry in enumerate(tracks):
+        where = f"request.floorplan.tracks[{index}]"
+        if not isinstance(entry, dict):
+            raise PlaceAndRouteError(f"{where} must be a JSON object")
+        layer = entry.get("layer")
+        if not isinstance(layer, str) or not layer:
+            raise PlaceAndRouteError(f"{where}.layer must be a non-empty string")
+        if layer in seen:
+            raise PlaceAndRouteError(
+                f"request.floorplan.tracks names layer '{layer}' more than once"
+            )
+        seen.add(layer)
+        for key in _TRACK_KEYS:
+            value = entry.get(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise PlaceAndRouteError(f"{where}.{key} must be a finite number")
+            if key.endswith("pitch_um") and value <= 0:
+                raise PlaceAndRouteError(f"{where}.{key} must be > 0")
+            if key.endswith("offset_um") and value < 0:
+                raise PlaceAndRouteError(f"{where}.{key} must be >= 0")
+
+
+def validate_tech_lef_track_offsets(
+    floorplan: dict[str, Any], tech_lef: str | None
+) -> None:
+    """Issue #4088: reject, before OpenROAD launches, a tech LEF whose routing
+    layers declare a negative ``OFFSET`` (legal LEF, but the bare
+    ``make_tracks`` aborts with IFP-0039 on it) unless ``floorplan.tracks``
+    takes over track creation. Skipped when the LEF cannot be read here --
+    the engine reports that itself."""
+
+    if floorplan.get("tracks") is not None or not tech_lef:
+        return
+    try:
+        header = read_lef_header(tech_lef)
+    except OSError:
+        return
+    offenders = []
+    for layer in header.get("layers", []):
+        if layer.get("type") != "ROUTING":
+            continue
+        for axis in ("x", "y"):
+            offset = layer.get(f"offset_{axis}_um")
+            if offset is not None and offset < 0:
+                offenders.append(f"{layer['name']} ({axis} OFFSET {offset:g})")
+    if offenders:
+        raise PlaceAndRouteError(
+            "tech LEF declares a negative OFFSET on routing layer(s) "
+            + ", ".join(offenders)
+            + "; OpenROAD's automatic make_tracks rejects that (IFP-0039). "
+            "Set request.floorplan.tracks to give explicit per-layer tracks"
+        )
 
 
 def _signal_routing_layers(cell_library: str) -> tuple[str, ...] | None:
@@ -1492,6 +1566,106 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
     return float(value)
 
 
+_LIBRARY_KEYS = ("cts_buffer", "power_pins", "wire_rc")
+
+
+def _positive_number(value: Any, where: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise PlaceAndRouteError(f"{where} must be a positive number")
+    return float(value)
+
+
+def _validate_library_power_pin(entry: Any, where: str) -> tuple[str, str, bool]:
+    if not isinstance(entry, dict):
+        raise PlaceAndRouteError(f"{where} must be a JSON object")
+    unknown = sorted(set(entry) - {"net_role", "pattern", "primary"})
+    if unknown:
+        raise PlaceAndRouteError(f"{where} has unknown key(s): {', '.join(unknown)}")
+    net_role = entry.get("net_role")
+    if net_role not in ("power", "ground"):
+        raise PlaceAndRouteError(f"{where}.net_role must be 'power' or 'ground'")
+    pattern = entry.get("pattern")
+    if not isinstance(pattern, str) or not pattern:
+        raise PlaceAndRouteError(f"{where}.pattern must be a non-empty string")
+    primary = entry.get("primary", False)
+    if not isinstance(primary, bool):
+        raise PlaceAndRouteError(f"{where}.primary must be a boolean")
+    return net_role, pattern, primary
+
+
+def _validate_library_power_pins(raw: Any) -> list[tuple[str, str, bool]]:
+    where = "request.library.power_pins"
+    if not isinstance(raw, list) or not raw:
+        raise PlaceAndRouteError(f"{where} must be a non-empty list of objects")
+    pins = [
+        _validate_library_power_pin(entry, f"{where}[{index}]")
+        for index, entry in enumerate(raw)
+    ]
+    for net_role in ("power", "ground"):
+        count = sum(1 for role, _, primary in pins if role == net_role and primary)
+        if count != 1:
+            raise PlaceAndRouteError(
+                f"{where} must name exactly one primary pin for net_role "
+                f"'{net_role}' (found {count})"
+            )
+    return pins
+
+
+def _validate_library_wire_rc(rc: Any) -> tuple[float, float]:
+    where = "request.library.wire_rc"
+    if not isinstance(rc, dict):
+        raise PlaceAndRouteError(f"{where} must be a JSON object")
+    keys = ("resistance_ohm_per_um", "capacitance_pf_per_um")
+    unknown = sorted(set(rc) - set(keys))
+    if unknown:
+        raise PlaceAndRouteError(f"{where} has unknown key(s): {', '.join(unknown)}")
+    for key in keys:
+        if key not in rc:
+            raise PlaceAndRouteError(f"{where}.{key} is required")
+    return (
+        _positive_number(rc[keys[0]], f"{where}.{keys[0]}"),
+        _positive_number(rc[keys[1]], f"{where}.{keys[1]}"),
+    )
+
+
+def _validate_library(library: Any) -> dict[str, Any] | None:
+    """Optional ``request.library`` (issue #4086): per-library inputs for a
+    standard-cell library the built-in tables
+    (``_CTS_BUFFER_CELLS``/``_POWER_PIN_PATTERNS``) do not cover, or an
+    override of a built-in entry. ``None`` (field omitted) leaves every
+    generated script byte-identical. Returns only the keys that were given:
+    ``cts_buffer`` (str), ``power_pins`` (list of ``(net_role, pattern,
+    primary)``), ``wire_rc`` (``(resistance, capacitance)``).
+    """
+    if library is None:
+        return None
+    if not isinstance(library, dict):
+        raise PlaceAndRouteError("request.library must be a JSON object")
+    unknown = sorted(set(library) - set(_LIBRARY_KEYS))
+    if unknown:
+        raise PlaceAndRouteError(
+            f"request.library has unknown key(s): {', '.join(unknown)}"
+        )
+    out: dict[str, Any] = {}
+    if "cts_buffer" in library:
+        buf = library["cts_buffer"]
+        if not isinstance(buf, str) or not buf.strip():
+            raise PlaceAndRouteError(
+                "request.library.cts_buffer must be a non-empty string"
+            )
+        out["cts_buffer"] = buf
+    if "power_pins" in library:
+        out["power_pins"] = _validate_library_power_pins(library["power_pins"])
+    if "wire_rc" in library:
+        out["wire_rc"] = _validate_library_wire_rc(library["wire_rc"])
+    return out
+
+
 def _validate_seed(seed: Any) -> int:
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise PlaceAndRouteError("request.seed must be an integer")
@@ -1761,6 +1935,9 @@ def _resolve_lef(
 
 
 def _resolve_gds_view(pdk_info: dict[str, Any], cell_library: str) -> str:
+    mapped = descriptor_views(pdk_info, cell_library).get("gds")
+    if mapped is not None:
+        return mapped
     libs_ref = pdk_info["assets"]["libs_ref"]
     gds_path = os.path.join(libs_ref or "", cell_library, "gds", f"{cell_library}.gds")
     if libs_ref is None or not os.path.isfile(gds_path):

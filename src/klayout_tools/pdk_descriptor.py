@@ -73,7 +73,9 @@ def load_descriptor(directory: str) -> dict[str, Any]:
     """Load and validate ``directory``/``klt-pdk.json``.
 
     Returns ``{"variant": str | None, "assets": {key: abs dir | None},
-    "liberty": {cell_library: {corner: abs path}}}``. Asset directories that do
+    "liberty": {cell_library: {corner: abs path | [abs path, ...]}},
+    "views": {cell_library: {"cell_lef": path, "tech_lef": {corner: path},
+    "gds": path}}}``. Asset directories that do
     not exist on disk resolve to ``None`` (same posture as the structural
     layouts); a malformed field, an escaping path, or a missing ``liberty``
     target raises :class:`DescriptorError` naming the file and field.
@@ -87,6 +89,7 @@ def load_descriptor(directory: str) -> dict[str, Any]:
         "variant": variant,
         "assets": _resolve_assets(directory, path, data.get("assets", {})),
         "liberty": _resolve_liberty(directory, path, data.get("liberty", {})),
+        "views": _resolve_views(directory, path, data.get("views", {})),
     }
 
 
@@ -129,11 +132,11 @@ def _resolve_assets(
 
 def _resolve_liberty(
     directory: str, path: str, raw_liberty: Any
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, str | list[str]]]:
     """Resolve the ``liberty`` object to ``{cell_library: {corner: abs path}}``."""
     if not isinstance(raw_liberty, dict):
         raise DescriptorError(f"{path}: field 'liberty' must be an object")
-    liberty: dict[str, dict[str, str]] = {}
+    liberty: dict[str, dict[str, str | list[str]]] = {}
     for cell_library, corners in raw_liberty.items():
         if not isinstance(corners, dict) or not corners:
             raise DescriptorError(
@@ -141,12 +144,73 @@ def _resolve_liberty(
                 "object mapping corner -> path"
             )
         liberty[cell_library] = {
-            corner: _resolve_liberty_file(
+            corner: _resolve_liberty_entry(
                 directory, rel, f"{path}: field 'liberty.{cell_library}.{corner}'"
             )
             for corner, rel in corners.items()
         }
     return liberty
+
+
+def _resolve_liberty_entry(directory: str, rel: Any, where: str) -> str | list[str]:
+    """One corner value: a path string, or a non-empty list of path strings."""
+    if not isinstance(rel, list):
+        return _resolve_liberty_file(directory, rel, where)
+    if not rel:
+        raise DescriptorError(f"{where}: a Liberty list must not be empty")
+    return [
+        _resolve_liberty_file(directory, item, f"{where}[{index}]")
+        for index, item in enumerate(rel)
+    ]
+
+
+#: Keys a ``views.<cell_library>`` object may carry.
+VIEW_KEYS: tuple[str, ...] = ("cell_lef", "tech_lef", "gds")
+
+
+def _resolve_views(
+    directory: str, path: str, raw_views: Any
+) -> dict[str, dict[str, Any]]:
+    """Resolve ``views`` to ``{cell_library: {cell_lef/gds: path, tech_lef:
+    {corner: path}}}``; every mapped file must exist."""
+    if not isinstance(raw_views, dict):
+        raise DescriptorError(f"{path}: field 'views' must be an object")
+    views: dict[str, dict[str, Any]] = {}
+    for cell_library, entry in raw_views.items():
+        where = f"{path}: field 'views.{cell_library}"
+        if not isinstance(entry, dict):
+            raise DescriptorError(f"{where}' must be an object")
+        resolved: dict[str, Any] = {}
+        for key, value in entry.items():
+            if key not in VIEW_KEYS:
+                raise DescriptorError(
+                    f"{where}.{key}' is not a known view key "
+                    f"(expected one of {', '.join(VIEW_KEYS)})"
+                )
+            if key == "tech_lef":
+                if not isinstance(value, dict) or not value:
+                    raise DescriptorError(
+                        f"{where}.tech_lef' must be a non-empty object "
+                        "mapping interconnect corner -> path"
+                    )
+                resolved[key] = {
+                    corner: _resolve_view_file(
+                        directory, rel, f"{where}.tech_lef.{corner}'"
+                    )
+                    for corner, rel in value.items()
+                }
+            else:
+                resolved[key] = _resolve_view_file(directory, value, f"{where}.{key}'")
+        views[cell_library] = resolved
+    return views
+
+
+def _resolve_view_file(directory: str, rel: Any, where: str) -> str:
+    """Resolve one view path; it must exist as a file."""
+    resolved = resolve_under_root(directory, rel, where)
+    if not os.path.isfile(resolved):
+        raise DescriptorError(f"{where}: '{rel}' does not exist")
+    return resolved
 
 
 def _resolve_liberty_file(directory: str, rel: Any, where: str) -> str:

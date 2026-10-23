@@ -440,6 +440,108 @@ def test_broker_refusal_is_surfaced_verbatim(broker, report, tmp_path, capsys, o
     assert "repo_firewalled" in error["message"]
 
 
+@pytest.fixture
+def sleeps(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr(store, "_sleep", slept.append)
+    return slept
+
+
+def _rate_limited_handler(monkeypatch, statuses, retry_after=None):
+    """Make the fake broker answer ``statuses`` (then 200s) on stat."""
+    queue = list(statuses)
+    real = FakeBroker.answer
+
+    def answer(self, op, body):
+        if queue:
+            return queue.pop(0), {
+                "error": "rate_limited",
+                "message": "per-caller rate limit",
+            }
+        return real(self, op, body)
+
+    monkeypatch.setattr(FakeBroker, "answer", answer)
+
+
+def test_429_is_retried_then_succeeds(broker, monkeypatch, sleeps):
+    _rate_limited_handler(monkeypatch, [429, 429])
+    client = store.BrokerClient(broker.base)
+
+    out = client.call("stat", {"kind": "evidence", "repo": REPO, "sha256": "a" * 64})
+
+    assert out["exists"] is False
+    assert sleeps == [1.0, 2.0]
+    assert len(broker.requests) == 3
+
+
+def test_429_exhaustion_is_broker_rate_limited(broker, monkeypatch, sleeps):
+    _rate_limited_handler(monkeypatch, [429] * 10)
+    client = store.BrokerClient(broker.base)
+
+    with pytest.raises(store.ArtifactError) as info:
+        client.call("stat", {"kind": "evidence", "repo": REPO, "sha256": "a" * 64})
+
+    assert info.value.code == "broker_rate_limited"
+    assert info.value.details["broker_status"] == 429
+    assert info.value.details["attempts"] == store.RATE_LIMIT_ATTEMPTS
+    assert "retry_after_s" not in info.value.details
+    assert len(sleeps) == store.RATE_LIMIT_ATTEMPTS - 1
+
+
+def test_non_429_is_never_retried(broker, sleeps):
+    broker.refuse["stat"] = (503, "fleet_unavailable", "down")
+    client = store.BrokerClient(broker.base)
+
+    with pytest.raises(store.ArtifactError) as info:
+        client.call("stat", {"kind": "evidence", "repo": REPO, "sha256": "a" * 64})
+
+    assert info.value.code == "broker_refused"
+    assert sleeps == [] and len(broker.requests) == 1
+
+
+def test_retry_after_is_honored_and_clamped(monkeypatch, sleeps):
+    class Resp:
+        def __init__(self, status, ra):
+            self.status, self._ra = status, ra
+
+        def read(self, n):
+            return b"{}" if self.status == 200 else b'{"error":"rate_limited"}'
+
+        def getheader(self, name):
+            return self._ra
+
+    answers = [Resp(429, "5"), Resp(429, "9999"), Resp(200, None)]
+
+    class Conn:
+        def request(self, *a, **k): ...
+        def getresponse(self):
+            return answers.pop(0)
+
+        def close(self): ...
+
+    monkeypatch.setattr(store, "_connection", lambda *a, **k: Conn())
+    out = store.BrokerClient("http://x").call("stat", {})
+
+    assert out == {}
+    assert sleeps == [5.0, store.RATE_LIMIT_MAX_SLEEP_S]
+
+
+def test_verify_reports_broker_rate_limited(
+    broker, report, tmp_path, capsys, monkeypatch, sleeps
+):
+    manifest = tmp_path / "m.json"
+    _put(report, manifest, capsys)
+    _rate_limited_handler(monkeypatch, [429] * 10)
+
+    code, out, err = _run(
+        ["artifact", "verify", str(manifest), "--format", "json"], capsys
+    )
+
+    assert code == 1
+    assert out == ""
+    assert json.loads(err)["error"]["code"] == "broker_rate_limited"
+
+
 def test_refusal_text_format(broker, report, capsys):
     broker.refuse["put"] = (
         503,

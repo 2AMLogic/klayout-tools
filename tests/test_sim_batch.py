@@ -891,6 +891,23 @@ _CAP_REFUSAL = (
 )
 
 
+#: Verbatim shape of 2am's shared vCPU-budget refusal (issue #4103).
+_VCPU_REFUSAL = (
+    "error: 224 vCPU already running + 1 instance(s) of up to 32 vCPU exceeds "
+    "BATCH_MAX_VCPU=224, and only 0 type(s) fit the 0 vCPU left (floor 3) "
+    "-- the spot quota is shared with ci-spot"
+)
+
+
+def test_classify_launch_failure_matches_the_vcpu_budget_refusal():
+    assert sb._classify_launch_failure(_VCPU_REFUSAL) == "batch_no_capacity"
+    both = f"{_CAP_REFUSAL}; {_VCPU_REFUSAL}"
+    assert sb._classify_launch_failure(both) == "batch_concurrency_cap"
+    assert sb._classify_launch_failure(f"{_CAPACITY_REFUSAL}; {_VCPU_REFUSAL}") == (
+        "batch_no_capacity"
+    )
+
+
 def test_classify_launch_failure_matches_the_concurrency_cap_refusal():
     assert sb._classify_launch_failure(_CAP_REFUSAL) == "batch_concurrency_cap"
     assert sb.BATCH_CONCURRENCY_CAP_CODE == "batch_concurrency_cap"
@@ -7868,3 +7885,40 @@ def test_capacity_watch_throttles_to_the_heartbeat_interval():
     assert len(lines) == 3
     assert "3 of 3 shards pending" in lines[0]
     assert "(last refusal: batch_no_capacity)" in lines[0]
+
+
+def test_models_pdk_root_local_directory_is_refused(tmp_path):
+    request = _lib_request(
+        tmp_path, models={"pdk": "gf180mcuD", "pdk_root": str(tmp_path)}
+    )
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_pdk_root_host_path"
+
+
+def test_models_pdk_root_runner_only_path_passes(tmp_path):
+    sb._validate_batch_pdk_root({"models": {"pdk_root": "/runner/only/pdks"}})
+    sb._validate_batch_pdk_root({"models": {"pdk": "sky130A"}})
+
+
+def test_corners_params_is_a_registry_feature():
+    request = {"corners": {"params": {"vdd": [1.6, 1.8]}}}
+    assert sb._request_features(request) == ["corners.params"]
+    assert sb._missing_runner_features(["corners.params"], "0.6.0") == [
+        "corners.params"
+    ]
+    assert sb._missing_runner_features(["corners.params"], None) is None
+
+
+def test_expr_no_value_offhost_carries_runner_hint():
+    report: dict = {}
+    corners = [{"measurements": [{"name": "v", "value": None}]}]
+    sim._attach_expr_runner_hint(
+        report, [{"name": "v", "expr": "v(out)"}], corners, backend="batch"
+    )
+    assert report["diagnostics"][0]["code"] == "expr_runner_may_predate"
+    local: dict = {}
+    sim._attach_expr_runner_hint(
+        local, [{"name": "v", "expr": "v(out)"}], corners, backend="local"
+    )
+    assert local == {}

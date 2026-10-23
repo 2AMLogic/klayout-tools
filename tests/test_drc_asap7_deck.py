@@ -42,6 +42,8 @@ from klayout_tools.decks.asap7_rules import (
     DRM_SOURCE,
     ISOLATION_ONLY_RULES,
     NOT_IMPLEMENTED,
+    OPT_IN_DECK_VARS,
+    OPT_IN_RULE_IDS,
     PAD_DISPOSITION,
     PAD_LAYER,
     RULE_IDS,
@@ -814,3 +816,73 @@ def test_lup_reference_predicate_on_written_layout(tmp_path, exp, metric):
     gds = tmp_path / f"{exp.name}.gds"
     fx.write_latchup_experiment(str(gds), exp)
     assert fx.latchup_reference(str(gds), metric) is exp.expect[metric]
+
+
+# --------------------------------------------------------------------------- #
+# Opt-in absolute grid-origin rules (#4082)
+# --------------------------------------------------------------------------- #
+
+
+def test_opt_in_grid_rules_are_declared_apart_from_the_default_ids():
+    assert not set(OPT_IN_RULE_IDS) & set(RULE_IDS)
+    text = _deck_text()
+    for rule_id in OPT_IN_RULE_IDS:
+        assert f'output("{rule_id}", "DRM Table' in text
+    for var in OPT_IN_DECK_VARS:
+        assert f"${var} = nil unless defined? ${var}" in text
+    # The default contract is untouched: nothing opt-in leaked into RULES.
+    assert len(RULE_IDS) == 263
+
+
+def test_docs_list_opt_in_grid_rules_and_vars():
+    section = _docs_asap7_section()
+    for name in (*OPT_IN_RULE_IDS, *OPT_IN_DECK_VARS):
+        assert f"`{name}`" in section, name
+
+
+def _grid_run(tmp_path, shapes, **deck_vars):
+    gds = tmp_path / "grid.gds"
+    fx.write_shapes(str(gds), shapes)
+    report = run_drc_klayout_engine(
+        str(gds), str(DECK_PATH), deck_vars={k: str(v) for k, v in deck_vars.items()}
+    )
+    return {v["rule"] for v in report["violations"]}
+
+
+@_needs_klayout
+def test_grid_rules_do_not_run_without_the_vars(tmp_path):
+    assert _grid_run(tmp_path, fx._move(fx.device(), dx=1, dy=1)) == set()
+
+
+@_needs_klayout
+@pytest.mark.parametrize(
+    ("dx", "dy", "expect"),
+    [
+        (0, 0, set()),
+        (1, 0, {"GATE.GRID.1"}),
+        (0, 1, {"FIN.GRID.1"}),
+        (1, 1, {"GATE.GRID.1", "FIN.GRID.1"}),
+        (54, 27, set()),
+    ],
+)
+def test_grid_rules_flag_a_shifted_cell(tmp_path, dx, dy, expect):
+    # device() draws gates at x 17 + 54k and fins at y 10 + 27k.
+    shapes = fx._move(fx.device(), dx=dx, dy=dy)
+    got = _grid_run(tmp_path, shapes, gate_x_origin_nm=17, fin_y_origin_nm=10)
+    assert got & {"GATE.GRID.1", "FIN.GRID.1"} == expect
+
+
+@_needs_klayout
+def test_grid_rules_honour_a_non_zero_origin(tmp_path):
+    shapes = fx.device()
+    on = _grid_run(tmp_path, shapes, gate_x_origin_nm=17, fin_y_origin_nm=10)
+    off = _grid_run(tmp_path, shapes, gate_x_origin_nm=0, fin_y_origin_nm=0)
+    assert not on & set(OPT_IN_RULE_IDS)
+    assert set(OPT_IN_RULE_IDS) <= off
+
+
+@_needs_klayout
+def test_grid_rules_each_var_enables_only_its_rule(tmp_path):
+    shapes = fx._move(fx.device(), dx=1, dy=1)
+    assert _grid_run(tmp_path, shapes, gate_x_origin_nm=17) == {"GATE.GRID.1"}
+    assert _grid_run(tmp_path, shapes, fin_y_origin_nm=10) == {"FIN.GRID.1"}

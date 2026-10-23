@@ -996,6 +996,10 @@ under `--format json`, an error envelope carrying a stable
 
 A capacity refusal is a fleet-wide condition that usually clears within
 minutes, so the code marks it as **retryable**, unlike a request error.
+The same code also covers the provisioner's shared vCPU-budget refusal
+(`N vCPU already running + ... exceeds BATCH_MAX_VCPU=M ... the spot quota is
+shared with ci-spot`, [#4103](https://github.com/2AMLogic/klayout-tools/issues/4103)),
+so `--capacity-retries` and `batch.capacity_wait_s` wait it out too.
 The shared-fleet concurrency-cap refusal (`N instance(s) already running + 1
 requested exceeds BATCH_MAX_CONCURRENT_INSTANCES=M`,
 [#2917](https://github.com/2AMLogic/klayout-tools/issues/2917)) is the other
@@ -1592,6 +1596,7 @@ but no tagged release contains it yet.
 | --- | --- |
 | `measurements[].expr` | 0.7.0 |
 | `corners.process[].sections[]` (object form) | 0.7.0 |
+| `corners.params` | 0.7.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
@@ -1704,6 +1709,7 @@ release segment:
 | `twoport` ([#3338](https://github.com/2AMLogic/klayout-tools/issues/3338)) | `analysis.kind` is `"twoport"` | `0.7.1` (**mandatory**, see below) |
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
+| `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (warn-and-run like the other non-mandatory entries; the post-run `params_unsupported_worker` check stays) | `0.7.0` |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
@@ -1715,7 +1721,14 @@ An entry whose minimum is `unreleased` has no detector and never counts as
 "every runner is too old".
 
 `decks[]` ([#3303](https://github.com/2AMLogic/klayout-tools/issues/3303)) is
-the next registry entry.
+not a registry row (its capability landed at `0.7.1.dev307`, so a plain
+minimum version cannot express it). It is judged by the same build-string
+check the pre-launch refusal uses and is reported as the `decks` feature in
+`runner_request_features` ([#4109](https://github.com/2AMLogic/klayout-tools/issues/4109)):
+`required` carries `decks` for a non-empty `decks[]`, `missing` is `["decks"]`
+for a runner that predates it (e.g. `0.7.0`), and `status` is `unsupported`,
+`supported`, or `unknown` (`missing: null`) when the runner version cannot be
+established. `runner_compatibility` itself stays a major.minor gate.
 
 - **Before launch**: when every image the AMI manifest publishes predates a
   feature the request uses, the request is refused once with
@@ -6416,6 +6429,24 @@ in a `<variant>/libs.tech/...` tree, the replacement
 `options.stage_model_inputs: true` (the library ships with the job).
 `local`/`local-parallel` accept absolute paths unchanged.
 
+A netlist-body `.lib <file> <section>` line gets the same treatment as
+`.include` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)):
+an absolute path under the submitter's `$PDK_ROOT` is rewritten to
+`$PDK_ROOT/<rel> <section>`; an absolute path outside every PDK root is
+refused at staging (`IncludeStagingError`) instead of dying on the runner with
+`Could not find library file`. `.lib <section>`, `$VAR` and relative targets
+stay verbatim.
+
+`models.pdk_root` that is an existing directory on the submitting host is
+**refused** on the `batch` backend before any S3 write: exit `1`, `error.code`
+`models_pdk_root_host_path`. It is forwarded verbatim and would not exist on the
+runner; drop it and use `models.pdk`. A path that does not exist here is
+assumed runner-valid and passes.
+
+When an off-host run returns no value for a `measurements[].expr` measurement,
+the report's top-level `diagnostics[]` also carries a warning with code
+`expr_runner_may_predate` (the runner image may predate `expr`).
+
 A `$PDK` / `${PDK}` reference in `models.lib` (or a per-section `lib`) is
 refused the same way when the request declares no `models.pdk`
 ([#3917](https://github.com/2AMLogic/klayout-tools/issues/3917)): the runner
@@ -6606,6 +6637,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `engine_aborted`   | The engine exited with a non-zero code (`corners[].engine_exit_code`) without a classifiable cause in its log. (A clean exit that wrote no log, or a non-zero exit with no log file at all, is reported as `unknown` with the exit status and output tail, issue #3016.) Always `error`; accepted by `options.fail_on_diagnostic`. The message carries the exit code and the last ~20 lines of engine stderr/stdout/log, also with `keep_artifacts: false` and on the batch backend. When a corner carries `engine_aborted` or `engine_killed`, its per-measurement `measurement ... produced no value` diagnostics are omitted (the measurement results stay `error`), so `diagnostics[0]` names the cause (issue #3067). |
 | `measurement`      | A declared `.meas` produced no value (missing, not a `"fail"` — see below). |
 | `measurement_absent` | Issue #2925. An `optional: true` measurement produced no value (`severity: "info"`; the measurement is `status: "absent"` and the corner is not graded `error` for it). Selectable in `options.fail_on_diagnostic` to grade a corner `inconclusive` when absence should not be accepted. See "Optional measurements". |
+| `par_call_cap`     | Issue #4084. ngspice aborts a file at its 99-calls-per-file `par()` limit (`ERROR: More than 99 function calls to par()`); every measurement then reports only `produced no value`. Emitted as an `error` classified from the log, and as a `warning` before ngspice runs when the emitted deck holds more than 99 `par(` calls. Workaround: expose the current as a node voltage through a 1 ohm CCVS and `FIND v(node)`, or capture the sweep with `options.waveforms`. |
 | `no_such_vector`   | ngspice's own `Error: no such vector as ...` — emitted *alongside* `measurement` when the missing signal's name never resolved to a vector at all (issue #2521). See "Saved signal set (`save all`)" below for what this can and cannot tell you. |
 | `step_failed`      | An `analysis_steps[]` step's analysis produced no plot of its own (it failed, or the run ended before it) — read from `klt`'s own step markers in the log, never inferred from measurements. The step's own measurements are reported `value: null`/`status: "error"` under this one diagnostic (issue #2482). See "Several solves per corner" above. |
 | `derived_input_unavailable` | A measurement computed from other results (a derived measurement, or a step `expr` reading an earlier step) was **not graded** because at least one of its inputs produced no value in this corner (issue #2482). Distinguishes "an input was missing" from a derived expression that itself failed, which is an ordinary `measurement` diagnostic. |
@@ -6619,6 +6651,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
 | `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |
+| `expr_runner_may_predate` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)): an off-host (`remote`/`batch`) run returned no value for a `measurements[].expr` measurement, so the runner image may predate `expr`; `measurements` lists the affected names. |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `batch_job_interrupted` | The corner's result was never observed: the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than `batch.interrupted_grace_s`, so polling stopped before `poll_timeout_s`. Distinct from `batch_poll_timeout`; the job may still be recoverable on the fleet and the client does not re-launch it. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
@@ -6927,6 +6960,17 @@ being written into `points[]`. This is applied uniformly to every column,
 including the sweep variable (frequency): its imaginary part is always `0`
 in practice, so its magnitude and real part are the same value. `tran`/`dc`
 rawfiles (`Flags: real`) are unaffected and continue to report bare floats.
+
+### Swept families: capture, don't spell out `.meas` cards (issue #4084)
+
+A DC family or AC response is one `options.waveforms: true` run (with
+`options.capture_only: true` when there are no scalar measurements), not one
+`.meas ... AT=` card per point. Per-point `par()` measurements also hit
+ngspice's 99-call cap (`par_call_cap`, above). Two failures that used to
+surface only as `produced no value` now name their cause: a `.meas ac ... AT=`
+on a sweep with fewer than 2 data rows (e.g. `ac lin 2 ...`) says the sweep is
+too sparse and suggests a denser `dec` sweep, and a deck over the `par()` cap
+gets the `par_call_cap` diagnostic.
 
 ## Waveform plots (`--plot <dir>`, issue #1723)
 

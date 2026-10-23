@@ -458,6 +458,27 @@ RULES: tuple[Asap7Rule, ...] = (
 
 RULE_IDS: tuple[str, ...] = tuple(r.id for r in RULES)
 
+#: Opt-in absolute grid-origin rules (#4082). Not in :data:`RULES`: they run
+#: only when the caller declares an origin with the matching ``--deck-var``,
+#: so the default 263-category contract is unchanged. The DRM gives the fin
+#: and gate pitches (Tables 3.3.1 / 3.4.1) but no absolute origin, so the
+#: origin is the caller's; the checked reference is the FIN lower edge and
+#: the GATE left edge.
+OPT_IN_RULES: tuple[tuple[str, str, Asap7Rule], ...] = (
+    (
+        "fin_y_origin_nm",
+        "FIN.GRID.1",
+        Asap7Rule("FIN.GRID.1", "Table 3.3.1"),
+    ),
+    (
+        "gate_x_origin_nm",
+        "GATE.GRID.1",
+        Asap7Rule("GATE.GRID.1", "Table 3.4.1"),
+    ),
+)
+OPT_IN_DECK_VARS: tuple[str, ...] = tuple(v for v, _, _ in OPT_IN_RULES)
+OPT_IN_RULE_IDS: tuple[str, ...] = tuple(r.id for _, _, r in OPT_IN_RULES)
+
 _SRAM = (
     "SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM "
     "says SRAM rules may be waived for other cells"

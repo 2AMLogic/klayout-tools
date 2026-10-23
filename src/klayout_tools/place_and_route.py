@@ -794,6 +794,9 @@ from .place_and_route_request import (
     _validate_io_delay as _validate_io_delay,
 )
 from .place_and_route_request import (
+    _validate_library as _validate_library,
+)
+from .place_and_route_request import (
     _validate_macros as _validate_macros,
 )
 from .place_and_route_request import (
@@ -825,6 +828,9 @@ from .place_and_route_request import (
 )
 from .place_and_route_request import (
     _validate_target_stage as _validate_target_stage,
+)
+from .place_and_route_request import (
+    validate_tech_lef_track_offsets as validate_tech_lef_track_offsets,
 )
 
 # The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
@@ -883,6 +889,9 @@ from .place_and_route_script import (
 )
 from .place_and_route_script import (
     _violation_count_lines as _violation_count_lines,
+)
+from .place_and_route_script import (
+    _wire_rc_lines as _wire_rc_lines,
 )
 from .place_and_route_script import (
     _write_script as _write_script,
@@ -1860,6 +1869,119 @@ def run_place_and_route(
     )
 
 
+def _layer_has_rc(tech_lef: str, layer: str) -> bool:
+    """``True`` unless ``tech_lef`` is readable and its ``layer`` states no
+    ``RESISTANCE RPERSQ`` (an unreadable LEF is not this check's to report)."""
+    try:
+        header = read_lef_header(tech_lef)
+    except Exception:
+        return True
+    for entry in header["layers"]:
+        if entry["name"] == layer:
+            return entry["resistance_rpersq"] is not None
+    return True
+
+
+def _missing_stage_tables(
+    stage_index: int, target_stage: str, cell_library: str, lib: dict[str, Any]
+) -> list[str]:
+    """CTS-buffer / routing-layer-range / antenna-diode gaps for
+    ``target_stage`` (issue #4086: collected, not raised one at a time)."""
+    missing: list[str] = []
+    at_cts = stage_index >= STAGE_ORDER.index("cts")
+    at_route = stage_index >= STAGE_ORDER.index("route")
+    tail = f"-- cannot reach target_stage '{target_stage}'"
+    if at_cts and "cts_buffer" not in lib and cell_library not in _CTS_BUFFER_CELLS:
+        missing.append(
+            f"no clock-tree buffer cell known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_CTS_BUFFER_CELLS))}) "
+            f"{tail} [supply request.library.cts_buffer]"
+        )
+    if at_route and cell_library not in _ROUTING_LAYER_RANGE:
+        missing.append(
+            f"no routing-layer range known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_ROUTING_LAYER_RANGE))}) "
+            f"{tail} [no request override yet]"
+        )
+    if at_route and cell_library not in _ANTENNA_DIODE_CELLS:
+        missing.append(
+            f"no antenna-diode cell known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_ANTENNA_DIODE_CELLS))}) "
+            f"{tail} [no request override yet]"
+        )
+    return missing
+
+
+def _missing_power_tables(
+    stage_index: int,
+    target_stage: str,
+    cell_library: str,
+    lib: dict[str, Any],
+    power: dict[str, Any] | None,
+) -> list[str]:
+    """``request.power`` pin-pattern / tapcell / filler gaps (issue #1091).
+
+    Unconditional on ``stage_index`` for the first two (the PDN/tapcell Tcl
+    runs at the end of ``"floorplan"``). A ``_NO_TAPCELL_LIBRARIES`` library
+    (issue #2441) is the one deliberate tapcell exception: its PDK ships no
+    tap/endcap cells, so the ``tapcell`` line is skipped; a library in
+    *neither* table is "unverified", not "none exist", and is reported.
+    """
+    if power is None:
+        return []
+    missing: list[str] = []
+    if "power_pins" not in lib and cell_library not in _POWER_PIN_PATTERNS:
+        missing.append(
+            f"no power pin-pattern table known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_POWER_PIN_PATTERNS))}) "
+            "-- cannot honor request.power [supply request.library.power_pins]"
+        )
+    if cell_library not in _TAPCELL_CELLS and cell_library not in _NO_TAPCELL_LIBRARIES:
+        missing.append(
+            f"no tapcell master known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_TAPCELL_CELLS))}; "
+            f"libraries with no tap/endcap cells at all: "
+            f"{', '.join(sorted(_NO_TAPCELL_LIBRARIES))}) "
+            "-- cannot honor request.power [no request override yet]"
+        )
+    if stage_index >= STAGE_ORDER.index("route") and cell_library not in _FILLER_CELLS:
+        missing.append(
+            f"no filler-cell masters known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_FILLER_CELLS))}) "
+            f"-- cannot honor request.power at target_stage '{target_stage}' "
+            "[no request override yet]"
+        )
+    return missing
+
+
+def _missing_wire_rc(
+    stage_index: int,
+    cell_library: str,
+    lib: dict[str, Any],
+    io_spec: dict[str, Any] | None,
+    tech_lef: str | None,
+) -> list[str]:
+    """Wire-RC gap, checked only for a library with no built-in table at all
+    (neither CTS nor power-pin), so built-in libraries' runs stay unchanged.
+    ``set_wire_rc -layer`` reads the tech LEF layer's ``RESISTANCE RPERSQ``;
+    without one OpenROAD stops with RSZ-0089 at ``place``."""
+    if (
+        stage_index < STAGE_ORDER.index("place")
+        or io_spec is None
+        or tech_lef is None
+        or "wire_rc" in lib
+        or cell_library in _CTS_BUFFER_CELLS
+        or cell_library in _POWER_PIN_PATTERNS
+        or _layer_has_rc(tech_lef, io_spec["layer_v"])
+    ):
+        return []
+    return [
+        f"tech LEF layer '{io_spec['layer_v']}' carries no resistance, so "
+        f"`set_wire_rc -layer` cannot work (OpenROAD RSZ-0089) "
+        f"[supply request.library.wire_rc]"
+    ]
+
+
 def _validate_stage_prerequisites(
     *,
     stage_index: int,
@@ -1868,6 +1990,8 @@ def _validate_stage_prerequisites(
     clock_port: str | None,
     io_spec: dict[str, Any] | None,
     power: dict[str, Any] | None,
+    library: dict[str, Any] | None = None,
+    tech_lef: str | None = None,
 ) -> None:
     """Fail with a clear request error when ``target_stage`` (or
     ``request.power``) needs inputs or per-library tables this request lacks
@@ -1889,70 +2013,21 @@ def _validate_stage_prerequisites(
             f"request.io.layer_h/layer_v are required to reach target_stage "
             f"'{target_stage}'"
         )
-    if (
-        stage_index >= STAGE_ORDER.index("cts")
-        and cell_library not in _CTS_BUFFER_CELLS
-    ):
+    # Every missing per-library input is collected and reported together
+    # (issue #4086), each naming the `request.library` field that supplies it
+    # (or "no request override yet"), instead of one error per rerun.
+    lib = library or {}
+    missing = _missing_stage_tables(stage_index, target_stage, cell_library, lib)
+    missing += _missing_power_tables(
+        stage_index, target_stage, cell_library, lib, power
+    )
+    missing += _missing_wire_rc(stage_index, cell_library, lib, io_spec, tech_lef)
+    if len(missing) == 1:
+        raise PlaceAndRouteError(missing[0])
+    if missing:
         raise PlaceAndRouteError(
-            f"no clock-tree buffer cell known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_CTS_BUFFER_CELLS))}) "
-            f"-- cannot reach target_stage '{target_stage}'"
-        )
-    if (
-        stage_index >= STAGE_ORDER.index("route")
-        and cell_library not in _ROUTING_LAYER_RANGE
-    ):
-        raise PlaceAndRouteError(
-            f"no routing-layer range known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_ROUTING_LAYER_RANGE))}) "
-            f"-- cannot reach target_stage '{target_stage}'"
-        )
-    if (
-        stage_index >= STAGE_ORDER.index("route")
-        and cell_library not in _ANTENNA_DIODE_CELLS
-    ):
-        raise PlaceAndRouteError(
-            f"no antenna-diode cell known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_ANTENNA_DIODE_CELLS))}) "
-            f"-- cannot reach target_stage '{target_stage}'"
-        )
-    # `request.power` (issue #1091): its own PDN/tapcell Tcl always runs at
-    # the end of the "floorplan" stage (the first stage every run reaches),
-    # so these table lookups are unconditional on `stage_index` -- unlike
-    # the CTS/routing-layer/antenna-diode checks above, which only apply
-    # once a run actually reaches the stage that needs them.
-    if power is not None and cell_library not in _POWER_PIN_PATTERNS:
-        raise PlaceAndRouteError(
-            f"no power pin-pattern table known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_POWER_PIN_PATTERNS))}) "
-            "-- cannot honor request.power"
-        )
-    # A library in `_NO_TAPCELL_LIBRARIES` (issue #2441) is the one
-    # deliberate exception: its PDK states it ships no tap/endcap cells at
-    # all, so `request.power` skips the `tapcell` line and runs every other
-    # power-delivery step. A library in *neither* table still raises -- the
-    # absence there means "unverified", not "none exist".
-    if (
-        power is not None
-        and cell_library not in _TAPCELL_CELLS
-        and cell_library not in _NO_TAPCELL_LIBRARIES
-    ):
-        raise PlaceAndRouteError(
-            f"no tapcell master known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_TAPCELL_CELLS))}; "
-            f"libraries with no tap/endcap cells at all: "
-            f"{', '.join(sorted(_NO_TAPCELL_LIBRARIES))}) "
-            "-- cannot honor request.power"
-        )
-    if (
-        power is not None
-        and stage_index >= STAGE_ORDER.index("route")
-        and cell_library not in _FILLER_CELLS
-    ):
-        raise PlaceAndRouteError(
-            f"no filler-cell masters known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_FILLER_CELLS))}) "
-            f"-- cannot honor request.power at target_stage '{target_stage}'"
+            f"standard-cell library '{cell_library}' is missing "
+            f"{len(missing)} required input(s): " + "; ".join(missing)
         )
     # Row-rail fallback (issue #1442): once `stage_index` reaches `"route"`
     # on a `cell_library` with a verified `_ROW_RAIL_STRAP` entry (`power`
@@ -2058,6 +2133,7 @@ def _run_single_corner(
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
     power = _validate_power(request.get("power"), cell_library)
+    library = _validate_library(request.get("library"))
     (
         clock_port,
         clock_period_ns,
@@ -2085,6 +2161,7 @@ def _run_single_corner(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
+    validate_tech_lef_track_offsets(floorplan, tech_lef)
 
     # Issue #2170: the joint floorplan/PDN pre-flight -- see
     # `_validate_pdn_core_fit`'s own docstring for why it lives outside this
@@ -2108,6 +2185,8 @@ def _run_single_corner(
         clock_port=clock_port,
         io_spec=io_spec,
         power=power,
+        library=library,
+        tech_lef=tech_lef,
     )
 
     output_dir = os.path.join(request_dir, ".klt", "place-and-route")
@@ -2155,6 +2234,7 @@ def _run_single_corner(
             output_dir=output_dir,
             route_critical_nets_percentage=route_critical_nets_percentage,
             max_antenna_repair_iterations=max_antenna_repair_iterations,
+            library=library,
         )
         _write_script(script_path, lines)
 
@@ -2269,6 +2349,7 @@ def _run_single_corner(
                 output_delay_ns=output_delay_ns,
                 output_dir=output_dir,
                 hdl_toplevel=hdl_toplevel,
+                library=library,
             )
 
         stages.append(
