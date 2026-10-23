@@ -6606,6 +6606,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `engine_aborted`   | The engine exited with a non-zero code (`corners[].engine_exit_code`) without a classifiable cause in its log. (A clean exit that wrote no log, or a non-zero exit with no log file at all, is reported as `unknown` with the exit status and output tail, issue #3016.) Always `error`; accepted by `options.fail_on_diagnostic`. The message carries the exit code and the last ~20 lines of engine stderr/stdout/log, also with `keep_artifacts: false` and on the batch backend. When a corner carries `engine_aborted` or `engine_killed`, its per-measurement `measurement ... produced no value` diagnostics are omitted (the measurement results stay `error`), so `diagnostics[0]` names the cause (issue #3067). |
 | `measurement`      | A declared `.meas` produced no value (missing, not a `"fail"` — see below). |
 | `measurement_absent` | Issue #2925. An `optional: true` measurement produced no value (`severity: "info"`; the measurement is `status: "absent"` and the corner is not graded `error` for it). Selectable in `options.fail_on_diagnostic` to grade a corner `inconclusive` when absence should not be accepted. See "Optional measurements". |
+| `par_call_cap`     | Issue #4084. ngspice aborts a file at its 99-calls-per-file `par()` limit (`ERROR: More than 99 function calls to par()`); every measurement then reports only `produced no value`. Emitted as an `error` classified from the log, and as a `warning` before ngspice runs when the emitted deck holds more than 99 `par(` calls. Workaround: expose the current as a node voltage through a 1 ohm CCVS and `FIND v(node)`, or capture the sweep with `options.waveforms`. |
 | `no_such_vector`   | ngspice's own `Error: no such vector as ...` — emitted *alongside* `measurement` when the missing signal's name never resolved to a vector at all (issue #2521). See "Saved signal set (`save all`)" below for what this can and cannot tell you. |
 | `step_failed`      | An `analysis_steps[]` step's analysis produced no plot of its own (it failed, or the run ended before it) — read from `klt`'s own step markers in the log, never inferred from measurements. The step's own measurements are reported `value: null`/`status: "error"` under this one diagnostic (issue #2482). See "Several solves per corner" above. |
 | `derived_input_unavailable` | A measurement computed from other results (a derived measurement, or a step `expr` reading an earlier step) was **not graded** because at least one of its inputs produced no value in this corner (issue #2482). Distinguishes "an input was missing" from a derived expression that itself failed, which is an ordinary `measurement` diagnostic. |
@@ -6927,6 +6928,17 @@ being written into `points[]`. This is applied uniformly to every column,
 including the sweep variable (frequency): its imaginary part is always `0`
 in practice, so its magnitude and real part are the same value. `tran`/`dc`
 rawfiles (`Flags: real`) are unaffected and continue to report bare floats.
+
+### Swept families: capture, don't spell out `.meas` cards (issue #4084)
+
+A DC family or AC response is one `options.waveforms: true` run (with
+`options.capture_only: true` when there are no scalar measurements), not one
+`.meas ... AT=` card per point. Per-point `par()` measurements also hit
+ngspice's 99-call cap (`par_call_cap`, above). Two failures that used to
+surface only as `produced no value` now name their cause: a `.meas ac ... AT=`
+on a sweep with fewer than 2 data rows (e.g. `ac lin 2 ...`) says the sweep is
+too sparse and suggests a denser `dec` sweep, and a deck over the `par()` cap
+gets the `par_call_cap` diagnostic.
 
 ## Waveform plots (`--plot <dir>`, issue #1723)
 
