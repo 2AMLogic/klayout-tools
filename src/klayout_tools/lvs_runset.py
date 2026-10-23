@@ -681,10 +681,100 @@ def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
     }
 
 
-def read_lvsdb_verdict(lvsdb_path: str) -> dict[str, Any]:
+def _empty_extraction_verdict(l2n: Any, reference_path: str | None) -> dict[str, Any]:
+    """Verdict for a db with no cross-reference whose extracted netlist holds
+    no devices: the runset recognized nothing, so its compare step never ran.
+
+    The layout side is empty and every reference device is an unmatched
+    ``device.unmatched`` finding (issue #4081). The reference netlist is the
+    one stored in the db when present, else ``reference_path`` parsed as SPICE.
+    ``{}`` when no reference netlist can be obtained (the caller then raises
+    its "no cross-reference" error).
+    """
+    import klayout.db as kdb
+
+    reference = getattr(l2n, "reference", None)
+    if reference is None and reference_path:
+        try:
+            reference = kdb.Netlist()
+            reference.read(reference_path, kdb.NetlistSpiceReader())
+        except Exception:
+            return {}
+    if reference is None:
+        return {}
+
+    layout_declared, layout_counts = _class_census(l2n.netlist())
+    ref_declared, ref_counts = _class_census(reference)
+    mismatches: list[dict[str, Any]] = []
+    for circuit in reference.each_circuit():
+        cname = {"layout": None, "reference": circuit.name}
+        for device in circuit.each_device():
+            cls = device.device_class().name
+            mismatches.append(
+                _mismatch(
+                    "device.unmatched",
+                    "error",
+                    f"reference device '{_device_label(device)}' (class "
+                    f"'{cls}') has no counterpart: the runset extracted no "
+                    "devices from the layout",
+                    "reference",
+                    device={
+                        "layout": None,
+                        "reference": _device_label(device),
+                        "class": cls,
+                    },
+                    circuit=cname,
+                )
+            )
+    nothing = not ref_counts
+    if nothing:
+        mismatches.append(
+            _mismatch(
+                CATEGORY_NO_DEVICES,
+                "error",
+                "the runset recognized no devices on either side -- an "
+                "empty compare is not a verdict",
+                "both",
+            )
+        )
+    top_circuits = list(reference.top_circuits())
+    layout_netlist = l2n.netlist()
+    layout_tops = list(layout_netlist.top_circuits()) if layout_netlist else []
+    return {
+        "status": STATUS_INCONCLUSIVE if nothing else STATUS_MISMATCH,
+        "mismatches": mismatches,
+        "power_connectivity": runset_power_connectivity(layout_netlist),
+        "coverage": _build_coverage(
+            layout_declared, ref_declared, layout_counts, ref_counts
+        ),
+        "device_census": {"layout": layout_counts, "reference": ref_counts},
+        "counts": {
+            "nets": {"layout": 0, "reference": 0, "matched": 0},
+            "devices": {
+                "layout": 0,
+                "reference": sum(ref_counts.values()),
+                "matched": 0,
+            },
+            "pins": {"layout": 0, "reference": 0, "matched": 0},
+        },
+        "net_correspondence": [],
+        "top": layout_tops[0].name if layout_tops else None,
+        "reference_top": top_circuits[0].name if top_circuits else None,
+    }
+
+
+def read_lvsdb_verdict(
+    lvsdb_path: str, reference_path: str | None = None
+) -> dict[str, Any]:
     """Read ``lvsdb_path`` and derive the verdict, mismatches, census and
     coverage from its cross-reference. Raises ``LvsError`` when the database
-    is unreadable or carries no cross-reference."""
+    is unreadable or carries no cross-reference.
+
+    A db with no cross-reference *and no extracted layout devices* (the runset
+    recognized nothing, so it never compared) is graded instead: see
+    :func:`_empty_extraction_verdict`. ``reference_path`` is the reference
+    SPICE, used when the db does not carry the reference netlist.
+    """
     import klayout.db as kdb
 
     from .lvs import LvsError
@@ -698,6 +788,11 @@ def read_lvsdb_verdict(lvsdb_path: str) -> dict[str, Any]:
             f"could not read the runset's .lvsdb database '{lvsdb_path}': {exc}"
         ) from exc
     if xref is None or xref.circuit_count() == 0:
+        extracted = l2n.netlist()
+        if extracted is not None and not _class_census(extracted)[1]:
+            verdict = _empty_extraction_verdict(l2n, reference_path)
+            if verdict:
+                return verdict
         raise LvsError(
             "the runset's .lvsdb database carries no layout-vs-schematic "
             "cross-reference (the runset extracted the layout but did not "
@@ -777,7 +872,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             work_dir=work_dir,
         )
         try:
-            verdict = read_lvsdb_verdict(lvsdb_path)
+            verdict = read_lvsdb_verdict(lvsdb_path, reference)
         except LvsError as exc:
             if completed.returncode == 0:
                 raise

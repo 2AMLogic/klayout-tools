@@ -37,7 +37,9 @@ def _make_gds(path: str, n_dev: int) -> None:
     ly.write(path)
 
 
-def _write_lvsdb(gds: str, schem: str, out: str, extract: bool = True) -> None:
+def _write_lvsdb(
+    gds: str, schem: str, out: str, extract: bool = True, compare: bool = True
+) -> None:
     ly = kdb.Layout()
     ly.read(gds)
     l2n = kdb.LayoutVsSchematic(kdb.RecursiveShapeIterator(ly, ly.top_cell(), []))
@@ -58,14 +60,21 @@ def _write_lvsdb(gds: str, schem: str, out: str, extract: bool = True) -> None:
     ref = kdb.Netlist()
     ref.read(schem, kdb.NetlistSpiceReader())
     l2n.reference = ref
-    l2n.compare(kdb.NetlistComparer())
+    if compare:
+        l2n.compare(kdb.NetlistComparer())
     l2n.write(out)
 
 
 @pytest.fixture
 def fake_klayout(monkeypatch, tmp_path):
     """Replace the subprocess boundary; ``state`` controls the fake runset."""
-    state = {"returncode": 0, "write_db": True, "extract": True, "stdout": ""}
+    state = {
+        "returncode": 0,
+        "write_db": True,
+        "extract": True,
+        "compare": True,
+        "stdout": "",
+    }
     fake_bin = tmp_path / "klayout"
     fake_bin.write_text("#!/bin/sh\n")
     fake_bin.chmod(0o755)
@@ -81,7 +90,11 @@ def fake_klayout(monkeypatch, tmp_path):
         state["cmd"] = cmd
         if state["write_db"]:
             _write_lvsdb(
-                args["input"], args["schematic"], args["report"], state["extract"]
+                args["input"],
+                args["schematic"],
+                args["report"],
+                state["extract"],
+                state["compare"],
             )
         # The driver exits 0 even when the netlists do not match.
         return subprocess.CompletedProcess(
@@ -155,6 +168,49 @@ def test_zero_devices_recognized_is_not_clean(tmp_path, fake_klayout):
     )
 
 
+def test_empty_extraction_without_compare_is_a_graded_mismatch(tmp_path, fake_klayout):
+    # The runset recognized nothing, so it never compared (issue #4081).
+    fake_klayout["extract"] = False
+    fake_klayout["compare"] = False
+    report = run_lvs(_request(tmp_path, 1))
+    assert report["status"] == "mismatch"
+    assert report["device_census"] == {"layout": {}, "reference": {"NMOS": 1}}
+    assert report["error_count"] > 0
+    unmatched = [m for m in report["mismatches"] if m["category"] == "device.unmatched"]
+    assert len(unmatched) == 1
+    assert unmatched[0]["side"] == "reference"
+    assert unmatched[0]["device"]["class"] == "NMOS"
+    assert report["counts"]["devices"] == {"layout": 0, "reference": 1, "matched": 0}
+    assert coverage_validation_error(report["coverage"]) is None
+    assert report["coverage"]["recognized_device_classes"]["reference"] == ["NMOS"]
+    assert "declared_not_recognized" in report["coverage"]
+
+
+def test_empty_extraction_without_compare_and_empty_reference_stays_inconclusive(
+    tmp_path, fake_klayout
+):
+    fake_klayout["extract"] = False
+    fake_klayout["compare"] = False
+    sp = tmp_path / "empty.sp"
+    sp.write_text(".subckt TOP\n.ends\n")
+    req = json.loads(_request(tmp_path, 1))
+    req["reference"]["netlist"] = str(sp)
+    report = run_lvs(json.dumps(req))
+    assert report["status"] == "inconclusive"
+    assert report["coverage"]["nothing_checked"] is True
+    assert any(
+        m["category"] == "coverage.no_devices_recognized" for m in report["mismatches"]
+    )
+
+
+def test_no_cross_reference_with_extracted_devices_is_still_an_error(
+    tmp_path, fake_klayout
+):
+    fake_klayout["compare"] = False  # devices extracted, but never compared
+    with pytest.raises(LvsError, match="no layout-vs-schematic cross-reference"):
+        run_lvs(_request(tmp_path, 1))
+
+
 def test_nonzero_exit_is_an_error(tmp_path, fake_klayout):
     fake_klayout["write_db"] = False  # crashed before writing a db
     fake_klayout["returncode"] = 1
@@ -195,7 +251,7 @@ def test_nonzero_exit_with_unusable_database_is_an_error(
     fake_klayout["returncode"] = 1
     fake_klayout["stdout"] = "ERROR: died after extraction\n"
 
-    def no_xref(path):
+    def no_xref(path, reference=None):
         raise LvsError("database has no cross-reference")
 
     monkeypatch.setattr(lvs_runset, "read_lvsdb_verdict", no_xref)
