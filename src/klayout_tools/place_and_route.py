@@ -826,6 +826,9 @@ from .place_and_route_request import (
 from .place_and_route_request import (
     _validate_target_stage as _validate_target_stage,
 )
+from .place_and_route_request import (
+    validate_tech_lef_track_offsets as validate_tech_lef_track_offsets,
+)
 
 # The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
 # `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
@@ -2085,6 +2088,7 @@ def _run_single_corner(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
+    validate_tech_lef_track_offsets(floorplan, tech_lef)
 
     # Issue #2170: the joint floorplan/PDN pre-flight -- see
     # `_validate_pdn_core_fit`'s own docstring for why it lives outside this

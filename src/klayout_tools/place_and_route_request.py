@@ -491,7 +491,81 @@ def _validate_floorplan(floorplan: Any) -> dict[str, Any]:
                     "[llx, lly, urx, ury]"
                 )
 
+    if floorplan.get("tracks") is not None:
+        _validate_floorplan_tracks(floorplan["tracks"])
+
     return dict(floorplan)
+
+
+_TRACK_KEYS = ("x_offset_um", "x_pitch_um", "y_offset_um", "y_pitch_um")
+
+
+def _validate_floorplan_tracks(tracks: Any) -> None:
+    """Issue #4088: validate ``request.floorplan.tracks``, the optional
+    per-layer ``make_tracks`` definitions that replace the bare
+    ``make_tracks`` (which aborts on a tech LEF with a negative ``OFFSET``)."""
+
+    if not isinstance(tracks, list) or not tracks:
+        raise PlaceAndRouteError(
+            "request.floorplan.tracks must be a non-empty array of objects"
+        )
+    seen: set[str] = set()
+    for index, entry in enumerate(tracks):
+        where = f"request.floorplan.tracks[{index}]"
+        if not isinstance(entry, dict):
+            raise PlaceAndRouteError(f"{where} must be a JSON object")
+        layer = entry.get("layer")
+        if not isinstance(layer, str) or not layer:
+            raise PlaceAndRouteError(f"{where}.layer must be a non-empty string")
+        if layer in seen:
+            raise PlaceAndRouteError(
+                f"request.floorplan.tracks names layer '{layer}' more than once"
+            )
+        seen.add(layer)
+        for key in _TRACK_KEYS:
+            value = entry.get(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise PlaceAndRouteError(f"{where}.{key} must be a finite number")
+            if key.endswith("pitch_um") and value <= 0:
+                raise PlaceAndRouteError(f"{where}.{key} must be > 0")
+            if key.endswith("offset_um") and value < 0:
+                raise PlaceAndRouteError(f"{where}.{key} must be >= 0")
+
+
+def validate_tech_lef_track_offsets(
+    floorplan: dict[str, Any], tech_lef: str | None
+) -> None:
+    """Issue #4088: reject, before OpenROAD launches, a tech LEF whose routing
+    layers declare a negative ``OFFSET`` (legal LEF, but the bare
+    ``make_tracks`` aborts with IFP-0039 on it) unless ``floorplan.tracks``
+    takes over track creation. Skipped when the LEF cannot be read here --
+    the engine reports that itself."""
+
+    if floorplan.get("tracks") is not None or not tech_lef:
+        return
+    try:
+        header = read_lef_header(tech_lef)
+    except OSError:
+        return
+    offenders = []
+    for layer in header.get("layers", []):
+        if layer.get("type") != "ROUTING":
+            continue
+        for axis in ("x", "y"):
+            offset = layer.get(f"offset_{axis}_um")
+            if offset is not None and offset < 0:
+                offenders.append(f"{layer['name']} ({axis} OFFSET {offset:g})")
+    if offenders:
+        raise PlaceAndRouteError(
+            "tech LEF declares a negative OFFSET on routing layer(s) "
+            + ", ".join(offenders)
+            + "; OpenROAD's automatic make_tracks rejects that (IFP-0039). "
+            "Set request.floorplan.tracks to give explicit per-layer tracks"
+        )
 
 
 def _signal_routing_layers(cell_library: str) -> tuple[str, ...] | None:

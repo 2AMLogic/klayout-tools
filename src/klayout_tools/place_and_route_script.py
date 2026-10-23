@@ -150,6 +150,18 @@ def _io_delay_lines(
     return lines
 
 
+def _make_tracks_lines(floorplan: dict[str, Any]) -> list[str]:
+    tracks = floorplan.get("tracks")
+    if not tracks:
+        return ["make_tracks"]
+    return [
+        f"make_tracks {t['layer']} -x_offset {t['x_offset_um']} "
+        f"-x_pitch {t['x_pitch_um']} -y_offset {t['y_offset_um']} "
+        f"-y_pitch {t['y_pitch_um']}"
+        for t in tracks
+    ]
+
+
 def _floorplan_init_lines(floorplan: dict[str, Any]) -> list[str]:
     method = floorplan["method"]
     if method == "def":
@@ -708,7 +720,7 @@ def _stage_script_lines(
             f"-orientation {macro['orientation']} -exact"
             for macro in macros
         ]
-        lines += ["make_tracks"]
+        lines += _make_tracks_lines(floorplan)
         # `request.power` (issue #1091): tapcell + PDN Tcl, right after
         # `place_macro`/`make_tracks` and before this stage's own
         # `write_db` -- the same insertion point OpenROAD-flow-scripts
