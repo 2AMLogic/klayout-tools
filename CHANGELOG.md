@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt artifact`: manifest `uri`s are logical `artifact:<key>` names**
+  (issue #4069, operator ruling H1 in 2AMLogic/2am#5553, documented in
+  [`docs/cli/artifact.md`](docs/cli/artifact.md)). `put` writes
+  `"uri": "artifact:<key>"` with the broker's key verbatim, so a manifest
+  never names a storage bucket. `--bucket`, `$KLT_ARTIFACT_BUCKET` and the
+  `bucket_unconfigured` error are removed. `get` and `verify` refuse any
+  other `uri` scheme, `s3://` included, as `invalid_manifest`; the
+  uri-key-equals-broker-key and sha256 checks are unchanged. No manifest in
+  the old form was ever committed, so there is no compatibility path.
+
 - **`klt artifact put|get|verify`** (issue #4063, documented in
   [`docs/cli/artifact.md`](docs/cli/artifact.md)): new verb. A client for the
   fleet artifact store's broker. `put` uploads over a presigned URL with

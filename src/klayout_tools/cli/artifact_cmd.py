@@ -53,7 +53,6 @@ def run_put(args: argparse.Namespace) -> int:
             version=args.producer_version,
             commit=args.commit,
         )
-        bucket = args.bucket or os.environ.get(store.ENV_BUCKET)
         results = [
             store.put_file(
                 client,
@@ -61,7 +60,6 @@ def run_put(args: argparse.Namespace) -> int:
                 repo=repo,
                 producer=producer,
                 kind=args.kind,
-                bucket=bucket,
                 name=args.name,
                 media_type=args.media_type,
             )
