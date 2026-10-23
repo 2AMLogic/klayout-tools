@@ -2911,7 +2911,7 @@ def _resolve_verilog_top(
 
 def _resolve_testbench_target(
     verilog_tb: dict[str, str | None] | None, testbench: Any, request_dir: str
-) -> tuple[str, str, str | None]:
+) -> tuple[str, str, str | list[str] | None]:
     """``(module, module_dir, testcase)`` for either testbench form."""
     if verilog_tb is None:
         return _resolve_testbench(testbench, request_dir)
