@@ -1023,7 +1023,7 @@ class _Stager:
             return f'{match.group("prefix")}"{name}"'
 
         if item.mode != _MODE_MODEL:
-            return None
+            return self._rewrite_netlist_lib(body, item, index, decodable)
         lib_match = _LIB_RE.match(body)
         if lib_match is None:
             return None
@@ -1042,6 +1042,44 @@ class _Stager:
             where=f"referenced by `.lib` in '{local_path}' line {index}",
         )
         return f'{lib_match.group("prefix")} "{name}" {section}'
+
+    def _rewrite_netlist_lib(
+        self, body: str, item: _Pending, index: int, decodable: bool
+    ) -> str | None:
+        """Rewrite a netlist-body ``.lib <file> <section>`` the way ``.include``
+        is (issue #4097): an absolute path under this host's ``$PDK_ROOT``
+        becomes ``$PDK_ROOT/<rel>``; an absolute submitter-local path outside
+        every PDK root is refused, since the runner cannot read it. One-token
+        ``.lib <section>``, ``$VAR`` and relative targets stay verbatim."""
+        lib_match = _LIB_RE.match(body)
+        if lib_match is None:
+            return None
+        try:
+            tokens = shlex.split(lib_match.group("rest"))
+        except ValueError:
+            return None
+        if len(tokens) != 2:
+            return None
+        target, section = tokens
+        env_form = self._client_pdk_root_form(target, origin=item.local_path)
+        if env_form is not None:
+            self._require_decodable(item, index, decodable)
+            self.host_resolved.append(env_form)
+            self.host_resolved_detail.append((env_form, "env_var"))
+            return f'{lib_match.group("prefix")} "{env_form}" {section}'
+        expanded = os.path.expanduser(target)
+        if "$" in target or not os.path.isabs(expanded):
+            return None
+        if self._resolve(target, origin=item.local_path) is None:
+            return None  # under a forwarded root: the executing host owns it
+        raise IncludeStagingError(
+            f"netlist '{item.local_path}' line {index}: `.lib` target "
+            f"{target!r} is an absolute path on this host that is not under "
+            "$PDK_ROOT, so the runner cannot read it (the job would die with "
+            "`Could not find library file`). Name it under the PDK root or "
+            "through an environment variable (e.g. `$PDK_ROOT/...`), or add "
+            "the section via corners.process[].sections[]"
+        )
 
     @staticmethod
     def _require_decodable(item: _Pending, index: int, decodable: bool) -> None:

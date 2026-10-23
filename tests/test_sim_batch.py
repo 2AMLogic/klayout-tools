@@ -7868,3 +7868,40 @@ def test_capacity_watch_throttles_to_the_heartbeat_interval():
     assert len(lines) == 3
     assert "3 of 3 shards pending" in lines[0]
     assert "(last refusal: batch_no_capacity)" in lines[0]
+
+
+def test_models_pdk_root_local_directory_is_refused(tmp_path):
+    request = _lib_request(
+        tmp_path, models={"pdk": "gf180mcuD", "pdk_root": str(tmp_path)}
+    )
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_pdk_root_host_path"
+
+
+def test_models_pdk_root_runner_only_path_passes(tmp_path):
+    sb._validate_batch_pdk_root({"models": {"pdk_root": "/runner/only/pdks"}})
+    sb._validate_batch_pdk_root({"models": {"pdk": "sky130A"}})
+
+
+def test_corners_params_is_a_registry_feature():
+    request = {"corners": {"params": {"vdd": [1.6, 1.8]}}}
+    assert sb._request_features(request) == ["corners.params"]
+    assert sb._missing_runner_features(["corners.params"], "0.6.0") == [
+        "corners.params"
+    ]
+    assert sb._missing_runner_features(["corners.params"], None) is None
+
+
+def test_expr_no_value_offhost_carries_runner_hint():
+    report: dict = {}
+    corners = [{"measurements": [{"name": "v", "value": None}]}]
+    sim._attach_expr_runner_hint(
+        report, [{"name": "v", "expr": "v(out)"}], corners, backend="batch"
+    )
+    assert report["diagnostics"][0]["code"] == "expr_runner_may_predate"
+    local: dict = {}
+    sim._attach_expr_runner_hint(
+        local, [{"name": "v", "expr": "v(out)"}], corners, backend="local"
+    )
+    assert local == {}

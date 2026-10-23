@@ -328,6 +328,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # Report-level (top-level `diagnostics[]`, issue #2901): batch runner
         # predates request fields, under `runner_version_check: "warn"`.
         "batch_runner_request_feature_predated",
+        # Report-level (top-level `diagnostics[]`, issue #4097): an off-host
+        # `measurements[].expr` produced no value; the runner may predate it.
+        "expr_runner_may_predate",
     }
 )
 
@@ -4300,6 +4303,7 @@ def _run_sim_corners(
         # Additive/optional (issue #2901): only present when a batch runner
         # predates a request feature under `runner_version_check: "warn"`.
         report["diagnostics"] = [request_feature_diagnostic]
+    _attach_expr_runner_hint(report, measurements_spec, corners, backend=backend)
     _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
         # Additive/optional: only present when `--plot`/`plot_dir` was
@@ -13090,6 +13094,56 @@ def _monte_carlo_rollup(
         for corner_id, pairs in grouped.items()
     ]
     return rollup
+
+
+EXPR_RUNNER_MAYBE_OLD_CODE = "expr_runner_may_predate"
+
+
+def _attach_expr_runner_hint(
+    report: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    corners: list[dict[str, Any]],
+    *,
+    backend: str | None,
+) -> None:
+    """Additive/optional (issue #4097): on an off-host run, a
+    ``measurements[].expr`` measurement that came back with no value may mean
+    the runner image predates ``expr`` (its version compare is major.minor
+    only, so the pre-launch check cannot prove it). Name that suspect beside
+    the per-measurement "produced no value"."""
+    if backend not in _OFFHOST_BACKENDS:
+        return
+    expr_names = {
+        spec["name"]
+        for spec in measurements_spec
+        if isinstance(spec, dict) and spec.get("expr") is not None and "name" in spec
+    }
+    if not expr_names:
+        return
+    silent = sorted(
+        {
+            m["name"]
+            for corner in corners
+            for m in corner.get("measurements") or []
+            if m.get("name") in expr_names and m.get("value") is None
+        }
+    )
+    if not silent:
+        return
+    report.setdefault("diagnostics", []).append(
+        {
+            "code": EXPR_RUNNER_MAYBE_OLD_CODE,
+            "severity": "warning",
+            "message": (
+                f"measurements[].expr measurement(s) {', '.join(silent)} "
+                "produced no value on the off-host runner, which may predate "
+                "`expr` (runner may predate expr; compare "
+                "environment.remote.runner_klt_version with the client "
+                "version and rebuild the runner image if older)"
+            ),
+            "measurements": silent,
+        }
+    )
 
 
 def _attach_not_reached_count(

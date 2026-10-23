@@ -1592,6 +1592,7 @@ but no tagged release contains it yet.
 | --- | --- |
 | `measurements[].expr` | 0.7.0 |
 | `corners.process[].sections[]` (object form) | 0.7.0 |
+| `corners.params` | 0.7.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
@@ -1704,6 +1705,7 @@ release segment:
 | `twoport` ([#3338](https://github.com/2AMLogic/klayout-tools/issues/3338)) | `analysis.kind` is `"twoport"` | `0.7.1` (**mandatory**, see below) |
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
+| `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (warn-and-run like the other non-mandatory entries; the post-run `params_unsupported_worker` check stays) | `0.7.0` |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
@@ -6416,6 +6418,24 @@ in a `<variant>/libs.tech/...` tree, the replacement
 `options.stage_model_inputs: true` (the library ships with the job).
 `local`/`local-parallel` accept absolute paths unchanged.
 
+A netlist-body `.lib <file> <section>` line gets the same treatment as
+`.include` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)):
+an absolute path under the submitter's `$PDK_ROOT` is rewritten to
+`$PDK_ROOT/<rel> <section>`; an absolute path outside every PDK root is
+refused at staging (`IncludeStagingError`) instead of dying on the runner with
+`Could not find library file`. `.lib <section>`, `$VAR` and relative targets
+stay verbatim.
+
+`models.pdk_root` that is an existing directory on the submitting host is
+**refused** on the `batch` backend before any S3 write: exit `1`, `error.code`
+`models_pdk_root_host_path`. It is forwarded verbatim and would not exist on the
+runner; drop it and use `models.pdk`. A path that does not exist here is
+assumed runner-valid and passes.
+
+When an off-host run returns no value for a `measurements[].expr` measurement,
+the report's top-level `diagnostics[]` also carries a warning with code
+`expr_runner_may_predate` (the runner image may predate `expr`).
+
 A `$PDK` / `${PDK}` reference in `models.lib` (or a per-section `lib`) is
 refused the same way when the request declares no `models.pdk`
 ([#3917](https://github.com/2AMLogic/klayout-tools/issues/3917)): the runner
@@ -6619,6 +6639,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
 | `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |
+| `expr_runner_may_predate` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)): an off-host (`remote`/`batch`) run returned no value for a `measurements[].expr` measurement, so the runner image may predate `expr`; `measurements` lists the affected names. |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `batch_job_interrupted` | The corner's result was never observed: the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than `batch.interrupted_grace_s`, so polling stopped before `poll_timeout_s`. Distinct from `batch_poll_timeout`; the job may still be recoverable on the fleet and the client does not re-launch it. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
