@@ -161,7 +161,8 @@ def run_extract_klayout_engine(
 
     Returns a dict shaped closely enough to :func:`run_extract`'s own
     ``devices``/``device_counts`` fields to compare directly (see
-    ``docs/cli/extract.md``): ``{"schema_version": 2, "file": {"path": <repo-relative path>, "scope": "repo"} (issue #2659), "deck":
+    ``docs/cli/extract.md``): ``{"schema_version": 2, "file": {"path":
+    <repo-relative path>, "scope": "repo"} (issue #2659), "deck":
     lvs_deck_file, "engine": "klayout", "top": <resolved top cell name>,
     "device_count": int, "device_counts": {<class name>: int, ...},
     "devices": [{"name": str, "class": str, "params": {<name>: float,
