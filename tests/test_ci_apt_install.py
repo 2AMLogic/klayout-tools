@@ -911,6 +911,26 @@ def _step_text(workflow_text: str, name: str) -> str:
     return steps[0]
 
 
+def test_yosys_apt_step_is_gated_on_a_yosys_cache_miss():
+    """Issue #4100: the Yosys build prerequisites are only needed to compile
+    Yosys, and the compile step is already skipped on a cache hit. The apt
+    step must therefore run after the cache step and only on a miss, so a
+    warm-cache leg never touches the (flaky) apt mirror."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    apt_step = _step_text(text, "Install Yosys build dependencies")
+
+    assert re.search(
+        r"^        if: steps\.yosys-cache\.outputs\.cache-hit != 'true'$",
+        apt_step,
+        re.MULTILINE,
+    ), "Yosys apt step must be skipped on a cache hit"
+
+    cache_pos = text.index("name: Cache pinned Yosys build")
+    apt_pos = text.index("name: Install Yosys build dependencies")
+    assert "id: yosys-cache" in _step_text(text, "Cache pinned Yosys build")
+    assert cache_pos < apt_pos, "Yosys cache step must precede the apt step"
+
+
 def test_yosys_step_widens_the_retry_budget_for_its_large_cmake_download():
     """Issue #1224 (post-#1226): `cmake` (11.2 MB) repeatedly got killed
     mid-download by the script's shared default budget, sized for the much
