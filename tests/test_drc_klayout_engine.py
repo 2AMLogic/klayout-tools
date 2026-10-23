@@ -252,8 +252,10 @@ def test_klayout_engine_clean_report(tmp_path, monkeypatch):
 
     report = run_drc_klayout_engine(gds, deck_file)
 
-    assert report["schema_version"] == 2
-    assert report["file"] == gds
+    assert report["schema_version"] == 3
+    # Issue #2659: the `{path, scope}` envelope. `tmp_path` is outside any
+    # repo here, so the absolute path is dropped rather than echoed.
+    assert report["file"] == {"path": None, "scope": "external"}
     assert report["deck"] == deck_file
     assert report["engine"] == "klayout"
     assert report["dbu_um"] == 0.001
@@ -1897,6 +1899,46 @@ def test_cli_klayout_engine_real_binary_resolves_sg13cmos5l_via_pdk_flags(
 
 
 # --------------------------------------------------------------------------- #
+# Issue #2659: `file` is the portable `{path, scope}` envelope on *both*
+# response builders. The two engines' envelopes are read generically by a
+# `klt signoff` citation, so they must not drift apart on this field.
+# --------------------------------------------------------------------------- #
+
+
+def test_klayout_engine_file_is_repo_relative_inside_a_repo(tmp_path, monkeypatch):
+    """A layout inside a repo is echoed as `{path, scope: "repo"}` -- the
+    same shape the curated engine's own response builder emits, so a
+    committed envelope is re-verifiable from any clone whichever engine
+    produced it (issue #2659)."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    root = tmp_path / "fake-repo"
+    (root / ".git").mkdir(parents=True)
+    gds = _write_gds(root / "test.gds")
+    deck_file = _write_deck_file(root / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["schema_version"] == 3
+    assert report["file"] == {"path": "test.gds", "scope": "repo"}
+    # `deck` is untouched: it is pinned by `provenance.deck.content_hash`,
+    # not by `provenance.input`, and for this engine it is the deck script's
+    # own path rather than a curated deck name.
+    assert report["deck"] == deck_file
+
+
+def test_klayout_engine_file_is_external_outside_any_repo(tmp_path, monkeypatch):
+    """Outside any repo the absolute path is dropped rather than leaked
+    (issue #2659) -- `scope: "external"`, `path: null`."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["file"] == {"path": None, "scope": "external"}
+
+
+# --------------------------------------------------------------------------- #
 # Opt-in rule-category coverage assertion (issue #2697)
 # --------------------------------------------------------------------------- #
 
@@ -1909,6 +1951,22 @@ _DUPLICATE_CATEGORIES_RDB = _CLEAN_WITH_CATEGORIES_RDB.replace(
 
 
 def _assert_setup(tmp_path):
+    """The engine tests' standard gds+deck pair.
+
+    Seeds a `.git` marker so `tmp_path` resolves as this run's own repo root
+    (`env_provenance.find_repo_root` only checks for a `.git` entry): since
+    issue #2659 the echoed `file` is the committable `{path, scope}` envelope,
+    and `klt drc --check`/`--rerun` can only re-verify a `scope: "repo"`
+    report. A bare `tmp_path` records the degenerate external branch -- no
+    locatable input -- which makes every rerun test below fail with
+    "committed report has no 'file' field to rerun". Seeding the marker puts
+    these tests in the realistic position of a design inside a repo (the
+    convention `tests/test_drc.py` applies module-wide via its `tmp_path`
+    override); the external branch stays pinned by
+    `test_klayout_engine_file_is_external_outside_any_repo`, which works on
+    plain `tmp_path` without this helper.
+    """
+    (tmp_path / ".git").mkdir(exist_ok=True)
     return (
         _write_gds(tmp_path / "test.gds"),
         _write_deck_file(tmp_path / "deck.lydrc"),
@@ -2124,6 +2182,10 @@ def test_request_document_expect_rule_categories(tmp_path, monkeypatch, capsys, 
 
 def test_expect_rule_categories_report_check_and_rerun(tmp_path, monkeypatch, capsys):
     _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    # Issue #2659: a bare `tmp_path` input records `scope: "external"` (no
+    # locatable path), which `--check`/`--rerun` cannot verify; a `.git`
+    # marker makes it a repo-scoped input, as committed evidence always is.
+    (tmp_path / ".git").mkdir()
     gds, deck = _assert_setup(tmp_path)
     report_path = tmp_path / "report.json"
     assert (
@@ -2961,6 +3023,9 @@ def test_directory_deck_records_tree_identity_that_tracks_includes(tmp_path):
 def test_directory_deck_provenance_and_check_detect_helper_drift(
     tmp_path, monkeypatch, capsys
 ):
+    # In-repo position (issue #2659): outside a repo `file` is `path: null`,
+    # which `--check` cannot re-hash and so reports as drift.
+    (tmp_path / ".git").mkdir(exist_ok=True)
     gds = _write_gds(tmp_path / "test.gds")
     deck = _tree_deck(tmp_path)
     real_run = subprocess.run

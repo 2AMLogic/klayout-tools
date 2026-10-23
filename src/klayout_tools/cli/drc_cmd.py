@@ -69,6 +69,7 @@ from ..drc import (
     run_drc_klayout_engine,
 )
 from ..drc_crosscheck import crosscheck_exit_code, run_drc_crosscheck
+from ..env_provenance import render_path_field
 from . import _request_document as reqdoc
 from .output import emit_error, emit_success, render_rerun_drift
 
@@ -600,7 +601,9 @@ def _print_rule_list(listing: dict) -> None:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    # `file` is the `{path, scope}` object (issue #2659) -- rendered via the
+    # same courtesy helper `klt sim`/`klt pex` use, never the absolute path.
+    print(f"file: {render_path_field(report['file'])}")
     print(f"deck: {report['deck']}")
     if "engine" in report:
         print(f"engine: {report['engine']}")

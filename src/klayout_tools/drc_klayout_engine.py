@@ -34,7 +34,10 @@ from .drc import (
     CODE_KLAYOUT_VERSION_TOO_OLD,
     CODE_MULTIPLE_TOP_CELLS,
     CODE_NEGATIVE_CONTROL_FAILED,
+    SCHEMA_VERSION,
     DrcError,
+    _report_path,
+    _report_repo_root,
 )
 from .pdk import PdkNotFoundError, find_pdk
 
@@ -1734,8 +1737,10 @@ def run_drc_klayout_engine(
     deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
     return {
-        "schema_version": 2,
-        "file": path,
+        "schema_version": SCHEMA_VERSION,
+        # Issue #2659: same `{path, scope}` normalization the curated engine's
+        # own response builder applies -- see `drc._report_path`.
+        "file": _report_path(path, repo_root=_report_repo_root(path)),
         "deck": deck_file,
         "engine": "klayout",
         # Additive, and present *only* when --allow-deck-errors actually

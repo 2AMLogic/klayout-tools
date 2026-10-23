@@ -2181,7 +2181,7 @@ absolute host path). Additive; `content_hash` remains authoritative.
 are plain absolute-path strings, not the `{path, scope}` envelope
 `klt synthesize`/`klt pex`/`klt sim`/`klt size` report their own output
 paths as. This is a deliberate, documented split, not an oversight —
-see `docs/json-contract.md`'s "Output-artifact path fields: envelope vs.
+see `docs/json-contract.md`'s "Path fields: envelope vs.
 plain string" for the full enumeration and rationale.
 
 | Field | Type | Description |
