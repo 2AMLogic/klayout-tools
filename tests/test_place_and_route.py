@@ -11155,3 +11155,101 @@ def test_portable_paths_must_be_boolean(tmp_path, monkeypatch):
 
     with pytest.raises(PlaceAndRouteError, match="portable_paths must be a boolean"):
         run_place_and_route(request_path)
+
+
+# --------------------------------------------------------------------------- #
+# `floorplan.tracks` + negative-OFFSET tech LEF preflight (issue #4088).
+# --------------------------------------------------------------------------- #
+
+_TRACKS_FLOORPLAN = {
+    "method": "utilization",
+    "utilization_pct": 40,
+    "site": "asap7sc7p5t",
+}
+_GOOD_TRACK = {
+    "layer": "M2",
+    "x_offset_um": 0.0,
+    "x_pitch_um": 0.048,
+    "y_offset_um": 0.0,
+    "y_pitch_um": 0.048,
+}
+
+
+def _tech_lef_with_offset(tmp_path, offset, layer_type="ROUTING"):
+    path = tmp_path / "tech.lef"
+    path.write_text(
+        "VERSION 5.7 ;\n"
+        "LAYER M2\n"
+        f"  TYPE {layer_type} ;\n"
+        "  DIRECTION VERTICAL ;\n"
+        "  PITCH 0.048 ;\n"
+        f"  OFFSET {offset} ;\n"
+        "  WIDTH 0.024 ;\n"
+        "END M2\n"
+        "END LIBRARY\n"
+    )
+    return str(path)
+
+
+def test_negative_offset_tech_lef_without_tracks_is_rejected(tmp_path):
+    tech_lef = _tech_lef_with_offset(tmp_path, "-0.27")
+    with pytest.raises(PlaceAndRouteError) as exc:
+        place_and_route.validate_tech_lef_track_offsets(_TRACKS_FLOORPLAN, tech_lef)
+    message = str(exc.value)
+    assert "M2" in message and "-0.27" in message
+    assert "floorplan.tracks" in message
+
+
+def test_negative_offset_tech_lef_with_tracks_is_accepted(tmp_path):
+    tech_lef = _tech_lef_with_offset(tmp_path, "-0.27")
+    floorplan = {**_TRACKS_FLOORPLAN, "tracks": [_GOOD_TRACK]}
+    place_and_route.validate_tech_lef_track_offsets(floorplan, tech_lef)
+
+
+def test_nonnegative_or_nonrouting_offset_does_not_trigger_preflight(tmp_path):
+    place_and_route.validate_tech_lef_track_offsets(
+        _TRACKS_FLOORPLAN, _tech_lef_with_offset(tmp_path, "0.024")
+    )
+    place_and_route.validate_tech_lef_track_offsets(
+        _TRACKS_FLOORPLAN, _tech_lef_with_offset(tmp_path, "-0.27", "MASTERSLICE")
+    )
+
+
+def test_tracks_emit_explicit_make_tracks_lines():
+    from klayout_tools.place_and_route_script import _make_tracks_lines
+
+    assert _make_tracks_lines(_TRACKS_FLOORPLAN) == ["make_tracks"]
+    lines = _make_tracks_lines(
+        {**_TRACKS_FLOORPLAN, "tracks": [_GOOD_TRACK, {**_GOOD_TRACK, "layer": "M3"}]}
+    )
+    assert lines == [
+        "make_tracks M2 -x_offset 0.0 -x_pitch 0.048 -y_offset 0.0 -y_pitch 0.048",
+        "make_tracks M3 -x_offset 0.0 -x_pitch 0.048 -y_offset 0.0 -y_pitch 0.048",
+    ]
+
+
+@pytest.mark.parametrize(
+    "tracks",
+    [
+        "M2",
+        [],
+        ["M2"],
+        [{k: v for k, v in _GOOD_TRACK.items() if k != "x_pitch_um"}],
+        [{**_GOOD_TRACK, "layer": ""}],
+        [{**_GOOD_TRACK, "x_pitch_um": "0.048"}],
+        [{**_GOOD_TRACK, "y_pitch_um": 0}],
+        [{**_GOOD_TRACK, "x_offset_um": -0.27}],
+        [{**_GOOD_TRACK, "x_pitch_um": float("inf")}],
+        [_GOOD_TRACK, _GOOD_TRACK],
+    ],
+)
+def test_malformed_tracks_rejected(tracks):
+    with pytest.raises(PlaceAndRouteError, match="floorplan.tracks"):
+        place_and_route._validate_floorplan({**_TRACKS_FLOORPLAN, "tracks": tracks})
+
+
+def test_valid_tracks_pass_floorplan_validation():
+    out = place_and_route._validate_floorplan(
+        {**_TRACKS_FLOORPLAN, "tracks": [_GOOD_TRACK]}
+    )
+    assert out["tracks"] == [_GOOD_TRACK]
