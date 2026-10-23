@@ -1566,6 +1566,106 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
     return float(value)
 
 
+_LIBRARY_KEYS = ("cts_buffer", "power_pins", "wire_rc")
+
+
+def _positive_number(value: Any, where: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise PlaceAndRouteError(f"{where} must be a positive number")
+    return float(value)
+
+
+def _validate_library_power_pin(entry: Any, where: str) -> tuple[str, str, bool]:
+    if not isinstance(entry, dict):
+        raise PlaceAndRouteError(f"{where} must be a JSON object")
+    unknown = sorted(set(entry) - {"net_role", "pattern", "primary"})
+    if unknown:
+        raise PlaceAndRouteError(f"{where} has unknown key(s): {', '.join(unknown)}")
+    net_role = entry.get("net_role")
+    if net_role not in ("power", "ground"):
+        raise PlaceAndRouteError(f"{where}.net_role must be 'power' or 'ground'")
+    pattern = entry.get("pattern")
+    if not isinstance(pattern, str) or not pattern:
+        raise PlaceAndRouteError(f"{where}.pattern must be a non-empty string")
+    primary = entry.get("primary", False)
+    if not isinstance(primary, bool):
+        raise PlaceAndRouteError(f"{where}.primary must be a boolean")
+    return net_role, pattern, primary
+
+
+def _validate_library_power_pins(raw: Any) -> list[tuple[str, str, bool]]:
+    where = "request.library.power_pins"
+    if not isinstance(raw, list) or not raw:
+        raise PlaceAndRouteError(f"{where} must be a non-empty list of objects")
+    pins = [
+        _validate_library_power_pin(entry, f"{where}[{index}]")
+        for index, entry in enumerate(raw)
+    ]
+    for net_role in ("power", "ground"):
+        count = sum(1 for role, _, primary in pins if role == net_role and primary)
+        if count != 1:
+            raise PlaceAndRouteError(
+                f"{where} must name exactly one primary pin for net_role "
+                f"'{net_role}' (found {count})"
+            )
+    return pins
+
+
+def _validate_library_wire_rc(rc: Any) -> tuple[float, float]:
+    where = "request.library.wire_rc"
+    if not isinstance(rc, dict):
+        raise PlaceAndRouteError(f"{where} must be a JSON object")
+    keys = ("resistance_ohm_per_um", "capacitance_pf_per_um")
+    unknown = sorted(set(rc) - set(keys))
+    if unknown:
+        raise PlaceAndRouteError(f"{where} has unknown key(s): {', '.join(unknown)}")
+    for key in keys:
+        if key not in rc:
+            raise PlaceAndRouteError(f"{where}.{key} is required")
+    return (
+        _positive_number(rc[keys[0]], f"{where}.{keys[0]}"),
+        _positive_number(rc[keys[1]], f"{where}.{keys[1]}"),
+    )
+
+
+def _validate_library(library: Any) -> dict[str, Any] | None:
+    """Optional ``request.library`` (issue #4086): per-library inputs for a
+    standard-cell library the built-in tables
+    (``_CTS_BUFFER_CELLS``/``_POWER_PIN_PATTERNS``) do not cover, or an
+    override of a built-in entry. ``None`` (field omitted) leaves every
+    generated script byte-identical. Returns only the keys that were given:
+    ``cts_buffer`` (str), ``power_pins`` (list of ``(net_role, pattern,
+    primary)``), ``wire_rc`` (``(resistance, capacitance)``).
+    """
+    if library is None:
+        return None
+    if not isinstance(library, dict):
+        raise PlaceAndRouteError("request.library must be a JSON object")
+    unknown = sorted(set(library) - set(_LIBRARY_KEYS))
+    if unknown:
+        raise PlaceAndRouteError(
+            f"request.library has unknown key(s): {', '.join(unknown)}"
+        )
+    out: dict[str, Any] = {}
+    if "cts_buffer" in library:
+        buf = library["cts_buffer"]
+        if not isinstance(buf, str) or not buf.strip():
+            raise PlaceAndRouteError(
+                "request.library.cts_buffer must be a non-empty string"
+            )
+        out["cts_buffer"] = buf
+    if "power_pins" in library:
+        out["power_pins"] = _validate_library_power_pins(library["power_pins"])
+    if "wire_rc" in library:
+        out["wire_rc"] = _validate_library_wire_rc(library["wire_rc"])
+    return out
+
+
 def _validate_seed(seed: Any) -> int:
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise PlaceAndRouteError("request.seed must be an integer")
