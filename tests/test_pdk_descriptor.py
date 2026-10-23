@@ -163,3 +163,116 @@ def test_symlinked_asset_dir_inside_root_resolves(tmp_path):
         encoding="utf-8",
     )
     assert pdk.find_pdk(root=str(root))["assets"]["libs_ref"] == str(root / "link")
+
+
+# --- views + multi-file Liberty (issue #4087) -------------------------------
+
+_HEADER = 'library (x) {\n  time_unit : "1ps";\n'
+
+
+def _lib(*cells, header=_HEADER):
+    body = "".join(f"  cell ({c}) {{ area : 1; }}\n" for c in cells)
+    return header + body + "}\n"
+
+
+def _views_tree(tmp_path, monkeypatch, liberty=None):
+    monkeypatch.setenv("KLT_CACHE_DIR", str(tmp_path / "cache"))
+    root = tmp_path / "up"
+    (root / "d").mkdir(parents=True)
+    for name in ("a.lef", "t_nom.tlef", "t_max.tlef", "x.gds"):
+        (root / "d" / name).write_text("x", encoding="utf-8")
+    (root / "d" / "g1.lib").write_text(_lib("A", "B"), encoding="utf-8")
+    (root / "d" / "g2.lib").write_text(_lib("C"), encoding="utf-8")
+    (root / "klt-pdk.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "variant": "up",
+                "assets": {"libs_ref": "d"},
+                "liberty": liberty or {"lib": {"tt": ["d/g1.lib", "d/g2.lib"]}},
+                "views": {
+                    "lib": {
+                        "cell_lef": "d/a.lef",
+                        "tech_lef": {"nom": "d/t_nom.tlef", "max": "d/t_max.tlef"},
+                        "gds": "d/x.gds",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_views_resolve_lef_and_gds(tmp_path, monkeypatch):
+    root = _views_tree(tmp_path, monkeypatch)
+    lefs = pdk.lef_files("lib", root=str(root))
+    assert lefs == {
+        "tech_lef": str(root / "d" / "t_nom.tlef"),
+        "cell_lef": str(root / "d" / "a.lef"),
+    }
+    assert pdk.lef_files("lib", root=str(root), corner="max")["tech_lef"].endswith(
+        "t_max.tlef"
+    )
+    info = pdk.find_pdk(root=str(root))
+    from klayout_tools.place_and_route_request import _resolve_gds_view
+
+    assert _resolve_gds_view(info, "lib") == str(root / "d" / "x.gds")
+
+
+def test_unmapped_library_keeps_convention(tmp_path, monkeypatch):
+    root = _views_tree(tmp_path, monkeypatch)
+    assert pdk.lef_files("other", root=str(root)) == {
+        "tech_lef": None,
+        "cell_lef": None,
+    }
+
+
+def test_unmapped_tech_lef_corner_names_mapped(tmp_path, monkeypatch):
+    root = _views_tree(tmp_path, monkeypatch)
+    with pytest.raises(pdk.PdkNotFoundError, match="mapped: max, nom"):
+        pdk.lef_files("lib", root=str(root), corner="min")
+
+
+@pytest.mark.parametrize("bad", ["/abs/a.lef", "../a.lef", "d/missing.lef"])
+def test_bad_view_path_rejected(tmp_path, monkeypatch, bad):
+    root = _views_tree(tmp_path, monkeypatch)
+    desc = json.loads((root / "klt-pdk.json").read_text())
+    desc["views"]["lib"]["cell_lef"] = bad
+    (root / "klt-pdk.json").write_text(json.dumps(desc), encoding="utf-8")
+    with pytest.raises(pdk.PdkNotFoundError, match="views.lib.cell_lef'"):
+        pdk.find_pdk(root=str(root))
+
+
+def test_liberty_list_merges_outside_pdk_tree(tmp_path, monkeypatch):
+    root = _views_tree(tmp_path, monkeypatch)
+    info = pdk.find_pdk(root=str(root))
+    path, corner = pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+    assert corner == "tt"
+    assert not path.startswith(str(root))
+    text = open(path, encoding="utf-8").read()
+    assert all(f"cell ({c})" in text for c in "ABC")
+    mtime = __import__("os").stat(path).st_mtime_ns
+    again, _ = pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+    assert again == path
+    assert __import__("os").stat(path).st_mtime_ns == mtime
+
+
+def test_liberty_one_element_list_equals_string(tmp_path, monkeypatch):
+    root = _views_tree(tmp_path, monkeypatch, liberty={"lib": {"tt": ["d/g1.lib"]}})
+    info = pdk.find_pdk(root=str(root))
+    path, _ = pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+    assert path == str(root / "d" / "g1.lib")
+
+
+def test_liberty_header_mismatch_and_duplicate(tmp_path, monkeypatch):
+    root = _views_tree(tmp_path, monkeypatch)
+    info = pdk.find_pdk(root=str(root))
+    (root / "d" / "g2.lib").write_text(
+        _lib("C", header='library (x) {\n  time_unit : "1ns";\n'), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="headers differ"):
+        pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+    (root / "d" / "g2.lib").write_text(_lib("B"), encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate cell 'B'"):
+        pdk_cells._descriptor_liberty(info, "lib", None, ValueError)

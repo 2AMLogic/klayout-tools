@@ -1297,6 +1297,15 @@ def _resolve_tech_lef(lib_dir: str, cell_library: str, corner: str) -> str | Non
     return None
 
 
+def descriptor_views(info: dict[str, Any], cell_library: str) -> dict[str, Any]:
+    """Descriptor ``views`` entry for ``cell_library`` (issue #4087), or ``{}``
+    when the resolved install has no descriptor or does not map the library."""
+    variant_dir = variant_dir_of(info)
+    if variant_dir is None or not has_descriptor(variant_dir):
+        return {}
+    return _descriptor_load(variant_dir)["views"].get(cell_library, {})
+
+
 def lef_files(
     cell_library: str,
     variant: str | None = None,
@@ -1343,19 +1352,29 @@ def lef_files(
     (the same condition :func:`find_pdk` raises for).
     """
     info = find_pdk(variant=variant, root=root)
+    views = descriptor_views(info, cell_library)
+    mapped_tech = views.get("tech_lef")
+    if mapped_tech is not None and corner not in mapped_tech:
+        raise PdkNotFoundError(
+            f"tech LEF not found: no '{corner}' interconnect corner mapped for "
+            f"'{cell_library}' in the PDK descriptor "
+            f"(mapped: {', '.join(sorted(mapped_tech))})"
+        )
+
     libs_ref = info["assets"]["libs_ref"]
-    if libs_ref is None:
-        return {"tech_lef": None, "cell_lef": None}
+    tech_lef: str | None = None
+    cell_lef: str | None = None
+    if libs_ref is not None:
+        lib_dir = os.path.join(libs_ref, cell_library)
+        tech_lef = _resolve_tech_lef(lib_dir, cell_library, corner)
+        conventional = os.path.join(lib_dir, "lef", f"{cell_library}.lef")
+        cell_lef = conventional if os.path.isfile(conventional) else None
 
-    lib_dir = os.path.join(libs_ref, cell_library)
-
-    tech_lef = _resolve_tech_lef(lib_dir, cell_library, corner)
-    cell_lef = os.path.join(lib_dir, "lef", f"{cell_library}.lef")
-
-    return {
-        "tech_lef": tech_lef,
-        "cell_lef": cell_lef if os.path.isfile(cell_lef) else None,
-    }
+    if mapped_tech is not None:
+        tech_lef = mapped_tech[corner]
+    if "cell_lef" in views:
+        cell_lef = views["cell_lef"]
+    return {"tech_lef": tech_lef, "cell_lef": cell_lef}
 
 
 def resolve_klayout_layer_map(pdk_info: dict[str, Any]) -> tuple[str | None, str]:
