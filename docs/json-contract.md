@@ -1332,6 +1332,8 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `drc` | `file` (the hashed input layout; both engines) | 3 | #2659 |
 | `extract` | `file` (the hashed input layout; both response builders) | 4 | #2659 |
 | `lvs` | `layout` (the hashed layout side — **not** `reference`) | 2 | #2659 |
+| `erc` | `file` (the hashed input layout; `spec` stays a plain string) | 2 | #2703 |
+| `lef-abstract` | `file` (the hashed input layout; `socket` and `output` stay plain strings) | 2 | #2703 |
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
@@ -1349,7 +1351,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `gen-compose` | `gds_path` (top-level and per-block) | 1 |
 | `draw` | `gds_path` | 1 |
 | `layout-plan-execute` | `gds_path` | 1 |
-| `lef-abstract` | `output` | 1 |
+| `lef-abstract` | `output`, `socket` | 2 |
 | `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
 | `functional-verification` | `info_path`, `log_path`, `options.trace.path` | 1 |
 | `yield-campaign` | `campaign.sim_report_path`, `campaign.request_path` | 1 (`yield_analysis.py`) |

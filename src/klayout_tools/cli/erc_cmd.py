@@ -45,6 +45,7 @@ exclusive with ``file``/``--check`` and refuses the layout-only flags.
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..erc import (
     DISCLOSURE_KIND_UNEXPRESSIBLE,
     ErcError,
@@ -272,7 +273,7 @@ def _print_compact_note(report: dict) -> None:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    print(f"file: {render_path_field(report['file'])}")
     print(f"spec: {report['spec']}")
     print(f"pdk: {report['pdk']}")
     # `--deck` (issue #2204): omitted entirely when no deck was selected, so
