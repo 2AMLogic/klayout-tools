@@ -14,15 +14,16 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import sim, sim_remote
-from test_sim_save_mode import (  # noqa: F401  (autouse fixture + helpers)
-    _bare_name_ngspice_resolution,
+from test_sim_save_mode import (
     _capture_decks,
     _write_body,
     _write_deck,
     _write_request,
 )
 
-pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+pytestmark = pytest.mark.usefixtures(
+    "real_build_identity_git", "bare_name_ngspice_resolution"
+)
 
 _CARD = {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
 _POINT = sim.CornerPoint("tt", {"vdd": 1.8}, 27)

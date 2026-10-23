@@ -21,7 +21,7 @@ subcommand.)
 
 The exit code answers the *antenna* question, because ``status`` does (see
 ``_EXIT_CODE_BY_STATUS`` below). On a PDK with no antenna-ratio table --
-every PDK but sky130 today, any run that omits ``--pdk``, and every
+every PDK but sky130 and ihp-sg13g2 today, any run that omits ``--pdk``, and every
 ``--findings-only`` run (issue #2219, which skips the antenna accumulation
 outright) -- that answer is permanently ``4``, however clean the design is.
 A caller that wants only
@@ -36,6 +36,11 @@ reproduces, as ``klt drc``/``klt lvs`` do -- see ``docs/cli/erc.md``,
 ``spec``. Cheap mode re-hashes the recorded layout and spec; ``--rerun``
 re-runs ERC from the echoed inputs and diffs verdict-bearing fields. Both
 report ``status: "match"`` (exit 0) or ``"drifted"`` (exit 3).
+
+``--validate-spec <spec>`` (issue #4034) checks a spec file's schema and
+cross-references without reading any layout and without producing a verdict:
+``status: "valid"`` (exit 0) or the ordinary exit-1 error. It is mutually
+exclusive with ``file``/``--check`` and refuses the layout-only flags.
 """
 
 import argparse
@@ -46,6 +51,7 @@ from ..erc import (
     check_erc_report,
     rerun_erc_report,
     run_erc,
+    validate_erc_spec,
 )
 from .output import emit_error, emit_success, render_rerun_drift
 
@@ -64,6 +70,9 @@ _EXIT_CODE_BY_STATUS = {
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.validate_spec is not None:
+        return _run_validate_spec(args)
+
     if args.check is not None:
         # `file` is in `--check`'s mutually exclusive argparse group
         # (parser.py), and `spec` cannot be given without it -- so
@@ -93,6 +102,44 @@ def run(args: argparse.Namespace) -> int:
 
     emit_success(report, args.format, _print_text)
     return _EXIT_CODE_BY_STATUS[report["status"]]
+
+
+def _run_validate_spec(args: argparse.Namespace) -> int:
+    # `file` and `--check` are in `--validate-spec`'s mutually exclusive
+    # argparse group (parser.py), so those combinations are usage errors
+    # (exit 2). The remaining flags are not positional, so they are refused
+    # here rather than silently ignored.
+    layout_only = {
+        "--top": args.top is not None,
+        "--pdk": args.pdk is not None,
+        "--deck": args.deck is not None,
+        "--findings-only": args.findings_only,
+        "--omit-antenna-tables": args.omit_antenna_tables,
+        "--compact": args.compact,
+        "--rerun": args.rerun,
+    }
+    conflicts = [flag for flag, given in layout_only.items() if given]
+    if conflicts:
+        return emit_error(
+            "erc",
+            f"--validate-spec reads no layout and runs no check, so it cannot "
+            f"be combined with {', '.join(conflicts)}",
+            args.format,
+        )
+    try:
+        result = validate_erc_spec(args.validate_spec)
+    except ErcError as exc:
+        return emit_error("erc", str(exc), args.format)
+
+    emit_success(result, args.format, _print_validate_spec_text)
+    return 0
+
+
+def _print_validate_spec_text(result: dict) -> None:
+    print(f"spec: {result['spec']}")
+    print(f"status: {result['status']}")
+    for section, count in result["counts"].items():
+        print(f"  {section}: {count}")
 
 
 def _run_check(args: argparse.Namespace) -> int:
@@ -176,6 +223,22 @@ def _print_declared_nets(report: dict) -> None:
                 f"islands={entry['unlabelled_islands']} "
                 f"area={entry['unlabelled_area_um2']}um^2{suffix}"
             )
+
+
+def _print_skipped_coverage(report: dict) -> None:
+    """Name each skipped ``erc_coverage`` entry and its reason (issue #3745).
+
+    A skipped ``erc.missing_tie:*`` (degenerate tap declaration) leaves
+    ``erc_findings`` empty and the exit status 0, so ``erc_status:
+    clean_partial`` alone is easy to read past. Printed only when something
+    was skipped, so output is byte-identical otherwise. ``.get`` because
+    this renderer is also pointed at stored payloads."""
+    skipped = (report.get("erc_coverage") or {}).get("skipped") or []
+    if not skipped:
+        return
+    print(f"erc_skipped: {len(skipped)} (not checked; see erc_coverage.skipped)")
+    for entry in skipped:
+        print(f"  {entry['id']}: {entry['reason']}")
 
 
 def _print_gate_count(report: dict) -> None:
@@ -288,6 +351,7 @@ def _print_text(report: dict) -> None:
         if undeclared:
             print(f"  undeclared classes: {', '.join(undeclared)}")
     _print_declared_nets(report)
+    _print_skipped_coverage(report)
     print(f"erc_findings: {report['erc_finding_count']}")
     for finding in report["erc_findings"]:
         subject = finding["net"] or finding["gate_id"] or finding["layer"] or "?"

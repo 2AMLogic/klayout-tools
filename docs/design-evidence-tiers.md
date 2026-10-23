@@ -98,6 +98,16 @@ netlist; item 9's or 10's several files), the envelope may bind the set with
 `provenance.input.paths` (issue #3044) so that editing any member turns the
 row stale; see [`docs/cli/signoff.md`](cli/signoff.md).
 
+For items 1 and 2, whose artifacts are usually *generated* (a netlist from
+its schematic, a stream from its generator), the attestation may also carry
+a regeneration claim (issue #2887): the generator command and the hash the
+attester's CI got by re-running it. The tool never runs the generator. It
+checks only that the claimed hash equals the bound artifact's, and renders
+`stale_artifact` when they differ, which means the committed artifact is not
+what its generator produces. This states freshness in the manifest instead
+of in a separate CI gate, but the regeneration itself remains the
+attester's word.
+
 ### What a T1 claim is scoped to
 
 **T1 is block-scoped.** Every item is evidence about *this block*, at its
@@ -249,6 +259,29 @@ written to every block.
    is not covered. Warnings-only mismatches must be listed with the claim.
    A second, independent engine's concurring verdict (#343) strengthens this
    from "one toolchain agrees with itself" to a cross-checked result.
+   **PDK-runset path (issue #2870, operator ruling of 2026-10-08).** For
+   device families the PDK's own open KLayout LVS runset recognises and the
+   curated extraction deck does not, a `klt lvs` report with
+   `"engine": "klayout-runset"` is accepted evidence for this item, on four
+   conditions: (1) the runset is the PDK's own at a pinned revision — `klt
+   signoff` checks `provenance.runset.content_hash` against a signoff-side
+   allowlist (`signoff_runset.PINNED_RUNSETS`, hash → PDK revision), not against
+   a field the block declares, and the runset file named by the report must
+   still re-hash to that value; (2) the report is a `klt` envelope with the
+   same `--check` re-hash guarantees as a curated-deck report (layout hash,
+   reference netlist hash, plus the runset hash); (3) the report names its
+   engine, and `klt signoff` carries `engine` and the runset hash distinctly in
+   the check detail and the `met` citation; (4) every device is recognised — a
+   non-empty `coverage.declared_not_recognized`, or a `device_census` whose
+   per-class layout and reference counts differ, is a failure
+   (`runset_unrecognised_device`), never a warning, even when `status` reads
+   `match`. A report from a runset that is not in the allowlist is refused
+   `runset_not_pinned`; one whose runset file changed since the run,
+   `runset_hash_mismatch`. **This does not change** the default: curated decks
+   stay the route wherever they recognise every device in the block, and a
+   block may not choose the runset to avoid a curated-deck finding. The
+   allowlist is empty as of this change (2026-10-17) until a published runset's
+   digest is reviewed into it, so no runset report grades `met` before then.
 5. **Full corner verification vs a ratified spec**
    - *Analog* — PVT corner-matrix simulation results covering every spec
      row at its bound corners, with per-row pass/fail and the binding
@@ -329,6 +362,17 @@ written to every block.
    partition only; an analog partition (including the analog half of a
    mixed-signal block) always requires Monte Carlo evidence. `klt signoff`
    reports it as `not_applicable`, never as `met`.
+   **Several statistical rows, only some evidenced** (issue #2908): item 6
+   is a claim about *every* statistical row, so a manifest may declare the
+   row set under `spec_rows."6"` and cite one `klt yield` report per row set
+   (`rows` on each citation). Item 6 grades `met` only when every declared
+   row is covered by a passing citation against a ratified target. A row with
+   no citation (`uncovered_rows`), a row declared a `gap` because no evidence
+   can exist yet (`declared_gaps`), or a row declared `ratified: false`
+   (`unratified_rows`, evidence against a proposed limit is provisional)
+   grades `unmet` / `partial_coverage`, never `met`. Without a declaration
+   the item grades as before; a `not_applicable` entry contradicts a declared
+   row set and is `invalid_evidence`.
 7. **Post-layout verification**
    - *Analog* — the spec suite re-run against the netlist extracted from
      the layout, not only the drawn schematic (#252). Parasitic extraction
@@ -438,6 +482,13 @@ written to every block.
       `detail.power_delivery` the supplies the ERC run did prove. Produce
       the ERC supply spec anyway — it is the half that survives an unrelated
       LVS defect, and it is what makes the distinction visible.
+      A `klayout-runset` report (item 4's PDK-runset path) can be this LVS
+      half under the same pin and re-hash conditions: the engine lists the
+      nets its compare paired in `net_correspondence` (issue #2870), so the
+      supply-pairing test above reads the same way, with the same
+      "participation test, not a second opinion" caveat. An unpinned or
+      modified runset renders `runset_not_pinned` / `runset_hash_mismatch`
+      here too.
     - *Digital* — the `klt erc` supply evidence below, plus the routed
       artifact having actually been produced with a power grid, plus item
       4's power/ground verdict having actually run. Concretely: the `klt

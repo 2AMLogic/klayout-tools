@@ -1,0 +1,223 @@
+[
+  {
+    "schema": "klt.design_agent_benchmark.layout_run/1",
+    "run_id": "fixture-draw-only-1",
+    "protocol_sha256": "c05526c1a26afa3f9aeafd873ddea2c4d038b0c5ecfcba9e5d8f21c6af59e3cd",
+    "task_id": "five-transistor-ota-layout",
+    "task_sha256": "60806484c248b4333cbfe3bd7d07925c8fc2f6149ef0e123a998c07bd96af5e0",
+    "arm": "draw-only",
+    "agent": {
+      "id": "fixture-agent",
+      "provider": "interactive-agent",
+      "model": null
+    },
+    "replicate": 1,
+    "seed_sha256": "bbeec1321239a8fdc80e82ec2a2b22e0cb22d0c5d711cc77de916e2db406c797",
+    "seed_from": null,
+    "tool_calls": [
+      {
+        "seq": 1,
+        "phase": "draw",
+        "verb": "draw",
+        "class": "draw",
+        "exit_code": 0
+      },
+      {
+        "seq": 2,
+        "phase": "draw",
+        "verb": "drc",
+        "class": "verify",
+        "exit_code": 0
+      },
+      {
+        "seq": 3,
+        "phase": "draw",
+        "verb": "lvs",
+        "class": "verify",
+        "exit_code": 0
+      }
+    ],
+    "status": "valid",
+    "artifact": {
+      "gds_sha256": "88da9a2726c9c6dcb47badbad3ac0ffc0c4afed7a95e4adbadb0634697c95824",
+      "cell_name": "ota5t",
+      "selected_round": 1
+    },
+    "validity": {
+      "drc": {
+        "status": "clean",
+        "gds_sha256": "88da9a2726c9c6dcb47badbad3ac0ffc0c4afed7a95e4adbadb0634697c95824",
+        "report_sha256": "720c77864b59a97f0599015a9e758c584f9267d38c390ae7375dade8a0a4c068"
+      },
+      "lvs": {
+        "status": "match",
+        "gds_sha256": "88da9a2726c9c6dcb47badbad3ac0ffc0c4afed7a95e4adbadb0634697c95824",
+        "report_sha256": "cb7c69c12fc2c719f43b7c223bd32e787610ac89bbb83630e72a2c04023a5fee",
+        "netlist_sha256": "4f57053a65ab71e9000c13b6f2815be6e4576a08823520ddc53c136b069b14fa"
+      }
+    },
+    "score": {
+      "area_um2": 410.0,
+      "utilization": null,
+      "sim_margin": null
+    },
+    "usage": {
+      "tool_calls": 3,
+      "turns": 4
+    },
+    "notes": null
+  },
+  {
+    "schema": "klt.design_agent_benchmark.layout_run/1",
+    "run_id": "fixture-gen-only-1",
+    "protocol_sha256": "c05526c1a26afa3f9aeafd873ddea2c4d038b0c5ecfcba9e5d8f21c6af59e3cd",
+    "task_id": "five-transistor-ota-layout",
+    "task_sha256": "60806484c248b4333cbfe3bd7d07925c8fc2f6149ef0e123a998c07bd96af5e0",
+    "arm": "gen-only",
+    "agent": {
+      "id": "fixture-agent",
+      "provider": "interactive-agent",
+      "model": null
+    },
+    "replicate": 1,
+    "seed_sha256": "02f1c17c4e27c1d916c0050f312d087f1e5edc07c460f40364b94c8e5f37c034",
+    "seed_from": null,
+    "tool_calls": [
+      {
+        "seq": 1,
+        "phase": "generate",
+        "verb": "gen",
+        "class": "generate",
+        "exit_code": 0
+      },
+      {
+        "seq": 2,
+        "phase": "generate",
+        "verb": "gen-compose",
+        "class": "generate",
+        "exit_code": 0
+      },
+      {
+        "seq": 3,
+        "phase": "generate",
+        "verb": "drc",
+        "class": "verify",
+        "exit_code": 0
+      },
+      {
+        "seq": 4,
+        "phase": "generate",
+        "verb": "lvs",
+        "class": "verify",
+        "exit_code": 0
+      }
+    ],
+    "status": "valid",
+    "artifact": {
+      "gds_sha256": "e8ed9ed6b7d4fff7bbe230bfea124a6d62a6ffeebab878e9ca523d0a654570a0",
+      "cell_name": "ota5t",
+      "selected_round": 1
+    },
+    "validity": {
+      "drc": {
+        "status": "clean",
+        "gds_sha256": "e8ed9ed6b7d4fff7bbe230bfea124a6d62a6ffeebab878e9ca523d0a654570a0",
+        "report_sha256": "dec41611064badce6ff32284f7419dc0cb444a358608f76d6e9c86fc3c246bbc"
+      },
+      "lvs": {
+        "status": "match",
+        "gds_sha256": "e8ed9ed6b7d4fff7bbe230bfea124a6d62a6ffeebab878e9ca523d0a654570a0",
+        "report_sha256": "9f1ab7a99ec8983498bdfec177304dfe84f09416c624d7bee5fca984446d7fae",
+        "netlist_sha256": "4f57053a65ab71e9000c13b6f2815be6e4576a08823520ddc53c136b069b14fa"
+      }
+    },
+    "score": {
+      "area_um2": 380.0,
+      "utilization": null,
+      "sim_margin": null
+    },
+    "usage": {
+      "tool_calls": 4,
+      "turns": 5
+    },
+    "notes": null
+  },
+  {
+    "schema": "klt.design_agent_benchmark.layout_run/1",
+    "run_id": "fixture-gen-refine-1",
+    "protocol_sha256": "c05526c1a26afa3f9aeafd873ddea2c4d038b0c5ecfcba9e5d8f21c6af59e3cd",
+    "task_id": "five-transistor-ota-layout",
+    "task_sha256": "60806484c248b4333cbfe3bd7d07925c8fc2f6149ef0e123a998c07bd96af5e0",
+    "arm": "gen+refine",
+    "agent": {
+      "id": "fixture-agent",
+      "provider": "interactive-agent",
+      "model": null
+    },
+    "replicate": 1,
+    "seed_sha256": "41f96ae2b99abb7d27c36205e0caa3a542e86b3e34c44143bee5604aed2a0907",
+    "seed_from": {
+      "run_id": "fixture-gen-only-1",
+      "gds_sha256": "e8ed9ed6b7d4fff7bbe230bfea124a6d62a6ffeebab878e9ca523d0a654570a0"
+    },
+    "tool_calls": [
+      {
+        "seq": 1,
+        "phase": "refine",
+        "verb": "draw",
+        "class": "draw",
+        "exit_code": 0
+      },
+      {
+        "seq": 2,
+        "phase": "refine",
+        "verb": "gen-compose",
+        "class": "generate",
+        "exit_code": 0
+      },
+      {
+        "seq": 3,
+        "phase": "refine",
+        "verb": "drc",
+        "class": "verify",
+        "exit_code": 0
+      },
+      {
+        "seq": 4,
+        "phase": "refine",
+        "verb": "lvs",
+        "class": "verify",
+        "exit_code": 0
+      }
+    ],
+    "status": "valid",
+    "artifact": {
+      "gds_sha256": "e37b279e4fb86cc961a24d5f3f15394a929b4760b33445128b28d28ab8e6dabe",
+      "cell_name": "ota5t",
+      "selected_round": 2
+    },
+    "validity": {
+      "drc": {
+        "status": "clean",
+        "gds_sha256": "e37b279e4fb86cc961a24d5f3f15394a929b4760b33445128b28d28ab8e6dabe",
+        "report_sha256": "21b77eab147699dffab8296b3621e647283d4bad38d46e57ef03f5b1cba22c13"
+      },
+      "lvs": {
+        "status": "match",
+        "gds_sha256": "e37b279e4fb86cc961a24d5f3f15394a929b4760b33445128b28d28ab8e6dabe",
+        "report_sha256": "9aa502e2c2420c6d79e11a0906ae65022aecc51744cc76b5cb4cdbeebb418b3a",
+        "netlist_sha256": "4f57053a65ab71e9000c13b6f2815be6e4576a08823520ddc53c136b069b14fa"
+      }
+    },
+    "score": {
+      "area_um2": 352.5,
+      "utilization": null,
+      "sim_margin": null
+    },
+    "usage": {
+      "tool_calls": 4,
+      "turns": 5
+    },
+    "notes": null
+  }
+]

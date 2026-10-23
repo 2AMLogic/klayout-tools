@@ -377,6 +377,78 @@ def test_parse_netlist_survives_a_recursive_subckt():
     assert parsed.unexpanded == ["X1.Xl"]
 
 
+def _fan_out_netlist(levels: int, fan_out: int) -> str:
+    """A `levels`-deep hierarchy where every level instantiates the next
+    `fan_out` times and the last level holds one MOS."""
+    lines = [".subckt lvl0 a b\nM1 a b 0 0 nmos\n.ends"]
+    for level in range(1, levels):
+        calls = "\n".join(f"X{i} a b lvl{level - 1}" for i in range(fan_out))
+        lines.append(f".subckt lvl{level} a b\n{calls}\n.ends")
+    lines.append(f"Xtop in out lvl{levels - 1}")
+    return "\n".join(lines) + "\n"
+
+
+def test_parse_netlist_caps_total_expanded_instances(monkeypatch):
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 50)
+
+    parsed = op_sanity.parse_netlist(_fan_out_netlist(7, 8), {})
+
+    assert parsed.expansion_truncated
+    assert parsed.expanded_instances == 50
+    # Devices reached before the cap are still reported.
+    assert parsed.devices
+
+
+def test_parse_netlist_below_the_expansion_cap_is_untouched(monkeypatch):
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 50)
+
+    parsed = op_sanity.parse_netlist(_fan_out_netlist(2, 4), {})
+
+    assert not parsed.expansion_truncated
+    assert len(parsed.devices) == 4
+
+
+def test_parse_netlist_expansion_cap_boundary_is_exact(monkeypatch):
+    # lvl1 -> 4x lvl0: 1 top call + 4 leaf calls = 5 expansions.
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 5)
+    exact = op_sanity.parse_netlist(_fan_out_netlist(2, 4), {})
+    assert not exact.expansion_truncated
+    assert len(exact.devices) == 4
+
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 4)
+    over = op_sanity.parse_netlist(_fan_out_netlist(2, 4), {})
+    assert over.expansion_truncated
+    assert len(over.devices) == 3
+
+
+def test_parse_netlist_fan_out_case_returns_quickly_at_the_default_cap():
+    import time
+
+    start = time.monotonic()
+    parsed = op_sanity.parse_netlist(_fan_out_netlist(7, 8), {})
+
+    assert parsed.expansion_truncated
+    assert parsed.expanded_instances == op_sanity._MAX_EXPANDED_INSTANCES
+    assert time.monotonic() - start < 2.0
+
+
+def test_expansion_cap_emits_one_unsupported_hierarchy_warning(tmp_path, monkeypatch):
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 50)
+    request = _write_request(tmp_path, _fan_out_netlist(7, 8) + "Vdd vdd 0 1.8\n")
+    _install_fake_ngspice(monkeypatch, {})
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    capped = [
+        entry
+        for entry in report["diagnostics"]
+        if entry["code"] == "unsupported_hierarchy" and "cap" in entry["message"]
+    ]
+    assert len(capped) == 1
+    assert capped[0]["severity"] == "warning"
+    assert "50" in capped[0]["message"]
+
+
 def test_behavioural_source_terminals_count_for_the_floating_node_check():
     parsed = op_sanity.parse_netlist(
         "Vs vs 0 DC 1\n"
@@ -1103,6 +1175,79 @@ def test_osdi_preload_reaches_the_op_lint_deck(tmp_path, monkeypatch):
     (deck,) = decks
     pre = deck.index(f"pre_osdi {osdi}")
     assert deck.index(".control") < pre < deck.index("op")
+
+
+_PWL_NETLIST = _GOOD_NETLIST.replace("Vdd vdd 0 DC {vdd}", "Vdd vdd 0 PWL(0 0 1u 1.8)")
+
+
+def _record_decks(monkeypatch) -> list[list[str]]:
+    _install_fake_ngspice(
+        monkeypatch,
+        {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+        node_voltages={"vdd": 1.8, "in": 0.9, "bias": 0.6, "out": 1.2},
+    )
+    decks: list[list[str]] = []
+    fake_run = op_sanity.subprocess.run
+
+    def recording_run(cmd, **kwargs):
+        deck = Path(cmd[cmd.index("-b") + 1])
+        decks.append(deck.read_text().splitlines())
+        # The work dir is removed on exit; capture the included copy now.
+        for line in decks[-1]:
+            if line.startswith(".include "):
+                decks[-1].append("INCLUDED " + Path(line.split(" ", 1)[1]).read_text())
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(op_sanity.subprocess, "run", recording_run)
+    return decks
+
+
+def test_supply_waveform_rail_is_scaled_not_altered_in_the_op_lint_deck(
+    tmp_path, monkeypatch
+):
+    """Issue #3624: `alter` on a PWL source is a no-op in ngspice, so the lint
+    deck must skip it and include the per-corner scaled netlist copy, as the
+    sweep deck does (issue #2902); a DC rail is still `alter`ed."""
+    request = _write_request(tmp_path, _PWL_NETLIST)
+    doc = json.loads(request.read_text())
+    doc["corners"] = {
+        "supply_v": {"vdd": [1.2], "Vbias": [0.5]},
+        "temperature_c": [27],
+        "supply_waveforms": ["vdd"],
+    }
+    request.write_text(json.dumps(doc))
+    decks = _record_decks(monkeypatch)
+
+    op_sanity.run_op_sanity(str(request))
+
+    (deck,) = decks
+    assert not any(line.startswith("alter vdd=") for line in deck)
+    assert "alter Vbias=0.5" in deck
+    include = next(line for line in deck if line.startswith(".include "))
+    assert include.endswith("netlist.supply_waveforms.cir")
+    assert "PWL(0 0 1u 1.2)" in next(x for x in deck if x.startswith("INCLUDED "))
+
+
+def test_op_lint_deck_without_supply_waveforms_is_unchanged(tmp_path, monkeypatch):
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    decks = _record_decks(monkeypatch)
+
+    op_sanity.run_op_sanity(str(request))
+
+    (deck,) = decks
+    assert "alter vdd=1.8" in deck
+    include = next(line for line in deck if line.startswith(".include "))
+    assert include.endswith("body.spice")
+
+
+def test_unsupported_supply_waveform_source_is_an_op_sanity_error(tmp_path):
+    request = _write_request(tmp_path, _GOOD_NETLIST)  # DC source, not PWL
+    doc = json.loads(request.read_text())
+    doc["corners"]["supply_waveforms"] = ["vdd"]
+    request.write_text(json.dumps(doc))
+
+    with pytest.raises(op_sanity.OpSanityError, match="PWL/PULSE"):
+        op_sanity.run_op_sanity(str(request))
 
 
 def test_per_section_corner_libs_reach_the_op_lint_deck(tmp_path, monkeypatch):

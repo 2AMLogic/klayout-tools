@@ -14,7 +14,7 @@ failed *silently* -- ngspice's ``Could not find include file`` only surfaced
 as ``unavailable_measurement`` rows that read like a real regression.
 
 This module is the single place that gap is closed, shared by both
-backends (:func:`stage_sim_netlist`) so their independently-implemented job
+backends (:func:`stage_sim_job`) so their independently-implemented job
 builders cannot drift apart on include handling:
 
 - **Stage what can be staged.** Every ``.include``/``.inc`` target that
@@ -161,7 +161,7 @@ class IncludeStagingError(Exception):
     :data:`MAX_STAGED_INCLUDES`/:data:`MAX_STAGED_BYTES`.
 
     Both backends re-raise this as ``sim.SimError`` (see
-    :func:`stage_sim_netlist`), so it surfaces as `klt sim`'s documented
+    :func:`stage_sim_job`), so it surfaces as `klt sim`'s documented
     "could not run" exit 1 with a named message -- never as a job that is
     submitted, billed, and comes back as undiagnosable
     ``unavailable_measurement`` rows.
@@ -284,26 +284,62 @@ class StagedSimJob:
 def host_resolved_roots(request: dict[str, Any]) -> tuple[str, ...]:
     """Directory roots whose contents the *executing* host resolves for
     itself, so an ``.include`` landing under one is left verbatim:
-    ``request.models.pdk_root`` (forwarded to the job instance -- the
-    ``batch`` backend writes it straight into ``job.json``'s ``pdk_root``)
-    and this host's own ``$PDK_ROOT``.
+    ``request.models.pdk_root``, which is forwarded to the job instance (the
+    ``batch`` backend writes it straight into ``job.json``'s ``pdk_root``).
+
+    This host's own ``$PDK_ROOT`` is deliberately *not* a root: it is not
+    forwarded, so an absolute path under it is a submitting-host path the
+    runner may not have. :class:`_Stager` rewrites such an include to the
+    literal ``$PDK_ROOT/<rel>`` instead (see :func:`client_pdk_root`).
 
     A path that does not exist locally is still honored as a root: the
     question is "does this target *belong to* the PDK", which is a prefix
     question, not an existence one.
     """
-    roots: list[str] = []
-    candidates = [
-        (request.get("models") or {}).get("pdk_root"),
-        os.environ.get("PDK_ROOT"),
-    ]
-    for candidate in candidates:
-        if not isinstance(candidate, str) or not candidate:
+    candidate = (request.get("models") or {}).get("pdk_root")
+    if not isinstance(candidate, str) or not candidate:
+        return ()
+    return (os.path.abspath(os.path.expanduser(candidate)),)
+
+
+def client_pdk_root() -> str | None:
+    """This (submitting) host's own ``$PDK_ROOT``, absolute, or ``None``."""
+    candidate = os.environ.get("PDK_ROOT")
+    if not candidate:
+        return None
+    return os.path.abspath(os.path.expanduser(candidate))
+
+
+_PDK_ROOT_LITERAL_PREFIXES = ("$PDK_ROOT/", "${PDK_ROOT}/")
+
+
+def runner_resolved_osdi(request: dict[str, Any], request_dir: str) -> dict[int, str]:
+    """``{index: reason}`` for every ``options.osdi_preload`` entry the
+    *executing* host resolves for itself (issue #3819), by the same two
+    reasons the include rule reports: ``"env_var"`` for a literal
+    ``$PDK_ROOT/<rel>`` and ``"pdk_root"`` for a path under
+    ``models.pdk_root``. Such an entry names an image-baked ``.osdi``: it is
+    not existence-checked, staged or hashed on this host. Malformed entries
+    are left to the callers' own validation.
+    """
+    from ._paths import _resolve_relative
+
+    raw = (request.get("options") or {}).get("osdi_preload")
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        return {}
+    roots = host_resolved_roots(request)
+    found: dict[int, str] = {}
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, str) or not entry.strip():
             continue
-        resolved = os.path.abspath(os.path.expanduser(candidate))
-        if resolved not in roots:
-            roots.append(resolved)
-    return tuple(roots)
+        if entry.startswith(_PDK_ROOT_LITERAL_PREFIXES):
+            found[index] = "env_var"
+        elif "$" not in entry and any(
+            _is_under(os.path.abspath(_resolve_relative(entry, request_dir)), root)
+            for root in roots
+        ):
+            found[index] = "pdk_root"
+    return found
 
 
 def stage_netlist(
@@ -447,35 +483,6 @@ def netlist_identity(
     return f"sha256:{digest.hexdigest()}", None
 
 
-def stage_sim_netlist(
-    request: dict[str, Any],
-    netlist_path: str,
-    *,
-    netlist_staged_name: str,
-    reserved_names: Sequence[str] = (),
-    backend: str,
-) -> StagedNetlist:
-    """:func:`stage_netlist` with `klt sim`'s own conventions applied: PDK
-    roots derived from the forwarded request (:func:`host_resolved_roots`)
-    and :class:`IncludeStagingError` re-raised as ``sim.SimError`` naming
-    the backend.
-
-    Netlist-only: model inputs are staged by :func:`stage_sim_job`, which
-    is what both off-host job builders call.
-    """
-    from .sim import SimError
-
-    try:
-        return stage_netlist(
-            netlist_path,
-            netlist_staged_name=netlist_staged_name,
-            reserved_names=reserved_names,
-            roots=host_resolved_roots(request),
-        )
-    except IncludeStagingError as exc:
-        raise SimError(f"backend {backend!r}: {exc}") from exc
-
-
 def stage_model_inputs_requested(request: dict[str, Any]) -> bool:
     """Validate and return ``request.options.stage_model_inputs`` (issue
     #2668): absent means ``False``; anything but a JSON boolean is a
@@ -504,7 +511,7 @@ def stage_sim_job(
     backend: str,
 ) -> StagedSimJob:
     """Stage one off-host `klt sim` job: the netlist's include closure
-    (always, exactly as :func:`stage_sim_netlist`) and -- only when
+    (always) and -- only when
     ``request.options.stage_model_inputs`` is ``true`` -- the request's own
     model inputs, returning the files to upload and the worker request to
     serialize beside them (issue #2668).
@@ -570,7 +577,7 @@ def _stage_model_closure(
 ) -> StagedSimJob:
     roots = _collect_model_roots(request, request_dir)
     lib_names: dict[str, str] = {}
-    osdi_names: list[str] = []
+    staged_osdi: list[str] = []
     root_by_name: dict[str, _ModelRoot] = {}
     for root in roots:
         mode = _MODE_BINARY if root.kind == "osdi" else _MODE_MODEL
@@ -579,7 +586,7 @@ def _stage_model_closure(
         )
         root_by_name.setdefault(name, root)
         if root.kind == "osdi":
-            osdi_names.append(name)
+            staged_osdi.append(name)
         else:
             lib_names[root.ref] = name
 
@@ -601,6 +608,7 @@ def _stage_model_closure(
             )
         )
 
+    osdi_names = _osdi_forward_order(request, request_dir, staged_osdi)
     worker = _rewrite_worker_request(request, lib_names, osdi_names)
     return StagedSimJob(
         netlist=netlist,
@@ -710,6 +718,7 @@ def _osdi_roots(request: dict[str, Any], request_dir: str) -> list[_ModelRoot]:
     raw = (request.get("options") or {}).get("osdi_preload")
     if raw is None:
         return []
+    runner_resolved = runner_resolved_osdi(request, request_dir)
     if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
         raise ModelStagingError(
             "options.osdi_preload must be an array of paths to compiled "
@@ -720,6 +729,8 @@ def _osdi_roots(request: dict[str, Any], request_dir: str) -> list[_ModelRoot]:
         field_name = f"options.osdi_preload[{index}]"
         if not isinstance(entry, str) or not entry.strip():
             raise ModelStagingError(f"{field_name} must be a non-empty path")
+        if index in runner_resolved:
+            continue
         path = os.path.abspath(_resolve_relative(entry, request_dir))
         if not os.path.isfile(path):
             raise ModelStagingError(
@@ -729,11 +740,27 @@ def _osdi_roots(request: dict[str, Any], request_dir: str) -> list[_ModelRoot]:
     return roots
 
 
+def _osdi_forward_order(
+    request: dict[str, Any], request_dir: str, staged: list[str]
+) -> list[str]:
+    """The worker's ``options.osdi_preload``: staged names for host-local
+    entries, runner-resolved entries (issue #3819) unexpanded, declared order."""
+    raw = (request.get("options") or {}).get("osdi_preload") or []
+    runner_resolved = runner_resolved_osdi(request, request_dir)
+    staged_iter = iter(staged)
+    return [
+        entry if index in runner_resolved else next(staged_iter)
+        for index, entry in enumerate(raw)
+    ]
+
+
 def _rewrite_worker_request(
     request: dict[str, Any], lib_names: dict[str, str], osdi_names: list[str]
 ) -> dict[str, Any]:
     """A deep copy of ``request`` with every model reference replaced by
-    its staged job-relative name, plus :data:`STAGED_MODEL_INPUTS_FIELD`."""
+    its staged job-relative name, plus :data:`STAGED_MODEL_INPUTS_FIELD`.
+    ``osdi_names`` is the complete preload list in declared order, runner-
+    resolved entries (issue #3819) verbatim among the staged names."""
     worker = copy.deepcopy(request)
     models = worker.get("models")
     if isinstance(models, dict) and models.get("lib") in lib_names:
@@ -961,6 +988,12 @@ class _Stager:
                     target, item=item, index=index, directive="`.include`"
                 )
             else:
+                env_form = self._client_pdk_root_form(target, origin=local_path)
+                if env_form is not None:
+                    self._require_decodable(item, index, decodable)
+                    self.host_resolved.append(env_form)
+                    self.host_resolved_detail.append((env_form, "env_var"))
+                    return f'{match.group("prefix")}"{env_form}"'
                 resolved = self._resolve(target, origin=local_path)
                 if resolved is None:
                     self.host_resolved.append(target)
@@ -1079,6 +1112,28 @@ class _Stager:
             )
         return resolved
 
+    def _client_pdk_root_form(self, target: str, *, origin: str) -> str | None:
+        """``$PDK_ROOT/<rel>`` when ``target`` is an absolute path under this
+        host's own ``$PDK_ROOT`` and not under a forwarded root, else
+        ``None``. The submitting host's ``$PDK_ROOT`` is not forwarded to the
+        runner, so the literal env form (which the executing host expands
+        against its own root) replaces the submitter-local absolute path."""
+        client = client_pdk_root()
+        if client is None or not target or "$" in target:
+            return None
+        expanded = os.path.expanduser(target)
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(os.path.dirname(os.path.abspath(origin)), expanded)
+        resolved = os.path.abspath(expanded)
+        if any(_is_under(resolved, root) for root in self.roots):
+            return None
+        if not _is_under(resolved, client):
+            return None
+        rel = os.path.relpath(resolved, client)
+        if rel == ".":
+            return None
+        return "$PDK_ROOT/" + rel.replace(os.sep, "/")
+
     def _resolve(self, target: str, *, origin: str) -> str | None:
         """Absolute local path ``target`` names, or ``None`` when the
         executing host owns its resolution (see this module's docstring)."""
@@ -1094,6 +1149,17 @@ class _Stager:
         if any(_is_under(resolved, root) for root in self.roots):
             return None
         return resolved
+
+
+def resolve_include_target(
+    target: str, *, origin: str, roots: Sequence[str] = ()
+) -> str | None:
+    """Absolute local path an ``.include`` ``target`` carried by ``origin``
+    names, by the same rule :func:`stage_netlist` follows; ``None`` when the
+    executing host owns its resolution (an env-var or PDK-root target)."""
+    return _Stager(reserved_names=(), roots=tuple(roots))._resolve(
+        target, origin=origin
+    )
 
 
 def _read_text(path: str) -> tuple[str, bool]:

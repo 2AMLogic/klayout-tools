@@ -124,7 +124,9 @@ klt yield mc.json --limits spec-limits.json --format json
   always grades without one. To grade a control from a second, known-bad
   campaign, derive a sample set from both reports with
   [`klt yield-samples`](#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples)
-  — never by hand-editing a committed response.
+  — never by hand-editing a committed response. A
+  [`klt yield-campaign`](yield-campaign.md#negative-control) spec can declare
+  the control itself (`negative_control`) and run both campaigns in one call.
 
 ### Sample-set document
 
@@ -425,7 +427,7 @@ value `0.787`:
 | `consistent` | The sample set is not inconsistent with a normal. |
 | `rejected` | `A2*` exceeds the critical value — a warning says so, and the parametric estimate and Cpk should be treated as indicative only. |
 | `insufficient_samples` | `N < 8`, below where the critical values apply; normality was **not** tested. |
-| `degenerate` | Zero sample spread; the statistic is undefined. |
+| `degenerate` | Zero sample spread; the statistic is undefined. A bit-identical sample set, or one whose sample standard deviation is at or below `1e-12 * max(abs(mean), tiny)` (a floating-point rounding residue, e.g. 100 copies of `1.800306041`), counts as zero spread. A genuine relative spread of `1e-9` does not. |
 
 ### Two yield estimates, side by side
 
@@ -457,7 +459,7 @@ past where it is informative.
 | `sigma_to_spec_confidence_interval` | `3 ×` the `cpk` interval. |
 | `limiting_side` | `"lower"` or `"upper"` — which limit `cpk` is measured against. |
 
-All are `null` when the sample spread is zero (the fit is degenerate).
+All are `null` when the sample spread is zero (the fit is degenerate), using the same relative floor (`stddev <= 1e-12 * max(abs(mean), tiny)`) as the `degenerate` normality verdict.
 
 ### Sample-size verdict
 

@@ -67,13 +67,24 @@ def run(args: argparse.Namespace) -> int:
     # group (parser.py) -- omitting both, or giving both, is already a usage
     # error (exit 2) by the time `run()` is ever called.
     if args.check is not None:
+        if args.deck_file is not None or args.deck_var:
+            return emit_error(
+                "lvs",
+                "--deck-file/--deck-var apply to a fresh run; --check reads "
+                "the deck from the committed report",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
         return emit_error("lvs", "--rerun requires --check <report>", args.format)
 
     try:
-        report = run_lvs(args.request)
+        report = run_lvs(
+            args.request,
+            deck_file=args.deck_file,
+            deck_vars=_parse_deck_vars(args.deck_var),
+        )
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
 
@@ -82,6 +93,21 @@ def run(args: argparse.Namespace) -> int:
     # Unknown/unexpected status can only mean a future additive value this
     # build predates -- never silently report it as a clean `0`.
     return _EXIT_BY_STATUS.get(report["status"], EXIT_MISMATCH)
+
+
+def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
+    """Parse repeatable ``--deck-var NAME=VALUE`` (issue #3206), same
+    spelling and last-one-wins rule as ``klt drc --deck-var``."""
+    deck_vars: dict[str, str] = {}
+    for item in raw or ():
+        name, sep, value = item.partition("=")
+        if not sep or not name:
+            raise LvsError(
+                f"invalid --deck-var {item!r}: expected 'name=value' "
+                "(e.g. --deck-var feol=true)"
+            )
+        deck_vars[name] = value
+    return deck_vars
 
 
 def _run_check(args: argparse.Namespace) -> int:

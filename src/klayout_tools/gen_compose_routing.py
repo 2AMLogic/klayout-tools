@@ -44,9 +44,11 @@ ring-gap-port check).
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import Any, NamedTuple
 
+from ._unionfind import UnionFind
 from .decks import (
     ExtractionDeck,
     UnknownDeckError,
@@ -2017,8 +2019,10 @@ def _drawn_leg_footprint_region(
 
     region = _drawn_route_region(points_um, width_um, dbu)
 
-    landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
     for drop in via_drops:
+        landing_half_dbu = int(
+            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
+        )
         landing_layers = drop.get("landing_layers")
         if (
             route_layer is not None
@@ -2088,11 +2092,13 @@ def _drawn_leg_intermediate_pad_regions(
     if route_layer is None:
         return regions
 
-    landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
     for drop in via_drops:
         landing_layers = drop.get("landing_layers")
         if not landing_layers:
             continue
+        landing_half_dbu = int(
+            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
+        )
         cx = int(round(drop["x_um"] / dbu))
         cy = int(round(drop["y_um"] / dbu))
         box = kdb.Box(
@@ -2369,525 +2375,406 @@ def _zero_junction_stubs(
     )
 
 
-def route_two_pin(
+# Self-net pad-crossing check (#433) and self-net drawn-metal check
+# (#453/#469), factored into a closure parameterised on which layer (and,
+# since issue #1620, which width) is under test: issue #1168 retries
+# these two checks (and only these two -- the ones the checks' own
+# rejection text below points a caller at a "layer_role with a metal2/via
+# stack") against an optional ``cross_block_route_layer`` when the
+# primary ``route_layer`` rejects, so a same-block bus that must cross an
+# intermediate pad on the same drawing layer can escape to the configured
+# second metal instead of failing outright. See the retry drive code just
+# below this def.
+def _same_layer_short_reason(
+    effective_route_layer: tuple[int, int] | None,
+    effective_block_geometry: dict[str, dict[str, Any] | None] | None,
+    effective_width_um: float,
+    *,
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
     blocks: dict[str, dict[str, Any]],
     offsets_um: dict[str, dict[str, float]],
-    placed_bboxes_um: dict[str, dict[str, float]],
-    width_um: float,
-    route_layer: tuple[int, int] | None = None,
-    extraction_deck: ExtractionDeck | None = None,
-    block_geometry: dict[str, dict[str, Any] | None] | None = None,
-    waypoints_um: list[tuple[float, float]] | None = None,
-    cross_block_route_layer: tuple[int, int] | None = None,
-    cross_block_geometry: dict[str, dict[str, Any] | None] | None = None,
-    cross_block_width_um: float | None = None,
-    leg_conflict: Any = None,
-    block_geometry_for: Any = None,
-    cross_block_geometry_for: Any = None,
-    channel_offset_um: float = 0.0,
-    grid_um: float = 0.0,
-) -> dict[str, Any]:
-    """Route one two-pin net and report the result.
+    points: list[tuple[float, float]],
+    waypoints_um: list[tuple[float, float]] | None,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    va: tuple[int, int],
+    dir_a: int,
+    dir_b: int,
+    own_a: str,
+    own_b: str,
+    block_a: dict[str, Any],
+    block_b: dict[str, Any],
+    same_block_self_net: bool,
+    margin_eps_um: float,
+) -> str | None:
+    # Looked up at call time, as ``route_two_pin`` does: the test suite's
+    # ``klayout_tools.gen_compose.<name>`` re-export takes effect here.
+    from .gen_compose import _port_has_geometry
 
-    Resolves each pin's port position into the composed coordinate frame
-    (port ``x_um``/``y_um`` translated by its block's ``offset_um``),
-    generates a Manhattan backbone (:func:`manhattan_backbone`), and applies
-    five routability checks before reporting success -- all diagnostic
-    heuristics against the composition's own already-known geometry
-    (``bbox_um``/``ports[]``) or, for check 4, the block's own drawn shapes
-    (:func:`read_block_layer_geometry`) -- not a DRC check (``klt drc``
-    remains authoritative):
+    # Self-net pad-crossing check (#433): the whole-block bbox check below
+    # skips a self-net's own block entirely (a same-block net's backbone
+    # is, by construction, always inside its own block's bbox -- that
+    # check would otherwise reject every self-net). But skipping it also
+    # means nothing else was checking whether the backbone runs straight
+    # over one of that block's *other* pads -- exactly what happens
+    # bussing an array's unit devices (e.g. chaining a bjt_array's
+    # emitters): a same-layer pad in the backbone's path shorts to it,
+    # silently, since a self-net was never compared against the block's
+    # own ports[] at all. Approximate each other port on this block as a
+    # square pad footprint (side length its own reported ``width_um``,
+    # centered on its position), *inflated* by the route's own trace
+    # half-width on every side -- ``_segment_bbox_interior_overlap_um``
+    # treats a backbone segment as a zero-width centerline, but the wire
+    # actually drawn is ``width_um`` wide, so a centerline that merely
+    # passes within ``width_um / 2`` of a pad's edge still draws metal on
+    # top of it. This Minkowski-sum inflation is what makes the check
+    # actually catch pads much narrower than the route (e.g. a bjt_array
+    # base contact's reported ``width_um`` alone is too small to reach a
+    # jog stubbed out by the route's own width -- only their sum is).
+    # Reject the route if the backbone overlaps this inflated footprint's
+    # interior -- mirroring the bbox-interior accounting above, just
+    # against a pad instead of a whole block.
+    #
+    # Same-direction degenerate-jog check (#453): the inflated-footprint
+    # test above models each other port as a square of side its
+    # *reported* ``width_um``. For an array unit's own pad that badly
+    # *under*-estimates the real drawn metal in the port's facing
+    # direction -- e.g. a bjt_array base-tie tap draws li1 metal several
+    # times taller than its reported ``width_um`` (the reported width is
+    # roughly the contact size, not the pad extent). When both pins face
+    # the *same* direction and share the coordinate along that facing
+    # axis (same row for a vertical facing, same column for a horizontal
+    # one), ``manhattan_backbone()`` collapses to a single straight jog
+    # lifted just one stub width (``width_um``) to the ports' outward
+    # side -- so a route wide enough that the jog clears the under-sized
+    # reported square still plows straight through the real pad of any
+    # intervening same-facing port. That is exactly the reproduction in
+    # #453 (bussing two same-row north-facing bjt_array emitters across
+    # the intervening unit's north-facing base-tie pad composed
+    # ``routed: true`` and DRC-clean while extraction showed the whole
+    # array's shared base node absorbed into the emitter net). Treat any
+    # other same-layer port that faces the same direction and sits
+    # strictly between the two pins along the perpendicular axis (on the
+    # same row/column) as crossed: its pad opens toward the jog, so
+    # bussing across it draws a silent short regardless of how small its
+    # reported ``width_um`` is.
+    if same_block_self_net:
+        own_ports = blocks[own_a].get("ports") or {}
+        own_offset = offsets_um[own_a]
+        route_half_um = effective_width_um / 2.0
+        skip_port_names = {pin_a["port"], pin_b["port"]}
+        facing_vertical = va[1] != 0
+        # A degenerate single-jog backbone only forms when both pins face
+        # the same direction *and* share their facing-axis coordinate
+        # (same row for a vertical facing, same column for a horizontal
+        # one).
+        same_line = (
+            abs(a[1] - b[1]) < 1e-9 if facing_vertical else abs(a[0] - b[0]) < 1e-9
+        )
+        # Like the channel-width heuristic and the #461 stub lift above,
+        # this conservative fallback is a statement about the
+        # *degenerate single-jog shape* -- it rejects on port positions
+        # alone, without consulting `points`, precisely because that
+        # fixed shape is known to run straight along the ports' own
+        # row/column. Supplying waypoints_um (#634) replaces that shape
+        # with the caller's own path, so the premise no longer holds and
+        # the fallback would reject route-arounds that never go near the
+        # intervening pad. The waypoint-drawn path is still checked
+        # against the same pads by the inflated-footprint test below and
+        # by the drawn-metal check (#453/#469) -- both of which measure
+        # the actual `points`, so a caller whose waypoints really do
+        # cross a pad is still rejected.
+        conservative_same_dir = waypoints_um is None and dir_a == dir_b and same_line
+        for other_name, other_port in own_ports.items():
+            if other_name in skip_port_names or not _port_has_geometry(other_port):
+                continue
+            other_layer = (
+                other_port["layer"]["layer"],
+                other_port["layer"]["datatype"],
+            )
+            if (
+                effective_route_layer is not None
+                and other_layer != effective_route_layer
+            ):
+                continue  # a pad on a different physical layer can't short
+            px = float(other_port["x_um"]) + own_offset["x"]
+            py = float(other_port["y_um"]) + own_offset["y"]
 
-    1. **Channel-width check** (original, phase 2): when the backbone
-       requires a jog *across* the channel between the two pins' blocks and
-       that channel is narrower than ``width_um``, the wire cannot fit
-       without overlapping a block. Evaluated from the raw port positions
-       and the inter-block gap -- i.e. it is a property of the *fixed*
-       one-jog shape, not of the drawn path -- so it is skipped entirely
-       when ``waypoints_um`` is supplied (#634); see below.
-    2. **Guard/collector-ring check** (#199 case 2): a block reporting a
-       guard or collector ring (any ``TAP_*``/``COLL_*`` port -- see
-       :func:`_block_has_ring_taps`) has that ring drawn *around* its other
-       ports; a route touching one of those non-tap ports necessarily
-       crosses the ring's own metal loop on its way in or out, merging the
-       net with the ring's own tap net. Since issue #1960 that is a
-       statement about the *plane* the leg is drawn on, not about block/port
-       identity alone: a backbone on a level the ring has no conductor on,
-       separated from every ring conductor by at least one via in the
-       resolved deck's own ``metals``/``vias`` stack, and whose via-drop
-       landing pads all stay clear of the ring's trace, physically flies
-       over the loop and is admitted (:func:`_leg_plane_clears_ring`).
-       Everything else -- a same-plane backbone, a pad landing on the ring's
-       own layer where it is not provably clear of the trace, or a layer
-       pair the deck cannot resolve at all -- takes the identical rejection
-       as before.
-    3. **Self-net pad-crossing check** (#433): a same-block net's backbone is
-       always inside its own block's bbox, so the obstacle-overlap check
-       below exempts it entirely -- but nothing else was checking whether
-       that backbone runs straight over one of the block's *other* pads
-       (e.g. bussing a bjt_array's emitters together necessarily crosses the
-       base pads sitting between them). Every other port on the same block
-       that shares the route's own ``route_layer`` is treated as a square
-       pad footprint (side length its reported ``width_um``); a backbone
-       overlapping that footprint's interior is rejected rather than drawn
-       as a silent short. A same-direction degenerate-jog variant of this
-       same check (#453's conservative fallback) additionally rejects any
-       other same-facing port on the same row/column between the two pins
-       outright, regardless of its reported ``width_um`` -- see the
-       ``conservative_same_dir`` block below. That degenerate-jog fallback is
-       likewise a property of the fixed shape rather than of the drawn path,
-       so it too is skipped when ``waypoints_um`` is supplied (#634); the
-       pad-footprint test itself still runs against the drawn ``points``.
-    4. **Self-net drawn-metal check** (#453/#469): check 3's reported-
-       ``width_um`` pad model, even with its same-direction fallback, is
-       still built from *reported* geometry and can miss a short whenever
-       the pins sit on different rows/columns or the route is wide enough to
-       reach a pad the modelled square under-states. When ``block_geometry``
-       supplies the block's actual drawn shapes on ``route_layer``
-       (:func:`read_block_layer_geometry`), the route's own drawn metal
-       (:func:`_drawn_route_region`, the same ``kdb.Path`` the composed cell
-       gets) is intersected with them: overlapping any merged shape other
-       than the two the endpoints sit on (positive area only -- an edge
-       touch is a ``klt drc`` spacing question, not a short) is a silent
-       short. This check is independent of, and composes with, check 3 --
-       it catches cases (different rows, wider routes) check 3's reported-
-       geometry model cannot see.
+            # #453: an intervening same-facing pad on the jog's own
+            # row/column is crossed no matter how small its reported
+            # footprint is.
+            other_dir = int(other_port.get("direction_deg", 0)) % 360
+            if conservative_same_dir and other_dir == dir_a:
+                if facing_vertical:
+                    between = (
+                        min(a[0], b[0]) < px < max(a[0], b[0]) and abs(py - a[1]) < 1e-9
+                    )
+                else:
+                    between = (
+                        min(a[1], b[1]) < py < max(a[1], b[1]) and abs(px - a[0]) < 1e-9
+                    )
+                if between:
+                    axis = "row" if facing_vertical else "column"
+                    return (
+                        f"self-net between two same-facing ports on the "
+                        f"same {axis} jogs directly over block "
+                        f"'{own_a}''s own port '{other_name}' (same "
+                        "facing direction, same drawing layer) -- "
+                        "bussing this net across the block would draw a "
+                        "silent short to that pad's real drawn metal, "
+                        "which extends past its reported width_um "
+                        "footprint in its facing direction; route to a "
+                        "layer_role with a metal2/via stack instead "
+                        "(or configure routing.cross_block_layer_role, "
+                        "issue #1168), or wire this net externally"
+                    )
 
-       **Own-block escape check** (issue #1527): checks 3/4 above only ever
-       ran for a same-block self-net (``pin_a``/``pin_b`` share a block) --
-       an inter-block leg (the far more common case) skipped both entirely,
-       even though it still draws an approach stub inside *each* endpoint's
-       own block on its way out, exactly the same as a self-net's backbone
-       does. Nothing checked that stub against the block's other drawn
-       geometry: check 5 below only ever modelled a pin's own block by its
-       bbox, with an unavoidable margin (:func:`_port_edge_margin_um`)
-       exempting the approach stub from being flagged at all, so a
-       coordinate-tapped ``blocks[].cell`` port whose escape direction
-       happened to run across a *different* net already drawn inside that
-       same block composed ``routed: true`` and DRC-clean while silently
-       shorting the two nets together. When ``block_geometry`` is supplied,
-       :func:`_self_net_drawn_short` is now also run once per endpoint whose
-       own block is a ``blocks[].cell`` block (independently of
-       ``same_block_self_net`` -- scoped to ``cell`` blocks only, not every
-       ``generator_report`` block too, since a generator can legitimately
-       draw real, unreported geometry this check cannot tell apart from an
-       obstacle, e.g. ``mos_array``'s own dummy matching columns, already
-       excluded from the netlist by ``klt extract``'s own dummy-suppression
-       convention), comparing that endpoint's drawn leg against its *own*
-       block's other drawn shapes on ``route_layer`` -- excluding only the
-       shape its own port lands on (not the far endpoint's port, which is
-       not on this block at all).
-    5. **Obstacle-overlap check** (#199 case 1): after each port's own
-       unavoidable "sit set back from my own block's edge" margin is
-       excluded (:func:`_port_edge_margin_um`), the drawn backbone must not
-       cross the *interior* of any block's bbox -- including the two pins'
-       own blocks (a same-facing port pair forces the backbone to plow
-       through the destination block's full width to reach a port on its far
-       side, e.g. crossing that block's own opposite-facing pin) and any
-       third block's bbox the straight-line/single-jog backbone happens to
-       cross in a longer row. Every bbox tested here is inflated by
-       ``width_um / 2`` on every side first (#999), so a centerline that
-       merely runs close enough alongside a block's edge -- closer than half
-       the route's own drawn width -- is caught too, not just one that
-       crosses the zero-width centerline through the block's true interior;
-       each own-pin's allowance is bumped by the same ``width_um / 2`` so a
-       normal approach into that pin's own block is not penalized by the
-       inflation. A block that draws no shapes at all on ``effective_route_
-       layer`` is exempted from this check entirely (#1656): a route on
-       metal2 cannot short to a block whose own drawn geometry has no
-       metal2 shapes, so a bare bbox crossing there is a false positive,
-       not a real obstacle -- see ``block_geometry_for``/
-       ``cross_block_geometry_for`` below. A block that *does* draw there is
-       exempted too whenever this leg's own drawn metal
-       (:func:`_drawn_route_region`) does not actually overlap any of those
-       shapes (#1681): a bbox is a solid proxy for a shape that need not be
-       solid, so a route crossing only the *hollow interior* of a
-       ``guard_ring``-style enclosure block -- the natural shape for a
-       composition that places a region's ring and the content it encloses
-       as two separate ``blocks[]`` entries -- was being rejected for
-       "crossing" metal it never comes near. Both exemptions remove false
-       positives only: a leg that does reach a block's real drawn shapes is
-       still measured, and rejected or detoured, exactly as before. A block
-       that declares one or more ``navigable_regions`` (issues #1531/#1835 --
-       e.g. ``mos_array``'s ``interior_channel_um``) gets a third exemption:
-       the portion of the backbone's interior overlap that falls inside one
-       of that block's own declared channels is subtracted before this
-       check's threshold comparison (:func:`_segment_obstacle_overlap_um`),
-       so a route that stays inside the declared channel is not "crossing"
-       the block's obstacle even though the channel geometrically sits
-       inside its bbox. Absent/empty ``navigable_regions`` (every block that
-       predates #1531, and every ``mos_array`` call with
-       ``interior_channel_um=0.0``) leaves this check byte-for-byte
-       unchanged. A crossing this check finds against a block none of these
-       exemptions clears is not automatically
-       fatal (#1167): when the *only* blocks crossed are ones neither pin
-       sits on, the net is retried around them first -- see "Bounded detour
-       search" below -- and reported unroutable only if no alternate lane
-       clears them either.
-    6. **Via-drop resolution** (#454; multi-hop ladder since #1567): when
-       ``route_layer`` and a pin's own reported layer differ,
-       :func:`_resolve_via_drop_layer` looks up whether ``extraction_deck``
-       connects the two -- via however many via hops the ``deck.metals``
-       stack puts between them (e.g. ``routing.layer_role: "metal2"``
-       backbone reaching a ``"metal"``-role li1 pad via sky130's ``mcon``, or
-       ``routing.layer_role: "metal3"`` reaching that same li1 pad via a
-       two-hop ``mcon`` + ``via`` ladder). A pin whose own layer *is*
-       ``route_layer`` needs no drop; a pin on an unrelated role a
-       route-layer shape already covers (e.g. a guard ring's active/tap port)
-       is left exactly as before #454 (drawn directly on ``route_layer``, no
-       via). A pin whose layer is a *different* ``deck.metals`` level than
-       ``route_layer`` but the deck declares no via for one of the hops
-       between them, **or** a pin on the deck's bare ``poly`` layer (a gate
-       drawn without ``params.gate_contact``, issue #492), is rejected here
-       -- reported unroutable rather than drawing a disconnected short or an
-       uncontacted stub.
+            pad_w = other_port.get("width_um")
+            if (
+                not isinstance(pad_w, (int, float))
+                or isinstance(pad_w, bool)
+                or (pad_w <= 0)
+            ):
+                # no reported pad size -- fall back to trace width
+                pad_w = effective_width_um
+            half = float(pad_w) / 2.0 + route_half_um
+            pad_bbox_um = {
+                "x0": px - half,
+                "y0": py - half,
+                "x1": px + half,
+                "y1": py + half,
+            }
+            crossed_um = sum(
+                _segment_bbox_interior_overlap_um(seg_p0, seg_p1, pad_bbox_um)
+                for seg_p0, seg_p1 in zip(points, points[1:], strict=False)
+            )
+            if crossed_um > margin_eps_um:
+                return (
+                    f"self-net backbone crosses {crossed_um:.4g}um "
+                    f"through block '{own_a}''s own port '{other_name}' "
+                    "on the same drawing layer -- bussing this net "
+                    "across the block would draw a silent short to that "
+                    "pad; route to a layer_role with a metal2/via stack "
+                    "instead (or configure "
+                    "routing.cross_block_layer_role, issue #1168), or "
+                    "wire this net externally"
+                )
 
-    Checks 1-5 report the net unroutable (spike section 2,
-    ``unrouted_nets[]``) rather than silently drawing a short; check 6 does
-    the same for a route it cannot connect end to end. ``route_layer`` (the
-    ``(layer, datatype)`` pair ``routing.layer_role`` resolved to, see
-    :func:`_resolve_route_layer`) is optional only for callers that predate
-    #433/don't care about check 3 (e.g. direct unit tests) -- ``compose()``
-    always passes it when ``connectivity[]`` is non-empty, since that's the
-    only time a route is actually drawn. ``block_geometry`` (block ``id`` ->
-    :func:`read_block_layer_geometry` result, ``None`` for a block that draws
-    nothing on the route layer) is likewise optional and likewise always
-    supplied by ``compose()`` -- for both endpoint blocks of every leg since
-    issue #1527, not only a same-block self-net's shared one; without it
-    check 4 and the own-block escape check above are both skipped and only
-    check 3's weaker reported-geometry pad model applies (same-block self-net
-    legs only -- an inter-block leg has no check 3 fallback, since that
-    check's reported-``width_um`` pad model only ever compared against
-    *other ports on the same block*, which an inter-block leg's own block
-    need not report at all). ``extraction_deck`` is likewise optional and
-    only consulted
-    (check 6) when both it and ``route_layer`` are given -- omitting it (e.g.
-    a pre-#454 caller) draws every pin directly on ``route_layer`` with no
-    via-drop, exactly as before that issue. ``waypoints_um`` (#634) is
-    likewise optional -- ``None``/omitted preserves today's fixed-shape
-    backbone exactly (:func:`manhattan_backbone`'s default one-jog/corner
-    shape); when given, it is threaded straight into
-    :func:`manhattan_backbone`, whose own docstring covers how the path is
-    built from it. Every check that measures the *drawn path* runs against
-    whatever ``points`` results either way -- a waypoint-supplied path is not
-    exempt from the obstacle-overlap check (5), the ring-opening check
-    (#434), the pad-footprint half of check 3, check 4, or check 6 just
-    because the caller supplied it. What supplying waypoints *does* switch
-    off is the handful of heuristics that never look at ``points`` at all
-    because they are predictions about the fixed one-jog shape: the
-    channel-width check (1), check 3's ``conservative_same_dir``
-    degenerate-jog fallback, and the #461 recessed-stub lift. Each of those
-    reasons from the raw port positions and block bboxes on the assumption
-    that ``manhattan_backbone`` will draw its default shape; once the caller
-    supplies a path, that shape is not drawn, so the prediction describes a
-    route that does not exist and would reject perfectly good route-arounds
-    (the tightly-packed-row case -- inter-block gap narrower than
-    ``width_um`` -- being exactly the one waypoints exist to solve). The
-    closed guard/collector-ring check (2) is *not* in that group and still
-    runs: a closed ring encloses its block completely, so no choice of
-    waypoints can reach an interior port without crossing it.
+    # Self-net drawn-metal check (#453/#469): check 3 above models each
+    # other port as a square built from its *reported* ``width_um``,
+    # which is a port's contact/access size -- not the extent of the pad
+    # metal drawn around it. A bjt_array base tie, for instance, reports
+    # ``width_um: 0.22`` (``CONTACT_SIZE_UM``) for a pad whose drawn
+    # local metal is 0.42um x 0.68um. So the modelled square (and even
+    # its same-direction same-row/column fallback, which only fires for a
+    # degenerate single-jog backbone) systematically under-states the
+    # real obstacle and misses any short outside that narrow shape --
+    # notably a same-facing pair on *different* rows/columns, or a route
+    # wide enough to reach an adjacent row's pad. Compare the route's
+    # *drawn* metal against the block's own *drawn* shapes on the route
+    # layer instead: every merged shape except the two the endpoints land
+    # on is an obstacle, and overlapping one (positive area -- an edge
+    # touch is a spacing question for `klt drc`, not a short) is the same
+    # silent short, just measured against geometry the reported port
+    # model cannot see. This is independent of, and composes with, check
+    # 3: either can catch a case the other misses.
+    if same_block_self_net and effective_block_geometry is not None:
+        geometry = effective_block_geometry.get(own_a)
+        if geometry is not None:
+            drawn = _self_net_drawn_short(
+                points,
+                geometry,
+                a,
+                b,
+                effective_width_um,
+                blocks[own_a].get("ports") or {},
+                offsets_um[own_a],
+            )
+            if drawn is not None:
+                overlap_um2, crossed_names = drawn
+                if not crossed_names:
+                    where = "drawn geometry (no port of its own sits on it)"
+                else:
+                    noun = "port" if len(crossed_names) == 1 else "ports"
+                    where = f"{noun} " + ", ".join(f"'{n}'" for n in crossed_names)
+                return (
+                    f"self-net's drawn {effective_width_um}um metal overlaps "
+                    f"{overlap_um2:.4g}um^2 of block '{own_a}''s own "
+                    f"drawn pad metal on the route layer ({where}) -- "
+                    "bussing this net across the block would draw a "
+                    "silent short to that pad (its drawn metal is "
+                    "larger than the contact size its port reports); "
+                    "route to a layer_role with a metal2/via stack "
+                    "instead (or configure "
+                    "routing.cross_block_layer_role, issue #1168), or "
+                    "wire this net externally"
+                )
 
-    ``cross_block_route_layer``/``cross_block_geometry`` (issue #1168) name an
-    optional *second*, higher metal ``(layer, datatype)`` pair (resolved by
-    :func:`_resolve_cross_block_route_layer` from ``routing.
-    cross_block_layer_role``) and its own drawn-geometry cache
-    (:func:`read_block_layer_geometry` result per block, mirroring
-    ``block_geometry`` but for the cross layer) -- both optional and both
-    ``None`` unless the caller configured a cross-block bus layer. When
-    checks 3/4 above reject a leg because it crosses another same-block port
-    or drawn pad *on the primary ``route_layer``*, and a cross-block layer is
-    configured, the identical pair of checks is retried against
-    ``cross_block_route_layer``/``cross_block_geometry`` instead of failing
-    outright; a leg that resolves on the cross layer draws there for its
-    *entire* length (not just the crossing segment), with checks 5/6 and the
-    stub-widen pass all re-run against that same effective layer, including
-    an endpoint via-drop (check 6) wherever a pin's own reported layer is the
-    primary ``route_layer`` rather than the cross layer itself -- exactly the
-    same via-drop resolution :func:`_resolve_via_drop_layer` already performs
-    for a caller-selected ``routing.layer_role: "metal2"``, just decided
-    per-leg instead of for the whole composition. A leg that never trips
-    checks 3/4 on the primary layer, or that trips them with no cross-block
-    layer configured, is entirely unaffected -- this is an additive fallback,
-    not a change to any existing single-layer behaviour.
+    # Own-block escape check (issue #1527): the two checks above only
+    # ever ran for a same-block self-net -- a leg whose two pins sit on
+    # *different* blocks skipped both entirely. But such a leg still
+    # draws an approach stub inside each endpoint's own block on its way
+    # out (the whole-block bbox check further below deliberately exempts
+    # exactly that stub, via each own-pin's `_port_edge_margin_um`
+    # allowance, so a normal approach is never rejected for "crossing my
+    # own block") -- and nothing checked whether that stub crosses a
+    # *different* net already drawn inside that same block. That is
+    # precisely the gap a coordinate-tapped `blocks[].cell` port opens:
+    # the tap sits on one of the block's own internal wires, so the one
+    # region a leg is guaranteed to cross is the one region no obstacle
+    # model covered.
+    #
+    # Scoped to a `blocks[].cell` endpoint only (`block.get("source") ==
+    # "cell"`), deliberately *not* every block. A `cell` block's every
+    # `ports[]` entry is hand-declared by the caller directly onto the
+    # stream's own geometry (`_parse_cell_block`) -- so, for that block
+    # kind, "every merged shape my own port does not land on is a
+    # genuinely different net" is a sound assumption. It is not sound for
+    # a `generator_report` block: e.g. `mos_array`'s own `dummy` columns
+    # (added by default) draw real, unreported metal pads flanking the
+    # array purely for layout matching, which `klt extract`'s own
+    # dummy-suppression convention (#295/#462) already excludes from the
+    # netlist -- this check cannot tell that apart from an actual
+    # obstacle, and a first attempt at this issue that ran unconditionally
+    # rejected several previously-`routed: true` fixtures that route
+    # straight over such dummy geometry (verified against this repo's own
+    # `mos_array`/`bjt_array` composition tests) for a "short" `klt
+    # extract` would never actually see. A generator that reports
+    # everything it draws as either a port or a suppressed dummy has no
+    # such gap to begin with, so it is left to the coarser whole-block
+    # bbox check (#199) below, unchanged. Compare each endpoint's own
+    # drawn leg against its *own* block's other drawn shapes on the route
+    # layer, excluding only the shape that endpoint's own port lands on
+    # -- unlike the same-block check above, the *other* endpoint is not
+    # on this block at all, so nothing else needs excluding here.
+    if not same_block_self_net and effective_block_geometry is not None:
+        for own_id, pin, point, block in (
+            (own_a, pin_a, a, block_a),
+            (own_b, pin_b, b, block_b),
+        ):
+            if block.get("source") != "cell":
+                continue
+            geometry = effective_block_geometry.get(own_id)
+            if geometry is None:
+                continue
+            drawn = _self_net_drawn_short(
+                points,
+                geometry,
+                point,
+                point,
+                effective_width_um,
+                block.get("ports") or {},
+                offsets_um[own_id],
+            )
+            if drawn is not None:
+                overlap_um2, crossed_names = drawn
+                if not crossed_names:
+                    where = "drawn geometry (no port of its own sits on it)"
+                else:
+                    noun = "port" if len(crossed_names) == 1 else "ports"
+                    where = f"{noun} " + ", ".join(f"'{n}'" for n in crossed_names)
+                return (
+                    f"leg's drawn {effective_width_um}um metal overlaps "
+                    f"{overlap_um2:.4g}um^2 of block '{own_id}''s own "
+                    f"drawn geometry on the route layer ({where}) near "
+                    f"its own port '{pin['port']}' -- the escape from "
+                    f"this port would draw a silent short to another net "
+                    f"already present inside block '{own_id}' (issue "
+                    "#1527); tap a different point on the intended net, "
+                    "supply waypoints_um that route the approach clear of "
+                    "the obstruction, or route to a layer_role with a "
+                    "metal2/via stack instead (or configure "
+                    "routing.cross_block_layer_role, issue #1168)"
+                )
+    return None
 
-    ``cross_block_width_um`` (issue #1620) is the width a leg draws at once
-    it actually falls back to ``cross_block_route_layer`` -- checks 3/4's
-    retry above, the obstacle-overlap inflation (check 1 below), the
-    detour-lane clearance, and the stub-widen pass are all re-evaluated
-    against this width instead of ``width_um`` once the cross layer wins,
-    so a wider cross-block plane's own footprint is judged at the width it
-    is actually drawn with, not the (generally narrower) primary plane's
-    width. ``None`` (the default) reuses ``width_um`` for a cross-layer leg
-    too, reproducing this function's pre-#1620 behaviour exactly. The
-    returned result's own ``width_um`` field (see below) reports whichever
-    width actually won.
 
-    ``block_geometry_for``/``cross_block_geometry_for`` (issue #1656) are the
-    same lazy per-block geometry caches ``compose()`` builds around
-    :func:`read_block_layer_geometry` for ``block_geometry``/
-    ``cross_block_geometry`` above (a callable that, given a ``block_id``,
-    returns the shared ``{block_id: geometry-or-None}`` cache dict with that
-    entry populated) -- but reachable here for *any* block in
-    ``placed_bboxes_um``, not only the leg's own two endpoint blocks. The
-    obstacle-overlap check (5) below uses them to test whether a block it is
-    about to reject a crossing against actually draws anything on
-    ``effective_route_layer``: a block whose own geometry has nothing there
-    cannot be shorted to by this route, no matter how much its *bbox*
-    overlaps the drawn path, so it is exempted from that check entirely.
-    Since issue #1681 they are also used for the stronger test the same
-    cached ``region`` makes possible: a block that *does* draw on that layer
-    is exempted too when this leg's own drawn metal does not overlap any of
-    its shapes, so an enclosure block (a ``guard_ring``) whose hollow
-    interior the route merely passes through stops reading as an obstacle.
-    Both are optional and ``None`` by default; when omitted (e.g. a direct
-    unit-test caller, or ``route_layer is None``), the obstacle check falls
-    back to its pre-#1656 bbox-only behaviour and every placed block stays a
-    potential obstacle regardless of what it draws.
+# Ring-gap reach allowance (issue #1902): see the call site in
+# ``route_two_pin`` for the derivation of ``ring_pin_blocks``.
+def _own_block_allowance_um(
+    own_id: str,
+    point: tuple[float, float],
+    direction_deg: int,
+    bbox: dict[str, float],
+    *,
+    ring_pin_blocks: dict[str, dict[str, Any]],
+    stub_um: float,
+) -> float:
+    margin = max(0.0, _port_edge_margin_um(point, direction_deg, bbox))
+    ring_block = ring_pin_blocks.get(own_id)
+    if ring_block is None:
+        return margin
+    for side in _ring_gap_ports(ring_block):
+        side_dir = RING_SIDE_DIRECTIONS[side]
+        reach = max(0.0, _port_edge_margin_um(point, side_dir, bbox))
+        if side_dir != direction_deg:
+            reach += stub_um
+        margin = max(margin, reach)
+    return margin
 
-    **Bounded detour search (#1167).** Rejecting every backbone that crosses
-    a third block's bbox means only *immediately adjacent* blocks in a row
-    can ever be wired -- a real block's netlist is not a Hamiltonian path
-    over its devices, so most of its nets never had a chance (issue #1164
-    measured 0/8, 0/9 and 0/9 nets routed across three real gf180mcu
-    blocks). So when check 5 rejects a path **solely** because of blocks
-    neither pin sits on, this function retries the same pin pair around them
-    before giving up: :func:`_detour_lane_waypoints_um` proposes up to
-    ``_MAX_DETOUR_LANES`` alternate *lanes* (a straight run over/under, or
-    left/right of, every block in the way, ordered shortest-detour first),
-    and each is routed by a recursive call to this same function with the
-    lane as ``waypoints_um``. That is the whole mechanism -- a detour is
-    just a route this function generated for itself instead of the caller
-    generating it, so **every check above applies to it unchanged**; nothing
-    is waived to make a detour fit, and a lane that would cross a block's
-    drawn geometry, a ring, or another pad is rejected exactly as a
-    caller-supplied path would be. The search is bounded on both sides: the
-    retry supplies ``waypoints_um``, and a waypoint-supplied path is never
-    itself detoured (one level of recursion, at most two extra attempts per
-    net); and the lane is placed clear of *every* block it spans, so two
-    obstacles between the pins cost exactly one lane, not two nested
-    detours. What is deliberately **not** detoured is a backbone crossing
-    one of its own two pins' blocks (the same-facing port pair): that is a
-    statement about which way the ports face, and its remedy stays the
-    caller-supplied ``waypoints_um`` of #634. When no lane works, the
-    reported ``reason`` is check 5's original wording plus a note that the
-    detour was tried, so a caller can tell "there was no way around" from
-    "no attempt was made".
 
-    **Same-block cross-layer conflict retry (issue #1393).** ``leg_conflict``
-    is an optional callable with the same signature as
-    :func:`route_bundle`'s own ``leg_conflict`` parameter (``(points_um,
-    via_drops, stub_widen, route_layer) -> str | None``) -- ``compose()``
-    threads its route-vs-route collision check (#1057/#1386) through
-    unchanged. It has no effect unless **all** of the following hold, so
-    every other leg is entirely unaffected -- a same-block self-net that
-    resolved on the *primary* ``route_layer``, an inter-block net, and a
-    caller-supplied ``waypoints_um`` path all behave exactly as before this
-    issue:
+def _route_touches_drawn_geometry(
+    geometry: dict[str, Any],
+    *,
+    points: list[tuple[float, float]],
+    effective_width_um: float,
+    drawn_route_by_dbu: dict[float, Any],
+) -> bool:
+    """Whether this leg's drawn metal actually overlaps ``geometry``'s
+    own drawn shapes (positive area -- a bare edge touch is a ``klt drc``
+    spacing question, not a short, the same convention
+    :func:`_self_net_drawn_short` applies)."""
+    dbu = geometry["dbu"]
+    drawn = drawn_route_by_dbu.get(dbu)
+    if drawn is None:
+        drawn = _drawn_route_region(points, effective_width_um, dbu)
+        drawn_route_by_dbu[dbu] = drawn
+    return not (geometry["region"] & drawn).is_empty()
 
-    - this leg is a same-block self-net (``pin_a``/``pin_b`` share a block);
-    - this call is the *fixed*-shape attempt, not itself a caller- or
-      detour-supplied path (``waypoints_um`` is ``None`` -- bounds the
-      search to one level of recursion, mirroring #1167);
-    - the leg actually resolved on ``cross_block_route_layer`` -- i.e. the
-      checks 3/4 same-layer-short retry above fired, so this leg exists
-      *because of* ``routing.cross_block_layer_role`` in the first place.
 
-    When all three hold and ``leg_conflict`` rejects the fixed-shape path --
-    the case #1168's own fallback has no visibility into: a *different*
-    same-block self-net that also needed the cross layer and already claimed
-    the identical lane (:func:`route_bundle`'s route-vs-route check, #1057,
-    correctly flags the resulting literal overlap or spacing violation) --
-    this function generalises the same *pattern* of bounded detour search
-    used just above -- but not the same lane shape, which does not work for
-    this case (see :func:`_self_net_cross_layer_lane_waypoints_um`'s own
-    docstring: a straight up/down lane at either port's native column can run
-    straight through a *different* same-block self-net's own approach stub,
-    since a same-block self-net's ports can share coordinates with another
-    same-block self-net's ports -- verified as the actual failure mode this
-    issue's own reproduction hits). Instead,
-    :func:`_self_net_cross_layer_lane_waypoints_um` proposes up to
-    ``_MAX_SAME_BLOCK_CROSS_LAYER_LANES`` single-corner waypoints that route
-    fully *around the outside* of the block both pins sit on (there is no
-    third-party obstacle bbox here, unlike the #1167 case -- the collision is
-    with another net's *drawn metal*, not a placed block), and each is routed
-    by a recursive call to this same function with the corner as its sole
-    ``waypoints_um`` entry (without threading ``leg_conflict`` further --
-    the one-level recursion bound is enforced the same way #1167's own
-    retry is, by the ``waypoints_um is None`` gate above); ``leg_conflict``
-    is then re-checked against *that* lane's actual drawn points before it is
-    accepted, so a lane that clears the block but still collides with the
-    other net is rejected and the next lane is tried. Unlike #1167's own
-    scope guard (just above, which deliberately excludes a pin's own block
-    from that retry), this is a distinct case with its own gating -- not a
-    relaxation of that guard: #1167 retries around a *third*, unrelated
-    block's bbox; this retries around an *already-accepted leg of a
-    different self-net on the same block*. When no lane clears the conflict
-    either, the reported ``reason`` is ``leg_conflict``'s own wording plus a
-    note that the detour was tried.
+def _closed_ring_pins(
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    *,
+    block_a: dict[str, Any],
+    block_b: dict[str, Any],
+    port_a: dict[str, Any],
+    port_b: dict[str, Any],
+    a: tuple[float, float],
+    b: tuple[float, float],
+    offsets_um: dict[str, dict[str, float]],
+    route_layer: tuple[int, int] | None,
+    cross_block_route_layer: tuple[int, int] | None,
+    extraction_deck: ExtractionDeck | None,
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], str | None]:
+    """Guard/collector-ring check (check 2, #199 case 2).
 
-    A retried lane is **not** pinned to ``cross_block_route_layer``: the
-    recursive call re-runs the *whole* layer resolution above against the
-    lane's own drawn path, so a lane that loops clear of the block no longer
-    crosses the pads that forced the fallback in the first place and
-    naturally resolves back onto the primary ``route_layer``. That is the
-    intended outcome, not an escape -- it is the same checks reaching a
-    different verdict for a genuinely different path, and it leaves the
-    cross layer free for the *first* self-net that still needs it. What the
-    gating above guarantees is only that this retry is *reachable* solely
-    from a leg that needed the cross layer; it makes no promise about which
-    layer the accepted lane ends up on.
+    Returns ``(ring_pins, reason)``. ``reason`` is the unroutable wording when
+    a block with a *closed* ring drawn around it (any ``TAP_*``/``COLL_*``
+    port reported, no ``GAP_*`` opening) is reached at a non-tap port -- the
+    route would cross the ring's own metal loop on the way in for a
+    destination pin, or on the way out for a source pin, since the ring fully
+    encloses the block either way. Only meaningful for distinct blocks: a
+    self-net's two ports already both sit inside the same ring, so it draws no
+    *additional* ring crossing (``ring_pins`` is empty and ``reason`` is
+    ``None``).
 
-    **Channel track retry (issue #1467).** #1393 above only ever fires for a
-    *same-block* self-net's cross-layer fallback -- an *inter*-block leg that
-    ``leg_conflict`` rejects (a route-vs-route collision, #1057/#1386, not a
-    block obstacle) had no retry at this level at all before this issue: the
-    fixed one-jog shape always lands every net sharing one channel on the
-    exact same mid coordinate (:func:`manhattan_backbone`'s ``my``/``mx``),
-    so the *first* net processed wins the channel and every other net
-    contending for it is simply rejected, with no attempt to offset it onto a
-    different track the same channel has room for (see the module's own
-    "capability ceiling" framing -- this is a resource-*allocation* gap, not
-    a rejection-logic bug). This fires only for the common shared-row-channel
-    shape: an inter-block leg (``pin_a``/``pin_b`` on different blocks), both
-    ports facing the identical vertical direction (``va[1] == vb[1] != 0`` --
-    both north-facing or both south-facing, i.e. :func:`manhattan_backbone`'s
-    both-vertical-facing/horizontal-jog branch), with no caller-supplied
-    ``waypoints_um`` (a caller-steered path owns its own routing, exactly as
-    every other fixed-shape-only heuristic in this function already respects)
-    and ``leg_conflict`` actually supplied. Mixed-orientation pairs, a
-    vertical (both-horizontal-facing) jog's column channel, and same-block
-    self-nets are all out of scope for this retry -- the first two lack the
-    "many nets, one mid coordinate" degeneracy this retry exists to fix, and
-    the third is already #1393's own case.
+    A block whose ring declares an opening (``params.ring_gap_side``, #434) is
+    not rejected here: it is collected into ``ring_pins`` instead, and the
+    drawn backbone is checked against the ring's own geometry afterwards (see
+    :func:`_ring_opening_conflict`) -- the route is allowed only if it
+    actually passes through that opening.
 
-    When eligible and the fixed-shape (``channel_offset_um=0.0``) attempt's
-    ``leg_conflict`` check rejects it, this function retries the *identical*
-    pin pair on successive channel tracks -- the horizontal jog shifted
-    ``_CHANNEL_TRACK_PITCH_WIDTHS * width_um`` farther from the row per track,
-    away from the ports' own facing direction (north-facing ports stack
-    tracks upward, south-facing downward) -- via a recursive call with
-    ``channel_offset_um`` set accordingly, up to ``_MAX_CHANNEL_TRACKS``
-    tracks. Each candidate track is routed through *every* one of this
-    function's own checks again (obstacle overlap, via-drop resolution, the
-    lot -- a track is just a different fixed shape, not an exemption from
-    anything) and then re-checked against ``leg_conflict``; the first track
-    that clears both is accepted. This is the online equivalent of the
-    classic left-edge interval-packing channel-router algorithm: legs are
-    already processed in a fixed (request-declaration, or nearest-first
-    within a bundle) order, and each one claims the lowest-numbered track
-    that is actually free by the time it is processed, exactly as first-fit
-    packing would -- just decided lazily, on rejection, rather than by a
-    separate up-front sort. When every track up to the bound still conflicts
-    and no ``cross_block_route_layer`` is configured (or this leg already
-    resolved on it), the leg is reported unroutable with ``leg_conflict``'s
-    own wording plus a note naming how many tracks were tried, the same
-    convention #1167's and #1393's own exhausted searches use. When a
-    ``cross_block_route_layer`` *is* configured and available, exhaustion
-    instead reports the untracked fixed shape as routed on the primary
-    layer (exactly as a non-eligible leg would) so :func:`route_bundle`'s own
-    ``leg_conflict`` check and its ``_retry_leg_on_cross_layer`` fallback
-    (issue #1680) get the chance to resolve it on the cross layer instead --
-    returning a terminal unroutable result here would make that bundle-level
-    retry unreachable, since it only ever fires once ``route_two_pin`` has
-    already reported a leg as routed. A resolved leg reports which track it
-    landed on in its own ``channel_track`` field (0 for the untracked
-    default, matching :func:`route_bundle`'s own per-leg passthrough) -- see
-    the return-value doc below.
-
-    Returns ``{"routed": bool, "route_length_um": float | None,
-    "points_um": list | None, "via_drops": list, "stub_widen": list,
-    "route_layer": tuple[int, int] | None, "width_um": float,
-    "channel_track": int, "reason": str | None}`` (a rejected leg omits
-    ``width_um``/``channel_track``, nothing having been drawn for it).
-    ``via_drops`` is a list of ``{"x_um", "y_um", "via_layer",
-    "landing_layers", "block_id"}`` entries (empty unless a drop was
-    resolved; issue #1567: one entry per via *hop* -- a multi-level drop
-    produces more than one entry at the identical ``(x_um, y_um)``, each with
-    its own ``via_layer``/``landing_layers`` pair), consumed by
-    :func:`_write_composed_gds` to draw each hop's via + landing pads.
-    ``stub_widen`` (issue #496, see :func:`_endpoint_stub_widen_um`) is a list
-    of ``{"x_um", "y_um", "direction_deg", "length_um", "width_um"}`` entries
-    -- one per endpoint whose own reported pad is wider than ``width_um`` and
-    faces north/south -- consumed by :func:`_write_composed_gds` to re-draw
-    that endpoint's own first backbone segment at the pad's width, closing
-    the sub-spacing gap a narrower stub would otherwise leave beside it.
-    ``route_layer`` (issue #1168) is the *effective* drawing layer this
-    result's geometry actually landed on -- ``route_layer`` (the parameter)
-    unless the cross-block retry above fired, in which case it is
-    ``cross_block_route_layer`` -- so a caller drawing multiple legs on
-    different layers within one net (:func:`route_bundle`) or one composition
-    (``compose()``) knows which layer each leg's ``points_um``/``via_drops``
-    belong on. ``width_um`` (issue #1620) is, correspondingly, the *effective*
-    drawn width -- ``width_um`` (the parameter) unless the cross-block retry
-    fired, in which case it is ``cross_block_width_um`` (or ``width_um``
-    again when that parameter was left ``None``) -- so the same caller knows
-    which width to draw each leg's geometry at.
+    Both of those are *plane*-conditional since issue #1960: a leg drawn
+    entirely on a level the ring has no conductor on -- and whose via-drop
+    landing pads all stay clear of the ring's trace -- physically flies over
+    the loop and merges with nothing, so it is neither rejected here nor
+    measured against the ring's geometry later. See
+    :func:`_leg_plane_clears_ring` for exactly what "clears" requires; an
+    unresolvable or same-plane answer keeps the identical rejection this
+    check has always emitted.
     """
-    # `_endpoint_stub_widen_um`/`_self_net_cross_layer_lane_waypoints_um` are
-    # looked up dynamically (rather than called as this module's own
-    # same-name functions, defined above) so a caller that monkeypatches
-    # `klayout_tools.gen_compose.<name>` (the test suite's own re-export,
-    # preserved from before issue #1708's split) still takes effect here,
-    # exactly as before the split.
-    from .gen_compose import (
-        _DIRECTION_VECTORS,
-        _endpoint_stub_widen_um,
-        _port_has_geometry,
-        _self_net_cross_layer_lane_waypoints_um,
-    )
-
-    block_a = blocks[pin_a["block"]]
-    block_b = blocks[pin_b["block"]]
-    port_a = block_a["ports"].get(pin_a["port"])
-    port_b = block_b["ports"].get(pin_b["port"])
-
-    # A block with no reported ports[] (a hand-crafted generator_report) can't
-    # supply a routable position -- treat as unroutable rather than crashing.
-    if not isinstance(port_a, dict) or not isinstance(port_b, dict):
-        return _unroutable("one or both ports report no position (empty ports[])")
-
-    off_a = offsets_um[pin_a["block"]]
-    off_b = offsets_um[pin_b["block"]]
-    a = (
-        float(port_a["x_um"]) + off_a["x"],
-        float(port_a["y_um"]) + off_a["y"],
-    )
-    b = (
-        float(port_b["x_um"]) + off_b["x"],
-        float(port_b["y_um"]) + off_b["y"],
-    )
-    dir_a = int(port_a.get("direction_deg", 0)) % 360
-    dir_b = int(port_b.get("direction_deg", 0)) % 360
-    if dir_a not in _DIRECTION_VECTORS or dir_b not in _DIRECTION_VECTORS:
-        return _unroutable("a port reports a non-orthogonal direction_deg")
-
-    va = _DIRECTION_VECTORS[dir_a]
-    vb = _DIRECTION_VECTORS[dir_b]
-    stub_um = width_um
-
-    # Guard/collector-ring check (#199 case 2): a block with a *closed* ring
-    # drawn around it (any TAP_*/COLL_* port reported, no GAP_* opening)
-    # cannot be reached at any other port without the route crossing the
-    # ring's own metal loop -- on the way in for a destination pin, or on the
-    # way out for a source pin, since the ring fully encloses the block either
-    # way. Only meaningful for distinct blocks: a self-net's two ports already
-    # both sit inside the same ring, so it draws no *additional* ring crossing.
-    #
-    # A block whose ring declares an opening (params.ring_gap_side, #434) is
-    # not rejected here: it is collected instead, and the drawn backbone is
-    # checked against the ring's own geometry below, once `points` exists --
-    # the route is allowed only if it actually passes through that opening.
-    #
-    # Both of those are *plane*-conditional since issue #1960: a leg drawn
-    # entirely on a level the ring has no conductor on -- and whose via-drop
-    # landing pads all stay clear of the ring's trace -- physically flies
-    # over the loop and merges with nothing, so it is neither rejected here
-    # nor measured against the ring's geometry below. See
-    # :func:`_leg_plane_clears_ring` for exactly what "clears" requires; an
-    # unresolvable or same-plane answer keeps the identical rejection this
-    # branch has always emitted.
     ring_pins: list[tuple[dict[str, Any], dict[str, Any]]] = []
     if pin_a["block"] != pin_b["block"]:
         for pin, block in ((pin_a, block_a), (pin_b, block_b)):
@@ -2909,7 +2796,7 @@ def route_two_pin(
             if _ring_gap_ports(block):
                 ring_pins.append((pin, block))
                 continue
-            return _unroutable(
+            return ring_pins, (
                 f"block '{pin['block']}' has a closed guard/collector ring "
                 f"(reports a TAP_*/COLL_* port and no GAP_* opening) -- a "
                 f"route to its non-tap port '{pin['port']}' would cross the "
@@ -2919,60 +2806,97 @@ def route_two_pin(
                 "(params.ring_gap_side/ring_gap_um), or regenerate it with "
                 "add_guard_ring/add_collector_ring: false"
             )
+    return ring_pins, None
 
-    # Routability heuristic: a jog perpendicular to the ports' facing axis has
-    # to squeeze through the channel between the two blocks. When both ports
-    # face x and their y differs (a vertical jog is required), the channel is
-    # the horizontal gap; symmetric for both-y. Only meaningful for distinct
-    # blocks (a self-net has no inter-block channel).
-    #
-    # Skipped entirely when the caller supplies waypoints_um (#634), for the
-    # same reason the #461 stub lift below is: this heuristic is a statement
-    # about the *fixed one-jog shape*, computed from the raw port positions
-    # and the inter-block gap rather than from the path actually drawn. Once
-    # waypoints are supplied that jog is never drawn at all -- manhattan_
-    # backbone routes through the caller's own points -- so a narrow channel
-    # the caller's path deliberately avoids (routing over the row, say) is
-    # not a reason to reject the net. Tightly packed rows, where the gap is
-    # narrower than the route width, are exactly the case a caller most needs
-    # a route-around for, so leaving this check unconditional silently
-    # defeated waypoints_um precisely where it is most useful. The path that
-    # does get drawn is still fully checked below: the obstacle-overlap check
-    # (#199 case 1) rejects any backbone that actually crosses a block's
-    # interior, including through this same channel.
-    if waypoints_um is None and pin_a["block"] != pin_b["block"]:
-        bbox_a = placed_bboxes_um[pin_a["block"]]
-        bbox_b = placed_bboxes_um[pin_b["block"]]
-        if va[1] == 0 and vb[1] == 0 and abs(a[1] - b[1]) > 1e-9:
-            gap = _block_gap_um(bbox_a, bbox_b, axis="x")
-            if 0.0 <= gap < width_um:
-                return _unroutable(
-                    f"vertical jog needs a channel >= width {width_um}um "
-                    f"but the gap between blocks is only {gap:.4g}um"
-                )
-        elif va[0] == 0 and vb[0] == 0 and abs(a[0] - b[0]) > 1e-9:
-            gap = _block_gap_um(bbox_a, bbox_b, axis="y")
-            if 0.0 <= gap < width_um:
-                return _unroutable(
-                    f"horizontal jog needs a channel >= width {width_um}um "
-                    f"but the gap between blocks is only {gap:.4g}um"
-                )
 
-    # Recessed same-direction vertical ports (#461): a gate landing pad now
-    # sits *above* its own gate port, so a port facing +y no longer sits on
-    # its block's top edge -- it is inset by the pad's own height. Two such
-    # ports bussed across a row connect through a horizontal jog; left at the
-    # default one-width stub that jog runs at pad height, straight through
-    # both blocks' poly. Lift each stub so the jog clears both blocks' tops
-    # (or bottoms, for -y). Scoped to ring-free blocks: a ringed block routes
-    # through its declared gap at port level, never over its own top. For the
-    # pre-#461 geometry (gate port exactly on the block edge) this reduces to
-    # the default stub, so no existing route changes. Skipped entirely when
-    # the caller supplies waypoints_um (#634): the automatic jog this lift
-    # exists to clear is not drawn at all in that case (manhattan_backbone
-    # routes through the caller's own points instead), so stretching the
-    # stub here would just move the endpoint the caller's waypoints are
-    # relative to, out from under them.
+def _channel_width_reason(
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    *,
+    placed_bboxes_um: dict[str, dict[str, float]],
+    a: tuple[float, float],
+    b: tuple[float, float],
+    va: tuple[int, int],
+    vb: tuple[int, int],
+    width_um: float,
+    waypoints_um: list[tuple[float, float]] | None,
+) -> str | None:
+    """Channel-width check (check 1): the unroutable reason, or ``None``.
+
+    A jog perpendicular to the ports' facing axis has to squeeze through the
+    channel between the two blocks. When both ports face x and their y differs
+    (a vertical jog is required), the channel is the horizontal gap;
+    symmetric for both-y. Only meaningful for distinct blocks (a self-net has
+    no inter-block channel).
+
+    Skipped entirely when the caller supplies ``waypoints_um`` (#634), for the
+    same reason the #461 recessed-stub lift is: this heuristic is a statement
+    about the *fixed one-jog shape*, computed from the raw port positions and
+    the inter-block gap rather than from the path actually drawn. Once
+    waypoints are supplied that jog is never drawn at all --
+    :func:`manhattan_backbone` routes through the caller's own points -- so a
+    narrow channel the caller's path deliberately avoids (routing over the
+    row, say) is not a reason to reject the net. Tightly packed rows, where
+    the gap is narrower than the route width, are exactly the case a caller
+    most needs a route-around for, so leaving this check unconditional
+    silently defeated ``waypoints_um`` precisely where it is most useful. The
+    path that does get drawn is still fully checked afterwards: the
+    obstacle-overlap check (#199 case 1) rejects any backbone that actually
+    crosses a block's interior, including through this same channel.
+    """
+    if waypoints_um is not None or pin_a["block"] == pin_b["block"]:
+        return None
+    bbox_a = placed_bboxes_um[pin_a["block"]]
+    bbox_b = placed_bboxes_um[pin_b["block"]]
+    if va[1] == 0 and vb[1] == 0 and abs(a[1] - b[1]) > 1e-9:
+        gap = _block_gap_um(bbox_a, bbox_b, axis="x")
+        if 0.0 <= gap < width_um:
+            return (
+                f"vertical jog needs a channel >= width {width_um}um "
+                f"but the gap between blocks is only {gap:.4g}um"
+            )
+    elif va[0] == 0 and vb[0] == 0 and abs(a[0] - b[0]) > 1e-9:
+        gap = _block_gap_um(bbox_a, bbox_b, axis="y")
+        if 0.0 <= gap < width_um:
+            return (
+                f"horizontal jog needs a channel >= width {width_um}um "
+                f"but the gap between blocks is only {gap:.4g}um"
+            )
+    return None
+
+
+def _recessed_stub_lengths_um(
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    *,
+    block_a: dict[str, Any],
+    block_b: dict[str, Any],
+    placed_bboxes_um: dict[str, dict[str, float]],
+    a: tuple[float, float],
+    b: tuple[float, float],
+    dir_a: int,
+    dir_b: int,
+    va: tuple[int, int],
+    stub_um: float,
+    waypoints_um: list[tuple[float, float]] | None,
+) -> tuple[float, float]:
+    """Per-endpoint approach-stub lengths, lifted for recessed ports (#461).
+
+    A gate landing pad now sits *above* its own gate port, so a port facing
+    +y no longer sits on its block's top edge -- it is inset by the pad's own
+    height. Two such ports bussed across a row connect through a horizontal
+    jog; left at the default one-width stub that jog runs at pad height,
+    straight through both blocks' poly. Lift each stub so the jog clears both
+    blocks' tops (or bottoms, for -y). Scoped to ring-free blocks: a ringed
+    block routes through its declared gap at port level, never over its own
+    top. For the pre-#461 geometry (gate port exactly on the block edge) this
+    reduces to the default stub, so no existing route changes. Skipped
+    entirely when the caller supplies ``waypoints_um`` (#634): the automatic
+    jog this lift exists to clear is not drawn at all in that case
+    (:func:`manhattan_backbone` routes through the caller's own points
+    instead), so stretching the stub here would just move the endpoint the
+    caller's waypoints are relative to, out from under them.
+    """
     stub_a_um = stub_b_um = stub_um
     if (
         waypoints_um is None
@@ -2992,29 +2916,24 @@ def route_two_pin(
             jog_y = min(bbox_a["y0"], bbox_b["y0"]) - stub_um
             stub_a_um = max(stub_um, a[1] - jog_y)
             stub_b_um = max(stub_um, b[1] - jog_y)
+    return stub_a_um, stub_b_um
 
-    # A plane-change junction (#2930) is a free point, not a block pad: its
-    # port has no approach stub, so the path meets it exactly at the waypoint.
-    stub_a_um, stub_b_um = _zero_junction_stubs(port_a, port_b, stub_a_um, stub_b_um)
 
-    points = manhattan_backbone(
-        a,
-        dir_a,
-        b,
-        dir_b,
-        stub_um,
-        stub_a_um=stub_a_um,
-        stub_b_um=stub_b_um,
-        waypoints=waypoints_um,
-        channel_offset_um=channel_offset_um,
-        grid_um=grid_um,
-    )
-    margin_eps_um = 1e-6
+def _ring_opening_conflict(
+    points: list[tuple[float, float]],
+    ring_pins: list[tuple[dict[str, Any], dict[str, Any]]],
+    *,
+    offsets_um: dict[str, dict[str, float]],
+    placed_bboxes_um: dict[str, dict[str, float]],
+    width_um: float,
+) -> str | None:
+    """Ring-opening check (#434): the first conflict reason, or ``None``.
 
-    # Ring-opening check (#434): for every pin on a block whose ring declares
-    # an opening, the drawn backbone must reach that pin *through* the opening
-    # -- every other crossing of the ring's metal is the same short the
-    # closed-ring check above rejects.
+    For every pin on a block whose ring declares an opening, the drawn
+    backbone must reach that pin *through* the opening -- every other crossing
+    of the ring's metal is the same short the closed-ring check
+    (:func:`_closed_ring_pins`) rejects.
+    """
     for pin, block in ring_pins:
         conflict = _ring_gap_route_conflict(
             points,
@@ -3024,416 +2943,123 @@ def route_two_pin(
             width_um,
         )
         if conflict is not None:
-            return _unroutable(conflict)
+            return conflict
+    return None
 
-    # Obstacle-overlap check (#199 case 1): sum how much of the drawn backbone
-    # lies inside each block's bbox *interior* (a boundary touch doesn't
-    # count -- see _segment_bbox_interior_overlap_um), then compare each
-    # block's total against how much crossing is unavoidable there. A pin's
-    # own block always gets an allowance equal to that port's own edge margin
-    # (_port_edge_margin_um) -- crossing exactly that much is just "the route
-    # reached the pin", not a fault. Crossing *more* than that (own blocks) or
-    # *any* amount (every other block) means the backbone plowed through a
-    # block it shouldn't have -- e.g. a same-facing port pair forcing the
-    # route through the destination's full width to reach a pin on its far
-    # side, crossing that block's own other pins on the way.
-    #
-    # width_um-aware inflation (#999): the check above treats the backbone as
-    # a zero-width centerline, but the wire actually drawn is `width_um` wide
-    # -- it extends `width_um / 2` past the centerline on every side, the
-    # same Minkowski-sum inflation the self-net pad-crossing check (#433,
-    # below) and the ring-opening check (`_ring_gap_route_conflict`) already
-    # apply. A centerline that clears a block's bbox edge by less than
-    # `width_um / 2` therefore still draws metal on top of that block even
-    # though the old zero-width test reports no crossing at all -- most
-    # commonly a same-facing port pair's connecting jog running parallel to,
-    # and just outside, its own origin block's edge. Every bbox this check
-    # tests against is inflated by `width_um / 2` on every side before the
-    # interior-overlap test runs (see `obstacle_bboxes_um` below); each own-
-    # pin's allowance is bumped by the same `width_um / 2` to compensate --
-    # without it, the inflated bbox would eat into the own-pin's normal
-    # approach margin and reject routes that were always fine (the approach
-    # stub's own dip into its own block, `_port_edge_margin_um`, is a
-    # statement about *insertion depth*, not about the wire's width).
-    own_a, own_b = pin_a["block"], pin_b["block"]
-    same_block_self_net = own_a == own_b
-    # obstacle_half_um/obstacle_bboxes_um/allowances_um (#999) are computed
-    # further below, *after* the same-layer-short retry decides
-    # effective_route_layer/effective_width_um (#1620) -- they must be sized
-    # from whichever width the leg actually ends up drawn at, not
-    # unconditionally from the primary plane's own width_um, or a wider
-    # cross-block leg's real footprint would be checked against too small an
-    # inflation.
 
-    # Self-net pad-crossing check (#433) and self-net drawn-metal check
-    # (#453/#469), factored into a closure parameterised on which layer (and,
-    # since issue #1620, which width) is under test: issue #1168 retries
-    # these two checks (and only these two -- the ones the checks' own
-    # rejection text below points a caller at a "layer_role with a metal2/via
-    # stack") against an optional ``cross_block_route_layer`` when the
-    # primary ``route_layer`` rejects, so a same-block bus that must cross an
-    # intermediate pad on the same drawing layer can escape to the configured
-    # second metal instead of failing outright. See the retry drive code just
-    # below this def.
-    def _same_layer_short_reason(
-        effective_route_layer: tuple[int, int] | None,
-        effective_block_geometry: dict[str, dict[str, Any] | None] | None,
-        effective_width_um: float,
-    ) -> str | None:
-        # Self-net pad-crossing check (#433): the whole-block bbox check below
-        # skips a self-net's own block entirely (a same-block net's backbone
-        # is, by construction, always inside its own block's bbox -- that
-        # check would otherwise reject every self-net). But skipping it also
-        # means nothing else was checking whether the backbone runs straight
-        # over one of that block's *other* pads -- exactly what happens
-        # bussing an array's unit devices (e.g. chaining a bjt_array's
-        # emitters): a same-layer pad in the backbone's path shorts to it,
-        # silently, since a self-net was never compared against the block's
-        # own ports[] at all. Approximate each other port on this block as a
-        # square pad footprint (side length its own reported ``width_um``,
-        # centered on its position), *inflated* by the route's own trace
-        # half-width on every side -- ``_segment_bbox_interior_overlap_um``
-        # treats a backbone segment as a zero-width centerline, but the wire
-        # actually drawn is ``width_um`` wide, so a centerline that merely
-        # passes within ``width_um / 2`` of a pad's edge still draws metal on
-        # top of it. This Minkowski-sum inflation is what makes the check
-        # actually catch pads much narrower than the route (e.g. a bjt_array
-        # base contact's reported ``width_um`` alone is too small to reach a
-        # jog stubbed out by the route's own width -- only their sum is).
-        # Reject the route if the backbone overlaps this inflated footprint's
-        # interior -- mirroring the bbox-interior accounting above, just
-        # against a pad instead of a whole block.
-        #
-        # Same-direction degenerate-jog check (#453): the inflated-footprint
-        # test above models each other port as a square of side its
-        # *reported* ``width_um``. For an array unit's own pad that badly
-        # *under*-estimates the real drawn metal in the port's facing
-        # direction -- e.g. a bjt_array base-tie tap draws li1 metal several
-        # times taller than its reported ``width_um`` (the reported width is
-        # roughly the contact size, not the pad extent). When both pins face
-        # the *same* direction and share the coordinate along that facing
-        # axis (same row for a vertical facing, same column for a horizontal
-        # one), ``manhattan_backbone()`` collapses to a single straight jog
-        # lifted just one stub width (``width_um``) to the ports' outward
-        # side -- so a route wide enough that the jog clears the under-sized
-        # reported square still plows straight through the real pad of any
-        # intervening same-facing port. That is exactly the reproduction in
-        # #453 (bussing two same-row north-facing bjt_array emitters across
-        # the intervening unit's north-facing base-tie pad composed
-        # ``routed: true`` and DRC-clean while extraction showed the whole
-        # array's shared base node absorbed into the emitter net). Treat any
-        # other same-layer port that faces the same direction and sits
-        # strictly between the two pins along the perpendicular axis (on the
-        # same row/column) as crossed: its pad opens toward the jog, so
-        # bussing across it draws a silent short regardless of how small its
-        # reported ``width_um`` is.
-        if same_block_self_net:
-            own_ports = blocks[own_a].get("ports") or {}
-            own_offset = offsets_um[own_a]
-            route_half_um = effective_width_um / 2.0
-            skip_port_names = {pin_a["port"], pin_b["port"]}
-            facing_vertical = va[1] != 0
-            # A degenerate single-jog backbone only forms when both pins face
-            # the same direction *and* share their facing-axis coordinate
-            # (same row for a vertical facing, same column for a horizontal
-            # one).
-            same_line = (
-                abs(a[1] - b[1]) < 1e-9 if facing_vertical else abs(a[0] - b[0]) < 1e-9
-            )
-            # Like the channel-width heuristic and the #461 stub lift above,
-            # this conservative fallback is a statement about the
-            # *degenerate single-jog shape* -- it rejects on port positions
-            # alone, without consulting `points`, precisely because that
-            # fixed shape is known to run straight along the ports' own
-            # row/column. Supplying waypoints_um (#634) replaces that shape
-            # with the caller's own path, so the premise no longer holds and
-            # the fallback would reject route-arounds that never go near the
-            # intervening pad. The waypoint-drawn path is still checked
-            # against the same pads by the inflated-footprint test below and
-            # by the drawn-metal check (#453/#469) -- both of which measure
-            # the actual `points`, so a caller whose waypoints really do
-            # cross a pad is still rejected.
-            conservative_same_dir = (
-                waypoints_um is None and dir_a == dir_b and same_line
-            )
-            for other_name, other_port in own_ports.items():
-                if other_name in skip_port_names or not _port_has_geometry(other_port):
-                    continue
-                other_layer = (
-                    other_port["layer"]["layer"],
-                    other_port["layer"]["datatype"],
-                )
-                if (
-                    effective_route_layer is not None
-                    and other_layer != effective_route_layer
-                ):
-                    continue  # a pad on a different physical layer can't short
-                px = float(other_port["x_um"]) + own_offset["x"]
-                py = float(other_port["y_um"]) + own_offset["y"]
+def _select_route_layer(
+    route_layer: tuple[int, int] | None,
+    block_geometry: dict[str, dict[str, Any] | None] | None,
+    width_um: float,
+    cross_block_route_layer: tuple[int, int] | None,
+    cross_block_geometry: dict[str, dict[str, Any] | None] | None,
+    cross_block_width_um: float | None,
+    **short_kwargs: Any,
+) -> tuple[tuple[int, int] | None, float, str | None]:
+    """Same-layer-short retry (#1168/#1620): ``(layer, width_um, reason)``.
 
-                # #453: an intervening same-facing pad on the jog's own
-                # row/column is crossed no matter how small its reported
-                # footprint is.
-                other_dir = int(other_port.get("direction_deg", 0)) % 360
-                if conservative_same_dir and other_dir == dir_a:
-                    if facing_vertical:
-                        between = (
-                            min(a[0], b[0]) < px < max(a[0], b[0])
-                            and abs(py - a[1]) < 1e-9
-                        )
-                    else:
-                        between = (
-                            min(a[1], b[1]) < py < max(a[1], b[1])
-                            and abs(px - a[0]) < 1e-9
-                        )
-                    if between:
-                        axis = "row" if facing_vertical else "column"
-                        return (
-                            f"self-net between two same-facing ports on the "
-                            f"same {axis} jogs directly over block "
-                            f"'{own_a}''s own port '{other_name}' (same "
-                            "facing direction, same drawing layer) -- "
-                            "bussing this net across the block would draw a "
-                            "silent short to that pad's real drawn metal, "
-                            "which extends past its reported width_um "
-                            "footprint in its facing direction; route to a "
-                            "layer_role with a metal2/via stack instead "
-                            "(or configure routing.cross_block_layer_role, "
-                            "issue #1168), or wire this net externally"
-                        )
+    Tries the primary ``route_layer`` first -- the overwhelmingly common case
+    (no configured cross-block layer, or a leg that never crosses another
+    same-layer pad) resolves here with no behaviour change. Only when the
+    primary layer's checks 3/4 (:func:`_same_layer_short_reason`) object AND a
+    ``cross_block_route_layer`` is configured is the *identical* pair of
+    checks retried against that second layer; if the crossed pad sits on the
+    primary layer (the overwhelmingly common case), the ``effective_route_
+    layer != other_layer`` guard inside :func:`_same_layer_short_reason`
+    naturally exempts it on the retry, since a pad on ``route_layer`` cannot
+    short a backbone now drawn on ``cross_block_route_layer``. Any *other*
+    obstacle that also happens to sit on the cross layer is still caught by
+    the same checks, run again in full -- this is not a bypass, it is the
+    identical short-detection logic evaluated against a different drawing
+    layer. Everything downstream (obstacle-overlap check 5, via-drop check 6,
+    stub-widen) uses whichever layer wins here.
 
-                pad_w = other_port.get("width_um")
-                if (
-                    not isinstance(pad_w, (int, float))
-                    or isinstance(pad_w, bool)
-                    or (pad_w <= 0)
-                ):
-                    # no reported pad size -- fall back to trace width
-                    pad_w = effective_width_um
-                half = float(pad_w) / 2.0 + route_half_um
-                pad_bbox_um = {
-                    "x0": px - half,
-                    "y0": py - half,
-                    "x1": px + half,
-                    "y1": py + half,
-                }
-                crossed_um = sum(
-                    _segment_bbox_interior_overlap_um(seg_p0, seg_p1, pad_bbox_um)
-                    for seg_p0, seg_p1 in zip(points, points[1:], strict=False)
-                )
-                if crossed_um > margin_eps_um:
-                    return (
-                        f"self-net backbone crosses {crossed_um:.4g}um "
-                        f"through block '{own_a}''s own port '{other_name}' "
-                        "on the same drawing layer -- bussing this net "
-                        "across the block would draw a silent short to that "
-                        "pad; route to a layer_role with a metal2/via stack "
-                        "instead (or configure "
-                        "routing.cross_block_layer_role, issue #1168), or "
-                        "wire this net externally"
-                    )
-
-        # Self-net drawn-metal check (#453/#469): check 3 above models each
-        # other port as a square built from its *reported* ``width_um``,
-        # which is a port's contact/access size -- not the extent of the pad
-        # metal drawn around it. A bjt_array base tie, for instance, reports
-        # ``width_um: 0.22`` (``CONTACT_SIZE_UM``) for a pad whose drawn
-        # local metal is 0.42um x 0.68um. So the modelled square (and even
-        # its same-direction same-row/column fallback, which only fires for a
-        # degenerate single-jog backbone) systematically under-states the
-        # real obstacle and misses any short outside that narrow shape --
-        # notably a same-facing pair on *different* rows/columns, or a route
-        # wide enough to reach an adjacent row's pad. Compare the route's
-        # *drawn* metal against the block's own *drawn* shapes on the route
-        # layer instead: every merged shape except the two the endpoints land
-        # on is an obstacle, and overlapping one (positive area -- an edge
-        # touch is a spacing question for `klt drc`, not a short) is the same
-        # silent short, just measured against geometry the reported port
-        # model cannot see. This is independent of, and composes with, check
-        # 3: either can catch a case the other misses.
-        if same_block_self_net and effective_block_geometry is not None:
-            geometry = effective_block_geometry.get(own_a)
-            if geometry is not None:
-                drawn = _self_net_drawn_short(
-                    points,
-                    geometry,
-                    a,
-                    b,
-                    effective_width_um,
-                    blocks[own_a].get("ports") or {},
-                    offsets_um[own_a],
-                )
-                if drawn is not None:
-                    overlap_um2, crossed_names = drawn
-                    if not crossed_names:
-                        where = "drawn geometry (no port of its own sits on it)"
-                    else:
-                        noun = "port" if len(crossed_names) == 1 else "ports"
-                        where = f"{noun} " + ", ".join(f"'{n}'" for n in crossed_names)
-                    return (
-                        f"self-net's drawn {effective_width_um}um metal overlaps "
-                        f"{overlap_um2:.4g}um^2 of block '{own_a}''s own "
-                        f"drawn pad metal on the route layer ({where}) -- "
-                        "bussing this net across the block would draw a "
-                        "silent short to that pad (its drawn metal is "
-                        "larger than the contact size its port reports); "
-                        "route to a layer_role with a metal2/via stack "
-                        "instead (or configure "
-                        "routing.cross_block_layer_role, issue #1168), or "
-                        "wire this net externally"
-                    )
-
-        # Own-block escape check (issue #1527): the two checks above only
-        # ever ran for a same-block self-net -- a leg whose two pins sit on
-        # *different* blocks skipped both entirely. But such a leg still
-        # draws an approach stub inside each endpoint's own block on its way
-        # out (the whole-block bbox check further below deliberately exempts
-        # exactly that stub, via each own-pin's `_port_edge_margin_um`
-        # allowance, so a normal approach is never rejected for "crossing my
-        # own block") -- and nothing checked whether that stub crosses a
-        # *different* net already drawn inside that same block. That is
-        # precisely the gap a coordinate-tapped `blocks[].cell` port opens:
-        # the tap sits on one of the block's own internal wires, so the one
-        # region a leg is guaranteed to cross is the one region no obstacle
-        # model covered.
-        #
-        # Scoped to a `blocks[].cell` endpoint only (`block.get("source") ==
-        # "cell"`), deliberately *not* every block. A `cell` block's every
-        # `ports[]` entry is hand-declared by the caller directly onto the
-        # stream's own geometry (`_parse_cell_block`) -- so, for that block
-        # kind, "every merged shape my own port does not land on is a
-        # genuinely different net" is a sound assumption. It is not sound for
-        # a `generator_report` block: e.g. `mos_array`'s own `dummy` columns
-        # (added by default) draw real, unreported metal pads flanking the
-        # array purely for layout matching, which `klt extract`'s own
-        # dummy-suppression convention (#295/#462) already excludes from the
-        # netlist -- this check cannot tell that apart from an actual
-        # obstacle, and a first attempt at this issue that ran unconditionally
-        # rejected several previously-`routed: true` fixtures that route
-        # straight over such dummy geometry (verified against this repo's own
-        # `mos_array`/`bjt_array` composition tests) for a "short" `klt
-        # extract` would never actually see. A generator that reports
-        # everything it draws as either a port or a suppressed dummy has no
-        # such gap to begin with, so it is left to the coarser whole-block
-        # bbox check (#199) below, unchanged. Compare each endpoint's own
-        # drawn leg against its *own* block's other drawn shapes on the route
-        # layer, excluding only the shape that endpoint's own port lands on
-        # -- unlike the same-block check above, the *other* endpoint is not
-        # on this block at all, so nothing else needs excluding here.
-        if not same_block_self_net and effective_block_geometry is not None:
-            for own_id, pin, point, block in (
-                (own_a, pin_a, a, block_a),
-                (own_b, pin_b, b, block_b),
-            ):
-                if block.get("source") != "cell":
-                    continue
-                geometry = effective_block_geometry.get(own_id)
-                if geometry is None:
-                    continue
-                drawn = _self_net_drawn_short(
-                    points,
-                    geometry,
-                    point,
-                    point,
-                    effective_width_um,
-                    block.get("ports") or {},
-                    offsets_um[own_id],
-                )
-                if drawn is not None:
-                    overlap_um2, crossed_names = drawn
-                    if not crossed_names:
-                        where = "drawn geometry (no port of its own sits on it)"
-                    else:
-                        noun = "port" if len(crossed_names) == 1 else "ports"
-                        where = f"{noun} " + ", ".join(f"'{n}'" for n in crossed_names)
-                    return (
-                        f"leg's drawn {effective_width_um}um metal overlaps "
-                        f"{overlap_um2:.4g}um^2 of block '{own_id}''s own "
-                        f"drawn geometry on the route layer ({where}) near "
-                        f"its own port '{pin['port']}' -- the escape from "
-                        f"this port would draw a silent short to another net "
-                        f"already present inside block '{own_id}' (issue "
-                        "#1527); tap a different point on the intended net, "
-                        "supply waypoints_um that route the approach clear of "
-                        "the obstruction, or route to a layer_role with a "
-                        "metal2/via stack instead (or configure "
-                        "routing.cross_block_layer_role, issue #1168)"
-                    )
-        return None
-
-    # Drive the retry (#1168): try the primary route_layer first -- the
-    # overwhelmingly common case (no configured cross-block layer, or a leg
-    # that never crosses another same-layer pad) resolves here with no
-    # behaviour change from before this issue. Only when the primary layer's
-    # checks object AND a cross_block_route_layer is configured is the
-    # *identical* pair of checks retried against that second layer; if the
-    # crossed pad sits on the primary layer (the overwhelmingly common case),
-    # the `effective_route_layer != other_layer` guard inside the closure
-    # above naturally exempts it on the retry, since a pad on `route_layer`
-    # cannot short a backbone now drawn on `cross_block_route_layer`. Any
-    # *other* obstacle that also happens to sit on the cross layer is still
-    # caught by the same checks, run again in full -- this is not a bypass,
-    # it is the identical short-detection logic evaluated against a different
-    # drawing layer. Everything downstream (obstacle-overlap check 5,
-    # via-drop check 6, stub-widen) uses whichever layer wins here.
+    ``reason`` is non-``None`` only when neither layer resolves the leg (the
+    caller reports the net unroutable). The returned width (#1620) is the
+    width the leg actually draws at -- ``cross_block_width_um`` once the retry
+    switched to ``cross_block_route_layer`` (falling back to ``width_um``
+    when the caller left it unset), ``width_um`` otherwise. Everything that
+    sizes drawn/checked geometry (obstacle-overlap inflation, the detour-lane
+    clearance, stub-widen) uses it, not the bare ``width_um`` parameter, so a
+    wider cross-block leg's own footprint is judged and drawn consistently.
+    ``short_kwargs`` are the per-leg keyword arguments
+    :func:`_same_layer_short_reason` takes after its three positional ones.
+    """
     effective_route_layer = route_layer
-    short_reason = _same_layer_short_reason(route_layer, block_geometry, width_um)
+    short_reason = _same_layer_short_reason(
+        route_layer, block_geometry, width_um, **short_kwargs
+    )
     if short_reason is not None and cross_block_route_layer is not None:
         cross_effective_width_um = (
             cross_block_width_um if cross_block_width_um is not None else width_um
         )
         cross_short_reason = _same_layer_short_reason(
-            cross_block_route_layer, cross_block_geometry, cross_effective_width_um
+            cross_block_route_layer,
+            cross_block_geometry,
+            cross_effective_width_um,
+            **short_kwargs,
         )
         if cross_short_reason is None:
             effective_route_layer = cross_block_route_layer
             short_reason = None
-    if short_reason is not None:
-        return _unroutable(short_reason)
-
-    # effective_width_um (#1620): the width this leg actually draws at --
-    # cross_block_width_um once the retry above switched effective_route_layer
-    # to cross_block_route_layer (falling back to width_um when the caller
-    # left cross_block_width_um unset), width_um otherwise. Everything below
-    # that sizes drawn/checked geometry (obstacle-overlap inflation, the
-    # detour-lane clearance, stub-widen) uses this, not the bare width_um
-    # parameter, so a wider cross-block leg's own footprint is judged and
-    # drawn consistently.
     effective_width_um = (
         (cross_block_width_um if cross_block_width_um is not None else width_um)
         if cross_block_route_layer is not None
         and effective_route_layer == cross_block_route_layer
         else width_um
     )
+    return effective_route_layer, effective_width_um, short_reason
 
-    # obstacle_half_um/obstacle_bboxes_um/allowances_um (#999, relocated here
-    # by #1620): every bbox this check tests against is inflated by
-    # `effective_width_um / 2` on every side, sized from whichever layer this
-    # leg actually landed on above -- see the check's own docstring section
-    # further up this function for the full rationale.
-    obstacle_half_um = effective_width_um / 2.0
-    obstacle_bboxes_um = {
+
+def _inflated_obstacle_bboxes_um(
+    placed_bboxes_um: dict[str, dict[str, float]], half_um: float
+) -> dict[str, dict[str, float]]:
+    """Every placed bbox inflated by ``half_um`` on every side (#999, #1620).
+
+    The obstacle-overlap check treats the backbone as a zero-width
+    centerline, but the wire actually drawn is ``width_um`` wide -- it extends
+    ``width_um / 2`` past the centerline on every side, the same Minkowski-sum
+    inflation the self-net pad-crossing check (#433) and the ring-opening
+    check (:func:`_ring_gap_route_conflict`) already apply. A centerline that
+    clears a block's bbox edge by less than ``width_um / 2`` therefore still
+    draws metal on top of that block even though a zero-width test reports no
+    crossing at all -- most commonly a same-facing port pair's connecting jog
+    running parallel to, and just outside, its own origin block's edge.
+    ``half_um`` is sized from whichever width the leg actually ends up drawn
+    at (:func:`_select_route_layer`), not unconditionally from the primary
+    plane's own ``width_um``.
+    """
+    return {
         block_id: {
-            "x0": bbox["x0"] - obstacle_half_um,
-            "y0": bbox["y0"] - obstacle_half_um,
-            "x1": bbox["x1"] + obstacle_half_um,
-            "y1": bbox["y1"] + obstacle_half_um,
+            "x0": bbox["x0"] - half_um,
+            "y0": bbox["y0"] - half_um,
+            "x1": bbox["x1"] + half_um,
+            "y1": bbox["y1"] + half_um,
         }
         for block_id, bbox in placed_bboxes_um.items()
     }
 
-    # navigable_regions (issues #1531/#1835): a block may declare one or more
-    # rectangles of its own interior as a navigable channel (e.g.
-    # `mos_array`'s `interior_channel_um`) -- reported in the block's own
-    # local frame, oriented but not yet translated by `_parse_blocks`
-    # (mirroring `bbox_um`), so translate each one by this block's own
-    # `offsets_um` entry here, the same translation every other per-block
-    # geometry (ports, bbox_um) already receives before comparison against
-    # real composed coordinates. Empty/absent for every block that predates
-    # this field -- the obstacle-overlap loop below then behaves exactly as
-    # before (see `_segment_obstacle_overlap_um`'s own docstring).
+
+def _navigable_regions_by_block_um(
+    block_ids: Any,
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+) -> dict[str, list[dict[str, float]]]:
+    """Per-block ``navigable_regions`` in composed coordinates (#1531/#1835).
+
+    A block may declare one or more rectangles of its own interior as a
+    navigable channel (e.g. ``mos_array``'s ``interior_channel_um``) --
+    reported in the block's own local frame, oriented but not yet translated
+    by ``_parse_blocks`` (mirroring ``bbox_um``), so translate each one by
+    this block's own ``offsets_um`` entry here, the same translation every
+    other per-block geometry (ports, ``bbox_um``) already receives before
+    comparison against real composed coordinates. Empty/absent for every
+    block that predates this field -- the obstacle-overlap loop then behaves
+    exactly as before (see :func:`_segment_obstacle_overlap_um`'s own
+    docstring).
+    """
     navigable_regions_by_block_um: dict[str, list[dict[str, float]]] = {}
-    for block_id in obstacle_bboxes_um:
+    for block_id in block_ids:
         local_regions = blocks.get(block_id, {}).get("navigable_regions") or []
         if not local_regions:
             continue
@@ -3447,73 +3073,94 @@ def route_two_pin(
             }
             for region in local_regions
         ]
+    return navigable_regions_by_block_um
 
-    # Ring-gap reach allowance (issue #1902): `_port_edge_margin_um` alone
-    # states an own-pin allowance as if the backbone always approaches from
-    # the port's own facing side -- true for most blocks, but not for a
-    # guard/collector-ringed block whose only way in is a declared
-    # `ring_gap_side` opening (#434) on a *different* side than the port
-    # faces. `ring_pins` above already lists exactly those (pin, block)
-    # pairs, and by the time this point is reached every one of them has
-    # already cleared `_ring_gap_route_conflict` -- so the crossing from that
-    # opening's own side to the port is a validated, unavoidable path, not
-    # evidence the backbone plowed through something it shouldn't have.
-    # Widen the allowance for such a pin to the larger of the two: the
-    # port's own facing-side margin (unchanged for every other block), or
-    # the distance from the port to the *gapped* side's own edge, plus one
-    # more stub width when that side is not the one the port already faces
-    # (the backbone still draws its normal facing-direction approach stub
-    # before turning towards the opening, on top of the reach across the
-    # block -- see `manhattan_backbone`'s own per-pin stub).
-    ring_pin_blocks = {pin["block"]: block for pin, block in ring_pins}
 
-    def _own_block_allowance_um(
-        own_id: str,
-        point: tuple[float, float],
-        direction_deg: int,
-        bbox: dict[str, float],
-    ) -> float:
-        margin = max(0.0, _port_edge_margin_um(point, direction_deg, bbox))
-        ring_block = ring_pin_blocks.get(own_id)
-        if ring_block is None:
-            return margin
-        for side in _ring_gap_ports(ring_block):
-            side_dir = RING_SIDE_DIRECTIONS[side]
-            reach = max(0.0, _port_edge_margin_um(point, side_dir, bbox))
-            if side_dir != direction_deg:
-                reach += stub_um
-            margin = max(margin, reach)
-        return margin
+def _own_pin_allowances_um(
+    *,
+    own_a: str,
+    own_b: str,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    dir_a: int,
+    dir_b: int,
+    placed_bboxes_um: dict[str, dict[str, float]],
+    ring_pins: list[tuple[dict[str, Any], dict[str, Any]]],
+    stub_um: float,
+    obstacle_half_um: float,
+) -> dict[str, float]:
+    """Per-block crossing allowance for the two pins' own blocks (#199, #1902).
 
+    A pin's own block always gets an allowance equal to that port's own edge
+    margin (:func:`_port_edge_margin_um`) -- crossing exactly that much is
+    just "the route reached the pin", not a fault. Each allowance is bumped by
+    ``obstacle_half_um`` (the route's half-width) to compensate for the bbox
+    inflation (#999): without it, the inflated bbox would eat into the
+    own-pin's normal approach margin and reject routes that were always fine
+    (the approach stub's own dip into its own block is a statement about
+    *insertion depth*, not about the wire's width). A same-block self-net has
+    no allowance (it is expected to cross its own block).
+
+    Ring-gap reach allowance (issue #1902): ``_port_edge_margin_um`` alone
+    states an own-pin allowance as if the backbone always approaches from the
+    port's own facing side -- true for most blocks, but not for a
+    guard/collector-ringed block whose only way in is a declared
+    ``ring_gap_side`` opening (#434) on a *different* side than the port
+    faces. ``ring_pins`` lists exactly those (pin, block) pairs, and by the
+    time this is reached every one of them has already cleared
+    :func:`_ring_opening_conflict` -- so the crossing from that opening's own
+    side to the port is a validated, unavoidable path, not evidence the
+    backbone plowed through something it shouldn't have. See
+    :func:`_own_block_allowance_um`.
+    """
     allowances_um: dict[str, float] = {}
-    if not same_block_self_net:
-        allowances_um[own_a] = (
-            _own_block_allowance_um(own_a, a, dir_a, placed_bboxes_um[own_a])
-            + obstacle_half_um
+    if own_a == own_b:
+        return allowances_um
+    ring_pin_blocks = {pin["block"]: block for pin, block in ring_pins}
+    allowances_um[own_a] = (
+        _own_block_allowance_um(
+            own_a,
+            a,
+            dir_a,
+            placed_bboxes_um[own_a],
+            ring_pin_blocks=ring_pin_blocks,
+            stub_um=stub_um,
         )
-        allowances_um[own_b] = (
-            _own_block_allowance_um(own_b, b, dir_b, placed_bboxes_um[own_b])
-            + obstacle_half_um
+        + obstacle_half_um
+    )
+    allowances_um[own_b] = (
+        _own_block_allowance_um(
+            own_b,
+            b,
+            dir_b,
+            placed_bboxes_um[own_b],
+            ring_pin_blocks=ring_pin_blocks,
+            stub_um=stub_um,
         )
+        + obstacle_half_um
+    )
+    return allowances_um
 
-    # #1656: pick whichever lazy per-block geometry cache (if any) matches
-    # the layer this leg actually landed on above -- `block_geometry_for`
-    # reads `route_layer`, `cross_block_geometry_for` reads
-    # `cross_block_route_layer` (see #1620's same-layer-short retry just
-    # above for how `effective_route_layer` can end up being either one).
-    # `None` when the caller supplied neither cache for this layer (e.g. a
-    # direct unit-test caller, or `route_layer is None`) -- the obstacle
-    # check below then falls back to its pre-#1656 bbox-only behaviour.
-    if effective_route_layer == route_layer:
-        layer_geometry_for = block_geometry_for
-    elif (
-        cross_block_route_layer is not None
-        and effective_route_layer == cross_block_route_layer
-    ):
-        layer_geometry_for = cross_block_geometry_for
-    else:
-        layer_geometry_for = None
 
+def _exempt_obstacle_block_ids(
+    obstacle_block_ids: Any,
+    layer_geometry_for: Any,
+    *,
+    own_a: str,
+    same_block_self_net: bool,
+    points: list[tuple[float, float]],
+    effective_width_um: float,
+) -> set[str]:
+    """Blocks the leg cannot short to on its drawn layer (#1656/#1681).
+
+    Decided once per block rather than per segment -- both exemptions are
+    properties of the whole leg against one block, not of a single segment
+    against it. ``layer_geometry_for`` is whichever lazy per-block geometry
+    cache matches the layer the leg landed on; ``None`` (a direct unit-test
+    caller, or ``route_layer is None``) falls back to the pre-#1656 bbox-only
+    behaviour, so no block is exempt.
+    """
+    exempt_block_ids: set[str] = set()
     # #1681: the leg's own drawn metal, as the composed cell would draw it --
     # the same `_drawn_route_region` construction `_self_net_drawn_short`
     # tests a self-net's backbone against. Built at most once per distinct
@@ -3521,25 +3168,8 @@ def route_two_pin(
     # practice, so this is one region per leg) and only when some block
     # actually reaches the geometry test below.
     drawn_route_by_dbu: dict[float, Any] = {}
-
-    def _route_touches_drawn_geometry(geometry: dict[str, Any]) -> bool:
-        """Whether this leg's drawn metal actually overlaps ``geometry``'s
-        own drawn shapes (positive area -- a bare edge touch is a ``klt drc``
-        spacing question, not a short, the same convention
-        :func:`_self_net_drawn_short` applies)."""
-        dbu = geometry["dbu"]
-        drawn = drawn_route_by_dbu.get(dbu)
-        if drawn is None:
-            drawn = _drawn_route_region(points, effective_width_um, dbu)
-            drawn_route_by_dbu[dbu] = drawn
-        return not (geometry["region"] & drawn).is_empty()
-
-    # Per-block exemptions, decided once per block rather than per segment --
-    # both are properties of the whole leg against one block, not of a single
-    # segment against it.
-    exempt_block_ids: set[str] = set()
     if layer_geometry_for is not None:
-        for other_id in obstacle_bboxes_um:
+        for other_id in obstacle_block_ids:
             if same_block_self_net and other_id == own_a:
                 continue
             geometry = layer_geometry_for(other_id).get(other_id)
@@ -3548,7 +3178,12 @@ def route_two_pin(
                 # so the route cannot short to it -- a bbox crossing here is
                 # a false positive, not a real obstacle.
                 exempt_block_ids.add(other_id)
-            elif not _route_touches_drawn_geometry(geometry):
+            elif not _route_touches_drawn_geometry(
+                geometry,
+                points=points,
+                effective_width_um=effective_width_um,
+                drawn_route_by_dbu=drawn_route_by_dbu,
+            ):
                 # #1681: this block *does* draw on effective_route_layer, but
                 # not anywhere this leg's own drawn metal actually reaches --
                 # the classic case being a `guard_ring` block whose hollow
@@ -3557,7 +3192,29 @@ def route_two_pin(
                 # not solid, so the crossing it reports here is a false
                 # positive exactly as #1656's "draws nothing" one was.
                 exempt_block_ids.add(other_id)
+    return exempt_block_ids
 
+
+def _blocking_crossings_um(
+    points: list[tuple[float, float]],
+    obstacle_bboxes_um: dict[str, dict[str, float]],
+    navigable_regions_by_block_um: dict[str, list[dict[str, float]]],
+    allowances_um: dict[str, float],
+    exempt_block_ids: set[str],
+    *,
+    own_a: str,
+    same_block_self_net: bool,
+    margin_eps_um: float,
+) -> dict[str, float]:
+    """Per-block backbone crossing that exceeds its allowance (#199 case 1).
+
+    Sums how much of the drawn backbone lies inside each block's bbox
+    *interior* (a boundary touch doesn't count -- see
+    :func:`_segment_obstacle_overlap_um`), then keeps each block whose total
+    exceeds how much crossing is unavoidable there: the pin's own-block
+    allowance, or zero for every other block -- *any* amount of crossing a
+    third block means the backbone plowed through a block it shouldn't have.
+    """
     overlap_by_block_um: dict[str, float] = {}
     for seg_p0, seg_p1 in zip(points, points[1:], strict=False):
         for other_id, other_bbox in obstacle_bboxes_um.items():
@@ -3576,37 +3233,58 @@ def route_two_pin(
                     overlap_by_block_um.get(other_id, 0.0) + length
                 )
 
-    blocking_um = {
+    return {
         other_id: crossed_um
         for other_id, crossed_um in overlap_by_block_um.items()
         if crossed_um > allowances_um.get(other_id, 0.0) + margin_eps_um
     }
 
-    # Far-side approach check (issue #1895): the per-block allowance above is
-    # `_port_edge_margin_um`, which measures the unavoidable approach depth on
-    # the side the port *faces*. The comparison it feeds is against the
-    # backbone's *total* crossing of that block, with no account of where in
-    # the block that crossing sits -- so a backbone that never approaches from
-    # the facing side at all, and instead tunnels in from the opposite one, is
-    # funded by an allowance describing metal on the other side of the block
-    # entirely. On a tall block that allowance is large: #1895's reproduction
-    # reaches a north-facing gate pad 6.43um below its own block's top edge by
-    # running in from the south, straight across the source strap underneath
-    # it, and passes this check with 2.96um of crossing against a 6.61um
-    # allowance -- `routed: true`, no warning, and a real drawn short `klt
-    # extract` recovers as one merged net.
-    #
-    # So measure the crossing on the *far* side of the port separately
-    # (`_port_approach_side_bbox_um`) and hold it to the inflation
-    # compensation alone (`obstacle_half_um`, #999's own half-width term --
-    # what it takes for a route running just outside the block to graze the
-    # inflated bbox), never to the facing-side margin. A normal approach --
-    # in along the port's own facing direction, however deep -- is entirely
-    # on the near side and is unaffected, so this rejects only the crossing
-    # the margin never described. Scoped exactly as the allowance itself is:
-    # a same-block self-net (no allowance; it is expected to cross its own
-    # block) and a block exempted above (#1656/#1681: it draws nothing this
-    # leg's metal can short to on this layer) are both skipped.
+
+def _far_side_crossings_um(
+    points: list[tuple[float, float]],
+    obstacle_bboxes_um: dict[str, dict[str, float]],
+    navigable_regions_by_block_um: dict[str, list[dict[str, float]]],
+    exempt_block_ids: set[str],
+    *,
+    own_a: str,
+    own_b: str,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    dir_a: int,
+    dir_b: int,
+    same_block_self_net: bool,
+    obstacle_half_um: float,
+    margin_eps_um: float,
+) -> dict[str, float]:
+    """Far-side approach check (issue #1895): crossing behind a pin's port.
+
+    The per-block allowance is :func:`_port_edge_margin_um`, which measures
+    the unavoidable approach depth on the side the port *faces*. The
+    comparison it feeds is against the backbone's *total* crossing of that
+    block, with no account of where in the block that crossing sits -- so a
+    backbone that never approaches from the facing side at all, and instead
+    tunnels in from the opposite one, is funded by an allowance describing
+    metal on the other side of the block entirely. On a tall block that
+    allowance is large: #1895's reproduction reaches a north-facing gate pad
+    6.43um below its own block's top edge by running in from the south,
+    straight across the source strap underneath it, and passes the allowance
+    check with 2.96um of crossing against a 6.61um allowance -- ``routed:
+    true``, no warning, and a real drawn short ``klt extract`` recovers as
+    one merged net.
+
+    So measure the crossing on the *far* side of the port separately
+    (:func:`_port_approach_side_bbox_um`) and hold it to the inflation
+    compensation alone (``obstacle_half_um``, #999's own half-width term --
+    what it takes for a route running just outside the block to graze the
+    inflated bbox), never to the facing-side margin. A normal approach -- in
+    along the port's own facing direction, however deep -- is entirely on the
+    near side and is unaffected, so this rejects only the crossing the margin
+    never described. Scoped exactly as the allowance itself is: a same-block
+    self-net (no allowance; it is expected to cross its own block) and a
+    block exempted by :func:`_exempt_obstacle_block_ids` (#1656/#1681: it
+    draws nothing this leg's metal can short to on this layer) are both
+    skipped.
+    """
     far_side_um: dict[str, float] = {}
     if not same_block_self_net:
         for own_id, own_point, own_dir in ((own_a, a, dir_a), (own_b, b, dir_b)):
@@ -3628,70 +3306,94 @@ def route_two_pin(
             )
             if crossed_um > obstacle_half_um + margin_eps_um:
                 far_side_um[own_id] = max(far_side_um.get(own_id, 0.0), crossed_um)
+    return far_side_um
 
-    # Bounded detour search (#1167): a backbone rejected *only* for crossing
-    # blocks neither of its two pins sits on is not a routing failure -- it is
-    # the fixed one-jog shape being the wrong shape. Before reporting the net
-    # unroutable, retry it around those obstacles on up to _MAX_DETOUR_LANES
-    # alternate lanes (_detour_lane_waypoints_um), shortest first, and keep the
-    # first that passes. Each retry goes back through *this same function* with
-    # the lane as waypoints_um, so every routability check above -- rings, pad
-    # crossings, drawn-metal shorts, this very obstacle check, via drops --
-    # applies to the detour exactly as it does to any other path; nothing is
-    # waived to make a detour fit. Recursion is bounded at one level by
-    # construction: the retry supplies waypoints_um, and a waypoint-supplied
-    # path is never itself detoured (a caller who supplies a path owns it --
-    # #634 -- and the detour retry is such a caller).
-    #
-    # Scoped to *unrelated* blocks on purpose. A backbone that plows through
-    # one of its own two pins' blocks (the same-facing port pair) is a
-    # statement about which port faces which way, not about something sitting
-    # in the channel; the remedy there stays the caller-supplied waypoints_um
-    # of #634, whose routability the caller -- not this heuristic -- vouches
-    # for.
+
+def _bounded_detour_retry(
+    reroute: Any,
+    blocking_um: dict[str, float],
+    *,
+    own_a: str,
+    own_b: str,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    va: tuple[int, int],
+    vb: tuple[int, int],
+    placed_bboxes_um: dict[str, dict[str, float]],
+    effective_width_um: float,
+    waypoints_um: list[tuple[float, float]] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Bounded detour search (#1167): ``(routed_retry, detour_note)``.
+
+    A backbone rejected *only* for crossing blocks neither of its two pins
+    sits on is not a routing failure -- it is the fixed one-jog shape being
+    the wrong shape. Before reporting the net unroutable, retry it around
+    those obstacles on up to ``_MAX_DETOUR_LANES`` alternate lanes
+    (:func:`_detour_lane_waypoints_um`), shortest first, and keep the first
+    that passes (returned as ``routed_retry``). Each retry goes back through
+    :func:`route_two_pin` (via ``reroute``) with the lane as ``waypoints_um``,
+    so every routability check -- rings, pad crossings, drawn-metal shorts,
+    the obstacle check, via drops -- applies to the detour exactly as it does
+    to any other path; nothing is waived to make a detour fit. Recursion is
+    bounded at one level by construction: the retry supplies ``waypoints_um``,
+    and a waypoint-supplied path is never itself detoured (a caller who
+    supplies a path owns it -- #634 -- and the detour retry is such a caller).
+
+    Scoped to *unrelated* blocks on purpose. A backbone that plows through
+    one of its own two pins' blocks (the same-facing port pair) is a
+    statement about which port faces which way, not about something sitting
+    in the channel; the remedy there stays the caller-supplied
+    ``waypoints_um`` of #634, whose routability the caller -- not this
+    heuristic -- vouches for. ``detour_note`` is non-empty only when lanes
+    were tried and none routed; it is appended to the rejection reason.
+    """
+    if not (
+        blocking_um and waypoints_um is None and not ({own_a, own_b} & set(blocking_um))
+    ):
+        return None, ""
+    lanes = _detour_lane_waypoints_um(
+        (a, va, placed_bboxes_um[own_a]),
+        (b, vb, placed_bboxes_um[own_b]),
+        [placed_bboxes_um[other_id] for other_id in blocking_um],
+        placed_bboxes_um,
+        effective_width_um,
+    )
+    for lane in lanes:
+        retry = reroute(waypoints_um=lane)
+        if retry["routed"]:
+            return retry, ""
     detour_note = ""
-    if blocking_um and waypoints_um is None and not ({own_a, own_b} & set(blocking_um)):
-        lanes = _detour_lane_waypoints_um(
-            (a, va, placed_bboxes_um[own_a]),
-            (b, vb, placed_bboxes_um[own_b]),
-            [placed_bboxes_um[other_id] for other_id in blocking_um],
-            placed_bboxes_um,
-            effective_width_um,
+    if lanes:
+        detour_note = (
+            f" -- a bounded detour around it ({len(lanes)} alternate "
+            f"lane{'' if len(lanes) == 1 else 's'} placed clear of every "
+            "block between the two pins) was tried first, and each one "
+            "still crossed a placed block"
         )
-        for lane in lanes:
-            retry = route_two_pin(
-                pin_a,
-                pin_b,
-                blocks,
-                offsets_um,
-                placed_bboxes_um,
-                width_um,
-                route_layer,
-                extraction_deck,
-                block_geometry,
-                waypoints_um=lane,
-                cross_block_route_layer=cross_block_route_layer,
-                cross_block_geometry=cross_block_geometry,
-                cross_block_width_um=cross_block_width_um,
-                block_geometry_for=block_geometry_for,
-                cross_block_geometry_for=cross_block_geometry_for,
-                grid_um=grid_um,
-            )
-            if retry["routed"]:
-                return retry
-        if lanes:
-            detour_note = (
-                f" -- a bounded detour around it ({len(lanes)} alternate "
-                f"lane{'' if len(lanes) == 1 else 's'} placed clear of every "
-                "block between the two pins) was tried first, and each one "
-                "still crossed a placed block"
-            )
+    return None, detour_note
 
+
+def _obstacle_rejection_reason(
+    far_side_um: dict[str, float],
+    blocking_um: dict[str, float],
+    allowances_um: dict[str, float],
+    detour_note: str,
+    *,
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    own_a: str,
+    own_b: str,
+    dir_a: int,
+    dir_b: int,
+    effective_width_um: float,
+    obstacle_half_um: float,
+) -> str | None:
+    """Unroutable wording for the first far-side/blocking crossing, or ``None``."""
     for own_id, crossed_um in far_side_um.items():
         own_port = pin_a["port"] if own_id == own_a else pin_b["port"]
         own_dir = dir_a if own_id == own_a else dir_b
         allowed_um = allowances_um.get(own_id, 0.0)
-        return _unroutable(
+        return (
             f"backbone's {effective_width_um}um-wide drawn path crosses "
             f"{crossed_um:.4g}um of block '{own_id}''s interior on the side "
             f"*away* from its own pin '{own_port}' (which faces "
@@ -3729,25 +3431,37 @@ def route_two_pin(
                 "width) -- the route is not point-to-point between only the "
                 "two connected blocks"
             )
-        return _unroutable(reason + detour_note)
+        return reason + detour_note
+    return None
 
-    # Via-drop resolution (#454, check 5 -- see docstring; generalized to a
-    # multi-hop ladder by issue #1567): only consulted when both a
-    # route_layer and an extraction_deck are given (pre-#454 callers that
-    # pass neither draw exactly as before, no via-drop). For each endpoint
-    # whose own reported layer differs from route_layer, either resolve the
-    # connecting via-drop ladder (drop needed and available -- possibly more
-    # than one via, issue #1567), find nothing to do (not a metals-stack
-    # level -- an unrelated role, unchanged legacy behavior), or reject the
-    # whole net as unroutable (a drop is needed but not resolvable). Uses
-    # ``effective_route_layer`` (#1168): when the same-layer-short retry
-    # above switched this leg to ``cross_block_route_layer``, every endpoint
-    # whose own pad sits on the *primary* ``route_layer`` now needs exactly
-    # the drop this loop already knows how to resolve -- no separate
-    # cross-block via-drop mechanism.
+
+def _resolve_via_drops(
+    effective_route_layer: tuple[int, int] | None,
+    extraction_deck: ExtractionDeck | None,
+    endpoints: tuple[
+        tuple[dict[str, Any], dict[str, Any], tuple[float, float]],
+        tuple[dict[str, Any], dict[str, Any], tuple[float, float]],
+    ],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Via-drop resolution (check 6, #454; multi-hop ladder since #1567).
+
+    Returns ``(via_drops, reason)``. Only consulted when both a route layer
+    and an ``extraction_deck`` are given (pre-#454 callers that pass neither
+    draw exactly as before, no via-drop). For each endpoint (``(pin, port,
+    position)``) whose own reported layer differs from the route layer,
+    either resolve the connecting via-drop ladder (drop needed and available
+    -- possibly more than one via, issue #1567), find nothing to do (not a
+    metals-stack level -- an unrelated role, unchanged legacy behavior), or
+    report ``reason`` (a drop is needed but not resolvable; the caller rejects
+    the whole net as unroutable). Uses ``effective_route_layer`` (#1168): when
+    the same-layer-short retry switched this leg to
+    ``cross_block_route_layer``, every endpoint whose own pad sits on the
+    *primary* ``route_layer`` now needs exactly the drop this already knows
+    how to resolve -- no separate cross-block via-drop mechanism.
+    """
     via_drops: list[dict[str, Any]] = []
     if effective_route_layer is not None and extraction_deck is not None:
-        for pin, port, pos in ((pin_a, port_a, a), (pin_b, port_b, b)):
+        for pin, port, pos in endpoints:
             port_layer = _port_own_layer(port)
             if port_layer is None:
                 continue  # no reported layer -- draw directly, legacy behavior
@@ -3755,7 +3469,7 @@ def route_two_pin(
                 extraction_deck, effective_route_layer, port_layer
             )
             if drop_error is not None:
-                return _unroutable(
+                return via_drops, (
                     f"pin '{pin['port']}' on block '{pin['block']}' is drawn "
                     f"on layer {port_layer}, which routing.layer_role's "
                     f"{effective_route_layer} cannot reach: {drop_error}"
@@ -3770,12 +3484,14 @@ def route_two_pin(
                 # per entry, so a multi-level drop is just N single-level
                 # drops stacked at the identical (x, y).
                 for via_layer, metal_a, metal_b in ladder:
+                    drop_array = _drop_array(port, via_layer)
                     via_drops.append(
                         {
                             "x_um": pos[0],
                             "y_um": pos[1],
                             "via_layer": via_layer,
                             "landing_layers": (metal_a, metal_b),
+                            **({"array": drop_array} if drop_array else {}),
                             # block_id (#1520): which endpoint's own block
                             # this drop's landing pad lands on -- lets a
                             # caller-side conflict check (compose()'s own
@@ -3785,33 +3501,122 @@ def route_two_pin(
                             "block_id": pin["block"],
                         }
                     )
+    return via_drops, None
 
-    # Stub-widen (#496): see _endpoint_stub_widen_um's own docstring. Computed
-    # independently of the via-drop loop above (it needs no ExtractionDeck --
-    # only route_layer, to compare against each port's own reported layer),
-    # for both endpoints.
+
+def _endpoint_stub_widen_entries(
+    endpoints: tuple[
+        tuple[dict[str, Any], dict[str, Any], tuple[float, float], int, float],
+        tuple[dict[str, Any], dict[str, Any], tuple[float, float], int, float],
+    ],
+    effective_width_um: float,
+    effective_route_layer: tuple[int, int] | None,
+) -> list[dict[str, Any]]:
+    """Stub-widen entries (#496) for both endpoints.
+
+    See :func:`_endpoint_stub_widen_um`. Computed independently of the
+    via-drop resolution (it needs no ``ExtractionDeck`` -- only the route
+    layer, to compare against each port's own reported layer). Each endpoint
+    is ``(pin, port, position, direction_deg, stub_len_um)``.
+    """
+    # `_endpoint_stub_widen_um` is looked up dynamically (rather than called
+    # as this module's own same-name function, defined above) so a caller
+    # that monkeypatches `klayout_tools.gen_compose.<name>` (the test suite's
+    # own re-export, preserved from before issue #1708's split) still takes
+    # effect here, exactly as before the split.
+    from .gen_compose import _endpoint_stub_widen_um
+
     stub_widen: list[dict[str, Any]] = []
-    for pin, port, pos, direction, stub_len_um in (
-        (pin_a, port_a, a, dir_a, stub_a_um),
-        (pin_b, port_b, b, dir_b, stub_b_um),
-    ):
+    for pin, port, pos, direction, stub_len_um in endpoints:
         widen = _endpoint_stub_widen_um(
             port, pos, direction, stub_len_um, effective_width_um, effective_route_layer
         )
         if widen is not None:
-            # block_id (#1520): same purpose as via_drops' own block_id above.
+            # block_id (#1520): same purpose as via_drops' own block_id.
             widen["block_id"] = pin["block"]
             stub_widen.append(widen)
+    return stub_widen
 
-    # Same-block cross-layer conflict retry (#1393, see docstring): only
-    # armed when leg_conflict was supplied AND this leg is a same-block
-    # self-net's fixed-shape attempt that resolved on cross_block_route_layer
-    # -- every other leg (an inter-block net, a same-block self-net that
-    # never needed the cross-layer fallback, or a caller-/detour-supplied
-    # waypoints_um path) skips this block entirely and returns below exactly
-    # as before this issue, so route_bundle's own leg_conflict check (#1057/
-    # #1386) remains the sole, unchanged decision-maker for every one of
-    # those cases.
+
+def _routed_result(
+    points: list[tuple[float, float]],
+    via_drops: list[dict[str, Any]],
+    stub_widen: list[dict[str, Any]],
+    effective_route_layer: tuple[int, int] | None,
+    effective_width_um: float,
+) -> dict[str, Any]:
+    """The success result for an untracked (``channel_track == 0``) leg."""
+    return {
+        "routed": True,
+        "route_length_um": _polyline_length_um(points),
+        "points_um": points,
+        "via_drops": via_drops,
+        "stub_widen": stub_widen,
+        "route_layer": effective_route_layer,
+        "width_um": effective_width_um,
+        "channel_track": 0,
+        "reason": None,
+    }
+
+
+def _same_block_cross_layer_retry(
+    reroute: Any,
+    leg_conflict: Any,
+    points: list[tuple[float, float]],
+    via_drops: list[dict[str, Any]],
+    stub_widen: list[dict[str, Any]],
+    *,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    own_bbox_um: dict[str, float],
+    same_block_self_net: bool,
+    waypoints_um: list[tuple[float, float]] | None,
+    cross_block_route_layer: tuple[int, int] | None,
+    effective_route_layer: tuple[int, int] | None,
+    effective_width_um: float,
+) -> dict[str, Any] | None:
+    """Same-block cross-layer conflict retry (issue #1393).
+
+    Returns the final result when the retry fires (a routed lane, or the
+    unroutable wording), ``None`` when it is not armed or the fixed shape has
+    no conflict. ``leg_conflict`` is an optional callable with the same
+    signature as :func:`route_bundle`'s own ``leg_conflict`` parameter
+    (``(points_um, via_drops, stub_widen, route_layer) -> str | None``).
+
+    Only armed when ``leg_conflict`` was supplied AND this leg is a
+    same-block self-net's fixed-shape attempt that resolved on
+    ``cross_block_route_layer`` -- every other leg (an inter-block net, a
+    same-block self-net that never needed the cross-layer fallback, or a
+    caller-/detour-supplied ``waypoints_um`` path) skips this entirely, so
+    :func:`route_bundle`'s own ``leg_conflict`` check (#1057/#1386) remains
+    the sole, unchanged decision-maker for every one of those cases.
+
+    When the fixed-shape path conflicts -- a *different* same-block self-net
+    that also needed the cross layer already claimed the identical lane --
+    this generalises the bounded detour search of :func:`_bounded_detour_retry`
+    but not its lane shape: :func:`_self_net_cross_layer_lane_waypoints_um`
+    proposes up to ``_MAX_SAME_BLOCK_CROSS_LAYER_LANES`` single-corner
+    waypoints that route fully *around the outside* of the block both pins
+    sit on (the collision is with another net's *drawn metal*, not a placed
+    block), each routed by ``reroute`` with the corner as its sole
+    ``waypoints_um`` entry (without threading ``leg_conflict`` further -- the
+    one-level recursion bound is enforced by the ``waypoints_um is None``
+    gate). ``leg_conflict`` is then re-checked against *that* lane's actual
+    drawn points before it is accepted. A retried lane is **not** pinned to
+    ``cross_block_route_layer``: the recursive call re-runs the whole layer
+    resolution against the lane's own drawn path, so a lane that loops clear
+    of the block naturally resolves back onto the primary ``route_layer``,
+    leaving the cross layer free for the *first* self-net that still needs
+    it. When no lane clears the conflict either, the reported ``reason`` is
+    ``leg_conflict``'s own wording plus a note that the detour was tried.
+    """
+    # `_self_net_cross_layer_lane_waypoints_um` is looked up dynamically
+    # (rather than called as this module's own same-name function, defined
+    # above) so a caller that monkeypatches `klayout_tools.gen_compose.<name>`
+    # (the test suite's own re-export, preserved from before issue #1708's
+    # split) still takes effect here, exactly as before the split.
+    from .gen_compose import _self_net_cross_layer_lane_waypoints_um
+
     retry_eligible = (
         leg_conflict is not None
         and same_block_self_net
@@ -3824,54 +3629,83 @@ def route_two_pin(
         if retry_eligible
         else None
     )
-    if conflict_reason is not None:
-        lanes = _self_net_cross_layer_lane_waypoints_um(
-            a, b, placed_bboxes_um[own_a], effective_width_um
+    if conflict_reason is None:
+        return None
+    lanes = _self_net_cross_layer_lane_waypoints_um(
+        a, b, own_bbox_um, effective_width_um
+    )
+    for lane in lanes:
+        retry = reroute(waypoints_um=lane)
+        if not retry["routed"]:
+            continue
+        lane_conflict = leg_conflict(
+            retry["points_um"],
+            retry.get("via_drops", []),
+            retry.get("stub_widen", []),
+            retry.get("route_layer"),
         )
-        for lane in lanes:
-            retry = route_two_pin(
-                pin_a,
-                pin_b,
-                blocks,
-                offsets_um,
-                placed_bboxes_um,
-                width_um,
-                route_layer,
-                extraction_deck,
-                block_geometry,
-                waypoints_um=lane,
-                cross_block_route_layer=cross_block_route_layer,
-                cross_block_geometry=cross_block_geometry,
-                cross_block_width_um=cross_block_width_um,
-                block_geometry_for=block_geometry_for,
-                cross_block_geometry_for=cross_block_geometry_for,
-                grid_um=grid_um,
-            )
-            if not retry["routed"]:
-                continue
-            lane_conflict = leg_conflict(
-                retry["points_um"],
-                retry.get("via_drops", []),
-                retry.get("stub_widen", []),
-                retry.get("route_layer"),
-            )
-            if lane_conflict is None:
-                return retry
-        return _unroutable(
-            conflict_reason + " -- a bounded same-block cross-layer detour "
-            f"({len(lanes)} alternate lane{'' if len(lanes) == 1 else 's'} "
-            "looped clear of the block's own bbox) was tried first, and "
-            "each one still conflicted"
-        )
+        if lane_conflict is None:
+            return retry
+    return _unroutable(
+        conflict_reason + " -- a bounded same-block cross-layer detour "
+        f"({len(lanes)} alternate lane{'' if len(lanes) == 1 else 's'} "
+        "looped clear of the block's own bbox) was tried first, and "
+        "each one still conflicted"
+    )
 
-    # Channel track retry (#1467, see docstring): only armed for the
-    # untracked (channel_offset_um == 0.0) top-level attempt at an
-    # inter-block leg whose fixed shape is the shared-channel horizontal jog
-    # -- both ports facing the identical vertical direction -- with no
-    # caller-supplied waypoints_um. Every other leg (a vertical-jog/column
-    # channel, a mixed-orientation corner, a same-block self-net -- #1393's
-    # own case -- or a caller-/detour-supplied path) skips this block
-    # entirely, exactly as before this issue.
+
+def _channel_track_retry(
+    reroute: Any,
+    leg_conflict: Any,
+    points: list[tuple[float, float]],
+    via_drops: list[dict[str, Any]],
+    stub_widen: list[dict[str, Any]],
+    *,
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    va: tuple[int, int],
+    vb: tuple[int, int],
+    waypoints_um: list[tuple[float, float]] | None,
+    channel_offset_um: float,
+    cross_block_route_layer: tuple[int, int] | None,
+    effective_route_layer: tuple[int, int] | None,
+    effective_width_um: float,
+) -> dict[str, Any] | None:
+    """Channel track retry (issue #1467): the final result, or ``None``.
+
+    Only armed for the untracked (``channel_offset_um == 0.0``) top-level
+    attempt at an inter-block leg whose fixed shape is the shared-channel
+    horizontal jog -- both ports facing the identical vertical direction --
+    with no caller-supplied ``waypoints_um`` and a ``leg_conflict`` supplied.
+    Every other leg (a vertical-jog/column channel, a mixed-orientation
+    corner, a same-block self-net -- #1393's own case, see
+    :func:`_same_block_cross_layer_retry` -- or a caller-/detour-supplied
+    path) returns ``None``, as does a fixed shape with no conflict.
+
+    The fixed one-jog shape lands every net sharing one channel on the exact
+    same mid coordinate, so the *first* net processed wins the channel and
+    every other net contending for it is rejected. This retries the
+    *identical* pin pair on successive channel tracks -- the horizontal jog
+    shifted ``_CHANNEL_TRACK_PITCH_WIDTHS * width_um`` farther from the row
+    per track, away from the ports' facing direction -- via ``reroute`` with
+    ``channel_offset_um`` set accordingly, up to ``_MAX_CHANNEL_TRACKS``
+    tracks. Each candidate track is routed through *every* check again and
+    then re-checked against ``leg_conflict``; the first track that clears
+    both is accepted and reports its ``channel_track``. This is the online
+    equivalent of the classic left-edge interval-packing channel-router
+    algorithm: first-fit, decided lazily on rejection.
+
+    When every track still conflicts and a ``cross_block_route_layer`` is
+    configured and not yet used, exhaustion instead reports the untracked
+    fixed shape as routed on the primary layer (issue #1680) so
+    :func:`route_bundle`'s own ``leg_conflict`` check and its
+    ``_retry_leg_on_cross_layer`` fallback get the chance to resolve it on the
+    cross layer -- returning a terminal unroutable result here would make that
+    bundle-level retry unreachable, since it only ever fires once
+    ``route_two_pin`` has already reported a leg as routed. Otherwise the leg
+    is reported unroutable with ``leg_conflict``'s own wording plus a note
+    naming how many tracks were tried.
+    """
     channel_track_eligible = (
         leg_conflict is not None
         and waypoints_um is None
@@ -3886,87 +3720,572 @@ def route_two_pin(
         if channel_track_eligible
         else None
     )
-    if channel_track_reason is not None:
-        pitch_um = _CHANNEL_TRACK_PITCH_WIDTHS * effective_width_um
-        direction_sign = 1 if va[1] > 0 else -1
-        for track_index in range(1, _MAX_CHANNEL_TRACKS + 1):
-            retry = route_two_pin(
-                pin_a,
-                pin_b,
-                blocks,
-                offsets_um,
-                placed_bboxes_um,
-                width_um,
-                route_layer,
-                extraction_deck,
-                block_geometry,
-                cross_block_route_layer=cross_block_route_layer,
-                cross_block_geometry=cross_block_geometry,
-                cross_block_width_um=cross_block_width_um,
-                leg_conflict=leg_conflict,
-                block_geometry_for=block_geometry_for,
-                cross_block_geometry_for=cross_block_geometry_for,
-                channel_offset_um=direction_sign * pitch_um * track_index,
-                grid_um=grid_um,
-            )
-            if not retry["routed"]:
-                continue
-            track_conflict = leg_conflict(
-                retry["points_um"],
-                retry.get("via_drops", []),
-                retry.get("stub_widen", []),
-                retry.get("route_layer"),
-            )
-            if track_conflict is None:
-                retry["channel_track"] = track_index
-                return retry
-        if (
-            cross_block_route_layer is not None
-            and effective_route_layer != cross_block_route_layer
-        ):
-            # Every channel track is exhausted, but a caller-configured
-            # `cross_block_route_layer` may still resolve this leg on a
-            # different physical layer with no route-vs-route collision at
-            # all (issue #1680) -- exactly what would already happen for a
-            # non-`channel_track_eligible` leg (see the untracked "routed:
-            # True" fallthrough below). Report the untracked fixed shape as
-            # routed here too, so `route_bundle()`'s own `leg_conflict`
-            # check runs against it and its `_retry_leg_on_cross_layer`
-            # fallback gets the chance it would otherwise never see --
-            # returning a terminal "routed": False from *inside*
-            # route_two_pin (as below) would make that bundle-level retry
-            # unreachable, since it only ever fires when `result["routed"]`
-            # is already True.
-            return {
-                "routed": True,
-                "route_length_um": _polyline_length_um(points),
-                "points_um": points,
-                "via_drops": via_drops,
-                "stub_widen": stub_widen,
-                "route_layer": effective_route_layer,
-                "width_um": effective_width_um,
-                "channel_track": 0,
-                "reason": None,
-            }
-        return _unroutable(
-            channel_track_reason
-            + f" -- {_MAX_CHANNEL_TRACKS} alternate channel tracks (this "
-            "leg's shared-channel horizontal jog shifted farther from "
-            "the row, one route width's worth of clearance per track) "
-            "were tried first, and each one still conflicted"
+    if channel_track_reason is None:
+        return None
+    pitch_um = _CHANNEL_TRACK_PITCH_WIDTHS * effective_width_um
+    direction_sign = 1 if va[1] > 0 else -1
+    for track_index in range(1, _MAX_CHANNEL_TRACKS + 1):
+        retry = reroute(
+            leg_conflict=leg_conflict,
+            channel_offset_um=direction_sign * pitch_um * track_index,
         )
+        if not retry["routed"]:
+            continue
+        track_conflict = leg_conflict(
+            retry["points_um"],
+            retry.get("via_drops", []),
+            retry.get("stub_widen", []),
+            retry.get("route_layer"),
+        )
+        if track_conflict is None:
+            retry["channel_track"] = track_index
+            return retry
+    if (
+        cross_block_route_layer is not None
+        and effective_route_layer != cross_block_route_layer
+    ):
+        return _routed_result(
+            points, via_drops, stub_widen, effective_route_layer, effective_width_um
+        )
+    return _unroutable(
+        channel_track_reason
+        + f" -- {_MAX_CHANNEL_TRACKS} alternate channel tracks (this "
+        "leg's shared-channel horizontal jog shifted farther from "
+        "the row, one route width's worth of clearance per track) "
+        "were tried first, and each one still conflicted"
+    )
 
-    return {
-        "routed": True,
-        "route_length_um": _polyline_length_um(points),
-        "points_um": points,
-        "via_drops": via_drops,
-        "stub_widen": stub_widen,
-        "route_layer": effective_route_layer,
-        "width_um": effective_width_um,
-        "channel_track": 0,
-        "reason": None,
-    }
+
+def _obstacle_crossings(
+    points: list[tuple[float, float]],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+    placed_bboxes_um: dict[str, dict[str, float]],
+    ring_pins: list[tuple[dict[str, Any], dict[str, Any]]],
+    *,
+    route_layer: tuple[int, int] | None,
+    cross_block_route_layer: tuple[int, int] | None,
+    effective_route_layer: tuple[int, int] | None,
+    effective_width_um: float,
+    block_geometry_for: Any,
+    cross_block_geometry_for: Any,
+    own_a: str,
+    own_b: str,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    dir_a: int,
+    dir_b: int,
+    stub_um: float,
+    same_block_self_net: bool,
+    margin_eps_um: float,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float], float]:
+    """Obstacle-overlap check (check 5, #199 case 1).
+
+    Returns ``(blocking_um, far_side_um, allowances_um, obstacle_half_um)``:
+    the per-block crossings that exceed their allowance, the far-side
+    approach crossings (#1895), the allowances they were measured against,
+    and the half-width the bboxes were inflated by. Everything is sized from
+    ``effective_width_um`` (#1620) -- the width this leg actually draws at
+    once :func:`_select_route_layer` has decided its layer -- not the primary
+    plane's own ``width_um``.
+    """
+    obstacle_half_um = effective_width_um / 2.0
+    obstacle_bboxes_um = _inflated_obstacle_bboxes_um(
+        placed_bboxes_um, obstacle_half_um
+    )
+    navigable_regions_by_block_um = _navigable_regions_by_block_um(
+        obstacle_bboxes_um, blocks, offsets_um
+    )
+    allowances_um = _own_pin_allowances_um(
+        own_a=own_a,
+        own_b=own_b,
+        a=a,
+        b=b,
+        dir_a=dir_a,
+        dir_b=dir_b,
+        placed_bboxes_um=placed_bboxes_um,
+        ring_pins=ring_pins,
+        stub_um=stub_um,
+        obstacle_half_um=obstacle_half_um,
+    )
+
+    # #1656: pick whichever lazy per-block geometry cache (if any) matches
+    # the layer this leg actually landed on -- `block_geometry_for` reads
+    # `route_layer`, `cross_block_geometry_for` reads `cross_block_route_layer`
+    # (see :func:`_select_route_layer` for how `effective_route_layer` can end
+    # up being either one). `None` when the caller supplied neither cache for
+    # this layer (e.g. a direct unit-test caller, or `route_layer is None`) --
+    # the check then falls back to its pre-#1656 bbox-only behaviour.
+    if effective_route_layer == route_layer:
+        layer_geometry_for = block_geometry_for
+    elif (
+        cross_block_route_layer is not None
+        and effective_route_layer == cross_block_route_layer
+    ):
+        layer_geometry_for = cross_block_geometry_for
+    else:
+        layer_geometry_for = None
+
+    exempt_block_ids = _exempt_obstacle_block_ids(
+        obstacle_bboxes_um,
+        layer_geometry_for,
+        own_a=own_a,
+        same_block_self_net=same_block_self_net,
+        points=points,
+        effective_width_um=effective_width_um,
+    )
+    blocking_um = _blocking_crossings_um(
+        points,
+        obstacle_bboxes_um,
+        navigable_regions_by_block_um,
+        allowances_um,
+        exempt_block_ids,
+        own_a=own_a,
+        same_block_self_net=same_block_self_net,
+        margin_eps_um=margin_eps_um,
+    )
+    far_side_um = _far_side_crossings_um(
+        points,
+        obstacle_bboxes_um,
+        navigable_regions_by_block_um,
+        exempt_block_ids,
+        own_a=own_a,
+        own_b=own_b,
+        a=a,
+        b=b,
+        dir_a=dir_a,
+        dir_b=dir_b,
+        same_block_self_net=same_block_self_net,
+        obstacle_half_um=obstacle_half_um,
+        margin_eps_um=margin_eps_um,
+    )
+    return blocking_um, far_side_um, allowances_um, obstacle_half_um
+
+
+def route_two_pin(
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+    placed_bboxes_um: dict[str, dict[str, float]],
+    width_um: float,
+    route_layer: tuple[int, int] | None = None,
+    extraction_deck: ExtractionDeck | None = None,
+    block_geometry: dict[str, dict[str, Any] | None] | None = None,
+    waypoints_um: list[tuple[float, float]] | None = None,
+    cross_block_route_layer: tuple[int, int] | None = None,
+    cross_block_geometry: dict[str, dict[str, Any] | None] | None = None,
+    cross_block_width_um: float | None = None,
+    leg_conflict: Any = None,
+    block_geometry_for: Any = None,
+    cross_block_geometry_for: Any = None,
+    channel_offset_um: float = 0.0,
+    grid_um: float = 0.0,
+) -> dict[str, Any]:
+    """Route one two-pin net and report the result.
+
+    Resolves each pin's port position into the composed coordinate frame
+    (port ``x_um``/``y_um`` translated by its block's ``offset_um``),
+    generates a Manhattan backbone (:func:`manhattan_backbone`), and applies
+    five routability checks before reporting success -- all diagnostic
+    heuristics against the composition's own already-known geometry
+    (``bbox_um``/``ports[]``) or, for check 4, the block's own drawn shapes
+    (:func:`read_block_layer_geometry`) -- not a DRC check (``klt drc``
+    remains authoritative). Each check lives in a named helper whose
+    docstring carries the full rationale; the order below is the order they
+    run in (it is load-bearing -- the checks share locals):
+
+    1. **Channel-width check** (:func:`_channel_width_reason`): the fixed
+       one-jog shape needs a channel at least ``width_um`` wide between the
+       two blocks. Skipped when ``waypoints_um`` is supplied (#634).
+    2. **Guard/collector-ring check** (:func:`_closed_ring_pins`, #199 case
+       2; opening conflicts via :func:`_ring_opening_conflict`, #434): a route
+       to a non-tap port of a closed ring crosses the ring's metal loop.
+       Plane-conditional since #1960 (:func:`_leg_plane_clears_ring`). Still
+       runs with ``waypoints_um``.
+    3. **Self-net pad-crossing check** (#433) and
+    4. **Self-net drawn-metal check** (#453/#469), plus the **own-block escape
+       check** (#1527): see :func:`_same_layer_short_reason`, driven by
+       :func:`_select_route_layer`. Check 3's reported-``width_um`` pad model
+       and check 4's drawn-geometry intersection (:func:`_drawn_route_region`
+       against ``block_geometry``) compose; without ``block_geometry`` only
+       check 3 applies, to same-block self-net legs only. Check 3's
+       ``conservative_same_dir`` fallback is skipped with ``waypoints_um``;
+       the pad-footprint test and check 4 still run on the drawn ``points``.
+    5. **Obstacle-overlap check** (#199 case 1): the drawn backbone must not
+       cross the *interior* of any block's bbox beyond each own-pin's
+       allowance (:func:`_port_edge_margin_um`, :func:`_own_pin_allowances_um`,
+       :func:`_blocking_crossings_um`, :func:`_far_side_crossings_um`). Every
+       bbox is inflated by half the drawn width (#999,
+       :func:`_inflated_obstacle_bboxes_um`); blocks the leg cannot short to
+       (draws nothing on the layer #1656, or not touched by the leg's metal
+       #1681) are exempt (:func:`_exempt_obstacle_block_ids`); declared
+       ``navigable_regions`` (#1531/#1835) are subtracted. A crossing of
+       *unrelated* blocks is retried around them first
+       (:func:`_bounded_detour_retry`, #1167).
+    6. **Via-drop resolution** (:func:`_resolve_via_drops`, #454; multi-hop
+       since #1567): when ``route_layer`` and a pin's own layer differ,
+       ``extraction_deck`` must connect them; a pin on an unresolvable hop, or
+       on the bare ``poly`` layer (#492), is reported unroutable rather than
+       drawn as a disconnected stub.
+
+    Checks 1-5 report the net unroutable (spike section 2,
+    ``unrouted_nets[]``) rather than silently drawing a short; check 6 does
+    the same for a route it cannot connect end to end. ``route_layer`` (the
+    ``(layer, datatype)`` pair ``routing.layer_role`` resolved to, see
+    :func:`_resolve_route_layer`) is optional only for callers that predate
+    #433/don't care about check 3 (e.g. direct unit tests) -- ``compose()``
+    always passes it when ``connectivity[]`` is non-empty.
+    ``block_geometry`` (block ``id`` -> :func:`read_block_layer_geometry`
+    result, ``None`` for a block that draws nothing on the route layer) is
+    likewise optional and always supplied by ``compose()`` for both endpoint
+    blocks of every leg (#1527). ``extraction_deck`` is only consulted
+    (check 6) when both it and ``route_layer`` are given.
+
+    ``waypoints_um`` (#634) is optional -- ``None`` preserves today's
+    fixed-shape backbone exactly; when given, it is threaded straight into
+    :func:`manhattan_backbone`. Every check that measures the *drawn path*
+    (5, the ring-opening check, the pad-footprint half of check 3, check 4,
+    check 6) still runs against whatever ``points`` results. What supplying
+    waypoints switches off is the handful of heuristics that predict the
+    fixed one-jog shape without looking at ``points``: the channel-width
+    check (1), check 3's ``conservative_same_dir`` fallback, and the #461
+    recessed-stub lift (:func:`_recessed_stub_lengths_um`). The closed
+    guard/collector-ring check (2) is *not* in that group: a closed ring
+    encloses its block completely, so no choice of waypoints can reach an
+    interior port without crossing it.
+
+    ``cross_block_route_layer``/``cross_block_geometry`` (issue #1168) name an
+    optional *second*, higher metal pair (resolved by
+    :func:`_resolve_cross_block_route_layer`) and its own drawn-geometry cache.
+    When checks 3/4 reject a leg on the primary ``route_layer`` and a cross
+    layer is configured, the identical checks are retried against it; a leg
+    that resolves there draws on it for its *entire* length, with checks 5/6
+    and the stub-widen pass re-run against that effective layer. This is an
+    additive fallback -- a leg that never trips checks 3/4 is unaffected.
+    ``cross_block_width_um`` (#1620) is the width such a leg draws at (``None``
+    reuses ``width_um``); the result's ``width_um`` reports whichever won.
+
+    ``block_geometry_for``/``cross_block_geometry_for`` (#1656) are the lazy
+    per-block geometry caches ``compose()`` builds around
+    :func:`read_block_layer_geometry` (``block_id`` -> the shared
+    ``{block_id: geometry-or-None}`` dict), reachable for *any* block in
+    ``placed_bboxes_um``; the obstacle-overlap check uses them for its
+    #1656/#1681 exemptions and falls back to bbox-only when they are omitted.
+
+    **Retries** (each re-enters this function via ``reroute``, so every check
+    applies to the retried path unchanged; none waives anything): the bounded
+    detour search (#1167, :func:`_bounded_detour_retry`), the same-block
+    cross-layer conflict retry (#1393, :func:`_same_block_cross_layer_retry`)
+    and the channel track retry (#1467, :func:`_channel_track_retry`).
+    ``leg_conflict`` has :func:`route_bundle`'s own signature (``(points_um,
+    via_drops, stub_widen, route_layer) -> str | None``); ``channel_offset_um``
+    is the track offset the channel track retry supplies.
+
+    Returns ``{"routed": bool, "route_length_um": float | None,
+    "points_um": list | None, "via_drops": list, "stub_widen": list,
+    "route_layer": tuple[int, int] | None, "width_um": float,
+    "channel_track": int, "reason": str | None}`` (a rejected leg omits
+    ``width_um``/``channel_track``, nothing having been drawn for it).
+    ``via_drops`` is a list of ``{"x_um", "y_um", "via_layer",
+    "landing_layers", "block_id"}`` entries (empty unless a drop was
+    resolved; one entry per via *hop* since #1567), consumed by
+    :func:`_write_composed_gds`. ``stub_widen`` (#496, see
+    :func:`_endpoint_stub_widen_um`) is a list of ``{"x_um", "y_um",
+    "direction_deg", "length_um", "width_um"}`` entries -- one per endpoint
+    whose own pad is wider than ``width_um`` and faces north/south.
+    ``route_layer`` (#1168) and ``width_um`` (#1620) are the *effective*
+    drawing layer and width this result's geometry landed on, so a caller
+    drawing multiple legs (:func:`route_bundle`, ``compose()``) knows which
+    layer and width each leg belongs on. ``channel_track`` is the track a
+    resolved leg landed on (0 for the untracked default).
+    """
+    # `_endpoint_stub_widen_um`/`_self_net_cross_layer_lane_waypoints_um` are
+    # looked up dynamically inside `_endpoint_stub_widen_entries`/
+    # `_same_block_cross_layer_retry` (see their comments) so a monkeypatch of
+    # `klayout_tools.gen_compose.<name>` still takes effect.
+    from .gen_compose import _DIRECTION_VECTORS
+
+    block_a = blocks[pin_a["block"]]
+    block_b = blocks[pin_b["block"]]
+    port_a = block_a["ports"].get(pin_a["port"])
+    port_b = block_b["ports"].get(pin_b["port"])
+
+    # A block with no reported ports[] (a hand-crafted generator_report) can't
+    # supply a routable position -- treat as unroutable rather than crashing.
+    if not isinstance(port_a, dict) or not isinstance(port_b, dict):
+        return _unroutable("one or both ports report no position (empty ports[])")
+
+    off_a = offsets_um[pin_a["block"]]
+    off_b = offsets_um[pin_b["block"]]
+    a = (
+        float(port_a["x_um"]) + off_a["x"],
+        float(port_a["y_um"]) + off_a["y"],
+    )
+    b = (
+        float(port_b["x_um"]) + off_b["x"],
+        float(port_b["y_um"]) + off_b["y"],
+    )
+    dir_a = int(port_a.get("direction_deg", 0)) % 360
+    dir_b = int(port_b.get("direction_deg", 0)) % 360
+    if dir_a not in _DIRECTION_VECTORS or dir_b not in _DIRECTION_VECTORS:
+        return _unroutable("a port reports a non-orthogonal direction_deg")
+
+    va = _DIRECTION_VECTORS[dir_a]
+    vb = _DIRECTION_VECTORS[dir_b]
+    stub_um = width_um
+
+    # Guard/collector-ring check (#199 case 2, #434, #1960): see
+    # _closed_ring_pins.
+    ring_pins, ring_reason = _closed_ring_pins(
+        pin_a,
+        pin_b,
+        block_a=block_a,
+        block_b=block_b,
+        port_a=port_a,
+        port_b=port_b,
+        a=a,
+        b=b,
+        offsets_um=offsets_um,
+        route_layer=route_layer,
+        cross_block_route_layer=cross_block_route_layer,
+        extraction_deck=extraction_deck,
+    )
+    if ring_reason is not None:
+        return _unroutable(ring_reason)
+
+    # Channel-width check (check 1): see _channel_width_reason.
+    channel_reason = _channel_width_reason(
+        pin_a,
+        pin_b,
+        placed_bboxes_um=placed_bboxes_um,
+        a=a,
+        b=b,
+        va=va,
+        vb=vb,
+        width_um=width_um,
+        waypoints_um=waypoints_um,
+    )
+    if channel_reason is not None:
+        return _unroutable(channel_reason)
+
+    # Recessed same-direction vertical ports (#461): see
+    # _recessed_stub_lengths_um.
+    stub_a_um, stub_b_um = _recessed_stub_lengths_um(
+        pin_a,
+        pin_b,
+        block_a=block_a,
+        block_b=block_b,
+        placed_bboxes_um=placed_bboxes_um,
+        a=a,
+        b=b,
+        dir_a=dir_a,
+        dir_b=dir_b,
+        va=va,
+        stub_um=stub_um,
+        waypoints_um=waypoints_um,
+    )
+
+    # A plane-change junction (#2930) is a free point, not a block pad: its
+    # port has no approach stub, so the path meets it exactly at the waypoint.
+    stub_a_um, stub_b_um = _zero_junction_stubs(port_a, port_b, stub_a_um, stub_b_um)
+
+    points = manhattan_backbone(
+        a,
+        dir_a,
+        b,
+        dir_b,
+        stub_um,
+        stub_a_um=stub_a_um,
+        stub_b_um=stub_b_um,
+        waypoints=waypoints_um,
+        channel_offset_um=channel_offset_um,
+        grid_um=grid_um,
+    )
+    margin_eps_um = 1e-6
+
+    # Ring-opening check (#434): see _ring_opening_conflict.
+    ring_conflict = _ring_opening_conflict(
+        points,
+        ring_pins,
+        offsets_um=offsets_um,
+        placed_bboxes_um=placed_bboxes_um,
+        width_um=width_um,
+    )
+    if ring_conflict is not None:
+        return _unroutable(ring_conflict)
+
+    own_a, own_b = pin_a["block"], pin_b["block"]
+    same_block_self_net = own_a == own_b
+
+    # Same-layer-short retry (#1168/#1620): see _select_route_layer.
+    effective_route_layer, effective_width_um, short_reason = _select_route_layer(
+        route_layer,
+        block_geometry,
+        width_um,
+        cross_block_route_layer,
+        cross_block_geometry,
+        cross_block_width_um,
+        pin_a=pin_a,
+        pin_b=pin_b,
+        blocks=blocks,
+        offsets_um=offsets_um,
+        points=points,
+        waypoints_um=waypoints_um,
+        a=a,
+        b=b,
+        va=va,
+        dir_a=dir_a,
+        dir_b=dir_b,
+        own_a=own_a,
+        own_b=own_b,
+        block_a=block_a,
+        block_b=block_b,
+        same_block_self_net=same_block_self_net,
+        margin_eps_um=margin_eps_um,
+    )
+    if short_reason is not None:
+        return _unroutable(short_reason)
+
+    # Obstacle-overlap check (check 5): see _obstacle_crossings.
+    blocking_um, far_side_um, allowances_um, obstacle_half_um = _obstacle_crossings(
+        points,
+        blocks,
+        offsets_um,
+        placed_bboxes_um,
+        ring_pins,
+        route_layer=route_layer,
+        cross_block_route_layer=cross_block_route_layer,
+        effective_route_layer=effective_route_layer,
+        effective_width_um=effective_width_um,
+        block_geometry_for=block_geometry_for,
+        cross_block_geometry_for=cross_block_geometry_for,
+        own_a=own_a,
+        own_b=own_b,
+        a=a,
+        b=b,
+        dir_a=dir_a,
+        dir_b=dir_b,
+        stub_um=stub_um,
+        same_block_self_net=same_block_self_net,
+        margin_eps_um=margin_eps_um,
+    )
+
+    # Bounded detour search (#1167): see _bounded_detour_retry. `reroute`
+    # re-enters this function with the same leg inputs (the one-level
+    # recursion every retry below shares).
+    reroute = functools.partial(
+        route_two_pin,
+        pin_a,
+        pin_b,
+        blocks,
+        offsets_um,
+        placed_bboxes_um,
+        width_um,
+        route_layer,
+        extraction_deck,
+        block_geometry,
+        cross_block_route_layer=cross_block_route_layer,
+        cross_block_geometry=cross_block_geometry,
+        cross_block_width_um=cross_block_width_um,
+        block_geometry_for=block_geometry_for,
+        cross_block_geometry_for=cross_block_geometry_for,
+        grid_um=grid_um,
+    )
+    detour_retry, detour_note = _bounded_detour_retry(
+        reroute,
+        blocking_um,
+        own_a=own_a,
+        own_b=own_b,
+        a=a,
+        b=b,
+        va=va,
+        vb=vb,
+        placed_bboxes_um=placed_bboxes_um,
+        effective_width_um=effective_width_um,
+        waypoints_um=waypoints_um,
+    )
+    if detour_retry is not None:
+        return detour_retry
+
+    obstacle_reason = _obstacle_rejection_reason(
+        far_side_um,
+        blocking_um,
+        allowances_um,
+        detour_note,
+        pin_a=pin_a,
+        pin_b=pin_b,
+        own_a=own_a,
+        own_b=own_b,
+        dir_a=dir_a,
+        dir_b=dir_b,
+        effective_width_um=effective_width_um,
+        obstacle_half_um=obstacle_half_um,
+    )
+    if obstacle_reason is not None:
+        return _unroutable(obstacle_reason)
+
+    # Via-drop resolution (check 6, #454/#1567/#1168): see _resolve_via_drops.
+    via_drops, via_drop_reason = _resolve_via_drops(
+        effective_route_layer,
+        extraction_deck,
+        ((pin_a, port_a, a), (pin_b, port_b, b)),
+    )
+    if via_drop_reason is not None:
+        return _unroutable(via_drop_reason)
+
+    # Stub-widen (#496): see _endpoint_stub_widen_entries.
+    stub_widen = _endpoint_stub_widen_entries(
+        (
+            (pin_a, port_a, a, dir_a, stub_a_um),
+            (pin_b, port_b, b, dir_b, stub_b_um),
+        ),
+        effective_width_um,
+        effective_route_layer,
+    )
+
+    # Same-block cross-layer conflict retry (#1393) and channel track retry
+    # (#1467): see _same_block_cross_layer_retry / _channel_track_retry.
+    cross_layer_retry = _same_block_cross_layer_retry(
+        reroute,
+        leg_conflict,
+        points,
+        via_drops,
+        stub_widen,
+        a=a,
+        b=b,
+        own_bbox_um=placed_bboxes_um[own_a],
+        same_block_self_net=same_block_self_net,
+        waypoints_um=waypoints_um,
+        cross_block_route_layer=cross_block_route_layer,
+        effective_route_layer=effective_route_layer,
+        effective_width_um=effective_width_um,
+    )
+    if cross_layer_retry is not None:
+        return cross_layer_retry
+
+    track_retry = _channel_track_retry(
+        reroute,
+        leg_conflict,
+        points,
+        via_drops,
+        stub_widen,
+        pin_a=pin_a,
+        pin_b=pin_b,
+        va=va,
+        vb=vb,
+        waypoints_um=waypoints_um,
+        channel_offset_um=channel_offset_um,
+        cross_block_route_layer=cross_block_route_layer,
+        effective_route_layer=effective_route_layer,
+        effective_width_um=effective_width_um,
+    )
+    if track_retry is not None:
+        return track_retry
+
+    return _routed_result(
+        points, via_drops, stub_widen, effective_route_layer, effective_width_um
+    )
 
 
 def _pin_ref(pin: dict[str, Any]) -> str:
@@ -4614,20 +4933,7 @@ def route_bundle(
         )
 
     pin_count = len(pins)
-    parent = list(range(pin_count))
-
-    def _find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def _union(left: int, right: int) -> bool:
-        root_left, root_right = _find(left), _find(right)
-        if root_left == root_right:
-            return False
-        parent[max(root_left, root_right)] = min(root_left, root_right)
-        return True
+    uf = UnionFind(range(pin_count), min_root=True)
 
     components = pin_count
 
@@ -4638,7 +4944,7 @@ def route_bundle(
     for index, pin in enumerate(pins):
         key = (pin["block"], pin["port"])
         if key in first_seen:
-            if _union(first_seen[key], index):
+            if uf.union(first_seen[key], index):
                 components -= 1
         else:
             first_seen[key] = index
@@ -4908,7 +5214,7 @@ def route_bundle(
                     result = retry
                     reason = None
         if reason is None and result["routed"]:
-            if _union(i, j):
+            if uf.union(i, j):
                 components -= 1
             total_length_um += result["route_length_um"]
             legs.append(
@@ -4946,7 +5252,7 @@ def route_bundle(
     for i, j in candidates:
         if components == 1:
             break
-        if _find(i) == _find(j):
+        if uf.find(i) == uf.find(j):
             continue  # already connected through other legs -- no leg needed
         if (
             frozenset(
@@ -5003,7 +5309,7 @@ def route_bundle(
                     reason = None
 
         if reason is None and result["routed"]:
-            _union(i, j)
+            uf.union(i, j)
             components -= 1
             total_length_um += result["route_length_um"]
             legs.append(
@@ -5058,7 +5364,7 @@ def route_bundle(
     # --- Unroutable: report which pins were stranded and why ----------------
     groups: dict[int, list[int]] = {}
     for index in range(pin_count):
-        groups.setdefault(_find(index), []).append(index)
+        groups.setdefault(uf.find(index), []).append(index)
     # The largest component is "the net"; every pin outside it is stranded.
     main_root = max(groups, key=lambda root: (len(groups[root]), -root))
     stranded = sorted(
@@ -5147,27 +5453,14 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
     byte-reproducible leg list run to run.
     """
     pin_count = len(pins)
-    parent = list(range(pin_count))
-
-    def _find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def _union(left: int, right: int) -> bool:
-        root_left, root_right = _find(left), _find(right)
-        if root_left == root_right:
-            return False
-        parent[max(root_left, root_right)] = min(root_left, root_right)
-        return True
+    uf = UnionFind(range(pin_count), min_root=True)
 
     components = pin_count
     first_seen: dict[tuple[str, str], int] = {}
     for index, pin in enumerate(pins):
         key = (pin["block"], pin["port"])
         if key in first_seen:
-            if _union(first_seen[key], index):
+            if uf.union(first_seen[key], index):
                 components -= 1
         else:
             first_seen[key] = index
@@ -5179,9 +5472,9 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
         for j in range(i + 1, pin_count):
             if components == 1:
                 break
-            if _find(i) == _find(j):
+            if uf.find(i) == uf.find(j):
                 continue
-            _union(i, j)
+            uf.union(i, j)
             components -= 1
             legs.append(
                 {
@@ -5202,3 +5495,27 @@ def _declare_only_bundle_result(pins: list[dict[str, Any]]) -> dict[str, Any]:
         "reason": _DECLARE_ONLY_REASON,
         "status": "unrouted",
     }
+
+
+def _drop_array(
+    port: dict[str, Any], via_layer: tuple[int, int]
+) -> dict[str, Any] | None:
+    """The ``{"rows", "cols", "pitch_um"}`` cut array a port asks for on
+    ``via_layer`` (a label-derived port with ``access.via_array``, #2927), or
+    ``None`` for the ordinary single-cut drop."""
+    spec = port.get("via_array")
+    if not isinstance(spec, dict):
+        return None
+    pitch = (spec.get("pitch_um") or {}).get(f"{via_layer[0]}/{via_layer[1]}")
+    if pitch is None:
+        return None
+    return {"rows": spec["rows"], "cols": spec["cols"], "pitch_um": pitch}
+
+
+def _drop_array_extra_um(drop: dict[str, Any]) -> float:
+    """Extra side length (um) a drop's cut array adds to its landing pad over
+    the single-cut pad: ``(max(rows, cols) - 1) * pitch``; ``0.0`` without one."""
+    array = drop.get("array")
+    if not array:
+        return 0.0
+    return (max(array["rows"], array["cols"]) - 1) * array["pitch_um"]

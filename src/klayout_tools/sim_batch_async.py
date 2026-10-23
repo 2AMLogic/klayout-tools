@@ -24,12 +24,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any
 
 from . import remote_transport, sim_batch
 from .sim_batch import (
+    BATCH_RECEIPT_FILENAME,
     BATCH_TERMINAL_STATES,
     BATCH_WAITING_STATES,
     BatchConfig,
@@ -40,6 +42,7 @@ from .sim_batch import (
     _prepare_batch_job_spec,
     _read_status,
     _resolve_batch_config,
+    _write_batch_receipt,
     job_uri,
     launch_job,
     new_job_id,
@@ -105,6 +108,7 @@ def submit_only(
     keep_artifacts: bool,
     want_waveforms: bool,
     request_dir: str | None = None,
+    artifacts_dir: str | None = None,
     runner: remote_transport.CommandRunner | None = None,
 ) -> dict[str, Any]:
     """Upload and launch one batch job, then return its identity at once.
@@ -113,6 +117,11 @@ def submit_only(
     :func:`read_job_status`. Applies the same pre-submit gates as the
     blocking path (config/bucket resolution, runner-version check, the
     whole-job ceiling), all before the first S3 write.
+
+    When ``artifacts_dir`` is given, the same ``batch-receipt.json`` the
+    blocking path writes (issue #3065) is written after ``launch`` with
+    ``state: null``, so the job id survives the caller. The receipt is
+    best-effort: a write failure is a stderr warning, never a failed submit.
     """
     from .sim import SimError
 
@@ -123,7 +132,6 @@ def submit_only(
         unit_count=len(corner_points), per_unit_timeout_s=timeout_s, config=config
     )
     _enforce_job_ceiling(job_ceiling)
-    job_id = new_job_id()
     try:
         spec = _prepare_batch_job_spec(
             request,
@@ -135,10 +143,57 @@ def submit_only(
             want_waveforms=want_waveforms,
             request_dir=request_dir,
         )
+    except BatchError as exc:
+        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+    return launch_prepared_job(
+        request=request,
+        config=config,
+        spec=spec,
+        unit_count=len(corner_points),
+        job_ceiling=job_ceiling,
+        artifacts_dir=artifacts_dir,
+        runner=runner,
+    )
+
+
+def launch_prepared_job(
+    *,
+    request: dict[str, Any],
+    config: BatchConfig,
+    spec: Any,
+    unit_count: int,
+    job_ceiling: dict[str, Any] | None,
+    artifacts_dir: str | None = None,
+    runner: remote_transport.CommandRunner | None = None,
+) -> dict[str, Any]:
+    """Upload and launch an already-built job spec, then return the
+    ``status: "submitted"`` payload. Shared by the corner and deck-list
+    paths (issue #3958); ``job_ceiling`` is ``None`` where the path does not
+    assess one (the deck-list path today)."""
+    from .sim import SimError
+
+    job_id = new_job_id()
+    try:
         submit_job(config, job_id, spec, runner=runner)
         launch_job(config, job_id, runner=runner)
     except BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+    launched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    digest = request_sha256(request)
+    if artifacts_dir is not None:
+        _write_batch_receipt(
+            os.path.join(artifacts_dir, BATCH_RECEIPT_FILENAME),
+            {
+                "job_id": job_id,
+                "bucket": config.bucket,
+                "jobs_prefix": config.jobs_prefix,
+                "region": config.region,
+                "profile": getattr(config, "profile", None),
+                "launched_at": launched_at,
+                "request_sha256": digest,
+                "state": None,
+            },
+        )
     return {
         "schema_version": ASYNC_SCHEMA_VERSION,
         "status": "submitted",
@@ -147,9 +202,9 @@ def submit_only(
         "region": config.region,
         "jobs_prefix": config.jobs_prefix,
         "job_uri": job_uri(config, job_id),
-        "launched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "request_sha256": request_sha256(request),
-        "unit_count": len(corner_points),
+        "launched_at": launched_at,
+        "request_sha256": digest,
+        "unit_count": unit_count,
         "job_ceiling": job_ceiling,
     }
 

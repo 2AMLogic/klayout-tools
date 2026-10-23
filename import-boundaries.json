@@ -11,6 +11,14 @@
         "klayout_tools.cli.arith_gen_cmd"
       ]
     },
+    "artifact": {
+      "kind": "verb",
+      "description": "`klt artifact` implementation: fleet artifact-store client (issue #4063) plus CLI adapter.",
+      "modules": [
+        "klayout_tools.artifact_store",
+        "klayout_tools.cli.artifact_cmd"
+      ]
+    },
     "cells": {
       "kind": "verb",
       "description": "`klt cells` implementation: core modules plus CLI adapter.",
@@ -60,6 +68,14 @@
         "klayout_tools.components"
       ]
     },
+    "corner_matrix": {
+      "kind": "verb",
+      "description": "`klt corner-matrix` implementation: core module plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.corner_matrix_cmd",
+        "klayout_tools.corner_matrix"
+      ]
+    },
     "congestion": {
       "kind": "verb",
       "description": "`klt congestion` implementation: core modules plus CLI adapter.",
@@ -91,12 +107,22 @@
         "klayout_tools.draw"
       ]
     },
+    "diff": {
+      "kind": "verb",
+      "description": "`klt diff` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.diff_cmd",
+        "klayout_tools.layout_diff"
+      ]
+    },
     "drc": {
       "kind": "verb",
       "description": "`klt drc` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.drc_cmd",
-        "klayout_tools.drc"
+        "klayout_tools.drc",
+        "klayout_tools.drc_crosscheck",
+        "klayout_tools.drc_klayout_engine"
       ]
     },
     "economy": {
@@ -120,7 +146,11 @@
       "description": "`klt equiv` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.equiv_cmd",
-        "klayout_tools.equiv"
+        "klayout_tools.equiv",
+        "klayout_tools.equiv_errors",
+        "klayout_tools.equiv_replay",
+        "klayout_tools.equiv_sequential",
+        "klayout_tools.equiv_stage"
       ]
     },
     "erc": {
@@ -128,7 +158,8 @@
       "description": "`klt erc` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.erc_cmd",
-        "klayout_tools.erc"
+        "klayout_tools.erc",
+        "klayout_tools.erc_spec"
       ]
     },
     "eval": {
@@ -137,6 +168,13 @@
       "modules": [
         "klayout_tools.cli.eval_cmd",
         "klayout_tools.eval"
+      ]
+    },
+    "evidence": {
+      "kind": "verb",
+      "description": "`klt evidence` implementation: CLI adapter for the evidence-record/1 writer.",
+      "modules": [
+        "klayout_tools.cli.evidence_cmd"
       ]
     },
     "extract": {
@@ -168,7 +206,8 @@
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.functional_verification",
         "klayout_tools.functional_verification_initial_state",
-        "klayout_tools.functional_verification_sdf"
+        "klayout_tools.functional_verification_sdf",
+        "klayout_tools.functional_verification_sdf_rename"
       ]
     },
     "gen": {
@@ -180,6 +219,7 @@
         "klayout_tools.gen_cap_vpp",
         "klayout_tools.gen_describe",
         "klayout_tools.gen_layer_params",
+        "klayout_tools.gen_layer_tables",
         "klayout_tools.gen_pcells",
         "klayout_tools.gen_pcells.bjt_array",
         "klayout_tools.gen_pcells.bond_pad",
@@ -200,7 +240,17 @@
       "modules": [
         "klayout_tools.cli.gen_compose_cmd",
         "klayout_tools.gen_compose",
+        "klayout_tools.gen_compose_port_access",
+        "klayout_tools.gen_compose_port_request",
         "klayout_tools.gen_compose_routing"
+      ]
+    },
+    "interface_check": {
+      "kind": "verb",
+      "description": "`klt interface_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.interface_check_cmd",
+        "klayout_tools.interface_check"
       ]
     },
     "kb": {
@@ -209,6 +259,14 @@
       "modules": [
         "klayout_tools.cli.kb_cmd",
         "klayout_tools.kb"
+      ]
+    },
+    "keepout_check": {
+      "kind": "verb",
+      "description": "`klt keepout_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.keepout_check_cmd",
+        "klayout_tools.keepout_check"
       ]
     },
     "layers": {
@@ -231,6 +289,7 @@
       "kind": "verb",
       "description": "`klt layout_plan` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli.layout_plan_cmd",
         "klayout_tools.layout_plan",
         "klayout_tools.layout_plan_execute"
       ]
@@ -249,9 +308,13 @@
       "modules": [
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
+        "klayout_tools.lvs_combine",
         "klayout_tools.lvs_finfet",
+        "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_netgen",
+        "klayout_tools.lvs_power",
+        "klayout_tools.lvs_runset",
         "klayout_tools.lvs_supply"
       ]
     },
@@ -304,6 +367,7 @@
         "klayout_tools.pdk_capabilities",
         "klayout_tools.pdk_cells",
         "klayout_tools.pdk_compat",
+        "klayout_tools.pdk_descriptor",
         "klayout_tools.pdk_families",
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_pcell",
@@ -329,8 +393,12 @@
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
+        "klayout_tools.place_and_route_pins",
+        "klayout_tools.place_and_route_portable",
         "klayout_tools.place_and_route_power_audit",
         "klayout_tools.place_and_route_reports",
+        "klayout_tools.place_and_route_request",
+        "klayout_tools.place_and_route_script",
         "klayout_tools.place_and_route_sta"
       ]
     },
@@ -398,6 +466,7 @@
         "klayout_tools._provenance",
         "klayout_tools._report_verify",
         "klayout_tools._text",
+        "klayout_tools._unionfind",
         "klayout_tools._vendor",
         "klayout_tools._vendor.mutation_variants",
         "klayout_tools._version_scheme",
@@ -405,11 +474,14 @@
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
         "klayout_tools.design_evidence_tiers",
+        "klayout_tools.evidence_record",
         "klayout_tools.lef_header",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
         "klayout_tools.output_lock",
         "klayout_tools.resistor_mesh",
+        "klayout_tools.routing_pitch",
+        "klayout_tools.touchstone",
         "klayout_tools.verilog_netlist"
       ]
     },
@@ -421,7 +493,9 @@
         "klayout_tools.signoff",
         "klayout_tools.signoff_attest",
         "klayout_tools.signoff_envelopes",
-        "klayout_tools.signoff_power_delivery"
+        "klayout_tools.signoff_generator_batch",
+        "klayout_tools.signoff_power_delivery",
+        "klayout_tools.signoff_runset"
       ]
     },
     "sim": {
@@ -431,6 +505,7 @@
         "klayout_tools.asap7_bsimcmg",
         "klayout_tools.cli.sim_cmd",
         "klayout_tools.cli.sim_merge_cmd",
+        "klayout_tools.cli.sim_plan_cmd",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
         "klayout_tools.remote_launcher",
@@ -438,24 +513,36 @@
         "klayout_tools.sim",
         "klayout_tools.sim_batch",
         "klayout_tools.sim_batch_async",
+        "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_decks",
         "klayout_tools.sim_energy",
+        "klayout_tools.sim_errors",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_noise",
+        "klayout_tools.sim_passes",
+        "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_portable",
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",
+        "klayout_tools.sim_snm",
+        "klayout_tools.sim_snm_meas",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_steps",
+        "klayout_tools.sim_stimulus",
+        "klayout_tools.sim_subckt_override",
+        "klayout_tools.sim_supply_relative",
         "klayout_tools.sim_supply_waveform",
+        "klayout_tools.sim_tian",
         "klayout_tools.sim_transfer",
-        "klayout_tools.sim_transfer_meas"
+        "klayout_tools.sim_transfer_meas",
+        "klayout_tools.sim_twoport",
+        "klayout_tools.sim_validate"
       ]
     },
     "size": {
@@ -463,7 +550,8 @@
       "description": "`klt size` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.size_cmd",
-        "klayout_tools.size"
+        "klayout_tools.size",
+        "klayout_tools.size_topology"
       ]
     },
     "reset_coverage": {
@@ -590,9 +678,34 @@
   },
   "allowed_group_edges": [
     {
+      "consumer": "artifact",
+      "exporter": "cli-infra",
+      "reason": "`klt artifact` adapter uses the shared CLI output envelope helpers (emit_success/emit_error), like every verb adapter."
+    },
+    {
+      "consumer": "corner_matrix",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope, as every verb does (issue #4045)."
+    },
+    {
+      "consumer": "corner_matrix",
+      "exporter": "sim",
+      "reason": "Issue #4045: `klt corner-matrix` must check the grid exactly as `klt sim` expands it, so it calls sim's expander and catches SimError rather than duplicating the expansion."
+    },
+    {
+      "consumer": "keepout_check",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --region/--layers parsers, as every verb does."
+    },
+    {
       "consumer": "tap_distance",
       "exporter": "cli-infra",
       "reason": "CLI adapter uses the shared output envelope and --region parser, as every verb does."
+    },
+    {
+      "consumer": "layout_plan",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope, as every verb does."
     },
     {
       "consumer": "tap_distance",
@@ -740,6 +853,11 @@
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {
+      "consumer": "evidence",
+      "exporter": "cli-infra",
+      "reason": "`klt evidence` adapter uses the shared CLI output envelope helpers (emit_success/emit_error), like every verb adapter."
+    },
+    {
       "consumer": "extract",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
@@ -793,6 +911,11 @@
       "consumer": "gen_compose",
       "exporter": "gen",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "interface_check",
+      "exporter": "cli-infra",
+      "reason": "Verb adapter uses the shared output envelope (issue #4024), as every verb does."
     },
     {
       "consumer": "kb",
@@ -881,6 +1004,11 @@
     },
     {
       "consumer": "lvs",
+      "exporter": "place_and_route",
+      "reason": "Issue #3798: klt lvs reuses place_and_route_portable.portable_response for its opt-in portable_paths rewrite rather than a second path walker."
+    },
+    {
+      "consumer": "lvs",
       "exporter": "socket_check",
       "reason": "Issue #2971: klt lvs power findings reuse the verb's public classify_pin_by_name ground/power name heuristic to decide which pins get the substrate-continuity caveat, so lvs and socket-check never disagree about what a ground pin is."
     },
@@ -918,6 +1046,11 @@
       "consumer": "pdk",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "pdk",
+      "exporter": "drc",
+      "reason": "Issue #3816: `klt pdk decks` reuses the DRC engine's deck-global scanner (scan_deck_globals) instead of a second Ruby scan; imported lazily."
     },
     {
       "consumer": "pdk",
@@ -1016,11 +1149,6 @@
     },
     {
       "consumer": "shared-core",
-      "exporter": "netlist",
-      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
-    },
-    {
-      "consumer": "shared-core",
       "exporter": "sim",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
@@ -1083,6 +1211,16 @@
       "consumer": "sta",
       "exporter": "env_provenance",
       "reason": "klt sta reports its def/verilog/spef inputs as {path, scope} envelopes via repo_relative_path/render_path_field, like sim/pex (issue #2879)."
+    },
+    {
+      "consumer": "place_and_route",
+      "exporter": "env_provenance",
+      "reason": "klt place-and-route reports its pinned input netlist as a {path, scope} envelope via find_repo_root/repo_relative_path, like sta/sim/pex (issue #3751)."
+    },
+    {
+      "consumer": "diff",
+      "exporter": "cli-infra",
+      "reason": "klt diff emits through the shared cli output envelope (issue #3093)."
     },
     {
       "consumer": "stats",
@@ -1193,9 +1331,48 @@
       "consumer": "place_and_route",
       "exporter": "netlist",
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "signoff",
+      "exporter": "netlist",
+      "reason": "Issue #3289: operator-approved generator execution reuses the existing Spot batch lifecycle (sim_batch submit/launch/poll/collect) and the netlist batch tree packaging rather than adding another runner."
+    },
+    {
+      "consumer": "signoff",
+      "exporter": "sim",
+      "reason": "Issue #3289: operator-approved generator execution reuses the existing Spot batch lifecycle (sim_batch submit/launch/poll/collect) and the netlist batch tree packaging rather than adding another runner."
+    },
+    {
+      "consumer": "synthesize",
+      "exporter": "characterize",
+      "reason": "Issue #3709: restructure and synthesize read Liberty pins through liberty_compare.parse_liberty_text (the one real Liberty parser) instead of a second regex scraper; the scraper found 0 cells on the sky130 library, the parser finds 428."
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.evidence_record",
+      "exporter": "klayout_tools.env_provenance",
+      "symbol": "_assert_no_leaks",
+      "reason": "Issue #4044: the evidence-record wrapper leak scan must match the provenance scrub exactly rather than duplicating its absolute-path/secret scanner."
+    },
+    {
+      "consumer": "klayout_tools.corner_matrix",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #4045: loads the request JSON with the same error handling as sim/characterize; promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.corner_matrix",
+      "exporter": "klayout_tools.sim",
+      "symbol": "_expand_corners",
+      "reason": "Issue #4045: the checker's whole contract is that its grid ids match what `klt sim` expands; reusing the private expander guarantees that. Make it public or move it to a shared module when sim is next split."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_portable",
+      "exporter": "klayout_tools.env_provenance",
+      "symbol": "_absolute_paths_in",
+      "reason": "Issue #3820: portable_paths reuses env_provenance's absolute-path scanner so response rewriting matches the provenance scrub exactly rather than duplicating the regex."
+    },
     {
       "consumer": "klayout_tools.tap_distance",
       "exporter": "klayout_tools.erc",
@@ -1242,6 +1419,30 @@
       "consumer": "klayout_tools.equiv",
       "exporter": "klayout_tools._provenance",
       "symbol": "_yosys_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv_sequential",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_combined_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv_sequential",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_yosys_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv_stage",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_combined_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv_stage",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
@@ -1465,6 +1666,66 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_tracked_files",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_select_files",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_job_timeout_seconds",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_runner_preflight_script",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_classify_collected_report",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_resolve_batch_config",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_batch_environment",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_read_runner_identity",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_status_exit_code",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
     }
   ],
   "legacy_exceptions": {
@@ -1566,7 +1827,7 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.erc",
+        "consumer": "klayout_tools.erc_spec",
         "exporter": "klayout_tools._paths",
         "symbol": "_parse_layer_datatype",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
@@ -1578,7 +1839,13 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.erc",
+        "consumer": "klayout_tools.erc_spec",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_reject_unknown_keys",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc_spec",
         "exporter": "klayout_tools._paths",
         "symbol": "_validate_via_entries",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
@@ -1836,6 +2103,18 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_scale_supply_waveforms",
+        "reason": "op-lint rescales `supply_waveforms` rails with the same helper the sweep uses (issue #3624); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_supply_alter_lines",
+        "reason": "op-lint emits `alter` lines for supply rails with the same helper the sweep uses (issue #3624); remove by making the symbol public or moving it to a shared module."
+      },
+      {
         "consumer": "klayout_tools.pdk_pcell",
         "exporter": "klayout_tools.gen",
         "symbol": "_PARAM_TYPE_NAMES",
@@ -1891,12 +2170,6 @@
       },
       {
         "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_timing_violation_report_lines",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route",
         "exporter": "klayout_tools._paths",
         "symbol": "_count_spef_nets_annotated",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
@@ -1914,15 +2187,21 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.place_and_route",
-        "exporter": "klayout_tools.synthesize",
-        "symbol": "_ABC_DONT_USE_GLOBS",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
         "consumer": "klayout_tools.place_and_route_gds_merge",
         "exporter": "klayout_tools.extract",
         "symbol": "_DEF_NET_NAME_PROPERTY_ID",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route_script",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_timing_violation_report_lines",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route_script",
+        "exporter": "klayout_tools.synthesize",
+        "symbol": "_ABC_DONT_USE_GLOBS",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
@@ -2100,6 +2379,12 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
+        "consumer": "klayout_tools.size_topology",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_models_lib",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
         "consumer": "klayout_tools.sta",
         "exporter": "klayout_tools._native",
         "symbol": "_load_native_extension",
@@ -2121,12 +2406,6 @@
         "consumer": "klayout_tools.techmap",
         "exporter": "klayout_tools._paths",
         "symbol": "_resolve_relative",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.verilog_netlist",
-        "exporter": "klayout_tools.netlist_normalize",
-        "symbol": "_merge_continuations",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {

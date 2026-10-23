@@ -43,7 +43,9 @@ _MANIFEST_PIN_SOURCE = (
 )
 
 #: File the lambdapdk fetch writes at the archive root, holding the release.
+_FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 LAMBDAPDK_MARKER = ".fetched-version"
+FETCHED_COMMIT_MARKER = ".fetched-commit"
 
 #: How many directory levels above a variant directory to look for
 #: :data:`LAMBDAPDK_MARKER` (lambdapdk nests ``<root>/lambdapdk/<process>``).
@@ -118,6 +120,28 @@ def read_fetched_marker(variant_dir: str) -> str | None:
             except OSError:
                 return None
             return value or None
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def read_fetched_commit(variant_dir: str) -> str | None:
+    """Return the upstream commit recorded by ``scripts/fetch-*.sh`` in the
+    nearest :data:`FETCHED_COMMIT_MARKER` (same search as
+    :func:`read_fetched_marker`), or ``None`` when absent, unreadable, or not
+    a 40-hex id (issue #3786). Never guessed."""
+    current = os.path.abspath(variant_dir)
+    for _ in range(_MARKER_SEARCH_DEPTH + 1):
+        marker = os.path.join(current, FETCHED_COMMIT_MARKER)
+        if os.path.isfile(marker):
+            try:
+                with open(marker, encoding="utf-8") as handle:
+                    value = handle.read().strip()
+            except (OSError, UnicodeDecodeError):
+                return None
+            return value if _FULL_COMMIT.fullmatch(value) else None
         parent = os.path.dirname(current)
         if parent == current:
             break
@@ -237,3 +261,39 @@ def compatibility_warning(result: dict[str, Any]) -> str | None:
         f"determined (expected {expected.get('value')!r}, pinned in "
         f"{result['source']}); compatibility is unverified"
     )
+
+
+def check_expected_version(
+    expected: str, variant_dir: str, sources_version: str | None = None
+) -> dict[str, Any]:
+    """Compare a caller-supplied pin (``klt pdk find --expect-version``)
+    against the installed identity of ``variant_dir``.
+
+    Shape: ``{"status": "match"|"mismatch"|"unknown", "expected": str,
+    "installed": str | None}``. The installed identity is the open_pdks
+    ``SOURCES`` stamp if present, else the lambdapdk ``.fetched-version``
+    marker. A bare hex SHA (>= 7 chars) or an ``open_pdks <sha>`` stamp is an
+    open_pdks identity; any other string is compared exactly in the installed
+    tree's own namespace. Differing namespaces and an unreadable installed
+    identity are ``unknown`` -- callers gating on this must fail closed.
+    """
+    installed: dict[str, str] | None = None
+    for namespace in (NS_OPEN_PDKS_SOURCES, NS_LAMBDAPDK_RELEASE):
+        installed, _ = read_installed_identity(variant_dir, namespace, sources_version)
+        if installed:
+            break
+    wanted = expected.strip()
+    if re.fullmatch(rf"[0-9a-fA-F]{{{_MIN_SHORT_HASH},}}", wanted):
+        identity = {"namespace": NS_OPEN_PDKS_SOURCES, "value": f"open_pdks {wanted}"}
+    elif _OPEN_PDKS_STAMP.search(wanted):
+        identity = {"namespace": NS_OPEN_PDKS_SOURCES, "value": wanted}
+    else:
+        identity = {
+            "namespace": installed["namespace"] if installed else "",
+            "value": wanted,
+        }
+    return {
+        "status": compare_identities(identity, installed),
+        "expected": expected,
+        "installed": installed["value"] if installed else None,
+    }

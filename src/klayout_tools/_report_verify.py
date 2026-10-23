@@ -68,6 +68,9 @@ VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
         ("provenance", "klt_version"),
         ("provenance", "klayout_version"),
         ("provenance", "pdk", "version"),
+        # Issue #3786: the upstream commit behind a fetched PDK -- a revision
+        # stamp like `version`, absent on installs that predate the record.
+        ("provenance", "pdk", "commit"),
         # `klt extract`'s additive wall-clock `timing` object (issue #3181):
         # a measurement of the run, never part of the evidence.
         ("timing",),
