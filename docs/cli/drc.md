@@ -2450,10 +2450,11 @@ To check flipped row stacks that share a rail, build the placements with
 ```python
 import klayout.db as db
 
-ly = db.Layout(); ly.read("cell.gds")
+ly = db.Layout()
+ly.read("cell.gds")
 src = ly.cell("cell")
 top = ly.create_cell("stack_top")
-H, W = 270 * 4, 54 * 4 * 6   # 270 nm tall, six gate pitches wide, at 0.25 nm dbu
+H, W = 270 * 4, 54 * 4 * 6  # 270 nm tall, six gate pitches wide, at 0.25 nm dbu
 for row, trans in enumerate((db.Trans.R0, db.Trans.M0, db.Trans.R0, db.Trans.M0)):
     # M0 mirrors about the x axis: shift it up one height so the rails meet.
     dy = (row + (1 if trans == db.Trans.M0 else 0)) * H
