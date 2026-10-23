@@ -25365,7 +25365,7 @@ def test_lvs_response_schema_rejects_wrong_schema_version_and_mismatch_entry(tmp
         _lvs_schema_request(tmp_path, _INVERTER_SPICE.replace("W=0.65U", "W=0.70U"))
     )
     bad_version = json.loads(json.dumps(report))
-    bad_version["schema_version"] = 2
+    bad_version["schema_version"] = 1
     with pytest.raises(jsonschema.ValidationError):
         _assert_lvs_report_conforms(bad_version)
 
