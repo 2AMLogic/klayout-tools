@@ -268,6 +268,19 @@ unmatched devices, nets, pins and circuits become `mismatches[]` entries using
 the shared categories (`device.unmatched`, `device.property`, `net.unmatched`,
 `pin.unmatched`, `topology`).
 
+**An empty extraction is graded, not an error (issue #4081).** When the runset
+extracts zero devices from the layout its compare step never runs, so the
+`.lvsdb` has no cross-reference. If the extracted netlist is also device-free,
+`klt lvs` reports `status: "mismatch"` (exit 2): `device_census.layout` is
+`{}`, `device_census.reference` counts the reference devices, each reference
+device is a `device.unmatched` finding (`side: "reference"`), and `coverage`
+(including `declared_not_recognized`) is populated for the reference side. The
+reference netlist is taken from the db when it carries one, else parsed from
+`reference.netlist`. A reference that is also empty stays `inconclusive` with
+`coverage.no_devices_recognized`. A db with no cross-reference but *with*
+extracted layout devices (the runset genuinely did not compare) is still an
+error, as is a crashed runset. Additive; no `schema_version` bump.
+
 **Coverage honesty.** Additive fields:
 
 - `device_census` — `{layout: {class: n}, reference: {class: n}}`.
