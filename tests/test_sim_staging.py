@@ -226,7 +226,7 @@ def test_non_directive_lines_are_left_byte_identical(tmp_path):
     netlist = tmp_path / "tb.spice"
     netlist.write_bytes(
         b"* this deck will .include the dut\r\n"
-        b".lib /pdk/sky130.lib.spice tt\r\n"
+        b".lib $PDK_ROOT/sky130.lib.spice tt\r\n"
         b'.include "dut.spice"\r\n'
         b"R1 a b 1k\r\n"
     )
@@ -236,7 +236,7 @@ def test_non_directive_lines_are_left_byte_identical(tmp_path):
     content = staged.netlist.content
     assert content is not None
     assert "* this deck will .include the dut\r\n" in content
-    assert ".lib /pdk/sky130.lib.spice tt\r\n" in content
+    assert ".lib $PDK_ROOT/sky130.lib.spice tt\r\n" in content
     assert '.include "dut.spice"\r\n' in content
     assert content.endswith("R1 a b 1k\r\n")
 
@@ -897,3 +897,36 @@ def test_tilde_and_quoted_env_targets_still_host_resolved_off_host(tmp_path):
     assert staged.includes == ()
     assert staged.netlist.local_path == str(netlist)
     assert set(staged.host_resolved) == {"${INCDIR}/a.sp", "$INCDIR/b.sp"}
+
+
+def test_netlist_lib_under_client_pdk_root_is_rewritten(tmp_path, monkeypatch):
+    """`.lib <abs under $PDK_ROOT> <section>` -> `$PDK_ROOT/<rel> <section>` (#4097)."""
+    pdk_root = tmp_path / "pdks"
+    models = _write(pdk_root / "sky130A", "sm141064.ngspice", "* models\n")
+    monkeypatch.setenv("PDK_ROOT", str(pdk_root))
+    netlist = _write(tmp_path, "tb.spice", f".lib {models} efuse\n.lib tt\nR1 a b 1k\n")
+
+    staged = _stage(netlist)
+
+    assert staged.netlist.content is not None
+    assert '.lib "$PDK_ROOT/sky130A/sm141064.ngspice" efuse' in staged.netlist.content
+    assert "\n.lib tt\n" in staged.netlist.content
+    assert str(pdk_root) not in staged.netlist.content
+
+
+def test_netlist_lib_outside_pdk_root_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("PDK_ROOT", str(tmp_path / "pdks"))
+    models = _write(tmp_path / "elsewhere", "m.lib", "* models\n")
+    netlist = _write(tmp_path, "tb.spice", f'.lib "{models}" tt\n')
+
+    with pytest.raises(st.IncludeStagingError, match="`.lib` target"):
+        _stage(netlist)
+
+
+def test_netlist_lib_one_token_and_env_forms_stay_verbatim(tmp_path, monkeypatch):
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    netlist = _write(tmp_path, "tb.spice", ".lib tt\n.lib $PDK_ROOT/x.lib tt\n")
+
+    staged = _stage(netlist)
+
+    assert staged.netlist.content is None

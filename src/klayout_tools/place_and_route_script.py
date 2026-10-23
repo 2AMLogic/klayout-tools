@@ -41,6 +41,11 @@ def _write_script(script_path: str, lines: list[str]) -> None:
         ) from exc
 
 
+# Pins command units to ns / pF so the unit-less constraint numbers below and
+# the metric procs read back are Liberty-``time_unit``-independent (#4089).
+_UNIT_PIN_LINE = "set_cmd_units -time ns -capacitance pF"
+
+
 def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[str]:
     """``create_clock`` (OpenROAD's minimal SDC-equivalent input, contract
     spike section 5's ``constraints`` field) -- must run only **after** the
@@ -53,8 +58,9 @@ def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[
     if clock_port is None:
         return []
     return [
+        _UNIT_PIN_LINE,
         f"create_clock -name {clock_port} -period {clock_period_ns} "
-        f"[get_ports {clock_port}]"
+        f"[get_ports {clock_port}]",
     ]
 
 

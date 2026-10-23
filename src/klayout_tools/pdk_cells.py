@@ -27,6 +27,7 @@ import os
 import re
 from typing import Any
 
+from .liberty_merge import LibertyMergeError, merge_liberty
 from .pdk import (
     PdkNotFoundError,
     _read_text,
@@ -405,7 +406,16 @@ def _descriptor_liberty(
             f"'{cell_library}' in the PDK descriptor "
             f"(mapped: {', '.join(sorted(corners))})"
         )
-    return corners[corner], corner
+    mapped = corners[corner]
+    if isinstance(mapped, list):
+        try:
+            mapped = merge_liberty(mapped)
+        except LibertyMergeError as exc:
+            raise error_cls(
+                f"liberty not found for deck: cannot merge '{cell_library}' "
+                f"corner '{corner}': {exc}"
+            ) from exc
+    return mapped, corner
 
 
 def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:

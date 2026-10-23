@@ -106,6 +106,12 @@ def _print_log_lines(environment: dict, status: str) -> None:
         print(f"test_log tail: {_log_tail(test_log, lines=40)}")
 
 
+def _print_results_xml(environment: dict) -> None:
+    # Null on the Verilog-bench path (issue #4083): no cocotb run, no XML.
+    if environment["results_xml"] is not None:
+        print(f"results_xml: {environment['results_xml']}")
+
+
 def _print_text(report: dict) -> None:
     environment = report["environment"]
     engine_version = environment.get("engine_version") or ""
@@ -149,7 +155,7 @@ def _print_text(report: dict) -> None:
         )
 
     print()
-    print(f"results_xml: {environment['results_xml']}")
+    _print_results_xml(environment)
     _print_log_lines(environment, report["status"])
     random_seed = environment.get("random_seed")
     if random_seed is not None:

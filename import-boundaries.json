@@ -363,6 +363,7 @@
         "klayout_tools.decks.sg13cmos5l",
         "klayout_tools.decks.sg13g2",
         "klayout_tools.decks.sky130",
+        "klayout_tools.liberty_merge",
         "klayout_tools.pdk",
         "klayout_tools.pdk_capabilities",
         "klayout_tools.pdk_cells",

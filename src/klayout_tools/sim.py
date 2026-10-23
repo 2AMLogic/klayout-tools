@@ -283,6 +283,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "model_bin_range",
         "ngspice_fatal",
         "no_such_vector",
+        # ngspice's 99-calls-per-file `par()` cap (issue #4084); a log
+        # classifier (error) and a pre-flight deck count (warning).
+        "par_call_cap",
         # Missing-capability prerequisites (issue #2814).
         "unsupported_model_level",
         "osdi_abi_mismatch",
@@ -328,6 +331,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # Report-level (top-level `diagnostics[]`, issue #2901): batch runner
         # predates request fields, under `runner_version_check: "warn"`.
         "batch_runner_request_feature_predated",
+        # Report-level (top-level `diagnostics[]`, issue #4097): an off-host
+        # `measurements[].expr` produced no value; the runner may predate it.
+        "expr_runner_may_predate",
     }
 )
 
@@ -1020,6 +1026,19 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # specific information layered on top.
         "no_such_vector",
         re.compile(r"^Error:\s*no such vector as", re.IGNORECASE | re.MULTILINE),
+    ),
+    (
+        # ngspice aborts the whole file at its 99th-plus `par()` call: `ERROR:
+        # More than 99 function calls to par()` (verified against the ngspice
+        # binary's own string table, issue #4084). Every `.meas` then reports
+        # only the generic `produced no value`, so this names the cap and the
+        # workaround. Ahead of the generic `netlist` entry, which would not
+        # match it anyway; the per-measurement errors stay alongside.
+        "par_call_cap",
+        re.compile(
+            r"^\s*(?:Error:\s*)?More than \d+ function calls to par\(\)",
+            re.IGNORECASE | re.MULTILINE,
+        ),
     ),
     (
         "netlist",
@@ -4300,6 +4319,7 @@ def _run_sim_corners(
         # Additive/optional (issue #2901): only present when a batch runner
         # predates a request feature under `runner_version_check: "warn"`.
         report["diagnostics"] = [request_feature_diagnostic]
+    _attach_expr_runner_hint(report, measurements_spec, corners, backend=backend)
     _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
         # Additive/optional: only present when `--plot`/`plot_dir` was
@@ -9599,6 +9619,7 @@ def _run_corner(
     )
 
     diagnostics: list[dict[str, str]] = list(include_diagnostics)
+    diagnostics.extend(_par_call_cap_preflight(deck_path, is_xyce))
     started = time.monotonic()
     timed_out = False
     engine_aborted = False
@@ -10106,6 +10127,11 @@ def _corner_measurement_results(
     measurement_results: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
     meas_errors = {} if is_xyce else _parse_meas_errors(log_text)
+    ac_too_few_points = (
+        not is_xyce
+        and analysis.get("kind") == "ac"
+        and _ac_sweep_too_few_points(log_text)
+    )
     unreached_names = set() if is_xyce else _parse_meas_unreached_names(log_text)
     attributed: set[str] = set()
     # Forms whose value comes from a rawfile reduction rather than the log:
@@ -10172,7 +10198,10 @@ def _corner_measurement_results(
             continue
         if value is None:
             result, diagnostic, was_attributed = _no_value_measurement(
-                spec, meas_errors, save_mode=save_mode
+                spec,
+                meas_errors,
+                save_mode=save_mode,
+                too_few_points=ac_too_few_points,
             )
             measurement_results.append(result)
             diagnostics.append(diagnostic)
@@ -10228,6 +10257,23 @@ ABSENT_DIAGNOSTIC_CODE = "measurement_absent"
 _MEAS_ABSENT_CAUSE_RE = re.compile(r"out of interval", re.IGNORECASE)
 
 
+#: ngspice's data-row count line, e.g. ``No. of Data Rows : 1`` (verified on
+#: ngspice-46). An ``ac lin 2 ...`` sweep leaves one row, so ``.meas ac ...
+#: AT=`` cannot interpolate and fails without an ``Error: measure`` line
+#: (issue #4084).
+_DATA_ROWS_RE = re.compile(r"No\. of Data Rows\s*:\s*(\d+)", re.IGNORECASE)
+_AC_TOO_FEW_POINTS_HINT = (
+    " -- the ac sweep produced fewer than 2 data points, so AT=/interpolation "
+    "has nothing to interpolate between: use a denser sweep (e.g. `dec`)"
+)
+
+
+def _ac_sweep_too_few_points(log_text: str) -> bool:
+    """Whether the log's (last) ``No. of Data Rows`` is below 2."""
+    rows = _DATA_ROWS_RE.findall(log_text or "")
+    return bool(rows) and int(rows[-1]) < 2
+
+
 def _is_legitimately_absent(cause: str | None) -> bool:
     """Whether a value-less ``optional`` measurement is absent data rather than
     an engine failure: no ngspice ``Error: measure`` reason at all, or the
@@ -10263,6 +10309,7 @@ def _no_value_measurement(
     meas_errors: dict[str, str],
     *,
     save_mode: str,
+    too_few_points: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], bool]:
     """``(result, diagnostic, attributed)`` for a scalar measurement whose log
     carried no value: ``absent`` when it is ``optional`` and the engine gave no
@@ -10277,6 +10324,8 @@ def _no_value_measurement(
     message = _no_value_message(spec, save_mode=save_mode)
     if cause is not None:
         message += f" -- ngspice reported: {cause}"
+    elif too_few_points and spec.get("spice"):
+        message += _AC_TOO_FEW_POINTS_HINT
     result = {
         "name": name,
         "value": None,
@@ -12129,6 +12178,43 @@ def _timestep_too_small_diagnostic(
     }
 
 
+#: ngspice's per-file ceiling on `par()` calls (issue #4084).
+_PAR_CALL_CAP = 99
+_PAR_CALL_RE = re.compile(r"\bpar\s*\(", re.IGNORECASE)
+
+_PAR_CALL_CAP_WORKAROUND = (
+    "expose the quantity as a node voltage (e.g. a 1 ohm CCVS) and measure "
+    "`v(node)`, or capture the sweep with `options.waveforms` (+ "
+    "`capture_only`) instead of one `.meas` card per point"
+)
+_PAR_CALL_CAP_MESSAGE = (
+    "ngspice aborted at its limit of " + str(_PAR_CALL_CAP) + " par() calls per "
+    "input file ({raw}); every measurement then reports no value. To stay "
+    "under the cap, " + _PAR_CALL_CAP_WORKAROUND
+)
+
+
+def _par_call_cap_preflight(deck_path: str, is_xyce: bool) -> list[dict[str, str]]:
+    """A one-item ``warning`` diagnostic list when the emitted deck holds more
+    than :data:`_PAR_CALL_CAP` ``par(`` calls (issue #4084), else ``[]`` (always
+    ``[]`` for Xyce, which has no such cap). Counts on the already-written deck
+    text; no extra netlist pass."""
+    if is_xyce:
+        return []
+    count = len(_PAR_CALL_RE.findall(_read_log_file(deck_path)))
+    if count <= _PAR_CALL_CAP:
+        return []
+    return [
+        {
+            "severity": "warning",
+            "code": "par_call_cap",
+            "message": f"the corner deck contains {count} par() calls; ngspice "
+            f"allows at most {_PAR_CALL_CAP} per input file and aborts the run "
+            "beyond that. To stay under the cap, " + _PAR_CALL_CAP_WORKAROUND,
+        }
+    ]
+
+
 def _classify_diagnostics(
     log_text: str, netlist_path: str = ""
 ) -> list[dict[str, Any]]:
@@ -12157,6 +12243,8 @@ def _classify_diagnostics(
                 # consequence of the rejected model level, not a bin range.
                 continue
             message = _diagnose_modelname_error(netlist_path) or message
+        elif code == "par_call_cap":
+            message = _PAR_CALL_CAP_MESSAGE.format(raw=message.strip())
         elif code in _PREREQUISITE_MESSAGES:
             message = _PREREQUISITE_MESSAGES[code].format(raw=message.strip())
         if code == "ngspice_fatal" and any(
@@ -13090,6 +13178,56 @@ def _monte_carlo_rollup(
         for corner_id, pairs in grouped.items()
     ]
     return rollup
+
+
+EXPR_RUNNER_MAYBE_OLD_CODE = "expr_runner_may_predate"
+
+
+def _attach_expr_runner_hint(
+    report: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    corners: list[dict[str, Any]],
+    *,
+    backend: str | None,
+) -> None:
+    """Additive/optional (issue #4097): on an off-host run, a
+    ``measurements[].expr`` measurement that came back with no value may mean
+    the runner image predates ``expr`` (its version compare is major.minor
+    only, so the pre-launch check cannot prove it). Name that suspect beside
+    the per-measurement "produced no value"."""
+    if backend not in _OFFHOST_BACKENDS:
+        return
+    expr_names = {
+        spec["name"]
+        for spec in measurements_spec
+        if isinstance(spec, dict) and spec.get("expr") is not None and "name" in spec
+    }
+    if not expr_names:
+        return
+    silent = sorted(
+        {
+            m["name"]
+            for corner in corners
+            for m in corner.get("measurements") or []
+            if m.get("name") in expr_names and m.get("value") is None
+        }
+    )
+    if not silent:
+        return
+    report.setdefault("diagnostics", []).append(
+        {
+            "code": EXPR_RUNNER_MAYBE_OLD_CODE,
+            "severity": "warning",
+            "message": (
+                f"measurements[].expr measurement(s) {', '.join(silent)} "
+                "produced no value on the off-host runner, which may predate "
+                "`expr` (runner may predate expr; compare "
+                "environment.remote.runner_klt_version with the client "
+                "version and rebuild the runner image if older)"
+            ),
+            "measurements": silent,
+        }
+    )
 
 
 def _attach_not_reached_count(

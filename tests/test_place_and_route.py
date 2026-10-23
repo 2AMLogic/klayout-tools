@@ -11253,3 +11253,11 @@ def test_valid_tracks_pass_floorplan_validation():
         {**_TRACKS_FLOORPLAN, "tracks": [_GOOD_TRACK]}
     )
     assert out["tracks"] == [_GOOD_TRACK]
+
+
+def test_place_and_route_clock_lines_pin_units_issue_4089():
+    assert place_and_route._clock_lines("clk", 1.0) == [
+        "set_cmd_units -time ns -capacitance pF",
+        "create_clock -name clk -period 1.0 [get_ports clk]",
+    ]
+    assert place_and_route._clock_lines(None, None) == []

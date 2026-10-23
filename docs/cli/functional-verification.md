@@ -221,6 +221,60 @@ not optional Verilator code-coverage collection. Signoff also validates
 these counts against the individual outcomes when reading saved evidence,
 including envelopes from older producers.
 
+## Verilog benches: `testbench.verilog_top`
+
+A block that already has a self-checking Verilog testbench (`$display`
+PASS/FAIL, `$finish`) can run through the same verb — including gate-level
+with `options.sdf` — without a cocotb port. Give `testbench.verilog_top`
+(a module declared in `sources`) **instead of** `testbench.module`; giving
+both, or neither, is a request error (exit 1).
+
+```json
+{
+  "engine": "icarus",
+  "sources": ["and_cell.v", "and2.v", "tb_and2.v"],
+  "hdl_toplevel": "and2",
+  "testbench": {
+    "verilog_top": "tb_and2",
+    "pass_marker": "PASS",
+    "fail_marker": "FAIL",
+    "dut_instance": "tb_and2.dut"
+  },
+  "options": { "sdf": { "file": "and2.sdf" } }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `testbench.verilog_top` | Bench module name; becomes the `iverilog -s` root. `hdl_toplevel` stays the DUT module (used for the SDF port/instance preprocessing). |
+| `testbench.pass_marker` | Optional substring that must appear in the transcript. |
+| `testbench.fail_marker` | Optional substring that must **not** appear in the transcript. |
+| `testbench.dut_instance` | Hierarchical path of the DUT inside the bench (e.g. `tb_and2.dut`). Required with `options.sdf` (it is the `$sdf_annotate` scope), rejected without it. |
+
+**Verdict — never trust an exit code alone.** The run passes only when `vvp`
+exits 0, no `fail_marker` line appears, and (when declared) the `pass_marker`
+appears. `$fatal` exits nonzero and so fails; a bench that exits 0 without
+printing its `pass_marker` fails too. With no `pass_marker` the verdict is the
+exit status and `fail_marker` only — so declare one unless the bench uses
+`$fatal` for every failure. Markers are plain substrings; there is no regex
+and no per-case result parsing.
+
+**Report.** Same envelope as the cocotb path, with one synthetic `tests`
+entry named after `verilog_top` (a failure carries
+`error_type: "VerilogBenchFailure"`). `environment.cocotb_version` and
+`environment.results_xml` are `null`; `environment.test_log`/`build_log`
+name the transcripts and `environment.sdf` is populated as on the cocotb path.
+The SDF diagnostic gate is unchanged: a partial annotation is still exit 1.
+No pass-through wrapper is generated, since the bench already nests the DUT.
+
+**Not supported on this path** (each is a request error): `engine:
+"verilator"`, `options.coverage`, `options.initial_state`, `options.trace`,
+`options.random_seed`, `options.timescale` (put a `` `timescale `` in the
+sources), `request.parameters`, and `--mutations`.
+
+Worked example: `examples/functional-verification/verilog-tb/`
+(`request-rtl.json` and `request-sdf.json`).
+
 ## Artifacts
 
 Everything a run produces is written to `.klt/functional-verification/` next

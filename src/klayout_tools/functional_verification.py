@@ -2803,6 +2803,358 @@ def _apply_sdf_bus_port_source_drop(
 # ---------------------------------------------------------------------------
 
 
+VERILOG_TOP_FIELDS = (
+    "verilog_top",
+    "pass_marker",
+    "fail_marker",
+    "dut_instance",
+)
+
+#: ``options`` keys the Verilog-top path cannot honor (each depends on cocotb
+#: or on a per-test result stream), mapped to the value that means "unset".
+_VERILOG_TOP_REJECTED_OPTIONS = (
+    ("coverage", False),
+    ("initial_state", None),
+    ("trace", False),
+    ("random_seed", None),
+    ("timescale", None),
+)
+
+
+def _verilog_top_fields(testbench: dict[str, Any]) -> dict[str, str | None]:
+    """Shape-check the ``verilog_top`` testbench fields."""
+    if "module" in testbench:
+        raise FunctionalVerificationError(
+            "request.testbench must give exactly one of 'module' (cocotb) or "
+            "'verilog_top' (Verilog bench), not both"
+        )
+    unknown = sorted(
+        set(testbench) - set(VERILOG_TOP_FIELDS) - {"search_path", "testcase"}
+    )
+    if unknown:
+        raise FunctionalVerificationError(
+            "request.testbench has unknown field(s) for verilog_top: "
+            + ", ".join(unknown)
+        )
+    for cocotb_only in ("search_path", "testcase"):
+        if testbench.get(cocotb_only) is not None:
+            raise FunctionalVerificationError(
+                f"request.testbench.{cocotb_only} applies to a cocotb "
+                "testbench and cannot be combined with verilog_top"
+            )
+    resolved: dict[str, str | None] = {}
+    for name in VERILOG_TOP_FIELDS:
+        value = testbench.get(name)
+        if value is None and name == "verilog_top":
+            raise FunctionalVerificationError(
+                "request.testbench.verilog_top must be a non-empty string"
+            )
+        if value is not None and (not isinstance(value, str) or not value):
+            raise FunctionalVerificationError(
+                f"request.testbench.{name} must be a non-empty string when given"
+            )
+        resolved[name] = value
+    return resolved
+
+
+def _reject_verilog_top_options(engine: str, options: Any) -> None:
+    if engine != "icarus":
+        raise FunctionalVerificationError(
+            f"testbench.verilog_top requires engine 'icarus' -- engine "
+            f"'{engine}' has no Verilog-bench path"
+        )
+    opts = options if isinstance(options, dict) else {}
+    for key, unset in _VERILOG_TOP_REJECTED_OPTIONS:
+        if opts.get(key, unset) != unset:
+            raise FunctionalVerificationError(
+                f"options.{key} cannot be combined with testbench.verilog_top "
+                "-- not supported on the Verilog-bench path (it has no cocotb "
+                "run to apply it to)"
+            )
+
+
+def _require_module_declared(top: str, sources: list[str]) -> None:
+    module_re = re.compile(rf"^\s*module\s+{re.escape(top)}\b", re.MULTILINE)
+    for source in sources:
+        try:
+            with open(source, encoding="utf-8", errors="replace") as handle:
+                if module_re.search(handle.read()):
+                    return
+        except OSError:
+            continue
+    raise FunctionalVerificationError(
+        f"testbench.verilog_top '{top}' is not a module declared in request.sources"
+    )
+
+
+def _resolve_verilog_top(
+    testbench: Any, sources: list[str], engine: str, options: Any
+) -> dict[str, str | None] | None:
+    """Validate the Verilog-bench form of ``request.testbench`` (issue #4083).
+
+    Returns ``None`` when ``testbench.verilog_top`` is absent (the ordinary
+    cocotb path), else ``{"verilog_top", "pass_marker", "fail_marker",
+    "dut_instance"}``. ``testbench.module`` and ``testbench.verilog_top`` are
+    mutually exclusive. The bench's verdict is derived without cocotb (see
+    :func:`_run_verilog_top`), so every option that needs cocotb is rejected
+    here rather than silently ignored.
+    """
+    if not isinstance(testbench, dict) or "verilog_top" not in testbench:
+        return None
+    resolved = _verilog_top_fields(testbench)
+    _reject_verilog_top_options(engine, options)
+    top = resolved["verilog_top"]
+    assert top is not None
+    _require_module_declared(top, sources)
+    return resolved
+
+
+def _resolve_testbench_target(
+    verilog_tb: dict[str, str | None] | None, testbench: Any, request_dir: str
+) -> tuple[str, str, str | list[str] | None]:
+    """``(module, module_dir, testcase)`` for either testbench form."""
+    if verilog_tb is None:
+        return _resolve_testbench(testbench, request_dir)
+    top = verilog_tb["verilog_top"]
+    assert top is not None
+    return top, request_dir, None
+
+
+def _sdf_annotate_scope(verilog_tb: dict[str, str | None] | None) -> str:
+    """Hierarchical scope the generated ``$sdf_annotate`` shim targets."""
+    if verilog_tb is None:
+        return f"{SDF_WRAPPER_MODULE}.{SDF_WRAPPER_DUT_INSTANCE}"
+    dut_instance = verilog_tb["dut_instance"]
+    assert dut_instance is not None
+    return dut_instance
+
+
+def _sdf_extend_sources(
+    verilog_tb: dict[str, str | None] | None,
+    sources: list[str],
+    *,
+    wrapper_path: str,
+    shim_path: str,
+    hdl_toplevel: str,
+    ports: Any,
+) -> tuple[list[str], str]:
+    """Add the SDF scaffolding to ``sources``; return it with the build top.
+
+    A Verilog bench already nests the DUT one level down, so there is no
+    pass-through wrapper: the bench itself is the second root alongside the
+    shim.
+    """
+    if verilog_tb is not None:
+        top = verilog_tb["verilog_top"]
+        assert top is not None
+        return [*sources, shim_path], top
+    _write_sdf_dut_wrapper(wrapper_path, hdl_toplevel=hdl_toplevel, ports=ports)
+    return [*sources, wrapper_path, shim_path], SDF_WRAPPER_MODULE
+
+
+def _check_verilog_top_sdf(
+    verilog_tb: dict[str, str | None] | None, sdf: Any, parameters: Any
+) -> None:
+    """``testbench.dut_instance`` is the SDF scope, so it is required with
+    ``options.sdf`` and meaningless without it. ``request.parameters`` is
+    rejected: it would have to target the bench, not the DUT. A no-op on the
+    cocotb path (``verilog_tb is None``)."""
+    if verilog_tb is None:
+        return
+    if parameters:
+        raise FunctionalVerificationError(
+            "request.parameters cannot be combined with testbench.verilog_top"
+        )
+    if sdf is not None and not verilog_tb["dut_instance"]:
+        raise FunctionalVerificationError(
+            "options.sdf with testbench.verilog_top requires "
+            "testbench.dut_instance (the DUT's hierarchical path inside the "
+            "bench, e.g. 'tb.dut') -- it is the $sdf_annotate scope"
+        )
+    if sdf is None and verilog_tb["dut_instance"]:
+        raise FunctionalVerificationError(
+            "testbench.dut_instance only applies together with options.sdf"
+        )
+
+
+def _verilog_top_sdf_gate(
+    sdf: dict[str, str] | None,
+    engine: str,
+    build_log: str,
+    test_log: str,
+    sdf_pre_dropped_counts: dict[str, int],
+) -> dict[str, int]:
+    """Raise on SDF back-annotation diagnostics; return the dropped counts."""
+    if sdf is None:
+        return {}
+    diagnostics, scanned = _scan_sdf_diagnostics(build_log, test_log)
+    if diagnostics:
+        shown = " | ".join(diagnostics[:5])
+        more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
+        raise FunctionalVerificationError(
+            f"SDF back-annotation of '{sdf['file']}' did not fully apply: "
+            f"{len(diagnostics)} diagnostic(s) in the {engine} transcript "
+            f"-- {shown}{more}. The simulator exits 0 after skipping an "
+            "annotation it cannot apply, so this run's verdict would have "
+            "been a zero-delay one reported as if it were annotated."
+        )
+    return {**sdf_pre_dropped_counts, **scanned}
+
+
+def _verilog_top_error(
+    returncode: int, transcript: str, pass_marker: str | None, fail_marker: str | None
+) -> str | None:
+    """Why the bench run failed, or ``None`` when it passed."""
+    if returncode != 0:
+        return f"vvp exited with status {returncode}"
+    if fail_marker and fail_marker in transcript:
+        return f"fail_marker {fail_marker!r} found in the transcript"
+    if pass_marker and pass_marker not in transcript:
+        return (
+            f"pass_marker {pass_marker!r} not found in the transcript "
+            "(vvp exited 0 without reporting a pass)"
+        )
+    return None
+
+
+def _run_verilog_top(
+    verilog_tb: dict[str, str | None],
+    *,
+    engine: str,
+    hdl_toplevel: str,
+    sources: list[str],
+    build_args: list[str],
+    defines: dict[str, str | None],
+    includes: list[str],
+    build_dir: str,
+    build_log: str,
+    test_log: str,
+    sdf: dict[str, str] | None,
+    sdf_pre_dropped_counts: dict[str, int],
+    sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]],
+    sdf_renamed: list[dict[str, str]],
+    source_defines: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the bench with ``iverilog``, run it with ``vvp`` and assemble the
+    ordinary report (issue #4083). No cocotb is involved.
+
+    The verdict never trusts an exit code alone: the run passes only when
+    ``vvp`` exits 0, no ``fail_marker`` substring appears in the transcript
+    and, when ``pass_marker`` is declared, that substring does appear. A
+    ``$fatal`` exits nonzero and so fails. A bench that exits 0 without ever
+    printing its ``pass_marker`` fails, so a bench that silently did nothing
+    cannot read as green. The SDF diagnostic gate runs first, exactly as on
+    the cocotb path.
+    """
+    top = verilog_tb["verilog_top"]
+    pass_marker = verilog_tb["pass_marker"]
+    fail_marker = verilog_tb["fail_marker"]
+    assert top is not None
+
+    os.makedirs(build_dir, exist_ok=True)
+    vvp_path = os.path.join(build_dir, "sim.vvp")
+    cmd = ["iverilog", "-o", vvp_path, "-s", top, "-g2012"]
+    cmd += [f"-I{path}" for path in includes]
+    for key, value in defines.items():
+        cmd.append(f"-D{key}" if value is None else f"-D{key}={value}")
+    cmd += build_args + sources
+    try:
+        with open(build_log, "w", encoding="utf-8") as handle:
+            built = subprocess.run(
+                cmd, stdout=handle, stderr=subprocess.STDOUT, check=False
+            )
+    except OSError as exc:
+        raise FunctionalVerificationError(
+            f"could not launch the icarus build: {exc}"
+        ) from exc
+    if built.returncode != 0:
+        raise FunctionalVerificationError(
+            f"icarus build/elaboration failed (exit {built.returncode}): "
+            f"{_log_tail(build_log)}"
+        )
+
+    try:
+        with open(test_log, "w", encoding="utf-8") as handle:
+            ran = subprocess.run(
+                ["vvp", vvp_path],
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                cwd=build_dir,
+                check=False,
+            )
+    except OSError as exc:
+        raise FunctionalVerificationError(f"could not launch vvp: {exc}") from exc
+    with open(test_log, encoding="utf-8", errors="replace") as handle:
+        transcript = handle.read()
+
+    sdf_dropped_counts = _verilog_top_sdf_gate(
+        sdf, engine, build_log, test_log, sdf_pre_dropped_counts
+    )
+    error_message = _verilog_top_error(
+        ran.returncode, transcript, pass_marker, fail_marker
+    )
+    entry: dict[str, Any] = {
+        "name": top,
+        "status": "failed" if error_message else "passed",
+        "sim_time_ns": None,
+        "real_time_s": None,
+    }
+    if error_message:
+        entry["error_type"] = "VerilogBenchFailure"
+        entry["error_message"] = error_message
+    failed_count = 1 if error_message else 0
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "engine": engine,
+        "hdl_toplevel": hdl_toplevel,
+        "testbench": top,
+        "status": "fail" if failed_count else "pass",
+        "test_count": 1,
+        "passed_count": 1 - failed_count,
+        "failed_count": failed_count,
+        "skipped_count": 0,
+        "tests": [entry],
+        "coverage": None,
+        "trace": None,
+        "environment": {
+            "engine": engine,
+            "engine_version": _engine_version(engine),
+            "cocotb_version": None,
+            "results_xml": None,
+            "test_log": test_log,
+            "build_log": build_log,
+            "random_seed": None,
+            "source_defines": source_defines,
+            "initial_state": None,
+            "sdf": (
+                None
+                if sdf is None
+                else {
+                    "file": sdf["file"],
+                    "corner": sdf["corner"],
+                    "entries": sdf["entries"],
+                    "annotated": True,
+                    "partial": bool(sdf_dropped_counts),
+                    "dropped": _sdf_dropped_report(
+                        sdf_dropped_counts, sdf_pre_dropped_arcs
+                    ),
+                    **_sdf_renamed_report(sdf_renamed),
+                }
+            ),
+        },
+    }
+
+
+def _reject_verilog_top_mutations(testbench: Any) -> None:
+    if isinstance(testbench, dict) and "verilog_top" in testbench:
+        raise FunctionalVerificationError(
+            "testbench.verilog_top cannot be combined with --mutations -- "
+            "not yet designed (the Verilog-top path has no per-test results "
+            "to attribute a kill to)"
+        )
+
+
 def _resolve_output_dir(request_dir: str, output_dir: str | None) -> str:
     """Directory run artifacts are written to: ``output_dir`` (relative paths
     resolve against the cwd, not the request directory) or, by default,
@@ -2811,6 +3163,15 @@ def _resolve_output_dir(request_dir: str, output_dir: str | None) -> str:
     if output_dir:
         return os.path.abspath(output_dir)
     return os.path.join(request_dir, ".klt", "functional-verification")
+
+
+def _resolve_engine(request_doc: dict[str, Any]) -> str:
+    engine = request_doc.get("engine", DEFAULT_ENGINE)
+    if engine not in SUPPORTED_ENGINES:
+        raise FunctionalVerificationError(
+            f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
+        )
+    return engine
 
 
 def run_functional_verification(
@@ -2839,11 +3200,7 @@ def run_functional_verification(
     request_doc, request_dir = load_request_arg(request)
     output_dir = _resolve_output_dir(request_dir, output_dir)
 
-    engine = request_doc.get("engine", DEFAULT_ENGINE)
-    if engine not in SUPPORTED_ENGINES:
-        raise FunctionalVerificationError(
-            f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
-        )
+    engine = _resolve_engine(request_doc)
 
     sources = _resolve_sources(request_doc["sources"], request_dir)
 
@@ -2853,8 +3210,11 @@ def run_functional_verification(
             "request.hdl_toplevel must be a non-empty string"
         )
 
-    module, module_dir, testcase = _resolve_testbench(
-        request_doc["testbench"], request_dir
+    verilog_tb = _resolve_verilog_top(
+        request_doc["testbench"], sources, engine, request_doc.get("options")
+    )
+    module, module_dir, testcase = _resolve_testbench_target(
+        verilog_tb, request_doc["testbench"], request_dir
     )
     (
         coverage_requested,
@@ -2866,6 +3226,7 @@ def run_functional_verification(
         sdf,
         trace_requested,
     ) = _resolve_options(request_doc.get("options"), engine, request_dir)
+    _check_verilog_top_sdf(verilog_tb, sdf, request_doc.get("parameters"))
     initial_state = _resolve_initial_state(
         request_doc.get("options"), engine, request_dir
     )
@@ -2983,7 +3344,6 @@ def run_functional_verification(
         # `SDF_CORNERS`).
         ports = _parse_toplevel_ports(sources, hdl_toplevel)
         wrapper_path = os.path.join(output_dir, f"{SDF_WRAPPER_MODULE}.v")
-        _write_sdf_dut_wrapper(wrapper_path, hdl_toplevel=hdl_toplevel, ports=ports)
 
         # Issue #2364: `options.sdf.entries: "interconnect"` -- net-delay
         # back-annotation only, as the first entry-level normalization step.
@@ -3125,11 +3485,17 @@ def run_functional_verification(
         _write_sdf_annotate_shim(
             shim_path,
             sdf_paths=sdf_paths,
-            scope=f"{SDF_WRAPPER_MODULE}.{SDF_WRAPPER_DUT_INSTANCE}",
+            scope=_sdf_annotate_scope(verilog_tb),
         )
-        sources = [*sources, wrapper_path, shim_path]
+        sources, build_hdl_toplevel = _sdf_extend_sources(
+            verilog_tb,
+            sources,
+            wrapper_path=wrapper_path,
+            shim_path=shim_path,
+            hdl_toplevel=hdl_toplevel,
+            ports=ports,
+        )
         build_args += [*SDF_BUILD_ARGS, "-T", sdf["corner"]]
-        build_hdl_toplevel = SDF_WRAPPER_MODULE
     initial_state_info: dict[str, Any] = {}
     if initial_state is not None:
         shim_path, initial_state_info = _write_initial_state_shim(
@@ -3147,6 +3513,25 @@ def run_functional_verification(
         sources, source_defines, output_dir
     )
     includes = [*includes, *scoped_include_dirs]
+
+    if verilog_tb is not None:
+        return _run_verilog_top(
+            verilog_tb,
+            engine=engine,
+            hdl_toplevel=hdl_toplevel,
+            sources=sources,
+            build_args=build_args,
+            defines=defines,
+            includes=includes,
+            build_dir=build_dir,
+            build_log=build_log,
+            test_log=test_log,
+            sdf=sdf,
+            sdf_pre_dropped_counts=sdf_pre_dropped_counts,
+            sdf_pre_dropped_arcs=sdf_pre_dropped_arcs,
+            sdf_renamed=sdf_renamed,
+            source_defines=source_defines,
+        )
 
     runner_module = _import_runner()
     _check_cocotb_abi_compatibility()
@@ -3421,6 +3806,7 @@ def run_functional_verification_with_mutations(
     _validate_proposal_indices(proposal_records)
 
     request_doc, request_dir = load_request_arg(request)
+    _reject_verilog_top_mutations(request_doc.get("testbench"))
     raw_sources = request_doc.get("sources")
     _validate_mutation_scope(
         scope, raw_sources if isinstance(raw_sources, list) else []
