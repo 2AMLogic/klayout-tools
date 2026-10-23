@@ -15545,6 +15545,19 @@ def test_par_call_cap_log_classified():
     assert "par_call_cap" in sim.DIAGNOSTIC_CODES
 
 
+def test_par_call_cap_real_ngspice_46_log_classified():
+    # Verbatim ngspice-46 `-b -o` log for a deck with 105 `.meas ... par(...)`
+    # cards (single local run, issue #4108).
+    log = (
+        "\nNote: No compatibility mode selected!\n\n\n"
+        "ERROR: More than 99 function calls to par()\n"
+        "  Limited to 99 per input file\n\n"
+        "ERROR: fatal error in ngspice, exit(1)\n"
+    )
+    codes = [d["code"] for d in sim._classify_diagnostics(log)]
+    assert codes.count("par_call_cap") == 1
+
+
 def test_par_call_cap_preflight_boundary(tmp_path):
     at_cap = "\n".join(f".meas dc m{i} FIND par('-i(v1)') AT={i}" for i in range(99))
     deck = tmp_path / "deck.cir"
