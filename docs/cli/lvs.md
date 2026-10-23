@@ -1276,10 +1276,12 @@ forms under "Vector-ported macros" below), a simple `assign
 vector alias or tie-off padding). A concatenation is expanded MSB-first into
 one per-bit alias using the module's own `wire`/`input`/`output`/`inout`
 declared widths; both sides must be exactly the same total width, and each
-operand must be a plain net or single-index bit-select — replication
-(`{N{x}}`), literals (`1'b0`), and part-selects (`a[7:4]`) inside a
-concatenation remain unsupported and fail with the same "only a plain
-`assign`" error. A Verilog **escaped identifier** (`\name`) is
+operand must be a plain net, a single-index bit-select, a nested
+concatenation (`{ {a, b}, x }`), or a replication with a literal positive
+integer count (`{2{a}}`, `{2{ {a, b} }}`; issue #4117). Literals (`1'b0`) and
+part-selects (`a[7:4]`) inside a concatenation, a zero or non-integer
+replication count, and unbalanced braces remain unsupported and fail with the
+same "only a plain `assign`" error. A Verilog **escaped identifier** (`\name`) is
 accepted wherever a name is, and is read exactly as Verilog defines it —
 one atomic token running from the backslash to the next whitespace, so
 every character in between belongs to the literal name. A backend-emitted
