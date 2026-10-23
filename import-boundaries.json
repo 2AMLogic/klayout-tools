@@ -998,6 +998,16 @@
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {
+      "consumer": "erc",
+      "exporter": "env_provenance",
+      "reason": "`klt erc` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #2703)."
+    },
+    {
+      "consumer": "lef_abstract",
+      "exporter": "env_provenance",
+      "reason": "`klt lef-abstract` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #2703)."
+    },
+    {
       "consumer": "lvs",
       "exporter": "env_provenance",
       "reason": "`klt lvs` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #2659)."
