@@ -3097,6 +3097,32 @@ def _cmd_run_layout(args: argparse.Namespace) -> int:
     return 0 if summary["run_set"]["valid"] else 1
 
 
+def _cmd_report_layout(args: argparse.Namespace) -> int:
+    """Regenerate the layout-flow comparison report from ledgers alone (#3027)."""
+    import design_agent_benchmark_layout_report as report_mod
+
+    protocol = report_mod.layout.load_protocol(Path(args.protocol))
+    protocol_result = report_mod.layout.validate_protocol(protocol)
+    if not protocol_result["valid"]:
+        print(json.dumps({"protocol": protocol_result}, indent=2))
+        return 1
+    try:
+        report = report_mod.report_from_dir(Path(args.out_dir), protocol)
+    except report_mod.LayoutReportError as exc:
+        print(f"report-layout: {exc}", file=sys.stderr)
+        return 1
+    text = (
+        report_mod.to_markdown(report)
+        if args.format == "markdown"
+        else report_mod.to_json(report)
+    )
+    if args.output:
+        Path(args.output).write_text(text)
+    else:
+        sys.stdout.write(text)
+    return 0 if report["integrity"]["valid"] else 1
+
+
 def _resolve_agent_timeout(provider: str, value: float | None) -> float:
     """The per-attempt wall-clock ceiling for ``provider``. ``--agent-timeout-s``
     defaults to ``None`` rather than a number so each agent provider can carry
@@ -3311,6 +3337,26 @@ def main(argv: list[str] | None = None) -> int:
     run_layout_parser.add_argument("--agent-timeout-s", type=float, default=None)
     run_layout_parser.add_argument("--agent-tool-budget", type=int, default=None)
     run_layout_parser.set_defaults(func=_cmd_run_layout)
+
+    report_layout_parser = subparsers.add_parser(
+        "report-layout",
+        help=(
+            "regenerate the layout-flow comparison report (issue #3027) from "
+            "an executor --out-dir's runs.jsonl / journal.jsonl alone"
+        ),
+    )
+    report_layout_parser.add_argument(
+        "--out-dir", required=True, help="run-layout output directory (ledgers)"
+    )
+    report_layout_parser.add_argument(
+        "--protocol",
+        default=str(REPO_ROOT / "benchmarks" / "design-agent" / "layout-protocol.json"),
+    )
+    report_layout_parser.add_argument(
+        "--format", choices=("json", "markdown"), default="json"
+    )
+    report_layout_parser.add_argument("-o", "--output", default=None)
+    report_layout_parser.set_defaults(func=_cmd_report_layout)
 
     run_parser = subparsers.add_parser(
         "run", help="run N attempts per task and report pass@k per tier"

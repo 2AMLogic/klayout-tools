@@ -160,6 +160,29 @@ jobs:
             --task benchmarks/design-agent/fixtures/layout/task-five-transistor-ota-layout.json \
             --runs benchmarks/design-agent/fixtures/layout/runs-valid.json
 
+      - name: Layout-flow executor + report round-trip (reference provider, issue #3027)
+        # Bounded and deterministic: one frozen task (nfet-unit), the two arms
+        # the credential-free reference provider can complete (gen-only,
+        # gen+refine seeded from it), one replicate, scored by the real
+        # `klt drc`/`klt lvs` gate -- no agent, no ngspice, no credentials.
+        # The report is then regenerated from the two ledgers alone (runs.jsonl
+        # + journal.jsonl; sandboxes deleted first) and must be byte-identical
+        # to the one built beside the sandboxes.
+        run: |
+          set -e
+          uv run --frozen python scripts/design_agent_benchmark.py run-layout \
+            --provider reference --task nfet-unit --arm gen-only --arm gen+refine \
+            --replicates 1 --out-dir layout-run >layout-run-summary.json
+          uv run --frozen python scripts/design_agent_benchmark.py report-layout \
+            --out-dir layout-run -o layout-report.json
+          rm -rf layout-run/runs
+          uv run --frozen python scripts/design_agent_benchmark.py report-layout \
+            --out-dir layout-run -o layout-report-regenerated.json
+          cmp layout-report.json layout-report-regenerated.json
+          uv run --frozen python scripts/design_agent_benchmark.py report-layout \
+            --out-dir layout-run --format markdown -o layout-report.md
+          cat layout-report.md >>"$GITHUB_STEP_SUMMARY"
+
       - name: Run the harness (reference candidate provider, pass@1/pass@5)
         # Deterministic reference-provider proof-of-concept -- see
         # benchmarks/design-agent/README.md "Known limitations". Always
@@ -188,6 +211,10 @@ jobs:
           path: |
             design-agent-benchmark-validate.json
             design-agent-benchmark-run.json
+            layout-run/runs.jsonl
+            layout-run/journal.jsonl
+            layout-report.json
+            layout-report.md
           retention-days: 90
 
   design-agent-benchmark-live:
@@ -400,4 +427,61 @@ jobs:
             .klt/interactive-smoke-sandboxes/**/agent-session.json
             .klt/interactive-smoke-sandboxes/**/agent-transcript.jsonl
             .klt/interactive-smoke-sandboxes/**/*.spice
+          retention-days: 90
+
+  design-agent-benchmark-layout-live:
+    name: Live-agent layout-flow smoke, opt-in/scheduled (issue #3027)
+    runs-on: ubuntu-24.04
+    # Phase-1 budget (layout-protocol.json `budget.ci`): live is credential-
+    # gated, one task x three arms x one replicate, each run bounded by the
+    # protocol's per-run ceilings (1800 s / 80 tool calls), and the result
+    # never fails the workflow. It is additive: the deterministic round-trip
+    # above is the gate. 3 runs x 30 min worst case + setup fits the ceiling.
+    timeout-minutes: 120
+    continue-on-error: true
+    env:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Install the claude CLI
+        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run the layout-flow smoke and report it
+        run: |
+          set -e
+          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "design-agent-benchmark (layout-live): SKIPPED - CLAUDE_CODE_OAUTH_TOKEN secret not provisioned" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          uv run --frozen python scripts/design_agent_benchmark.py run-layout \
+            --provider interactive-agent --task nfet-unit --replicates 1 \
+            --out-dir layout-live-run >layout-live-summary.json || true
+          uv run --frozen python scripts/design_agent_benchmark.py report-layout \
+            --out-dir layout-live-run --format markdown -o layout-live-report.md || true
+          uv run --frozen python scripts/design_agent_benchmark.py report-layout \
+            --out-dir layout-live-run -o layout-live-report.json || true
+          cat layout-live-report.md >>"$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: design-agent-benchmark-layout-live-report
+          path: |
+            layout-live-run/runs.jsonl
+            layout-live-run/journal.jsonl
+            layout-live-summary.json
+            layout-live-report.json
+            layout-live-report.md
+          if-no-files-found: ignore
           retention-days: 90
