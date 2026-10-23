@@ -2501,6 +2501,13 @@ _CAPACITY_REFUSAL_MARKER = "no capacity in any of the"
 #: opened (issue #2917).
 _CONCURRENCY_CAP_MARKER = "exceeds BATCH_MAX_CONCURRENT_INSTANCES"
 
+#: The fragment of the same script's shared vCPU-budget refusal (``fail "N
+#: vCPU already running + K instance(s) of up to M vCPU exceeds
+#: BATCH_MAX_VCPU=V ... the spot quota is shared with ci-spot"``). Transient
+#: shared-quota exhaustion, so it is classified with the Spot capacity refusal
+#: (issue #4103).
+_VCPU_BUDGET_MARKER = "exceeds BATCH_MAX_VCPU"
+
 #: The refusal codes :func:`submit_launch` waits out under ``capacity_wait_s``.
 _RETRYABLE_LAUNCH_CODES = frozenset(
     {BATCH_NO_CAPACITY_CODE, BATCH_CONCURRENCY_CAP_CODE}
@@ -2509,8 +2516,8 @@ _RETRYABLE_LAUNCH_CODES = frozenset(
 
 def _classify_launch_failure(stderr: str) -> str | None:
     """:data:`BATCH_NO_CAPACITY_CODE` when a failed ``launch``'s stderr is
-    the provisioner's Spot capacity refusal,
-    :data:`BATCH_CONCURRENCY_CAP_CODE` when it is the shared-fleet
+    the provisioner's Spot capacity refusal or its shared vCPU-budget
+    refusal, :data:`BATCH_CONCURRENCY_CAP_CODE` when it is the shared-fleet
     concurrency-cap refusal, else ``None``.
 
     **Coupling:** this is a text match against 2am's
@@ -2526,6 +2533,8 @@ def _classify_launch_failure(stderr: str) -> str | None:
         return BATCH_NO_CAPACITY_CODE
     if _CONCURRENCY_CAP_MARKER in stderr:
         return BATCH_CONCURRENCY_CAP_CODE
+    if _VCPU_BUDGET_MARKER in stderr:
+        return BATCH_NO_CAPACITY_CODE
     return None
 
 

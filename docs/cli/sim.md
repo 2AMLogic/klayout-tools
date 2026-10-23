@@ -996,6 +996,10 @@ under `--format json`, an error envelope carrying a stable
 
 A capacity refusal is a fleet-wide condition that usually clears within
 minutes, so the code marks it as **retryable**, unlike a request error.
+The same code also covers the provisioner's shared vCPU-budget refusal
+(`N vCPU already running + ... exceeds BATCH_MAX_VCPU=M ... the spot quota is
+shared with ci-spot`, [#4103](https://github.com/2AMLogic/klayout-tools/issues/4103)),
+so `--capacity-retries` and `batch.capacity_wait_s` wait it out too.
 The shared-fleet concurrency-cap refusal (`N instance(s) already running + 1
 requested exceeds BATCH_MAX_CONCURRENT_INSTANCES=M`,
 [#2917](https://github.com/2AMLogic/klayout-tools/issues/2917)) is the other
