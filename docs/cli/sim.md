@@ -1063,7 +1063,7 @@ made. Things worth knowing:
 Right after `launch` succeeds — before the first poll — the client writes
 `batch-receipt.json` into the artifacts directory (`options.artifacts_dir`,
 default `<request dir>/.klt/sim`; a sharded run writes
-`batch-receipt-<job-id>.json` per shard). It holds `job_id`, `bucket`,
+`batch-receipt-<job-id>.json` per shard). It holds `job_id`,
 `jobs_prefix`, `region`, `profile`, `launched_at` (UTC), `request_sha256` and
 `state`. `state` is `null` until the job reaches a terminal state, so a receipt
 that still has `state: null` means the client died (or timed out polling) while
@@ -1492,7 +1492,7 @@ Works for `hosts == 1` and `hosts > 1`.
 -- with or without `--resume` -- records its shards in
 `<artifacts-dir>/batch-shards.json` (schema_version 1) *before* the first
 shard is submitted: the request fingerprint, the shard count, where the jobs
-live (`bucket`, `jobs_prefix`, `region`, `profile`) and per shard its `index`,
+live (`jobs_prefix`, `region`, `profile`; never the bucket) and per shard its `index`,
 `job_id`, a digest of its corner ids and its client-side lifecycle:
 
 | field | meaning |
@@ -2053,8 +2053,9 @@ the remaining evidence (`status.json`, `harness.log`, `outputs/`) lives at
 bucket name embeds the fleet's AWS account number, and `--report-out` reports
 are meant to be committed unmodified as evidence, so emitting it published
 that number from any public repo. `job_id` and `region` stay, which is enough
-to `--attach`; the receipt file in the artifacts directory and the
-`--submit-only` / `--status` outputs still carry `bucket` (operational, not
+to `--attach`; the receipt and shard-manifest files in the artifacts directory omit it
+too (issue #4079: canary repos commit them), while the
+`--submit-only` / `--status` stdout outputs still carry `bucket` (operational, not
 committed evidence). Report-bound text (poll-timeout and interrupt messages,
 `harness_log`) shows `s3://<bucket>/...` literally in place of the name.
 
