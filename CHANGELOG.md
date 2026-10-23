@@ -14,6 +14,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt artifact put|get|verify`** (issue #4063, documented in
+  [`docs/cli/artifact.md`](docs/cli/artifact.md)): new verb. A client for the
+  fleet artifact store's broker. `put` uploads over a presigned URL with
+  exactly the broker's headers and writes manifest entries (`sha256`, `size`,
+  `kind`, `producer`, `uri`, and optionally `name` and `media_type`). `get`
+  writes the bytes only when they re-hash to both the manifest's digest and
+  the key's. `verify` checks every entry and exits `3` on any missing or
+  mismatched object. There is no credential and no cloud SDK, and presigned
+  URLs are never printed. `klt signoff --manifest` cites a stored object
+  through the existing command-backed entry. `schema_version` 1.
+
 - **`klt evidence record`** (issue #4044, documented in
   [`docs/cli/evidence.md`](docs/cli/evidence.md)): new verb. Writes one
   `evidence-record/1` file (id `<YYYYMMDD>-<HHMMSS>-<short-sha>`, never

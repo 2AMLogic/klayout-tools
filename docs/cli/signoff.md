@@ -1104,6 +1104,16 @@ wrapped, and so the one hardest to cite.
   the same resolution path, so a committed report that cites by pointer
   reproduces, and drifts when the *nested* envelope changes.
 
+### Citing an object in the artifact store (issue #4063)
+
+Evidence too large for git can live in the fleet artifact store, with only a
+manifest committed ([`artifact.md`](artifact.md)). It is cited through the
+existing command-backed entry, not a new shape: the command is `klt artifact
+get <manifest>#<sha256|name> -o -`, which writes the bytes to stdout only after
+they re-hash to the manifest's digest, and `pointer` works on it as above.
+A missing or mismatched object leaves stdout empty and exits non-zero, so the
+item renders `unmet` with `command_failed`.
+
 ### The declared partition boundary (issue #2278)
 
 `kind: "mixed-signal"` asserts that the block has two partitions: every T1
