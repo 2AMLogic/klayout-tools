@@ -1601,6 +1601,7 @@ but no tagged release contains it yet.
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
+| `measurements[].search` | unreleased |
 
 Safe on an old runner: a plain `measurements[]` `{name, spice}` `.meas` card
 and the plain-string `sections[]` form. Prefer them over `expr` when the
@@ -1757,7 +1758,7 @@ established. `runner_compatibility` itself stays a major.minor gate.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895)).**
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
 undriven), so
@@ -2410,6 +2411,11 @@ campaign: a missing value is never replaced by zero. It also stops when
 
 Caveats:
 
+- **In-corner alternative.** A threshold search whose probes can run inside one
+  corner's ngspice process (no fleet round trip per probe, composes with
+  `monte_carlo`, `limits` and `klt yield`) is the
+  [`measurements[].search`](#bisection--threshold-search-measurementssearch)
+  measurement; use this controller only when the probes need separate jobs.
 - **Assumptions.** The example assumes the measurement is monotonic in the
   source value over the bracket and that the bracket is valid (the crossing
   lies inside it); the endpoints are not probed.
@@ -4296,8 +4302,77 @@ measurement, with no out-of-tool waveform post-processing:
   release segment `0.7.1`): see "Mandatory features" under "Runner/client `klt`
   version skew". An older or unreadable runner refuses the request instead of
   omitting the margin.
-- **Out of scope.** A bounded bisection / `analysis_steps[]` search mode, and
-  read/write-margin wrappers or cell templates.
+- **Out of scope.** `analysis_steps[]` search mode, and read/write-margin
+  wrappers or cell templates. A bounded bisection over a source value is the
+  separate [`measurements[].search`](#bisection--threshold-search-measurementssearch)
+  form.
+
+## Bisection / threshold search (`measurements[].search`)
+
+Issue [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121). A
+"smallest drive that still flips the cell" margin (write margin, minimum trip
+current, hold time) is a threshold search over one source value. It is one
+graded scalar, computed on the worker inside the corner's single ngspice
+process, so it runs unchanged on every backend and `limits`, `monte_carlo`
+statistics and `klt yield` consume it like any measurement:
+
+```json
+{"analysis": {"kind": "op", "args": ""},
+ "measurements": [
+   {"name": "min_flip_drive_ua",
+    "search": {
+      "source": "Ibl", "lo": 0.0, "hi": 100e-6,
+      "tol": 1e-7, "max_iter": 20,
+      "analysis": {"kind": "tran", "args": "10p 5n"},
+      "predicate": {"expr": "v(q) > 0.9*vdd", "at": "end"}},
+    "unit": "A", "limits": {"min": 1e-6}}]}
+```
+
+- **Form.** `search` requires `source` (a top-level independent `V`/`I`
+  source), `lo` < `hi`, `tol`, `max_iter`, `analysis` (`{kind, args}`, `kind` is
+  `tran`, `dc` or `op`) and `predicate` (`{expr, at}`; `at` is `"end"`, the last
+  point of the expression's vector). Optional: `direction` (`"rising"`, the
+  default: predicate false at `lo` and true at `hi`; or `"falling"`) and
+  `report` (`"boundary"`). The `expr` is an ngspice expression with a truth
+  value; `<`, `<=`, `>`, `>=`, `==`, `!=` are rewritten to `lt`/`le`/`gt`/`ge`/
+  `eq`/`ne` for you. Unknown keys, a second value form on the entry, duplicate
+  measurement names, an `analysis.passes` or twoport analysis, and a `source`
+  that is a `corners.supply_v` axis or has an explicit waveform (where `alter`
+  has no effect) are refused up front (exit 1).
+- **Bounds contract.** `max_iter` is required and capped at 64. Because the
+  bracket halves each probe, validation also refuses a `max_iter` that cannot
+  reach `tol` (`ceil(log2((hi - lo) / tol))` halvings), and a `tol` finer than
+  the 6 significant digits ngspice's `alter` receives (`tol >= 1e-5 *
+  max(|lo|, |hi|)`).
+- **Method.** Both bracket ends are probed first; their predicate outcomes must
+  differ. Each iteration probes the midpoint and keeps the half that still
+  straddles the change. It stops when `hi - lo <= tol`. The loop is an ngspice
+  `.control` `while` loop (`alter` + analysis + predicate per probe), one search
+  per measurement, all probes in the corner's single ngspice process. Monotonic
+  behaviour is **assumed**: only the endpoints are checked, so a non-monotonic
+  predicate between them yields *a* boundary, not necessarily the nearest.
+- **Value.** `value` is the midpoint of the final bracket, in the source's unit,
+  graded against `limits` like any scalar. An additive `search` sibling carries
+  `{source, direction, iterations, lo, hi, converged}`. The search runs after
+  the corner's own `analysis` and its other measurements.
+- **Errors.** A failure is `status: "error"`, `value: null`, and a
+  `code: "measurement"` diagnostic whose message starts with a reason token --
+  never a silent substitute or a pass:
+
+  | Token | Meaning |
+  |---|---|
+  | `[search_bracket_invalid]` | the predicate has the same outcome at `lo` and `hi` |
+  | `[search_probe_failed]` | a probe's analysis failed or the predicate vector did not resolve (check node names and `options.save_mode`) |
+  | `[search_not_converged]` | `max_iter` was spent before `tol` (strict; there is no unconverged mode) |
+  | `[search_no_result]` | the control block ended before the search reported |
+- **Not supported.** `analysis_steps[]` (refused by name; search inside a step is
+  a follow-up) and `engine: "xyce"`. Multi-dimensional or non-monotone search
+  and read/write-margin wrapper templates are out of scope.
+- **Backends.** `local`, `local-parallel`, `remote` and `batch` all run `search`.
+  It is a mandatory runner feature (`search`, first `klt` release segment
+  `0.7.1`; `unreleased` in the table above): see "Mandatory features" under
+  "Runner/client `klt` version skew". An older or unreadable runner refuses the
+  request instead of omitting the measurement.
 
 ## Multi-pass AC acquisition (`analysis.passes`)
 
