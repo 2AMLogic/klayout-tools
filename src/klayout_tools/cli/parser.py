@@ -5310,13 +5310,13 @@ def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``artifact`` verb with nested ``put``/``get``/``verify``
-    subcommands (issue #4063): the client for the fleet artifact store's
+    """Register the ``artifact`` verb with nested ``put``/``get``/``verify``/``delete``
+    subcommands (issues #4063, #4101): the client for the fleet artifact store's
     broker. See docs/cli/artifact.md.
     """
     artifact_parser = subparsers.add_parser(
         "artifact",
-        help="put/get/verify evidence bytes in the fleet artifact store by "
+        help="put/get/verify/delete evidence bytes in the fleet artifact store by "
         "sha256, with a committed manifest",
         description=(
             "Evidence bytes go to the artifact store through its broker; git "
@@ -5405,6 +5405,39 @@ def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
     verify_parser.add_argument("manifest", metavar="MANIFEST")
     _add_artifact_common_args(verify_parser, repo=False)
     verify_parser.set_defaults(func=artifact_cmd.run_verify)
+
+    delete_parser = artifact_sub.add_parser(
+        "delete",
+        help="delete stored objects through the broker (dry run unless --yes)",
+        description=(
+            "REF is a sha256 (under --repo) or MANIFEST[#SELECTOR], as for "
+            "`get`. Without --yes only `stat` is called and nothing is "
+            "deleted. Each --keep MANIFEST protects the objects it names: a "
+            "referenced target refuses the whole batch unless "
+            "--force-referenced. An absent object is success. The broker "
+            "decides whether the caller may delete."
+        ),
+    )
+    delete_parser.add_argument(
+        "refs", nargs="+", metavar="REF", help="sha256 or MANIFEST[#SELECTOR]"
+    )
+    delete_parser.add_argument(
+        "--keep",
+        metavar="MANIFEST",
+        action="append",
+        default=[],
+        help="manifest whose objects must not be deleted (repeatable)",
+    )
+    delete_parser.add_argument(
+        "--yes", action="store_true", help="actually delete (default: dry run)"
+    )
+    delete_parser.add_argument(
+        "--force-referenced",
+        action="store_true",
+        help="delete even objects a --keep manifest names",
+    )
+    _add_artifact_common_args(delete_parser, repo=True)
+    delete_parser.set_defaults(func=artifact_cmd.run_delete)
 
 
 def _add_artifact_common_args(parser: argparse.ArgumentParser, *, repo: bool) -> None:
