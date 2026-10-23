@@ -2443,6 +2443,59 @@ artifact is not read as a real violation. To check the abutted context, instance
 the cell two or three times edge to edge in a new top cell and run `klt drc`
 on that; the marker stays, because it describes the check, not the outcome.
 
+To check flipped row stacks that share a rail, build the placements with
+`klayout.db` and run `klt drc` on the result. A minimal MX / MY / R180 recipe
+(`cell` is your cell's name, `H` its height and `W` its width in dbu):
+
+```python
+import klayout.db as db
+
+ly = db.Layout(); ly.read("cell.gds")
+src = ly.cell("cell")
+top = ly.create_cell("stack_top")
+H, W = 270 * 4, 54 * 4 * 6   # 270 nm tall, six gate pitches wide, at 0.25 nm dbu
+for row, trans in enumerate((db.Trans.R0, db.Trans.M0, db.Trans.R0, db.Trans.M0)):
+    # M0 mirrors about the x axis: shift it up one height so the rails meet.
+    dy = (row + (1 if trans == db.Trans.M0 else 0)) * H
+    for col in range(3):
+        top.insert(db.CellInstArray(src.cell_index(), db.Trans(trans, col * W, dy)))
+# For R180 offset by (W, H); for MY (db.Trans.M90) offset x by W.
+ly.write("stack.gds")
+```
+
+Then `klt drc stack.gds --engine klayout --deck-file <deck> --top stack_top`.
+A per-case placement request form (a cell plus a row / flipped-stack /
+neighbour context, reported per case) is **out of scope** for klt: it would
+duplicate the placement `klayout.db` already does in a few lines, and the
+placements are the consumer's to own.
+
+### Opt-in fin / gate grid origin (`FIN.GRID.1`, `GATE.GRID.1`)
+
+`FIN.S.1` and `GATE.S.1` judge neighbour spacing only, so a cell whose shapes
+all moved by the same off-grid offset is still reported `clean`. Two opt-in
+rules check the absolute origin. They are not among the 263 default ids; they
+run only when a `--deck-var` declares the origin (nanometres, the drawn 1x
+scale), and with neither set the deck output, categories and coverage are
+unchanged:
+
+| `--deck-var` | Rule id | Checks |
+|---|---|---|
+| `fin_y_origin_nm` | `FIN.GRID.1` | the lower edge of every FIN sits a whole number of 27 nm vertical pitches from the origin (DRM Table 3.3.1) |
+| `gate_x_origin_nm` | `GATE.GRID.1` | the left edge of every GATE sits a whole number of 54 nm horizontal pitches from the origin (DRM Table 3.4.1) |
+
+```bash
+klt drc cell.gds --engine klayout --deck-file "$(klt deck path --deck asap7 --format json | jq -r .path)" \
+    --deck-var gate_x_origin_nm=17 --deck-var fin_y_origin_nm=10
+```
+
+The DRM states the pitches but no absolute origin, so the origin is yours to
+declare (a cell drawn like the shipped `INVx1`, with gates at x = 17 + 54k nm
+and fins at y = 10 + 27k nm, passes with `17` / `10`; the same cell with `0` /
+`0` fails). Only the FIN lower edge and GATE left edge are held to the grid,
+so a fin or gate whose width is wrong is `FIN.W.1` / `GATE.W.1`, not a second
+grid report. `--expect-rule-categories` stays `263` for the default run;
+add the opt-in ids to the count when you set the vars.
+
 ### Rule ids (the contract)
 
 Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the

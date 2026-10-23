@@ -800,3 +800,28 @@ v8.not_inside(m8 & m9)
   .output("V8.AUX.1", "Table 3.19.1: V8 must be inside M8 and M9")
 v9.not_inside(m9 & pad)
   .output("V9.AUX.1", "Table 3.19.1: V9 must be inside M9 and PAD")
+
+# --------------------------------------------------------------------------
+# Opt-in absolute grid origin (#4082) -- NOT part of the 263 default ids
+# --------------------------------------------------------------------------
+# FIN.S.1 / GATE.S.1 above only look at neighbour spacing, so a whole cell
+# moved off the grid still passes. When the caller declares an origin with
+# --deck-var, the lower edge of every FIN is held to the 27 nm vertical
+# pitch (DRM Table 3.3.1) and the left edge of every GATE to the 54 nm
+# horizontal pitch (DRM Table 3.4.1), counted from that origin. The DRM states
+# the pitches only, not an absolute origin, so the origin is the caller's.
+$fin_y_origin_nm = nil unless defined? $fin_y_origin_nm
+$gate_x_origin_nm = nil unless defined? $gate_x_origin_nm
+
+# Edges of `m` that bound it from below / the left: the horizontal (vertical)
+# edges that are not inside the layer shifted up (right) by one dbu.
+if $fin_y_origin_nm
+  fy = $fin_y_origin_nm.to_f
+  horz(fin).outside(fin.moved(0, 0.25.nm)).extended(:in => 27.nm).moved(0, -fy.nm).ongrid(0.25.nm, 27.nm)
+    .output("FIN.GRID.1", "DRM Table 3.3.1 (opt-in fin_y_origin_nm): FIN lower edge must be on the 27 nm vertical pitch from the declared origin")
+end
+if $gate_x_origin_nm
+  gx = $gate_x_origin_nm.to_f
+  vert(gate).outside(gate.moved(0.25.nm, 0)).extended(:in => 54.nm).moved(-gx.nm, 0).ongrid(54.nm, 0.25.nm)
+    .output("GATE.GRID.1", "DRM Table 3.4.1 (opt-in gate_x_origin_nm): GATE left edge must be on the 54 nm horizontal pitch from the declared origin")
+end
