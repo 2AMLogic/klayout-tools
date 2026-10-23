@@ -4,6 +4,11 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-23
 
+- **PR #4070**: klt artifact: write logical artifact:<key> URIs; drop the bucket setting
+- **PR #3913**: feat(benchmark): add report-layout for ledger-only layout comparison reports
+- **PR #3903**: test: add live OpenROAD klt sta tests for write_spef NAME_MAP and driving cell/load
+- **Issue #4069** (closed): klt artifact: write logical artifact:<key> URIs; drop the bucket setting
+- **Issue #3027** (closed): Layout-flow benchmark phase 4: comparison reporting and bounded CI
 - **PR #4068**: security: bump certifi 2026.7.22 -> 2026.10.19 in uv.lock
 - **Issue #4067** (closed): security: bump certifi 2026.7.22 -> 2026.10.19 in uv.lock
 - **PR #4066**: klt artifact: put/get/verify client for the fleet artifact store
