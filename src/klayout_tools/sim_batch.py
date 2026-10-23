@@ -1969,6 +1969,35 @@ def _resolve_batch_config(
     return config
 
 
+def dry_run_runner_check(
+    request: dict[str, Any], *, corner_count: int, timeout_s: float
+) -> dict[str, Any] | None:
+    """The pre-launch runner checks for ``klt sim --backend batch --dry-run``
+    (issue #4120): the same :func:`_resolve_batch_config` comparison a real
+    submit makes, so a request using a feature every published image predates
+    is refused (or, under ``warn``, diagnosed) without any S3 write or launch.
+
+    Returns the feature diagnostic a ``warn`` run reports, else ``None``. A
+    host with no resolvable batch configuration (no bucket, no provision
+    script) cannot run the check and is left to dry-run clean, as before;
+    only the runner version/feature refusals propagate.
+    """
+    from .sim import SimError
+
+    try:
+        config = _resolve_batch_config(
+            request, corner_count=corner_count, timeout_s=timeout_s
+        )
+    except SimError as exc:
+        if getattr(exc, "code", None) in (
+            BATCH_RUNNER_FEATURE_CODE,
+            BATCH_RUNNER_MISMATCH_CODE,
+        ):
+            raise
+        return None
+    return config.feature_diagnostic
+
+
 def _assess_published_runner(
     request: dict[str, Any], config: BatchConfig
 ) -> dict[str, Any]:
@@ -2614,7 +2643,9 @@ def submit_job(
     run = runner if runner is not None else _run_subprocess
     prefix = job_uri(config, job_id)
     if progress:
-        _progress(f"klt: batch job {job_id} submitting to {prefix}")
+        _progress(
+            f"klt: batch job {job_id} submitting to {report_job_uri(config, job_id)}"
+        )
     with tempfile.TemporaryDirectory(prefix="klt-batch-") as staging:
         for item in spec.inputs:
             local_path = item.local_path
