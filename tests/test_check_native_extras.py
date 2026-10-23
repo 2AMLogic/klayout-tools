@@ -78,3 +78,11 @@ def test_publish_workflow_runs_the_guard_before_publishing():
     text = (REPO_ROOT / ".github" / "workflows" / "publish.yml").read_text()
     assert "scripts/check_native_extras.py" in text
     assert text.index("check_native_extras.py") < text.index("uv publish")
+
+
+def test_publish_job_is_gated_on_the_guard_job_and_runs_no_repo_script():
+    text = (REPO_ROOT / ".github" / "workflows" / "publish.yml").read_text()
+    publish = text[text.index("\n  publish:\n") :]
+    assert "needs: [build, check-native-extras]" in publish
+    assert "check_native_extras.py" not in publish
+    assert "actions/checkout" not in publish
