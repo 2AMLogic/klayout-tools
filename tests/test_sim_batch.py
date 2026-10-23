@@ -2889,7 +2889,12 @@ def test_receipt_is_written_before_the_first_poll_and_records_terminal_state(
     assert seen_before_poll[0]["job_id"] == "job-1"
     final = json.loads(receipt_path.read_text())
     assert final["state"] == "done"
-    assert {"bucket", "region", "launched_at", "request_sha256"} <= set(final)
+    assert {"region", "launched_at", "request_sha256"} <= set(final)
+    for record in (final, seen_before_poll[0]):
+        raw = json.dumps(record)
+        assert "bucket" not in record
+        assert "s3://" not in raw
+        assert "arn:" not in raw
     assert not list(receipt_path.parent.glob("*.tmp.*"))
 
 
@@ -7316,7 +7321,11 @@ def test_shard_map_tracks_launch_state_and_is_self_describing(tmp_path, monkeypa
     _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
     fleet()
     document = json.loads(manifest_path.read_text())
-    assert document["bucket"] == FAKE_BUCKET
+    raw = manifest_path.read_text()
+    assert "bucket" not in document
+    assert FAKE_BUCKET not in raw
+    assert "s3://" not in raw
+    assert "arn:" not in raw
     for entry in document["shards"]:
         assert entry["state"] == "collected"
         assert all(entry[k] for k in ("submitted_at", "launched_at", "collected_at"))
@@ -7837,6 +7846,10 @@ def test_refused_shard_rolls_back_to_submitted_for_resume(tmp_path, monkeypatch)
     # The refused shard is "submitted" (resume launches it); the other,
     # launched and collected, is not.
     assert sorted(entry["state"] for entry in shards) == ["collected", "submitted"]
+    raw = (tmp_path / "artifacts" / "batch-shards.json").read_text()
+    assert "bucket" not in raw
+    assert "s3://" not in raw
+    assert "arn:" not in raw
 
 
 def test_capacity_watch_throttles_to_the_heartbeat_interval():
