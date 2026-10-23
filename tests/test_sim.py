@@ -15545,12 +15545,15 @@ def test_par_call_cap_log_classified():
     assert "par_call_cap" in sim.DIAGNOSTIC_CODES
 
 
-def test_par_call_cap_preflight_boundary():
+def test_par_call_cap_preflight_boundary(tmp_path):
     at_cap = "\n".join(f".meas dc m{i} FIND par('-i(v1)') AT={i}" for i in range(99))
-    assert sim._par_call_cap_preflight(at_cap) is None
+    deck = tmp_path / "deck.cir"
+    deck.write_text(at_cap)
+    assert sim._par_call_cap_preflight(str(deck), False) == []
     over = at_cap + "\n.meas dc m99 FIND par('-i(v1)') AT=99"
-    warning = sim._par_call_cap_preflight(over)
-    assert warning is not None
+    deck.write_text(over)
+    assert sim._par_call_cap_preflight(str(deck), True) == []
+    (warning,) = sim._par_call_cap_preflight(str(deck), False)
     assert warning["severity"] == "warning"
     assert warning["code"] == "par_call_cap"
     assert "100 par() calls" in warning["message"]

@@ -9615,10 +9615,7 @@ def _run_corner(
     )
 
     diagnostics: list[dict[str, str]] = list(include_diagnostics)
-    if not is_xyce:
-        par_warning = _par_call_cap_preflight(_read_log_file(deck_path))
-        if par_warning is not None:
-            diagnostics.append(par_warning)
+    diagnostics.extend(_par_call_cap_preflight(deck_path, is_xyce))
     started = time.monotonic()
     timed_out = False
     engine_aborted = False
@@ -12193,20 +12190,25 @@ _PAR_CALL_CAP_MESSAGE = (
 )
 
 
-def _par_call_cap_preflight(deck_text: str) -> dict[str, str] | None:
-    """A ``warning`` diagnostic when the emitted deck holds more than
-    :data:`_PAR_CALL_CAP` ``par(`` calls (issue #4084), else ``None``. Counts
-    on the already-written deck text; no extra netlist pass."""
-    count = len(_PAR_CALL_RE.findall(deck_text))
+def _par_call_cap_preflight(deck_path: str, is_xyce: bool) -> list[dict[str, str]]:
+    """A one-item ``warning`` diagnostic list when the emitted deck holds more
+    than :data:`_PAR_CALL_CAP` ``par(`` calls (issue #4084), else ``[]`` (always
+    ``[]`` for Xyce, which has no such cap). Counts on the already-written deck
+    text; no extra netlist pass."""
+    if is_xyce:
+        return []
+    count = len(_PAR_CALL_RE.findall(_read_log_file(deck_path)))
     if count <= _PAR_CALL_CAP:
-        return None
-    return {
-        "severity": "warning",
-        "code": "par_call_cap",
-        "message": f"the corner deck contains {count} par() calls; ngspice "
-        f"allows at most {_PAR_CALL_CAP} per input file and aborts the run "
-        "beyond that. To stay under the cap, " + _PAR_CALL_CAP_WORKAROUND,
-    }
+        return []
+    return [
+        {
+            "severity": "warning",
+            "code": "par_call_cap",
+            "message": f"the corner deck contains {count} par() calls; ngspice "
+            f"allows at most {_PAR_CALL_CAP} per input file and aborts the run "
+            "beyond that. To stay under the cap, " + _PAR_CALL_CAP_WORKAROUND,
+        }
+    ]
 
 
 def _classify_diagnostics(
