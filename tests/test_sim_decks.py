@@ -2091,3 +2091,74 @@ class TestRunnerDecksGate:
         message = report["units"][0]["diagnostics"][0]["message"]
         assert "missing required field: netlist" in message
         assert "predates decks[] support" in message
+
+
+# --------------------------------------------------------------------------- #
+# engine_version pin on deck requests (issue #3625)
+# --------------------------------------------------------------------------- #
+
+
+class TestEngineVersionPin:
+    def test_local_mismatch_fails_before_any_deck_runs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sim, "_probe_engine_version", lambda *_: "42")
+        request = deck_request(tmp_path, engine_version="44")
+        with pytest.raises(sim.SimError, match="requires ngspice 44") as exc:
+            run_local(tmp_path, request)
+        assert exc.value.code == sim.ENGINE_VERSION_UNMET_CODE
+        assert not (tmp_path / "out").exists()
+
+    @pytest.mark.parametrize(
+        ("pin", "found"), [("44", "44.2"), ("44.2", "44.2"), ("42", "42")]
+    )
+    def test_local_match_runs(self, tmp_path, monkeypatch, pin, found):
+        monkeypatch.setattr(sim, "_probe_engine_version", lambda *_: found)
+        report = run_local(tmp_path, deck_request(tmp_path, engine_version=pin))
+        assert report["unit_count"] == 2
+
+    def test_minor_pin_mismatch_and_unparseable_probe_fail_closed(
+        self, tmp_path, monkeypatch
+    ):
+        request = deck_request(tmp_path, engine_version="44.2")
+        monkeypatch.setattr(sim, "_probe_engine_version", lambda *_: "44.1")
+        with pytest.raises(sim.SimError) as exc:
+            run_local(tmp_path, request)
+        assert exc.value.code == sim.ENGINE_VERSION_UNMET_CODE
+        monkeypatch.setattr(sim, "_probe_engine_version", lambda *_: None)
+        with pytest.raises(sim.SimError, match="no ngspice version") as exc:
+            run_local(tmp_path, request)
+        assert exc.value.code == sim.ENGINE_VERSION_UNMET_CODE
+
+    @pytest.mark.parametrize("bad", [44, "v44", "44.2.1", ""])
+    def test_malformed_pin_rejected(self, tmp_path, bad):
+        request = deck_request(tmp_path, engine_version=bad)
+        with pytest.raises(sim.SimError, match="MAJOR") as exc:
+            run_local(tmp_path, request)
+        assert exc.value.code is None
+
+    def test_unpinned_request_does_not_probe(self, tmp_path, monkeypatch):
+        def must_not_probe(*_):
+            raise AssertionError("no probe without a pin")
+
+        monkeypatch.setattr(sim, "_probe_engine_version", must_not_probe)
+        report = run_local(tmp_path, deck_request(tmp_path))
+        assert report["unit_count"] == 2
+
+    @pytest.mark.parametrize(
+        ("reported", "ok"), [("46.1", True), ("42", False), (None, False)]
+    )
+    def test_offhost_pin_checked_against_report(
+        self, tmp_path, monkeypatch, reported, ok
+    ):
+        def fake_run(request, **_):
+            return {"environment": {"engine_version": reported}}
+
+        monkeypatch.setattr(sim, "run_deck_request", fake_run)
+        request = batch_deck_request(tmp_path, engine_version="46")
+        if ok:
+            assert run_local(tmp_path, request)["environment"] == {
+                "engine_version": reported
+            }
+            return
+        with pytest.raises(sim.SimError) as exc:
+            run_local(tmp_path, request)
+        assert exc.value.code == sim.ENGINE_VERSION_UNMET_CODE

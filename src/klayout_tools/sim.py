@@ -2600,6 +2600,17 @@ def _dispatch_deck_request(
         budget_s, plot_dir, fail_fast_probe, fail_on_diagnostic
     )
     request_dir = os.path.dirname(os.path.abspath(request_path))
+    # Issue #3625: the `engine_version` pin (issue #3041) applies to decks too
+    # -- they run on ngspice just like corners. Local backends are probed
+    # before anything runs; off-host ones are checked against the report below.
+    engine_version_pin = _validate_engine_version_pin(request)
+    if engine_version_pin is not None and resolved_backend not in _OFFHOST_BACKENDS:
+        _check_local_engine_version_pin(
+            engine_version_pin,
+            resolved_backend,
+            "ngspice",
+            _resolve_ngspice_binary(request.get("options") or {}, request_dir),
+        )
     # Issue #3168: a deck run always writes (and a remote/batch pull replaces)
     # unit trees under its outdir, so it owns that root unconditionally --
     # after the flag checks above, which must fail without locking anything.
@@ -2611,7 +2622,7 @@ def _dispatch_deck_request(
             None,
             persistent=True,
         )
-    return run_deck_request(
+    report = run_deck_request(
         request,
         request_dir=request_dir,
         backend=resolved_backend,
@@ -2621,6 +2632,13 @@ def _dispatch_deck_request(
         submit_only=submit_only,
         attach_job_id=attach_job_id,
     )
+    _check_offhost_engine_version_pin(
+        engine_version_pin,
+        resolved_backend,
+        "ngspice",
+        (report.get("environment") or {}).get("engine_version"),
+    )
+    return report
 
 
 #: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
