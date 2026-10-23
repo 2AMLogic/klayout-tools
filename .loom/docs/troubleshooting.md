@@ -8,7 +8,7 @@
 - [Stuck Agent Detection](#stuck-agent-detection)
 - [Sweep Dispatch Troubleshooting](#sweep-dispatch-troubleshooting)
 - [Overnight / long-running orchestration](#overnight--long-running-orchestration)
-- [Worker disk full: dispatch halted `disk_full` (#10973)](#worker-disk-full-dispatch-halted-disk_full-10973)
+- [Worker disk full (#10973)](#worker-disk-full-10973)
 <!-- toc:end -->
 
 ## Common Issues
@@ -639,9 +639,7 @@ failed, cancelled or watchdog-cancelled); a manual spawn's, or one kept at run
 end, is collected by the orphan sweep about 10 minutes after its owner
 exits. Agents must use it (or
 their worktree's `target/`) and never create one under `/tmp`, `~`, `~/.cache`
-or `.loom/target-*`; see `cargo-target-isolation.md`. The disk-headroom
-estimate per worktree (`LOOM_PER_WORKTREE_GB`) defaults to 8 GB, measured
-from full builds of this workspace.
+or `.loom/target-*`; see `cargo-target-isolation.md`.
 
 ### Building into a private target dir you can actually delete afterwards (#8460)
 
@@ -1187,8 +1185,8 @@ loom-daemon --version
 ./.loom/scripts/merge-pr.sh <PR> --dry-run
 ```
 
-**If no artifact carries the floor yet** — releases are cut at fleet-rollable
-boundaries, not on every `VERSION` bump (see
+**If no artifact carries the floor yet** — only a green `main` commit is released and
+not every `VERSION` bump gets a tag (see
 [`release-cadence.md`](release-cadence.md)), so `main` routinely runs ahead of
 the newest published release — you have two options, both of which keep the
 fail-closed guarantee:
@@ -1206,20 +1204,17 @@ Do **not** work around it by reverting the pull or by hand-editing the refusal
 out. The guard is the only thing standing between a stale binary and a silently
 mis-closed issue.
 
-**Preventing the next one**: `scripts/check-daemon-subcommand-versions.sh`
-fails CI when a shell script gains a NEW `loom-daemon <subcommand>` dependency
-without declaring its floor:
+**Preventing the next one**: declare the floor when a shell script gains a NEW
+`loom-daemon <subcommand>` dependency:
 
 ```
 # requires-daemon: <subcommand> >= <version>   <which PR added it>
 # requires-daemon: <subcommand> optional       <how it degrades>
 ```
 
-It is a one-way ratchet over `scripts/daemon-subcommand-baseline.txt` — every
-dependency that predates the convention is grandfathered, so the gate fires
-only at the moment someone moves the floor. Run
-`scripts/check-daemon-subcommand-versions.sh --help` for the full convention,
-and `--list` to see every daemon dependency in the tree.
+In the Loom source tree, `scripts/check-daemon-subcommand-versions.sh --help`
+documents the convention and `--list` shows every daemon dependency (the
+`install-compat check` CI step reads that list).
 
 #### The same refusal, from any stub (#8385)
 
@@ -1239,9 +1234,8 @@ found, exactly like the `tokens select --model` capability probe next to it.
 The behaviour is identical whether the stub delegates its exec to
 `loom_exec_script_helper` (`lib/script-helper.sh`, which execs through
 `loom_daemon_exec_checked`) or calls `loom_daemon_version_preflight <sub>
-"$BIN"` itself one line above its own `exec` (which is what a Shape-A `stub`
-in `scripts/shell-allowlist.txt` must do to keep that category — the cap
-requires the last code line to *be* the `exec`).
+"$BIN"` itself one line above its own `exec` (the Shape-A stub pattern, whose
+last code line *is* the `exec`).
 
 Two properties are worth knowing when you meet one:
 
@@ -3388,23 +3382,20 @@ legitimately changed for some other reason, `git diff <old-sha> <new-sha>`
 being empty confirms the content is identical (the #6646 incident's actual
 outcome) even though the identity changed.
 
-## Worker disk full: dispatch halted `disk_full` (#10973)
+## Worker disk full (#10973)
 
-**Symptom.** `host.health` shows `dispatch_halted: true` with a `halt_reason`
-starting `disk_full: <n> GB free`, `loom-daemon status` reports the host
-breaker `open` with the same reason, and `dispatch_sweep` is refused. On the
-2026-10-08 incident a worker's worktree volume reached 0 GB and, because that
-host was the ETA authority, fleet ETAs went `stale_inputs` for hours (ETA has since been removed from Loom, #11098).
+**Symptom.** A worker's worktree volume runs out of space. Builds and clones
+fail, and sweeps on that host error out. On the 2026-10-08 incident a worker's
+worktree volume reached 0 GB.
 
-**What the daemon does by itself.** Each work-finder tick samples free GB on
-the worktree-root volume. Two consecutive readings below the floor
-(`LOOM_DISK_FULL_HALT_GB`, default 3; `0` disables) halt new dispatch. The
-eager reclaim pass (#7512) gets the first low tick to free space, so a pass
-that frees space never halts. The halt clears only at `LOOM_DISK_FULL_RESUME_GB`
-(default twice the floor). An unmeasurable probe (`df` failure) never halts and
-clears an existing halt. Running sweeps drain; nothing is killed. Grep the
-daemon log for `disk_full_halt:` (edges) and `eager_reclaim:` (what each
-reclaim step freed).
+**What the daemon does by itself.** The daemon does not halt dispatch on low
+disk; the old disk-full halt and the host-distress breaker were removed by
+#12406. Admission is capped only by `autonomous.workFinder.maxConcurrent`.
+When free space on the worktree-root volume falls below the floor
+(`autonomous.worktreeReaper.diskWarnFreeGb`), the eager reclaim pass (#7512)
+runs and frees Loom-managed space. Grep the daemon log for `eager_reclaim:`
+(what each reclaim step freed). If a host keeps filling, lower its
+`maxConcurrent` in fleet config.
 
 **Alerts.** SigNoz pages before this point (`signoz/alerts/`): `host-disk-low`
 (warning: under 30 GB or 10%, or full within 6 h at the last hour's rate) and
@@ -3421,4 +3412,12 @@ heartbeats but its work finder has not ticked for 2x its own interval.
    manual run is the way past it.
 4. Reclaim only touches Loom-managed paths. Space held by anything else (logs,
    caches, another tenant) must be freed by hand.
-5. The halt lifts within a tick or two of free space reaching the resume level.
+   **The uv cache** (`~/.cache/uv`, 28 GB on one busy host, #12460) is such a
+   path: the daemon never prunes it, because uv is a host tool provisioned from
+   the worker spec (`infra/aws/loom-worker/` in 2AMLogic/2am), not by Loom.
+   uv has no size cap, so the bound is a periodic `uv cache prune --ci` (drops
+   pre-built wheels, keeps source-built ones; add it to the worker spec's
+   housekeeping, not to a sweep) or `UV_CACHE_DIR` pointed at a volume that can
+   fill harmlessly. `uv cache prune` alone removes only unreferenced entries.
+5. If the host keeps filling, lower its `autonomous.workFinder.maxConcurrent`
+   in fleet config.

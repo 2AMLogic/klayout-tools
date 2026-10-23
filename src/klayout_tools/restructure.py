@@ -67,6 +67,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .liberty_compare import Group, LibertyCompareError, parse_liberty_text
 from .sta import (
     DEFAULT_INPUT_TRANSITION_NS,
     DEFAULT_OUTPUT_LOAD_PF,
@@ -83,19 +84,6 @@ DEFAULT_MAX_ITERATIONS = 8
 #: "Drive-strength naming convention".
 _DRIVE_SUFFIX_RE = re.compile(r"^(?P<family>.+)_(?P<drive>\d+)$")
 
-#: Matches a liberty ``cell (name) {`` header; the block itself is read via
-#: brace matching from the character right after this match (see
-#: :func:`_match_brace`), not by this regex.
-_CELL_HEADER_RE = re.compile(r"\bcell\s*\(\s*(?P<name>[A-Za-z0-9_]+)\s*\)\s*\{")
-
-#: Matches a ``pin (name) {`` header *within* an already-isolated cell
-#: block. Liberty ``pg_pin (...)`` entries (power/ground) use a different
-#: keyword and are never matched here -- exactly the pins this module's
-#: pin-compatibility check should ignore (see the module docstring).
-_PIN_HEADER_RE = re.compile(r"\bpin\s*\(\s*(?P<name>[A-Za-z0-9_\[\]]+)\s*\)\s*\{")
-
-_DIRECTION_RE = re.compile(r"\bdirection\s*:\s*(?P<direction>input|output)\s*;")
-
 
 class RestructureError(Exception):
     """Raised when the restructuring loop cannot even be attempted: an
@@ -107,65 +95,52 @@ class RestructureError(Exception):
     """
 
 
-def _match_brace(text: str, open_index: int) -> int:
-    """Return the index of the ``}`` matching the ``{`` at ``text[open_index]``.
-
-    Raises :class:`RestructureError` for unbalanced braces -- a malformed
-    liberty file, never silently truncated.
-    """
-    depth = 0
-    for i in range(open_index, len(text)):
-        char = text[i]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return i
-    raise RestructureError("unbalanced braces while parsing liberty file")
+def _collect_pins(group: Group, pins: dict[str, str]) -> None:
+    """Add every ``pin (name) { direction : input|output; }`` under ``group``
+    (at any depth, so pins inside a ``bus``/``bundle`` are seen exactly as
+    the regex scan this replaced saw them) to ``pins``."""
+    for child in group.groups:
+        if child.kind == "pin" and child.args:
+            direction = child.attributes.get("direction")
+            if direction in ("input", "output"):
+                pins[child.args[0]] = direction
+        _collect_pins(child, pins)
 
 
 def _parse_liberty_pins(liberty_text: str) -> dict[str, dict[str, str]]:
     """Parse ``cell (name) { ... pin (name) { direction : input|output; ... } ... }``
-    blocks out of ``liberty_text``, returning ``{cell_name: {pin_name:
-    "input"|"output"}}``.
+    groups out of ``liberty_text`` (via :func:`~klayout_tools.liberty_compare.
+    parse_liberty_text`, so quoted cell/pin names are handled), returning
+    ``{cell_name: {pin_name: "input"|"output"}}``.
 
-    Deliberately minimal -- this is not a general liberty parser (that is
-    ``native/statime/src/liberty.rs``'s job, for NLDM timing tables this
-    module never needs): it extracts only what
-    :func:`_cell_pin_compatible` needs to verify a proposed upsize is
-    pin-compatible before it is ever proposed. Every other liberty
-    construct (timing arcs, ``pg_pin`` power/ground pins, ``bus``/
-    ``bundle`` groups) is ignored, not misparsed -- pins with no recognised
-    ``direction :`` line are simply absent from the result, and a
-    :class:`_cell_family_and_drive`-eligible cell with no pins at all
-    resolves to an empty pin dict (which the equality check in
-    :func:`_upsize_candidates` treats as pin-incompatible with anything
-    that has real pins, never as a false match).
+    It extracts only what :func:`_cell_pin_compatible` needs to verify a
+    proposed upsize is pin-compatible before it is ever proposed. Every other
+    liberty construct (timing arcs, ``pg_pin`` power/ground pins) is ignored
+    -- pins with no ``direction : input|output`` attribute are simply absent
+    from the result, and a :class:`_cell_family_and_drive`-eligible cell with
+    no pins at all resolves to an empty pin dict (which the equality check in
+    :func:`_upsize_candidates` treats as pin-incompatible with anything that
+    has real pins, never as a false match).
+
+    Raises :class:`RestructureError` when the text is not parseable liberty
+    (no ``library()`` group, or an unclosed group) -- never an empty result
+    that would read as "this library has no cells".
     """
+    try:
+        library = parse_liberty_text(liberty_text)
+    except LibertyCompareError as exc:
+        raise RestructureError(f"could not parse liberty: {exc}") from exc
     cells: dict[str, dict[str, str]] = {}
-    for header in _CELL_HEADER_RE.finditer(liberty_text):
-        cell_name = header.group("name")
-        open_index = header.end() - 1  # the '{' this header matched
-        close_index = _match_brace(liberty_text, open_index)
-        block = liberty_text[open_index : close_index + 1]
-
+    for cell in library.children("cell"):
+        if not cell.args:
+            continue
         pins: dict[str, str] = {}
-        for pin_header in _PIN_HEADER_RE.finditer(block):
-            pin_open = pin_header.end() - 1
-            try:
-                pin_close = _match_brace(block, pin_open)
-            except RestructureError:
-                continue
-            pin_block = block[pin_open : pin_close + 1]
-            direction_match = _DIRECTION_RE.search(pin_block)
-            if direction_match is not None:
-                pins[pin_header.group("name")] = direction_match.group("direction")
+        _collect_pins(cell, pins)
         # A later block for the same cell name (should not happen in a
         # well-formed liberty) overwrites rather than merges -- "last one
         # wins" matches how a real liberty parser would treat a duplicate
         # definition.
-        cells[cell_name] = pins
+        cells[cell.args[0]] = pins
     return cells
 
 

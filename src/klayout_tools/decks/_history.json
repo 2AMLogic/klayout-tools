@@ -245,6 +245,14 @@
       "git_tag": "v0.7.0",
       "git_commit": "0e2362bda7309829398a35d54efaa989d5806065",
       "package_version": "0.7.0"
+    },
+    {
+      "deck": "asap7",
+      "artifact": "drc_deck",
+      "content_hash": "sha256:a14ce43afe9f6e14091836a30476e01fa56990b1d1f31525b4a88da66610dbd0",
+      "git_tag": "v0.7.0",
+      "git_commit": "0e2362bda7309829398a35d54efaa989d5806065",
+      "package_version": "0.7.0"
     }
   ]
 }

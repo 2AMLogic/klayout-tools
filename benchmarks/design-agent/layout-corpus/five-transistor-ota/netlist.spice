@@ -1,0 +1,7 @@
+.subckt five_transistor_ota N1 TAIL_NODE VOUT vsubs
+M1 N1        g1 flt1 vsubs nfet L=1U   W=6U
+M2 TAIL_NODE g2 N1    vsubs nfet L=0.5U W=8U
+M3 flt3      g3 TAIL_NODE vsubs nfet L=1U   W=10U
+M4 flt4      g4 VOUT  vsubs nfet L=1U   W=6U
+M5 TAIL_NODE g5 VOUT  vsubs nfet L=0.5U W=8U
+.ends

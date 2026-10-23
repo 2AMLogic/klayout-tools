@@ -27,7 +27,7 @@ committed records carrying three identifier classes, written **by design** by
 each canary's own `sim/harness/report.py`:
 
 ```
-  - PDK: volare `gf180mcuD`, open_pdks `c6d73a3`
+  - PDK: volare `gf180mcuD`, open_pdks `f6eeac7`
     (/Users/<author>/.volare/gf180mcuD, found via search_root:~/.volare)
   - Host: macOS-26.6.1-arm64-arm-64bit-Mach-O (<hostname>)
 ```
@@ -330,4 +330,4 @@ that formats its own records can use just the pieces it needs.
 - **`lint-envelope` does not rewrite anything.** It reports the field; the fix
   (retype to `{path, scope}`, or drop the path for a content hash) is a
   per-field contract decision — see
-  [`../json-contract.md`](../json-contract.md) → "Output-artifact path fields".
+  [`../json-contract.md`](../json-contract.md) → "Path fields: envelope vs. plain string".

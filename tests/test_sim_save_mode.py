@@ -18,10 +18,11 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import _paths as paths_module
 from klayout_tools import sim, sim_remote
 
-pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+pytestmark = pytest.mark.usefixtures(
+    "real_build_identity_git", "bare_name_ngspice_resolution"
+)
 
 HAVE_NGSPICE = shutil.which("ngspice") is not None and (
     os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
@@ -32,20 +33,6 @@ _SKIP_NO_NGSPICE = pytest.mark.skipif(
 
 _CARD = {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
 _EXPR = {"name": "vpk", "expr": "vecmax(v(out))"}
-
-
-@pytest.fixture(autouse=True)
-def _bare_name_ngspice_resolution(monkeypatch):
-    """Same stub as `tests/test_sim.py`'s identically-named fixture: the
-    mocked-`subprocess.run` tests below need no real ngspice binary."""
-    real_which = shutil.which
-
-    def fake_which(cmd, *args, **kwargs):
-        if cmd == "ngspice":
-            return cmd
-        return real_which(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
 
 
 def _write_body(tmp_path: Path) -> Path:
@@ -80,7 +67,7 @@ def _capture_decks(monkeypatch) -> list[str]:
     """Stub `subprocess.run`; record the text of every deck it is handed."""
     decks: list[str] = []
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         decks.append(Path(cmd[cmd.index("-b") + 1]).read_text())
         if "-o" in cmd:
             Path(cmd[cmd.index("-o") + 1]).write_text("")
@@ -192,7 +179,7 @@ def test_run_sim_xyce_without_save_mode_is_unaffected(tmp_path, monkeypatch):
     )
     seen: list[list[str]] = []
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         seen.append(cmd)
         Path(cmd[cmd.index("-l") + 1]).write_text("")
         return fake_completed("Xyce Release 7.10.0\n")
@@ -451,6 +438,68 @@ def test_no_value_message_default_mode_is_unchanged():
     assert sim._no_value_message(_CARD, save_mode="all") == (
         "measurement 'vout' produced no value"
     )
+
+
+@pytest.mark.parametrize(
+    "code", ["timeout", "engine_killed", "timestep_too_small", "nonconvergence"]
+)
+def test_effective_save_mode_drops_hint_when_an_error_diagnostic_explains_it(code):
+    diagnostics = [{"severity": "error", "code": code, "message": "x"}]
+
+    assert sim._effective_save_mode("netlist", diagnostics) == "all"
+
+
+def test_effective_save_mode_keeps_hint_for_no_such_vector():
+    # `no_such_vector` is the very symptom the hint explains (a signal the
+    # netlist's `.save` cards no longer retain), so it must not suppress it.
+    diagnostics = [{"severity": "error", "code": "no_such_vector", "message": "x"}]
+
+    assert sim._effective_save_mode("netlist", diagnostics) == "netlist"
+
+
+@pytest.mark.parametrize("severity", ["info", "warning"])
+def test_effective_save_mode_keeps_hint_without_an_error_diagnostic(severity):
+    diagnostics = [{"severity": severity, "code": "note", "message": "x"}]
+
+    assert sim._effective_save_mode("netlist", diagnostics) == "netlist"
+    assert sim._effective_save_mode("netlist", []) == "netlist"
+    assert sim._effective_save_mode("all", []) == "all"
+
+
+def _no_value_messages(tmp_path, monkeypatch, run) -> list[str]:
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [_CARD],
+            "options": {"save_mode": "netlist"},
+        },
+    )
+    monkeypatch.setattr(sim.subprocess, "run", run)
+    report = sim.run_sim(str(request))
+    (corner,) = report["corners"]
+    return [d["message"] for d in corner["diagnostics"] if d["code"] == "measurement"]
+
+
+def test_timed_out_corner_measurement_has_no_save_mode_hint(tmp_path, monkeypatch):
+    def run(cmd, capture_output, text, timeout, cwd=None, env=None):
+        raise sim.subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+    messages = _no_value_messages(tmp_path, monkeypatch, run)
+
+    assert messages
+    assert not any('options.save_mode is "netlist"' in m for m in messages)
+
+
+def test_clean_run_with_missing_value_keeps_save_mode_hint(tmp_path, monkeypatch):
+    def run(cmd, capture_output, text, timeout, cwd=None, env=None):
+        return fake_completed("** ngspice-99\n")
+
+    messages = _no_value_messages(tmp_path, monkeypatch, run)
+
+    assert any('options.save_mode is "netlist"' in m for m in messages)
 
 
 @pytest.mark.parametrize("spec", [_CARD, _EXPR])

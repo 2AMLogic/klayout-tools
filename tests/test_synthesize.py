@@ -227,10 +227,12 @@ def _make_pdk_install(
             else:
                 operating_conditions = corner_name
             content = (
+                "library (fabricated) {\n"
                 f'    default_operating_conditions : "{operating_conditions}";\n'
                 f"    nom_process : {process};\n"
                 f"    nom_temperature : {temperature};\n"
                 f"    nom_voltage : {voltage};\n"
+                "}\n"
             )
             (lib_views_dir / f"{cell_library}{separator}{corner_name}.lib").write_text(
                 content, encoding="utf-8"
@@ -1301,6 +1303,16 @@ _GCD_LEAKAGE_NW = {
 }
 
 
+def _append_to_library(liberty_path: Path, body: str) -> None:
+    """Insert ``body`` inside the fabricated ``.lib``'s ``library (...) { }``
+    group (reopening it if it is already closed), so the file stays
+    well-formed liberty after every append."""
+    text = liberty_path.read_text(encoding="utf-8").rstrip()
+    if text.endswith("}"):
+        text = text[:-1]
+    liberty_path.write_text(text + body + "}\n", encoding="utf-8")
+
+
 def _append_leakage_cells(
     liberty_path: Path, leakage_by_cell: dict[str, float], unit: str = '"1nW"'
 ) -> None:
@@ -1313,9 +1325,7 @@ def _append_leakage_cells(
         lines.append(f"    cell ({cell_name}) {{\n")
         lines.append(f"        cell_leakage_power : {value_nw:.10f};\n")
         lines.append("    }\n")
-    liberty_path.write_text(
-        liberty_path.read_text(encoding="utf-8") + "".join(lines), encoding="utf-8"
-    )
+    _append_to_library(liberty_path, "".join(lines))
 
 
 def test_run_synthesize_reports_leakage_power_nw(tmp_path, monkeypatch):
@@ -1416,24 +1426,24 @@ def test_run_synthesize_leakage_power_nw_partial_coverage(tmp_path, monkeypatch)
 # --------------------------------------------------------------------------- #
 
 
+def _in_library(body: str) -> str:
+    return "library (t) {\n" + body + "}\n"
+
+
 def test_leakage_unit_scale_to_nw_quoted():
-    assert synthesize._leakage_unit_scale_to_nw(
-        '    leakage_power_unit : "1nW";\n'
-    ) == pytest.approx(1.0)
+    assert synthesize._leakage_unit_scale_to_nw("1nW") == pytest.approx(1.0)
 
 
 def test_leakage_unit_scale_to_nw_unquoted_microwatt():
-    assert synthesize._leakage_unit_scale_to_nw(
-        "  leakage_power_unit : 1uW ;\n"
-    ) == pytest.approx(1000.0)
+    assert synthesize._leakage_unit_scale_to_nw("1uW") == pytest.approx(1000.0)
 
 
 def test_leakage_unit_scale_to_nw_defaults_to_one_when_absent():
-    assert synthesize._leakage_unit_scale_to_nw("library(x) {}\n") == 1.0
+    assert synthesize._leakage_unit_scale_to_nw(None) == 1.0
 
 
 def test_leakage_unit_scale_to_nw_defaults_to_one_when_unrecognised():
-    assert synthesize._leakage_unit_scale_to_nw('leakage_power_unit : "1Zw";\n') == 1.0
+    assert synthesize._leakage_unit_scale_to_nw("1Zw") == 1.0
 
 
 def test_parse_liberty_leakage_nw_multiple_cells():
@@ -1446,7 +1456,7 @@ def test_parse_liberty_leakage_nw_multiple_cells():
         "        cell_leakage_power : 0.002;\n"
         "    }\n"
     )
-    leakage_by_cell = synthesize._parse_liberty_leakage_nw(liberty_text)
+    leakage_by_cell = synthesize._parse_liberty_leakage_nw(_in_library(liberty_text))
     assert leakage_by_cell == {
         "buf_1": pytest.approx(0.001),
         "buf_2": pytest.approx(0.002),
@@ -1469,7 +1479,7 @@ def test_parse_liberty_leakage_nw_cell_without_scalar_is_absent():
         "        }\n"
         "    }\n"
     )
-    leakage_by_cell = synthesize._parse_liberty_leakage_nw(liberty_text)
+    leakage_by_cell = synthesize._parse_liberty_leakage_nw(_in_library(liberty_text))
     assert leakage_by_cell == {"buf_1": pytest.approx(0.001)}
     assert "buf_2" not in leakage_by_cell
 
@@ -1484,8 +1494,70 @@ def test_parse_liberty_leakage_nw_last_definition_wins():
         "        cell_leakage_power : 0.005;\n"
         "    }\n"
     )
-    leakage_by_cell = synthesize._parse_liberty_leakage_nw(liberty_text)
+    leakage_by_cell = synthesize._parse_liberty_leakage_nw(_in_library(liberty_text))
     assert leakage_by_cell == {"buf_1": pytest.approx(0.005)}
+
+
+def test_parse_liberty_leakage_nw_reads_unit_from_library_attribute():
+    """The unit comes from the library's own `leakage_power_unit` (quoted or
+    bare), converted to nW -- not from some later nested occurrence."""
+    liberty_text = _in_library(
+        "    leakage_power_unit : 1uW ;\n"
+        "    cell (buf_1) {\n"
+        "        cell_leakage_power : 0.5;\n"
+        "    }\n"
+    )
+    assert synthesize._parse_liberty_leakage_nw(liberty_text) == {
+        "buf_1": pytest.approx(500.0)
+    }
+
+
+def test_parse_liberty_leakage_nw_quoted_cell_names():
+    """A real volare sky130 liberty quotes cell names."""
+    liberty_text = _in_library(
+        '    leakage_power_unit : "1nW";\n'
+        '    cell ("sky130_fd_sc_hd__buf_1") {\n'
+        "        cell_leakage_power : 0.001;\n"
+        "    }\n"
+    )
+    assert synthesize._parse_liberty_leakage_nw(liberty_text) == {
+        "sky130_fd_sc_hd__buf_1": pytest.approx(0.001)
+    }
+
+
+def test_parse_liberty_leakage_nw_later_cell_without_scalar_keeps_earlier_value():
+    liberty_text = _in_library(
+        "    cell (buf_1) {\n        cell_leakage_power : 0.001;\n    }\n"
+        "    cell (buf_1) {\n        area : 1.0;\n    }\n"
+    )
+    assert synthesize._parse_liberty_leakage_nw(liberty_text) == {
+        "buf_1": pytest.approx(0.001)
+    }
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "",
+        "cell (buf_1) { cell_leakage_power : 0.001; }\n",  # no library()
+        "library (t) {\n cell (buf_1) {\n cell_leakage_power : 0.001;\n }\n",
+    ],
+)
+def test_parse_liberty_leakage_nw_malformed_is_empty_not_zero(malformed):
+    """Unparseable liberty yields no entries (so `_compute_leakage` reports
+    `None`), never a fabricated zero."""
+    assert synthesize._parse_liberty_leakage_nw(malformed) == {}
+
+
+def test_liberty_cell_names_quoted_and_malformed(tmp_path):
+    quoted = _write(
+        tmp_path / "q.lib",
+        'library (x) {\n cell ("a__b_1") {\n }\n cell (c) {\n }\n}\n',
+    )
+    assert synthesize._liberty_cell_names(quoted) == frozenset({"a__b_1", "c"})
+    # Unclosed library: cannot establish the cell list -> None, not a guess.
+    unclosed = _write(tmp_path / "u.lib", "library (x) {\n cell (a) {\n }\n")
+    assert synthesize._liberty_cell_names(unclosed) is None
 
 
 def test_compute_leakage_unreadable_liberty_degrades_to_none(tmp_path):
@@ -1497,7 +1569,9 @@ def test_compute_leakage_unreadable_liberty_degrades_to_none(tmp_path):
 
 def test_compute_leakage_no_entries_at_all_degrades_to_none(tmp_path):
     liberty_path = tmp_path / "empty.lib"
-    liberty_path.write_text('leakage_power_unit : "1nW";\n', encoding="utf-8")
+    liberty_path.write_text(
+        _in_library('    leakage_power_unit : "1nW";\n'), encoding="utf-8"
+    )
     total, by_type = synthesize._compute_leakage(str(liberty_path), {"buf_1": 3})
     assert (total, by_type) == (None, None)
 
@@ -1509,10 +1583,12 @@ def test_compute_leakage_empty_instance_counts_is_zero_not_none(tmp_path):
     data available for an instantiated type", not "nothing to sum"."""
     liberty_path = tmp_path / "lib.lib"
     liberty_path.write_text(
-        '    leakage_power_unit : "1nW";\n'
-        "    cell (buf_1) {\n"
-        "        cell_leakage_power : 0.001;\n"
-        "    }\n",
+        _in_library(
+            '    leakage_power_unit : "1nW";\n'
+            "    cell (buf_1) {\n"
+            "        cell_leakage_power : 0.001;\n"
+            "    }\n"
+        ),
         encoding="utf-8",
     )
     total, by_type = synthesize._compute_leakage(str(liberty_path), {})
@@ -2418,6 +2494,24 @@ def test_read_stats_cyclic_modules_graph_terminates(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def test_generated_script_reads_sv_sources_with_sv_front_end(tmp_path, monkeypatch):
+    """Issue #3797: `.sv` sources get `read_verilog -sv`; `.v` stay plain."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _write(tmp_path / "c.sv", "module c(input logic clk); endmodule\n")
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["sources"] = ["gcd.v", "c.sv"]
+    _write_request(Path(request_path), request)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    script_text = Path(_abs_path(report["script_path"], tmp_path)).read_text(
+        encoding="utf-8"
+    )
+    assert "read_verilog gcd.v" in script_text
+    assert "read_verilog -sv c.sv" in script_text
+
+
 def test_generated_script_passes_constr_and_dont_use(tmp_path, monkeypatch):
     """The default (no `clock_period_ns`) run passes `-constr` -- which is
     what unlocks ABC's `buffer`/`upsize`/`dnsize` sizing steps and its
@@ -2492,6 +2586,108 @@ def test_clock_period_ns_must_be_positive(tmp_path, monkeypatch, clock_period_ns
         _base_request(constraints={"clock_period_ns": clock_period_ns}),
     )
     with pytest.raises(SynthesizeError, match="greater than zero"):
+        run_synthesize(request_path)
+
+
+def _clocks_request(tmp_path, monkeypatch, constraints):
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    return _write_request(
+        tmp_path / "request.json", _base_request(constraints=constraints)
+    )
+
+
+def test_clocks_list_uses_tightest_period_and_is_echoed(tmp_path, monkeypatch):
+    request_path = _clocks_request(
+        tmp_path,
+        monkeypatch,
+        {
+            "clocks": [
+                {"port": "clk_a", "period_ns": 5},
+                {"port": "clk_b", "period_ns": 2.5},
+            ]
+        },
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["timing"]["delay_target_ps"] == 2500
+    assert report["clock_targets"] == {
+        "clocks": [
+            {"port": "clk_a", "period_ns": 5},
+            {"port": "clk_b", "period_ns": 2.5},
+        ],
+        "delay_target_ps": 2500,
+        "delay_target_basis": "min_clocks_period_ns",
+        "per_clock_enforced": False,
+    }
+
+
+def test_clock_period_ns_alone_reports_single_global_basis(tmp_path, monkeypatch):
+    request_path = _clocks_request(tmp_path, monkeypatch, {"clock_period_ns": 4})
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["clock_targets"]["delay_target_basis"] == "clock_period_ns"
+    assert report["clock_targets"]["delay_target_ps"] == 4000
+    assert report["clock_targets"]["clocks"] == []
+
+
+def test_explicit_clock_period_ns_wins_over_clocks(tmp_path, monkeypatch):
+    request_path = _clocks_request(
+        tmp_path,
+        monkeypatch,
+        {"clock_period_ns": 3, "clocks": [{"port": "clk", "period_ns": 2}]},
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["timing"]["delay_target_ps"] == 3000
+    assert report["clock_targets"]["delay_target_basis"] == "clock_period_ns"
+    assert report["clock_targets"]["clocks"] == [{"port": "clk", "period_ns": 2}]
+
+
+def test_no_constraints_reports_basis_none(tmp_path, monkeypatch):
+    request_path = _clocks_request(tmp_path, monkeypatch, {})
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["clock_targets"]["delay_target_basis"] == "none"
+    assert report["clock_targets"]["delay_target_ps"] is None
+
+
+@pytest.mark.parametrize(
+    ("clocks", "message"),
+    [
+        ("clk", "non-empty array"),
+        ([], "non-empty array"),
+        (["clk"], r"clocks\[0\] must be a"),
+        ([{"port": "", "period_ns": 1}], "port must be a non-empty string"),
+        ([{"port": "c", "period_ns": "x"}], "period_ns must be a positive number"),
+        ([{"port": "c", "period_ns": True}], "period_ns must be a positive number"),
+        ([{"port": "c", "period_ns": 0}], "greater than zero"),
+        ([{"port": "c", "period_ns": 1, "extra": 1}], "unknown key"),
+        (
+            [{"port": "c", "period_ns": 1}, {"port": "c", "period_ns": 2}],
+            "more than once",
+        ),
+    ],
+)
+def test_clocks_validation_errors(tmp_path, monkeypatch, clocks, message):
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clocks": clocks}),
+    )
+    with pytest.raises(SynthesizeError, match=message):
         run_synthesize(request_path)
 
 
@@ -2591,10 +2787,8 @@ def _append_liberty_cells(
     actually be matched against it (issue #2382). Deliberately bare: the
     zero-match check reads only the group *names*, never a pin or timing
     model."""
-    liberty_path.write_text(
-        liberty_path.read_text(encoding="utf-8")
-        + "".join(f"    cell ({name}) {{\n    }}\n" for name in cell_names),
-        encoding="utf-8",
+    _append_to_library(
+        liberty_path, "".join(f"    cell ({name}) {{\n    }}\n" for name in cell_names)
     )
 
 
@@ -5370,7 +5564,7 @@ def test_check_synthesize_report_clean_pass(tmp_path, monkeypatch):
     assert result["mode"] == "check"
     assert result["report"] == report_path
     assert result["status"] == "match"
-    assert len(result["checks"]) == 2
+    assert len(result["checks"]) == 3
     assert all(check["match"] for check in result["checks"])
 
 
@@ -5839,3 +6033,142 @@ def test_cli_text_format_renders_memory_mapping_and_blackboxes(
     assert "memory_mapping: lowered_to_logic" in out
     assert "gcd: lowered_to_logic (elaborated=1, pre_lowering=1, final=0)" in out
     assert "blackbox_modules (area not included): hm" in out
+
+
+# --------------------------------------------------------------------------- #
+# Issue #3466: `parameters` override + unknown top-level request keys
+# --------------------------------------------------------------------------- #
+
+
+def test_load_request_rejects_unknown_top_level_key(tmp_path):
+    path = _write_request(
+        tmp_path / "request.json", _base_request(paramters={"LAGS": 8})
+    )
+    with pytest.raises(SynthesizeError, match="unknown field 'paramters'"):
+        load_request(path)
+
+
+def test_load_request_tolerates_comment_and_schema(tmp_path):
+    path = _write_request(
+        tmp_path / "request.json",
+        _base_request(_comment="note", schema="klt.synthesize.request/1"),
+    )
+    assert load_request(path)["hdl_toplevel"] == "gcd"
+
+
+@pytest.mark.parametrize(
+    "parameters, match",
+    [
+        ([1], "must be a JSON object"),
+        ({"": 1}, "Verilog identifiers"),
+        ({"1BAD": 1}, "Verilog identifiers"),
+        ({"W": True}, "integer or a string"),
+        ({"W": 1.5}, "integer or a string"),
+        ({"W": [1]}, "integer or a string"),
+        ({"MODE": 'a"; shell rm'}, "outside the supported set"),
+        ({"MODE": "a\nb"}, "outside the supported set"),
+    ],
+)
+def test_run_synthesize_rejects_malformed_parameters(tmp_path, parameters, match):
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    path = _write_request(
+        tmp_path / "request.json", _base_request(parameters=parameters)
+    )
+    with pytest.raises(SynthesizeError, match=match):
+        run_synthesize(path)
+
+
+def test_run_synthesize_applies_and_echoes_parameters(tmp_path, monkeypatch):
+    _setup_success_env(tmp_path, monkeypatch)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(parameters={"LAGS": 8, "MODE": "fast"}),
+    )
+    _stub_yosys_success(monkeypatch)
+    scripts = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["parameters"] == {"LAGS": 8, "MODE": "fast"}
+    assert report["provenance"]["parameters"] == {"LAGS": 8, "MODE": "fast"}
+    lines = Path(scripts[0]).read_text(encoding="utf-8").splitlines()
+    chparam = 'chparam -set LAGS 8 -set MODE "fast" gcd'
+    assert chparam in lines
+    assert lines.index(chparam) < lines.index("hierarchy -check -top gcd")
+    first_read = next(i for i, ln in enumerate(lines) if ln.startswith("read_verilog"))
+    assert first_read < lines.index(chparam)
+
+
+def test_run_synthesize_without_parameters_emits_no_chparam(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    scripts = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["parameters"] == {}
+    assert report["provenance"]["parameters"] == {}
+    assert "chparam" not in Path(scripts[0]).read_text(encoding="utf-8")
+
+
+def test_check_synthesize_report_detects_parameter_drift(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report_path = _write_report(
+        tmp_path / "gcd.synth.json", run_synthesize(request_path)
+    )
+
+    _write_request(tmp_path / "request.json", _base_request(parameters={"LAGS": 8}))
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["parameters"]["match"] is False
+    assert by_field["parameters"]["expected"] == {}
+    assert by_field["parameters"]["actual"] == {"LAGS": 8}
+    assert by_field["provenance.input.content_hash"]["match"] is True
+
+
+def test_check_synthesize_report_treats_missing_parameters_as_empty(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    committed = run_synthesize(request_path)
+    del committed["parameters"]  # a report predating the field
+    report_path = _write_report(tmp_path / "gcd.synth.json", committed)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "match"
+
+
+def test_equivalence_gate_forwards_parameters_to_gold_side(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    def fake_run_equiv(request_path, timeout_s=None):
+        captured.update(json.loads(Path(request_path).read_text(encoding="utf-8")))
+        return {
+            "status": "equivalent",
+            "engine": "yosys",
+            "engine_version": "0",
+            "timeout_s": 1,
+            "elapsed_s": 0.1,
+            "artifacts": {},
+        }
+
+    monkeypatch.setattr(synthesize, "run_equiv", fake_run_equiv)
+    kwargs = dict(
+        synthesize_output_dir=str(tmp_path),
+        resolved_sources=["a.v"],
+        hdl_toplevel="gcd",
+        netlist_path="n.v",
+        liberty_path="l.lib",
+        timeout_s=None,
+    )
+    synthesize._verify_synthesis_equivalence(**kwargs, parameters={"W": 8})
+    assert captured["gold"]["parameters"] == {"W": 8}
+    assert "parameters" not in captured["gate"]
+
+    synthesize._verify_synthesis_equivalence(**kwargs)
+    assert "parameters" not in captured["gold"]

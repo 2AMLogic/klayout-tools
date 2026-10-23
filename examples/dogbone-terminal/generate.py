@@ -54,6 +54,7 @@ from klayout_tools.gen import (
     CONTACT_SIZE_UM,
     ENCLOSURE_MARGIN_UM,
     UNIT_MIN_W_UM,
+    _sd_implant_margin_um,
     generate,
 )
 
@@ -89,6 +90,13 @@ DEVICE_SPACING_UM = 2.0
 
 DBU_UM = 0.001
 
+#: Minimum gate-poly extension past the narrow channel, per family (issue
+#: #2936). sky130's curated deck checks `poly.8` (0.13um), which the pad-
+#: height poly alone misses (only (0.42 - 0.30) / 2 = 0.06um); 0.15um gives
+#: margin. gf180mcu's curated deck transcribes no equivalent, so its poly
+#: stays at the pad height (committed geometry unchanged).
+_GATE_ENDCAP_UM = {"sky130": 0.15, "gf180mcu": 0.0}
+
 #: `active`/`poly`/`contact`/`metal` role layer/datatype pairs, one set per
 #: family -- the exact pairs `klayout_tools.gen._PDK_ROLE_LAYERS` resolves
 #: `mos_array`/`diff_pair` to, so this hand-drawn device merges into the
@@ -105,6 +113,11 @@ _ROLE_LAYERS = {
         "poly": (30, 0),  # Poly2
         "contact": (33, 0),  # Contact
         "metal": (34, 0),  # Metal1
+        # gf180mcu's DF.12 (`comp.coverage.1`) forbids Comp not covered by
+        # Nplus/Pplus, so the device needs its n+ source/drain implant --
+        # the same layer `mos_array` draws for an NMOS unit. sky130 has no
+        # such rule (and no implant in its curated deck), so it omits this.
+        "implant": (32, 0),  # Nplus
     },
 }
 
@@ -127,7 +140,7 @@ def _box(x0_um: float, y0_um: float, x1_um: float, y1_um: float) -> kdb.Box:
 
 
 def _dogbone_boxes_um(
-    w_channel_um: float, l_um: float
+    w_channel_um: float, l_um: float, endcap_um: float = 0.0
 ) -> tuple[dict[str, list[tuple[float, float, float, float]]], float]:
     """Per-role box lists (um) for one dog-bone unit device, plus its total
     footprint length along the source-to-drain axis.
@@ -190,7 +203,14 @@ def _dogbone_boxes_um(
 
     gate_x0_um = x_um
     boxes["active"].append((x_um, y0_ch_um, x_um + l_um, y1_ch_um))
-    boxes["poly"].append((gate_x0_um, y0_pad_um, gate_x0_um + l_um, y1_pad_um))
+    boxes["poly"].append(
+        (
+            gate_x0_um,
+            min(y0_pad_um, y0_ch_um - endcap_um),
+            gate_x0_um + l_um,
+            max(y1_pad_um, y1_ch_um + endcap_um),
+        )
+    )
     x_um += l_um
 
     boxes["active"].append((x_um, y0_ch_um, x_um + SHOULDER_UM, y1_ch_um))
@@ -206,11 +226,16 @@ def _draw_dogbone(layout: kdb.Layout, cell: kdb.Cell, family: str) -> float:
     """Draw one dog-bone unit device into `cell` and return its footprint
     length (um) along the source-to-drain axis."""
     layers = _ROLE_LAYERS[family]
-    boxes, total_len_um = _dogbone_boxes_um(W_CHANNEL_UM, L_UM)
+    boxes, total_len_um = _dogbone_boxes_um(W_CHANNEL_UM, L_UM, _GATE_ENDCAP_UM[family])
     for role, box_list in boxes.items():
         layer_index = layout.layer(*layers[role])
         for x0_um, y0_um, x1_um, y1_um in box_list:
             cell.shapes(layer_index).insert(_box(x0_um, y0_um, x1_um, y1_um))
+    if "implant" in layers:
+        m = _sd_implant_margin_um(family)
+        cell.shapes(layout.layer(*layers["implant"])).insert(
+            _box(-m, -m, total_len_um + m, CONTACT_REGION_UM + m)
+        )
     return total_len_um
 
 

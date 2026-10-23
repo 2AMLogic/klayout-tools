@@ -34,6 +34,14 @@ name: Place-and-route smoke (LVS/DRC)
 
 on:
   workflow_dispatch:
+    inputs:
+      portable_paths:
+        description: >-
+          Run the smoke with "portable_paths": true on the route request
+          (SMOKE_PORTABLE_PATHS=1; issue #3874) and lint the envelope with
+          `klt env-provenance lint-envelope`.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -143,4 +151,7 @@ jobs:
         env:
           PDK: sky130A
           PDK_ROOT: /home/runner/.ciel
+          # Unset (not "0") when the input is false, so a default run's
+          # route request stays byte-identical to before the input existed.
+          SMOKE_PORTABLE_PATHS: ${{ inputs.portable_paths && '1' || '' }}
         run: scripts/place-and-route-smoke.sh gcd mult8

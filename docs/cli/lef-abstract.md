@@ -156,8 +156,8 @@ view rather than a hole-aware multi-`RECT` decomposition).
 
 ```json
 {
-  "schema_version": 1,
-  "file": "analog_block.gds",
+  "schema_version": 2,
+  "file": {"path": "analog_block.gds", "scope": "repo"},
   "socket": "analog_block.socket.json",
   "output": "analog_block.lef",
   "macro_name": "analog_block",
@@ -195,7 +195,8 @@ view rather than a hole-aware multi-`RECT` decomposition).
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
-| `file` / `socket` | string | Echo of the input paths exactly as provided. |
+| `file` | object | (issue #2703) The input layout as `{path, scope}` (`schema_version` 2): repo-relative `path` with `scope: "repo"`, or `path: null` with `scope: "external"` outside any repo. |
+| `socket` | string | Echo of the socket path exactly as provided. |
 | `output` | string | The LEF path actually written. |
 | `macro_name` | string | Echo of `--macro-name`. |
 | `class` | string | Echo of `--class` (default `"BLOCK"`). |

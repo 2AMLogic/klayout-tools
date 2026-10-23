@@ -109,6 +109,7 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from typing import Any
 
 from . import env_provenance
@@ -132,7 +133,10 @@ from .sim import (
     _needs_models_lib,
     _resolve_corner_section_libs,
     _resolve_models_lib,
+    _resolve_netlist_include,
     _resolve_osdi_preload,
+    _scale_supply_waveforms,
+    _supply_alter_lines,
 )
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -241,6 +245,7 @@ _ELEMENT_TERMINALS = {
     "D": 2,
     "E": 4,
     "G": 4,
+    "B": 2,
     "Q": 3,
     "J": 3,
     "M": 4,
@@ -289,7 +294,17 @@ class MosInstance:
 class ParsedNetlist:
     """Everything the structural checks need out of one netlist body."""
 
-    __slots__ = ("devices", "nodes", "node_degree", "sources", "params", "unresolved")
+    __slots__ = (
+        "devices",
+        "nodes",
+        "node_degree",
+        "sources",
+        "params",
+        "unresolved",
+        "unexpanded",
+        "expanded_instances",
+        "expansion_truncated",
+    )
 
     def __init__(self) -> None:
         self.devices: list[MosInstance] = []
@@ -304,6 +319,14 @@ class ParsedNetlist:
         #: instance names that look like MOS devices but whose channel type
         #: could not be determined
         self.unresolved: list[str] = []
+        #: ``X`` instances that are neither a recognised MOS model nor a
+        #: resolvable user subcircuit -- their contents are not linted
+        self.unexpanded: list[str] = []
+        #: user-subcircuit instances expanded so far (bounded by
+        #: ``_MAX_EXPANDED_INSTANCES``)
+        self.expanded_instances = 0
+        #: set once the expansion cap was hit; later subckt calls are skipped
+        self.expansion_truncated = False
 
 
 def _strip_comment(line: str) -> str:
@@ -391,7 +414,11 @@ def _op_candidates(instance: str, model: str, override: str | None) -> list[str]
     """ngspice op-point instance paths to probe for one device, most likely
     first. See this module's docstring for why more than one is probed."""
     lowered = instance.lower()
-    if lowered.startswith("x"):
+    # A device inside a user subcircuit carries its instance path
+    # (`xdut.m1`); ngspice names its vectors `m.<path>` and, for a PDK cell,
+    # `m.<path>.<inner element>`.
+    leaf = lowered.rsplit(".", 1)[-1]
+    if leaf.startswith("x"):
         inner = (
             [override]
             if override
@@ -399,31 +426,156 @@ def _op_candidates(instance: str, model: str, override: str | None) -> list[str]
         )
         return [f"m.{lowered}.{name}" for name in inner]
     # A plain `M` element's vectors live directly under its own name.
-    return [override] if override else [lowered]
+    if override:
+        return [override]
+    return [f"m.{lowered}" if "." in lowered else lowered]
 
 
-def parse_netlist(text: str, model_overrides: dict[str, Any]) -> ParsedNetlist:
+#: Hard caps on the hierarchy walk: nesting depth of user subcircuit calls,
+#: the number of files one netlist may pull in through ``.include``, and the
+#: total number of subcircuit instances expanded (a deep fan-out hierarchy
+#: grows exponentially even within the depth cap).
+_MAX_SUBCKT_DEPTH = 16
+_MAX_INCLUDE_FILES = 64
+_MAX_EXPANDED_INSTANCES = 20000
+
+_SUBCKT_CARD_RE = re.compile(r"^\.subckt\b", re.IGNORECASE)
+_ENDS_CARD_RE = re.compile(r"^\.(ends|eom)\b", re.IGNORECASE)
+_INCLUDE_CARD_RE = re.compile(r"^\.(include|inc)\s+(.+)$", re.IGNORECASE)
+
+
+class _SubcktDef:
+    """A user ``.subckt`` definition collected from the netlist or an include."""
+
+    __slots__ = ("name", "ports", "lines", "from_include")
+
+    def __init__(
+        self, name: str, ports: list[str], lines: list[str], from_include: bool
+    ) -> None:
+        self.name = name
+        self.ports = ports
+        self.lines = lines
+        self.from_include = from_include
+
+
+class _IncludeState:
+    """Bookkeeping for one parse's include expansion."""
+
+    __slots__ = ("seen", "base_dir")
+
+    def __init__(self, base_dir: str | None) -> None:
+        self.seen: set[str] = set()
+        self.base_dir = base_dir
+
+
+def _expand_includes(
+    lines: list[str], base_dir: str | None, state: _IncludeState
+) -> list[str]:
+    """Replace each resolvable ``.include``/``.inc`` card with the logical
+    lines of the file it names (recursively, relative to that file's own
+    directory). A reference that is unresolved, uses a ``$VAR``, or would
+    exceed the file cap is dropped rather than failing -- the structural lint
+    never assumes more than it can read."""
+    out: list[str] = []
+    for line in lines:
+        card = _INCLUDE_CARD_RE.match(line)
+        if card is None:
+            out.append(line)
+            continue
+        if base_dir is None:
+            continue
+        reference = card.group(2).strip().strip("\"'")
+        if "$" in reference:
+            continue
+        path = _resolve_netlist_include(reference, base_dir)
+        if path is None:
+            continue
+        real = os.path.realpath(path)
+        if real in state.seen or len(state.seen) >= _MAX_INCLUDE_FILES:
+            continue
+        state.seen.add(real)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            continue
+        out.extend(_expand_includes(_logical_lines(text), os.path.dirname(path), state))
+    return out
+
+
+def _split_subckts(
+    lines: list[str], defs: dict[str, _SubcktDef], from_include: bool
+) -> list[str]:
+    """Register every ``.subckt`` block in ``lines`` into ``defs`` (nested
+    definitions are registered globally) and return the top-level lines."""
+    top: list[str] = []
+    stack: list[_SubcktDef] = []
+    for line in lines:
+        if _SUBCKT_CARD_RE.match(line):
+            tokens = _positional_tokens(line)
+            ports = [tok.lower() for tok in tokens[2:]]
+            if "params:" in ports:
+                ports = ports[: ports.index("params:")]
+            name = tokens[1].lower() if len(tokens) > 1 else ""
+            definition = _SubcktDef(name, ports, [], from_include)
+            if name:
+                defs.setdefault(name, definition)
+            stack.append(definition)
+            continue
+        if _ENDS_CARD_RE.match(line):
+            if stack:
+                stack.pop()
+            continue
+        if stack:
+            stack[-1].lines.append(line)
+        else:
+            top.append(line)
+    return top
+
+
+def parse_netlist(
+    text: str, model_overrides: dict[str, Any], base_dir: str | None = None
+) -> ParsedNetlist:
     """Parse a ``klt sim``-convention netlist *body* into the structural
-    facts the lint needs: top-level MOS instances with their four terminals,
-    every node and its terminal count, and the independent voltage sources
-    (which is how the supply rails are identified).
+    facts the lint needs: MOS instances with their four terminals, every
+    node and its terminal count, and the independent voltage sources (which
+    is how the supply rails are identified).
 
-    Only the body's **top level** is walked: device lines inside a
-    ``.subckt``/``.ends`` block define a subcircuit, they are not instances,
-    and an ``X`` call to such a block is reported as one device the way any
-    other PDK-style call is. ``.control``/``.end`` cards are not expected
-    here at all (``klt sim`` generates those -- see ``sim.py``'s "Netlist
-    convention").
+    User subcircuits -- ``.subckt`` blocks in the body or in files it
+    ``.include``s (resolved relative to ``base_dir``, the netlist's own
+    directory) -- are expanded where an ``X`` line instantiates them: their
+    MOS devices are reported with hierarchical names (``xdut.m1``) and their
+    nodes mapped through the port list. A definition nothing instantiates
+    contributes nothing. An ``X`` line whose subcircuit cannot be resolved
+    (and is not a recognised PDK MOS model) is listed in
+    :attr:`ParsedNetlist.unexpanded`. ``.control``/``.end`` cards are not
+    expected here at all (``klt sim`` generates those -- see ``sim.py``'s
+    "Netlist convention").
     """
     parsed = ParsedNetlist()
-    depth = 0
     model_kinds: dict[str, str] = {}
+    state = _IncludeState(base_dir)
 
-    lines = _logical_lines(text)
+    body_lines = _logical_lines(text)
+    defs: dict[str, _SubcktDef] = {}
+    # Definitions in the body win over same-named ones from an include.
+    top_lines = _split_subckts(body_lines, defs, from_include=False)
+    top_lines = _expand_includes(top_lines, base_dir, state)
+    # Includes can also sit inside a subckt body; expand those before the
+    # definitions are used so the flat DUT file is visible to the walk.
+    for definition in list(defs.values()):
+        definition.lines = _expand_includes(definition.lines, base_dir, state)
+    top_lines = _split_subckts(top_lines, defs, from_include=True)
+    for definition in list(defs.values()):
+        if any(_SUBCKT_CARD_RE.match(entry) for entry in definition.lines):
+            definition.lines = _split_subckts(definition.lines, defs, True)
 
     # First pass: `.param` values and `.model` channel types, which later
-    # lines may reference regardless of ordering.
-    for line in lines:
+    # lines may reference regardless of ordering (or hierarchy level).
+    scan = list(top_lines)
+    for definition in defs.values():
+        scan.extend(definition.lines)
+    for line in scan:
         if _PARAM_CARD_RE.match(line):
             for match in _ASSIGNMENT_RE.finditer(line):
                 name, _, value = match.group(0).partition("=")
@@ -437,65 +589,164 @@ def parse_netlist(text: str, model_overrides: dict[str, Any]) -> ParsedNetlist:
             if kind is not None:
                 model_kinds[card.group(1).lower()] = kind
 
+    _walk_lines(
+        parsed,
+        top_lines,
+        defs,
+        model_kinds,
+        model_overrides,
+        prefix="",
+        node_map={},
+        stack=(),
+    )
+    return parsed
+
+
+def _map_node(token: str, prefix: str, node_map: dict[str, str]) -> str:
+    node = token.lower()
+    if not prefix or node == "0":
+        return node
+    return node_map.get(node, f"{prefix.lower()}{node}")
+
+
+def _walk_lines(
+    parsed: ParsedNetlist,
+    lines: list[str],
+    defs: dict[str, _SubcktDef],
+    model_kinds: dict[str, str],
+    model_overrides: dict[str, Any],
+    *,
+    prefix: str,
+    node_map: dict[str, str],
+    stack: tuple[str, ...],
+) -> None:
     for line in lines:
-        lowered = line.lower()
-        if lowered.startswith(".subckt"):
-            depth += 1
-            continue
-        if lowered.startswith(".ends") or lowered.startswith(".eom"):
-            depth = max(0, depth - 1)
-            continue
-        if line.startswith(".") or depth > 0:
+        if line.startswith("."):
             continue
 
         tokens = _positional_tokens(line)
         if len(tokens) < 3:
             continue
-        name = tokens[0]
-        element = name[0].upper()
+        leaf = tokens[0]
+        name = f"{prefix}{leaf}"
+        element = leaf[0].upper()
+
+        def mapped(items: list[str]) -> list[str]:
+            return [_map_node(tok, prefix, node_map) for tok in items]
 
         if element == "M" and len(tokens) >= 6:
-            nodes = [tok.lower() for tok in tokens[1:5]]
+            nodes = mapped(tokens[1:5])
             model = tokens[5]
             kind = model_kinds.get(model.lower()) or _mos_kind(model)
             _record_mos(parsed, name, kind, model, nodes, model_overrides)
-        elif element == "X" and len(tokens) >= 6:
-            nodes = [tok.lower() for tok in tokens[1:-1]]
-            model = tokens[-1]
-            # The `op_lint.models.<model>.kind` override is consulted BEFORE
-            # the naming heuristics, mirroring `_record_mos`'s own precedence
-            # on the unconditional `M` path: it exists precisely to resolve a
-            # model name this tool cannot classify, so gating it behind those
-            # heuristics would make it unreachable for the PDK subcircuit
-            # calls (`X<name> d g s b <model>`) it is documented to fix -- and
-            # a model name that also fails `_looks_like_mos` would drop out of
-            # the report with no `device_kind_unknown` diagnostic at all.
-            kind = (
-                (model_overrides.get(model.lower()) or {}).get("kind")
-                or model_kinds.get(model.lower())
-                or _mos_kind(model)
+        elif element == "X" and len(tokens) >= 3:
+            _walk_instance(
+                parsed,
+                tokens,
+                name,
+                mapped(tokens[1:-1]),
+                defs,
+                model_kinds,
+                model_overrides,
+                stack,
             )
-            if len(nodes) == 4 and kind is not None:
-                _record_mos(parsed, name, kind, model, nodes, model_overrides)
-            else:
-                if len(nodes) == 4 and _looks_like_mos(model):
-                    parsed.unresolved.append(name)
-                _record_nodes(parsed, nodes)
         else:
-            count = _ELEMENT_TERMINALS.get(element)
-            if count is None:
-                continue
-            nodes = [tok.lower() for tok in tokens[1 : 1 + count]]
-            if element == "V" and len(nodes) == 2:
-                rest = " ".join(tokens[3:])
-                parsed.sources[name[1:].lower()] = (
-                    nodes[0],
-                    nodes[1],
-                    _source_value(rest, parsed.params),
-                )
-            _record_nodes(parsed, nodes)
+            _walk_passive(parsed, line, tokens, mapped, prefix)
 
-    return parsed
+
+def _walk_instance(
+    parsed: ParsedNetlist,
+    tokens: list[str],
+    name: str,
+    nodes: list[str],
+    defs: dict[str, _SubcktDef],
+    model_kinds: dict[str, str],
+    model_overrides: dict[str, Any],
+    stack: tuple[str, ...],
+) -> None:
+    """Handle one ``X`` card: expand a user subckt, report a PDK device cell
+    as one MOS, or record it as unresolved/unexpanded."""
+    model = tokens[-1]
+    definition = defs.get(model.lower())
+    # The `op_lint.models.<model>.kind` override is consulted BEFORE
+    # the naming heuristics, mirroring `_record_mos`'s own precedence
+    # on the unconditional `M` path: it exists precisely to resolve a
+    # model name this tool cannot classify, so gating it behind those
+    # heuristics would make it unreachable for the PDK subcircuit
+    # calls (`X<name> d g s b <model>`) it is documented to fix -- and
+    # a model name that also fails `_looks_like_mos` would drop out of
+    # the report with no `device_kind_unknown` diagnostic at all.
+    kind = (
+        (model_overrides.get(model.lower()) or {}).get("kind")
+        or model_kinds.get(model.lower())
+        or _mos_kind(model)
+    )
+    pdk_style = len(nodes) == 4 and kind is not None
+    # A subckt that came from an `.include` and reads as a 4-terminal
+    # MOS model is a PDK device cell, reported as one device (the
+    # behaviour before includes were followed); a body-defined one is
+    # the user's own hierarchy and is expanded.
+    if (
+        definition is not None
+        and not (pdk_style and definition.from_include)
+        and len(nodes) == len(definition.ports)
+        and model.lower() not in stack
+        and len(stack) < _MAX_SUBCKT_DEPTH
+    ):
+        if parsed.expanded_instances >= _MAX_EXPANDED_INSTANCES:
+            parsed.expansion_truncated = True
+            _record_nodes(parsed, nodes)
+            return
+        parsed.expanded_instances += 1
+        _walk_lines(
+            parsed,
+            definition.lines,
+            defs,
+            model_kinds,
+            model_overrides,
+            prefix=f"{name}.",
+            node_map=dict(zip(definition.ports, nodes, strict=True)),
+            stack=(*stack, model.lower()),
+        )
+    elif pdk_style:
+        _record_mos(parsed, name, kind, model, nodes, model_overrides)
+    else:
+        if len(tokens) >= 6 and len(nodes) == 4 and _looks_like_mos(model):
+            parsed.unresolved.append(name)
+        else:
+            parsed.unexpanded.append(name)
+        _record_nodes(parsed, nodes)
+
+
+def _walk_passive(
+    parsed: ParsedNetlist,
+    line: str,
+    tokens: list[str],
+    mapped: Callable[[list[str]], list[str]],
+    prefix: str,
+) -> None:
+    """Handle every non-``M``/``X`` card: record its terminals, top-level
+    ``V`` source values, and ``B``-source node references."""
+    leaf = tokens[0]
+    element = leaf[0].upper()
+    count = _ELEMENT_TERMINALS.get(element)
+    if count is None:
+        return
+    nodes = mapped(tokens[1 : 1 + count])
+    if element == "V" and len(nodes) == 2 and not prefix:
+        rest = " ".join(tokens[3:])
+        parsed.sources[leaf[1:].lower()] = (
+            nodes[0],
+            nodes[1],
+            _source_value(rest, parsed.params),
+        )
+    _record_nodes(parsed, nodes)
+    if element == "B":
+        # A behavioural source's expression reads other nodes: each
+        # `v(<node>)` reference is a terminal on that node.
+        for match in _MEAS_NODE_RE.finditer(line):
+            refs = [grp for grp in match.groups() if grp]
+            _record_nodes(parsed, mapped(refs))
 
 
 def _looks_like_mos(model: str) -> bool:
@@ -646,8 +897,7 @@ def _write_op_deck(
     lines.append(".control")
     for path in osdi_preload:
         lines.append(f"pre_osdi {path}")
-    for key, value in sorted(point.supply_v.items()):
-        lines.append(f"alter {key}={value}")
+    lines.extend(_supply_alter_lines(point))
     lines.append("op")
     for index, device in enumerate(devices):
         lines.append(f"echo {_DEVICE_MARKER} {index} {device.name}")
@@ -1083,6 +1333,25 @@ def load_request(request_path: str) -> dict[str, Any]:
     )
 
 
+def _refuse_param_axis(point: Any) -> None:
+    """Issue #3035: the lint's deck does not apply the parameter axis, so it
+    would bias the netlist's own defaults while echoing a corner that names
+    other values."""
+    if point.params:
+        raise OpSanityError(
+            f"corner '{point.corner_id}' carries corners.params, which the "
+            "operating-point lint does not apply; lint a request without a "
+            "parameter axis"
+        )
+    if point.options:
+        # Issue #3125: the lint's deck carries no corner `.options` card.
+        raise OpSanityError(
+            f"corner '{point.corner_id}' carries corners.options, which the "
+            "operating-point lint does not apply; lint a request without an "
+            "options axis"
+        )
+
+
 def run_op_sanity(
     request_path: str,
     *,
@@ -1126,7 +1395,7 @@ def run_op_sanity(
         str(key).lower(): value for key, value in (op_lint.get("models") or {}).items()
     }
 
-    parsed = parse_netlist(netlist_text, model_overrides)
+    parsed = parse_netlist(netlist_text, model_overrides, os.path.dirname(netlist_path))
 
     corners_spec = request.get("corners") or {}
     try:
@@ -1149,6 +1418,7 @@ def run_op_sanity(
         point = selected[0]
     else:
         point = points[0]
+    _refuse_param_axis(point)
 
     models = request.get("models") or {}
     models_lib: str | None = None
@@ -1246,6 +1516,34 @@ def run_op_sanity(
             }
         )
 
+    for name in parsed.unexpanded:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "unsupported_hierarchy",
+                "message": (
+                    f"could not expand subcircuit instance {name}: its "
+                    "definition was not found in the netlist or its "
+                    "`.include`d files and it is not a recognised MOS model, "
+                    "so any devices inside it were not linted."
+                ),
+            }
+        )
+
+    if parsed.expansion_truncated:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "unsupported_hierarchy",
+                "message": (
+                    "subcircuit expansion stopped after "
+                    f"{_MAX_EXPANDED_INSTANCES} instances (hierarchy "
+                    "expansion cap); devices inside the remaining "
+                    "subcircuit instances were not linted."
+                ),
+            }
+        )
+
     margin_v = _triode_margin_v(point.temperature_c, thresholds)
     off_current_a = thresholds.get("off_current_a", _DEFAULT_OFF_CURRENT_A)
     if not isinstance(off_current_a, (int, float)) or isinstance(off_current_a, bool):
@@ -1268,15 +1566,7 @@ def run_op_sanity(
     error_count = sum(1 for entry in findings if entry["severity"] == "error")
     warning_count = len(findings) - error_count
 
-    analysis_failed = any(
-        diagnostic["severity"] == "error" for diagnostic in diagnostics
-    ) or (parsed.devices and not produced_values)
-    if analysis_failed:
-        status = "error"
-    elif findings:
-        status = "findings"
-    else:
-        status = "clean"
+    status = _op_status(diagnostics, parsed, produced_values, bool(findings))
 
     devices_payload = [
         {
@@ -1332,6 +1622,25 @@ def run_op_sanity(
     }
 
 
+def _op_status(
+    diagnostics: list[dict[str, str]],
+    parsed: ParsedNetlist,
+    produced_values: bool,
+    has_findings: bool,
+) -> str:
+    """Overall ``status`` of an op-lint run: error > findings > clean."""
+    analysis_failed = any(
+        diagnostic["severity"] == "error" for diagnostic in diagnostics
+    ) or (parsed.devices and not produced_values)
+    if analysis_failed:
+        return "error"
+    # No device was enumerated and some `X` instance went unexpanded: an
+    # empty device list must never read as "every device is saturated".
+    if has_findings or (parsed.unexpanded and not parsed.devices):
+        return "findings"
+    return "clean"
+
+
 def _run_op(
     *,
     netlist_path: str,
@@ -1362,9 +1671,17 @@ def _run_op(
     log_text = ""
 
     try:
+        # Issue #3624: a `corners.supply_waveforms` source is rescaled in a
+        # per-corner netlist copy (as the sweep does), not `alter`ed.
+        try:
+            deck_netlist_path, _ = _scale_supply_waveforms(
+                netlist_path, netlist_path, work_dir, point
+            )
+        except SimError as exc:
+            raise OpSanityError(str(exc)) from exc
         _write_op_deck(
             deck_path=deck_path,
-            netlist_path=netlist_path,
+            netlist_path=deck_netlist_path,
             models_lib=models_lib,
             point=point,
             devices=devices,

@@ -811,9 +811,12 @@ _APT_WORKFLOWS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 # The steps whose payload earns the widened #1224/#2662 budget (an 11.2 MB
-# `cmake` fetch), and therefore the 7-minute rather than 5-minute backstop.
-# Everything else takes the script's own defaults.
-_WIDE_BUDGET_STEP = "Install Yosys build dependencies"
+# `cmake` fetch; the apt `klayout` Qt5 libs, #4059), and therefore the
+# 7-minute rather than 5-minute backstop. Everything else takes the script's
+# own defaults.
+_WIDE_BUDGET_STEPS = frozenset(
+    {"Install Yosys build dependencies", "Install the klayout binary"}
+)
 
 
 def test_the_apt_workflow_table_covers_every_wrapper_caller():
@@ -860,16 +863,16 @@ def test_apt_steps_keep_their_timeout_backstop():
     the outer backstop -- the wrapper's own budget is sized to fit inside
     it.
 
-    The Yosys steps' backstop is 7 minutes rather than 5 (issues #2662,
-    #2672): their deadline has to hold two full-length 150s `cmake` fetches,
-    which 300s cannot. Every other step keeps the script's defaults and the
-    original 5-minute backstop.
+    The Yosys steps' (and the klayout step's, #4059) backstop is 7 minutes
+    rather than 5 (issues #2662, #2672): their deadline has to hold two
+    full-length 150s fetches, which 300s cannot. Every other step keeps the
+    script's defaults and the original 5-minute backstop.
     """
     for workflow_name, step_names in _APT_WORKFLOWS:
         path = WORKFLOW_DIR / workflow_name
         text = path.read_text(encoding="utf-8")
         for name in step_names:
-            expected = 7 if name == _WIDE_BUDGET_STEP else 5
+            expected = 7 if name in _WIDE_BUDGET_STEPS else 5
             for step in _step_texts(text, name):
                 assert f"timeout-minutes: {expected}" in step, (
                     f"{path}: '{name}' lost its timeout backstop (expected "

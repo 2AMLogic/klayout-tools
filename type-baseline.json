@@ -257,12 +257,6 @@
     {
       "file": "src/klayout_tools/drc.py",
       "code": "assignment",
-      "message": "Incompatible types in assignment (expression has type \"Element[str] | None\", variable has type \"Element[str]\")",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/drc.py",
-      "code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"list[list[int]] | None\", variable has type \"list[list[Any]]\")",
       "count": 1
     },
@@ -270,18 +264,12 @@
       "file": "src/klayout_tools/drc.py",
       "code": "union-attr",
       "message": "Item \"None\" of \"DerivedLayer | None\" has no attribute \"mode\"",
-      "count": 5
-    },
-    {
-      "file": "src/klayout_tools/drc.py",
-      "code": "union-attr",
-      "message": "Item \"None\" of \"DerivedLayer | None\" has no attribute \"sized_by_um\"",
       "count": 1
     },
     {
-      "file": "src/klayout_tools/equiv.py",
-      "code": "arg-type",
-      "message": "Argument \"resume_block\" to \"_resume_report_from_committed_stage1\" has incompatible type \"dict[str, Any] | None\"; expected \"dict[str, Any]\"",
+      "file": "src/klayout_tools/drc_klayout_engine.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"Element[str] | None\", variable has type \"Element[str]\")",
       "count": 1
     },
     {
@@ -294,6 +282,12 @@
       "file": "src/klayout_tools/equiv.py",
       "code": "union-attr",
       "message": "Item \"None\" of \"Any | None\" has no attribute \"get\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/equiv_sequential.py",
+      "code": "arg-type",
+      "message": "Argument \"resume_block\" to \"_resume_report_from_committed_stage1\" has incompatible type \"dict[str, Any] | None\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
@@ -336,12 +330,6 @@
       "file": "src/klayout_tools/extract.py",
       "code": "arg-type",
       "message": "Argument 2 to \"extract_devices\" of \"LayoutToNetlist\" has incompatible type \"dict[str, Region]\"; expected \"dict[str, ShapeCollection]\"",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/extract.py",
-      "code": "assignment",
-      "message": "Incompatible types in assignment (expression has type \"DeviceExtractorBJT3Transistor\", variable has type \"DeviceExtractorBJT4Transistor\")",
       "count": 1
     },
     {
@@ -479,7 +467,7 @@
     {
       "file": "src/klayout_tools/gen_compose_routing.py",
       "code": "no-redef",
-      "message": "Name \"ladder\" already defined on line 523",
+      "message": "Name \"ladder\" already defined on line 525",
       "count": 1
     },
     {
@@ -834,13 +822,13 @@
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
       "code": "attr-defined",
       "message": "\"_DiffPairPCell\" has no attribute \"TypeBoolean\"",
-      "count": 7
+      "count": 8
     },
     {
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
       "code": "attr-defined",
       "message": "\"_DiffPairPCell\" has no attribute \"TypeDouble\"",
-      "count": 14
+      "count": 16
     },
     {
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
@@ -852,7 +840,7 @@
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
       "code": "attr-defined",
       "message": "\"_DiffPairPCell\" has no attribute \"TypeLayer\"",
-      "count": 9
+      "count": 10
     },
     {
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
@@ -983,6 +971,12 @@
     {
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
       "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"ring_well_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
       "message": "\"_DiffPairPCell\" has no attribute \"row_spacing_um\"",
       "count": 1
     },
@@ -1014,6 +1008,12 @@
       "file": "src/klayout_tools/gen_pcells/diff_pair.py",
       "code": "attr-defined",
       "message": "\"_DiffPairPCell\" has no attribute \"tap_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "code": "attr-defined",
+      "message": "\"_DiffPairPCell\" has no attribute \"top_endcap_um\"",
       "count": 1
     },
     {
@@ -1062,7 +1062,7 @@
       "file": "src/klayout_tools/gen_pcells/esd_device.py",
       "code": "attr-defined",
       "message": "\"_EsdDevicePCell\" has no attribute \"TypeDouble\"",
-      "count": 11
+      "count": 12
     },
     {
       "file": "src/klayout_tools/gen_pcells/esd_device.py",
@@ -1257,6 +1257,12 @@
       "count": 1
     },
     {
+      "file": "src/klayout_tools/gen_pcells/esd_device.py",
+      "code": "attr-defined",
+      "message": "\"_EsdDevicePCell\" has no attribute \"top_endcap_um\"",
+      "count": 1
+    },
+    {
       "file": "src/klayout_tools/gen_pcells/guard_ring.py",
       "code": "attr-defined",
       "message": "\"_GuardRingPCell\" has no attribute \"TypeBoolean\"",
@@ -1266,7 +1272,7 @@
       "file": "src/klayout_tools/gen_pcells/guard_ring.py",
       "code": "attr-defined",
       "message": "\"_GuardRingPCell\" has no attribute \"TypeDouble\"",
-      "count": 8
+      "count": 9
     },
     {
       "file": "src/klayout_tools/gen_pcells/guard_ring.py",
@@ -1385,6 +1391,12 @@
     {
       "file": "src/klayout_tools/gen_pcells/guard_ring.py",
       "code": "attr-defined",
+      "message": "\"_GuardRingPCell\" has no attribute \"ring_well_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/guard_ring.py",
+      "code": "attr-defined",
       "message": "\"_GuardRingPCell\" has no attribute \"ring_width_um\"",
       "count": 1
     },
@@ -1410,13 +1422,13 @@
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
       "code": "attr-defined",
       "message": "\"_MosArrayPCell\" has no attribute \"TypeBoolean\"",
-      "count": 9
+      "count": 11
     },
     {
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
       "code": "attr-defined",
       "message": "\"_MosArrayPCell\" has no attribute \"TypeDouble\"",
-      "count": 14
+      "count": 18
     },
     {
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
@@ -1428,7 +1440,7 @@
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
       "code": "attr-defined",
       "message": "\"_MosArrayPCell\" has no attribute \"TypeLayer\"",
-      "count": 12
+      "count": 13
     },
     {
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
@@ -1565,6 +1577,18 @@
     {
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
       "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"pitch_x_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"pitch_y_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
       "message": "\"_MosArrayPCell\" has no attribute \"poly_layer\"",
       "count": 1
     },
@@ -1613,6 +1637,12 @@
     {
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
       "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"ring_well_margin_um\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
       "message": "\"_MosArrayPCell\" has no attribute \"rows\"",
       "count": 2
     },
@@ -1638,6 +1668,12 @@
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
       "code": "attr-defined",
       "message": "\"_MosArrayPCell\" has no attribute \"tap_layer\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "code": "attr-defined",
+      "message": "\"_MosArrayPCell\" has no attribute \"top_endcap_um\"",
       "count": 1
     },
     {
@@ -2117,12 +2153,6 @@
     {
       "file": "src/klayout_tools/lvs.py",
       "code": "assignment",
-      "message": "Incompatible types in assignment (expression has type \"bool\", variable has type \"None\")",
-      "count": 2
-    },
-    {
-      "file": "src/klayout_tools/lvs.py",
-      "code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"dict[str, Any]\", variable has type \"str\")",
       "count": 1
     },
@@ -2139,33 +2169,33 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/lvs.py",
+      "file": "src/klayout_tools/lvs_combine.py",
+      "code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"bool\", variable has type \"None\")",
+      "count": 2
+    },
+    {
+      "file": "src/klayout_tools/lvs_combine.py",
       "code": "misc",
       "message": "Property \"supports_parallel_combination\" defined in \"DeviceClass\" is read-only",
       "count": 1
     },
     {
-      "file": "src/klayout_tools/lvs.py",
+      "file": "src/klayout_tools/lvs_combine.py",
       "code": "misc",
       "message": "Property \"supports_serial_combination\" defined in \"DeviceClass\" is read-only",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/lvs.py",
-      "code": "no-redef",
-      "message": "Name \"reason\" already defined on line 8628",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/lvs.py",
-      "code": "union-attr",
-      "message": "Item \"None\" of \"Any | None\" has no attribute \"each_circuit\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/lvs_finfet.py",
       "code": "arg-type",
       "message": "Argument 1 to \"float\" has incompatible type \"Any | None\"; expected \"str | Buffer | SupportsFloat | SupportsIndex\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/lvs_gate_level.py",
+      "code": "union-attr",
+      "message": "Item \"None\" of \"Any | None\" has no attribute \"each_circuit\"",
       "count": 1
     },
     {
@@ -2321,79 +2351,79 @@
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 1 has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 1 has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"_critical_metric_blockers\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 1 to \"_critical_metric_blockers\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"_critical_metric_detail\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 1 to \"_critical_metric_detail\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"_erc_passed\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 1 to \"_erc_passed\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"_functional_verification_passed\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"_FunctionalVerificationEnvelope\"",
+      "message": "Argument 1 to \"_functional_verification_passed\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"_FunctionalVerificationEnvelope\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"_is_sdf_annotated\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 1 to \"_is_sdf_annotated\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"_nothing_checked_detail\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 1 to \"_nothing_checked_detail\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"_sdf_metadata\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 1 to \"_sdf_metadata\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"_sta_timing_passed\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 1 to \"_sta_timing_passed\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 1 to \"_sta_worst_corner\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 1 to \"_sta_worst_corner\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 2 to \"_coverage_refusal\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 2 to \"_coverage_refusal\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 2 to \"_drc_coverage_disclosure\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 2 to \"_drc_coverage_disclosure\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 2 to \"_pex_body_bias_disclosure\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 2 to \"_pex_body_bias_disclosure\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
@@ -2405,7 +2435,7 @@
     {
       "file": "src/klayout_tools/signoff.py",
       "code": "arg-type",
-      "message": "Argument 2 to \"_yield_campaign_disclosure\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <10 more items>\"; expected \"dict[str, Any]\"",
+      "message": "Argument 2 to \"_yield_campaign_disclosure\" has incompatible type \"_DrcEnvelope | _LvsEnvelope | _SimEnvelope | _YieldEnvelope | _ExtractEnvelope | <11 more items>\"; expected \"dict[str, Any]\"",
       "count": 1
     },
     {
@@ -2508,6 +2538,12 @@
       "file": "src/klayout_tools/signoff.py",
       "code": "typeddict-item",
       "message": "TypedDict \"_SocketCheckEnvelope\" has no key \"corners\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "code": "typeddict-item",
+      "message": "TypedDict \"_SynthesizeEnvelope\" has no key \"corners\"",
       "count": 1
     },
     {

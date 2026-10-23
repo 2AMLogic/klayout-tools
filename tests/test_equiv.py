@@ -84,7 +84,7 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import _paths as paths_module
-from klayout_tools import equiv
+from klayout_tools import equiv, equiv_replay, equiv_sequential, pdk_cells
 from klayout_tools import pdk as pdk_module
 from klayout_tools import synthesize as synthesize_module
 from klayout_tools.cli import main
@@ -688,7 +688,7 @@ def test_build_counterexample_shape():
 
 
 def test_confirm_counterexample_degrades_when_iverilog_missing(tmp_path, monkeypatch):
-    """`_confirm_counterexample` never raises when the confirmation
+    """`confirm_counterexample` never raises when the confirmation
     toolchain is unavailable -- it degrades to a diagnostic, leaving the
     solver-reported counterexample itself intact (per this module's own
     "gracefully around what you find" posture)."""
@@ -702,7 +702,7 @@ def test_confirm_counterexample_degrades_when_iverilog_missing(tmp_path, monkeyp
         equiv._parse_signal_table(_SAT_FAIL_TEXT)
     )
     diagnostics: list[dict] = []
-    equiv._confirm_counterexample(
+    equiv_replay.confirm_counterexample(
         counterexample=counterexample,
         netlist_path=str(tmp_path / "netlist.v"),
         output_dir=str(tmp_path),
@@ -1039,18 +1039,18 @@ def test_resolve_iverilog_binary_explicit_option_wins(tmp_path, monkeypatch):
     mirroring the yosys coverage above without needing a full replay run."""
     custom = str(tmp_path / "opt" / "iverilog-custom")
     monkeypatch.setattr(paths_module.shutil, "which", _which_only({custom: custom}))
-    resolved = equiv._resolve_iverilog_binary(
+    resolved = equiv_replay.resolve_iverilog_binary(
         {"iverilog_binary": custom}, str(tmp_path)
     )
     assert resolved == custom
 
 
 def test_resolve_iverilog_binary_missing_is_none_not_required(tmp_path, monkeypatch):
-    """No override, nothing on PATH: `_resolve_iverilog_binary` degrades to
+    """No override, nothing on PATH: `resolve_iverilog_binary` degrades to
     `None` (required=False) rather than raising -- the counterexample-replay
     path's pre-existing "iverilog absent" contract."""
     monkeypatch.setattr(paths_module.shutil, "which", _which_only({}))
-    assert equiv._resolve_iverilog_binary({}, str(tmp_path)) is None
+    assert equiv_replay.resolve_iverilog_binary({}, str(tmp_path)) is None
 
 
 def test_resolve_iverilog_binary_unresolvable_option_raises(tmp_path, monkeypatch):
@@ -1060,7 +1060,9 @@ def test_resolve_iverilog_binary_unresolvable_option_raises(tmp_path, monkeypatc
     monkeypatch.setattr(paths_module.shutil, "which", _which_only({}))
     missing = str(tmp_path / "nope" / "iverilog-custom")
     with pytest.raises(EquivError, match="request.iverilog_binary"):
-        equiv._resolve_iverilog_binary({"iverilog_binary": missing}, str(tmp_path))
+        equiv_replay.resolve_iverilog_binary(
+            {"iverilog_binary": missing}, str(tmp_path)
+        )
 
 
 def test_resolve_vvp_binary_explicit_option_wins(tmp_path, monkeypatch):
@@ -1068,7 +1070,7 @@ def test_resolve_vvp_binary_explicit_option_wins(tmp_path, monkeypatch):
     the coverage above."""
     custom = str(tmp_path / "opt" / "vvp-custom")
     monkeypatch.setattr(paths_module.shutil, "which", _which_only({custom: custom}))
-    resolved = equiv._resolve_vvp_binary({"vvp_binary": custom}, str(tmp_path))
+    resolved = equiv_replay.resolve_vvp_binary({"vvp_binary": custom}, str(tmp_path))
     assert resolved == custom
 
 
@@ -1079,7 +1081,7 @@ def test_resolve_vvp_binary_env_var_overrides_path(tmp_path, monkeypatch):
         _which_only({"vvp-from-env": "/opt/vvp-from-env"}),
     )
     monkeypatch.setenv("KLT_VVP_BINARY", "vvp-from-env")
-    assert equiv._resolve_vvp_binary({}, str(tmp_path)) == "/opt/vvp-from-env"
+    assert equiv_replay.resolve_vvp_binary({}, str(tmp_path)) == "/opt/vvp-from-env"
 
 
 # --------------------------------------------------------------------------- #
@@ -1090,7 +1092,7 @@ def test_resolve_vvp_binary_env_var_overrides_path(tmp_path, monkeypatch):
 # to `diagnostics`, it just did not act on it (the defect this issue tracks,
 # discovered live against a real post-route netlist pair -- see the issue
 # body's own evidence). Forced deterministically here by faking
-# `_confirm_counterexample`/`_confirm_sequential_counterexample` themselves
+# `confirm_counterexample`/`_confirm_sequential_counterexample` themselves
 # (the smallest surface that exercises `run_equiv`'s own status-downgrade
 # decision) rather than every downstream iverilog/vvp subprocess call --
 # portable to any CI environment, no real `iverilog` install required.
@@ -1101,7 +1103,7 @@ def test_unconfirmed_combinational_counterexample_downgrades_to_inconclusive(
     tmp_path, monkeypatch
 ):
     """Combinational (`"yosys"`) engine path -- `run_equiv`'s block that
-    calls `_confirm_counterexample` right after `_classify_sat_result`
+    calls `confirm_counterexample` right after `_classify_sat_result`
     reports `"counterexample"` (`src/klayout_tools/equiv.py`, near the
     `"engine": "icarus"`/confirmation block)."""
     _write(tmp_path / "gold.v", _GOLD_AND)
@@ -1125,7 +1127,7 @@ def test_unconfirmed_combinational_counterexample_downgrades_to_inconclusive(
         request_doc,
         request_dir,
     ):
-        # Mirrors the real `_confirm_counterexample`'s own "not reproduced"
+        # Mirrors the real `confirm_counterexample`'s own "not reproduced"
         # outcome shape (a simulation that ran, but found no divergence).
         counterexample["simulation"] = {
             "engine": "icarus",
@@ -1146,7 +1148,7 @@ def test_unconfirmed_combinational_counterexample_downgrades_to_inconclusive(
             }
         )
 
-    monkeypatch.setattr(equiv, "_confirm_counterexample", _fake_confirm_not_reproduced)
+    monkeypatch.setattr(equiv, "confirm_counterexample", _fake_confirm_not_reproduced)
 
     report = run_equiv(request_path)
 
@@ -1202,7 +1204,7 @@ def test_confirmed_by_simulation_none_keeps_combinational_counterexample_status(
             }
         )
 
-    monkeypatch.setattr(equiv, "_confirm_counterexample", _fake_confirm_unavailable)
+    monkeypatch.setattr(equiv, "confirm_counterexample", _fake_confirm_unavailable)
 
     report = run_equiv(request_path)
 
@@ -1926,7 +1928,7 @@ def test_sequential_engine_timeout_is_inconclusive_never_equivalent(tmp_path):
 # 2 reports a SAT `FAIL!` verdict), `_parse_module_ports` is faked to avoid
 # needing a real Yosys-written netlist file on disk, and
 # `_confirm_sequential_counterexample` is faked exactly as the combinational
-# test above fakes `_confirm_counterexample` -- no real `yosys`/`iverilog`
+# test above fakes `confirm_counterexample` -- no real `yosys`/`iverilog`
 # install required.
 # --------------------------------------------------------------------------- #
 
@@ -1954,7 +1956,7 @@ def _mock_sequential_yosys_run(stage1_stdout: str, stage2_stdout: str):
 
 
 # Stage 1: at least one unproven `$equiv` cell -- matches neither
-# `_EQUIV_NONE_FOUND_RE` nor `_EQUIV_ALL_PROVEN_RE`, so `_run_sequential`
+# `_EQUIV_NONE_FOUND_RE` nor `EQUIV_ALL_PROVEN_RE`, so `_run_sequential`
 # falls through to stage 2 (real Yosys's own wording for this case, per this
 # module's own docstring).
 _SEQ_STAGE1_PARTIALLY_UNPROVEN_TEXT = """
@@ -1987,7 +1989,7 @@ def test_unconfirmed_sequential_counterexample_downgrades_to_inconclusive(
         ),
     )
     monkeypatch.setattr(
-        equiv,
+        equiv_sequential,
         "_parse_module_ports",
         lambda netlist_path, module_name: {
             "clk": "input",
@@ -2027,7 +2029,9 @@ def test_unconfirmed_sequential_counterexample_downgrades_to_inconclusive(
         )
 
     monkeypatch.setattr(
-        equiv, "_confirm_sequential_counterexample", _fake_confirm_not_reproduced
+        equiv_sequential,
+        "_confirm_sequential_counterexample",
+        _fake_confirm_not_reproduced,
     )
 
     report = run_equiv(request_path)
@@ -2068,7 +2072,7 @@ def test_confirmed_by_simulation_none_keeps_sequential_counterexample_status(
         ),
     )
     monkeypatch.setattr(
-        equiv,
+        equiv_sequential,
         "_parse_module_ports",
         lambda netlist_path, module_name: {
             "clk": "input",
@@ -2101,7 +2105,9 @@ def test_confirmed_by_simulation_none_keeps_sequential_counterexample_status(
         )
 
     monkeypatch.setattr(
-        equiv, "_confirm_sequential_counterexample", _fake_confirm_unavailable
+        equiv_sequential,
+        "_confirm_sequential_counterexample",
+        _fake_confirm_unavailable,
     )
 
     report = run_equiv(request_path)
@@ -2167,7 +2173,7 @@ def test_sequential_engine_scripts_include_extra_opt_pass(tmp_path):
     gate = _side([_write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)])
 
     stage1_path = str(tmp_path / "stage1.ys")
-    equiv._write_sequential_stage1_script(
+    equiv_sequential._write_sequential_stage1_script(
         script_path=stage1_path,
         gold=gold,
         gate=gate,
@@ -2187,7 +2193,7 @@ def test_sequential_engine_scripts_include_extra_opt_pass(tmp_path):
     assert flatten_idx < opt_idx < equiv_make_idx
 
     stage2_path = str(tmp_path / "stage2.ys")
-    equiv._write_sequential_stage2_script(
+    equiv_sequential._write_sequential_stage2_script(
         script_path=stage2_path,
         gold=gold,
         gate=gate,
@@ -2226,7 +2232,7 @@ def test_sequential_stage1_script_emits_blacklist_when_given(tmp_path):
     gate = _side([_write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)])
 
     plain_path = str(tmp_path / "plain.ys")
-    equiv._write_sequential_stage1_script(
+    equiv_sequential._write_sequential_stage1_script(
         script_path=plain_path,
         gold=gold,
         gate=gate,
@@ -2239,7 +2245,7 @@ def test_sequential_stage1_script_emits_blacklist_when_given(tmp_path):
 
     blacklist_path = str(tmp_path / "bl.txt")
     refined_path = str(tmp_path / "refined.ys")
-    equiv._write_sequential_stage1_script(
+    equiv_sequential._write_sequential_stage1_script(
         script_path=refined_path,
         gold=gold,
         gate=gate,
@@ -2270,13 +2276,15 @@ def test_parse_unproven_equiv_signals_strips_gold_gate_suffixes():
         ]
     )
 
-    names = equiv._parse_unproven_equiv_signals(stdout)
+    names = equiv_sequential._parse_unproven_equiv_signals(stdout)
 
     # Bit-select tokens (`[3]`) carry no `_gold`/`_gate` suffix and are
     # dropped; the multi-bit port itself is still reported by its base name
     # so the caller can recognise (and refuse to blacklist) it.
     assert names == {"_560_.B", "result"}
-    assert equiv._parse_unproven_equiv_signals("nothing to see here") == set()
+    assert (
+        equiv_sequential._parse_unproven_equiv_signals("nothing to see here") == set()
+    )
 
 
 @pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
@@ -2423,7 +2431,7 @@ def test_parse_module_ports_matches_escaped_identifier_ports(tmp_path):
         encoding="utf-8",
     )
 
-    ports = equiv._parse_module_ports(str(netlist), "gold")
+    ports = equiv_sequential._parse_module_ports(str(netlist), "gold")
 
     assert ports == {
         "clk": "input",
@@ -2530,7 +2538,7 @@ def test_verilog_ident_escapes_only_when_required(name, expected):
     emitted verbatim (so every existing generated testbench is byte-for-byte
     unchanged); anything else becomes a whitespace-terminated Verilog
     escaped identifier."""
-    assert equiv._verilog_ident(name) == expected
+    assert equiv_sequential._verilog_ident(name) == expected
 
 
 @pytest.mark.parametrize("bad_depth", [0, -1, "4", 1.5, True])
@@ -3056,17 +3064,14 @@ def _find_any_cell_library() -> tuple[str, str, str, str] | None:
     which is always the bare corner suffix (e.g. ``"tt_025C_1v80"``, never
     ``"<cell_library>__tt_025C_1v80"``) regardless of what a library's `.lib`
     file's `default_operating_conditions` attribute reports (issue #820)."""
-    try:
-        result = pdk_module.list_pdks()
-    except Exception:
-        return None
+    result = pdk_module.list_pdks()
     for install in result["installs"]:
         for variant in install["variants"]:
             try:
-                libraries = pdk_module.list_cell_libraries(
+                libraries = pdk_cells.list_cell_libraries(
                     variant=variant["name"], root=install["root"]
                 )
-            except Exception:
+            except pdk_module.PdkNotFoundError:
                 continue
             for library in libraries["libraries"]:
                 return (
@@ -3179,7 +3184,7 @@ def test_corpus_rtl_vs_real_synthesized_gates(tmp_path, monkeypatch):
     assert "sum" in negative_report["counterexample"]["diverging_outputs"]
 
 
-# Sanity: `subprocess` really is the module `_confirm_counterexample`'s own
+# Sanity: `subprocess` really is the module `confirm_counterexample`'s own
 # stub-friendliness test above patches (guards against a future refactor
 # silently making that stub a no-op).
 def test_equiv_uses_stdlib_subprocess():
@@ -3303,7 +3308,7 @@ def test_supported_sim_backends_and_default():
     ],
 )
 def test_replay_backends_pairing(sim_backend, expected):
-    assert equiv._replay_backends(sim_backend) == expected
+    assert equiv_replay.replay_backends(sim_backend) == expected
 
 
 def test_unsupported_sim_backend_is_error(tmp_path):
@@ -3338,11 +3343,11 @@ def test_unsupported_sim_backend_is_error(tmp_path):
     ],
 )
 def test_explains_two_state(canonical, cross, explained):
-    assert equiv._explains_two_state(canonical, cross) is explained
+    assert equiv_replay.explains_two_state(canonical, cross) is explained
 
 
 def test_compare_replay_outputs_classifies_each_difference():
-    mismatches = equiv._compare_replay_outputs(
+    mismatches = equiv_replay.compare_replay_outputs(
         canonical={"gold": {"q": "x", "y": "1"}, "gate": {"q": "0", "y": "1"}},
         cross={"gold": {"q": "0", "y": "0"}, "gate": {"q": "0", "y": "1"}},
         cross_four_state=False,
@@ -3369,7 +3374,7 @@ def test_compare_replay_outputs_never_explains_for_a_four_state_cross_check():
     """The `explained_by: "two_state_backend"` escape hatch is keyed on the
     cross-check backend's *declared* value modelling -- it is never applied
     to a 4-state backend, which has no such excuse."""
-    mismatches = equiv._compare_replay_outputs(
+    mismatches = equiv_replay.compare_replay_outputs(
         canonical={"gold": {"q": "x"}, "gate": {}},
         cross={"gold": {"q": "0"}, "gate": {}},
         cross_four_state=True,
@@ -3638,13 +3643,13 @@ def test_sequential_replay_backend_disagreement_is_flagged(tmp_path, monkeypatch
     ):
         return (replies[backend], None, {})
 
-    monkeypatch.setattr(equiv, "_run_replay_backend", _fake_replay)
+    monkeypatch.setattr(equiv_sequential, "run_replay_backend", _fake_replay)
     monkeypatch.setattr(
-        equiv, "_sim_backend_version", lambda backend, binary=None: "0.0"
+        equiv_sequential, "sim_backend_version", lambda backend, binary=None: "0.0"
     )
 
     diagnostics: list[dict] = []
-    equiv._confirm_sequential_counterexample(
+    equiv_sequential._confirm_sequential_counterexample(
         counterexample=counterexample,
         ports={"q": "output"},
         netlist_path=str(tmp_path / "netlist.v"),
@@ -3656,7 +3661,7 @@ def test_sequential_replay_backend_disagreement_is_flagged(tmp_path, monkeypatch
     )
 
     assert counterexample["confirmed_by_simulation"] is None
-    assert equiv._replay_backends_disagreed(counterexample) is True
+    assert equiv_replay.replay_backends_disagreed(counterexample) is True
     assert counterexample["simulation_cross_check"]["agreement"] == "disagree"
     assert [diag["code"] for diag in diagnostics] == ["sim_backend_disagreement"]
     assert diagnostics[0]["severity"] == "error"
@@ -3690,13 +3695,13 @@ def test_sequential_replay_two_state_start_state_is_explained(tmp_path, monkeypa
     ):
         return (replies[backend], None, {})
 
-    monkeypatch.setattr(equiv, "_run_replay_backend", _fake_replay)
+    monkeypatch.setattr(equiv_sequential, "run_replay_backend", _fake_replay)
     monkeypatch.setattr(
-        equiv, "_sim_backend_version", lambda backend, binary=None: "0.0"
+        equiv_sequential, "sim_backend_version", lambda backend, binary=None: "0.0"
     )
 
     diagnostics: list[dict] = []
-    equiv._confirm_sequential_counterexample(
+    equiv_sequential._confirm_sequential_counterexample(
         counterexample=counterexample,
         ports={"q": "output"},
         netlist_path=str(tmp_path / "netlist.v"),
@@ -3710,7 +3715,7 @@ def test_sequential_replay_two_state_start_state_is_explained(tmp_path, monkeypa
     assert counterexample["confirmed_by_simulation"] is True
     cross_check = counterexample["simulation_cross_check"]
     assert cross_check["agreement"] == "agree"
-    assert equiv._replay_backends_disagreed(counterexample) is False
+    assert equiv_replay.replay_backends_disagreed(counterexample) is False
     assert {entry["cycle"] for entry in cross_check["output_mismatches"]} == {1}
     assert all(
         entry["explained_by"] == "two_state_backend"
