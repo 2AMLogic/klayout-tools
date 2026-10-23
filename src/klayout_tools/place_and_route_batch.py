@@ -59,11 +59,10 @@ import shutil
 import tarfile
 import tempfile
 import time
-import uuid
 from collections.abc import Callable
 from typing import Any
 
-from . import _provenance, output_lock, remote_transport, sim, sim_batch
+from . import _batch_common, _provenance, output_lock, remote_transport, sim, sim_batch
 from ._provenance import _content_hash
 from .netlist_batch import _remote_stderr_tail, _runner_error
 from .place_and_route import (
@@ -209,15 +208,14 @@ def package_tree(request: dict[str, Any], request_dir: str) -> list[tuple[str, s
 
 
 def _build_tarball(files: list[tuple[str, str]], path: str) -> None:
-    def _scrub(info: tarfile.TarInfo) -> tarfile.TarInfo:
-        info.uid = info.gid = 0
-        info.uname = info.gname = ""
-        info.mtime = 0
-        return info
-
     with tarfile.open(path, "w:gz") as archive:
         for source, name in files:
-            archive.add(source, arcname=name, recursive=False, filter=_scrub)
+            archive.add(
+                source,
+                arcname=name,
+                recursive=False,
+                filter=_batch_common.scrub_tarinfo,
+            )
 
 
 def unit_request(request: dict[str, Any], corner: str) -> dict[str, Any]:
@@ -310,7 +308,7 @@ def build_job_spec(
 
 def new_job_id() -> str:
     """A fresh ``[A-Za-z0-9._-]+`` job id, recognisable in the bucket."""
-    return f"klt-par-{uuid.uuid4().hex[:12]}"
+    return _batch_common.make_job_id("par")
 
 
 # --------------------------------------------------------------------------- #
@@ -387,31 +385,18 @@ def _job_failure(
 ) -> _UnitFailed:
     """A job that did not finish ``done``: the runner's own klt error when one
     can be recovered from the collected outputs, else a stderr tail."""
-    state = str(status.get("state") or "")
-    exit_code = sim_batch._status_exit_code(status)
-    head = f"batch job {job_id} finished {state!r}" + (
-        f" (exit {exit_code})" if exit_code is not None else ""
-    )
     runner_error, error_note = _runner_error(collected)
-    if runner_error is not None:
-        message = f"{head}: the runner's klt reported: {runner_error['message']}"
-        code = runner_error.get("code")
-    else:
-        message = f"{head} without a usable report"
-        detail = "; ".join(item for item in (note, error_note) if item)
-        if detail:
-            message += f" [output recovery: {detail}]"
-        message += (
-            " -- full log: "
-            + sim_batch.report_job_uri(config, job_id).rstrip("/")
-            + "/harness.log"
-        )
-        tail = _remote_stderr_tail(collected)
-        if tail:
-            message += f"\nlast of the runner's stderr.log:\n{tail}"
-        code = None
-    if code is None:
-        code = BATCH_JOB_TIMEOUT_CODE if state == "timeout" else BATCH_JOB_FAILED_CODE
+    message, code, _ = _batch_common.job_failure_parts(
+        job_id=job_id,
+        state=str(status.get("state") or ""),
+        exit_code=sim_batch._status_exit_code(status),
+        detail="",
+        runner_error=runner_error,
+        note="; ".join(item for item in (note, error_note) if item),
+        stderr_tail=_remote_stderr_tail(collected),
+        harness_log=sim_batch.report_job_uri(config, job_id).rstrip("/")
+        + "/harness.log",
+    )
     return _UnitFailed(
         f"{message} {_NO_FALLBACK}", code=code, job_id=job_id, remote=remote
     )
@@ -420,20 +405,6 @@ def _job_failure(
 # --------------------------------------------------------------------------- #
 # Collected output
 # --------------------------------------------------------------------------- #
-
-
-def _read_runner_roots(collected: str) -> list[str]:
-    try:
-        with open(
-            os.path.join(collected, BATCH_TREE_ROOT_FILENAME), encoding="utf-8"
-        ) as handle:
-            lines = [line.strip().rstrip("/") for line in handle.read().splitlines()]
-    except OSError:
-        return []
-    # Longest first, so a resolved path is rewritten before a prefix of it.
-    return sorted(
-        {line for line in lines if line.startswith("/")}, key=len, reverse=True
-    )
 
 
 def _rewrite_paths(value: Any, runner_roots: list[str], local_dir: str) -> Any:
@@ -714,7 +685,9 @@ def _finish_unit(
     if os.path.isdir(artifacts):
         os.makedirs(unit_dir, exist_ok=True)
         shutil.copytree(artifacts, unit_dir, dirs_exist_ok=True)
-    return _rewrite_paths(report, _read_runner_roots(collected), unit_dir), remote
+    return _rewrite_paths(
+        report, _batch_common.read_runner_roots(collected), unit_dir
+    ), remote
 
 
 __all__ = [
