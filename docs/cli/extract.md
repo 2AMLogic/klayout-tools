@@ -7764,8 +7764,8 @@ exit codes).
 
 ```json
 {
-  "schema_version": 1,
-  "file": "design.gds",
+  "schema_version": 4,
+  "file": { "path": "design.gds", "scope": "repo" },
   "deck": "sky130",
   "top": "ota_5t",
   "dbu_um": 0.001,
@@ -7837,12 +7837,12 @@ exit codes).
 
 | Field              | Type                       | Description                                                                                          |
 | ------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `schema_version`   | integer                    | Version of this command's JSON shape (starts at `1`; per-command, per `docs/json-contract.md`).        |
-| `file`             | string                     | The input path exactly as provided on the command line.                                                |
+| `schema_version`   | integer                    | Version of this command's JSON shape (`4`; per-command, per `docs/json-contract.md`).        |
+| `file`             | object                     | The input layout this run read and hashed, as the committable `{"path", "scope"}` envelope (issue #2659, `schema_version` 4 — it was the raw input path string through `schema_version` 3): `scope: "repo"` with a repo-relative POSIX `path` when the layout lives inside the repo the invocation resolved, `{"path": null, "scope": "external"}` when it does not. The producing host's absolute path is never echoed. This is the field `provenance.input.content_hash` covers, so it is also the one a consumer re-hashes to verify that hash against the artifact rather than against another claim — `klt signoff --manifest`'s `input_verified` gate resolves `scope: "repo"` against the repo root of the *evidence file's* own location, which is what lets a committed `klt extract` envelope be re-verified from any clone instead of only on the machine that wrote it. Same shape `klt sim`'s `netlist` and `klt pex`'s `layout` carry (issue #1261); see [`docs/json-contract.md`](../json-contract.md)'s "Path fields: envelope vs. plain string". |
 | `deck`             | string                     | Extraction deck used (`"sky130"` / `"gf180mcu"`).                                                      |
 | `top`              | string                     | Top cell the netlist was extracted from.                                                               |
 | `dbu_um`           | number (float)             | Database unit in micrometres, same semantics as `klt layers`/`klt drc`.                                |
-| `netlist_path`     | string \| null             | Resolved path of the written SPICE netlist (echoes `--output` or the computed default). `null` only when `--no-netlist` was passed. |
+| `netlist_path`     | string \| null             | Resolved path of the written SPICE netlist (echoes `--output` or the computed default). `null` only when `--no-netlist` was passed. Deliberately **not** retyped by issue #2659, which moved `file` above to the `{path, scope}` envelope: this is an *output* artifact, and the envelope would degrade to `path: null` for a netlist written outside the repo the `file` field is relative to — leaving a caller with no handle on the file it just asked `klt` to write. See [`docs/json-contract.md`](../json-contract.md)'s "Path fields: envelope vs. plain string". |
 | `netlist_sha256`   | string \| null             | SHA-256 hex digest of the written netlist file. `null` only when `--no-netlist` was passed.            |
 | `netlist_normalized_sha256` | string \| null | Additive (issue #3407). SHA-256 hex digest of the flat `devices[]`/`nets[]` connectivity with anonymous-net numbering normalized away (`net_id` dropped, each `\$N` net rewritten to its sorted `<device>.<terminal>` attachment list, `nets[]` re-sorted — the same canonicalization `--check --rerun` uses), serialized as sorted-key compact JSON. Pin this, not `netlist_sha256`, as cross-build evidence: it is unchanged when only the `$N` numbering differs, and changes on any real connectivity, device-parameter or net-name change. Covers the flat netlist only (not `--subcircuit` decks or `--parasitics` R/C elements). `null` only when `--no-netlist` was passed. Existing `netlist_sha256` values are unchanged. |
 | `timing`           | object                     | Additive (issue #3181): wall-clock `stages` (seconds per stage), `total_seconds`, `unattributed_seconds`. A measurement, ignored by `--check --rerun`. |
@@ -8013,6 +8013,21 @@ klt extract --check design.extract.json --rerun          # full mode
 `--check` is mutually exclusive with the positional `<file>` argument (and
 with `--deck`/`--top`/etc., which are ignored) — the input path and deck are
 both read from `<report.json>` itself, not given again on the command line.
+
+**Both modes resolve the committed report's `file` from *this* checkout
+(issue #2659).** Since `schema_version` 4 it is the `{path, scope}`
+envelope, and a `scope: "repo"` entry is joined to the repo root discovered
+from **the committed report's own directory** — not from the current working directory — so a report committed
+beside its input verifies from any clone and from any cwd, the same
+resolution `klt signoff`'s `input_verified` gate applies to the same shape.
+A `scope: "external"`/`"absent"` `file` names no path by construction (the
+absolute path is deliberately never emitted): cheap mode reports it as the
+unverifiable `actual: null` an absent field gets, and `--rerun` as the same
+clean "no `'file'` field to rerun" error. `netlist_path` is untouched by
+#2659 — still the plain output path the committed report recorded, replayed
+as the re-run's own `--output`. A report predating #2659, whose `file` is a
+bare path string, keeps resolving exactly as it always did — verbatim if absolute, against the current working
+directory if relative.
 
 ### Cheap mode (default)
 

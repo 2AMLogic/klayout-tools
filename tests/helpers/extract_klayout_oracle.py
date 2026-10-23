@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from klayout_tools._layout import load_layout, resolve_top_cell
-from klayout_tools.extract import ExtractError
+from klayout_tools.extract import ExtractError, _report_path, _report_repo_root
 
 #: Wall-clock budget (seconds) for the ``klayout`` subprocess
 #: :func:`run_extract_klayout_engine` launches -- mirrors
@@ -161,7 +161,8 @@ def run_extract_klayout_engine(
 
     Returns a dict shaped closely enough to :func:`run_extract`'s own
     ``devices``/``device_counts`` fields to compare directly (see
-    ``docs/cli/extract.md``): ``{"schema_version": 1, "file": path, "deck":
+    ``docs/cli/extract.md``): ``{"schema_version": 2, "file": {"path":
+    <repo-relative path>, "scope": "repo"} (issue #2659), "deck":
     lvs_deck_file, "engine": "klayout", "top": <resolved top cell name>,
     "device_count": int, "device_counts": {<class name>: int, ...},
     "devices": [{"name": str, "class": str, "params": {<name>: float,
@@ -290,8 +291,10 @@ def run_extract_klayout_engine(
     devices.sort(key=lambda d: d["name"])
 
     return {
-        "schema_version": 1,
-        "file": path,
+        # Bumped 1 -> 2 (issue #2659) for the same `file` retype as
+        # `run_extract`, so the two stay shape-compatible where they overlap.
+        "schema_version": 2,
+        "file": _report_path(path, repo_root=_report_repo_root(path)),
         "deck": lvs_deck_file,
         "engine": "klayout",
         "top": top_cell_name,

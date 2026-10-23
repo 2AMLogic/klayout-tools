@@ -1,6 +1,9 @@
 {
-  "schema_version": 2,
-  "file": "examples/dogbone-terminal/example_sky130.gds",
+  "schema_version": 3,
+  "file": {
+    "path": "examples/dogbone-terminal/example_sky130.gds",
+    "scope": "repo"
+  },
   "deck": "sky130",
   "dbu_um": 0.001,
   "status": "clean",

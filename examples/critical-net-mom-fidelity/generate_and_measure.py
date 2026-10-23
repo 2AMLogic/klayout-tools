@@ -100,9 +100,11 @@ it):
 - `lateral-coupling.gds` -- the fixture itself.
 - `phase1-baseline.json` / `.spice`, `phase2a-critical-net.json` / `.spice`,
   `phase2b-distributed-rc.json` / `.spice` -- the three `klt extract` runs'
-  full JSON reports and written netlists. The reports' `file`/`netlist_path`
-  are rewritten repo-relative before being committed (`_committable()`), so
-  regenerating them on a different checkout produces the same bytes.
+  full JSON reports and written netlists. The reports' `netlist_path` is
+  rewritten repo-relative before being committed (`_committable()`), and
+  their `file` arrives already repo-relative as the `{path, scope}` envelope
+  (issue #2659), so regenerating them on a different checkout produces the
+  same bytes.
 - `../../evidence/sim/sky130-critical-net-fixture/mom-coupling-fidelity/
   <recorded_at>-<script_sha>.json` -- the quantified comparison, wrapped in
   this repo's `evidence-record/1` shape
@@ -265,13 +267,14 @@ def _assert_distributed_rc_preserves_capacitance() -> dict:
 
 
 def _committable(report: dict) -> dict:
-    """``report`` with its two absolute path fields rewritten repo-relative.
+    """``report`` with its one remaining absolute path field rewritten
+    repo-relative.
 
-    `run_extract` echoes back the `file` it was handed and the `netlist_path`
-    it wrote, both of which are absolute here (the calls below pass absolute
-    paths so the script runs from any cwd). Committing them verbatim embedded
-    *this* machine's checkout path in the artifact -- e.g.
-    `/Users/<author>/.../worktrees/issue-978/examples/.../lateral-coupling.gds`
+    `run_extract` echoes back the `netlist_path` it wrote, which is absolute
+    here (the calls below pass absolute paths so the script runs from any
+    cwd). Committing it verbatim embedded *this* machine's checkout path in
+    the artifact -- e.g.
+    `/Users/<author>/.../worktrees/issue-978/examples/.../phase1-baseline.spice`
     -- which resolves nowhere else, makes a regeneration on another checkout
     byte-differ for a reason unrelated to the design, and discloses an author
     path in a public repo (issue #2230; `docs/json-contract.md` ->
@@ -282,11 +285,27 @@ def _committable(report: dict) -> dict:
     keeps `klt extract --check <report>` / `--rerun` working when run from the
     repo root -- which the absolute paths did not, anywhere but one machine.
     The field *shape* is untouched (still a plain string, per
-    `docs/json-contract.md`'s "plain-string fields" table).
+    `docs/json-contract.md`'s "Path fields: envelope vs. plain string"
+    table).
+
+    `file` needs no such rewrite since issue #2659: `run_extract` now emits
+    it as the `{path, scope}` envelope `env_provenance.repo_relative_path`
+    builds, so it is already repo-relative (`scope: "repo"`) and never
+    absolute. Asserted rather than assumed, so a regression that
+    reintroduced a raw absolute path there would fail here (and at the `klt
+    env-provenance lint-envelope` CI gate #2230 added) rather than silently
+    re-committing an author path.
     """
+    file_field = report["file"]
+    if not (isinstance(file_field, dict) and file_field.get("scope") == "repo"):
+        raise SystemExit(
+            f"klt extract's 'file' is {file_field!r}, not the "
+            f"{{path, scope: 'repo'}} envelope issue #2659 made it -- "
+            f"committing it verbatim would embed this machine's own "
+            f"checkout path (issue #2230)"
+        )
     return {
         **report,
-        "file": os.path.relpath(report["file"], REPO_ROOT),
         "netlist_path": os.path.relpath(report["netlist_path"], REPO_ROOT),
     }
 
