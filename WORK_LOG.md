@@ -2,8 +2,35 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-23
+
+- **PR #4068**: security: bump certifi 2026.7.22 -> 2026.10.19 in uv.lock
+- **Issue #4067** (closed): security: bump certifi 2026.7.22 -> 2026.10.19 in uv.lock
+- **PR #4066**: klt artifact: put/get/verify client for the fleet artifact store
+- **Issue #4064** (closed): klt artifact put/get/verify client for the common artifact store (mirror of 2am#5564)
+- **Issue #4063** (closed): klt artifact: put/get/verify client for the fleet artifact store (manifest + hash verify)
+- **PR #4062**: fix: attach interior contact/via landings by footprint in resistance graph
+- **Issue #4061** (closed): resistance-graph: nets with interior contact/via landings fall back to legacy R
+
 ### 2026-10-22
 
+- **PR #4060**: ci: widen apt budget for klayout install in ASAP7 deck job
+- **Issue #4059** (closed): test flake: ci-apt-install fails installing klayout on ASAP7 DRC deck fixtures (apt mirror, PR #4051)
+- **Issue #4058** (closed): test flake: ci-apt-install fails on Tests (Python 3.10) (apt mirror, PR #4049)
+- **PR #4057**: fix(tests): scope capacity-fleet fake clock to sim_batch to stop flaky sleep sum
+- **Issue #4055** (closed): test flake: test_fleet_capacity_wait_budget_is_shared_across_shards fails on Tests (Python 3.11/3.13)
+- **Issue #4054** (closed): CI flake: Yosys apt deps install fails after 3 attempts on Tests (Python 3.11)
+- **PR #4053**: feat: add klt evidence record writer for evidence-record/1
+- **PR #4052**: feat: pair a negative-control campaign inside klt yield-campaign specs
+- **PR #4051**: feat: add klt corner-matrix check for declared corner grids
+- **PR #4049**: feat(sim): add models.pdk_version pin checked before simulating
+- **PR #4048**: docs: survey six forked chip sim harnesses against klt
+- **Issue #4047** (closed): klt gap: Monte Carlo negative-control campaign shape (G5)
+- **Issue #4046** (closed): klt gap: toolchain/PDK pin and drift check before a run (G4)
+- **Issue #4045** (closed): klt gap: declared corner matrix and completeness check (G3)
+- **Issue #4044** (closed): klt gap: evidence-record writer for sim runs (G2)
+- **Issue #4042** (closed): Proposal: one shared chip sim harness in klt (six per-chip sim/harness forks are drifting apart)
+- **Issue #3874** (closed): Live-verify place-and-route portable_paths against a real route-stage response (follow-up to #3820)
 - **PR #4038**: feat(pex): consume terminal-aware selected resistance with --resistance-graph
 - **Issue #4037** (closed): klt pex: cannot consume the terminal-aware resistance graph (selected_resistance_ohm) from klt extract
 - **PR #4036**: feat(erc): add --validate-spec for layout-free spec validation
