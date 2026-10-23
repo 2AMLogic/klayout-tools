@@ -237,6 +237,19 @@ directory itself, or a named subdirectory of it). When present it wins over
   synthesize` / `place-and-route` / `post-route-sta` consult it before the
   `lib/<cell_library>__<corner>.lib` convention; unmapped libraries keep the
   convention. With several mapped corners, pass the corner explicitly.
+- `liberty.<cell_library>.<corner>` may also be a **list** of `.lib` files (a
+  library split into cell-group files with identical headers). klt merges them
+  into one content-addressed `.lib` under `$KLT_CACHE_DIR` (default
+  `~/.cache/klt/liberty-merged`, never inside the PDK tree) and hands that single
+  path to Yosys/OpenROAD/OpenSTA. Differing headers or a duplicate cell name are
+  errors; a one-element list equals the string form.
+- `views` (optional) maps `cell_library` → `{"cell_lef": path, "tech_lef":
+  {"min"|"nom"|"max": path}, "gds": path}` (every key optional) for trees that
+  do not use the open_pdks `lef/`, `techlef/`, `gds/` naming. `klt
+  place-and-route` consults it before the convention; unmapped libraries/keys
+  keep the convention. A requested interconnect corner missing from a mapped
+  `tech_lef` is an error naming the mapped corners (no fallback to `nom`).
+  CDL/SPICE views are not covered.
 - Every path must be relative and stay under the root (`..`/absolute paths are
   rejected; symlinks the checkout ships are followed). A malformed descriptor,
   an escaping path, or a mapped `.lib` that does not exist is a

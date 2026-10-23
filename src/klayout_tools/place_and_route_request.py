@@ -27,7 +27,7 @@ import re
 from typing import Any
 
 from .lef_header import read_lef_header
-from .pdk import lef_files
+from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 
 #: Valid ``request.macros[].orientation`` values -- OpenROAD's own
@@ -1761,6 +1761,9 @@ def _resolve_lef(
 
 
 def _resolve_gds_view(pdk_info: dict[str, Any], cell_library: str) -> str:
+    mapped = descriptor_views(pdk_info, cell_library).get("gds")
+    if mapped is not None:
+        return mapped
     libs_ref = pdk_info["assets"]["libs_ref"]
     gds_path = os.path.join(libs_ref or "", cell_library, "gds", f"{cell_library}.gds")
     if libs_ref is None or not os.path.isfile(gds_path):
