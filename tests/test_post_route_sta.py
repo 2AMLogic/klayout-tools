@@ -532,7 +532,8 @@ def test_sta_script_lines_order_no_spef():
     assert lines[1] == "read_lef /pdk/cells.lef"
     assert lines[2] == "read_def /design/top.def"
     assert lines[3] == "read_liberty /pdk/lib.lib"
-    assert lines[4] == "create_clock -name clk -period 2.5 [get_ports clk]"
+    assert lines[4] == post_route_sta._UNIT_PIN_LINE
+    assert lines[5] == "create_clock -name clk -period 2.5 [get_ports clk]"
     assert "report_worst_slack_metric -setup" in lines
     assert "report_worst_slack_metric -hold" in lines
     assert "report_tns_metric -setup" in lines
@@ -668,7 +669,8 @@ def test_sta_netlist_script_lines_order():
     assert lines[2] == "read_lef /pdk/cells.lef"
     assert lines[3] == "read_verilog /design/top.v"
     assert lines[4] == "link_design top"
-    assert lines[5] == "create_clock -name clk -period 2.5 [get_ports clk]"
+    assert lines[5] == post_route_sta._UNIT_PIN_LINE
+    assert lines[6] == "create_clock -name clk -period 2.5 [get_ports clk]"
     assert "report_worst_slack_metric -setup" in lines
     assert "report_worst_slack_metric -hold" in lines
     assert "report_tns_metric -setup" in lines
@@ -4065,7 +4067,33 @@ def test_clock_capture_fixture_matches_module_tcl():
     electrical = post_route_sta._electrical_check_lines()
     head = fresh[: -len(completeness)]
     assert head[-len(electrical) :] == electrical
-    assert stored == head[: -len(electrical)]
+    # Issue #4089 pins ns/pF command units just before ``create_clock``; the
+    # pre-#4089 capture predates that line.
+    pinned = head[: -len(electrical)]
+    pin_idx = pinned.index(post_route_sta._UNIT_PIN_LINE)
+    assert pinned[pin_idx + 1].startswith("create_clock")
+    assert stored == pinned[:pin_idx] + pinned[pin_idx + 1 :]
+
+
+def test_unit_pin_precedes_clock_and_metrics_issue_4089():
+    """A non-ns Liberty must not rescale the ns-named constraints or the
+    ``report_*_metric`` values: ``set_cmd_units`` comes before
+    ``create_clock``, the I/O delays and every metric proc."""
+    lines = post_route_sta._sta_netlist_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        verilog_path="/design/top.v",
+        liberty_path="/pdk/lib.lib",
+        hdl_toplevel="top",
+        clock_port="clk",
+        clock_period_ns=1.0,
+        input_delay_ns=0.0,
+        output_delay_ns=0.0,
+    )
+    assert lines.count("set_cmd_units -time ns -capacitance pF") >= 1
+    pin = lines.index("set_cmd_units -time ns -capacitance pF")
+    for needle in ("create_clock", "set_input_delay", "report_worst_slack_metric"):
+        assert pin < next(i for i, ln in enumerate(lines) if ln.startswith(needle))
 
 
 # -- request validation ------------------------------------------------------#
