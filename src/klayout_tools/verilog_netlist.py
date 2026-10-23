@@ -99,9 +99,10 @@ simple `assign <net> = <net>;` alias, and a plain concatenation `assign
 a vector alias or tie-off padding), expanded MSB-first into one per-bit
 alias using the module's own `wire`/`input`/`output`/`inout` declared
 widths; the two sides' total widths must agree exactly. A concatenation
-operand must be a plain net or single-index bit-select -- replication
-(`{N{x}}`), literals (`1'b0`) and part-selects (`a[7:4]`) inside a
-concatenation stay rejected. A Verilog escaped identifier
+operand must be a plain net, single-index bit-select, nested concatenation
+or replication with a literal positive count (`{N{x}}`, issue #4117);
+literals (`1'b0`) and part-selects (`a[7:4]`) inside a concatenation stay
+rejected. A Verilog escaped identifier
 (`\\name`) is accepted wherever a name is, as the single atomic token
 Verilog's own whitespace-terminated escape rule defines -- so a
 place-and-route-flattened hierarchy path like `\\my_array[0].u_inst/_01_` is
@@ -919,6 +920,59 @@ def _concat_operand_bits(
     )
 
 
+_REPLICATION_RE = re.compile(r"^(?P<count>\d+)\s*(?P<body>\{.*\})$", re.S)
+
+
+def _closes_at_end(expr: str) -> bool:
+    """True when the ``{`` opening ``expr`` is matched by its final ``}``."""
+    depth = 0
+    for index, char in enumerate(expr):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index == len(expr) - 1
+    return False
+
+
+def _flatten_concat(
+    statement: str, expr: str, net_widths: dict[str, list[str]]
+) -> list[str]:
+    """Flatten a brace-delimited concatenation ``{ ... }`` to its MSB-first
+    single-bit list (issue #4117). An element is a nested concatenation
+    (``{a, b}``), a replication with a literal positive integer count
+    (``2{a}`` / ``2{a, b}``), or a plain operand resolved by
+    :func:`_concat_operand_bits`, whose brace rejection backstops malformed
+    input."""
+    if not (expr.startswith("{") and _closes_at_end(expr)):
+        raise _unsupported_assign(statement, f"unbalanced braces in {expr!r}")
+    elements = _split_top_level(expr[1:-1])
+    if not elements:
+        raise _unsupported_assign(statement, "the concatenation is empty")
+    bits: list[str] = []
+    for element in elements:
+        replication = _REPLICATION_RE.match(element)
+        if replication is not None:
+            count = int(replication.group("count"))
+            if count < 1:
+                raise _unsupported_assign(
+                    statement,
+                    f"replication count in {element!r} must be a positive integer",
+                )
+            body = replication.group("body")
+            if not _closes_at_end(body):
+                raise _unsupported_assign(
+                    statement, f"unbalanced braces in {element!r}"
+                )
+            bits.extend(_flatten_concat(statement, body, net_widths) * count)
+        elif element.startswith("{"):
+            bits.extend(_flatten_concat(statement, element, net_widths))
+        else:
+            bits.extend(_concat_operand_bits(statement, element, net_widths))
+    return bits
+
+
 def _expand_concat_assign(
     statement: str,
     lhs: str,
@@ -932,9 +986,10 @@ def _expand_concat_assign(
 
     Verilog concatenation is MSB-first: the first operand supplies the
     most-significant bits. Both sides are expanded to MSB-first bit lists
-    from the module's own declarations and zipped. Operands are restricted
-    to plain nets and single-index bit-selects; replication (``{N{x}}``),
-    literals (``1'b0``) and part-selects (``a[7:4]``) are rejected with the
+    from the module's own declarations and zipped. Operands may be plain
+    nets, single-index bit-selects, nested concatenations and replications
+    with a literal positive count (``{N{x}}``, issue #4117); literals
+    (``1'b0``) and part-selects (``a[7:4]``) are rejected with the
     same "only a plain ... is supported" error as any other unsupported
     ``assign``, as is a width mismatch between the two sides (Verilog would
     silently zero-extend or truncate; a sign-off converter must not).
@@ -944,14 +999,8 @@ def _expand_concat_assign(
             statement,
             "a concatenation on the left-hand side is not supported",
         )
-    inner = rhs.strip()[1:-1]
-    operands = _split_top_level(inner)
-    if not operands:
-        raise _unsupported_assign(statement, "the concatenation is empty")
     lhs_bits = _concat_operand_bits(statement, lhs, net_widths)
-    rhs_bits: list[str] = []
-    for operand in operands:
-        rhs_bits.extend(_concat_operand_bits(statement, operand, net_widths))
+    rhs_bits = _flatten_concat(statement, rhs.strip(), net_widths)
     if len(lhs_bits) != len(rhs_bits):
         raise _unsupported_assign(
             statement,

@@ -17335,7 +17335,10 @@ def test_convert_gate_level_verilog_concatenation_assign_end_to_end():
 @pytest.mark.parametrize(
     ("assign", "reason"),
     [
-        ("assign b = {2{a}};", "replication"),
+        ("assign b = {0{a}};", "positive integer"),
+        ("assign b = {N{a}};", "replication or nested"),
+        ("assign b = { a, {c };", "found"),
+        ("assign b = { a, c}};", "unbalanced"),
         ("assign b = { a, 1'b0 };", "literal"),
         ("assign b = { a[1:0], c };", "part-select"),
         ("assign b = { a, undeclared };", "no 'wire'"),
@@ -17346,7 +17349,7 @@ def test_convert_gate_level_verilog_concatenation_assign_end_to_end():
     ],
 )
 def test_parse_gate_level_verilog_unsupported_assign_still_rejected(assign, reason):
-    """Issue #2372 handles only the plain concatenation case; replication,
+    """Issue #2372/#4117 handle plain, nested and replicated concatenations;
     literals, part-selects, width mismatches and general expressions keep
     failing loudly with the "only a plain ... is supported" error."""
     text = (
@@ -17356,6 +17359,50 @@ def test_parse_gate_level_verilog_unsupported_assign_still_rejected(assign, reas
     with pytest.raises(VerilogNetlistError, match="only a plain 'assign") as exc:
         parse_gate_level_verilog(text)
     assert re.search(reason, str(exc.value))
+
+
+@pytest.mark.parametrize(
+    "rhs",
+    [
+        "{ { a1, a0 }, c }",
+        "{ {2{c}}, c }",
+        "{ {2{ {c} }}, c }",
+        "{ a1, a0, c }",
+    ],
+)
+def test_parse_gate_level_verilog_nested_and_replicated_assign(rhs):
+    """Issue #4117: nested concatenations and literal-count replications
+    expand MSB-first to the same aliases as the equivalent flat form."""
+    decls = "  wire a1;\n  wire a0;\n  wire c;\n  wire [2:0] y;"
+    aliases = _assign_aliases(decls, f"assign y = {rhs};")
+    flat = {"{ { a1, a0 }, c }": ["a1", "a0", "c"], "{ a1, a0, c }": ["a1", "a0", "c"]}
+    expected = flat.get(rhs, ["c", "c", "c"])
+    assert [aliases[f"y[{i}]"] for i in (2, 1, 0)] == expected
+
+
+def test_parse_gate_level_verilog_replicated_bus_and_issue_repro():
+    aliases = _assign_aliases(
+        "  wire [1:0] x;\n  wire tie0;\n  wire [4:0] y;\n  wire [3:0] z;",
+        "assign y = { { tie0, tie0 }, x, tie0 }; assign z = {2{x}};",
+    )
+    assert [aliases[f"y[{i}]"] for i in (4, 3, 2, 1, 0)] == [
+        "tie0",
+        "tie0",
+        "x[1]",
+        "x[0]",
+        "tie0",
+    ]
+    assert [aliases[f"z[{i}]"] for i in (3, 2, 1, 0)] == [
+        "x[1]",
+        "x[0]",
+        "x[1]",
+        "x[0]",
+    ]
+
+
+def test_parse_gate_level_verilog_replicated_assign_width_mismatch():
+    with pytest.raises(VerilogNetlistError, match="only a plain 'assign"):
+        _assign_aliases("  wire a;\n  wire [2:0] y;", "assign y = {4{a}};")
 
 
 def _assign_aliases(decls: str, assign: str) -> dict[str, str]:
