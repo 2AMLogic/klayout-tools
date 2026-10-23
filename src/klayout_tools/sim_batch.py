@@ -3922,9 +3922,9 @@ class _ShardManifest:
 
     ``<artifacts_dir>/batch-shards.json`` holds the request fingerprint (the
     resume checkpoint's own, :func:`sim._checkpoint_fingerprint`), the shard
-    count, where the jobs live (``bucket``/``jobs_prefix``/``region``/
-    ``profile``, like ``batch-receipt.json``), and one entry per shard: its
-    index, the job id it was submitted as, a digest of the corner ids it
+    count, where the jobs live (``jobs_prefix``/``region``/``profile``,
+    like ``batch-receipt.json``; never the bucket, issue #4079), and one entry
+    per shard: its index, the job id it was submitted as, a digest of the corner ids it
     carries, and its client-side lifecycle -- ``state`` is ``pending`` (id
     minted, not yet submitted), ``submitted``, ``launching`` (``launch_job``
     started, outcome unknown), ``launched`` or ``collected``, with the
@@ -4355,7 +4355,8 @@ def _run_batch_job(
     receipt: dict[str, Any] = {
         "job_id": job_id,
         # getattr: the receipt is best-effort and must never break a run.
-        "bucket": getattr(config, "bucket", None),
+        # No bucket: its name carries the cloud account id and receipts get
+        # committed by canary repos (issue #4079).
         "jobs_prefix": getattr(config, "jobs_prefix", None),
         "region": getattr(config, "region", None),
         "profile": getattr(config, "profile", None),
@@ -4689,7 +4690,6 @@ def _open_shard_manifest(
         hosts,
         resume=resume,
         location={
-            "bucket": getattr(config, "bucket", None),
             "jobs_prefix": getattr(config, "jobs_prefix", None),
             "region": getattr(config, "region", None),
             "profile": getattr(config, "profile", None),

@@ -195,7 +195,11 @@ def test_submit_only_writes_the_submit_receipt(tmp_path, monkeypatch):
 
     receipt = json.loads((tmp_path / ".klt" / "sim" / "batch-receipt.json").read_text())
     assert receipt["job_id"] == result["job_id"]
-    assert receipt["bucket"] == FAKE_BUCKET
+    assert "bucket" not in receipt
+    raw = json.dumps(receipt)
+    assert FAKE_BUCKET not in raw
+    assert "s3://" not in raw
+    assert "arn:" not in raw
     assert receipt["request_sha256"] == result["request_sha256"]
     # state stays null: the client does not know the job's terminal state.
     assert receipt["state"] is None
