@@ -369,7 +369,7 @@ def _transport_failure(job_id: str, exc: sim_batch.BatchError) -> _UnitFailed:
         return _UnitFailed(
             f"batch job {job_id}: {exc} -- it may still finish on the fleet, but "
             f"no result was collected {_NO_FALLBACK}",
-            code=BATCH_POLL_TIMEOUT_CODE,
+            code=exc.code or BATCH_POLL_TIMEOUT_CODE,
             job_id=job_id,
         )
     return _UnitFailed(
@@ -403,7 +403,7 @@ def _job_failure(
             message += f" [output recovery: {detail}]"
         message += (
             " -- full log: "
-            + sim_batch.job_uri(config, job_id).rstrip("/")
+            + sim_batch.report_job_uri(config, job_id).rstrip("/")
             + "/harness.log"
         )
         tail = _remote_stderr_tail(collected)

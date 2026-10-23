@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import difflib
+import hashlib
 import io
 import json
 import os
@@ -251,6 +252,34 @@ def _make_inverter_layout(
         label(67, 5, substrate_tap_label, -300, -600)
 
     return layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Path:
+    """Shadows pytest's own built-in `tmp_path` fixture for every test in this
+    module (issue #2659): seeds a `.git` marker so `tmp_path` itself resolves
+    as this run's own repo root (`env_provenance.find_repo_root` only checks
+    for a `.git` entry -- no real `git` binary or working tree is needed).
+
+    Since #2659 `run_extract`'s `file` field is the committable
+    `{path, scope}` envelope rather than the raw input path, and `klt extract
+    --check`/`--rerun` resolve a `scope: "repo"` entry against the repo root
+    of the committed report's own directory. A layout under a bare `tmp_path`
+    resolves to `scope: "external"` with `path: null` -- correct, but it
+    means the report records no locatable input, which is the one case
+    `--check`/`--rerun` cannot verify. Seeding the marker puts every test
+    below in the *realistic* position of a design inside a repo (the only
+    position a report committed as `klt signoff` evidence is ever in).
+
+    The external branch is not thereby left uncovered: the tests that pin it
+    deliberately work outside `tmp_path`, via `tmp_path_factory` -- mirroring
+    how `tests/test_synthesize.py`'s own `tmp_path` override (issue #1844)
+    keeps its "no repo at all" case honest. `netlist_path`/`spef_path`/
+    `abstracted_cells[].lef_path` are unaffected either way: they stay plain
+    strings (see `extract.SCHEMA_VERSION`).
+    """
+    (tmp_path / ".git").mkdir()
+    return tmp_path
 
 
 def _write_gds(layout: kdb.Layout, path: Path) -> str:
@@ -503,6 +532,14 @@ def test_layout_with_no_devices_succeeds_with_zero_count(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
 
@@ -581,8 +618,11 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
 
     report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
 
-    assert report["schema_version"] == 3
-    assert report["file"] == path
+    assert report["schema_version"] == 4
+    # Issue #2659: the `{path, scope}` envelope, not the raw input path --
+    # this module's `tmp_path` override seeds a `.git` marker, so the layout
+    # resolves inside a repo.
+    assert report["file"] == {"path": "inv.gds", "scope": "repo"}
     assert report["deck"] == "sky130"
     assert report["top"] == "TOP"
     assert report["dbu_um"] == pytest.approx(0.001)
@@ -599,9 +639,19 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
     assert report["pdk"] is None
-    assert report["warnings"] == []
+    # Only the issue #3920 split-label warning (fixture's unstrapped `Y` pads).
+    assert len(report["warnings"]) == 1
+    assert "'Y' is drawn on 2 separate nets" in report["warnings"][0]
 
     prov = report["provenance"]
     assert set(prov.keys()) == {
@@ -3586,6 +3636,14 @@ def test_sky130_synthetic_bjt_extracts_one_pnp_device(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
     (device,) = report["devices"]
@@ -3631,6 +3689,18 @@ def test_gf180mcu_synthetic_bjt_extracts_one_bjt_device(tmp_path):
         "pfet",
         "bjt",
         "cap_mim_2f0_m4m5_noshield",
+        "cap_nmos_03v3",
+        "cap_nmos_03v3_dn",
+        "cap_pmos_03v3",
+        "cap_pmos_03v3_dn",
+        "cap_nmos_06v0",
+        "cap_nmos_06v0_dn",
+        "cap_pmos_06v0",
+        "cap_pmos_06v0_dn",
+        "cap_nmos_03v3_b",
+        "cap_pmos_03v3_b",
+        "cap_nmos_06v0_b",
+        "cap_pmos_06v0_b",
         "resistor",
         "diode_nd2ps_06v0",
         "diode_pd2nw_06v0",
@@ -4577,7 +4647,16 @@ def test_diodes_field_defaults_empty_and_is_a_no_op():
     )
     assert deck.diodes == ()
     assert deck.device_classes == ("nfet", "pfet")
-    assert get_extraction_deck("sky130").diodes == ()
+    assert {d.name for d in get_extraction_deck("sky130").diodes} == {
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
+    }
 
 
 def test_diode_with_no_drawn_terminal_is_a_deck_authoring_error(tmp_path):
@@ -4800,6 +4879,44 @@ def test_gf180mcu_dual_diode_clamp_reports_no_near_miss(tmp_path):
     report = run_extract(path, "gf180mcu", output=str(tmp_path / "diode.spice"))
 
     assert _near_miss_warnings(report) == []
+
+
+def _make_sg13g2_bare_activ_layout(*, hbt_trans: bool) -> kdb.Layout:
+    """A lone `Activ` island on sg13g2 -- the `dantenna` predicates minus the
+    `Recog.diode` marker -- optionally under the SiGe HBT's `TRANS` (26/0)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 1000, 1000))  # Activ
+    if hbt_trans:
+        top.shapes(layout.layer(26, 0)).insert(kdb.Box(-500, -500, 1500, 1500))
+    return layout
+
+
+def test_sg13g2_hbt_geometry_diode_near_miss_names_the_unmodelled_family(tmp_path):
+    """Issue #3137: the PDK's `npn13G2` Activ matches the `dantenna`
+    predicates minus `Recog.diode`; the near-miss warning must also say the
+    geometry is an HBT the deck does not model, not only "draw the marker"."""
+    path = _write_gds(
+        _make_sg13g2_bare_activ_layout(hbt_trans=True), tmp_path / "hbt.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "hbt.spice"))
+
+    assert report["device_counts"] == {}
+    dantenna = [w for w in _near_miss_warnings(report) if "'dantenna'" in w]
+    assert len(dantenna) == 1
+    assert "Recog.diode (99/31)" in dantenna[0]
+    assert "SiGe HBT" in dantenna[0] and "does not model" in dantenna[0]
+
+
+def test_sg13g2_diode_near_miss_without_hbt_geometry_has_no_unmodelled_note(tmp_path):
+    path = _write_gds(
+        _make_sg13g2_bare_activ_layout(hbt_trans=False), tmp_path / "activ.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "activ.spice"))
+
+    dantenna = [w for w in _near_miss_warnings(report) if "'dantenna'" in w]
+    assert len(dantenna) == 1
+    assert "does not model" not in dantenna[0]
 
 
 def test_diode_near_miss_names_layers_from_the_same_set_deck_devices_reports(tmp_path):
@@ -5676,26 +5793,34 @@ def _isolate_pdk_search(monkeypatch):
     monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [])
 
 
-def test_optional_pdk_resolution_is_reported(tmp_path):
-    variant_dir = tmp_path / "pdk_install" / "sky130A"
-    (variant_dir / "libs.tech").mkdir(parents=True)
+def test_optional_pdk_resolution_is_reported(tmp_path, tmp_path_factory):
+    # The PDK install goes outside this module's own `tmp_path` (which seeds a
+    # `.git` marker since issue #2659 -- see the fixture override above), so
+    # it is genuinely external to any repo, which is the condition the
+    # `scope: "external"` assertion below is about. A real PDK install always
+    # is; `tmp_path` being a repo root is a test-harness convenience.
+    external_pdk_root = tmp_path_factory.mktemp("outside-any-repo") / "pdk_install"
+    (external_pdk_root / "sky130A" / "libs.tech").mkdir(parents=True)
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
 
     report = run_extract(
-        path, "sky130", pdk_variant="sky130A", pdk_root=str(tmp_path / "pdk_install")
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=str(external_pdk_root),
     )
 
     # Issue #1376: `pdk.root` is a sanitized `{path, scope}` pair (mirroring
     # `env_provenance.repo_relative_path`), never the raw `--pdk-root`
-    # argument -- a PDK install under a pytest `tmp_path` lives outside this
-    # repo, so it resolves to `scope: "external"`, `path: null`. The literal
-    # absolute path string must not appear anywhere in the report.
+    # argument -- a PDK install outside this repo resolves to
+    # `scope: "external"`, `path: null`. The literal absolute path string
+    # must not appear anywhere in the report.
     assert report["pdk"] == {
         "variant": "sky130A",
         "root": {"path": None, "scope": "external"},
         "version": None,
     }
-    assert str(tmp_path / "pdk_install") not in json.dumps(report)
+    assert str(external_pdk_root) not in json.dumps(report)
 
     # The shared provenance block mirrors the resolved PDK (name/source/
     # version), independent of extract's own richer `pdk` echo above.
@@ -6332,8 +6457,14 @@ def test_pdk_binding_reports_no_warnings_for_pure_mos_layout(tmp_path):
         output=str(tmp_path / "inv.spice"),
     )
     # The layout draws no `hvi` marker, so the issue #2417 missing-marker
-    # warning is expected; this test is about "parameter dropped" warnings.
-    assert [w for w in report["warnings"] if "no shapes in the layout" not in w] == []
+    # warning is expected, as is the issue #3920 split-label warning for the
+    # fixture's unstrapped `Y` pads; this test is about "parameter dropped"
+    # warnings.
+    assert [
+        w
+        for w in report["warnings"]
+        if "no shapes in the layout" not in w and "separate nets" not in w
+    ] == []
 
 
 def test_pdk_binding_warns_when_bipolar_geometry_params_are_dropped(tmp_path):
@@ -6739,6 +6870,14 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
                 "sky130_fd_pr__model__cap_mim",
                 "sky130_fd_pr__model__cap_mim_m4",
                 "resistor",
+                "diode_pw2nd_05v5",
+                "diode_pw2nd_05v5_lvt",
+                "diode_pw2nd_05v5_nvt",
+                "diode_pw2nd_11v0",
+                "diode_pd2nw_05v5",
+                "diode_pd2nw_05v5_lvt",
+                "diode_pd2nw_05v5_hvt",
+                "diode_pd2nw_11v0",
             ),
         ),
         # gf180mcu declares one bipolar entry, generic `bjt` (issue #223 --
@@ -6746,7 +6885,8 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
         # with no single named device cell to attribute one to; see
         # `decks/gf180mcu.py`'s `EXTRACTION_DECK` note), one MiM-capacitor
         # entry (issue #225, its own official LVS device name for the deck's
-        # Metal4/Metal5 MiM stack), a drawn poly resistor (issue #222), and
+        # Metal4/Metal5 MiM stack), twelve MOS-capacitor classes (issue
+        # #2919), a drawn poly resistor (issue #222), and
         # the two 6V junction-diode flavours its own I/O library's ESD clamps
         # are built from (issue #542) -- which trail the `"resistor"` role.
         (
@@ -6756,6 +6896,18 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
                 "pfet",
                 "bjt",
                 "cap_mim_2f0_m4m5_noshield",
+                "cap_nmos_03v3",
+                "cap_nmos_03v3_dn",
+                "cap_pmos_03v3",
+                "cap_pmos_03v3_dn",
+                "cap_nmos_06v0",
+                "cap_nmos_06v0_dn",
+                "cap_pmos_06v0",
+                "cap_pmos_06v0_dn",
+                "cap_nmos_03v3_b",
+                "cap_pmos_03v3_b",
+                "cap_nmos_06v0_b",
+                "cap_pmos_06v0_b",
                 "resistor",
                 "diode_nd2ps_06v0",
                 "diode_pd2nw_06v0",
@@ -9188,10 +9340,15 @@ def test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res(tmp_
         # heads (`RA`/`RB`) merge onto one continuous, device-less net that
         # survives extraction instead of purging away -- see
         # `test_unmarked_poly_bar_is_not_a_resistor`.
-        assert len(report["warnings"]) == 2
+        # A third (issue #3138): the declared `poly.res` marker is claimed by
+        # no resistor class, so the unclaimed-marker warning fires too.
+        assert len(report["warnings"]) == 3
         assert "deck-coverage gap" in report["warnings"][0]
         assert "carry no resistor-marker layer at all" not in report["warnings"][0]
-        assert "merges 2 distinct labels (RA, RB)" in report["warnings"][1]
+        assert any(
+            "claimed by no declared resistor class" in w for w in report["warnings"]
+        )
+        assert any("merges 2 distinct labels (RA, RB)" in w for w in report["warnings"])
 
 
 def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_path):
@@ -9211,10 +9368,13 @@ def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_pa
     # A second warning (issue #539's `net 'RA,RB' merges ...` collision note)
     # now also fires -- see the matching comment in
     # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
-    assert len(report["warnings"]) == 2
+    # A third (issue #3138): the declared `RES_MK` marker is claimed by no
+    # resistor class, so the unclaimed-marker warning fires too.
+    assert len(report["warnings"]) == 3
     assert "deck-coverage gap" in report["warnings"][0]
     assert "carry no resistor-marker layer at all" not in report["warnings"][0]
-    assert "merges 2 distinct labels (RA, RB)" in report["warnings"][1]
+    assert any("claimed by no declared resistor class" in w for w in report["warnings"])
+    assert any("merges 2 distinct labels (RA, RB)" in w for w in report["warnings"])
 
 
 def test_marked_gate_poly_over_diffusion_stays_a_transistor(tmp_path):
@@ -9302,7 +9462,9 @@ def test_unmodelled_poly_field_empty_when_no_warning_fires(tmp_path):
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
 
-    assert report["warnings"] == []
+    # Ignore the issue #3920 split-label warning the fixture's unstrapped `Y`
+    # pads raise; no unmodelled-device warning may fire.
+    assert [w for w in report["warnings"] if "separate nets" not in w] == []
     assert report["unmodelled_poly"] == []
 
 
@@ -9396,7 +9558,8 @@ def test_unmodelled_poly_warning_distinguishes_marked_from_unmarked(tmp_path):
     # device-less net that survives extraction instead of purging away --
     # see the matching comment in
     # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
-    assert len(report["warnings"]) == 4
+    # Plus one unclaimed-marker warning (issue #3138) for the marked bar.
+    assert len(report["warnings"]) == 5
     unmarked = [
         w for w in report["warnings"] if "carry no resistor-marker layer at all" in w
     ]
@@ -9792,7 +9955,7 @@ def test_sky130_corpus_extraction_produces_well_formed_report(layout_path, tmp_p
         str(layout_path), "sky130", output=str(tmp_path / f"{layout_path.stem}.spice")
     )
 
-    assert report["schema_version"] == 3
+    assert report["schema_version"] == 4
     assert report["status"] == "extracted"
     assert report["device_count"] == sum(report["device_counts"].values())
     assert report["net_count"] == len(report["nets"])
@@ -9811,7 +9974,7 @@ def test_gf180mcu_corpus_extraction_produces_well_formed_report(layout_path, tmp
         str(layout_path), "gf180mcu", output=str(tmp_path / f"{layout_path.stem}.spice")
     )
 
-    assert report["schema_version"] == 3
+    assert report["schema_version"] == 4
     assert report["status"] == "extracted"
     assert report["device_count"] == sum(report["device_counts"].values())
     assert report["net_count"] == len(report["nets"])
@@ -9840,6 +10003,14 @@ def test_sky130_inv_1_spot_check(tmp_path):
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
         "resistor",
+        "diode_pw2nd_05v5",
+        "diode_pw2nd_05v5_lvt",
+        "diode_pw2nd_05v5_nvt",
+        "diode_pw2nd_11v0",
+        "diode_pd2nw_05v5",
+        "diode_pd2nw_05v5_lvt",
+        "diode_pd2nw_05v5_hvt",
+        "diode_pd2nw_11v0",
     ]
 
     devices = {d["class"]: d for d in report["devices"]}
@@ -9869,6 +10040,18 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
         "pfet",
         "bjt",
         "cap_mim_2f0_m4m5_noshield",
+        "cap_nmos_03v3",
+        "cap_nmos_03v3_dn",
+        "cap_pmos_03v3",
+        "cap_pmos_03v3_dn",
+        "cap_nmos_06v0",
+        "cap_nmos_06v0_dn",
+        "cap_pmos_06v0",
+        "cap_pmos_06v0_dn",
+        "cap_nmos_03v3_b",
+        "cap_pmos_03v3_b",
+        "cap_nmos_06v0_b",
+        "cap_pmos_06v0_b",
         "resistor",
         "diode_nd2ps_06v0",
         "diode_pd2nw_06v0",
@@ -13720,6 +13903,7 @@ def test_parasitics_summary_block_shape(tmp_path):
     para = report["parasitics"]
     assert para is not None
     assert set(para) == {
+        "model_revision",
         "r_count",
         "c_count",
         "cc_count",
@@ -13794,6 +13978,9 @@ def test_parasitics_summary_block_shape(tmp_path):
     # static across every extraction, so it must match the module constant
     # exactly, not just be present.
     assert para["model"] == PARASITIC_MODEL_SCOPE
+    # `model_revision` (issue #2957): bump PARASITICS_MODEL_REVISION (and the
+    # CHANGELOG) whenever R/C extraction semantics change.
+    assert para["model_revision"] == 2
     assert set(para["model"]) == {"capacitance", "coupling", "resistance", "frequency"}
     # sky130's PARASITICS.metals/metal_overlaps are fully populated (issue
     # #547's regression target was gf180mcu, not sky130) -- no gap for this
@@ -13831,6 +14018,7 @@ def test_parasitics_summary_block_shape(tmp_path):
             "rc_model",
             "terminals",
             "segments",
+            "pin_order",
             "coupled",
             "by_layer",
             "resistance_ohm_top_cell",
@@ -16921,6 +17109,7 @@ def test_distributed_rc_replaces_star_with_two_segment_ladder(tmp_path):
     )
     assert baseline_entry["rc_model"] == "lumped"
     assert baseline_entry["segments"] == []
+    assert baseline_entry["pin_order"] is None
 
     report = run_extract(
         path,
@@ -16936,6 +17125,10 @@ def test_distributed_rc_replaces_star_with_two_segment_ladder(tmp_path):
 
     entry = next(n for n in para["nets"] if n["net"] == net_name)
     assert entry["rc_model"] == "distributed"
+
+    # Issue #3937: `pin_order` names the terminal whose leg is the pin.
+    (pin_terminal,) = [t for t in entry["terminals"] if t["leg_net"] == net_name]
+    assert entry["pin_order"] == pin_terminal["order"] == len(entry["terminals"]) // 2
 
     # Net-level totals are unaffected by which model represents them --
     # `--distributed-rc` redistributes the *same* total R/C, it does not
@@ -20698,7 +20891,8 @@ def test_spef_floating_duplicate_named_outputs_are_skipped(tmp_path):
 def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
     """Issue #3580: a unique-named unlabelled `$N` net with no DEF net (and not
     a port) gets no `*D_NET` (STA-1650) and its coupling is dropped; a `$N`
-    that the DEF names, a port, and a labelled non-DEF net are untouched."""
+    that the DEF names and a port are untouched. Issue #3662: a labelled net
+    (e.g. a sub-cell label `Z`/`ZN`) with no DEF net is skipped the same way."""
     from klayout_tools.extract_spef import _write_spef
 
     def run(name, **kwargs):
@@ -20725,10 +20919,10 @@ def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
     skipped, text = run(
         "on", net_instance_pins={"sig": (("u1", "A"),), "$12": (("u2", "A"),)}
     )
-    assert skipped == ["$7"]
+    assert skipped == ["$7", "lab"]
     assert "*D_NET \\$7 " not in text
     assert "*D_NET \\$12 " in text
-    assert "*D_NET lab " in text
+    assert "*D_NET lab " not in text
     assert "*D_NET sig 1.000000" in text  # coupling cap not folded in
 
     skipped, _ = run("empty", net_instance_pins={})
@@ -22390,36 +22584,22 @@ def test_cli_extract_check_rerun_exits_three_on_drift(tmp_path, capsys):
     assert data["status"] == "drifted"
 
 
-def test_cli_extract_check_with_file_argument_is_a_usage_error(tmp_path):
-    """`file` and `--check` are a required, mutually exclusive argparse
-    group (issue #1149) -- combining them is a usage error (exit 2), the
-    same as any other mutually exclusive argparse pair, not an
-    application-level (`--format json` error envelope) one."""
+def test_cli_extract_check_with_file_argument_is_an_explicit_input_override(
+    tmp_path, capsys
+):
+    """`file` alongside `--check` is the explicit-input override (issue
+    #2699), no longer a usage error: it names the layout to verify."""
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     report_path = tmp_path / "inv.extract.json"
     _write_report(
         report_path, run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
     )
-
-    with pytest.raises(SystemExit) as exc_info:
-        main(["extract", path, "--check", str(report_path), "--format", "json"])
-    assert exc_info.value.code == 2
-
-
-def test_cli_extract_rerun_without_check_is_rejected(tmp_path, capsys):
-    """`--rerun` alongside `file` (no `--check`) passes argparse's
-    mutually-exclusive-group check (`file` alone already satisfies "one of
-    file/--check required") but is still a semantic error at the
-    application level (exit 1) -- `--rerun` only means something for
-    `--check`."""
-    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     capsys.readouterr()
 
-    assert (
-        main(["extract", path, "--deck", "sky130", "--rerun", "--format", "json"]) == 1
-    )
-    err = json.loads(capsys.readouterr().err)
-    assert "requires --check" in err["error"]["message"]
+    code = main(["extract", path, "--check", str(report_path), "--format", "json"])
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "match"
 
 
 def test_cli_extract_no_file_no_check_is_a_usage_error():
@@ -22707,7 +22887,11 @@ def test_extract_request_document_stdin_form(tmp_path, capsys, monkeypatch):
     code, report = _run_extract_json(capsys, ["-"])
 
     assert code == 0
-    assert report["file"] == path
+    # Issue #2659: the resolved layout, reported as the `{path, scope}`
+    # envelope. The request document's own *resolution* is unchanged -- only
+    # the shape the result is reported in. `netlist_path` is an output path
+    # and still the plain resolved string.
+    assert report["file"] == {"path": "inv.gds", "scope": "repo"}
     assert report["netlist_path"] == str(output)
     assert report["device_count"] == 2
 
@@ -22743,7 +22927,9 @@ def test_extract_request_document_relative_paths_resolve_against_its_directory(
     code, report = _run_extract_json(capsys, [str(request_path)])
 
     assert code == 0
-    assert report["file"] == str(design_dir / "inv.gds")
+    # The document-relative resolution is what is under test; #2659 only
+    # changed how the resolved *input* path is reported.
+    assert report["file"] == {"path": "design/inv.gds", "scope": "repo"}
     assert report["netlist_path"] == str(design_dir / "inv.spice")
 
 
@@ -24256,6 +24442,261 @@ def test_rerun_of_a_report_predating_the_field_replays_no_override(tmp_path):
     assert result["fresh"]["pin_count"] == committed["pin_count"]
 
 
+# --------------------------------------------------------------------------- #
+# Issue #2659: `file` is the portable `{path, scope}` envelope, not the
+# producing host's absolute path.
+#
+# A `klt extract --format json` envelope is cited verbatim by a `klt signoff`
+# manifest, and that verb's `input_verified` freshness gate (issue #2196)
+# re-hashes the artifact `file` names to check `provenance.input.content_hash`
+# against the file rather than against another claim. While `file` was the
+# producing run's own absolute path, the gate could resolve it only on the
+# producing host -- `input_verified: true` there, `null` from every other
+# clone, so `klt signoff --check` reported drift on
+# `items.N.citation.input_verified` for evidence committed in full beside the
+# manifest. `klt sim`/`klt pex` fixed the same defect for their own
+# input-path fields in issue #1261.
+#
+# `netlist_path`/`spef_path`/`abstracted_cells[].lef_path` are deliberately
+# *not* part of this: they are output artifacts, stay plain strings, and are
+# not what `provenance.input` covers -- see `extract.SCHEMA_VERSION`'s own
+# note and `docs/json-contract.md`'s "Path fields: envelope vs. plain
+# string".
+# --------------------------------------------------------------------------- #
+
+
+def _make_fake_repo(tmp_path: Path) -> Path:
+    """A `.git`-marked directory `env_provenance.find_repo_root` recognises as
+    a repo root -- mirrors `tests/test_pex.py`'s own `_make_fake_repo` (kept
+    local rather than imported across test modules, matching this file's
+    existing convention). No real git working tree is needed: `find_repo_root`
+    only looks for a `.git` entry."""
+    root = tmp_path / "fake-repo"
+    (root / ".git").mkdir(parents=True)
+    return root
+
+
+def test_run_extract_file_is_repo_relative_inside_a_repo(tmp_path):
+    """The happy path: a layout inside a repo is echoed as a repo-relative
+    `{path, scope: "repo"}` entry -- usable from any checkout of that repo,
+    and never the producing machine's absolute path."""
+    root = _make_fake_repo(tmp_path)
+    (root / "blocks").mkdir()
+    path = _write_gds(_make_inverter_layout(), root / "blocks" / "inv.gds")
+
+    report = run_extract(path, "sky130", output=str(root / "inv.spice"))
+
+    assert report["schema_version"] == 4
+    assert report["file"] == {"path": "blocks/inv.gds", "scope": "repo"}
+
+
+def test_run_extract_file_is_external_outside_any_repo(tmp_path_factory):
+    """The edge case from the issue's Test Plan: a layout outside any repo
+    reports `scope: "external"` with `path: null` -- detail is lost, the
+    absolute path is *never* emitted.
+
+    Deliberately uses `tmp_path_factory` rather than this module's own
+    `tmp_path` override, which seeds a `.git` marker -- so this really is
+    outside any repo."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert report["file"] == {"path": None, "scope": "external"}
+
+
+def test_run_extract_output_paths_stay_plain_strings(tmp_path):
+    """The deliberate boundary (issue #2659): only the *input* `file` is
+    retyped. `netlist_path` is an output artifact -- a caller chaining on the
+    written netlist still reads a usable filesystem path out of the response,
+    including for a netlist written outside any repo, which the `{path,
+    scope}` shape could only have reported as `path: null`."""
+    root = _make_fake_repo(tmp_path)
+    path = _write_gds(_make_inverter_layout(), root / "inv.gds")
+    outside = tmp_path / "outside-the-repo.spice"
+
+    report = run_extract(path, "sky130", output=str(outside))
+
+    assert report["file"] == {"path": "inv.gds", "scope": "repo"}
+    assert report["netlist_path"] == str(outside)
+    assert Path(report["netlist_path"]).is_file()
+
+
+def test_run_extract_klayout_engine_file_matches_run_extract_shape(tmp_path):
+    """The agreement oracle's own response builder normalises `file`
+    identically (its own `schema_version` 1 -> 2), so the two stay
+    shape-compatible field-for-field where they overlap."""
+    from helpers.extract_klayout_oracle import run_extract_klayout_engine
+
+    root = _make_fake_repo(tmp_path)
+    path = _write_gds(_make_inverter_layout(), root / "inv.gds")
+    deck = root / "deck.lylvs"
+    deck.write_text("# stub native deck\n", encoding="utf-8")
+
+    report = run_extract(path, "sky130", output=str(root / "inv.spice"))
+    try:
+        engine_report = run_extract_klayout_engine(path, str(deck))
+    except ExtractError:
+        pytest.skip("no klayout binary available for the native-deck engine")
+
+    assert engine_report["schema_version"] == 2
+    assert engine_report["file"] == report["file"]
+
+
+def test_check_extract_report_re_hashes_a_repo_scoped_file_from_another_checkout(
+    tmp_path, monkeypatch
+):
+    """The issue's own reproduction, reduced to `--check`: a report committed
+    beside its layout verifies from a *different* checkout of the same
+    content -- the `{path, scope}` entry resolves against the repo root of
+    the committed report's own directory, so neither the producing absolute
+    path nor the grading process's cwd is involved."""
+    producer = _make_fake_repo(tmp_path / "producer")
+    path = _write_gds(_make_inverter_layout(), producer / "inv.gds")
+    report = run_extract(path, "sky130", output=str(producer / "inv.spice"))
+    assert report["file"] == {"path": "inv.gds", "scope": "repo"}
+
+    consumer = _make_fake_repo(tmp_path / "consumer")
+    (consumer / "inv.gds").write_bytes((producer / "inv.gds").read_bytes())
+    report_path = consumer / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = check_extract_report(str(report_path))
+
+    (input_check,) = [
+        c for c in result["checks"] if c["field"] == "provenance.input.content_hash"
+    ]
+    assert input_check["match"] is True
+    assert result["status"] == "match"
+
+
+def test_check_extract_report_still_resolves_a_pre_2659_bare_string_file(
+    tmp_path_factory,
+):
+    """Backwards compatibility: every report committed before #2659 carries
+    `file` as a bare path string, and `--check` must keep resolving it
+    exactly as it always did -- including, as here, from outside any
+    repository, which is where the old shape was the *only* thing that
+    worked."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    report["schema_version"] = 3
+    report["file"] = path  # the pre-#2659 shape
+    report_path = tmp_path / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    assert check_extract_report(str(report_path))["status"] == "match"
+
+
+def test_check_extract_report_reports_an_external_file_as_unverifiable(
+    tmp_path_factory,
+):
+    """A `scope: "external"` entry names no path by construction, so there is
+    nothing to re-hash: the same unverifiable `actual: null` an absent field
+    gets -- never a crash, and never a false `"match"`.
+
+    This is the accepted cost of the portability fix, stated here as a test
+    rather than left to be discovered: a run whose layout is outside any
+    repository records no locatable input, so its committed report can no
+    longer be re-verified anywhere -- including on the producing host, which
+    the old absolute path did support. Inside a repo (every case where the
+    report is committed as evidence at all) the opposite holds, and `--check`
+    now works from *every* checkout rather than only one."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    assert report["file"] == {"path": None, "scope": "external"}
+    report_path = tmp_path / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    result = check_extract_report(str(report_path))
+
+    (input_check,) = [
+        c for c in result["checks"] if c["field"] == "provenance.input.content_hash"
+    ]
+    assert input_check["actual"] is None
+    assert input_check["match"] is False
+    assert result["status"] == "drifted"
+
+
+def test_rerun_extract_report_refuses_an_external_file_cleanly(tmp_path_factory):
+    """`--rerun` has nothing to re-run from when `file` names no path: the
+    same clean `ExtractError` a report missing the field entirely raises,
+    never a traceback (the counterpart to the `--check` case above)."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    report_path = tmp_path / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    with pytest.raises(ExtractError, match="no 'file' field to rerun"):
+        rerun_extract_report(str(report_path))
+
+
+def test_rerun_extract_report_resolves_a_repo_scoped_file_from_another_checkout(
+    tmp_path, monkeypatch
+):
+    """The `--rerun` half of the portability fix: the committed report's
+    `{path, scope}` entry is resolved against its own directory's repo root,
+    so the extraction actually re-runs on the grading checkout's copy."""
+    producer = _make_fake_repo(tmp_path / "producer")
+    path = _write_gds(_make_inverter_layout(), producer / "inv.gds")
+    report = run_extract(path, "sky130", output=str(producer / "inv.spice"))
+
+    consumer = _make_fake_repo(tmp_path / "consumer")
+    (consumer / "inv.gds").write_bytes((producer / "inv.gds").read_bytes())
+    report_path = consumer / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["fresh"]["device_count"] == report["device_count"]
+
+
+def test_extract_text_output_renders_the_file_envelope_not_a_dict_repr(
+    tmp_path, tmp_path_factory, capsys
+):
+    """`--format text` is a courtesy, but it must stay readable: `file` is
+    rendered through the shared `env_provenance.render_path_field` helper
+    `klt sim`/`klt pex` already use. `netlist_path` keeps printing its plain
+    string."""
+    root = _make_fake_repo(tmp_path)
+    path = _write_gds(_make_inverter_layout(), root / "inv.gds")
+    out = root / "inv.spice"
+
+    assert main(["extract", path, "--deck", "sky130", "-o", str(out)]) == 0
+    inside = capsys.readouterr().out
+
+    outside_dir = tmp_path_factory.mktemp("outside-any-repo")
+    outside_layout = _write_gds(_make_inverter_layout(), outside_dir / "inv.gds")
+    assert (
+        main(
+            [
+                "extract",
+                outside_layout,
+                "--deck",
+                "sky130",
+                "-o",
+                str(outside_dir / "inv.spice"),
+            ]
+        )
+        == 0
+    )
+    outside = capsys.readouterr().out
+
+    assert "file: inv.gds\n" in inside
+    assert f"netlist_path: {out}\n" in inside
+    assert "file: <outside repo>\n" in outside
+
+
 def _make_mos_layout_without_flavour_marker(draw_nmos) -> kdb.Layout:
     """One NMOS and *no* shape on the flavour marker layer at all (issue
     #2417) -- distinct from ``*_overlap=False``, which still draws the
@@ -25305,8 +25746,9 @@ def test_no_netlist_with_spef_still_works(tmp_path):
 
 
 def _make_gf180mcu_mos_cap_layout(*, with_marker: bool) -> kdb.Layout:
-    """One gf180mcu NMOS plus, optionally, a MOS-capacitor stack (Comp + Poly2
-    under ``MOS_CAP_MK`` 166/5) -- issue #2919."""
+    """One gf180mcu NMOS plus, optionally, an *unclassifiable* MOS-capacitor
+    stack (Comp + Poly2 under ``MOS_CAP_MK`` 166/5, no Nplus/Pplus implant, so
+    no ``mos_capacitors`` entry claims it) -- issue #2919."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     _draw_gf180mcu_nmos(top, layout, 0, "S", drain_label="D")
@@ -25318,8 +25760,9 @@ def _make_gf180mcu_mos_cap_layout(*, with_marker: bool) -> kdb.Layout:
 
 
 def test_gf180mcu_extract_flags_mos_cap_marker_as_unsupported(tmp_path):
-    """Issue #2919: shapes on `MOS_CAP_MK` (166/5) are reported in
-    `unsupported_devices[]` and `warnings[]` instead of a silent clean run."""
+    """Issue #2919 (deliverable A): marker shapes the deck cannot classify are
+    reported in `unsupported_devices[]` and `warnings[]` instead of a silent
+    clean run."""
     path = _write_gds(
         _make_gf180mcu_mos_cap_layout(with_marker=True), tmp_path / "moscap.gds"
     )
@@ -25346,6 +25789,183 @@ def test_gf180mcu_extract_unsupported_devices_empty_without_marker(tmp_path):
 
     assert report["unsupported_devices"] == []
     assert not any("unsupported device" in w for w in report["warnings"])
+
+
+def _draw_gf180mcu_mos_cap(
+    top,
+    layout,
+    x0,
+    *,
+    implant,
+    nwell=False,
+    lvpwell=False,
+    dualgate=False,
+    dnwell=False,
+    extra=(),
+    gate_label="G",
+    sd_label="SD",
+):
+    """Draw one PDK-style (`draw_cap_mos.py`) gf180mcu MOS capacitor at ``x0``:
+    one 2.0x2.0um Comp under ``MOS_CAP_MK`` (166/5), a 0.8um Poly2 gate across
+    it (S/D on both sides, strapped in Metal1), gate contact below, implant
+    (Nplus 32/0 / Pplus 31/0) over the Comp, and the optional well/voltage
+    layers. Gate region = 0.8 x 2.0um -> A=1.6um2, P=5.6um."""
+
+    def d(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    d(22, 0, kdb.Box(x0, 0, x0 + 2000, 2000))
+    d(166, 5, kdb.Box(x0, 0, x0 + 2000, 2000))
+    d(30, 0, kdb.Box(x0 + 600, -300, x0 + 1400, 2300))
+    for x in (200, 1700):
+        d(33, 0, kdb.Box(x0 + x, 800, x0 + x + 100, 1200))
+        d(34, 0, kdb.Box(x0 + x - 100, 600, x0 + x + 300, 1400))
+    d(34, 0, kdb.Box(x0 - 100, 600, x0 + 2100, 700))
+    d(33, 0, kdb.Box(x0 + 900, -250, x0 + 1100, -50))
+    d(34, 0, kdb.Box(x0 + 800, -300, x0 + 1200, 0))
+    top.shapes(layout.layer(34, 10)).insert(
+        kdb.Text(sd_label, kdb.Trans(x0 + 1000, 650))
+    )
+    top.shapes(layout.layer(34, 10)).insert(
+        kdb.Text(gate_label, kdb.Trans(x0 + 1000, -150))
+    )
+    d(*implant, kdb.Box(x0 - 160, -230, x0 + 2160, 2230))
+    if nwell:
+        d(21, 0, kdb.Box(x0 - 500, -500, x0 + 2500, 2500))
+    if lvpwell:
+        d(204, 0, kdb.Box(x0 - 500, -500, x0 + 2500, 2500))
+    if dualgate:
+        d(55, 0, kdb.Box(x0 - 300, -400, x0 + 2300, 2400))
+    if dnwell:
+        d(12, 0, kdb.Box(x0 - 1500, -1500, x0 + 3500, 3500))
+    for layer, datatype, box in extra:
+        d(layer, datatype, box)
+
+
+_NPLUS_DRAW = (32, 0)
+_PPLUS_DRAW = (31, 0)
+
+# Every case below is cross-checked against the PDK's own LVS runset
+# (`gf180mcu.lvs` at open_pdks f6eeac7, `net_only=true`, `consider_dn_dw_features`
+# for the `_dn` rows) run on the very same GDS -- it reports
+# `C$1 G SD 7.04e-15 <model> A=1.6P P=5.6U` (3.3V) / `3.68e-15 ... A=1.6P P=5.6U`
+# (6V), i.e. the model name, nets, C, A and P asserted here.
+_MOS_CAP_CASES = [
+    pytest.param(
+        dict(implant=_NPLUS_DRAW, lvpwell=True), "cap_nmos_03v3", 7.04e-15, id="nmos"
+    ),
+    pytest.param(
+        dict(implant=_NPLUS_DRAW, nwell=True), "cap_nmos_03v3_b", 7.04e-15, id="nmos_b"
+    ),
+    pytest.param(
+        dict(implant=_PPLUS_DRAW, nwell=True), "cap_pmos_03v3", 7.04e-15, id="pmos"
+    ),
+    pytest.param(dict(implant=_PPLUS_DRAW), "cap_pmos_03v3_b", 7.04e-15, id="pmos_b"),
+    pytest.param(
+        dict(implant=_NPLUS_DRAW, lvpwell=True, dualgate=True),
+        "cap_nmos_06v0",
+        3.68e-15,
+        id="nmos_6v",
+    ),
+    pytest.param(
+        dict(implant=_PPLUS_DRAW, nwell=True, dualgate=True, dnwell=True),
+        "cap_pmos_06v0_dn",
+        3.68e-15,
+        id="pmos_6v_dn",
+    ),
+]
+
+
+@pytest.mark.parametrize(("draw", "model", "c_f"), _MOS_CAP_CASES)
+def test_gf180mcu_extract_recognises_mos_capacitor(tmp_path, draw, model, c_f):
+    """Issue #2919 (deliverable B): a MOS capacitor extracts as a two-terminal
+    capacitor under the PDK model name with `A`/`P` on the gate region -- no
+    "touches no diffusion" warning, no `unsupported_devices[]` entry, and
+    never as a transistor."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_gf180mcu_mos_cap(top, layout, 0, **draw)
+    path = _write_gds(layout, tmp_path / "cap.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "cap.spice"))
+
+    assert report["status"] == "extracted"
+    assert report["device_counts"] == {model: 1}
+    (device,) = report["devices"]
+    assert device["class"] == model
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"G", "SD"}
+    assert device["params"]["area_um2"] == pytest.approx(1.6)
+    assert device["params"]["perimeter_um"] == pytest.approx(5.6)
+    assert device["params"]["c_f"] == pytest.approx(c_f)
+    assert report["unsupported_devices"] == []
+    assert not any("touches no diffusion" in w for w in report["warnings"])
+    assert not any("unsupported device" in w for w in report["warnings"])
+    assert model in report["device_classes"]
+
+
+def test_gf180mcu_mos_capacitor_next_to_ordinary_mos(tmp_path):
+    """A capacitor beside a transistor in one cell: each extracts as its own
+    class, and the capacitor's island does not leak into the MOS split."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_gf180mcu_nmos(top, layout, 0, "S", drain_label="D")
+    _draw_gf180mcu_mos_cap(top, layout, 10000, implant=_NPLUS_DRAW, nwell=True)
+    path = _write_gds(layout, tmp_path / "mixed.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "mixed.spice"))
+
+    assert report["device_counts"] == {"nfet": 1, "cap_nmos_03v3_b": 1}
+    assert report["unsupported_devices"] == []
+
+
+def test_gf180mcu_mos_capacitor_excluded_marker_stays_unsupported(tmp_path):
+    """An island under a `moscap_exclude` marker (here SAB 49/0) is not a
+    capacitor; the 166/5 marker is still reported, so the gap stays loud."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_gf180mcu_mos_cap(
+        top,
+        layout,
+        0,
+        implant=_NPLUS_DRAW,
+        nwell=True,
+        extra=[(49, 0, kdb.Box(600, 0, 1400, 2000))],
+    )
+    path = _write_gds(layout, tmp_path / "excl.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "excl.spice"))
+
+    assert not any(name.startswith("cap_") for name in report["device_counts"])
+    (entry,) = report["unsupported_devices"]
+    assert entry["kind"] == "mos_capacitor"
+
+
+def test_gf180mcu_mos_capacitor_without_implant_stays_unsupported(tmp_path):
+    """No Nplus/Pplus -> no entry claims the island: still reported loudly."""
+    path = _write_gds(
+        _make_gf180mcu_mos_cap_layout(with_marker=True), tmp_path / "bare.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "bare.spice"))
+
+    assert not any(name.startswith("cap_") for name in report["device_counts"])
+    assert len(report["unsupported_devices"]) == 1
+
+
+def test_gf180mcu_deck_devices_lists_mos_capacitors():
+    """`klt deck devices` publishes the twelve MOS-capacitor classes with
+    their marker, and `device_classes` carries the same names."""
+    from klayout_tools.decks import get_extraction_deck
+    from klayout_tools.decks.history import deck_devices
+
+    entries = [
+        e
+        for e in deck_devices("gf180mcu")["device_classes"]
+        if e["kind"] == "mos_capacitor"
+    ]
+    names = {e["name"] for e in entries}
+    assert len(entries) == 12
+    assert {"cap_nmos_03v3", "cap_nmos_03v3_b", "cap_pmos_06v0_dn"} <= names
+    assert all(
+        e["marker"]["layer"] == 166 and e["marker"]["datatype"] == 5 for e in entries
+    )
+    assert names <= set(get_extraction_deck("gf180mcu").device_classes)
 
 
 def test_sky130_extract_unsupported_devices_always_present_and_empty(tmp_path):
@@ -25911,6 +26531,18 @@ def test_report_carries_additive_timing_object(tmp_path):
     )
 
 
+def test_normalized_hash_has_its_own_stage_only_when_netlist_written(tmp_path):
+    # Issue #3408: the numbering-independent hash dominates a large block's
+    # run, so it must be attributed to a stage, not left in
+    # `unattributed_seconds`.
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    written = run_extract(path, "sky130")
+    assert "netlist_normalized_hash" in written["timing"]["stages"]
+    skipped = run_extract(path, "sky130", no_netlist=True)
+    assert skipped["netlist_normalized_sha256"] is None
+    assert "netlist_normalized_hash" not in skipped["timing"]["stages"]
+
+
 def test_progress_lines_go_to_stderr_and_stdout_stays_json(tmp_path, capsys):
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     code = main(["extract", path, "--deck", "sky130", "--progress", "--format", "json"])
@@ -26365,9 +26997,8 @@ def test_resistance_graph_unsupported_net_keeps_the_legacy_scalar(tmp_path):
     assert unsupported
     for entry in unsupported:
         graph = entry["resistance_graph"]
-        assert [d["code"] for d in graph["diagnostics"]] == ["unsupported_geometry"]
+        assert [d["code"] for d in graph["diagnostics"]] == ["via_resistance_unknown"]
         assert graph["terminals"] == [] and graph["pair_resistance_ohm"] == []
-        assert graph["nodes"] == 0 and graph["edges"] == 0
         assert graph["legacy_resistance_ohm"] == entry["resistance_ohm"]
     assert [e["resistance_ohm"] for e in report["parasitics"]["nets"]] == [
         e["resistance_ohm"] for e in base["parasitics"]["nets"]
@@ -26466,22 +27097,56 @@ def test_resistance_graph_report_two_level_series_matches_analytic(r_cut, expect
     assert report["pair_resistance_ohm"][0][1] == pytest.approx(expected, rel=1e-9)
 
 
-def test_resistance_graph_report_interior_contact_is_unsupported_geometry():
-    """A contact wholly inside the conductor has no boundary side to attach
-    to; it is reported, not solved with an attachment that doubles the
-    conductance across it."""
+def _strap_report(strapped):
     from klayout_tools.extract_parasitics import _resistance_graph_report
 
     um, region = _graph_report_regions()
-    roles = [("metal0", 10.0, region((0, 0, 20 * um, 2 * um)), None)]
-    contacts = region((0, 0, um // 2, 2 * um), (10 * um, 500, 10 * um + 500, 1500))
-    report = _resistance_graph_report(roles, contacts, [], 0.001, 7.0)
+    roles = [("metal0", 10.0, region((0, 0, 40 * um, 2 * um)), None)]
+    vias = []
+    if strapped:
+        roles.append(("metal1", 10.0, region((0, 0, 40 * um, 2 * um)), None))
+        vias = [
+            region(*[(x * um, um // 2, x * um + um // 2, um) for x in range(4, 36, 4)])
+        ]
+    # Terminals: metal0 contacts at both ends (not landings).
+    contacts = region((0, 0, um // 2, 2 * um), (39 * um, 0, 40 * um, 2 * um))
+    return _resistance_graph_report(roles, contacts, vias, 0.001, 400.0, 0.5)
+
+
+def test_resistance_graph_report_interior_landings_use_graph():
+    """Landings wholly inside a conductor no longer fall back to the legacy
+    scalar (issue #4061)."""
+    report = _strap_report(True)
+    assert report["status"] == "ok"
+    assert report["resistance_source"] == "graph"
+    assert "unsupported_geometry" not in [d["code"] for d in report["diagnostics"]]
+
+
+def test_resistance_graph_report_strapped_rail_is_lower_than_unstrapped():
+    strapped = _strap_report(True)["pair_resistance_ohm"][0][1]
+    bare = _strap_report(False)["pair_resistance_ohm"][0][1]
+    assert strapped < bare
+
+
+def test_resistance_graph_report_interior_landing_array_over_cap_is_too_large():
+    from klayout_tools.extract_parasitics import _resistance_graph_report
+
+    um, region = _graph_report_regions()
+    roles = [
+        ("metal0", 10.0, region((0, 0, 400 * um, 20 * um)), None),
+        ("metal1", 10.0, region((0, 0, 400 * um, 20 * um)), None),
+    ]
+    cuts = [
+        (x * um, y * um, x * um + um // 2, y * um + um // 2)
+        for x in range(2, 398, 2)
+        for y in range(2, 18, 2)
+    ]
+    contacts = region((0, 0, um // 2, 20 * um), (399 * um, 0, 400 * um, 20 * um))
+    report = _resistance_graph_report(roles, contacts, [region(*cuts)], 0.001, 9.0, 1.0)
     assert report["status"] == "unsupported"
-    assert report["legacy_resistance_ohm"] == 7.0
-    (diag,) = report["diagnostics"]
-    assert diag["code"] == "unsupported_geometry"
-    assert diag["detail"]["interior_landings"][0]["x_um"] == pytest.approx(10.25)
-    assert report["terminals"] == [] and report["nodes"] == 0
+    assert {d["code"] for d in report["diagnostics"]} == {"graph_too_large"}
+    assert report["resistance_source"] == "legacy"
+    assert report["selected_resistance_ohm"] == 9.0
 
 
 def test_cli_resistance_graph_json(tmp_path, capsys):
@@ -26494,6 +27159,206 @@ def test_cli_resistance_graph_json(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["parasitics"]["nets"][0]["resistance_graph"]["status"] == "ok"
     code = main(["extract", path, "--deck", "sky130", "--resistance-graph"])
+    assert code != 0
+
+
+# ---------------------------------------------------------------------------
+# Scalar selection from the resistance graph (issue #2983, final increment of
+# #2458). `resistance_ohm` is never replaced; the graph value is reported in the
+# additive `selected_resistance_ohm` with `resistance_source` provenance.
+# ---------------------------------------------------------------------------
+
+_STRAP_FIXTURES = Path(__file__).parent / "fixtures" / "resistance_graph_strap"
+_MET1_RS_OHM_SQ = 0.125  # sky130 PARASITICS met1 sheet resistance
+
+
+def _strap_fixture(name: str) -> str:
+    """Path of a committed strap GDS, after checking it against the manifest."""
+    manifest = json.loads((_STRAP_FIXTURES / "manifest.json").read_text())
+    path = _STRAP_FIXTURES / f"{name}.gds"
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert digest == manifest["files"][path.name]["sha256"]
+    return str(path)
+
+
+def _selected(path, tmp_path, r_cut):
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "sel.spice"),
+        parasitics=True,
+        resistance_graph=True,
+        resistance_graph_r_cut_ohm=r_cut,
+    )
+    (entry,) = report["parasitics"]["nets"]
+    return entry, entry["resistance_graph"]
+
+
+def _make_two_level_series_layout() -> kdb.Layout:
+    """F5: li1 0..4 um, met1 2..4 um, one mcon landing at their shared end
+    edge, terminals at the li1 far end (licon1) and the met1 far end (via)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(67, 20)).insert(kdb.Box(0, 0, 4000, 170))
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(2000, 0, 4000, 170))
+    top.shapes(layout.layer(67, 5)).insert(kdb.Text("S", kdb.Trans(1000, 85)))
+    top.shapes(layout.layer(66, 44)).insert(kdb.Box(0, 0, 170, 170))
+    top.shapes(layout.layer(67, 44)).insert(kdb.Box(3830, 0, 4000, 170))
+    top.shapes(layout.layer(68, 44)).insert(kdb.Box(2000, 0, 2170, 170))
+    return layout
+
+
+def test_selected_resistance_graph_value_for_a_two_terminal_net(tmp_path):
+    entry, graph = _selected(_strap_fixture("single_level"), tmp_path, None)
+    expected = _LI1_RS_OHM_SQ * 5000 / 170
+    assert graph["resistance_source"] == "graph"
+    assert graph["resistance_source_reason"] == "two_terminal_graph"
+    assert graph["selected_resistance_ohm"] == pytest.approx(expected, rel=1e-6)
+    assert graph["selected_resistance_ohm"] == graph["pair_resistance_ohm"][0][1]
+    assert entry["resistance_ohm"] == graph["legacy_resistance_ohm"]
+
+
+def test_selection_without_r_cut_falls_back_to_legacy_never_an_ideal_via(tmp_path):
+    """The shipped decks give no per-cut resistance and no value is assumed:
+    a cross-level net keeps the legacy scalar and says why."""
+    entry, graph = _selected(_strap_fixture("strapped"), tmp_path, None)
+    assert graph["status"] == "unsupported"
+    assert [d["code"] for d in graph["diagnostics"]] == ["via_resistance_unknown"] * 2
+    assert graph["resistance_source"] == "legacy"
+    assert graph["resistance_source_reason"] == "graph_status_unsupported"
+    assert graph["selected_resistance_ohm"] == entry["resistance_ohm"]
+
+
+def test_strapping_both_ends_never_raises_the_selected_resistance(tmp_path):
+    """Measured-layout regression for the #2458 defect, on committed hashed
+    GDS: the legacy series-sum scalar rises when the same conductor is strapped
+    across a second level; the selected graph value falls (ideal via) and stays
+    below the single-level value for a finite per-cut resistance."""
+    base_entry, base = _selected(_strap_fixture("single_level"), tmp_path, 0.0)
+    strapped_entry, ideal = _selected(_strap_fixture("strapped"), tmp_path, 0.0)
+    _, finite = _selected(_strap_fixture("strapped"), tmp_path, 10.0)
+    assert strapped_entry["resistance_ohm"] > base_entry["resistance_ohm"]  # defect
+    r_li1 = _LI1_RS_OHM_SQ * 5000 / 170
+    r_met1 = _MET1_RS_OHM_SQ * 5000 / 170
+    for result, vias in ((ideal, 0.0), (finite, 20.0)):
+        assert result["resistance_source"] == "graph"
+        assert result["selected_resistance_ohm"] == pytest.approx(
+            1 / (1 / r_li1 + 1 / (r_met1 + vias)), rel=1e-6
+        )
+        assert result["selected_resistance_ohm"] <= base["selected_resistance_ohm"]
+    assert ideal["selected_resistance_ohm"] < finite["selected_resistance_ohm"]
+
+
+@pytest.mark.parametrize(("r_cut", "extra"), [(0.0, 0.0), (10.0, 10.0)])
+def test_selected_resistance_two_level_series_f5_f5v(tmp_path, r_cut, extra):
+    path = _write_gds(_make_two_level_series_layout(), tmp_path / "f5.gds")
+    _, graph = _selected(path, tmp_path, r_cut)
+    expected = _LI1_RS_OHM_SQ * 4000 / 170 + _MET1_RS_OHM_SQ * 2000 / 170 + extra
+    assert graph["resistance_source"] == "graph"
+    assert graph["selected_resistance_ohm"] == pytest.approx(expected, rel=1e-6)
+
+
+def test_overlap_without_landing_leaves_the_selected_resistance_unchanged(tmp_path):
+    """F6: a met1 strip over the li1 strip with no via is a different net and
+    adds no path (no overlap-only classification)."""
+    layout = _make_li1_strip_layout()
+    layout.top_cell().shapes(layout.layer(68, 20)).insert(kdb.Box(1000, 0, 4000, 170))
+    path = _write_gds(layout, tmp_path / "f6.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "f6.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    selected = [
+        e["resistance_graph"]["selected_resistance_ohm"]
+        for e in report["parasitics"]["nets"]
+        if e["resistance_graph"]["status"] == "ok"
+    ]
+    assert selected == [pytest.approx(_LI1_RS_OHM_SQ * 5000 / 170, rel=1e-6)]
+
+
+def test_selection_fallbacks_keep_the_legacy_scalar_with_a_reason(tmp_path):
+    path = _write_gds(_make_hierarchy_layout(), tmp_path / "hier.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "h.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    for entry in report["parasitics"]["nets"]:
+        graph = entry["resistance_graph"]
+        assert graph["resistance_source"] == "legacy"
+        assert graph["resistance_source_reason"] == "graph_status_skipped"
+        assert graph["selected_resistance_ohm"] == entry["resistance_ohm"]
+
+
+@pytest.mark.parametrize(
+    ("status", "terminals", "pair", "source", "reason"),
+    [
+        ("ok", ["a", "b", "c"], [[0, 1, 2]] * 3, "legacy", "terminal_count_not_two"),
+        (
+            "ok",
+            ["a", "b"],
+            [[0.0, None], [None, 0.0]],
+            "legacy",
+            "pair_resistance_unavailable",
+        ),
+        ("ok", ["a", "b"], [[0.0, 5.0], [5.0, 0.0]], "graph", "two_terminal_graph"),
+        ("unsupported", [], [], "legacy", "graph_status_unsupported"),
+    ],
+)
+def test_selection_rule_unit(status, terminals, pair, source, reason):
+    from klayout_tools.extract_parasitics import _with_selected_resistance
+
+    result = _with_selected_resistance(
+        {
+            "status": status,
+            "terminals": terminals,
+            "pair_resistance_ohm": pair,
+            "legacy_resistance_ohm": 42.0,
+        }
+    )
+    assert result["resistance_source"] == source
+    assert result["resistance_source_reason"] == reason
+    assert result["selected_resistance_ohm"] == (5.0 if source == "graph" else 42.0)
+
+
+def test_resistance_graph_r_cut_is_validated():
+    with pytest.raises(ExtractError, match="--resistance-graph-r-cut requires"):
+        run_extract(
+            "/nonexistent.gds",
+            "sky130",
+            parasitics=True,
+            resistance_graph_r_cut_ohm=0.0,
+        )
+    for bad in (-1.0, float("inf"), float("nan")):
+        with pytest.raises(ExtractError, match="finite number >= 0"):
+            run_extract(
+                "/nonexistent.gds",
+                "sky130",
+                parasitics=True,
+                resistance_graph=True,
+                resistance_graph_r_cut_ohm=bad,
+            )
+
+
+def test_cli_resistance_graph_r_cut(tmp_path, capsys):
+    path = _strap_fixture("strapped")
+    out = ["-o", str(tmp_path / "cli.spice")]
+    argv = ["extract", path, "--deck", "sky130", "--parasitics", "--resistance-graph"]
+    code = main(argv + out + ["--resistance-graph-r-cut", "0", "--format", "json"])
+    assert code == 0
+    graph = json.loads(capsys.readouterr().out)["parasitics"]["nets"][0][
+        "resistance_graph"
+    ]
+    assert graph["resistance_source"] == "graph"
+    code = main(
+        ["extract", path, "--deck", "sky130", "--parasitics"]
+        + ["--resistance-graph-r-cut", "0"]
+    )
     assert code != 0
 
 
@@ -26551,6 +27416,58 @@ def test_remap_def_net_connections_follows_collision_suffix():
     assert _remap_def_net_connections(None, renames) is None
 
 
+def test_remap_def_net_connections_keeps_def_spef_spelling_and_port_pins():
+    """Issue #3900: the renamed key keeps the DEF's own SPEF spelling (so
+    `*D_NET` matches the linked design's net) while comparing equal to the
+    rewritten SPICE name; `port_pins` survives the rename, and a collision
+    still maps each DEF net to its own distinct SPEF name."""
+    from klayout_tools.extract import (
+        _remap_def_net_connections,
+        _rewrite_dotted_net_names,
+    )
+    from klayout_tools.extract_spef import (
+        DefName,
+        DefNetConnections,
+        _def_net_spellings,
+    )
+
+    netlist = kdb.Netlist()
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    for name in ("a_b", "g[0].u_slice/_00_", "a.b"):
+        circuit.create_net(name)
+    renames = _rewrite_dotted_net_names(netlist)
+    after = {before: new for _c, before, new in renames}
+    assert after["g[0].u_slice/_00_"] == "g[0]_u_slice/_00_"
+
+    def_name = DefName(r"g\[0\].u_slice/_00_")
+    original = DefNetConnections(
+        {
+            def_name: (("u1", "A"),),
+            DefName("a.b"): (("u2", "B"),),
+            DefName("a_b"): (("u3", "C"),),
+            DefName("plain"): (("u4", "D"),),
+        },
+        {"a_b": ("PORT",)},
+    )
+    remapped = _remap_def_net_connections(original, renames)
+    assert "g[0]_u_slice/_00_" in remapped
+    assert remapped.port_pins == {"a_b": ("PORT",)}
+    spellings = _def_net_spellings(remapped, frozenset())
+    assert spellings["g[0]_u_slice/_00_"] == def_name.spef
+    assert "u_slice" in def_name.spef and "[0]_u" not in def_name.spef
+    # Collision: `a.b` -> `a_b_1` spells like the DEF's `a.b`, `a_b` its own.
+    assert spellings["a_b_1"] != spellings["a_b"]
+    assert spellings["a_b_1"] == DefName("a.b").spef
+    # Un-renamed nets are untouched.
+    assert spellings["plain"] == "plain"
+    # A plain-str key (no DEF origin) stays a plain str.
+    plain = _remap_def_net_connections({"a.b": (("u", "p"),)}, renames)
+    assert plain == {"a_b_1": (("u", "p"),)}
+    assert not any(isinstance(key, DefName) for key in plain)
+
+
 def test_spef_missing_conn_warning_names_unmatched_and_duplicate_nets():
     """Issue #2903 ask 2: a written `*D_NET` that matches a DEF net but gets
     no instance `*CONN` is disclosed in `warnings[]`."""
@@ -26572,3 +27489,169 @@ def test_spef_missing_conn_warning_names_unmatched_and_duplicate_nets():
         _spef_missing_conn_warnings({"nets": [{"net": "ok"}]}, original, original) == []
     )
     assert _spef_missing_conn_warnings(report, None, None) == []
+
+
+# --- Unclaimed resistor-marker warning (issue #3138) -----------------------
+
+
+def _unclaimed_marker_warnings(report):
+    return [w for w in report["warnings"] if "claimed by no declared resistor" in w]
+
+
+def test_resistor_marker_beside_body_warns_unclaimed(tmp_path):
+    """A declared marker drawn *beside* (not over) the poly body yields no
+    device and, previously, no diagnostic (issue #3138)."""
+    layout = _make_poly_resistor_layout("sky130")
+    marker = layout.layer(66, 13)
+    layout.clear_layer(marker)
+    # Marker far above the bar: poly & marker is empty.
+    layout.top_cell().shapes(marker).insert(kdb.Box(3000, 5000, 4000, 6000))
+    path = _write_gds(layout, tmp_path / "beside.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "beside.spice"))
+
+    assert report["device_counts"] == {}
+    found = _unclaimed_marker_warnings(report)
+    assert len(found) == 1
+    assert "1 resistor-marker shape on layer 66/13" in found[0]
+    assert "res_generic_po" in found[0]
+
+
+def test_claimed_resistor_marker_is_quiet(tmp_path):
+    path = _write_gds(_make_poly_resistor_layout("sky130"), tmp_path / "ok.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "ok.spice"))
+    assert report["device_counts"] != {}
+    assert _unclaimed_marker_warnings(report) == []
+
+
+def test_resistor_free_layout_has_no_unclaimed_marker_warning(tmp_path):
+    path = _write_gds(
+        _make_poly_resistor_layout("sky130", marked=False), tmp_path / "nomark.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "nomark.spice"))
+    assert _unclaimed_marker_warnings(report) == []
+
+
+# --- Unmodelled device markers: sg13g2 Recog.esd (issue #3858) -------------
+
+
+def _esd_marker_layout(*, in_child: bool = False) -> kdb.Layout:
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    holder = top
+    if in_child:
+        holder = layout.create_cell("CHILD")
+        top.insert(kdb.CellInstArray(holder.cell_index(), kdb.Trans()))
+    holder.shapes(layout.layer(99, 30)).insert(kdb.Box(0, 0, 5000, 5000))
+    return layout
+
+
+def _esd_warnings(report: dict[str, Any]) -> list[str]:
+    return [w for w in report["warnings"] if "Recog.esd" in w]
+
+
+@pytest.mark.parametrize("in_child", [False, True])
+def test_sg13g2_recog_esd_shape_warns_not_recognised(tmp_path, in_child):
+    path = _write_gds(_esd_marker_layout(in_child=in_child), tmp_path / "esd.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "esd.spice"))
+
+    (warning,) = _esd_warnings(report)
+    assert "99/30" in warning
+    assert "klayout-runset" in warning
+
+
+def test_sg13g2_without_recog_esd_shape_has_no_esd_warning(tmp_path):
+    layout = _esd_marker_layout()
+    layout.top_cell().shapes(layout.layer(99, 30)).clear()
+    layout.top_cell().shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 5000, 5000))
+    path = _write_gds(layout, tmp_path / "noesd.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "noesd.spice"))
+
+    assert _esd_warnings(report) == []
+
+
+def test_other_decks_do_not_register_unmodeled_device_markers(tmp_path):
+    from klayout_tools.decks import get_unmodeled_device_markers
+
+    assert get_unmodeled_device_markers("sky130") == {}
+    assert (99, 30) in get_unmodeled_device_markers("sg13g2")
+    path = _write_gds(_esd_marker_layout(), tmp_path / "esd.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "esd.spice"))
+    assert _esd_warnings(report) == []
+
+
+# ---------------------------------------------------------------------------
+# Explicit input alongside --check / --rerun (issue #2699)
+# ---------------------------------------------------------------------------
+
+
+def _external_extract_report(tmp_path_factory):
+    """A committed report whose layout is outside any repo (`scope:
+    "external"`), plus the layout's path."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    assert report["file"] == {"path": None, "scope": "external"}
+    report_path = tmp_path / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    return path, report_path
+
+
+def test_check_extract_report_explicit_input_verifies_an_external_file(
+    tmp_path_factory,
+):
+    path, report_path = _external_extract_report(tmp_path_factory)
+
+    assert check_extract_report(str(report_path), input_path=path)["status"] == "match"
+
+
+def test_rerun_extract_report_explicit_input_reruns_an_external_file(
+    tmp_path_factory,
+):
+    path, report_path = _external_extract_report(tmp_path_factory)
+
+    result = rerun_extract_report(str(report_path), input_path=path)
+
+    assert result["status"] == "match"
+
+
+def test_extract_explicit_input_overrides_a_resolvable_recorded_input(
+    tmp_path, tmp_path_factory
+):
+    """Precedence rule (always override): a disagreeing explicit file is
+    reported `drifted` even though the report's own recorded input resolves."""
+    repo = _make_fake_repo(tmp_path / "repo")
+    path = _write_gds(_make_inverter_layout(), repo / "inv.gds")
+    report = run_extract(path, "sky130", output=str(repo / "inv.spice"))
+    report_path = repo / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    other = _write_gds(
+        _make_floating_gate_nmos_layout(), tmp_path_factory.mktemp("other") / "o.gds"
+    )
+
+    assert check_extract_report(str(report_path))["status"] == "match"
+    result = check_extract_report(str(report_path), input_path=other)
+
+    assert result["status"] == "drifted"
+
+
+def test_cli_extract_check_rerun_with_explicit_input_on_external_report(
+    tmp_path_factory, capsys
+):
+    path, report_path = _external_extract_report(tmp_path_factory)
+    capsys.readouterr()
+
+    for extra in ([], ["--rerun"]):
+        code = main(
+            ["extract", path, "--check", str(report_path), *extra, "--format", "json"]
+        )
+        assert code == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+    # Without the explicit input the honest drift/error is unchanged.
+    assert main(["extract", "--check", str(report_path), "--format", "json"]) == 3
+    capsys.readouterr()
+    assert (
+        main(["extract", "--check", str(report_path), "--rerun", "--format", "json"])
+        == 1
+    )

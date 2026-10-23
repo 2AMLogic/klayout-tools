@@ -219,6 +219,9 @@ from .gen_layer_params import (
     PAD_TOP_METAL_ENCLOSURE_MIN_UM as PAD_TOP_METAL_ENCLOSURE_MIN_UM,
 )
 from .gen_layer_params import (
+    TAP_PAD_REACH_UM as TAP_PAD_REACH_UM,
+)
+from .gen_layer_params import (
     UNIT_MIN_W_UM as UNIT_MIN_W_UM,
 )
 from .gen_layer_params import (
@@ -289,6 +292,12 @@ from .gen_layer_params import (
 )
 from .gen_layer_params import (
     _sd_implant_margin_um as _sd_implant_margin_um,
+)
+from .gen_layer_params import (
+    _sd_implant_min_space_um as _sd_implant_min_space_um,
+)
+from .gen_layer_params import (
+    _tap_pad_ring_implant_margins_um as _tap_pad_ring_implant_margins_um,
 )
 from .gen_layer_params import (
     _voltage_flavor_mark_layer as _voltage_flavor_mark_layer,
@@ -369,6 +378,11 @@ _HIDDEN_PARAMS = {
     "sd_implant_present",
     "sd_implant_margin_um",
     "mos_cap_mark_layer",
+    "sd_implant_min_space_um",
+    "npc_layer",
+    "npc_present",
+    "npc_margin_um",
+    "npc_min_space_um",
     "bjt_mark_layer",
     "bjt_mark_present",
     "res_mark_layer",
@@ -383,6 +397,8 @@ _HIDDEN_PARAMS = {
     "salicide_block_present",
     "voltage_flavor_mark_layer",
     "voltage_flavor_mark_present",
+    "voltage_flavor_extra_mark_layer",
+    "voltage_flavor_extra_mark_present",
     "cap_top_plate_layer",
     "cap_bottom_plate_layer",
     "cap_top_via_layer",
@@ -535,6 +551,12 @@ MIN_SAME_LAYER_SPACING_UM = 0.4
 #: gf180mcu (see :data:`_PDK_ROLE_LAYERS`'s ``"well"`` entries).
 WELL_ENCLOSURE_MARGIN_UM = 0.15
 
+#: Margin (um) the well keeps around a ``mos_array`` well-tie tap pad
+#: (:func:`_mos_array_well_tap_layout`) -- exceeds sg13cmos5l's
+#: ``nwell.enclosing.nactiv.1`` (NW.e, 0.24um), which the generic
+#: :data:`WELL_ENCLOSURE_MARGIN_UM` does not clear (issue #3573).
+WELL_TAP_ENCLOSURE_MARGIN_UM = 0.25
+
 #: Minimum spacing (um) between two well regions held at **different**
 #: potentials -- the rule ``well_island`` (issue #1421) enforces between its
 #: own drawn well and every other well region the caller names in
@@ -590,6 +612,34 @@ def _grid_snapped(dbu: float, *values_um: float) -> bool:
         return abs(count - round(count)) > 1e-9
 
     return any(_snapped(v) for v in values_um)
+
+
+def _mfg_grid_neighbours(
+    grid_um: float, value_um: float, multiple: int = 1
+) -> tuple[float, float] | None:
+    """The nearest values below and above ``value_um`` that are exact
+    multiples of ``multiple * grid_um`` (issue #2933), or ``None`` when
+    ``value_um`` already is one -- or when ``grid_um`` is ``0.0`` (the
+    family's curated deck declares no ``"ongrid"`` rule, see
+    :func:`~klayout_tools.gen_layer_params.mfg_grid_um`), so there is
+    nothing to check against.
+
+    ``multiple`` is for a quantity built from ``multiple`` equal on-grid
+    parts (e.g. a ``diff_pair`` device's total width, ``splits`` unit
+    widths): the representable set is then the multiples of
+    ``multiple * grid_um``, not of ``grid_um``. Unlike :func:`_grid_snapped`
+    this checks against the PDK *manufacturing* grid, never the dbu."""
+    if grid_um <= 0 or multiple < 1:
+        return None
+    step = grid_um * multiple
+    count = value_um / step
+    nearest = round(count)
+    if abs(count - nearest) <= 1e-6:
+        return None
+    below = math.floor(count)
+    # Round away float noise so the reported values read as the grid
+    # multiples they are (e.g. 4.635, not 4.635000000000001).
+    return (round(below * step, 9), round((below + 1) * step, 9))
 
 
 def _sd_pad_gate_offset_um(l_um: float, extra_offset_um: float = 0.0) -> float:
@@ -1224,6 +1274,67 @@ def _centroid_order(rows: int, cols: int) -> list[tuple[int, int]]:
     return ordered
 
 
+def _tap_pad_layout(
+    inner_box_um: tuple[float, float, float, float],
+    pad_um: float,
+    reach_um: float,
+) -> dict[str, Any]:
+    """Tap pads for a family with a tap-distance rule (issue #3648), placed in
+    the band :func:`_ring_layout` would draw around ``inner_box_um`` -- so each
+    pad sits exactly where a ring segment is already DRC-clean against the
+    enclosed devices -- but as separate ``pad_um``-square pads with one contact
+    each, leaving the band open for routing.
+
+    The bottom and top sides carry ``ceil(width / reach_um) + 1`` pads evenly
+    spread *including both ends*, so the pads sit over the footprint's corners
+    rather than its side midpoints, where a routing stub leaves the block
+    (a poly stub crossing a pad's tap ``Comp`` would draw a parasitic gate).
+    The left and right sides carry only the interior pads their height needs
+    (none up to ``reach_um``). Every point of the footprint is then within
+    about ``reach_um / 2`` along its side of a pad; a device deeper than
+    ``sqrt(reach_um**2 - (reach_um / 2)**2)`` from every side is out of reach
+    (the same limit the ring has). Pad origins are snapped to 0.01um so the
+    pad, its contact and its implant all stay on the 0.005um grid.
+
+    Returns ``{"pads": [{"box_um", "contact_um"}, ...], "outer_box_um"}``;
+    ``outer_box_um`` is the box a ring would span (what a pfet well encloses).
+    """
+    x0, y0, x1, y1 = inner_box_um
+    contact_half = CONTACT_SIZE_UM / 2.0
+    grid_um = 0.01
+
+    def _snap(v: float) -> float:
+        return round(v / grid_um) * grid_um
+
+    def _stops(lo: float, hi: float) -> list[float]:
+        n = max(1, math.ceil((hi - lo) / reach_um - 1e-9))
+        return [lo + i * (hi - lo) / n for i in range(n + 1)]
+
+    origins: list[tuple[float, float]] = []
+    for cx in _stops(x0, x1):
+        px = _snap(cx - pad_um / 2.0)
+        origins.append((px, _snap(y0 - pad_um)))  # bottom
+        origins.append((px, _snap(y1)))  # top
+    for cy in _stops(y0, y1)[1:-1]:
+        py = _snap(cy - pad_um / 2.0)
+        origins.append((_snap(x0 - pad_um), py))  # left
+        origins.append((_snap(x1), py))  # right
+
+    pads = []
+    for ox, oy in origins:
+        cx, cy = ox + pad_um / 2.0, oy + pad_um / 2.0
+        pads.append(
+            {
+                "box_um": (ox, oy, ox + pad_um, oy + pad_um),
+                "contact_um": _snap_square_box_um(cx, cy, contact_half, _GRID_DBU_UM),
+            }
+        )
+    return {
+        "pads": pads,
+        "outer_box_um": (x0 - pad_um, y0 - pad_um, x1 + pad_um, y1 + pad_um),
+    }
+
+
 def _mos_array_well_tap_layout(
     min_x0_um: float, min_y0_um: float, max_x1_um: float, max_y1_um: float
 ) -> dict[str, Any]:
@@ -1283,6 +1394,34 @@ def _clamp_pitch_override(override_um: float, minimum_um: float) -> tuple[float,
     return max(override_um, minimum_um), override_um < minimum_um
 
 
+def _shared_sd_col_pitch(
+    unit: dict[str, Any], min_col_pitch: float, share_sd: bool
+) -> float:
+    """Issue #3551: under ``share_sd`` the real columns abut, overlapping by
+    one contacted S/D segment, so the legal minimum pitch drops to
+    ``total_len_um - contact_region_um``."""
+    if not share_sd:
+        return min_col_pitch
+    return unit["total_len_um"] - (CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM)
+
+
+def _dummy_col_x0s(
+    dc: int,
+    cols: int,
+    col_pitch: float,
+    isolated_col_pitch: float,
+    share_sd: bool,
+) -> tuple[float, float]:
+    """x0 of the ``dc``-th left/right dummy column. Under ``share_sd`` dummies
+    stay at the isolated-unit pitch, measured from the abutted real columns."""
+    if share_sd:
+        return (
+            -dc * isolated_col_pitch,
+            (cols - 1) * col_pitch + dc * isolated_col_pitch,
+        )
+    return -dc * col_pitch, (cols - 1 + dc) * col_pitch
+
+
 def _mos_array_layout(
     w_um: float,
     l_um: float,
@@ -1309,6 +1448,9 @@ def _mos_array_layout(
     pitch_x_um: float = 0.0,
     pitch_y_um: float = 0.0,
     top_endcap_um: float = 0.0,
+    share_sd: bool = False,
+    mirror: bool = False,
+    tap_reach_um: float = 0.0,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1391,7 +1533,34 @@ def _mos_array_layout(
     ``min_col_pitch_um``/``min_row_pitch_um`` give the legal minimum. ``0.0``
     (the default) means "no override" and is a strict no-op. The override
     replaces the base pitch, and ``interior_channel_um`` is then added on top
-    of the effective base pitch."""
+    of the effective base pitch.
+
+    ``share_sd`` (issue #3551, Phase 2 of #3299) abuts horizontally adjacent
+    unit devices so each pair shares one contacted S/D segment: the real
+    columns' pitch drops from ``total_len_um + MIN_SAME_LAYER_SPACING_UM`` to
+    ``total_len_um - contact_region_um``, i.e. unit ``c``'s last (drain)
+    segment *is* unit ``c + 1``'s first (source) segment, drawn at identical
+    coordinates. This changes electrical topology -- each row becomes a
+    series chain whose ``U<i>_D`` and ``U<i+1>_S`` ports name the same node.
+    Only ``topology='array'`` with ``fingers == 1`` is supported, and it is
+    exclusive with ``pitch_x_um``/``interior_channel_um`` (both would pull
+    the units apart again); :func:`gen_describe._validate_share_sd` rejects
+    the rest with ``GenError``. ``dummy`` columns stay isolated at the normal
+    pitch. ``False`` (the default) is a strict no-op.
+
+    ``mirror`` (issue #3552, Phase 3 of #3299) flips every odd real column
+    about its vertical axis. It moves no unit, so the pitch is unchanged, but
+    each such cell carries ``mirrored=True`` (S on the right, D on the left);
+    dummy columns stay unmirrored. Under ``share_sd`` the abutted pairs then
+    alternate D|D / S|S down the row. ``False`` (the default) is a strict
+    no-op.
+
+    ``tap_reach_um`` (issue #3648, ``0.0`` by default = off) is the
+    tap-distance reach (:data:`TAP_PAD_REACH_UM`). When positive and no guard
+    ring is drawn, ``tap_pads`` carries :func:`_tap_pad_layout`'s pads around
+    the same ``ring_padding_um`` box a ring would enclose, so the default
+    ring-less output passes the deck's tap-distance rule. ``None`` otherwise,
+    so every other caller keeps byte-for-byte identical geometry."""
     unit = _mos_unit_layout(
         w_um,
         l_um,
@@ -1406,6 +1575,9 @@ def _mos_array_layout(
         top_endcap_um=top_endcap_um,
     )
     min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
+    # Issue #3551: dummy columns keep the isolated-unit pitch under `share_sd`.
+    isolated_col_pitch = min_col_pitch
+    min_col_pitch = _shared_sd_col_pitch(unit, min_col_pitch, share_sd)
     min_row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
     # Issue #3299 (Phase 1): an explicit pitch override, clamped up to the
     # legal minimum. `0.0` (the default) leaves the pitch untouched.
@@ -1426,21 +1598,31 @@ def _mos_array_layout(
         else [(r, c) for r in range(rows) for c in range(cols)]
     )
     cells = [
-        {"idx": idx, "row": r, "col": c, "x0_um": c * col_pitch, "y0_um": r * row_pitch}
+        {
+            "idx": idx,
+            "row": r,
+            "col": c,
+            "x0_um": c * col_pitch,
+            "y0_um": r * row_pitch,
+            "mirrored": mirror and c % 2 == 1,
+        }
         for idx, (r, c) in enumerate(order)
     ]
 
     dummy_cells = []
     for r in range(rows):
         for dc in range(1, dummy + 1):
+            left_x0, right_x0 = _dummy_col_x0s(
+                dc, cols, col_pitch, isolated_col_pitch, share_sd
+            )
             dummy_cells.append(
-                {"row": r, "col": -dc, "x0_um": -dc * col_pitch, "y0_um": r * row_pitch}
+                {"row": r, "col": -dc, "x0_um": left_x0, "y0_um": r * row_pitch}
             )
             dummy_cells.append(
                 {
                     "row": r,
                     "col": cols - 1 + dc,
-                    "x0_um": (cols - 1 + dc) * col_pitch,
+                    "x0_um": right_x0,
                     "y0_um": r * row_pitch,
                 }
             )
@@ -1503,11 +1685,12 @@ def _mos_array_layout(
     if draw_well_tap:
         well_tap = _mos_array_well_tap_layout(min_x0, min_y0, max_x1, max_y1)
         tap_box = well_tap["active"]
+        tap_margin = max(margin, WELL_TAP_ENCLOSURE_MARGIN_UM)
         well_box = (
-            min(well_box[0], tap_box[0] - margin),
-            min(well_box[1], tap_box[1] - margin),
-            max(well_box[2], tap_box[2] + margin),
-            max(well_box[3], tap_box[3] + margin),
+            min(well_box[0], tap_box[0] - tap_margin),
+            min(well_box[1], tap_box[1] - tap_margin),
+            max(well_box[2], tap_box[2] + tap_margin),
+            max(well_box[3], tap_box[3] + tap_margin),
         )
 
     ring = None
@@ -1530,6 +1713,10 @@ def _mos_array_layout(
         )
         ring_offset = _snap_offset_um(inner_x0 - ring_w, inner_y0 - ring_w)
 
+    tap_pads = _optional_tap_pads(
+        add_guard_ring, tap_reach_um, well_box, ring_padding_um
+    )
+
     return {
         "unit": unit,
         "col_pitch_um": col_pitch,
@@ -1538,6 +1725,8 @@ def _mos_array_layout(
         "min_row_pitch_um": min_row_pitch,
         "pitch_x_clamped": pitch_x_clamped,
         "pitch_y_clamped": pitch_y_clamped,
+        "share_sd": share_sd,
+        "mirror": mirror,
         "cells": cells,
         "dummy_cells": dummy_cells,
         "well_box_um": well_box,
@@ -1545,6 +1734,7 @@ def _mos_array_layout(
         "well_tap": well_tap,
         "ring": ring,
         "ring_offset_um": ring_offset,
+        "tap_pads": tap_pads,
         "navigable_regions_um": navigable_regions,
     }
 
@@ -2440,6 +2630,7 @@ def _diff_pair_layout(
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
     top_endcap_um: float = 0.0,
+    tap_reach_um: float = 0.0,
 ) -> dict[str, Any]:
     """Two matched devices (``"A"``/``"B"``), each split into ``splits``
     unit sub-instances, interleaved in a true common-centroid cross-quad
@@ -2476,6 +2667,9 @@ def _diff_pair_layout(
     with the same knock-on effect. ``contact_gate_offset_um``/
     ``bottom_endcap_um``/``sd_implant_margin_um`` (issue #1577) are likewise
     forwarded unchanged -- see :func:`_mos_unit_layout`'s own docstring.
+
+    ``tap_reach_um`` (issue #3648) behaves as in :func:`_mos_array_layout`:
+    positive with ``add_guard_ring`` off adds ``tap_pads`` around the core.
     """
     unit = _mos_unit_layout(
         w_um,
@@ -2527,6 +2721,10 @@ def _diff_pair_layout(
         )
         ring_offset = _snap_offset_um(-(ring_w + padding), -(ring_w + padding))
 
+    tap_pads = _optional_tap_pads(
+        add_guard_ring, tap_reach_um, (0.0, 0.0, core_w, core_h), ring_padding_um
+    )
+
     return {
         "unit": unit,
         "cells": cells,
@@ -2536,6 +2734,7 @@ def _diff_pair_layout(
         "core_h_um": core_h,
         "ring": ring,
         "ring_offset_um": ring_offset,
+        "tap_pads": tap_pads,
     }
 
 
@@ -2892,6 +3091,136 @@ def _insert_boxes(
                 int(round((y1 + oy_um) / dbu)),
             )
         )
+
+
+def _close_implant_gaps(
+    cell: Any, layer_index: int, dbu: float, min_space_um: float
+) -> None:
+    """Merge implant shapes on ``layer_index`` that sit closer than
+    ``min_space_um`` (issue #2934), so the layer never carries a sub-minimum
+    same-layer gap. No-op when ``min_space_um`` is not positive."""
+    import klayout.db as kdb
+
+    if min_space_um <= 0:
+        return
+    shapes = cell.shapes(layer_index)
+    region = kdb.Region(shapes)
+    half = int(round(min_space_um / dbu / 2)) + 1
+    closed = region.sized(half).sized(-half)
+    shapes.clear()
+    shapes.insert(closed)
+
+
+def _draw_npc_over_poly_contacts(
+    cell: Any,
+    npc_layer_index: int,
+    contact_layer_index: int,
+    poly_layer_index: int,
+    dbu: float,
+    margin_um: float,
+    min_space_um: float,
+) -> None:
+    """Draw ``npc`` over every poly-contact licon already on the cell (issue
+    #2934): each licon lying wholly inside the (merged) poly -- a gate
+    contact, never a source/drain or tap one -- gets a box grown by
+    ``margin_um``; shapes closer than ``min_space_um`` (``npc.2``) merge.
+    No-op when ``margin_um`` is not positive."""
+    import klayout.db as kdb
+
+    if margin_um <= 0:
+        return
+    contacts = kdb.Region(cell.shapes(contact_layer_index))
+    poly = kdb.Region(cell.shapes(poly_layer_index)).merged()
+    npc = contacts.inside(poly).sized(int(round(margin_um / dbu)))
+    cell.shapes(npc_layer_index).insert(npc.merged())
+    _close_implant_gaps(cell, npc_layer_index, dbu, min_space_um)
+
+
+def _draw_pcell_npc(
+    pcell: Any, contact_layer_index: int, poly_layer_index: int, dbu: float
+) -> None:
+    """Draw ``npc`` for a PCell instance carrying the ``npc_*`` parameters
+    (issue #2934), when its ``npc_present`` is set. Keeps the parameter
+    unpacking out of the PCell ``produce_impl`` bodies."""
+    if not getattr(pcell, "npc_present"):  # noqa: B009
+        return
+    _draw_npc_over_poly_contacts(
+        pcell.cell,
+        pcell.layout.layer(getattr(pcell, "npc_layer")),  # noqa: B009
+        contact_layer_index,
+        poly_layer_index,
+        dbu,
+        getattr(pcell, "npc_margin_um"),  # noqa: B009
+        getattr(pcell, "npc_min_space_um"),  # noqa: B009
+    )
+
+
+def _pcell_tap_reach_um(pcell: Any) -> float:
+    """The tap-distance reach a ``mos_array``/``diff_pair`` PCell passes its
+    layout (issue #3648): :data:`TAP_PAD_REACH_UM` when it draws no ring and
+    its family needs tap pads, else ``0.0`` (no pads).
+
+    ``mos_array`` only resolves the ring role for a family with a tap-distance
+    rule (:func:`~klayout_tools.gen_layer_params._tap_pads_wanted`), but
+    ``diff_pair`` always does, so the gate also requires the resolved
+    ``ring_implant_margin_um`` to be a tap-distance family's -- no new PCell
+    param, so every other family's GDS stream (which carries the PCell params)
+    stays byte-identical."""
+    if (
+        pcell.ring_implant_present
+        and not pcell.add_guard_ring
+        and pcell.ring_implant_margin_um in _tap_pad_ring_implant_margins_um()
+    ):
+        return TAP_PAD_REACH_UM
+    return 0.0
+
+
+def _draw_pcell_tap_pads(
+    pcell: Any, tap_pads: dict[str, Any] | None, li_metal: int, li_contact: int
+) -> None:
+    """Draw :func:`_tap_pad_layout`'s pads on ``pcell`` (a no-op for ``None``):
+    a ``tap`` square, a covering ``metal`` square and one contact each, the
+    ring's implant (grown by ``ring_implant_margin_um``, like
+    :func:`_insert_implant_ring`), and -- for a pfet pcell -- the ring-sized
+    well the ring variant draws, so every pad is a well tie."""
+    if tap_pads is None:
+        return
+    layout = pcell.layout
+    dbu = layout.dbu
+    pads = tap_pads["pads"]
+    boxes = [pad["box_um"] for pad in pads]
+    _insert_boxes(pcell.cell, layout.layer(pcell.tap_layer), dbu, boxes)
+    _insert_boxes(pcell.cell, li_metal, dbu, boxes)
+    _insert_boxes(pcell.cell, li_contact, dbu, [pad["contact_um"] for pad in pads])
+    if pcell.ring_implant_present:
+        _insert_boxes(
+            pcell.cell,
+            layout.layer(pcell.ring_implant_layer),
+            dbu,
+            [_grow_box_um(box, pcell.ring_implant_margin_um, dbu) for box in boxes],
+        )
+    if pcell.well_present and pcell.flavor == "pfet":
+        outer = _grow_box_um(tap_pads["outer_box_um"], pcell.ring_well_margin_um, dbu)
+        _insert_boxes(pcell.cell, layout.layer(pcell.well_layer), dbu, [outer])
+
+
+def _optional_tap_pads(
+    add_guard_ring: bool,
+    tap_reach_um: float,
+    inner_box_um: tuple[float, float, float, float],
+    padding_um: float,
+) -> dict[str, Any] | None:
+    """:func:`_tap_pad_layout` around ``inner_box_um`` grown by ``padding_um``
+    (the box a ring would enclose), or ``None`` when a ring is drawn instead or
+    ``tap_reach_um`` is ``0.0`` -- see :func:`_mos_array_layout`."""
+    if add_guard_ring or tap_reach_um <= 0.0:
+        return None
+    x0, y0, x1, y1 = inner_box_um
+    return _tap_pad_layout(
+        (x0 - padding_um, y0 - padding_um, x1 + padding_um, y1 + padding_um),
+        GUARD_RING_DEFAULT_WIDTH_UM,
+        tap_reach_um,
+    )
 
 
 def _fixed_cut_side_um(side_um: float, fixed_size_um: float) -> float:

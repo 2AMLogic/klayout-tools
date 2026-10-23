@@ -26,9 +26,10 @@ the one case where LVS genuinely cannot reach a verdict; see docs/cli/lvs.md's
 compare into *verifying a previously committed* ``--format json`` report
 still reproduces -- see ``docs/cli/lvs.md``, "--check" -- and is mutually
 exclusive with the positional ``request`` argument (inputs are read from the
-committed report itself). Cheap mode (default): re-hash the layout/
-reference netlists (and extraction deck, when one was used) named in the
-report and compare against its own recorded hash values, no compare engine
+committed report itself). ``--layout PATH`` (issue #2699) supplies the layout
+explicitly, overriding the recorded one unconditionally. Cheap mode (default):
+re-hash the layout/reference netlists (and extraction deck, when one was used)
+named in the report and compare against its own recorded hash values, no compare engine
 re-run. Full mode (``--check <report> --rerun``): best-effort re-run of the
 compare the report describes and diff verdict-bearing fields. Both reuse
 ``status: "match"`` / ``"drifted"`` and the same 0/3 exit-code split as a
@@ -37,6 +38,7 @@ normal run (see ``klayout_tools._report_verify``).
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
 from .output import emit_error, emit_success, render_rerun_drift
 
@@ -66,13 +68,27 @@ def run(args: argparse.Namespace) -> int:
     # group (parser.py) -- omitting both, or giving both, is already a usage
     # error (exit 2) by the time `run()` is ever called.
     if args.check is not None:
+        if args.deck_file is not None or args.deck_var:
+            return emit_error(
+                "lvs",
+                "--deck-file/--deck-var apply to a fresh run; --check reads "
+                "the deck from the committed report",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
         return emit_error("lvs", "--rerun requires --check <report>", args.format)
 
+    if args.layout is not None:
+        return emit_error("lvs", "--layout requires --check <report>", args.format)
+
     try:
-        report = run_lvs(args.request)
+        report = run_lvs(
+            args.request,
+            deck_file=args.deck_file,
+            deck_vars=_parse_deck_vars(args.deck_var),
+        )
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
 
@@ -83,12 +99,27 @@ def run(args: argparse.Namespace) -> int:
     return _EXIT_BY_STATUS.get(report["status"], EXIT_MISMATCH)
 
 
+def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
+    """Parse repeatable ``--deck-var NAME=VALUE`` (issue #3206), same
+    spelling and last-one-wins rule as ``klt drc --deck-var``."""
+    deck_vars: dict[str, str] = {}
+    for item in raw or ():
+        name, sep, value = item.partition("=")
+        if not sep or not name:
+            raise LvsError(
+                f"invalid --deck-var {item!r}: expected 'name=value' "
+                "(e.g. --deck-var feol=true)"
+            )
+        deck_vars[name] = value
+    return deck_vars
+
+
 def _run_check(args: argparse.Namespace) -> int:
     try:
         if args.rerun:
-            result = rerun_lvs_report(args.check)
+            result = rerun_lvs_report(args.check, layout_path=args.layout)
         else:
-            result = check_lvs_report(args.check)
+            result = check_lvs_report(args.check, layout_path=args.layout)
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
 
@@ -99,7 +130,12 @@ def _run_check(args: argparse.Namespace) -> int:
 
 
 def _print_text(report: dict) -> None:
-    print(f"layout: {report['layout']}")
+    # `layout` is the `{path, scope}` object
+    # `env_provenance.repo_relative_path` defines (issue #2659) -- rendered
+    # through the same courtesy helper `klt sim`/`klt pex` use, so the
+    # absolute path is never printed even in text mode. `reference` is still
+    # the request's own verbatim echo (a plain string) and prints as-is.
+    print(f"layout: {render_path_field(report['layout'])}")
     print(f"reference: {report['reference']}")
     print(f"top: {report['top']}")
     # Issue #1205: only printed when the two sides resolved to different top

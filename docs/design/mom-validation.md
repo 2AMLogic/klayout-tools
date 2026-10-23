@@ -573,9 +573,9 @@ fixture:
 Fixture: a 2-turn square spiral (8 segments), starting side 60 µm, 15 µm
 pitch growth per turn, 2×2 µm cross-section, `filament_size_um = 1.0`
 (2×2 filaments per segment). Each segment is modeled as its own PEEC
-conductor (multi-box-per-conductor spirals are
-[#1841](https://github.com/2AMLogic/klayout-tools/issues/1841)'s separate,
-still-open scope); the total spiral inductance is the signed sum
+conductor (this fixture predates the series-path winding support of
+[#2730](https://github.com/2AMLogic/klayout-tools/issues/2730), which models
+a spiral as one conductor — see "Series-path winding" below); the total spiral inductance is the signed sum
 `sum_i sum_j sign_i * sign_j * L[i][j]` over the full partial-inductance
 matrix, `sign_i` correcting for the segments whose physical winding
 direction runs opposite to `discretize_bars`' box-low-to-high filament
@@ -856,16 +856,18 @@ narrow winding; choose it near the trace width.
   "The external PyPEEC comparison" above) — but it remains one for every
   other fixture in this document, which is checked against closed forms and
   in-repo re-implementations only.
-- **Multi-box-per-conductor PEEC/full-wave geometry.** Every conductor must
-  still reduce to exactly one bar-shaped box —
-  [#1841](https://github.com/2AMLogic/klayout-tools/issues/1841) (a separate,
-  still-open increment) is what would let a single electrical conductor span
-  several boxes (e.g. a coax shield's wall segments, or a real spiral
-  modeled as one continuous net rather than one conductor per segment, as
-  the spiral fixture above does). Ports, S-parameter de-embedding
-  ([#894](https://github.com/2AMLogic/klayout-tools/issues/894)), and
-  skin-effect (frequency-dependent resistance/capacitance) behavior remain
-  later phases of #701.
+- **Geometry beyond bar boxes and series-path windings.** Multi-box
+  conductors ([#1841](https://github.com/2AMLogic/klayout-tools/issues/1841))
+  and connected, non-branching windings (#2728-#2730) are supported.
+  Branching or coax-shield current distribution, curved polygons, and
+  closed loops are rejected, not validated.
+- **Winding terminals, ports and S-parameters.** A winding combined with
+  `ports` is rejected; no `Z0`/`gamma`/S-parameters are reported for
+  windings. Winding accuracy is limited to series `Z` (no shunt C or
+  self-resonance), cell size about the trace width, the documented 5.5%
+  thin-wire vs PEEC kernel offset, and `k*length` well below 1.
+- **Skin effect.** Frequency-dependent resistance/capacitance behavior
+  remains out of scope.
 
 ## See also
 
@@ -883,4 +885,5 @@ narrow winding; choose it near the trace width.
   the full-wave frequency sweep (Phase 2a); [#894](https://github.com/2AMLogic/klayout-tools/issues/894)
   (port definition/de-embedding) and
   [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
-  (cross-validation against an external solver) are its planned follow-ons.
+  (cross-validation against an external solver) are its delivered
+  follow-ons.

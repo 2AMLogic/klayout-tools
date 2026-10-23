@@ -92,6 +92,38 @@ the campaign spec's own top level:
 }
 ```
 
+## Negative control
+
+A spec may carry an optional top-level `negative_control` object, so one
+call runs the nominal campaign *and* its known-bad control:
+
+```json
+{
+  "negative_control": {
+    "description": "2.5x mismatch",
+    "monte_carlo": {"mismatch_scale": 2.5}
+  }
+}
+```
+
+`negative_control.monte_carlo` (required, non-empty) is merged over the
+spec's own `monte_carlo` block to build a second `klt sim` request, dispatched
+with the same `--backend`/`--hosts` and written under `<out-dir>/control/`.
+Any `monte_carlo` field may be overridden (`mismatch_scale` is the usual one,
+see [`sim.md`](sim.md)); no new `klt sim` fields are involved. `description`
+is optional. The two reports are then combined by the same derivation
+[`klt yield-samples`](yield.md#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples)
+uses, written to `<out-dir>/derived-sample-set.json`, and graded by `klt
+yield` unchanged, so every measurement carries a populated `negative_control`.
+Control draws that fail to converge are disclosed (`errored`/`inconclusive`
+in the `derivation` echo), never dropped.
+
+The control is independently seeded: an omitted
+`negative_control.monte_carlo.seed` is derived from the merged content under
+its own salt, and a control seed equal to the nominal seed is refused. Adding
+a `negative_control` block never changes the nominal seed or draws. A spec
+without the block behaves, and emits, exactly as before.
+
 ## Seed management
 
 If `monte_carlo.seed` is omitted, one is derived deterministically from the
@@ -145,6 +177,21 @@ schema"](yield.md#json-schema-the-contract)) with one added `campaign` block:
   }
 }
 ```
+
+When the spec has a `negative_control`, `campaign` gains an additive
+`negative_control` echo (absent otherwise):
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `seed` | integer | The control's resolved Monte Carlo seed. |
+| `seed_source` | string | `"spec"` (explicit) or `"derived"`. |
+| `description` | string \| null | Echo of `negative_control.description`. |
+| `overrides` | object | The `monte_carlo` overrides merged over the nominal block. |
+| `sim_status` | string | The control `klt sim` report's top-level `status`. |
+| `derivation` | array | Per-measurement control `errored`/`inconclusive` accounting from the sample-set derivation. |
+| `sim_report_path` | string | Control `klt sim` report path. |
+| `request_path` | string | Resolved control `klt sim` request path. |
+| `sample_set_path` | string | The derived sample set handed to `klt yield`. |
 
 ### `campaign` fields
 

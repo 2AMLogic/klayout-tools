@@ -23,6 +23,7 @@ import klayout.db as kdb
 import pytest
 
 import klayout_tools.drc as drc_module
+import klayout_tools.drc_klayout_engine as engine_module
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import pdk
 from klayout_tools.cli import main
@@ -221,12 +222,27 @@ def _stub_klayout_drc_subprocess(
                 handle.write(rdb_xml)
         return fake_completed(stdout=stdout, stderr=stderr, returncode=returncode)
 
-    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
 
 
 # --------------------------------------------------------------------------- #
 # `run_drc_klayout_engine` -- mocked-subprocess unit tests
 # --------------------------------------------------------------------------- #
+
+
+def test_unmodeled_rules_only_for_the_packaged_asap7_deck(tmp_path):
+    from klayout_tools.decks.asap7_rules import DECK_PATH, NOT_IMPLEMENTED
+
+    expected = sorted(g.id for g in NOT_IMPLEMENTED)
+    assert engine_module._unmodeled_rules_for_deck(str(DECK_PATH)) == expected
+    copy = tmp_path / "copy.drc"
+    copy.write_bytes(DECK_PATH.read_bytes())
+    assert engine_module._unmodeled_rules_for_deck(str(copy)) == expected
+    edited = tmp_path / "edited.drc"
+    edited.write_bytes(DECK_PATH.read_bytes() + b"\n# edited\n")
+    assert engine_module._unmodeled_rules_for_deck(str(edited)) == []
+    stub = _write_deck_file(tmp_path / "stub.drc")
+    assert engine_module._unmodeled_rules_for_deck(stub) == []
 
 
 def test_klayout_engine_clean_report(tmp_path, monkeypatch):
@@ -236,8 +252,10 @@ def test_klayout_engine_clean_report(tmp_path, monkeypatch):
 
     report = run_drc_klayout_engine(gds, deck_file)
 
-    assert report["schema_version"] == 2
-    assert report["file"] == gds
+    assert report["schema_version"] == 3
+    # Issue #2659: the `{path, scope}` envelope. `tmp_path` is outside any
+    # repo here, so the absolute path is dropped rather than echoed.
+    assert report["file"] == {"path": None, "scope": "external"}
     assert report["deck"] == deck_file
     assert report["engine"] == "klayout"
     assert report["dbu_um"] == 0.001
@@ -255,6 +273,8 @@ def test_klayout_engine_clean_report(tmp_path, monkeypatch):
         "voltage_domain_warnings": [],
         "unchecked_rules": [],
         "deck_scope": [],
+        "unmodeled_rules": [],
+        "isolation_only_rules": [],
         "nothing_checked": False,
         "schema_version": 1,
         "known": False,
@@ -624,6 +644,28 @@ def test_klayout_engine_no_report_file_raises(tmp_path, monkeypatch):
         run_drc_klayout_engine(gds, deck_file)
 
 
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [
+        (-11, "", "SIGSEGV"),
+        (0, "ERROR: Signal number: 11\nAddress: 0x0\n", "SIGSEGV"),
+    ],
+)
+def test_klayout_engine_no_report_names_crash_signal(
+    tmp_path, monkeypatch, returncode, stdout, expected
+):
+    """A klayout crash (#3811) is named as such, with klayout's output kept."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch, write_report=False, returncode=returncode, stdout=stdout
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match=rf"klayout crashed \({expected}\)") as info:
+        run_drc_klayout_engine(gds, deck_file)
+    assert stdout.strip() in str(info.value)
+
+
 # --------------------------------------------------------------------------- #
 # A partially-executed deck must never read as clean (issue #1941)
 #
@@ -911,13 +953,118 @@ def test_klayout_engine_unparseable_report_raises_not_silently_clean(
         run_drc_klayout_engine(gds, deck_file)
 
 
-def test_klayout_engine_top_unsupported_raises(tmp_path, monkeypatch):
+def _write_multi_top_gds(path: Path) -> str:
+    """Two top cells (A, B) sharing subcell C; A also owns a shape."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    a = layout.create_cell("A")
+    b = layout.create_cell("B")
+    c = layout.create_cell("C")
+    for parent in (a, b):
+        parent.insert(kdb.CellInstArray(c.cell_index(), kdb.Trans()))
+    c.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 100, 1000))
+    layout.write(str(path))
+    return str(path)
+
+
+def _input_arg(cmd) -> str:
+    return next(a for a in cmd if a.startswith("input=")).split("=", 1)[1]
+
+
+def test_klayout_engine_multi_top_without_top_raises_before_launch(
+    tmp_path, monkeypatch
+):
+    cmds: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=cmds)
+    gds = _write_multi_top_gds(tmp_path / "multi.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match="--top") as excinfo:
+        run_drc_klayout_engine(gds, deck_file)
+
+    assert excinfo.value.code == "multiple_top_cells"
+    assert "A, B" in str(excinfo.value)
+    assert cmds == []
+
+
+def test_klayout_engine_top_prunes_stream_for_deck(tmp_path, monkeypatch):
+    cmds: list = []
+    seen: dict = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        cmds.append(cmd)
+        pruned = kdb.Layout()
+        pruned.read(_input_arg(cmd))
+        seen["tops"] = [c.name for c in pruned.top_cells()]
+        seen["cells"] = sorted(c.name for c in pruned.each_cell())
+        report = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
+        with open(report, "w", encoding="utf-8") as handle:
+            handle.write(_EMPTY_RDB)
+        return fake_completed()
+
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
+    gds = _write_multi_top_gds(tmp_path / "multi.gds")
+    before = Path(gds).read_bytes()
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    run_drc_klayout_engine(gds, deck_file, top="A")
+
+    assert _input_arg(cmds[0]) != gds
+    assert seen["tops"] == ["A"]
+    assert seen["cells"] == ["A", "C"]
+    assert Path(gds).read_bytes() == before
+
+
+def test_klayout_engine_top_child_of_single_top_prunes_stream(tmp_path, monkeypatch):
+    cmds: list = []
+    seen: dict = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        cmds.append(cmd)
+        pruned = kdb.Layout()
+        pruned.read(_input_arg(cmd))
+        seen["tops"] = [c.name for c in pruned.top_cells()]
+        report = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
+        with open(report, "w", encoding="utf-8") as handle:
+            handle.write(_EMPTY_RDB)
+        return fake_completed()
+
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    sub = layout.create_cell("SUB")
+    top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans()))
+    sub.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 100, 1000))
+    gds = str(tmp_path / "single.gds")
+    layout.write(gds)
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    run_drc_klayout_engine(gds, deck_file, top="SUB")
+
+    assert _input_arg(cmds[0]) != gds
+    assert seen["tops"] == ["SUB"]
+
+
+def test_klayout_engine_unknown_top_raises(tmp_path, monkeypatch):
     _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_multi_top_gds(tmp_path / "multi.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match="top cell not found in stream: NOPE"):
+        run_drc_klayout_engine(gds, deck_file, top="NOPE")
+
+
+def test_klayout_engine_single_top_passes_original_path(tmp_path, monkeypatch):
+    cmds: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=cmds)
     gds = _write_gds(tmp_path / "test.gds")
     deck_file = _write_deck_file(tmp_path / "deck.lydrc")
 
-    with pytest.raises(DrcError, match="does not support --top"):
-        run_drc_klayout_engine(gds, deck_file, top="TOP")
+    run_drc_klayout_engine(gds, deck_file)
+    run_drc_klayout_engine(gds, deck_file, top="TOP")
+
+    assert [_input_arg(c) for c in cmds] == [gds, gds]
 
 
 def test_klayout_engine_missing_deck_file_raises(tmp_path, monkeypatch):
@@ -944,14 +1091,14 @@ def test_klayout_engine_missing_input_file_raises_before_launching_subprocess(
 
 def test_klayout_engine_cleans_up_work_dir(tmp_path, monkeypatch):
     work_dirs: list = []
-    real_mkdtemp = drc_module.tempfile.mkdtemp
+    real_mkdtemp = engine_module.tempfile.mkdtemp
 
     def spy_mkdtemp(*args, **kwargs):
         created = real_mkdtemp(*args, **kwargs)
         work_dirs.append(created)
         return created
 
-    monkeypatch.setattr(drc_module.tempfile, "mkdtemp", spy_mkdtemp)
+    monkeypatch.setattr(engine_module.tempfile, "mkdtemp", spy_mkdtemp)
     _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EDGE_PAIR_RDB)
     gds = _write_gds(tmp_path / "test.gds")
     deck_file = _write_deck_file(tmp_path / "deck.lydrc")
@@ -967,14 +1114,14 @@ def test_klayout_engine_cleans_up_work_dir_on_error(tmp_path, monkeypatch):
     just the success path -- mirrors `_cleanup_netgen_work_dir`'s own
     `finally` placement in `lvs.py`."""
     work_dirs: list = []
-    real_mkdtemp = drc_module.tempfile.mkdtemp
+    real_mkdtemp = engine_module.tempfile.mkdtemp
 
     def spy_mkdtemp(*args, **kwargs):
         created = real_mkdtemp(*args, **kwargs)
         work_dirs.append(created)
         return created
 
-    monkeypatch.setattr(drc_module.tempfile, "mkdtemp", spy_mkdtemp)
+    monkeypatch.setattr(engine_module.tempfile, "mkdtemp", spy_mkdtemp)
     _stub_klayout_drc_subprocess(monkeypatch, write_report=False)
     gds = _write_gds(tmp_path / "test.gds")
     deck_file = _write_deck_file(tmp_path / "deck.lydrc")
@@ -1087,7 +1234,7 @@ def test_klayout_engine_deck_error_message_truncation_keeps_the_error_lines(
     lines themselves, even when they scrolled off the head."""
     noise = "\n".join(
         f"Executing rule R{index}"
-        for index in range(2 * drc_module._KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES)
+        for index in range(2 * engine_module._KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES)
     )
     _stub_klayout_drc_subprocess(
         monkeypatch,
@@ -1107,7 +1254,7 @@ def test_klayout_engine_deck_error_message_truncation_keeps_the_error_lines(
     # The tail -- where the abort is -- survives; the head does not.
     assert "Executing rule R0\n" not in message
     assert (
-        f"Executing rule R{2 * drc_module._KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES - 1}"
+        f"Executing rule R{2 * engine_module._KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES - 1}"
         in message
     )
 
@@ -1159,7 +1306,7 @@ def test_scan_deck_host_commands_finds_the_real_pmap_logger_formatter(tmp_path):
         "end\n",
     )
 
-    found = drc_module._scan_deck_host_commands(deck_file)
+    found = engine_module._scan_deck_host_commands(deck_file)
 
     assert set(found) == {"pmap", "tail"}
     assert found["pmap"].endswith("main.drc:2")
@@ -1177,7 +1324,7 @@ def test_scan_deck_host_commands_skips_what_it_cannot_be_sure_about(tmp_path):
         'system("true")\n',
     )
 
-    assert drc_module._scan_deck_host_commands(deck_file) == {}
+    assert engine_module._scan_deck_host_commands(deck_file) == {}
 
 
 def test_scan_deck_host_commands_follows_require_relative_includes(tmp_path):
@@ -1192,7 +1339,7 @@ def test_scan_deck_host_commands_follows_require_relative_includes(tmp_path):
         'require_relative "util"\nsource($input)\n',
     )
 
-    found = drc_module._scan_deck_host_commands(deck_file)
+    found = engine_module._scan_deck_host_commands(deck_file)
 
     assert set(found) == {"pmap"}
     assert found["pmap"].endswith("util.rb:2")
@@ -1752,6 +1899,46 @@ def test_cli_klayout_engine_real_binary_resolves_sg13cmos5l_via_pdk_flags(
 
 
 # --------------------------------------------------------------------------- #
+# Issue #2659: `file` is the portable `{path, scope}` envelope on *both*
+# response builders. The two engines' envelopes are read generically by a
+# `klt signoff` citation, so they must not drift apart on this field.
+# --------------------------------------------------------------------------- #
+
+
+def test_klayout_engine_file_is_repo_relative_inside_a_repo(tmp_path, monkeypatch):
+    """A layout inside a repo is echoed as `{path, scope: "repo"}` -- the
+    same shape the curated engine's own response builder emits, so a
+    committed envelope is re-verifiable from any clone whichever engine
+    produced it (issue #2659)."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    root = tmp_path / "fake-repo"
+    (root / ".git").mkdir(parents=True)
+    gds = _write_gds(root / "test.gds")
+    deck_file = _write_deck_file(root / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["schema_version"] == 3
+    assert report["file"] == {"path": "test.gds", "scope": "repo"}
+    # `deck` is untouched: it is pinned by `provenance.deck.content_hash`,
+    # not by `provenance.input`, and for this engine it is the deck script's
+    # own path rather than a curated deck name.
+    assert report["deck"] == deck_file
+
+
+def test_klayout_engine_file_is_external_outside_any_repo(tmp_path, monkeypatch):
+    """Outside any repo the absolute path is dropped rather than leaked
+    (issue #2659) -- `scope: "external"`, `path: null`."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["file"] == {"path": None, "scope": "external"}
+
+
+# --------------------------------------------------------------------------- #
 # Opt-in rule-category coverage assertion (issue #2697)
 # --------------------------------------------------------------------------- #
 
@@ -1764,6 +1951,22 @@ _DUPLICATE_CATEGORIES_RDB = _CLEAN_WITH_CATEGORIES_RDB.replace(
 
 
 def _assert_setup(tmp_path):
+    """The engine tests' standard gds+deck pair.
+
+    Seeds a `.git` marker so `tmp_path` resolves as this run's own repo root
+    (`env_provenance.find_repo_root` only checks for a `.git` entry): since
+    issue #2659 the echoed `file` is the committable `{path, scope}` envelope,
+    and `klt drc --check`/`--rerun` can only re-verify a `scope: "repo"`
+    report. A bare `tmp_path` records the degenerate external branch -- no
+    locatable input -- which makes every rerun test below fail with
+    "committed report has no 'file' field to rerun". Seeding the marker puts
+    these tests in the realistic position of a design inside a repo (the
+    convention `tests/test_drc.py` applies module-wide via its `tmp_path`
+    override); the external branch stays pinned by
+    `test_klayout_engine_file_is_external_outside_any_repo`, which works on
+    plain `tmp_path` without this helper.
+    """
+    (tmp_path / ".git").mkdir(exist_ok=True)
     return (
         _write_gds(tmp_path / "test.gds"),
         _write_deck_file(tmp_path / "deck.lydrc"),
@@ -1979,6 +2182,10 @@ def test_request_document_expect_rule_categories(tmp_path, monkeypatch, capsys, 
 
 def test_expect_rule_categories_report_check_and_rerun(tmp_path, monkeypatch, capsys):
     _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    # Issue #2659: a bare `tmp_path` input records `scope: "external"` (no
+    # locatable path), which `--check`/`--rerun` cannot verify; a `.git`
+    # marker makes it a repo-scoped input, as committed evidence always is.
+    (tmp_path / ".git").mkdir()
     gds, deck = _assert_setup(tmp_path)
     report_path = tmp_path / "report.json"
     assert (
@@ -2173,7 +2380,7 @@ def test_load_manifest_trims_dedups_and_keeps_literal_names(tmp_path):
         "﻿  B \n\nA\n\t\n# not a comment\nM*.a\nA\nwith space\r\n",
     )
 
-    assert drc_module.load_rule_category_manifest(path) == [
+    assert engine_module.load_rule_category_manifest(path) == [
         "# not a comment",
         "A",
         "B",
@@ -2193,14 +2400,14 @@ def test_load_manifest_trims_dedups_and_keeps_literal_names(tmp_path):
 def test_load_manifest_rejects_empty_and_invalid(tmp_path, text, raw, match):
     path = _manifest(tmp_path, text, raw=raw)
     with pytest.raises(DrcError, match=match):
-        drc_module.load_rule_category_manifest(path)
+        engine_module.load_rule_category_manifest(path)
 
 
 def test_load_manifest_rejects_unreadable(tmp_path):
     with pytest.raises(DrcError, match="could not read rule-category manifest"):
-        drc_module.load_rule_category_manifest(str(tmp_path / "missing.txt"))
+        engine_module.load_rule_category_manifest(str(tmp_path / "missing.txt"))
     with pytest.raises(DrcError, match="could not read rule-category manifest"):
-        drc_module.load_rule_category_manifest(str(tmp_path))
+        engine_module.load_rule_category_manifest(str(tmp_path))
 
 
 def test_cli_set_assertion_clean_exit_zero(tmp_path, monkeypatch, capsys):
@@ -2522,7 +2729,7 @@ def _stub_versioned_klayout(
             handle.write(_EMPTY_RDB)
         return fake_completed()
 
-    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
     return calls
 
 
@@ -2802,10 +3009,10 @@ def test_single_file_deck_has_no_tree_identity(tmp_path, monkeypatch):
 def test_directory_deck_records_tree_identity_that_tracks_includes(tmp_path):
     deck = _tree_deck(tmp_path)
 
-    first = drc_module._deck_tree_identity(deck)
-    again = drc_module._deck_tree_identity(deck)
+    first = engine_module._deck_tree_identity(deck)
+    again = engine_module._deck_tree_identity(deck)
     (tmp_path / "rules" / "helper.rb").write_text("# changed\n", encoding="utf-8")
-    changed = drc_module._deck_tree_identity(deck)
+    changed = engine_module._deck_tree_identity(deck)
 
     assert first == again
     assert first["file_count"] == 2
@@ -2816,6 +3023,9 @@ def test_directory_deck_records_tree_identity_that_tracks_includes(tmp_path):
 def test_directory_deck_provenance_and_check_detect_helper_drift(
     tmp_path, monkeypatch, capsys
 ):
+    # In-repo position (issue #2659): outside a repo `file` is `path: null`,
+    # which `--check` cannot re-hash and so reports as drift.
+    (tmp_path / ".git").mkdir(exist_ok=True)
     gds = _write_gds(tmp_path / "test.gds")
     deck = _tree_deck(tmp_path)
     real_run = subprocess.run
@@ -2829,7 +3039,7 @@ def test_directory_deck_provenance_and_check_detect_helper_drift(
         Path(report_path).write_text(_CLEAN_WITH_CATEGORIES_RDB, encoding="utf-8")
         return fake_completed()
 
-    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
     report = run_drc_klayout_engine(gds, deck)
     tree = report["provenance"]["deck"]["tree"]
     assert tree["file_count"] == 2
@@ -2857,7 +3067,7 @@ def _stub_by_input(monkeypatch, rdb_by_input_name: dict[str, str]):
         )
         return fake_completed()
 
-    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
 
 
 def test_negative_control_passes_and_is_reported(tmp_path, monkeypatch):
@@ -2944,3 +3154,54 @@ def test_request_document_negative_control(tmp_path, monkeypatch, capsys):
     assert main(["drc", str(request), "--format", "json"]) != 1
     data = json.loads(capsys.readouterr().out)
     assert data["negative_control"]["status"] == "passed"
+
+
+# --------------------------------------------------------------------------- #
+# issue #3816: missing-deck-globals warning
+# --------------------------------------------------------------------------- #
+
+_GATED_DECK_TEXT = (
+    'if not defined? $feol\n  $feol = "false"\nend\nthreads($thr) if $thr\n'
+)
+
+
+def test_klayout_engine_warns_when_required_deck_globals_not_supplied(
+    tmp_path, monkeypatch
+):
+    _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.drc", _GATED_DECK_TEXT)
+    baseline = run_drc_klayout_engine(
+        gds, _write_deck_file(tmp_path / "plain.drc"), deck_vars=None
+    )
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert "warnings" not in baseline
+    (warning,) = report["warnings"]
+    assert warning["category"] == "deck_globals_not_supplied"
+    assert warning["count"] == 1
+    assert "thr" in warning["text"] and "klt pdk decks" in warning["text"]
+    # Additive only: verdict fields match a run that has no warning.
+    assert report["status"] == baseline["status"]
+    assert report["violation_count"] == baseline["violation_count"]
+
+
+def test_klayout_engine_no_warning_when_deck_var_supplied(tmp_path, monkeypatch):
+    _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.drc", _GATED_DECK_TEXT)
+
+    report = run_drc_klayout_engine(gds, deck_file, deck_vars={"thr": "2"})
+
+    assert "warnings" not in report
+
+
+def test_klayout_engine_no_warning_for_self_contained_deck(tmp_path, monkeypatch):
+    _stub_klayout_drc_subprocess(monkeypatch)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(
+        tmp_path / "deck.lydrc", "source($input)\nreport('x', $report)\n"
+    )
+
+    assert "warnings" not in run_drc_klayout_engine(gds, deck_file)

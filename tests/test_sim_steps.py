@@ -20,10 +20,11 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import _paths as paths_module
 from klayout_tools import sim, sim_remote, sim_steps
 
-pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+pytestmark = pytest.mark.usefixtures(
+    "real_build_identity_git", "bare_name_ngspice_resolution"
+)
 
 HAVE_NGSPICE = shutil.which("ngspice") is not None and (
     os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
@@ -35,20 +36,6 @@ _SKIP_NO_NGSPICE = pytest.mark.skipif(
 #: A resistive divider: v(out) = vin * 2/3 with no load, so every number
 #: below is exact by construction (3.0 V -> 2.0 V, 3.3 V -> 2.2 V).
 _BODY = "VIN in 0 3.0\nR1 in out 1k\nR2 out 0 2k\nILOAD out 0 0\n"
-
-
-@pytest.fixture(autouse=True)
-def _bare_name_ngspice_resolution(monkeypatch):
-    """Same stub as `tests/test_sim.py`'s identically-named fixture: the
-    mocked-`subprocess.run` tests below need no real ngspice binary."""
-    real_which = shutil.which
-
-    def fake_which(cmd, *args, **kwargs):
-        if cmd == "ngspice":
-            return cmd
-        return real_which(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
 
 
 def _write_body(tmp_path: Path, text: str = _BODY) -> Path:
@@ -705,6 +692,92 @@ def test_repeated_analysis_kinds_and_negative_zero_overrides(tmp_path):
     ]
     assert lines.count("op") == 3
     assert "setplot new" in lines
+
+
+def _ac_request(alter_dm: dict, alter_cm: dict | None = None) -> dict:
+    step = {"analysis": {"kind": "ac", "args": "dec 1 1k 10k"}}
+    return {
+        "netlist": "body.spice",
+        "analysis_steps": [
+            {"name": "dm", "alter": alter_dm, **step},
+            {"name": "cm", "alter": alter_cm or {}, **step},
+        ],
+    }
+
+
+def test_ac_alter_emits_ac_magnitude_cards_in_declaration_order():
+    request = _ac_request({"VDM.ac": 1, "VCM.ac": 0, "VDM": 0.5}, {"VDM.ac": 0})
+    analysis, specs = _resolve(request)
+    lines = sim_steps.control_lines(analysis, specs)
+    assert [line for line in lines if line.startswith("alter")] == [
+        "alter VDM ac = 1",
+        "alter VCM ac = 0",
+        "alter VDM=0.5",
+        "alter VDM ac = 0",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("alter", "match"),
+    [
+        ({"R1.ac": 1}, "V or I source"),
+        ({"V1.foo": 1}, r"only supported key suffix is '\.ac'"),
+        ({"V1.ac": float("inf")}, "finite number"),
+        ({"V1.ac": {"pwl": [0, 0, 1, 1]}}, "not a pwl object"),
+        ({".ac": 1}, "not a top-level independent source"),
+        ({"V1.ac": 1, "v1.AC": 2}, "is repeated"),
+    ],
+)
+def test_ac_alter_refusals(alter, match):
+    with pytest.raises(sim.SimError, match=match):
+        _resolve(_ac_request(alter))
+
+
+def test_ac_alter_changes_the_checkpoint_definition():
+    a, _ = _resolve(_ac_request({"V1.ac": 1}))
+    b, _ = _resolve(_ac_request({"V1.ac": 2}))
+    assert json.dumps(a["steps"], sort_keys=True) != json.dumps(
+        b["steps"], sort_keys=True
+    )
+
+
+def test_run_sim_ac_alter_skips_dc_only_rules_but_needs_an_element(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path, _BODY + "VSTEP s 0 PULSE(0 1 0 1n 1n 1u 2u)\n")
+    decks = _stub_ngspice(monkeypatch, "")
+    request = _ac_request({"VSTEP.ac": 1})
+    request["corners"] = {"supply_v": {"VIN": [3.0]}}
+    request["analysis_steps"][1]["alter"] = {"VIN.ac": 0}
+    sim.run_sim(str(_write_request(tmp_path, request)))  # not refused
+    assert "alter VSTEP ac = 1" in decks[0]
+    decks.clear()
+    request["analysis_steps"][0]["alter"] = {"VNOPE.ac": 1}
+    with pytest.raises(sim.SimError, match="names no element"):
+        sim.run_sim(str(_write_request(tmp_path, request)))
+    assert decks == []
+
+
+@_SKIP_NO_NGSPICE
+def test_real_ngspice_ac_alter_is_cumulative(tmp_path):
+    _write_body(tmp_path, "V1 in 0 0 AC 1\nR1 in out 1k\nR2 out 0 1k\n")
+    request = {
+        "netlist": "body.spice",
+        "analysis_steps": [
+            {
+                "name": f"s{i}",
+                "alter": alter,
+                "analysis": {"kind": "ac", "args": "dec 1 1k 10k"},
+                "measurements": [{"name": "g", "expr": "mag(v(out))[0]"}],
+            }
+            for i, alter in enumerate(({"V1.ac": 2}, {}))
+        ],
+    }
+    report = sim.run_sim(str(_write_request(tmp_path, request)))
+    assert report["status"] == "pass", report["corners"][0]["diagnostics"]
+    values = {m["name"]: m["value"] for m in report["corners"][0]["measurements"]}
+    assert values["s0.g"] == pytest.approx(1.0, rel=1e-3)
+    assert values["s1.g"] == pytest.approx(1.0, rel=1e-3)
 
 
 def _reset_request(**overrides) -> dict:

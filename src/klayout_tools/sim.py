@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -86,22 +87,32 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from typing import IO, Any, NamedTuple
 
 from . import (
     env_provenance,
     output_lock,
+    sim_complex_vectors,
     sim_crossings,
     sim_cycle_mean,
     sim_decks,
     sim_energy,
     sim_injected,
     sim_mismatch_gate,
+    sim_noise,
+    sim_passes,
     sim_portable,
+    sim_snm_meas,
     sim_steps,
+    sim_stimulus,
+    sim_subckt_override,
+    sim_supply_waveform,
+    sim_tian,
     sim_transfer_meas,
+    sim_twoport,
 )
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
@@ -134,7 +145,7 @@ from .coverage import (
     work_id,
 )
 from .metrics import is_registered
-from .pdk import PdkNotFoundError, find_pdk
+from .pdk import PdkNotFoundError, find_pdk, list_corners
 from .pdk import ambiguity_warning as pdk_ambiguity_warning
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
@@ -145,11 +156,21 @@ from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 #: ``sim_remote``'s: `run_sim` dispatches into them and re-exports their
 #: helpers (self-aliased) so ``klayout_tools.sim.<name>`` resolves them too.
 from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
+from .sim_batch import (
+    _remove_shard_manifest,
+    _run_batch,
+    _run_batch_fleet,
+    _validate_batch_models_lib,
+    attach_engine_build_comparison,
+    attach_staged_model_comparison,
+)
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
-from .sim_batch import _run_batch, _run_batch_fleet
 from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE
 from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_decks import run_deck_request
+
+#: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
+from .sim_errors import SimError as SimError
 from .sim_plot import render_waveform_svg
 
 #: The remaining names below are not called directly from this module's own
@@ -171,6 +192,28 @@ from .sim_remote import (
 )
 from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
+from .sim_validate import _EXPR_MEAS_NAME_RE as _EXPR_MEAS_NAME_RE
+from .sim_validate import _MEAS_CARD_TYPE_RE as _MEAS_CARD_TYPE_RE
+from .sim_validate import _MEAS_VALUE_REF_RE as _MEAS_VALUE_REF_RE
+from .sim_validate import _SUPPORTED_MEAS_TYPES as _SUPPORTED_MEAS_TYPES
+from .sim_validate import ON_UNREACHED_VALUES as ON_UNREACHED_VALUES
+from .sim_validate import _expr_measurements as _expr_measurements
+from .sim_validate import _measurement_name_key as _measurement_name_key
+from .sim_validate import _require_measurement_form as _require_measurement_form
+from .sim_validate import _validate_crossings_form as _validate_crossings_form
+from .sim_validate import _validate_expr_body as _validate_expr_body
+from .sim_validate import _validate_expr_names_unique as _validate_expr_names_unique
+from .sim_validate import _validate_fail_on_diagnostic as _validate_fail_on_diagnostic
+from .sim_validate import _validate_meas_card as _validate_meas_card
+from .sim_validate import _validate_measurement_form as _validate_measurement_form
+from .sim_validate import _validate_measurement_forms as _validate_measurement_forms
+from .sim_validate import (
+    _validate_no_dependent_meas_cards as _validate_no_dependent_meas_cards,
+)
+from .sim_validate import _validate_noise_measurement as _validate_noise_measurement
+from .sim_validate import _validate_on_unreached as _validate_on_unreached
+from .sim_validate import _validate_optional_flag as _validate_optional_flag
+from .sim_validate import _validate_rawfile_form as _validate_rawfile_form
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -238,16 +281,22 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "missing_include",
         "netlist",
         "model_bin_range",
+        "ngspice_fatal",
         "no_such_vector",
         # Missing-capability prerequisites (issue #2814).
         "unsupported_model_level",
         "osdi_abi_mismatch",
         "osdi_load_failed",
+        # The analysis never completed (engine abort trailer), issue #2846.
+        "analysis_aborted",
         # Per-corner run outcomes synthesized by `_run_corner` itself.
         "timeout",
         "engine_killed",
         "engine_aborted",
         "measurement",
+        # An opted-in (`on_unreached: "null"`) unreached `.meas` target
+        # (issue #3108); `info` severity, so it never fails a corner itself.
+        "measurement_not_reached",
         # An `optional` measurement with no value (issue #2925); info severity.
         "measurement_absent",
         "unknown",
@@ -262,6 +311,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # produced no plot, and a result whose inputs produced no value.
         "step_failed",
         "derived_input_unavailable",
+        # Multi-pass AC acquisition (`analysis.passes`, issue #3159): a pass
+        # whose AC analysis left no decodable rawfile.
+        "pass_failed",
         # Units that never ran (`_unrun_corner_report` and friends).
         "budget_exceeded",
         "orphaned",
@@ -270,8 +322,12 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_job_failed",
         "batch_job_timeout",
         "batch_poll_timeout",
+        "batch_job_interrupted",
         # Report-level (`environment.job_diagnostic`, issue #2970).
         "all_units_at_timeout",
+        # Report-level (top-level `diagnostics[]`, issue #2901): batch runner
+        # predates request fields, under `runner_version_check: "warn"`.
+        "batch_runner_request_feature_predated",
     }
 )
 
@@ -292,15 +348,26 @@ WAVEFORM_TOO_LARGE_CODE = "waveform_too_large"
 #: :data:`_INCONCLUSIVE_STATUS`, and how a consumer tells the two apart.
 IMPLAUSIBLE_DIAGNOSTIC_CODE = "implausible_solution"
 
+#: The marker diagnostic :func:`_margin_measurement_result` attaches to a
+#: ``transfer`` margin measurement (issue #3088) whose limit was met but whose
+#: AC band cannot support a pass -- so the corner grades
+#: :data:`_INCONCLUSIVE_STATUS` and the message lists the
+#: ``MarginReport.ambiguity`` reasons.
+MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE = "margin_ambiguous"
+
 #: The codes above: emitted by the **grading** step rather than by a log
 #: classifier or an unrun-corner path, and therefore deliberately **not**
-#: members of :data:`DIAGNOSTIC_CODES`. Both are produced downstream of
+#: members of :data:`DIAGNOSTIC_CODES`. All are produced downstream of
 #: ``options.fail_on_diagnostic``'s code match on an already-inconclusive
 #: corner, so listing either there could not change any verdict; accepting
 #: them would only invite the misreading that it could. ``test_sim.py``'s
 #: drift guard derives this distinction rather than restating it.
 _GRADING_MARKER_CODES: frozenset[str] = frozenset(
-    {INCONCLUSIVE_DIAGNOSTIC_CODE, IMPLAUSIBLE_DIAGNOSTIC_CODE}
+    {
+        INCONCLUSIVE_DIAGNOSTIC_CODE,
+        IMPLAUSIBLE_DIAGNOSTIC_CODE,
+        MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE,
+    }
 )
 
 #: The corner/measurement/report status token issues #2492 and #2493 add
@@ -407,6 +474,19 @@ def resolve_backend(backend: str | None, request: dict[str, Any]) -> tuple[str, 
     if env_value:
         return env_value, True
     return "local", False
+
+
+def _backend_source(backend: str | None, request: dict[str, Any]) -> str:
+    """Where :func:`resolve_backend`'s answer came from: ``"flag"``,
+    ``"request"``, ``"env"`` (``$KLT_SIM_BACKEND``) or ``"default"``
+    (issue #2977, reported as ``environment.backend.source``)."""
+    if backend is not None:
+        return "flag"
+    if request.get("backend") is not None:
+        return "request"
+    if os.environ.get(BACKEND_ENV, "").strip():
+        return "env"
+    return "default"
 
 
 def _yield_host_default_backend(
@@ -861,32 +941,6 @@ _MEAS_VALUE_RE = re.compile(
     r"^([A-Za-z_][\w.]*)\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?)\s*(?:\S+=.*)?$"
 )
 
-#: A `.meas` card's declared analysis type (the token right after
-#: ``.meas``/``.measure``), e.g. ``tran`` in ``.meas tran vout find v(out)``.
-_MEAS_CARD_TYPE_RE = re.compile(r"^\s*\.meas(?:ure)?\s+(\S+)", re.IGNORECASE)
-
-#: A value position in a `.meas` card: an identifier right after ``=`` that is
-#: not a function call (``v(x)``/``i(x)`` never match -- the negative
-#: lookahead rejects a following ``(``). Issue #3038.
-_MEAS_VALUE_REF_RE = re.compile(r"=\s*([A-Za-z_]\w*)\b(?!\s*\()")
-
-#: ngspice's own ``.MEASURE`` statement only implements these analysis types
-#: (verified empirically against ngspice 46 -- see issue #205). Notably,
-#: there is no ``.MEASURE OP``: an operating-point analysis has no sweep
-#: variable for a measurement to search over, unlike DC/AC/TRAN/SP.
-_SUPPORTED_MEAS_TYPES = frozenset({"dc", "ac", "tran", "sp"})
-
-#: A ``measurements[].expr`` measurement's name (issue #2533). Stricter than
-#: ``measurements[].name`` for a ``spice`` card, and deliberately so: an
-#: ``expr`` name is *emitted into the deck* as an ngspice vector name
-#: (``let <name> = ...``) and then read back out of the log by
-#: :data:`_MEAS_VALUE_RE`, so it has to be simultaneously legal on both
-#: sides. ngspice vector names admit no ``.`` (which `_MEAS_VALUE_RE` would
-#: otherwise accept) and no leading digit; anything else would either fail
-#: to parse in the deck or fail to harvest from the log, both of which would
-#: surface as the unhelpfully generic "produced no value".
-_EXPR_MEAS_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
 #: Ordered diagnostic classifiers: (code, compiled pattern). Order matters --
 #: singular-matrix and nonconvergence text can co-occur in one log (ngspice
 #: tries gmin/source stepping as a nonconvergence *recovery* strategy after a
@@ -1020,7 +1074,64 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"^Error:\s*could not find a valid modelname", re.IGNORECASE | re.MULTILINE
         ),
     ),
+    (
+        # The generic shapes of an ngspice deck abort (issue #3879): `Error
+        # on line N ...` followed by `Simulation interrupted due to error!`,
+        # or `fatal error in ngspice`. Last on purpose: every specific
+        # pattern above names a cause, so this one is only the fallback cause
+        # (`_classify_diagnostics` drops it when a specific fatal code was
+        # already classified). The message is the first matching log line.
+        "ngspice_fatal",
+        re.compile(
+            r"^\s*Error on line \d+"
+            r"|Simulation interrupted due to error"
+            r"|fatal error in ngspice",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
 )
+
+#: Codes that mean ngspice aborted while reading the deck (issue #3879). When
+#: one of them is classified and the log shows no analysis banner, the run
+#: never started: its per-measurement "produced no value" errors are
+#: consequences and are collapsed (`_demote_abort_cascade`).
+_NGSPICE_FATAL_CODES: frozenset[str] = frozenset(
+    {"missing_include", "netlist", "model_bin_range", "ngspice_fatal"}
+)
+
+#: What ngspice prints once an analysis actually begins (or has produced
+#: data); absent from a run that died in the deck parser.
+_ANALYSIS_STARTED_RE = re.compile(
+    r"Doing analysis at TEMP|No\. of Data Rows|Initial Transient Solution",
+    re.IGNORECASE,
+)
+
+#: Appended to the cause diagnostic of a run that never started analysis.
+_NO_ANALYSIS_NOTE = (
+    "; no analysis started (the run's runtime_s is wall-clock before the "
+    "failure, not simulation time)"
+)
+
+
+def _mark_analysis_not_started(
+    diagnostics: list[dict[str, Any]], log_text: str
+) -> bool:
+    """Issue #3879: when ``diagnostics`` hold an ngspice deck-abort code and
+    ``log_text`` shows no analysis ever began, tag every such diagnostic with
+    the additive ``analysis_started: false`` field and a message note, and
+    return ``True``. A failure mid-analysis returns ``False`` untouched."""
+    fatal = [
+        d
+        for d in diagnostics
+        if d.get("code") in _NGSPICE_FATAL_CODES and d.get("severity") == "error"
+    ]
+    if not fatal or _ANALYSIS_STARTED_RE.search(log_text):
+        return False
+    for diagnostic in fatal:
+        diagnostic["analysis_started"] = False
+        if _NO_ANALYSIS_NOTE not in diagnostic["message"]:
+            diagnostic["message"] += _NO_ANALYSIS_NOTE
+    return True
 
 
 #: Prerequisite messages (issue #2814) for the capability diagnostics: they
@@ -1047,25 +1158,192 @@ _PREREQUISITE_MESSAGES: dict[str, str] = {
 }
 
 
-class SimError(Exception):
-    """Raised when a corner sweep cannot even be attempted: a missing/malformed
-    request file, an unresolvable netlist or model library, or an unsupported
-    engine.
+#: ``SimError.code`` for a request whose ``engine_version`` pin the resolved
+#: engine does not satisfy (issue #3041): the *tool* is unavailable at the
+#: pinned build. Distinct from :data:`UNSUPPORTED_ANALYSIS_CODE`.
+ENGINE_VERSION_UNMET_CODE = "engine_version_unmet"
 
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback. Distinct from a *corner* reporting ``status: "error"`` inside
-    an otherwise-successful response -- that is a documented outcome, not an
-    exception (see this module's docstring and docs/cli/sim.md).
+#: ``SimError.code`` for a request whose ``models.pdk_version`` pin the
+#: installed PDK does not satisfy (issue #4046): the *PDK* drifted from the
+#: pinned revision, or could not be identified.
+PDK_VERSION_UNMET_CODE = "pdk_version_unmet"
 
-    ``code`` is an optional machine-readable classification (issue #2721)
-    the CLI emits as the error envelope's ``error.code`` -- e.g.
-    ``"batch_no_capacity"`` for a retryable batch-fleet capacity refusal.
-    ``None`` (every other error today) emits no ``code`` field at all.
-    """
+#: ``SimError.code`` for an analysis kind `klt sim` has no implementation for
+#: (issue #3041): the *capability* is absent, whatever engine build is pinned.
+UNSUPPORTED_ANALYSIS_CODE = "unsupported_analysis"
 
-    def __init__(self, *args: object, code: str | None = None) -> None:
-        super().__init__(*args)
-        self.code = code
+#: Periodic small-signal / noise analysis kinds a request may name but `klt
+#: sim` does not implement (no PSS/pnoise/pac; see also issue #2985).
+UNSUPPORTED_ANALYSIS_KINDS: tuple[str, ...] = ("pss", "pnoise", "pac")
+
+
+def reject_unsupported_analysis(kind: Any) -> None:
+    """Raise :class:`SimError` (``code="unsupported_analysis"``) when ``kind``
+    names a periodic analysis (issue #3041) -- before any corner runs, so
+    callers can record "capability absent" apart from "tool unavailable"."""
+    if isinstance(kind, str) and kind.lower() in UNSUPPORTED_ANALYSIS_KINDS:
+        raise SimError(
+            f"analysis.kind {kind!r} is not supported: `klt sim` implements no "
+            "periodic small-signal/noise analysis "
+            f"({', '.join(UNSUPPORTED_ANALYSIS_KINDS)}); "
+            'see docs/cli/sim.md "Supported analyses"',
+            code=UNSUPPORTED_ANALYSIS_CODE,
+        )
+
+
+def _version_components(text: str) -> tuple[int, ...] | None:
+    """Leading dotted integer components of a version string (``"44.2"`` ->
+    ``(44, 2)``, ``"7.10.0-opensource"`` -> ``(7, 10, 0)``), or ``None``."""
+    match = re.match(r"\s*(\d+(?:\.\d+)*)", text)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _validate_engine_version_pin(request: dict[str, Any]) -> tuple[int, ...] | None:
+    """The request's ``engine_version`` pin as ``(major,)`` or ``(major,
+    minor)`` (issue #3041), ``None`` when unset."""
+    pin = request.get("engine_version")
+    if pin is None:
+        return None
+    if not isinstance(pin, str) or not re.fullmatch(r"\d+(?:\.\d+)?", pin.strip()):
+        raise SimError(
+            "request.engine_version must be a string of the form 'MAJOR' or "
+            f"'MAJOR.MINOR' (got {pin!r})"
+        )
+    return _version_components(pin) or None
+
+
+def _check_engine_version_pin(
+    pin: tuple[int, ...], found: str | None, engine: str, *, where: str
+) -> None:
+    """Fail closed with ``engine_version_unmet`` unless ``found`` matches the
+    pin on every component the pin states (``"44"`` pins the major only)."""
+    required = ".".join(str(part) for part in pin)
+    parsed = _version_components(found) if found else None
+    if parsed is not None and parsed[: len(pin)] == pin:
+        return
+    if found is None:
+        detail = f"{where} reported no {engine} version"
+    elif parsed is None:
+        detail = f"{where} reported an unparseable {engine} version {found!r}"
+    else:
+        detail = f"{where} found {engine} {found}"
+    raise SimError(
+        f"pinned simulator unavailable: request requires {engine} {required}; {detail}",
+        code=ENGINE_VERSION_UNMET_CODE,
+    )
+
+
+def _check_local_engine_version_pin(
+    pin: tuple[int, ...] | None, backend: str, engine: str, binary: str
+) -> None:
+    """Enforce the pin before any corner runs, where this process can see the
+    engine (local backends); a no-op when unset or for off-host backends."""
+    if pin is None or backend in _OFFHOST_BACKENDS:
+        return
+    _check_engine_version_pin(
+        pin,
+        _probe_engine_version(engine, binary),
+        engine,
+        where="the local engine probe",
+    )
+
+
+def _check_offhost_engine_version_pin(
+    pin: tuple[int, ...] | None,
+    backend: str,
+    engine: str,
+    engine_version: str | None,
+) -> None:
+    """Enforce the pin for off-host backends. No pre-submit probe exists for a
+    remote/batch runner, so it is checked against the version its reports
+    carried (after the run)."""
+    if pin is None or backend not in _OFFHOST_BACKENDS:
+        return
+    _check_engine_version_pin(
+        pin, engine_version, engine, where=f"the {backend} runner's report"
+    )
+
+
+def _validate_pdk_version_pin(models: Any) -> str | None:
+    """The request's ``models.pdk_version`` pin (issue #4046), ``None`` when
+    unset. Same value forms as ``klt pdk check --expect-version``."""
+    if not isinstance(models, dict):
+        return None
+    pin = models.get("pdk_version")
+    if pin is None:
+        return None
+    if not isinstance(pin, str) or not pin.strip():
+        raise SimError(
+            f"request.models.pdk_version must be a non-empty string (got {pin!r})"
+        )
+    return pin.strip()
+
+
+def _check_pdk_version_pin(pin: str | None, models: Any, backend: str) -> None:
+    """Enforce ``models.pdk_version`` before any corner runs (issue #4046).
+
+    Local backends resolve the PDK the way ``provenance.pdk`` does and fail
+    closed (``pdk_version_unmet``) on ``mismatch``/``unknown`` or when no PDK
+    resolves. Off-host backends reject the field: the worker-side comparison
+    is tracked in #3462, and silently passing would hide drift."""
+    if pin is None:
+        return
+    if backend in _OFFHOST_BACKENDS:
+        raise SimError(
+            f"models.pdk_version is not supported for backend {backend!r}: "
+            "the PDK is resolved on the runner, and the worker-side pin check "
+            "is not implemented yet (see issue #3462) -- use backend 'local' "
+            "or 'local-parallel', or drop the pin"
+        )
+    variant = models.get("pdk")
+    root = models.get("pdk_root")
+    if not (variant or root):
+        raise SimError(
+            f"models.pdk_version pins {pin!r} but no PDK is named: set "
+            "models.pdk and/or models.pdk_root so the installed revision can "
+            "be checked",
+            code=PDK_VERSION_UNMET_CODE,
+        )
+    try:
+        found = find_pdk(variant=variant, root=root, expect_version=pin)
+    except PdkNotFoundError as exc:
+        raise SimError(
+            f"models.pdk_version pins {pin!r} but the PDK could not be resolved: {exc}",
+            code=PDK_VERSION_UNMET_CODE,
+        ) from exc
+    expectation = found.get("version_expectation") or {}
+    status = expectation.get("status")
+    if status == "match":
+        return
+    installed = expectation.get("installed")
+    if status == "mismatch":
+        detail = f"installed PDK is {installed!r}"
+    elif installed:
+        detail = f"installed PDK {installed!r} could not be compared"
+    else:
+        detail = "installed PDK identity could not be determined"
+    raise SimError(
+        f"pinned PDK unavailable: request requires {pin!r}; {detail}",
+        code=PDK_VERSION_UNMET_CODE,
+    )
+
+
+def _probe_engine_version(engine: str, binary: str) -> str | None:
+    """Ask the local engine binary for its version without simulating."""
+    argv = [binary, "--version"] if engine == "ngspice" else [binary, "-v"]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (proc.stdout or "") + (proc.stderr or "")
+    if engine == "ngspice":
+        return _extract_engine_version(text)
+    match = re.search(r"Release\s+([\w.]+)", text)
+    return match.group(1) if match else None
 
 
 def _worker_ngspice_binary(remote: Any) -> str | None:
@@ -1175,6 +1453,41 @@ def load_request(request_path: str) -> dict[str, Any]:
     return request
 
 
+def _reject_linearize_in_steps(request: dict[str, Any]) -> None:
+    """Issue #4014: ``linearize`` is a scalar-``tran``-only field."""
+    holders = [("analysis", request.get("analysis"))]
+    holders.extend(
+        (f"analysis_steps[{i}]", step)
+        for i, step in enumerate(request.get("analysis_steps") or [])
+    )
+    for where, holder in holders:
+        if isinstance(holder, dict) and "linearize" in holder:
+            raise SimError(
+                f"{where}.linearize is not supported with analysis_steps[]: "
+                "`linearize` is only available on a scalar `tran` analysis "
+                '(analysis: {"kind": "tran", ..., "linearize": true})'
+            )
+
+
+def _validate_linearize(analysis: dict[str, Any]) -> None:
+    """Issue #4014: ``analysis.linearize`` must be a boolean on a ``tran``."""
+    if "linearize" not in analysis:
+        return
+    value = analysis["linearize"]
+    if not isinstance(value, bool):
+        raise SimError(
+            f"analysis.linearize must be a boolean (got {value!r}); "
+            "set true to resample the transient waveforms onto a uniform "
+            "time grid before the expr measurements are evaluated"
+        )
+    if value and str(analysis.get("kind", "")).lower() != "tran":
+        raise SimError(
+            'analysis.linearize requires analysis.kind "tran" '
+            f"(got {analysis.get('kind')!r}): `linearize` resamples a "
+            "transient waveform and has no meaning for other analyses"
+        )
+
+
 def _resolve_analysis_and_measurements(
     request: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -1187,10 +1500,19 @@ def _resolve_analysis_and_measurements(
     :func:`klayout_tools.sim_steps.resolve_analysis_steps`.
     """
     if request.get("analysis_steps") is not None:
+        _reject_linearize_in_steps(request)
         return sim_steps.resolve_analysis_steps(request)
     analysis = request.get("analysis") or {}
+    # Issue #3338: `kind: "twoport"` compiles to an `ac` analysis; resolved
+    # (every structural error raised) before the `kind`/`args` check.
+    analysis = sim_twoport.resolve_analysis(analysis)
     if "kind" not in analysis or "args" not in analysis:
         raise SimError("request.analysis requires 'kind' and 'args'")
+    reject_unsupported_analysis(analysis["kind"])
+    # Issue #3159: `analysis.passes` (AC only) is validated and normalised
+    # here, before any engine launch; absent `passes` returns `analysis` as is.
+    analysis = sim_passes.resolve_analysis(analysis)
+    _validate_linearize(analysis)
     measurements_spec = request.get("measurements", [])
     # Issue #2533: `spice` (a verbatim top-level `.meas` card) and `expr` (an
     # expression evaluated after the analysis, inside the generated
@@ -1222,7 +1544,32 @@ def _resolve_analysis_and_measurements(
     sim_cycle_mean.validate_cycle_mean_context(measurements_spec, analysis)
     # Issue #2923: and a transfer metric is an AC-sweep quantity.
     sim_transfer_meas.validate_transfer_context(measurements_spec, analysis)
-    return analysis, measurements_spec
+    # Issue #3160: a tian metric combines the named passes of `analysis.passes`.
+    sim_tian.validate_tian_context(measurements_spec, analysis)
+    # Issue #3895: and an snm margin is a DC-sweep quantity.
+    sim_snm_meas.validate_snm_context(measurements_spec, analysis)
+    # Issue #2938: a `noise` entry is lowered to an `expr` (plus helper
+    # lines) so everything downstream treats it as one.
+    sim_noise.validate_noise_context(measurements_spec, analysis)
+    return analysis, sim_noise.lower_measurements(measurements_spec, analysis)
+
+
+def _reject_param_braces(analysis: dict[str, Any], engine: str) -> None:
+    """Reject a ``{...}`` brace reference in a scalar ``analysis.args``
+    (issue #2846). ngspice emits the analysis as a ``.control`` command and
+    does not expand ``.param`` braces in control mode, so ``tran 2e-06
+    {stop_s}`` aborts the analysis. Xyce emits a ``.tran`` dot card where
+    braces are valid, so this check is skipped for ``engine == "xyce"``."""
+    args = analysis.get("args")
+    if engine != "xyce" and isinstance(args, str) and re.search(r"[{}]", args):
+        raise SimError(
+            f"request.analysis.args {args!r} contains a '{{...}}' brace "
+            "reference: ngspice runs the analysis as a .control command, "
+            "which does not expand .param braces (the analysis aborts with "
+            "'TSTOP is invalid'), and klt does not expand them. Write the "
+            "numeric value literally in analysis.args (or use engine 'xyce', "
+            "whose .tran card accepts braces)"
+        )
 
 
 def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
@@ -1237,6 +1584,100 @@ def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
     which is not necessarily what a caller meant.
     """
     return env_provenance.repo_relative_path(path, repo_root=repo_root)
+
+
+#: A literal numeric ``AT=<x>`` on a ``.meas`` card (issue #3520). The value
+#: must be a bare SPICE number; ``at=t_flip`` / ``at=0.5*2.5u`` never match
+#: (the lookahead rejects a trailing expression character).
+_MEAS_AT_LITERAL_RE = re.compile(
+    r"\bat\s*=\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?[a-zA-Z]*)(?![\w.*/+\-(])",
+    re.IGNORECASE,
+)
+
+
+def _dc_sweep_bounds(analysis: dict[str, Any]) -> tuple[float, float] | None:
+    """``(start, stop)`` of a ``dc`` analysis whose first sweep is all
+    literal numbers (``"V1 0 1 0.1"``), else ``None``."""
+    if str(analysis.get("kind", "")).lower() != "dc":
+        return None
+    tokens = str(analysis.get("args", "")).split()
+    if len(tokens) < 4:
+        return None
+    start = _parse_plain_number(tokens[1])
+    stop = _parse_plain_number(tokens[2])
+    if start is None or stop is None:
+        return None
+    suffix_scale = _spice_scale(tokens[1]), _spice_scale(tokens[2])
+    return start * suffix_scale[0], stop * suffix_scale[1]
+
+
+def _spice_scale(raw: str) -> float:
+    """The engineering-suffix multiplier of a numeric SPICE literal."""
+    match = _WIDTH_NUMBER_RE.match(raw.strip())
+    suffix = match.group(2).lower() if match else ""
+    for name, value in _WIDTH_UNIT_SUFFIXES:
+        if suffix.startswith(name):
+            return value
+    return 1.0
+
+
+def _meas_at_lint(
+    analysis: dict[str, Any], measurements_spec: list[dict[str, Any]]
+) -> list[dict[str, str]]:
+    """Warning-severity ``measurement`` diagnostics for a ``.meas`` card whose
+    literal ``AT=<x>`` cannot resolve on a literal ``dc`` sweep (issue #3520):
+    the sweep is degenerate (start == stop, one sample -- nothing to
+    interpolate) or ``x`` lies outside ``[start, stop]``. Parameterized /
+    expression ``AT=`` and non-literal or non-``dc`` sweeps are left alone.
+    """
+    bounds = _dc_sweep_bounds(analysis)
+    if bounds is None:
+        return []
+    lo, hi = min(bounds), max(bounds)
+    found: list[dict[str, str]] = []
+    for spec in measurements_spec:
+        match = _MEAS_AT_LITERAL_RE.search(spec.get("spice") or "")
+        if match is None:
+            continue
+        at = _parse_plain_number(match.group(1))
+        if at is None:
+            continue
+        at *= _spice_scale(match.group(1))
+        if lo == hi:
+            why = (
+                f"the dc sweep is a single point ({lo:g}); AT= needs two "
+                "samples to interpolate"
+            )
+        elif not lo <= at <= hi:
+            why = f"AT={match.group(1)} lies outside the dc sweep [{lo:g}, {hi:g}]"
+        else:
+            continue
+        found.append(
+            {
+                "severity": "warning",
+                "code": "measurement",
+                "message": (
+                    f"measurement '{spec['name']}' will likely report "
+                    f"'out of interval': {why}"
+                ),
+            }
+        )
+    return found
+
+
+def _attach_meas_lint(
+    corners: list[dict[str, Any]],
+    analysis: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+) -> None:
+    """Add the :func:`_meas_at_lint` warnings (once per corner) to a run's
+    corner reports, and echo them to stderr. Computed client-side from the
+    request alone, so it is identical for local, batch and remote runs."""
+    lint = _meas_at_lint(analysis, measurements_spec)
+    for diag in lint:
+        print(f"warning: {diag['message']}", file=sys.stderr)
+    for corner in corners:
+        corner["diagnostics"].extend(dict(d) for d in lint)
 
 
 def _portable_artifacts_option(options: dict[str, Any]) -> bool:
@@ -1330,390 +1771,6 @@ def _portable_substitutions(
             entry["models_lib_sha256"] = models_lib_sha256
         out.append(entry)
     return out
-
-
-def _validate_meas_card(name: str, spice: str) -> None:
-    """Reject a ``.meas`` card declaring an analysis type ngspice's own
-    ``.MEASURE`` statement does not implement.
-
-    Most notably ``"op"``: it is a legitimate ``analysis.kind`` (ngspice's
-    operating-point analysis runs fine as a plain ``op`` control-block
-    command), but there is no such thing as ``.MEASURE OP`` -- an operating
-    point has no sweep variable for a measurement to search over the way
-    DC/AC/TRAN/SP do. Pairing ``analysis.kind: "op"`` with a ``.meas op``
-    card fails with ngspice's own
-    ``Error: unrecognized analysis type 'op' for the following .meas
-    statement`` (verified against ngspice 46, see issue #205) -- this
-    catches it before the request ever reaches ngspice, with an actionable
-    message instead of a raw parser error. Applies to every ``.meas`` card
-    regardless of the request's own ``analysis.kind``: a ``.meas`` type
-    ngspice does not implement is invalid on its own terms, not just when
-    paired with a mismatched analysis.
-
-    A card this function does not recognise as a ``.meas``/``.measure``
-    line (unexpected shape) is left alone -- validating hand-written SPICE
-    syntax in general is out of scope here.
-    """
-    match = _MEAS_CARD_TYPE_RE.match(spice)
-    if match is None:
-        return
-    meas_type = match.group(1).lower()
-    if meas_type not in _SUPPORTED_MEAS_TYPES:
-        raise SimError(
-            f"measurement '{name}' declares an unsupported .meas analysis "
-            f"type '{meas_type}': ngspice has no `.MEASURE {meas_type.upper()}` "
-            "analysis type; declare the quantity as an expression instead "
-            f'(measurements[].expr, e.g. {{"name": "{name}", "expr": '
-            '"v(out)"}), which `klt sim` evaluates after the analysis inside '
-            'its own `.control` block -- or use analysis.kind: "tran" with '
-            "a short single-step transient and `.meas tran ... at=<t>`"
-        )
-
-
-def _validate_no_dependent_meas_cards(measurements_spec: list[dict[str, Any]]) -> None:
-    """Refuse a ``spice`` card whose value field names another measurement.
-
-    A file-scope ``.meas`` card resolves the right-hand side of ``at=``,
-    ``from=``, ``to=``, ``td=``, ``val=`` ... as a netlist ``.param``, never as
-    an earlier ``.meas`` result, so ``.meas tran vos find v(rmp) at=t_flip``
-    kills the whole deck at parse time (``Undefined parameter [t_flip]``) and
-    every measurement in the unit reads ``produced no value`` (issue #3038).
-    This names the dependent card up front instead.
-
-    Deliberately narrow: only an identifier directly after ``=`` (not a
-    function call such as ``v(vout)``) that case-insensitively equals the
-    ``name`` of a *different* ``measurements[]`` entry. A card referencing a
-    real netlist ``.param`` that happens to share a measurement name is
-    refused too -- that is ambiguous in ngspice anyway. Only ``spice`` cards
-    are scanned (``expr`` has its own rule, see ``docs/cli/sim.md``);
-    ``analysis_steps[]`` never reaches here (control-scope ``meas`` has
-    different semantics).
-    """
-    names = {
-        str(spec["name"]).lower(): spec["name"]
-        for spec in measurements_spec
-        if spec.get("name") is not None
-    }
-    for spec in measurements_spec:
-        spice = spec.get("spice")
-        if not isinstance(spice, str):
-            continue
-        own = str(spec["name"]).lower()
-        for ref in _MEAS_VALUE_REF_RE.findall(spice):
-            key = ref.lower()
-            if key in names and key != own:
-                raise SimError(
-                    f"measurement '{spec['name']}' references measurement "
-                    f"'{names[key]}' in its .meas card: a file-scope .meas "
-                    "card cannot read another .meas result (ngspice resolves "
-                    f"'{ref}' as a netlist .param and fails with 'Undefined "
-                    "parameter'). Fold both into one self-contained card "
-                    "(e.g. `.meas tran vos find v(rmp) when v(dn)=0.5 "
-                    "rise=1`), measure the interval with trig/targ, or "
-                    "compute it with measurements[].expr over saved vectors"
-                )
-
-
-def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None:
-    """Validate the *form* of every ``request.measurements[]`` entry: that it
-    declares exactly one of ``spice`` (a verbatim top-level ``.meas`` card --
-    the only form before issue #2533) or ``expr`` (an ngspice expression
-    ``klt sim`` evaluates after the analysis, inside its own ``.control``
-    block), and that an ``expr`` entry's name/expression are emittable and
-    harvestable.
-
-    Why ``expr`` exists at all (issue #2533): a top-level ``.meas`` card is
-    the *only* measurement shape ngspice's batch mode accepts at file scope,
-    and ``.MEASURE`` implements no ``op`` analysis type
-    (:data:`_SUPPORTED_MEAS_TYPES`) -- so an operating-point quantity, or any
-    quantity that is a reduction/combination of saved vectors rather than a
-    single card's search, had no expression in a request at all. The
-    *harvesting* side already tolerated it: a ``print``ed scalar lands in the
-    log as ``<name> = <value>``, the shape :data:`_MEAS_VALUE_RE` reads (see
-    that pattern's own note about the print fallback). Only the emitting side
-    was closed, because the netlist convention gives ``klt sim`` sole
-    ownership of the deck's single ``.control`` block (see this module's
-    docstring). ``expr`` is that block's caller-facing seam -- declarative
-    (one expression bound to one response name), so it composes with
-    ``corners.*``/``monte_carlo`` exactly like a ``.meas`` card does rather
-    than needing its own reduction contract.
-
-    Validation rules, and why each is a hard error rather than a best-effort:
-
-    - **Exactly one of ``spice``/``expr``.** Both would emit the measurement
-      twice under one name (a file-scope ``.meas`` card *and* a
-      ``let``/``print`` pair) and leave which one won up to log ordering.
-      Neither leaves nothing to run.
-    - **``expr`` is a single non-empty line.** It is spliced verbatim into a
-      generated ``.control`` block; an embedded newline would silently turn
-      the tail of the expression into a *separate control command*.
-    - **``expr`` names match :data:`_EXPR_MEAS_NAME_RE`.** The name is both
-      an ngspice vector name in the deck and the key read back out of the
-      log; see that pattern's docstring.
-    - **An ``expr`` name is unique across the whole ``measurements[]``
-      list.** A duplicate ``let`` silently overwrites the earlier vector, so
-      both response entries would report the *second* expression's value.
-      Only checked for entries involving an ``expr`` -- a request whose
-      duplicate names are all ``spice`` cards behaves exactly as it did
-      before this issue (ngspice's own ``.meas`` handling owns that case).
-
-    Does **not** validate the expression's ngspice syntax or that it reduces
-    to a scalar: neither is knowable without running the engine, and both
-    surface at harvest time as the measurement's own ``status: "error"``
-    (with the ``expr``-specific hint :func:`_run_corner` attaches). Same
-    boundary ``spice`` already has -- hand-written SPICE is passed through,
-    not parsed.
-
-    Split across three helpers (:func:`_validate_measurement_form`,
-    :func:`_validate_expr_body`, :func:`_validate_expr_names_unique`) rather
-    than written as one loop, so no single function carries the whole rule
-    set's branch count -- see ``scripts/check_complexity_baseline.py``.
-    """
-    for spec in measurements_spec:
-        _validate_measurement_form(spec)
-    _validate_expr_names_unique(measurements_spec)
-
-
-def _validate_optional_flag(name: Any, spec: dict[str, Any]) -> None:
-    """Issue #2925: ``optional``, when present, must be a real boolean."""
-    if "optional" in spec and not isinstance(spec["optional"], bool):
-        raise SimError(
-            f"measurement '{name}' has a non-boolean 'optional' "
-            f"({spec['optional']!r}): it must be true or false"
-        )
-
-
-def _validate_crossings_form(
-    name: Any, spec: dict[str, Any], scalar_form: bool
-) -> None:
-    """Issue #2868: ``crossings`` is a third, mutually exclusive measurement
-    form (``scalar_form`` = the entry also declares ``spice``/``expr``), and
-    issue #2925: it cannot be ``optional`` -- a signal with no crossings
-    reports a count of 0; a missing series is a read failure, not absent data."""
-    if scalar_form:
-        raise SimError(
-            f"measurement '{name}' declares 'crossings' together with "
-            f"'{'spice' if spec.get('spice') is not None else 'expr'}': they are "
-            "alternative forms of a measurement -- declare exactly one (use a "
-            "separate measurements[] entry for the scalar)"
-        )
-    if spec.get("optional") is True:
-        raise SimError(
-            f"measurement '{name}': 'optional' is not supported on "
-            "'crossings' (a signal with no crossings reports a count of "
-            "0; a missing series is a read failure, not absent data)"
-        )
-    sim_crossings.validate_crossings_spec(name, spec["crossings"])
-
-
-def _validate_rawfile_form(
-    name: Any, spec: dict[str, Any], present: dict[str, bool]
-) -> bool:
-    """Issues #2947, #3033: ``cycle_mean`` and ``energy`` are mutually
-    exclusive with every other form. Validates the one declared (``present``
-    maps each form name to whether ``spec`` declares it) and returns True, or
-    returns False when neither is declared."""
-    for form in ("cycle_mean", "energy"):
-        if not present[form]:
-            continue
-        others = [other for other, on in present.items() if on and other != form]
-        if others:
-            raise SimError(
-                f"measurement '{name}' declares '{form}' together with "
-                f"'{others[0]}': they are alternative forms of a measurement "
-                "-- declare exactly one (use a separate measurements[] entry "
-                "for the other)"
-            )
-        if form == "cycle_mean":
-            sim_cycle_mean.validate_cycle_mean_spec(name, spec["cycle_mean"])
-        else:
-            sim_energy.validate_energy_spec(name, spec["energy"])
-        return True
-    return False
-
-
-def _validate_measurement_form(spec: dict[str, Any]) -> None:
-    """One ``request.measurements[]`` entry's form: a ``name`` plus exactly
-    one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
-    the round trip through the deck and back out of the log. See
-    :func:`_validate_measurement_forms` for why each rule exists."""
-    if sim_transfer_meas.validate_form_exclusive(spec):
-        # Issue #2923: a fifth, mutually exclusive form.
-        return
-    name = spec.get("name")
-    has_spice = spec.get("spice") is not None
-    has_expr = spec.get("expr") is not None
-    has_crossings = sim_crossings.is_crossings(spec)
-    _validate_optional_flag(name, spec)
-    has_cycle_mean = sim_cycle_mean.is_cycle_mean(spec)
-    has_energy = sim_energy.is_energy(spec)
-    if name is None or not (
-        has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
-    ):
-        raise SimError(
-            "each request.measurements[] entry requires 'name' and "
-            "exactly one of 'spice' (a verbatim .meas card), 'expr' "
-            "(an ngspice expression evaluated after the analysis) or "
-            "'crossings' (a threshold-crossing time series) or "
-            "'cycle_mean' (a mean over whole reference cycles) or "
-            "'energy' (a source's energy over a transient window) or "
-            "'transfer' (an AC return-ratio metric)"
-        )
-    if _validate_rawfile_form(
-        name,
-        spec,
-        {
-            "spice": has_spice,
-            "expr": has_expr,
-            "crossings": has_crossings,
-            "cycle_mean": has_cycle_mean,
-            "energy": has_energy,
-        },
-    ):
-        return
-    if has_crossings:
-        _validate_crossings_form(name, spec, has_spice or has_expr)
-        return
-    if has_spice and has_expr:
-        raise SimError(
-            f"measurement '{name}' declares both 'spice' and 'expr': "
-            "they are alternative forms of the same measurement (a "
-            "top-level .meas card vs. an expression evaluated inside "
-            "`klt sim`'s own .control block) -- declare exactly one"
-        )
-    if not has_expr:
-        return
-    _validate_expr_body(name, spec["expr"])
-    if not _EXPR_MEAS_NAME_RE.match(str(name)):
-        raise SimError(
-            f"measurement '{name}' cannot be declared with 'expr': its "
-            "name is emitted as an ngspice vector name (`let <name> = "
-            "...`) and read back from the log, so it must match "
-            "[A-Za-z_][A-Za-z0-9_]* (no dots, no leading digit)"
-        )
-
-
-def _validate_expr_body(name: Any, expr: Any) -> None:
-    """A ``measurements[].expr`` value itself: one non-empty line of ngspice
-    expression text. Nothing about the *expression* is parsed (see
-    :func:`_validate_measurement_forms`) -- only that it can be spliced into
-    a single ``let`` line without becoming a second control command."""
-    if not isinstance(expr, str) or not expr.strip():
-        raise SimError(
-            f"measurement '{name}' has an empty or non-string 'expr': it "
-            "must be a single-line ngspice expression, e.g. "
-            '"v(d) - v(s)" or "vecmax(v(out)) - vecmin(v(out))"'
-        )
-    if "\n" in expr or "\r" in expr:
-        raise SimError(
-            f"measurement '{name}' has a multi-line 'expr': it is "
-            "spliced verbatim into one `let` line of the generated "
-            ".control block, so a newline would split it into a "
-            "separate control command -- use a single-line expression"
-        )
-    if "<" in expr or ">" in expr:
-        raise SimError(
-            f"measurement '{name}' has a bare '<' or '>' in 'expr': in "
-            "ngspice's control language these are I/O redirection, not "
-            "comparisons, so the measurement would produce no value (and "
-            "stray files) -- spell comparisons gt / lt / ge / le / eq / ne, "
-            "e.g. `(v(a) lt v(b))*v(a)`"
-        )
-
-
-def _validate_expr_names_unique(measurements_spec: list[dict[str, Any]]) -> None:
-    """No ``expr`` measurement shares its ``name`` with any other entry.
-
-    Checked in one pass over the whole list rather than incrementally, so an
-    ``expr`` entry colliding with a ``spice`` card declared *later* is caught
-    too (declaration order does not change the hazard: ``let <name>``
-    overwrites whatever held that name).
-
-    Compared **case-insensitively**, because the deck/log round trip is:
-    ngspice lower-cases both a printed vector name and a ``.meas`` name in its
-    own report, so ``vmid`` and ``Vmid`` are one name by the time
-    :func:`_harvest_measurement_value` reads them back -- and that function's
-    lower-cased fallback for an ``expr`` would otherwise be able to pick up
-    another entry's value.
-    """
-    counts: dict[Any, int] = {}
-    for spec in measurements_spec:
-        key = _measurement_name_key(spec.get("name"))
-        counts[key] = counts.get(key, 0) + 1
-    for spec in _expr_measurements(measurements_spec):
-        name = spec.get("name")
-        if counts.get(_measurement_name_key(name), 0) > 1:
-            raise SimError(
-                f"measurement '{name}' is declared more than once and one "
-                "declaration uses 'expr': a second `let " + str(name) + "` "
-                "would overwrite the first, so both response entries would "
-                "report the same value -- give each measurement a unique name "
-                "(compared case-insensitively: ngspice lower-cases the name "
-                "it prints back)"
-            )
-
-
-def _measurement_name_key(name: Any) -> Any:
-    """A ``measurements[].name`` reduced to the identity ngspice actually
-    round-trips: the lower-cased string. A non-string name is returned
-    unchanged so this stays total (``_validate_measurement_form`` is what
-    rejects one)."""
-    return name.lower() if isinstance(name, str) else name
-
-
-def _expr_measurements(
-    measurements_spec: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """The ``measurements[]`` entries declared as an ``expr`` (issue #2533),
-    in the caller's own declaration order -- which is also the order their
-    ``let`` lines are emitted in, so a later expression may reference an
-    earlier one's name (verified against ngspice 46: ``let b = a * 2`` after
-    ``let a = ...`` resolves)."""
-    return [spec for spec in measurements_spec if spec.get("expr") is not None]
-
-
-def _validate_fail_on_diagnostic(value: Any) -> tuple[str, ...]:
-    """Validate and normalise ``options.fail_on_diagnostic`` (issue #2492).
-
-    Returns the requested codes as a de-duplicated tuple in the caller's own
-    order; ``None``/absent (the house convention for an undeclared optional
-    field) and ``[]`` both normalise to ``()`` -- "no code is
-    disqualifying", today's behaviour exactly.
-
-    **An unrecognised code is an application error** (``SimError``, exit
-    ``1``), not a silent no-op. The whole point of this option is to make a
-    caller's distrust of a *recovered* convergence diagnostic mechanically
-    binding; a typo (``"singular-matrix"``, ``"singular_matrx"``) that
-    quietly matched nothing would hand that caller a report full of
-    confident ``pass`` corners while they believed they had opted into
-    stricter grading -- the exact silent-miscount failure mode this option
-    exists to remove. Listing a *valid* code that simply never occurs in
-    this run is fine and stays a no-op: that is a legitimate standing
-    policy, not a mistake.
-    """
-    if value is None:
-        return ()
-    if isinstance(value, str) or not isinstance(value, (list, tuple)):
-        raise SimError(
-            "options.fail_on_diagnostic must be an array of diagnostic code "
-            'strings (e.g. ["singular_matrix", "nonconvergence"])'
-        )
-    codes: list[str] = []
-    for entry in value:
-        if not isinstance(entry, str) or not entry.strip():
-            raise SimError(
-                "options.fail_on_diagnostic entries must be non-empty "
-                "diagnostic code strings"
-            )
-        code = entry.strip()
-        if code not in DIAGNOSTIC_CODES:
-            raise SimError(
-                f"options.fail_on_diagnostic names an unknown diagnostic code "
-                f"{code!r} (known codes: {', '.join(sorted(DIAGNOSTIC_CODES))})"
-            )
-        if code not in codes:
-            codes.append(code)
-    return tuple(codes)
 
 
 #: ``options.retry_on_convergence_error`` (issue #2973): the solver options a
@@ -2145,6 +2202,7 @@ def run_sim(
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
     max_units_per_job: int | None = None,
+    max_concurrent_jobs: int | None = None,
     dry_run: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
@@ -2162,9 +2220,9 @@ def run_sim(
     - **Deck-list requests** (issue #2804): a ``decks`` list of
       caller-composed ngspice decks, transported -- never composed,
       parsed, or graded -- to the selected backend. Same parameters,
-      minus the corner-only ones: ``--hosts``/``--resume``/
-      ``--budget-s``/``--plot``/``--fail-fast-probe``/
-      ``--fail-on-diagnostic`` are refused by name (see
+      minus the corner-only ones: ``--hosts``/``--budget-s``/``--plot``/
+      ``--fail-fast-probe``/``--fail-on-diagnostic`` (and ``--resume`` on
+      ``remote``) are refused by name (see
       :func:`klayout_tools.sim_decks.run_deck_request` and
       docs/cli/sim.md's "Pre-composed decks" section, which also
       documents the deck report's shape).
@@ -2369,8 +2427,10 @@ def run_sim(
     one ``batch`` job, then returns its identity (``job_id``, ``bucket``,
     ``launched_at``, ...) *instead of the report*, without polling or
     collecting; read it later with :func:`sim_batch_async.read_job_status`.
+    A deck-list request is one job too (issue #3958): ``submit_only`` and
+    ``attach_job_id`` apply to it on ``batch`` with ``job_ceiling: null``.
     Anything it cannot represent as one job (another backend, ``hosts > 1``,
-    ``resume``, ``plot_dir``, a deck-list request) raises :class:`SimError`
+    ``resume``, ``plot_dir``) raises :class:`SimError`
     with code ``submit_only_unsupported`` before any S3 write.
 
     **Output-directory ownership (issue #2770).** A run that writes
@@ -2398,8 +2458,6 @@ def run_sim(
     # corner dir and ngspice would never find its deck. Absolutise once here.
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
-    if attach_job_id is not None and sim_decks.DECKS_FIELD in request:
-        raise SimError("--attach does not apply to deck-list requests")
     if capacity_wait_s is not None and sim_decks.DECKS_FIELD in request:
         raise SimError("--wait-for-capacity does not apply to deck-list requests")
     if sim_decks.DECKS_FIELD in request:
@@ -2407,11 +2465,6 @@ def run_sim(
             raise SimError(
                 "--dry-run does not apply to deck-list requests (`decks`); "
                 "it validates corner/Monte Carlo requests only"
-            )
-        if submit_only:
-            raise SimError(
-                "--submit-only is not supported for deck-list requests",
-                code=SUBMIT_ONLY_UNSUPPORTED_CODE,
             )
         return _dispatch_deck_request(
             request,
@@ -2425,6 +2478,8 @@ def run_sim(
             plot_dir=plot_dir,
             fail_fast_probe=fail_fast_probe,
             fail_on_diagnostic=fail_on_diagnostic,
+            submit_only=submit_only,
+            attach_job_id=attach_job_id,
             _ownership=_ownership,
         )
     return _run_sim_corners(
@@ -2439,6 +2494,7 @@ def run_sim(
         fail_fast_probe=fail_fast_probe,
         fail_on_diagnostic=fail_on_diagnostic,
         max_units_per_job=max_units_per_job,
+        max_concurrent_jobs=max_concurrent_jobs,
         dry_run=dry_run,
         submit_only=submit_only,
         attach_job_id=attach_job_id,
@@ -2447,49 +2503,14 @@ def run_sim(
     )
 
 
-def _dispatch_deck_request(
-    request: dict[str, Any],
-    *,
-    request_path: str,
-    backend: str | None,
-    max_workers: int | None,
-    hosts: int | None,
-    artifacts_dir: str | None,
-    resume: bool | None,
+def _refuse_corner_only_deck_flags(
     budget_s: float | None,
     plot_dir: str | None,
     fail_fast_probe: bool | None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None,
-    _ownership: contextlib.ExitStack | None = None,
-) -> dict[str, Any]:
-    """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
-    resolving the backend exactly as the corner path does (flag >
-    request field > ``$KLT_SIM_BACKEND``, host defaults stepping
-    aside) and refusing the corner-only flags by name: a deck request
-    has no corner machinery for them to act on, so silently ignoring
-    one would mislead the caller about what ran."""
-    resolved_backend, from_host_default = resolve_backend(backend, request)
-    if resolved_backend not in SUPPORTED_BACKENDS:
-        source = f" (from ${BACKEND_ENV})" if from_host_default else ""
-        raise SimError(
-            f"unsupported backend '{resolved_backend}'{source} "
-            f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
-        )
-    # A deck request's engine is always ngspice (plan_deck_units
-    # enforces it), so the host-default's ngspice-only condition holds.
-    resolved_backend = _yield_host_default_backend(
-        resolved_backend, from_host_default, reason_ok=True
-    )
-    if hosts is not None and hosts != 1:
-        raise SimError(
-            "--hosts/remote.hosts sharding is not supported for "
-            "deck-list requests -- one off-host job runs the whole deck "
-            "list across its own worker pool (options.max_workers)"
-        )
-    if resume:
-        raise SimError(
-            "--resume/options.resume is not supported for deck-list requests"
-        )
+) -> None:
+    """Refuse, by name, the corner-only flags a deck-list request has no
+    machinery for (see :func:`_dispatch_deck_request`)."""
     if budget_s is not None:
         raise SimError(
             "--budget-s/options.wall_clock_budget_s is not supported for "
@@ -2510,11 +2531,80 @@ def _dispatch_deck_request(
             "--fail-on-diagnostic grades corner diagnostics, which "
             "deck-list requests do not produce"
         )
+
+
+def _dispatch_deck_request(
+    request: dict[str, Any],
+    *,
+    request_path: str,
+    backend: str | None,
+    max_workers: int | None,
+    hosts: int | None,
+    artifacts_dir: str | None,
+    resume: bool | None,
+    budget_s: float | None,
+    plot_dir: str | None,
+    fail_fast_probe: bool | None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+    submit_only: bool = False,
+    attach_job_id: str | None = None,
+    _ownership: contextlib.ExitStack | None = None,
+) -> dict[str, Any]:
+    """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
+    resolving the backend exactly as the corner path does (flag >
+    request field > ``$KLT_SIM_BACKEND``, host defaults stepping
+    aside) and refusing the corner-only flags by name: a deck request
+    has no corner machinery for them to act on, so silently ignoring
+    one would mislead the caller about what ran."""
+    resolved_backend, from_host_default = resolve_backend(backend, request)
+    if resolved_backend not in SUPPORTED_BACKENDS:
+        source = f" (from ${BACKEND_ENV})" if from_host_default else ""
+        raise SimError(
+            f"unsupported backend '{resolved_backend}'{source} "
+            f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
+        )
+    # A deck request's engine is always ngspice (plan_deck_units
+    # enforces it), so the host-default's ngspice-only condition holds. A
+    # single deck is one unit: like a one-corner request it stays local
+    # under a host default rather than waiting on a Spot instance.
+    resolved_backend = _yield_host_default_backend(
+        resolved_backend,
+        from_host_default,
+        reason_ok=len(request.get(sim_decks.DECKS_FIELD) or ()) > 1,
+    )
+    # Issue #3958: a deck list is one batch job with one job id, so
+    # --submit-only / --attach apply -- under the corner path's own
+    # refusals, all before the first S3 write.
+    if submit_only:
+        _refuse_unsupported_submit_only(
+            resolved_backend, 1 if hosts is None else hosts, resume, plot_dir
+        )
+    _apply_attach(
+        {}, attach_job_id, resolved_backend, 1 if hosts is None else hosts, submit_only
+    )
+    if hosts is not None and hosts != 1:
+        raise SimError(
+            "--hosts/remote.hosts sharding is not supported for "
+            "deck-list requests -- one off-host job runs the whole deck "
+            "list across its own worker pool (options.max_workers)"
+        )
+    if resume is None:
+        resume = bool((request.get("options") or {}).get("resume", False))
+    if resume and resolved_backend == "remote":
+        raise SimError(
+            "--resume/options.resume is not yet supported for deck-list "
+            "requests on backend 'remote' -- use backend 'local', "
+            "'local-parallel' or 'batch'"
+        )
+    _refuse_corner_only_deck_flags(
+        budget_s, plot_dir, fail_fast_probe, fail_on_diagnostic
+    )
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #3168: a deck run always writes (and a remote/batch pull replaces)
     # unit trees under its outdir, so it owns that root unconditionally --
     # after the flag checks above, which must fail without locking anything.
-    if _ownership is not None:
+    # A submit-only run collects nothing, so it owns no unit trees.
+    if _ownership is not None and not submit_only:
         _own_persistent_roots(
             _ownership,
             sim_decks.resolve_deck_outdir(artifacts_dir, request_dir),
@@ -2527,6 +2617,9 @@ def _dispatch_deck_request(
         backend=resolved_backend,
         max_workers=max_workers,
         artifacts_dir=artifacts_dir,
+        resume=bool(resume),
+        submit_only=submit_only,
+        attach_job_id=attach_job_id,
     )
 
 
@@ -2534,7 +2627,13 @@ def _dispatch_deck_request(
 #: a job that failed or was stopped by the harness, or a poll that gave up
 #: while the job may still be running (``sim_batch._unrun_corner_report``).
 _UNRUN_BATCH_CODES = frozenset(
-    {"lost_shard", "batch_job_failed", "batch_job_timeout", "batch_poll_timeout"}
+    {
+        "lost_shard",
+        "batch_job_failed",
+        "batch_job_timeout",
+        "batch_poll_timeout",
+        "batch_job_interrupted",
+    }
 )
 
 
@@ -2554,7 +2653,8 @@ def _record_batch_checkpoint(
     Issue #3367: `_run_batch` collects a shard's reports in one
     ``report.json``, so there is nothing to record incrementally; record the
     returned set after dispatch. A corner that never ran (``lost_shard``,
-    ``batch_job_failed``, ``batch_job_timeout``, ``batch_poll_timeout``) is
+    ``batch_job_failed``, ``batch_job_timeout``, ``batch_poll_timeout``,
+    ``batch_job_interrupted``) is
     left out and stays outstanding for the next ``--resume``; a corner that
     ran and genuinely errored is recorded exactly as the local backends do.
     A no-op without a checkpoint or off ``batch``.
@@ -2619,6 +2719,22 @@ def _with_max_units_override(
         "batch": {
             **(request.get("batch") or {}),
             "max_units_per_job": max_units_per_job,
+        },
+    }
+
+
+def _with_max_concurrent_override(
+    request: dict[str, Any], max_concurrent_jobs: int | None
+) -> dict[str, Any]:
+    """Fold the ``--max-concurrent-jobs`` CLI override into ``request.batch``
+    (issue #3914), leaving the loaded request untouched."""
+    if max_concurrent_jobs is None:
+        return request
+    return {
+        **request,
+        "batch": {
+            **(request.get("batch") or {}),
+            "max_concurrent_jobs": max_concurrent_jobs,
         },
     }
 
@@ -2719,30 +2835,92 @@ def _apply_attach(
     engine_kwargs["attach_job_id"] = attach_job_id
 
 
-def _run_sim_corners(
+@dataclass(frozen=True)
+class _ResolvedSimRequest:
+    """Everything :func:`_prepare_sim_request` validated and resolved, before any
+    corner is dispatched. Field names match the locals of the dispatch tail in
+    :func:`_run_sim_corners`, which unpacks them one-for-one."""
+
+    analysis: Any
+    artifacts_dir: Any
+    backend: Any
+    backend_from_host_default: Any
+    backend_source: Any
+    budget_s: Any
+    capture_only: Any
+    convergence_retry: Any
+    corner_points: Any
+    corner_section_libs: Any
+    deadline: Any
+    dispatch_netlist_path: Any
+    engine: Any
+    engine_version_pin: Any
+    fail_fast_probe: Any
+    fail_on_diagnostic_codes: Any
+    hosts: Any
+    initial_ppid: Any
+    keep_artifacts: Any
+    max_workers: Any
+    measurements_spec: Any
+    models_lib: Any
+    monte_carlo_info: Any
+    monte_carlo_stats: Any
+    netlist_identity: Any
+    netlist_identity_error: Any
+    netlist_overrides_report: Any
+    netlist_path: Any
+    netlist_source: Any
+    ngspice_binary: Any
+    ngspice_init_lines: Any
+    ngspice_options: Any
+    osdi_preload: Any
+    osdi_runner_environment: Any
+    portable_artifacts: Any
+    preflight_warning: Any
+    provenance_pdk: Any
+    repo_root: Any
+    request: Any
+    request_dir: Any
+    requested_backend: Any
+    resume: Any
+    save_mode: Any
+    save_vectors: Any
+    complex_vectors: Any
+    stage_model_inputs: Any
+    stimulus_lines: Any
+    stimulus_signals: Any
+    stimulus_by_corner: Any
+    sweep_started: Any
+    threads_per_worker: Any
+    timeout_s: Any
+    want_waveforms: Any
+    waveform_max_bytes: Any
+
+
+def _prepare_sim_request(
     request_path: str,
     *,
-    artifacts_dir: str | None = None,
-    backend: str | None = None,
-    max_workers: int | None = None,
-    hosts: int | None = None,
-    budget_s: float | None = None,
-    resume: bool | None = None,
-    plot_dir: str | None = None,
-    fail_fast_probe: bool | None = None,
-    fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
-    max_units_per_job: int | None = None,
-    dry_run: bool = False,
-    submit_only: bool = False,
-    attach_job_id: str | None = None,
-    capacity_wait_s: float | None = None,
-    _ownership: contextlib.ExitStack | None = None,
-) -> dict[str, Any]:
-    """The corner-sweep body of :func:`run_sim` -- every parameter, the
-    request/response contract, and the deck-list dispatch alternative
-    are documented there. Kept as its own function so the deck dispatch
-    in ``run_sim`` adds nothing to this sweep's own complexity budget."""
+    artifacts_dir: str | None,
+    backend: str | None,
+    max_workers: int | None,
+    hosts: int | None,
+    budget_s: float | None,
+    resume: bool | None,
+    plot_dir: str | None,
+    fail_fast_probe: bool | None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+    max_units_per_job: int | None,
+    max_concurrent_jobs: int | None,
+    capacity_wait_s: float | None,
+    dry_run: bool,
+) -> _ResolvedSimRequest:
+    """The up-front validate-and-resolve phase of :func:`_run_sim_corners`.
+
+    Everything here runs before the first artifact write or backend dispatch;
+    the order of the checks is the error precedence the JSON reports, so it
+    must not be reordered."""
     request = _with_max_units_override(load_request(request_path), max_units_per_job)
+    request = _with_max_concurrent_override(request, max_concurrent_jobs)
     request = _with_capacity_wait_override(request, capacity_wait_s)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
@@ -2759,7 +2937,9 @@ def _run_sim_corners(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
 
+    backend_source = _backend_source(backend, request)
     backend, backend_from_host_default = resolve_backend(backend, request)
+    requested_backend = backend
     if backend not in SUPPORTED_BACKENDS:
         source = f" (from ${BACKEND_ENV})" if backend_from_host_default else ""
         raise SimError(
@@ -2826,6 +3006,7 @@ def _run_sim_corners(
     # `analysis_steps[]` sequence, resolved -- every structural error raised
     # -- here, before any corner is dispatched.
     analysis, measurements_spec = _resolve_analysis_and_measurements(request)
+    _reject_param_braces(analysis, engine)
     for spec in measurements_spec:
         if spec.get("spice") is not None:
             _validate_meas_card(spec["name"], spec["spice"])
@@ -2833,6 +3014,9 @@ def _run_sim_corners(
             _validate_k_sigma(
                 spec["k_sigma"], f"request.measurements[{spec['name']!r}].k_sigma"
             )
+        _validate_spec_row(
+            spec.get("spec_row"), f"request.measurements[{spec['name']!r}].spec_row"
+        )
 
     options = request.get("options") or {}
     # Issue #2493: validates and resolves both plausibility declarations into
@@ -2857,7 +3041,14 @@ def _run_sim_corners(
     # so a typo'd path is always named; `engine: "xyce"` then refuses the
     # option outright in `_enforce_xyce_support_boundary` below rather than
     # silently dropping it.
-    osdi_preload = _resolve_osdi_preload(options, request_dir)
+    # Issue #3819: entries the executing host resolves for itself (a literal
+    # `$PDK_ROOT/<rel>`, or a path under `models.pdk_root`) name an
+    # image-baked `.osdi`; they are existence-checked here only when the run
+    # stays on this host (see below).
+    osdi_runner_resolved = sim_staging.runner_resolved_osdi(request, request_dir)
+    osdi_preload = _resolve_osdi_preload(
+        options, request_dir, skip_indices=frozenset(osdi_runner_resolved)
+    )
     # Issue #2668: opt-in staging of the request's own model inputs for the
     # off-host backends. Validated for every backend (a typo'd value is
     # always named) but only *acts* off-host -- `local`/`local-parallel`
@@ -2872,6 +3063,8 @@ def _run_sim_corners(
     # instead. Otherwise a host-default off-host backend steps aside to
     # `local`, like every other "this run cannot leave this host" case; an
     # explicit choice is never second-guessed, so it is refused by name.
+    # Runner-resolved entries (issue #3819) need neither staging nor a local
+    # file, so only the host-local ones count here.
     backend = _yield_host_default_backend(
         backend,
         backend_from_host_default,
@@ -2885,10 +3078,29 @@ def _run_sim_corners(
             "resolved on the off-host instance -- run OSDI-model sweeps with "
             "backend 'local' or 'local-parallel', or set "
             "options.stage_model_inputs: true to upload binaries built for "
-            "the runner's platform and ngspice OSDI ABI"
+            "the runner's platform and ngspice OSDI ABI, or name an "
+            "image-baked `.osdi` as `$PDK_ROOT/<rel>` (or under "
+            "models.pdk_root) so the runner resolves it"
         )
+    osdi_preload, osdi_runner_environment = _finalize_osdi_preload(
+        options, request_dir, backend, osdi_preload, osdi_runner_resolved
+    )
+    # Issue #3041: an `engine_version` pin is checked before any corner runs
+    # where this process can see the engine (local backends); off-host
+    # backends are checked against the report's `engine_version` afterwards.
+    engine_version_pin = _validate_engine_version_pin(request)
+    _check_local_engine_version_pin(
+        engine_version_pin, backend, engine, ngspice_binary or XYCE_BINARY
+    )
+    # Issue #4046: a `models.pdk_version` pin is checked the same way, before
+    # any corner runs; off-host backends reject it rather than pass silently.
+    _check_pdk_version_pin(_validate_pdk_version_pin(models), models, backend)
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
-    keep_artifacts = bool(options.get("keep_artifacts", False))
+    # Issue #3337: the complex-vector sidecar is the result, so declared
+    # vectors force artifacts on (validated in full below).
+    keep_artifacts = sim_complex_vectors.forces_artifacts(
+        options, bool(options.get("keep_artifacts", False))
+    )
     portable_artifacts = _portable_artifacts_option(options)
     want_waveforms = bool(options.get("waveforms", False))
     if plot_dir is not None:
@@ -2904,6 +3116,22 @@ def _run_sim_corners(
     sim_steps.refuse_unsupported_options(
         analysis, want_waveforms=want_waveforms, plot_requested=plot_dir is not None
     )
+    sim_passes.refuse_unsupported(
+        analysis,
+        measurements_spec,
+        want_waveforms=want_waveforms,
+        plot_requested=plot_dir is not None,
+    )
+    sim_passes.refuse_xyce(analysis, engine)
+    sim_twoport.refuse_unsupported(
+        analysis,
+        measurements_spec,
+        want_waveforms=want_waveforms,
+        plot_requested=plot_dir is not None,
+    )
+    sim_twoport.refuse_xyce(analysis, engine)
+    # The S-parameter `.s2p` sidecar is the result (issue #3338).
+    keep_artifacts = sim_twoport.forces_artifacts(analysis, keep_artifacts)
     capture_only = _capture_only_requested(
         options, want_waveforms=want_waveforms, measurements_spec=measurements_spec
     )
@@ -2970,10 +3198,19 @@ def _run_sim_corners(
     # Issue #3211: same up-front validation; off-host workers re-read both
     # from the forwarded request document.
     save_vectors, save_vectors_declared = _validate_save_vectors(options, save_mode)
+    complex_vectors = sim_complex_vectors.validate(options, analysis, save_mode, engine)
     waveform_max_bytes = _validate_waveform_max_bytes(options)
     # Issue #3111: same up-front validation; off-host workers re-read it from
     # the forwarded request document, and the echo check below verifies it.
     ngspice_options = _validate_ngspice_options(options.get("ngspice_options"))
+    # Issue #3036: the rule grammar is validated up front; the rules are
+    # resolved onto points after expansion, before any dispatch.
+    nodeset_rules = _validate_nodeset_rules(options.get("nodeset"))
+    # Issue #3881: same grammar, applied as `.ic` + `uic` on a transient.
+    ic_rules = _validate_nodeset_rules(
+        options.get("initial_conditions"), label=_IC_LABEL
+    )
+    _require_plain_tran_for_ic(bool(ic_rules), analysis)
 
     # Timeout budget preflight (issue #1686): a coarse, pre-grid sanity
     # check -- never blocks the sweep, only surfaces an advisory string. See
@@ -3013,12 +3250,15 @@ def _run_sim_corners(
         corners_spec=corners_spec,
         monte_carlo_declared=monte_carlo_spec is not None,
         fail_fast_probe=fail_fast_probe,
-        osdi_preload_declared=bool(osdi_preload),
+        osdi_preload_declared=bool(osdi_preload or osdi_runner_resolved),
         expr_measurements_declared=bool(_expr_measurements(measurements_spec)),
         save_mode_declared=save_mode_declared,
         save_vectors_declared=save_vectors_declared,
         ngspice_options_declared=bool(ngspice_options),
+        nodeset_declared=bool(nodeset_rules),
+        initial_conditions_declared=bool(ic_rules),
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
+        linearize_declared=analysis.get("linearize") is True,
         crossings_declared=bool(
             sim_crossings.crossings_measurements(measurements_spec)
         ),
@@ -3029,10 +3269,24 @@ def _run_sim_corners(
         transfer_declared=bool(
             sim_transfer_meas.transfer_measurements(measurements_spec)
         ),
+        snm_declared=bool(sim_snm_meas.snm_measurements(measurements_spec)),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
     explicit_points_wire = request.get("_explicit_points")
+    # Issue #3036: resolved once, after expansion/exclusions and before Monte
+    # Carlo cloning (samples inherit their base map). A fleet shard (below)
+    # receives the selected maps on the wire instead of re-resolving rules
+    # against its subset of the points.
+    _apply_nodeset_rules(
+        corner_points, nodeset_rules if explicit_points_wire is None else []
+    )
+    _apply_nodeset_rules(
+        corner_points,
+        ic_rules if explicit_points_wire is None else [],
+        label=_IC_LABEL,
+        attr="initial_conditions",
+    )
     if explicit_points_wire is not None:
         # Internal-only escape hatch: never set by an external caller or the
         # CLI, only by this same module's own `_run_remote_fleet` when it
@@ -3048,7 +3302,10 @@ def _run_sim_corners(
     elif monte_carlo_spec is not None:
         injected = _resolve_injected(monte_carlo_spec, netlist_path, request, repo_root)
         corner_points, monte_carlo_info = _expand_monte_carlo(
-            corner_points, monte_carlo_spec, injected
+            corner_points,
+            monte_carlo_spec,
+            injected,
+            mismatch_scale=_resolve_mismatch_scale(monte_carlo_spec, models.get("pdk")),
         )
         monte_carlo_info = _with_family_mismatch(
             monte_carlo_info,
@@ -3092,14 +3349,53 @@ def _run_sim_corners(
         explicit_points=explicit_points_wire is not None,
     )
 
+    # Issue #3919: `.subckt` override of the include closure. Applied on top of
+    # the (possibly gated) netlist; refused up front on an off-host backend.
+    dispatch_netlist_path, netlist_overrides_report = _maybe_override_subckts(
+        request,
+        dispatch_netlist_path,
+        request_dir=request_dir,
+        # The rewritten closure cannot leave this host, so an env-sourced
+        # off-host default yields to local (an explicit choice is refused).
+        backend=_yield_host_default_backend(
+            backend, backend_from_host_default, reason_ok=False
+        ),
+        explicit_points=explicit_points_wire is not None,
+        repo_root=repo_root,
+    )
+
     # Issue #2706: fail fast (before any probe or backend dispatch) when a
     # supply override targets a source with an explicit transient waveform.
     _validate_supply_override_targets(netlist_path, corner_points)
     # Issue #3035: the same for a `corners.params` name no `.param` declares.
     _validate_param_targets(netlist_path, corner_points)
+    # Issue #3918: a supply-relative `crossings.level` needs its `frac_of`
+    # key in every corner's supply map -- refused here, not mid-sweep.
+    sim_crossings.validate_supply_relative_levels(
+        measurements_spec, [point.supply_v for point in corner_points]
+    )
     # Issue #2482: the same pre-dispatch check for a step's own `alter`
     # overrides (plus a clash with the corner's own supply axis).
     sim_steps.validate_alter_targets(analysis, netlist_path, corner_points)
+    sim_passes.validate_alter_targets(analysis, netlist_path, corner_points)
+    # Issue #2977: the declarative timed stimulus, validated and expanded
+    # before any corner is dispatched (an off-host worker re-expands it
+    # from the forwarded request).
+    stimulus_signals, stimulus_by_corner = _resolve_stimulus(
+        request, analysis, engine, netlist_path, corner_points
+    )
+    stimulus_lines = (
+        sim_stimulus.corner_deck_lines(
+            {
+                sim_stimulus.supply_key(point.supply_v): stimulus_by_corner[
+                    point.corner_id
+                ]
+                for point in corner_points
+            }
+        )
+        if stimulus_by_corner
+        else sim_stimulus.deck_lines(stimulus_signals)
+    )
 
     # Issue #2522: a `corners.process` bundle may name its own model library
     # per section. Resolved (and existence-checked) per host, from the refs
@@ -3147,6 +3443,158 @@ def _run_sim_corners(
             "as 'local'/'local-parallel'/'batch' is tracked follow-up work; "
             "use resume with backend 'local', 'local-parallel' or 'batch'"
         )
+    return _ResolvedSimRequest(
+        analysis=analysis,
+        artifacts_dir=artifacts_dir,
+        backend=backend,
+        backend_from_host_default=backend_from_host_default,
+        backend_source=backend_source,
+        budget_s=budget_s,
+        capture_only=capture_only,
+        convergence_retry=convergence_retry,
+        corner_points=corner_points,
+        corner_section_libs=corner_section_libs,
+        deadline=deadline,
+        dispatch_netlist_path=dispatch_netlist_path,
+        engine=engine,
+        engine_version_pin=engine_version_pin,
+        fail_fast_probe=fail_fast_probe,
+        fail_on_diagnostic_codes=fail_on_diagnostic_codes,
+        hosts=hosts,
+        initial_ppid=initial_ppid,
+        keep_artifacts=keep_artifacts,
+        max_workers=max_workers,
+        measurements_spec=measurements_spec,
+        models_lib=models_lib,
+        monte_carlo_info=monte_carlo_info,
+        monte_carlo_stats=monte_carlo_stats,
+        netlist_identity=netlist_identity,
+        netlist_identity_error=netlist_identity_error,
+        netlist_overrides_report=netlist_overrides_report,
+        netlist_path=netlist_path,
+        netlist_source=netlist_source,
+        ngspice_binary=ngspice_binary,
+        ngspice_init_lines=ngspice_init_lines,
+        ngspice_options=ngspice_options,
+        osdi_preload=osdi_preload,
+        osdi_runner_environment=osdi_runner_environment,
+        portable_artifacts=portable_artifacts,
+        preflight_warning=preflight_warning,
+        provenance_pdk=provenance_pdk,
+        repo_root=repo_root,
+        request=request,
+        request_dir=request_dir,
+        requested_backend=requested_backend,
+        resume=resume,
+        save_mode=save_mode,
+        save_vectors=save_vectors,
+        complex_vectors=complex_vectors,
+        stage_model_inputs=stage_model_inputs,
+        stimulus_lines=stimulus_lines,
+        stimulus_signals=stimulus_signals,
+        stimulus_by_corner=stimulus_by_corner,
+        sweep_started=sweep_started,
+        threads_per_worker=threads_per_worker,
+        timeout_s=timeout_s,
+        want_waveforms=want_waveforms,
+        waveform_max_bytes=waveform_max_bytes,
+    )
+
+
+def _run_sim_corners(
+    request_path: str,
+    *,
+    artifacts_dir: str | None = None,
+    backend: str | None = None,
+    max_workers: int | None = None,
+    hosts: int | None = None,
+    budget_s: float | None = None,
+    resume: bool | None = None,
+    plot_dir: str | None = None,
+    fail_fast_probe: bool | None = None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    max_units_per_job: int | None = None,
+    max_concurrent_jobs: int | None = None,
+    dry_run: bool = False,
+    submit_only: bool = False,
+    attach_job_id: str | None = None,
+    capacity_wait_s: float | None = None,
+    _ownership: contextlib.ExitStack | None = None,
+) -> dict[str, Any]:
+    """The corner-sweep body of :func:`run_sim` -- every parameter, the
+    request/response contract, and the deck-list dispatch alternative
+    are documented there. Kept as its own function so the deck dispatch
+    in ``run_sim`` adds nothing to this sweep's own complexity budget."""
+    resolved = _prepare_sim_request(
+        request_path,
+        artifacts_dir=artifacts_dir,
+        backend=backend,
+        max_workers=max_workers,
+        hosts=hosts,
+        budget_s=budget_s,
+        resume=resume,
+        plot_dir=plot_dir,
+        fail_fast_probe=fail_fast_probe,
+        fail_on_diagnostic=fail_on_diagnostic,
+        max_units_per_job=max_units_per_job,
+        max_concurrent_jobs=max_concurrent_jobs,
+        capacity_wait_s=capacity_wait_s,
+        dry_run=dry_run,
+    )
+    analysis = resolved.analysis
+    artifacts_dir = resolved.artifacts_dir
+    backend = resolved.backend
+    backend_from_host_default = resolved.backend_from_host_default
+    backend_source = resolved.backend_source
+    budget_s = resolved.budget_s
+    capture_only = resolved.capture_only
+    convergence_retry = resolved.convergence_retry
+    corner_points = resolved.corner_points
+    corner_section_libs = resolved.corner_section_libs
+    deadline = resolved.deadline
+    dispatch_netlist_path = resolved.dispatch_netlist_path
+    engine = resolved.engine
+    engine_version_pin = resolved.engine_version_pin
+    fail_fast_probe = resolved.fail_fast_probe
+    fail_on_diagnostic_codes = resolved.fail_on_diagnostic_codes
+    hosts = resolved.hosts
+    initial_ppid = resolved.initial_ppid
+    keep_artifacts = resolved.keep_artifacts
+    max_workers = resolved.max_workers
+    measurements_spec = resolved.measurements_spec
+    models_lib = resolved.models_lib
+    monte_carlo_info = resolved.monte_carlo_info
+    monte_carlo_stats = resolved.monte_carlo_stats
+    netlist_identity = resolved.netlist_identity
+    netlist_identity_error = resolved.netlist_identity_error
+    netlist_overrides_report = resolved.netlist_overrides_report
+    netlist_path = resolved.netlist_path
+    netlist_source = resolved.netlist_source
+    ngspice_binary = resolved.ngspice_binary
+    ngspice_init_lines = resolved.ngspice_init_lines
+    ngspice_options = resolved.ngspice_options
+    osdi_preload = resolved.osdi_preload
+    osdi_runner_environment = resolved.osdi_runner_environment
+    portable_artifacts = resolved.portable_artifacts
+    preflight_warning = resolved.preflight_warning
+    provenance_pdk = resolved.provenance_pdk
+    repo_root = resolved.repo_root
+    request = resolved.request
+    request_dir = resolved.request_dir
+    requested_backend = resolved.requested_backend
+    resume = resolved.resume
+    save_mode = resolved.save_mode
+    save_vectors = resolved.save_vectors
+    complex_vectors = resolved.complex_vectors
+    stage_model_inputs = resolved.stage_model_inputs
+    stimulus_lines = resolved.stimulus_lines
+    stimulus_signals = resolved.stimulus_signals
+    stimulus_by_corner = resolved.stimulus_by_corner
+    sweep_started = resolved.sweep_started
+    threads_per_worker = resolved.threads_per_worker
+    timeout_s = resolved.timeout_s
+    want_waveforms = resolved.want_waveforms
+    waveform_max_bytes = resolved.waveform_max_bytes
 
     # `pre_completed` holds corner reports already recorded by a prior,
     # interrupted run of this *same* request (fingerprint-matched); those
@@ -3166,21 +3614,24 @@ def _run_sim_corners(
         dry_run=dry_run,
     )
     checkpoint_path = _checkpoint_path(artifacts_dir)
+    fingerprint_inputs: dict[str, Any] = {
+        "netlist_path": dispatch_netlist_path,
+        "models_lib": models_lib,
+        "analysis": analysis,
+        "measurements_spec": measurements_spec,
+        "corner_points": corner_points,
+        "timeout_s": timeout_s,
+        "engine": engine,
+        "osdi_preload": osdi_preload,
+        "corner_section_libs": corner_section_libs,
+        "save_mode": save_mode,
+        "save_vectors": save_vectors,
+        "complex_vectors": complex_vectors,
+        "ngspice_options": ngspice_options,
+        "stimulus_lines": stimulus_lines,
+    }
     pre_completed, loaded_engine_version, checkpoint = _open_resume_checkpoint(
-        checkpoint_path,
-        resume=bool(resume),
-        netlist_path=dispatch_netlist_path,
-        models_lib=models_lib,
-        analysis=analysis,
-        measurements_spec=measurements_spec,
-        corner_points=corner_points,
-        timeout_s=timeout_s,
-        engine=engine,
-        osdi_preload=osdi_preload,
-        corner_section_libs=corner_section_libs,
-        save_mode=save_mode,
-        save_vectors=save_vectors,
-        ngspice_options=ngspice_options,
+        checkpoint_path, resume=bool(resume), **fingerprint_inputs
     )
 
     dispatch_points = (
@@ -3188,16 +3639,32 @@ def _run_sim_corners(
         if resume
         else corner_points
     )
+    _refuse_override_on_host_default(
+        netlist_overrides_report,
+        backend=backend,
+        backend_from_host_default=backend_from_host_default,
+        n_points=len(dispatch_points),
+    )
     # A single-unit run under a host default stays here: one corner does not
     # repay a Spot instance's minutes of boot, and it is exactly the "probe
     # one corner locally" case 2am#1004's ruling keeps local.
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=len(dispatch_points) > 1
     )
+    # Issue #2977: which backend actually ran, and where the request for it
+    # came from -- so a host-policy audit can spot a `local` run although
+    # `$KLT_SIM_BACKEND=batch` asked otherwise.
+    backend_provenance = {
+        "resolved": backend,
+        "source": backend_source,
+        "requested": requested_backend,
+    }
     # Issue #2924: off-host workers run the whole `klt sim` request and return
     # only the scalar results (the AC rawfile never leaves the worker), so the
     # `transfer` form is gated by the mandatory runner-feature check in
     # `sim_batch`/`sim_remote` rather than refused here.
+    # Issues #3159/#3161: `analysis.passes` / `measurements[].tian` are gated
+    # the same way (the `dual_injection` mandatory runner feature).
 
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner
@@ -3227,6 +3694,7 @@ def _run_sim_corners(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
+            stimulus_lines=stimulus_lines,
         )
 
     probe_abort: dict[str, Any] | None = None
@@ -3308,8 +3776,10 @@ def _run_sim_corners(
             "osdi_preload": osdi_preload,
             "save_mode": save_mode,
             "save_vectors": save_vectors,
+            "complex_vectors": complex_vectors,
             "waveform_max_bytes": waveform_max_bytes,
             "ngspice_options": ngspice_options,
+            "stimulus_lines": stimulus_lines,
             "convergence_retry": convergence_retry,
         }
         if backend not in _OFFHOST_BACKENDS
@@ -3355,6 +3825,7 @@ def _run_sim_corners(
             keep_artifacts=keep_artifacts,
             want_waveforms=want_waveforms,
             request_dir=request_dir,
+            artifacts_dir=artifacts_dir,
         )
 
     if hosts == 1:
@@ -3381,6 +3852,13 @@ def _run_sim_corners(
             checkpoint=checkpoint,
             probe_abort=probe_abort,
             **local_engine_kwargs,
+            # Issue #3896: a `max_units_per_job` split reroute keeps its shard
+            # map even without --resume (no checkpoint to take it from).
+            **(
+                {"shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs)}
+                if backend == "batch"
+                else {}
+            ),
         )
     elif backend in _OFFHOST_BACKENDS:
         # Real fleet dispatch (Epic #375 Phase 1B, #377, wired in here by
@@ -3393,6 +3871,17 @@ def _run_sim_corners(
         # needs its own S3 job contract and launch. See this function's
         # docstring on `hosts`.
         fleet_dispatch = _run_remote_fleet if backend == "remote" else _run_batch_fleet
+        # Issue #3300: a sharded batch run keeps a shard-to-job-id map keyed
+        # by the resume fingerprint, so `--resume` re-attaches to shards that
+        # already ran instead of paying for them again.
+        shard_kwargs: dict[str, Any] = (
+            {
+                "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
+                "resume": bool(resume),
+            }
+            if backend == "batch"
+            else {}
+        )
         corners_new, backend_engine_version, remote_environment = fleet_dispatch(
             corner_points=dispatch_points,
             netlist_path=netlist_path,
@@ -3404,6 +3893,7 @@ def _run_sim_corners(
             hosts=hosts,
             measurements_spec=measurements_spec,
             request_dir=request_dir,
+            **shard_kwargs,
         )
     else:
 
@@ -3437,6 +3927,16 @@ def _run_sim_corners(
         )
 
     _require_params_echo(dispatch_points, corners_new, backend=backend)
+    _require_nodeset_echo(dispatch_points, corners_new, backend=backend)
+    _require_nodeset_echo(
+        dispatch_points,
+        corners_new,
+        backend=backend,
+        label=_IC_LABEL,
+        attr="initial_conditions",
+        code=IC_UNSUPPORTED_WORKER_CODE,
+    )
+    _require_options_echo(dispatch_points, corners_new, backend=backend)
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
 
     if resume:
@@ -3462,10 +3962,14 @@ def _run_sim_corners(
         # `remote`, whose corners this process never reconciles against a
         # local `CornerPoint` list).
         corners = corners_new
+    _attach_meas_lint(corners, analysis, measurements_spec)
     engine_version = (
         backend_engine_version
         if backend_engine_version is not None
         else loaded_engine_version
+    )
+    _check_offhost_engine_version_pin(
+        engine_version_pin, backend, engine, engine_version
     )
 
     budget_exceeded = any(
@@ -3487,7 +3991,8 @@ def _run_sim_corners(
         )
     )
     # Issue #3367: a corner that never ran on `batch` (`lost_shard`,
-    # `batch_job_failed`, `batch_job_timeout`, `batch_poll_timeout`) is
+    # `batch_job_failed`, `batch_job_timeout`, `batch_poll_timeout`,
+    # `batch_job_interrupted`) is
     # outstanding too, so a checkpoint holding the rest must outlive this
     # run. Kept out of `corners_skipped`
     # (the reported `environment.budget.corners_skipped`) to leave that
@@ -3505,6 +4010,10 @@ def _run_sim_corners(
     # diagnostic grid reports empty dicts and a zero count, never omits the
     # field) -- see docs/cli/sim.md's report schema.
     diagnostic_counts = _diagnostic_counts(corners)
+
+    if backend == "batch" and corners_skipped == 0 and corners_lost == 0:
+        # Issue #3300: nothing left to re-attach to.
+        _remove_shard_manifest(artifacts_dir)
 
     if checkpoint is not None:
         if corners_skipped == 0 and corners_lost == 0:
@@ -3566,6 +4075,14 @@ def _run_sim_corners(
     inconclusive = graded["inconclusive"]
     status = graded["status"]
 
+    engine_build = _engine_build_with_comparison(
+        ngspice_binary,
+        remote_environment,
+        backend,
+        staged_model_environment.get("staged_model_inputs"),
+        request,
+    )
+
     environment: dict[str, Any] = {
         "engine": engine,
         "engine_version": engine_version,
@@ -3576,6 +4093,8 @@ def _run_sim_corners(
         # nullable: `None` for `"engine": "xyce"`, which this issue adds no
         # override for (see `_resolve_ngspice_binary`'s own docstring).
         "ngspice_binary": ngspice_binary,
+        # Issue #3095: build identity of that binary (``null`` for xyce).
+        "engine_build": engine_build,
         # Issue #1274: normalised like every other path field this response
         # echoes -- the resolved library usually lives outside the repo (a
         # PDK under the user's home directory), which reports
@@ -3594,6 +4113,7 @@ def _run_sim_corners(
         "netlist_sha256": sha256_file(netlist_path),
     }
     environment.update(_threads_environment(effective_threads))
+    environment.update(_corner_coverage_environment(request, corner_points))
     # Issue #2799: `netlist_sha256` covers only the top-level file, so also
     # pin the resolved `.include`/`.inc` closure (same resolver the
     # off-host backends stage with). Additive; an unresolvable closure is
@@ -3626,6 +4146,10 @@ def _run_sim_corners(
             repo_root=repo_root,
         )
     )
+    # Additive/optional (issue #3819): `.osdi` entries the executing host
+    # resolved itself -- named, never hashed; the worker's own report is
+    # the source of what actually loaded.
+    environment.update(_osdi_runner_environment_fields(osdi_runner_environment))
     # Additive/optional (issue #2668): `staged_model_inputs`, only present
     # when `options.stage_model_inputs` staged model inputs for an off-host
     # backend -- see `_preflight_staged_model_inputs`.
@@ -3656,6 +4180,15 @@ def _run_sim_corners(
     apply_engine_host(
         environment, backend=backend, client_ngspice_binary=ngspice_binary
     )
+    environment["backend"] = backend_provenance
+    # Issue #2977: additive, only when declared; the schedule as applied (skew
+    # and transition times resolved, PWL points included) -- see docs/cli/sim.md.
+    environment.update(
+        sim_stimulus.environment_entry(stimulus_signals, stimulus_by_corner)
+    )
+    # Additive/optional (issue #3919): only present when the request declares
+    # `netlist_overrides` -- see docs/cli/sim.md.
+    environment.update(_netlist_overrides_environment(netlist_overrides_report))
     if monte_carlo_info is not None:
         # Additive/optional: only present when the request declares
         # `monte_carlo` -- the seed contract's request-level echo, per
@@ -3713,6 +4246,11 @@ def _run_sim_corners(
 
     _attach_timeout_budget_hint(environment, corners, timeout_s)
 
+    # Issue #2901: lifted out of `environment.remote` to the top level.
+    request_feature_diagnostic = (environment.get("remote") or {}).pop(
+        "request_feature_diagnostic", None
+    )
+
     report = {
         "schema_version": SCHEMA_VERSION,
         "netlist": _report_path(netlist_path, repo_root=repo_root),
@@ -3758,6 +4296,11 @@ def _run_sim_corners(
         "measurements": measurements_rollup,
         "corners": corners,
     }
+    if request_feature_diagnostic is not None:
+        # Additive/optional (issue #2901): only present when a batch runner
+        # predates a request feature under `runner_version_check: "warn"`.
+        report["diagnostics"] = [request_feature_diagnostic]
+    _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
         # Additive/optional: only present when `--plot`/`plot_dir` was
         # requested -- the flat list of every SVG actually written, in
@@ -4032,6 +4575,7 @@ _KNOWN_REQUEST_KEYS = frozenset(
         "models",
         "monte_carlo",
         "netlist",
+        "netlist_overrides",
         "netlist_source",
         "options",
         "remote",
@@ -4062,9 +4606,15 @@ def _build_dry_run_report(
     Built from the same ``corner_points`` / ``monte_carlo_info`` the real run
     dispatches, so the per-sample seeds are exactly the ones a real run uses.
     """
+    if backend == "batch":
+        # Issue #3917: a real batch submit refuses an unresolvable model
+        # library before any S3 write; the dry-run must say the same.
+        _validate_batch_models_lib(request)
     units: list[dict[str, Any]] = []
     for point in corner_points:
         unit: dict[str, Any] = {"corner_id": point.corner_id}
+        unit.update(_nodeset_report_field(point))
+        unit.update(_ic_report_field(point))
         if point.sample_index is not None:
             unit["sample_index"] = point.sample_index
         if point.mc_seed is not None:
@@ -4265,7 +4815,42 @@ def _needs_models_lib(point: CornerPoint) -> bool:
     return any(lib is None for lib in declared)
 
 
-def _resolve_osdi_preload(options: dict[str, Any], request_dir: str) -> tuple[str, ...]:
+def _finalize_osdi_preload(
+    options: dict[str, Any],
+    request_dir: str,
+    backend: str,
+    osdi_preload: tuple[str, ...],
+    osdi_runner_resolved: dict[int, str],
+) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+    """Settle ``osdi_preload`` once the backend is known (issue #3819).
+
+    Off-host, the runner-resolved entries are reported by name in
+    ``environment.osdi_preload_runner_resolved`` and the already-resolved
+    host-local ones stand. A run that stays on this host reads every entry
+    here, so the full existence check and expansion apply, exactly as before.
+    """
+    if backend not in _OFFHOST_BACKENDS:
+        return _resolve_osdi_preload(options, request_dir), []
+    return osdi_preload, [
+        {"entry": options["osdi_preload"][index], "reason": reason}
+        for index, reason in sorted(osdi_runner_resolved.items())
+    ]
+
+
+def _osdi_runner_environment_fields(
+    osdi_runner_environment: list[dict[str, str]],
+) -> dict[str, Any]:
+    """The ``environment`` fragment for runner-resolved ``.osdi`` entries."""
+    if not osdi_runner_environment:
+        return {}
+    return {"osdi_preload_runner_resolved": osdi_runner_environment}
+
+
+def _resolve_osdi_preload(
+    options: dict[str, Any],
+    request_dir: str,
+    skip_indices: frozenset[int] = frozenset(),
+) -> tuple[str, ...]:
     """Resolve ``options.osdi_preload`` (issue #2513) to absolute paths of
     compiled OSDI shared libraries the generated deck must ``pre_osdi``.
 
@@ -4289,6 +4874,11 @@ def _resolve_osdi_preload(options: dict[str, Any], request_dir: str) -> tuple[st
     :func:`_resolve_models_lib`'s ``model library not found`` -- rather than
     left to surface as a per-corner ngspice error deep inside the run.
 
+    ``skip_indices`` (issue #3819) are entries the executing host resolves
+    itself (see :func:`sim_staging.runner_resolved_osdi`): validated as
+    paths but neither expanded nor existence-checked, and omitted from the
+    result.
+
     Returns ``()`` when the option is absent or an empty list, which leaves
     every generated deck byte-identical to before this issue.
     """
@@ -4306,6 +4896,8 @@ def _resolve_osdi_preload(options: dict[str, Any], request_dir: str) -> tuple[st
             raise SimError(
                 f"request.options.osdi_preload[{index}] must be a non-empty path"
             )
+        if index in skip_indices:
+            continue
         path = _resolve_relative(entry, request_dir)
         if not os.path.isfile(path):
             raise SimError(f"osdi_preload file not found: {path}")
@@ -4385,6 +4977,20 @@ class CornerPoint:
     no parameter axis, in which case :attr:`corner_id` and :attr:`slug` are
     exactly the legacy ones.
 
+    ``nodeset`` (issue #3036) is the normalized ``{lowercase node: volts}``
+    initial-guess map :func:`_apply_nodeset_rules` selected for this point --
+    ``{}`` for a point no ``options.nodeset`` rule matched. It is a solver
+    hint, not part of the point's identity: it never changes :attr:`corner_id`.
+
+    ``initial_conditions`` (issue #3881) is the same shape for
+    ``options.initial_conditions``: the ``{lowercase node: volts}`` transient
+    start state, rendered as ``.ic`` cards plus ``uic`` on the analysis.
+    Like ``nodeset`` it never changes :attr:`corner_id`.
+
+    ``options`` (issue #3125) is the same for the ``corners.options`` axis: the
+    normalized ``{solver option: number}`` row, ``{}`` when the request has
+    no such axis (and then the IDs/slugs are untouched).
+
     ``process_sections`` is populated only when the request's
     ``corners.process[]`` entry for this point was the multi-section bundle
     object form (``{"name": str, "sections": [...]}``, see
@@ -4421,9 +5027,14 @@ class CornerPoint:
         "supply_v",
         "temperature_c",
         "params",
+        "nodeset",
+        "initial_conditions",
+        "options",
         "sample_index",
         "mc_seed",
+        "variant",
         "mc_injected",
+        "supply_waveforms",
     )
 
     def __init__(
@@ -4436,12 +5047,21 @@ class CornerPoint:
         process_section_libs: list[str | None] | None = None,
         process_section_libs_resolved: list[str | None] | None = None,
         params: dict[str, int | float] | None = None,
+        nodeset: dict[str, float] | None = None,
+        initial_conditions: dict[str, float] | None = None,
+        options: dict[str, int | float] | None = None,
         sample_index: int | None = None,
         mc_seed: dict[str, Any] | None = None,
+        variant: str | None = None,
         mc_injected: list[dict[str, Any]] | None = None,
+        supply_waveforms: tuple[str, ...] = (),
     ) -> None:
+        self.variant = variant
         self.process = process
         self.params: dict[str, int | float] = params or {}
+        self.nodeset: dict[str, float] = nodeset or {}
+        self.initial_conditions: dict[str, float] = initial_conditions or {}
+        self.options: dict[str, int | float] = options or {}
         self.process_sections = process_sections
         self.process_section_libs = process_section_libs
         self.process_section_libs_resolved = process_section_libs_resolved
@@ -4452,6 +5072,9 @@ class CornerPoint:
         # Issue #2911: this sample's recorded design-owned mismatch draws
         # (`sim_injected.draw`); ``None`` unless `monte_carlo.injected`.
         self.mc_injected = mc_injected
+        # Issue #2902: `supply_v` keys whose PWL/PULSE source is rescaled in
+        # the corner's netlist copy instead of `alter`ed.
+        self.supply_waveforms = supply_waveforms
 
     def section_lib(self, index: int, models_lib: str | None) -> str | None:
         """The library path the ``.lib`` card for ``process_sections[index]``
@@ -4495,8 +5118,12 @@ class CornerPoint:
             )
         temp_label = _format_number(self.temperature_c)
         base = f"{process_label}/{supply_label}/{temp_label}C"
+        if self.variant is not None:
+            base = f"{base}/@{self.variant}"
         if self.params:
             base = f"{base}/params:{_format_params_label(self.params)}"
+        if self.options:
+            base = f"{base}/options:{_format_params_label(self.options)}"
         if self.sample_index is None:
             return base
         return f"{base}/mc{self.sample_index}"
@@ -4505,14 +5132,40 @@ class CornerPoint:
     def slug(self) -> str:
         """Filesystem-safe artifact-directory name for this corner, derived
         from :attr:`corner_id` (e.g. ``ss/1.620V/125C`` -> ``ss_1p620V_125C``).
-        See :func:`_slugify_corner_id` for the parameter-axis form."""
+        See :func:`_slugify_corner_id` for the parameter-axis and bounded forms."""
         return _slugify_corner_id(self.corner_id)
+
+    @property
+    def readable_slug(self) -> str:
+        """The unbounded :attr:`slug` (before the long-name hash fallback)."""
+        return _readable_slug(self.corner_id)
 
 
 def _params_report_field(point: CornerPoint) -> dict[str, Any]:
     """The additive ``params`` field of a corner report: present only for a
     point on a ``corners.params`` axis, so every other report is unchanged."""
     return {"params": dict(point.params)} if point.params else {}
+
+
+def _ic_report_field(point: CornerPoint) -> dict[str, Any]:
+    """The additive ``initial_conditions`` field of a corner report (issue
+    #3881): present only for a point an ``options.initial_conditions`` rule
+    selected."""
+    if not point.initial_conditions:
+        return {}
+    return {"initial_conditions": dict(point.initial_conditions)}
+
+
+def _nodeset_report_field(point: CornerPoint) -> dict[str, Any]:
+    """The additive ``nodeset`` field of a corner report (issue #3036):
+    present only for a point an ``options.nodeset`` rule selected."""
+    return {"nodeset": dict(point.nodeset)} if point.nodeset else {}
+
+
+def _options_report_field(point: CornerPoint) -> dict[str, Any]:
+    """The additive ``options`` field of a corner report (issue #3125):
+    present only for a point on a ``corners.options`` axis."""
+    return {"options": dict(point.options)} if point.options else {}
 
 
 def _format_number(value: float) -> str:
@@ -4597,6 +5250,48 @@ def _normalize_param_row(
     return dict(sorted(row.items()))
 
 
+def _temperature_param_name(corners_spec: dict[str, Any]) -> str | None:
+    """The validated, lowercased ``corners.temperature_param`` name (issue
+    #3994), or ``None`` when the request does not bind one. It is refused if
+    ``corners.params`` or ``corners.supply_v`` already uses the name."""
+    raw = corners_spec.get("temperature_param")
+    if raw is None:
+        return None
+    if "units" in corners_spec:
+        raise SimError(
+            "corners.temperature_param cannot be combined with corners.units: "
+            "put the parameter in each unit's `params` instead"
+        )
+    name = _validate_param_name(raw, "corners.temperature_param")
+    declared = {str(key).lower() for key in (corners_spec.get("params") or {})}
+    if name in declared:
+        raise SimError(
+            f"corners.temperature_param name {name!r} is also a corners.params "
+            "key: a name may be bound by only one of the two"
+        )
+    supply = {str(key).lower() for key in (corners_spec.get("supply_v") or {})}
+    if name in supply:
+        raise SimError(
+            f"corners.temperature_param name {name!r} is also a "
+            "corners.supply_v key: a name may be in only one of the two maps"
+        )
+    return name
+
+
+def _bind_temperature_param(
+    param_row: dict[str, int | float],
+    temperature_param: str | None,
+    temperature_c: float,
+) -> dict[str, int | float]:
+    """``param_row`` with the grid temperature bound to ``temperature_param``
+    (issue #3994), name-sorted like every params row; ``param_row`` unchanged
+    when the request binds no temperature parameter."""
+    if not temperature_param:
+        return param_row
+    bound = {**param_row, temperature_param: _normalize_param_value(temperature_c)}
+    return dict(sorted(bound.items()))
+
+
 def _expand_param_axis(
     corners_spec: dict[str, Any],
 ) -> list[dict[str, int | float]]:
@@ -4647,6 +5342,97 @@ def _expand_param_axis(
             raise SimError(f"corners.params declares the row {label!r} twice")
         seen.add(label)
     return rows
+
+
+#: ``corners.options`` (issue #3125): the numeric solver ``.options`` a
+#: corner axis may sweep. A subset of :data:`NGSPICE_SOLVER_OPTIONS` -- the
+#: flag/token options (``method``, ``noopiter``) are not numbers -- plus
+#: ``itl3``. ngspice silently ignores an unknown ``.options`` name, so the
+#: allow-list turns a typo into a named error.
+CORNER_OPTION_NAMES = (
+    "abstol",
+    "gmin",
+    "gminsteps",
+    "itl1",
+    "itl2",
+    "itl3",
+    "itl4",
+    "pivtol",
+    "reltol",
+    "srcsteps",
+    "vntol",
+)
+
+
+def _validate_corner_option_name(name: Any, where: str) -> str:
+    lowered = name.lower() if isinstance(name, str) else name
+    if lowered not in CORNER_OPTION_NAMES:
+        raise SimError(
+            f"{where} name {name!r} is not a supported numeric solver "
+            f"option; supported: {', '.join(CORNER_OPTION_NAMES)}"
+        )
+    return lowered
+
+
+def _expand_options_axis(
+    corners_spec: dict[str, Any],
+) -> list[dict[str, int | float]]:
+    """The zipped ``corners.options`` rows (issue #3125), or ``[{}]`` for a
+    request with no options axis. Same shape and rules as
+    :func:`_expand_param_axis`: names zip by index, every array nonempty and
+    the same length, duplicate rows rejected."""
+    spec = corners_spec.get("options")
+    if spec is None or spec == {}:
+        return [{}]
+    if not isinstance(spec, dict):
+        raise SimError(
+            "corners.options must be an object mapping solver option names "
+            "to equal-length arrays of numbers"
+        )
+    columns: dict[str, list[int | float]] = {}
+    for name, values in spec.items():
+        lowered = _validate_corner_option_name(name, "corners.options")
+        if lowered in columns:
+            raise SimError(
+                f"corners.options declares {lowered!r} more than once "
+                "(names are case-insensitive)"
+            )
+        if not isinstance(values, list) or not values:
+            raise SimError(
+                f"corners.options.{name} must be a nonempty array of numbers"
+            )
+        columns[lowered] = [
+            _validate_param_scalar(value, f"corners.options.{name}[{i}]")
+            for i, value in enumerate(values)
+        ]
+    if len({len(values) for values in columns.values()}) != 1:
+        raise SimError("corners.options arrays must all be the same length")
+    count = len(next(iter(columns.values())))
+    rows = [
+        dict(sorted((name, values[i]) for name, values in columns.items()))
+        for i in range(count)
+    ]
+    seen: set[str] = set()
+    for row in rows:
+        label = _format_params_label(row)
+        if label in seen:
+            raise SimError(f"corners.options declares the row {label!r} twice")
+        seen.add(label)
+    return rows
+
+
+def _normalize_option_row(raw: Any, where: str) -> dict[str, int | float]:
+    """One scalar ``{option: number}`` row (a report/wire ``options`` map),
+    validated and normalized."""
+    if not isinstance(raw, dict):
+        raise SimError(f"{where} must be an object mapping names to numbers")
+    row: dict[str, int | float] = {}
+    for name, value in raw.items():
+        lowered = _validate_corner_option_name(name, where)
+        if lowered in row:
+            raise SimError(f"{where} declares {lowered!r} more than once")
+        row[lowered] = _validate_param_scalar(value, f"{where}.{name}")
+    return dict(sorted(row.items()))
 
 
 def _parse_process_entry(
@@ -4794,13 +5580,25 @@ def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
             "temperature_c": point.temperature_c,
             "sample_index": point.sample_index,
             "mc_seed": point.mc_seed,
+            "variant": point.variant,
             "mc_injected": point.mc_injected,
+            "supply_waveforms": list(point.supply_waveforms),
         }
         if point.params:
             # Issue #3035: only a parameter point carries the field, so every
             # request without a `corners.params` axis serialises exactly as
             # before.
             entry["params"] = point.params
+        if point.nodeset:
+            # Issue #3036: the already-selected map, never the rules -- a
+            # shard holds a subset of the points and could not re-resolve them.
+            entry["nodeset"] = point.nodeset
+        if point.initial_conditions:
+            # Issue #3881: likewise the selected map, never the rules.
+            entry["initial_conditions"] = point.initial_conditions
+        if point.options:
+            # Issue #3125: likewise additive, only for an options point.
+            entry["options"] = point.options
         wire.append(entry)
     return wire
 
@@ -4843,6 +5641,27 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
             if raw_params is not None
             else {}
         )
+        # Issue #3036: re-validated at the receiving worker as well.
+        raw_nodeset = entry.get("nodeset")
+        nodeset = (
+            _normalize_nodeset_values(raw_nodeset, "request._explicit_points[].nodeset")
+            if raw_nodeset is not None
+            else {}
+        )
+        raw_ic = entry.get("initial_conditions")
+        initial_conditions = (
+            _normalize_nodeset_values(
+                raw_ic, "request._explicit_points[].initial_conditions"
+            )
+            if raw_ic is not None
+            else {}
+        )
+        raw_options = entry.get("options")
+        options = (
+            _normalize_option_row(raw_options, "request._explicit_points[].options")
+            if raw_options is not None
+            else {}
+        )
         points.append(
             CornerPoint(
                 entry.get("process"),
@@ -4851,12 +5670,44 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
                 process_sections=sections,
                 process_section_libs=section_libs,
                 params=params,
+                nodeset=nodeset,
+                initial_conditions=initial_conditions,
+                options=options,
                 sample_index=entry.get("sample_index"),
                 mc_seed=entry.get("mc_seed"),
+                variant=entry.get("variant"),
                 mc_injected=entry.get("mc_injected"),
+                supply_waveforms=tuple(entry.get("supply_waveforms") or ()),
             )
         )
     return points
+
+
+def _parse_supply_waveforms(
+    corners_spec: dict[str, Any], supply_spec: dict[str, list[float]]
+) -> tuple[str, ...]:
+    """Validate ``corners.supply_waveforms`` (issue #2902): an array of
+    ``corners.supply_v`` keys whose PWL/PULSE source is scaled per corner."""
+    raw = corners_spec.get("supply_waveforms")
+    if raw is None:
+        return ()
+    if (
+        not isinstance(raw, list)
+        or not all(isinstance(n, str) and n.strip() for n in raw)
+        or len(set(raw)) != len(raw)
+    ):
+        raise SimError(
+            "corners.supply_waveforms must be an array of unique "
+            "corners.supply_v source names"
+        )
+    stray = [n for n in raw if n not in supply_spec]
+    if stray:
+        raise SimError(
+            f"corners.supply_waveforms names {stray!r}, which "
+            "corners.supply_v does not sweep: every entry must also be a "
+            "corners.supply_v key"
+        )
+    return tuple(raw)
 
 
 def _expand_corners(
@@ -4865,7 +5716,8 @@ def _expand_corners(
     """Expand the declared axes into the deterministic, odometer-style corner list.
 
     Axis order (outer to inner, per the spike): process, then the supply
-    sweep, then temperature. A missing axis collapses to a single default
+    sweep, then temperature, then ``params`` (#3035), then ``options``
+    (#3125). A missing axis collapses to a single default
     point (``process=None``, ``supply_v={}``, ``temperature_c=27``) rather
     than an error -- a request that only cares about one axis need not
     populate the others.
@@ -4904,29 +5756,46 @@ def _expand_corners(
     else:
         supply_points = [{}]
 
+    supply_waveforms = _parse_supply_waveforms(corners_spec, supply_spec)
     temperatures: list[float] = corners_spec.get("temperature_c") or [27]
+
+    variants = _parse_variants(corners_spec.get("variants"))
 
     # Issue #3035: the innermost axis. Its rows are validated before the
     # exclusion rules so a selector can be checked against the declared names.
     param_rows = _expand_param_axis(corners_spec)
-    declared_params = set(param_rows[0])
+    temperature_param = _temperature_param_name(corners_spec)
+    declared_params = set(param_rows[0]).union(filter(None, [temperature_param]))
     _validate_exclude_params(exclude_spec, declared_params)
+    # Issue #3125: the solver-option axis, innermost of all.
+    option_rows = _expand_options_axis(corners_spec)
+    _validate_exclude_options(exclude_spec, set(option_rows[0]))
 
     points: list[CornerPoint] = []
     for process, process_sections, process_section_libs in processes:
         for supply_v in supply_points:
-            for temperature_c in temperatures:
-                for param_row in param_rows:
-                    point = CornerPoint(
-                        process,
-                        supply_v,
-                        temperature_c,
-                        process_sections=process_sections,
-                        process_section_libs=process_section_libs,
-                        params=param_row,
-                    )
-                    if not _is_excluded(point, exclude_spec):
-                        points.append(point)
+            for variant_name, variant_sources in variants:
+                point_supply = {**supply_v, **variant_sources}
+                for temperature_c in temperatures:
+                    for param_row, option_row in itertools.product(
+                        param_rows, option_rows
+                    ):
+                        param_row = _bind_temperature_param(
+                            param_row, temperature_param, temperature_c
+                        )
+                        point = CornerPoint(
+                            process,
+                            point_supply,
+                            temperature_c,
+                            process_sections=process_sections,
+                            process_section_libs=process_section_libs,
+                            params=param_row,
+                            options=option_row,
+                            variant=variant_name,
+                            supply_waveforms=supply_waveforms,
+                        )
+                        if not _is_excluded(point, exclude_spec):
+                            points.append(point)
     return points
 
 
@@ -4957,8 +5826,34 @@ def _validate_exclude_params(
             _validate_param_scalar(value, f"exclude[].params.{name}")
 
 
+def _validate_exclude_options(
+    exclude_spec: list[dict[str, Any]], declared: set[str]
+) -> None:
+    """Reject an ``exclude[].options`` selector naming an option the request
+    does not sweep (issue #3125) -- it could never match."""
+    for entry in exclude_spec:
+        if not isinstance(entry, dict) or "options" not in entry:
+            continue
+        selector = entry["options"]
+        if not isinstance(selector, dict):
+            raise SimError("exclude[].options must be an object of name: number")
+        for name, value in selector.items():
+            lowered = name.lower() if isinstance(name, str) else name
+            if lowered not in declared:
+                raise SimError(
+                    f"exclude[].options names {name!r}, which is not a "
+                    "corners.options option of this request"
+                    + (
+                        f" (declared: {', '.join(sorted(declared))})"
+                        if declared
+                        else ""
+                    )
+                )
+            _validate_param_scalar(value, f"exclude[].options.{name}")
+
+
 _CORNER_UNIT_KEYS = ("process", "temperature_c", "supply_v")
-_CORNER_UNIT_CROSSED_KEYS = ("process", "supply_v", "temperature_c")
+_CORNER_UNIT_CROSSED_KEYS = ("process", "supply_v", "temperature_c", "variants")
 
 
 def _is_plain_number(value: Any) -> bool:
@@ -5051,6 +5946,225 @@ def _parse_unit_supply_v(supply_v: Any, where: str) -> dict[str, Any]:
     return dict(supply_v)
 
 
+_VARIANT_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+_EXPR_TOKEN_RE = re.compile(
+    r"\s*(?:(?P<num>\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?)"
+    r"|(?P<name>[A-Za-z_][A-Za-z0-9_.]*)|(?P<op>[-+*/()]))"
+)
+
+
+def _parse_variants(raw: Any) -> list[tuple[str | None, dict[str, float]]]:
+    """Normalize ``corners.variants`` (issue #3252) into ``(name, sources)``
+    pairs with every source value resolved to a number.
+
+    ``None`` (axis absent) yields the single nameless, source-less entry so
+    :func:`_expand_corners` is byte-identical to its pre-variant behaviour.
+    Each variant's ``sources`` map a voltage-source name to a number or to an
+    arithmetic expression of the *other* sources in the same variant; the
+    resolved numbers are applied with ``alter`` exactly like ``supply_v`` and
+    override a same-named ``supply_v`` key.
+    """
+    if raw is None:
+        return [(None, {})]
+    if not isinstance(raw, list) or not raw:
+        raise SimError("corners.variants must be a non-empty array")
+    seen: set[str] = set()
+    seen_slugs: dict[str, str] = {}
+    out: list[tuple[str | None, dict[str, float]]] = []
+    for index, entry in enumerate(raw):
+        where = f"corners.variants[{index}]"
+        if not isinstance(entry, dict):
+            raise SimError(f"{where} must be an object")
+        name = entry.get("name")
+        if not isinstance(name, str) or not _VARIANT_NAME_RE.match(name):
+            raise SimError(
+                f"{where}.name must be a non-empty string of letters, digits, "
+                "'_', '.' or '-'"
+            )
+        if name in seen:
+            raise SimError(f"corners.variants has duplicate name {name!r}")
+        seen.add(name)
+        # '.' and '-' are both legal in a name but slug to 'p' / 'n', so two
+        # distinct names can share an artifact directory -- refuse that.
+        slug = _slugify_label(name)
+        if slug in seen_slugs:
+            raise SimError(
+                f"corners.variants names {seen_slugs[slug]!r} and {name!r} "
+                f"both map to artifact slug {slug!r}; rename one"
+            )
+        seen_slugs[slug] = name
+        sources = entry.get("sources")
+        if not isinstance(sources, dict) or not sources:
+            raise SimError(f"{where}.sources must be a non-empty object")
+        out.append((name, _resolve_variant_sources(name, sources)))
+    return out
+
+
+def _resolve_variant_sources(variant: str, sources: dict[str, Any]) -> dict[str, float]:
+    resolved: dict[str, float] = {}
+    visiting: list[str] = []
+    lowered = {key.strip().lower(): key for key in sources}
+
+    def resolve(key: str) -> float:
+        if key in resolved:
+            return resolved[key]
+        if key in visiting:
+            cycle = " -> ".join([*visiting[visiting.index(key) :], key])
+            raise SimError(
+                f"corners.variants[{variant!r}].sources has a cyclic "
+                f"expression: {cycle}"
+            )
+        value = sources[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise SimError(
+                f"corners.variants[{variant!r}].sources[{key!r}] must be a "
+                "number or an arithmetic expression string"
+            )
+        if isinstance(value, str):
+            visiting.append(key)
+            try:
+                result = _eval_source_expr(variant, key, value, lowered, resolve)
+            finally:
+                visiting.pop()
+        else:
+            result = float(value)
+        resolved[key] = result
+        return result
+
+    for key in sources:
+        resolve(key)
+    return {key: resolved[key] for key in sources}
+
+
+def _tokenize_source_expr(where: str, text: str) -> list[tuple[str, str]]:
+    """Split ``text`` into ``(kind, lexeme)`` tokens for the source-expression
+    grammar, raising :class:`SimError` on any unparseable character."""
+    tokens: list[tuple[str, str]] = []
+    pos = 0
+    while pos < len(text):
+        if not text[pos:].strip():
+            break
+        match = _EXPR_TOKEN_RE.match(text, pos)
+        if match is None:
+            raise SimError(f"{where}: cannot parse expression {text!r}")
+        kind = match.lastgroup or ""
+        tokens.append((kind, match.group(kind)))
+        pos = match.end()
+    return tokens
+
+
+class _SourceExprParser:
+    """Recursive-descent evaluator for ``+ - * /``, parentheses, numbers, and
+    other source names of the same variant (no ``eval``)."""
+
+    def __init__(
+        self,
+        where: str,
+        text: str,
+        tokens: list[tuple[str, str]],
+        lowered: dict[str, str],
+        resolve: Any,
+    ) -> None:
+        self.where = where
+        self.text = text
+        self.tokens = tokens
+        self.lowered = lowered
+        self.resolve = resolve
+        self.cursor = 0
+
+    def peek(self) -> tuple[str, str] | None:
+        return self.tokens[self.cursor] if self.cursor < len(self.tokens) else None
+
+    def take(self) -> tuple[str, str]:
+        token = self.peek()
+        if token is None:
+            raise SimError(f"{self.where}: unexpected end of expression {self.text!r}")
+        self.cursor += 1
+        return token
+
+    def _peek_op(self, ops: str) -> str | None:
+        token = self.peek()
+        if token is not None and token[0] == "op" and token[1] in ops:
+            return token[1]
+        return None
+
+    def parse(self) -> float:
+        result = self.expr()
+        leftover = self.peek()
+        if leftover is not None:
+            raise SimError(
+                f"{self.where}: unexpected {leftover[1]!r} in expression {self.text!r}"
+            )
+        return result
+
+    def expr(self) -> float:
+        value = self.term()
+        while (op := self._peek_op("+-")) is not None:
+            self.take()
+            rhs = self.term()
+            value = value + rhs if op == "+" else value - rhs
+        return value
+
+    def term(self) -> float:
+        value = self.factor()
+        while (op := self._peek_op("*/")) is not None:
+            self.take()
+            rhs = self.factor()
+            value = self._apply_muldiv(op, value, rhs)
+        return value
+
+    def _apply_muldiv(self, op: str, lhs: float, rhs: float) -> float:
+        if op == "*":
+            return lhs * rhs
+        if rhs == 0:
+            raise SimError(f"{self.where}: division by zero in {self.text!r}")
+        return lhs / rhs
+
+    def _name(self, tok: str) -> float:
+        target = self.lowered.get(tok.lower())
+        if target is None:
+            raise SimError(
+                f"{self.where}: unknown source name {tok!r} in expression "
+                f"{self.text!r} (expressions may only reference other sources "
+                "of the same variant)"
+            )
+        return float(self.resolve(target))
+
+    def _group(self) -> float:
+        value = self.expr()
+        if self.take()[1] != ")":
+            raise SimError(f"{self.where}: unbalanced parentheses in {self.text!r}")
+        return value
+
+    def factor(self) -> float:
+        kind, tok = self.take()
+        if kind == "num":
+            return float(tok)
+        if kind == "name":
+            return self._name(tok)
+        if tok == "-":
+            return -self.factor()
+        if tok == "+":
+            return self.factor()
+        if tok == "(":
+            return self._group()
+        raise SimError(f"{self.where}: unexpected {tok!r} in expression {self.text!r}")
+
+
+def _eval_source_expr(
+    variant: str,
+    key: str,
+    text: str,
+    lowered: dict[str, str],
+    resolve: Any,
+) -> float:
+    """Evaluate ``text`` (``+ - * /``, parentheses, numbers, and other source
+    names of the same variant) without ``eval``."""
+    where = f"corners.variants[{variant!r}].sources[{key!r}]"
+    tokens = _tokenize_source_expr(where, text)
+    return _SourceExprParser(where, text, tokens, lowered, resolve).parse()
+
+
 def _is_excluded(point: CornerPoint, exclude_spec: list[dict[str, Any]]) -> bool:
     """A point is excluded if it matches every key of any one exclude entry."""
     for entry in exclude_spec:
@@ -5068,23 +6182,365 @@ def _mapping_matches(actual: dict[str, Any], selector: Any, fold: Any) -> bool:
     return all(actual.get(fold(name)) == value for name, value in selector.items())
 
 
+def _fold_lower(name: Any) -> str:
+    return str(name).lower()
+
+
+# exclude-entry key -> predicate(point, selector value); an unknown key never matches.
+_EXCLUDE_KEY_MATCHERS: dict[str, Any] = {
+    "process": lambda point, value: point.process == value,
+    "temperature_c": lambda point, value: point.temperature_c == value,
+    "variant": lambda point, value: point.variant == value,
+    "supply_v": lambda point, value: _mapping_matches(point.supply_v, value, str),
+    "params": lambda point, value: _mapping_matches(point.params, value, _fold_lower),
+    "options": lambda point, value: _mapping_matches(point.options, value, _fold_lower),
+}
+
+
 def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
     for key, value in entry.items():
-        if key == "process":
-            if point.process != value:
-                return False
-        elif key == "temperature_c":
-            if point.temperature_c != value:
-                return False
-        elif key == "supply_v":
-            if not _mapping_matches(point.supply_v, value, str):
-                return False
-        elif key == "params":
-            if not _mapping_matches(point.params, value, lambda n: str(n).lower()):
-                return False
-        else:
+        matcher = _EXCLUDE_KEY_MATCHERS.get(key)
+        if matcher is None or not matcher(point, value):
             return False
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Initial-guess hints: `options.nodeset` (issue #3036)
+# --------------------------------------------------------------------------- #
+
+#: A node name a ``.nodeset`` card may carry: a bare SPICE identifier (with
+#: ``.``/``:`` for hierarchy) or an all-digit node. Anything else -- spaces,
+#: newlines, parentheses, operators -- could break out of the one generated
+#: card, so it is refused rather than escaped.
+_NODESET_NODE_RE = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_.:]*|[0-9]+)")
+_NODESET_RULE_KEYS = ("match", "values")
+_NODESET_MATCH_KEYS = ("process", "temperature_c", "supply_v", "params")
+
+
+def _normalize_nodeset_values(raw: Any, where: str) -> dict[str, float]:
+    """A nonempty ``{node: volts}`` map, validated: names match
+    :data:`_NODESET_NODE_RE`, are lowercased, and may not repeat
+    case-insensitively; values are finite numbers (booleans and nulls are
+    refused). Used for the request rules and re-run at the receiving worker
+    on the wire map."""
+    if not isinstance(raw, dict) or not raw:
+        raise SimError(f"{where} must be a nonempty object mapping nodes to volts")
+    values: dict[str, float] = {}
+    for node, volts in raw.items():
+        if not isinstance(node, str) or not _NODESET_NODE_RE.fullmatch(node):
+            raise SimError(
+                f"{where} node {node!r} is not a supported node name "
+                "(expected [A-Za-z_][A-Za-z0-9_.:]* or digits only)"
+            )
+        lowered = node.lower()
+        if lowered in values:
+            raise SimError(
+                f"{where} names node {lowered!r} more than once "
+                "(node names are case-insensitive)"
+            )
+        if not _is_plain_number(volts) or not math.isfinite(volts):
+            raise SimError(f"{where}.{node} must be a finite number of volts")
+        values[lowered] = float(volts)
+    return dict(sorted(values.items()))
+
+
+def _nodeset_match_process(value: Any, where: str) -> str:
+    if not isinstance(value, str):
+        raise SimError(f"{where} must be a string")
+    return value
+
+
+def _nodeset_match_number(value: Any, where: str) -> Any:
+    if not _is_plain_number(value) or not math.isfinite(value):
+        raise SimError(f"{where} must be a finite number")
+    return value
+
+
+def _nodeset_match_supply(supply: Any, where: str) -> dict[str, Any]:
+    if not isinstance(supply, dict):
+        raise SimError(f"{where} must be an object of rail: number")
+    return {
+        rail: _nodeset_match_number(v, f"{where}.{rail}") for rail, v in supply.items()
+    }
+
+
+def _nodeset_match_params(params: Any, where: str) -> dict[str, int | float]:
+    if not isinstance(params, dict):
+        raise SimError(f"{where} must be an object of name: number")
+    row: dict[str, int | float] = {}
+    for name, value in params.items():
+        lowered = _validate_param_name(name, where)
+        if lowered in row:
+            raise SimError(
+                f"{where} names {lowered!r} more than once (names are case-insensitive)"
+            )
+        row[lowered] = _validate_param_scalar(value, f"{where}.{name}")
+    return row
+
+
+_NODESET_MATCH_VALIDATORS = {
+    "process": _nodeset_match_process,
+    "temperature_c": _nodeset_match_number,
+    "supply_v": _nodeset_match_supply,
+    "params": _nodeset_match_params,
+}
+
+
+def _validate_nodeset_match(raw: Any, where: str) -> dict[str, Any]:
+    """One rule's ``match`` selector, normalized to the shape
+    :func:`_matches_exclude` consumes (``params`` names lowercased)."""
+    if not isinstance(raw, dict):
+        raise SimError(f"{where} must be an object")
+    unknown = sorted(str(key) for key in set(raw) - set(_NODESET_MATCH_KEYS))
+    if unknown:
+        raise SimError(
+            f"{where} has unknown key(s) {', '.join(unknown)} "
+            f"(supported: {', '.join(_NODESET_MATCH_KEYS)})"
+        )
+    return {
+        key: _NODESET_MATCH_VALIDATORS[key](value, f"{where}.{key}")
+        for key, value in raw.items()
+    }
+
+
+def _validate_nodeset_rules(
+    value: Any, *, label: str = "options.nodeset"
+) -> list[dict[str, Any]]:
+    """Validate ``options.nodeset`` (issue #3036) into normalized rules
+    ``[{"match": {...}, "values": {node: volts}}]``; ``[]`` when omitted or
+    empty, so a legacy request is untouched."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise SimError(
+            f"{label} must be an array of {{match, values}} rules "
+            f"(got {json.dumps(value, default=repr)})"
+        )
+    rules: list[dict[str, Any]] = []
+    for index, rule in enumerate(value):
+        where = f"{label}[{index}]"
+        if not isinstance(rule, dict) or set(rule) != set(_NODESET_RULE_KEYS):
+            raise SimError(
+                f"{where} must be an object with exactly the keys "
+                f"{', '.join(_NODESET_RULE_KEYS)}"
+            )
+        rules.append(
+            {
+                "match": _validate_nodeset_match(rule["match"], f"{where}.match"),
+                "values": _normalize_nodeset_values(rule["values"], f"{where}.values"),
+            }
+        )
+    return rules
+
+
+def _check_nodeset_selector_names(
+    points: list[CornerPoint],
+    rules: list[dict[str, Any]],
+    label: str = "options.nodeset",
+) -> None:
+    """A selector naming a parameter or supply rail no point carries could
+    never match, so it is refused by name rather than as an unused rule."""
+    declared_params = {name for point in points for name in point.params}
+    declared_rails = {str(rail) for point in points for rail in point.supply_v}
+    for index, rule in enumerate(rules):
+        match = rule["match"]
+        for name in match.get("params", {}):
+            if name not in declared_params:
+                raise SimError(
+                    f"{label}[{index}].match.params names {name!r}, "
+                    "which is not a corners.params parameter of this request"
+                )
+        for rail in match.get("supply_v", {}):
+            if str(rail) not in declared_rails:
+                raise SimError(
+                    f"{label}[{index}].match.supply_v names rail "
+                    f"{rail!r}, which no corner of this request sets"
+                )
+
+
+def _apply_nodeset_rules(
+    points: list[CornerPoint],
+    rules: list[dict[str, Any]],
+    *,
+    label: str = "options.nodeset",
+    attr: str = "nodeset",
+) -> None:
+    """Resolve ``options.nodeset`` rules onto ``points`` in place (issue
+    #3036). Runs once, after corner expansion and exclusions and before Monte
+    Carlo cloning, so a sample inherits its base point's map.
+
+    Zero matching rules at a point mean no hint there; exactly one selects its
+    whole map; two is an error whatever their node maps are (no implicit merge
+    or priority). A rule that matches no retained point is an error, and so is
+    a selector naming a parameter or supply rail no point carries.
+    """
+    if not rules:
+        return
+    _check_nodeset_selector_names(points, rules, label)
+    used = [False] * len(rules)
+    for point in points:
+        hits = [
+            i for i, rule in enumerate(rules) if _matches_exclude(point, rule["match"])
+        ]
+        if len(hits) > 1:
+            raise SimError(
+                f"{label} rules {hits[0]} and {hits[1]} both match "
+                f"corner {point.corner_id!r}; overlapping rules are never "
+                "merged -- make the selectors disjoint"
+            )
+        if hits:
+            used[hits[0]] = True
+            setattr(point, attr, dict(rules[hits[0]]["values"]))
+    if not all(used):
+        raise SimError(
+            f"{label}[{used.index(False)}] matches no retained corner "
+            "of this request (every declared rule must apply somewhere)"
+        )
+
+
+def _nodeset_cards(point: CornerPoint) -> list[str]:
+    """One file-scope ``.nodeset`` card per selected node. ngspice has no
+    ``nodeset`` control command (it answers "no such command"); the card
+    form, placed after the netlist ``.include``, wins over a body-level hint
+    for the same node and survives ``alterparam`` + ``reset``."""
+    return [
+        f".nodeset v({node})={volts!r}" for node, volts in sorted(point.nodeset.items())
+    ]
+
+
+#: ngspice's warning for a ``.nodeset`` whose node the circuit does not have:
+#: it keeps running and exits 0, so without this the corner would grade on an
+#: unhinted solve.
+_NODESET_MISSING_RE = re.compile(
+    r"Nodeset on non-existent node - (?P<node>\S+?), ignored", re.IGNORECASE
+)
+
+
+def _nodeset_failures(point: CornerPoint, log_text: str) -> list[dict[str, Any]]:
+    """An error diagnostic for each requested hint node the engine reported as
+    non-existent (issue #3036). Warnings about a netlist body's own hints on
+    other nodes are none of the request's business and are ignored."""
+    if not point.nodeset:
+        return []
+    missing = sorted(
+        {
+            match.group("node").lower()
+            for match in _NODESET_MISSING_RE.finditer(log_text)
+        }
+        & set(point.nodeset)
+    )
+    return [
+        {
+            "severity": "error",
+            "code": "netlist",
+            "message": (
+                f"options.nodeset could not be applied: the engine reports "
+                f"node {node!r} does not exist, so this corner would have "
+                "solved without the requested initial guess"
+            ),
+        }
+        for node in missing
+    ]
+
+
+NODESET_UNSUPPORTED_WORKER_CODE = "nodeset_unsupported_worker"
+
+
+def _require_nodeset_echo(
+    points: list[CornerPoint],
+    corners: list[dict[str, Any]],
+    *,
+    backend: str = "remote",
+    label: str = "options.nodeset",
+    attr: str = "nodeset",
+    code: str = NODESET_UNSUPPORTED_WORKER_CODE,
+) -> None:
+    """Fail the request when an off-host worker did not honor
+    ``options.nodeset`` (issue #3036) -- or, with ``label``/``attr``/``code``
+    of ``options.initial_conditions``, that field (issue #3881).
+
+    A worker built before the field ignores the hints and would report a
+    passing, unhinted solve; one that supports it echoes each point's
+    ``nodeset`` in its corner report, which is compared with what was
+    dispatched. Independent of any version check, so it also catches a
+    same-release runner image built before the feature landed.
+    """
+    if backend not in _OFFHOST_BACKENDS or not any(getattr(p, attr) for p in points):
+        return
+    problem: str | None = None
+    if len(corners) != len(points):
+        problem = (
+            f"it returned {len(corners)} corner report(s) for "
+            f"{len(points)} dispatched point(s)"
+        )
+    else:
+        for point, corner in zip(points, corners, strict=True):
+            expected = getattr(point, attr)
+            if (corner.get(attr) or {}) != expected:
+                problem = (
+                    f"corner {point.corner_id!r} came back with {attr} "
+                    f"{corner.get(attr)!r}, expected {expected!r}"
+                )
+                break
+    if problem is not None:
+        raise SimError(
+            f"the remote/batch worker did not honor {label} -- "
+            f"{problem}. A worker built before the field ignores it and "
+            "would solve without the requested initial values; update the "
+            "runner image to this klt release, or use a local backend. No "
+            "result was reported",
+            code=code,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Transient start states: `options.initial_conditions` (issue #3881)
+# --------------------------------------------------------------------------- #
+#
+# Same rule grammar and per-point resolution as `options.nodeset`, but the
+# map is a transient *start state*: `.ic v(node)=volts` cards plus `uic` on
+# the `tran` command (a `.nodeset` is only a DC-solve guess and is dropped
+# once `uic` skips the operating point).
+
+_IC_LABEL = "options.initial_conditions"
+IC_UNSUPPORTED_WORKER_CODE = "initial_conditions_unsupported_worker"
+
+
+def _require_plain_tran_for_ic(declared: bool, analysis: dict[str, Any]) -> None:
+    """``uic`` is a ``tran`` flag, so a start state needs a plain transient
+    analysis; step/pass/two-port sequences and other kinds are refused up
+    front rather than silently run without it."""
+    if not declared:
+        return
+    if (
+        sim_steps.is_steps_analysis(analysis)
+        or str(analysis.get("kind", "")).lower() != "tran"
+    ):
+        raise SimError(
+            f"{_IC_LABEL} requires a single analysis of kind 'tran' "
+            "(`.ic` is applied with the `uic` flag of the transient command)"
+        )
+
+
+def _ic_cards(point: CornerPoint) -> list[str]:
+    """One file-scope ``.ic`` card per node of the point's start state."""
+    return [
+        f".ic v({node})={volts!r}"
+        for node, volts in sorted(
+            (getattr(point, "initial_conditions", None) or {}).items()
+        )
+    ]
+
+
+def _ic_analysis_args(point: CornerPoint, args: str) -> str:
+    """``args`` with ``uic`` appended for a point carrying a start state,
+    unless the request already spells it; untouched otherwise."""
+    if not getattr(point, "initial_conditions", None):
+        return args
+    if "uic" in str(args).lower().split():
+        return args
+    return f"{args} uic".strip()
 
 
 # --------------------------------------------------------------------------- #
@@ -5206,6 +6662,74 @@ def _apply_mismatch_instance_gating(
     return gated_path, report
 
 
+def _netlist_overrides_environment(report: Any) -> dict[str, Any]:
+    return {} if report is None else {"netlist_overrides": report}
+
+
+def _refuse_override_on_host_default(
+    report: Any,
+    *,
+    backend: str,
+    backend_from_host_default: bool,
+    n_points: int,
+) -> None:
+    """Issue #3919: a multi-corner request with ``netlist_overrides`` cannot
+    follow a host-default off-host backend (the rewritten closure stays here)."""
+    if (
+        report is not None
+        and backend_from_host_default
+        and backend in _OFFHOST_BACKENDS
+        and n_points > 1
+    ):
+        raise SimError(
+            "request.netlist_overrides cannot run on the host-default "
+            f"{backend!r} backend (the rewritten include closure is not "
+            "forwarded to remote/batch workers) and this request has "
+            f"{n_points} corners; run a single corner, or pass "
+            "--backend local explicitly"
+        )
+
+
+def _maybe_override_subckts(
+    request: dict[str, Any],
+    netlist_path: str,
+    *,
+    request_dir: str,
+    backend: str,
+    explicit_points: bool,
+    repo_root: str | None,
+) -> tuple[str, dict[str, Any] | None]:
+    """Apply ``request.netlist_overrides`` (issue #3919): returns
+    ``(netlist_to_dispatch, environment_entry)``; unchanged and ``None`` when
+    absent. Raises :class:`SimError` before any corner is dispatched."""
+    import atexit
+
+    if "netlist_overrides" not in request:
+        return netlist_path, None
+    if backend in _OFFHOST_BACKENDS or explicit_points:
+        raise SimError(
+            "request.netlist_overrides is only supported on local backends "
+            f"(got backend {backend!r}); the rewritten include closure is not "
+            "forwarded to remote/batch workers"
+        )
+    try:
+        overrides = sim_subckt_override.parse_spec(
+            request["netlist_overrides"], request_dir
+        )
+        work_dir = _tmp_work_dir()
+        atexit.register(_cleanup_dir, work_dir)
+        new_path, entries = sim_subckt_override.apply_overrides(
+            netlist_path,
+            overrides,
+            work_dir=work_dir,
+            roots=sim_staging.host_resolved_roots(request),
+            repo_root=repo_root,
+        )
+    except sim_subckt_override.OverrideError as exc:
+        raise SimError(str(exc)) from exc
+    return new_path, {"subckt": entries}
+
+
 def _validate_monte_carlo_spec(mc_spec: dict[str, Any]) -> tuple[int, int, str]:
     """Validate ``request.monte_carlo`` and return its ``(n, seed, vary)``
     fields. Raises :class:`SimError` with an actionable message for a
@@ -5277,6 +6801,51 @@ def _validate_k_sigma(value: Any, field: str) -> float:
     if value < 0:
         raise SimError(f"{field} must be a non-negative number (got {value!r})")
     return float(value)
+
+
+def _resolve_mismatch_scale(
+    mc_spec: dict[str, Any], pdk: Any
+) -> tuple[float, str] | None:
+    """Validate the optional ``request.monte_carlo.mismatch_scale`` (issue
+    #3942) and return ``(scale, param)`` -- the factor and the PDK family's
+    mismatch ``.param`` it sets -- or ``None`` when the request omits it.
+
+    The scale is applied by writing the family's multiplicative mismatch
+    switch (:data:`sim_mismatch_gate.MISMATCH_SWITCH`), so only a family
+    whose switch is verified to scale the ``AGAUSS``/``delvto`` terms
+    linearly is supported; any other family (or an undeterminable PDK) is
+    refused rather than approximated."""
+    if "mismatch_scale" not in mc_spec:
+        return None
+    value = mc_spec["mismatch_scale"]
+    field = "request.monte_carlo.mismatch_scale"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
+    if not math.isfinite(value) or value < 0:
+        raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
+    family = pdk_variant_family(pdk) if pdk else None
+    param = sim_mismatch_gate.MISMATCH_SWITCH.get(family or "")
+    if param is None:
+        known = ", ".join(sorted(sim_mismatch_gate.MISMATCH_SWITCH))
+        raise SimError(
+            f"{field} is only supported for PDK families with a verified "
+            f"multiplicative mismatch switch ({known}); models.pdk "
+            f"{pdk!r} resolves to family {family!r}"
+        )
+    return float(value), param
+
+
+def _validate_spec_row(value: Any, field: str) -> str | None:
+    """Validate ``request.measurements[].spec_row`` (issue #3778): the id of
+    the spec row this measurement grades, a non-empty string (``None`` when
+    undeclared). Echoed onto the
+    report's per-measurement rollup so `klt signoff` can derive which spec
+    rows a citation covers instead of trusting the manifest."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise SimError(f"{field} must be a non-empty string (got {value!r})")
+    return value
 
 
 def _validate_plausible_range(value: Any, field: str) -> dict[str, float]:
@@ -5490,6 +7059,46 @@ def _corner_process_sections(corner_points: list[Any]) -> list[str]:
     ]
 
 
+def _corner_coverage_environment(
+    request: dict[str, Any], corner_points: list[Any]
+) -> dict[str, Any]:
+    """Additive ``environment.corner_coverage`` (issue #3794): per requested
+    non-typical process section, the device flavours the PDK deck leaves at
+    their typical model (e.g. gf180mcu's 5/6V devices), so a multi-corner
+    sweep never reads as skewing devices it does not. Empty (key absent) when
+    there is no resolvable PDK, no per-flavour corner data, or nothing
+    unmoved."""
+    models = request.get("models") or {}
+    if not (models.get("pdk") or models.get("pdk_root")):
+        return {}
+    process_sections = list(dict.fromkeys(_corner_process_sections(corner_points)))
+    if not process_sections:
+        return {}
+    try:
+        report = list_corners(variant=models.get("pdk"), root=models.get("pdk_root"))
+    except PdkNotFoundError:
+        return {}
+    by_corner = {entry["corner"]: entry for entry in report["corners"]}
+    entries: list[dict[str, Any]] = []
+    for name in process_sections:
+        corner = by_corner.get(name)
+        if corner is None:
+            continue
+        devices = [
+            device
+            for section in corner["sections"]
+            for device in section.get("devices", [])
+        ]
+        if not devices:
+            continue
+        unmoved = [d["flavour"] for d in devices if d["skew"] == "typical"]
+        if name != "typical" and unmoved:
+            entries.append({"process": name, "unmoved_devices": unmoved})
+    if not entries:
+        return {}
+    return {"corner_coverage": {"pdk": report["pdk"], "sections": entries}}
+
+
 def _with_family_mismatch(
     monte_carlo_info: dict[str, Any],
     injected: tuple[list[dict[str, Any]], float] | None,
@@ -5608,6 +7217,7 @@ def _expand_monte_carlo(
     corner_points: list[CornerPoint],
     mc_spec: dict[str, Any],
     injected: tuple[list[dict[str, Any]], float] | None = None,
+    mismatch_scale: tuple[float, str] | None = None,
 ) -> tuple[list[CornerPoint], dict[str, Any]]:
     """Expand each point in ``corner_points`` into ``mc_spec["n"]`` sample
     points, returning ``(sampled_points, monte_carlo_info)``.
@@ -5634,11 +7244,13 @@ def _expand_monte_carlo(
     that draws mismatch from ngspice's own RNG (``agauss``/``gauss`` in
     ``.param`` expressions): ngspice receives only the combined
     ``.options seed=<rndseed>``, derived from both components, so it still
-    changes per sample under ``vary: "process"``. For such decks, switch
-    the deck's own mismatch off (e.g. gf180mcu ``sw_stat_mismatch=0``) to
-    get a sigma=0 control. Requesting the *same* ``mc_spec["seed"]`` again
-    (same process, different process, doesn't matter) reproduces the exact same sequence
-    of derived seeds -- see :func:`_derive_mc_seed`.
+    changes per sample under ``vary: "process"``. For such decks, request
+    ``monte_carlo.mismatch_scale: 0`` (issue #3942; sky130/gf180mcu) to
+    switch the deck's own mismatch off and get a sigma=0 control.
+
+    Requesting the *same* ``mc_spec["seed"]`` again (same process, different
+    process, doesn't matter) reproduces the exact same sequence of derived
+    seeds -- see :func:`_derive_mc_seed`.
 
     ``injected`` (issue #2911) is ``(resolved, scale)`` from
     :func:`_resolve_injected`: each sample then also records its design-owned
@@ -5685,6 +7297,10 @@ def _expand_monte_carlo(
                 # `quantiles`/`k_sigma`, so a request that omits the field
                 # keeps its pre-#2899 response shape.
                 mc_seed["seed_scope"] = seed_scope
+            if mismatch_scale is not None:
+                # Rides the point (and so the fleet wire and the deck
+                # writer); echoed only when declared (issue #3942).
+                mc_seed["mismatch_scale"], mc_seed["mismatch_param"] = mismatch_scale
             sampled.append(
                 CornerPoint(
                     base.process,
@@ -5693,6 +7309,10 @@ def _expand_monte_carlo(
                     process_sections=base.process_sections,
                     process_section_libs=base.process_section_libs,
                     params=base.params,
+                    variant=base.variant,
+                    nodeset=base.nodeset,
+                    initial_conditions=base.initial_conditions,
+                    options=base.options,
                     sample_index=sample_index,
                     mc_seed=mc_seed,
                     mc_injected=(
@@ -5707,6 +7327,8 @@ def _expand_monte_carlo(
         info["injected_scale"] = injected[1]
     if "seed_scope" in mc_spec:
         info["seed_scope"] = seed_scope
+    if mismatch_scale is not None:
+        info["mismatch_scale"], info["mismatch_param"] = mismatch_scale
     return sampled, info
 
 
@@ -5748,6 +7370,38 @@ def _open_resume_checkpoint(
     return pre_completed, loaded_engine_version, checkpoint
 
 
+def _key_in_initial_conditions(
+    payload: dict[str, Any], corner_points: Sequence[CornerPoint]
+) -> None:
+    """Issue #3881: a start state changes the transient result, so a changed
+    map must not reuse a stored one. Keyed in only when present, leaving every
+    legacy fingerprint untouched."""
+    ics = {
+        point.corner_id: point.initial_conditions
+        for point in corner_points
+        if point.initial_conditions
+    }
+    if ics:
+        payload["initial_conditions"] = ics
+
+
+def _key_in_mc_mismatch_scale(
+    payload: dict[str, Any], corner_points: Sequence[CornerPoint]
+) -> None:
+    """Issue #3942: corner IDs carry neither seeds nor the sigma scale, so a
+    resume under another ``monte_carlo.mismatch_scale`` would reuse samples
+    drawn at the old scale. Keyed in only when declared."""
+    mc_scales = sorted(
+        {
+            (point.mc_seed["mismatch_param"], point.mc_seed["mismatch_scale"])
+            for point in corner_points
+            if point.mc_seed and "mismatch_scale" in point.mc_seed
+        }
+    )
+    if mc_scales:
+        payload["mc_mismatch_scale"] = mc_scales
+
+
 def _checkpoint_fingerprint(
     *,
     netlist_path: str,
@@ -5761,7 +7415,9 @@ def _checkpoint_fingerprint(
     corner_section_libs: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
 ) -> str:
     """A SHA-256 fingerprint of everything that determines what a sweep's
     corners actually run -- the basis for deciding whether an on-disk
@@ -5779,7 +7435,7 @@ def _checkpoint_fingerprint(
     as if it did not exist, never silently reused against a since-modified
     matrix (see ``run_sim``'s docstring).
     """
-    payload = {
+    payload: dict[str, Any] = {
         "netlist_sha256": sha256_file(netlist_path),
         "models_lib_sha256": sha256_file(models_lib),
         "analysis": analysis,
@@ -5803,6 +7459,9 @@ def _checkpoint_fingerprint(
     if save_vectors:
         # Issue #3211: the saved vector set decides which measurements resolve.
         payload["save_vectors"] = list(save_vectors)
+    if complex_vectors:
+        # Issue #3337: the declared vectors decide what the corner returns.
+        payload["complex_vectors"] = list(complex_vectors)
     if ngspice_options:
         # Issue #3111: solver options change which solves converge, so a
         # checkpoint written under other options never applies. Only keyed
@@ -5819,6 +7478,21 @@ def _checkpoint_fingerprint(
         # drawn from other seeds. Only keyed in off the default, so an
         # existing checkpoint stays valid for a request that omits the field.
         payload["mc_seed_scope"] = sorted(mc_scopes)
+    _key_in_mc_mismatch_scale(payload, corner_points)
+    if stimulus_lines:
+        # Issue #2977: the declared stimulus decides every corner's drive, so
+        # an edited schedule must invalidate the checkpoint. Only keyed in
+        # when declared, so existing checkpoints stay valid.
+        payload["stimulus"] = list(stimulus_lines)
+    if any(point.nodeset for point in corner_points):
+        # Issue #3036: an initial guess can change which solution a
+        # multi-equilibrium circuit lands on, so a changed hint must not reuse
+        # a stored result. The corner IDs above do not carry it. Only keyed
+        # in when a hint exists, leaving every legacy fingerprint untouched.
+        payload["nodeset"] = {
+            point.corner_id: point.nodeset for point in corner_points if point.nodeset
+        }
+    _key_in_initial_conditions(payload, corner_points)
     if corner_section_libs:
         # Issue #2522: a corner's per-section libraries determine its device
         # models exactly as `models.lib` does, so editing one must invalidate
@@ -5874,6 +7548,10 @@ class _Checkpoint:
     per-shard threads call :meth:`record` concurrently.
     """
 
+    @property
+    def fingerprint(self) -> str:
+        return self._fingerprint
+
     def __init__(self, path: str, fingerprint: str) -> None:
         self._path = path
         self._fingerprint = fingerprint
@@ -5928,6 +7606,7 @@ def _refuse_xyce_control_block_measurements(
     cycle_mean_declared: bool,
     energy_declared: bool,
     transfer_declared: bool = False,
+    snm_declared: bool = False,
 ) -> None:
     """The ``engine: "xyce"`` refusals for measurement forms that exist only
     as commands in klt's generated ngspice ``.control`` block (``expr``,
@@ -5985,18 +7664,85 @@ def _refuse_xyce_control_block_measurements(
             "`.control` block, and the Xyce deck has none; use engine "
             "'ngspice'"
         )
+    if snm_declared:
+        # Issue #3895: same `.control` let/write boundary as `transfer`.
+        raise SimError(
+            "measurements[].snm is not supported for engine 'xyce': the sweep "
+            "vectors are dumped by ngspice `let`/`write` commands inside a "
+            "`.control` block, and the Xyce deck has none; use engine "
+            "'ngspice'"
+        )
 
 
 def _refuse_xyce_params_axis(corners_spec: dict[str, Any]) -> None:
     """The ``engine: "xyce"`` refusal for ``corners.params``. Split out of
     :func:`_enforce_xyce_support_boundary` to keep that gate under the
     complexity limit."""
-    if corners_spec.get("params"):
+    if corners_spec.get("params") or corners_spec.get("temperature_param"):
         raise SimError(
-            "engine 'xyce' does not support corners.params: the parameter "
+            "engine 'xyce' does not support corners.params or "
+            "corners.temperature_param: the parameter "
             "axis is applied with ngspice's `alterparam` + `reset` control "
             "commands, which Xyce has no netlist equivalent of -- use engine "
             "'ngspice'"
+        )
+
+
+def _refuse_xyce_alter_corner_axes(corners_spec: dict[str, Any]) -> None:
+    """The ``engine: "xyce"`` refusals for corner axes that are applied with
+    ngspice's ``alter`` control command (``supply_v``; ``variants``, issue
+    #3252). Split out of :func:`_enforce_xyce_support_boundary` to keep that
+    gate under the complexity limit."""
+    if corners_spec.get("supply_v") or any(
+        isinstance(unit, dict) and unit.get("supply_v")
+        for unit in corners_spec.get("units") or []
+    ):
+        raise SimError(
+            "engine 'xyce' does not support corners.supply_v: Xyce has "
+            "no netlist equivalent of ngspice's `alter` control command, "
+            "so per-corner supply rails cannot be patched into the deck "
+            "-- leave corners.supply_v unset (fixed supply, hardcoded in "
+            "the netlist body) or use engine 'ngspice'"
+        )
+    if corners_spec.get("variants"):
+        raise SimError(
+            "engine 'xyce' does not support corners.variants: variant "
+            "sources are applied with ngspice's `alter` control command, "
+            "which Xyce has no netlist equivalent of -- leave "
+            "corners.variants unset or use engine 'ngspice'"
+        )
+
+
+def _refuse_xyce_nodeset(declared: bool) -> None:
+    """Issue #3036: the hints are rendered as ngspice `.nodeset v(node)=`
+    cards; the Xyce deck is not given an equivalent."""
+    if declared:
+        raise SimError(
+            "options.nodeset is not supported for engine 'xyce': initial "
+            "guesses are applied as ngspice `.nodeset` cards; use engine "
+            "'ngspice' or omit options.nodeset"
+        )
+
+
+def _refuse_xyce_linearize(declared: bool) -> None:
+    """Issue #4014: `linearize` is an ngspice control command; the Xyce deck
+    has no `.control` block to carry it."""
+    if declared:
+        raise SimError(
+            "analysis.linearize is not supported for engine 'xyce': it is an "
+            "ngspice `.control` command, which the Xyce deck does not have; "
+            "use engine 'ngspice' or drop the field"
+        )
+
+
+def _refuse_xyce_options_axis(corners_spec: dict[str, Any]) -> None:
+    """The ``engine: "xyce"`` refusal for ``corners.options`` (issue #3125):
+    the axis is a generated ngspice ``.options`` card."""
+    if corners_spec.get("options"):
+        raise SimError(
+            "engine 'xyce' does not support corners.options: the axis is "
+            "emitted as ngspice solver `.options` cards, whose names Xyce "
+            "does not share -- use engine 'ngspice'"
         )
 
 
@@ -6012,11 +7758,15 @@ def _enforce_xyce_support_boundary(
     save_mode_declared: bool = False,
     save_vectors_declared: bool = False,
     ngspice_options_declared: bool = False,
+    nodeset_declared: bool = False,
+    initial_conditions_declared: bool = False,
     analysis_steps_declared: bool = False,
+    linearize_declared: bool = False,
     crossings_declared: bool = False,
     cycle_mean_declared: bool = False,
     energy_declared: bool = False,
     transfer_declared: bool = False,
+    snm_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -6029,6 +7779,7 @@ def _enforce_xyce_support_boundary(
     """
     if engine != "xyce":
         return
+    _refuse_xyce_linearize(linearize_declared)
     if analysis_steps_declared:
         # Issue #2482: an ordered step sequence is `alter`/analysis/`let`
         # commands inside one ngspice `.control` block. The Xyce deck has no
@@ -6049,18 +7800,9 @@ def _enforce_xyce_support_boundary(
             f"local-parallel), not '{backend}' -- the remote/batch "
             "provisioning path pins the ngspice toolchain"
         )
-    if corners_spec.get("supply_v") or any(
-        isinstance(unit, dict) and unit.get("supply_v")
-        for unit in corners_spec.get("units") or []
-    ):
-        raise SimError(
-            "engine 'xyce' does not support corners.supply_v: Xyce has "
-            "no netlist equivalent of ngspice's `alter` control command, "
-            "so per-corner supply rails cannot be patched into the deck "
-            "-- leave corners.supply_v unset (fixed supply, hardcoded in "
-            "the netlist body) or use engine 'ngspice'"
-        )
+    _refuse_xyce_alter_corner_axes(corners_spec)
     _refuse_xyce_params_axis(corners_spec)
+    _refuse_xyce_options_axis(corners_spec)
     if monte_carlo_declared:
         raise SimError(
             "engine 'xyce' does not implement monte_carlo sampling -- "
@@ -6092,6 +7834,7 @@ def _enforce_xyce_support_boundary(
         cycle_mean_declared=cycle_mean_declared,
         energy_declared=energy_declared,
         transfer_declared=transfer_declared,
+        snm_declared=snm_declared,
     )
     for declared, message in (
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
@@ -6125,6 +7868,13 @@ def _enforce_xyce_support_boundary(
     ):
         if declared:
             raise SimError(message)
+    _refuse_xyce_nodeset(nodeset_declared)
+    if initial_conditions_declared:
+        raise SimError(
+            "options.initial_conditions is not supported for engine 'xyce': "
+            "start states are applied as ngspice `.ic` cards with `uic`; use "
+            "engine 'ngspice' or omit options.initial_conditions"
+        )
 
 
 def _run_local(
@@ -6151,10 +7901,12 @@ def _run_local(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
     convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
@@ -6238,10 +7990,12 @@ def _run_local(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             save_vectors=save_vectors,
+            complex_vectors=complex_vectors,
             waveform_max_bytes=waveform_max_bytes,
             ngspice_options=ngspice_options,
             convergence_retry=convergence_retry,
             portable_roots=portable_roots,
+            stimulus_lines=stimulus_lines,
             threads_per_worker=threads_per_worker,
         )
         corners.append(result)
@@ -6387,10 +8141,12 @@ def _run_local_parallel(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
     convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
@@ -6503,10 +8259,12 @@ def _run_local_parallel(
                     osdi_preload=osdi_preload,
                     save_mode=save_mode,
                     save_vectors=save_vectors,
+                    complex_vectors=complex_vectors,
                     waveform_max_bytes=waveform_max_bytes,
                     ngspice_options=ngspice_options,
                     convergence_retry=convergence_retry,
                     portable_roots=portable_roots,
+                    stimulus_lines=stimulus_lines,
                     threads_per_worker=threads_per_worker,
                 )
                 in_flight[future] = next_index
@@ -6971,6 +8729,65 @@ def _param_target_hint(param: str, sources: list[str]) -> str:
     )
 
 
+def _resolve_stimulus(
+    request: dict[str, Any],
+    analysis: dict[str, Any],
+    engine: str,
+    netlist_path: str,
+    corner_points: list[CornerPoint],
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]] | None]:
+    """The request's resolved ``stimulus`` signals (issue #2977), every
+    problem raised as a coded :class:`SimError` before any corner runs.
+
+    The second item is ``{corner_id: signals}`` when a level is written
+    supply-relative (issue #3918, resolved against each corner's
+    ``supply_v``), else ``None`` -- the first item is then the one schedule
+    every corner shares."""
+    by_corner: dict[str, list[dict[str, Any]]] | None = None
+    try:
+        if sim_stimulus.has_supply_relative(request):
+            by_corner = {
+                point.corner_id: sim_stimulus.resolve_stimulus(
+                    request, analysis, point.supply_v
+                )
+                for point in corner_points
+            }
+            signals = next(iter(by_corner.values()), [])
+        else:
+            signals = sim_stimulus.resolve_stimulus(request, analysis)
+        if not signals:
+            return [], None
+        if engine != "ngspice":
+            raise sim_stimulus.StimulusError(
+                f"request.stimulus is not supported for engine {engine!r}; "
+                "it is expanded into the ngspice deck only",
+                sim_stimulus.CODE_UNSUPPORTED,
+            )
+        existing = _stimulus_existing_elements(netlist_path)
+        sim_stimulus.check_collisions(signals, existing)
+        sim_stimulus.check_supply_conflict(
+            signals,
+            {key.strip().lower() for point in corner_points for key in point.supply_v},
+        )
+    except sim_stimulus.StimulusError as exc:
+        raise SimError(str(exc), code=exc.code) from exc
+    return signals, by_corner
+
+
+def _stimulus_existing_elements(netlist_path: str) -> set[str]:
+    """Lower-cased top-level element names of the netlist and every
+    ``.include``/``.lib`` file the lexical scan can resolve."""
+    try:
+        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+            decl = _netlist_declarations(handle.read())
+    except OSError:
+        return set()
+    elements = set(decl.elements)
+    if decl.includes:
+        elements |= _included_elements(netlist_path, decl.includes) or set()
+    return elements
+
+
 def _validate_supply_override_targets(
     netlist_path: str, corner_points: list[CornerPoint]
 ) -> None:
@@ -6993,9 +8810,21 @@ def _validate_supply_override_targets(
     except (OSError, UnicodeDecodeError):
         return
     waveforms = _top_level_waveform_sources(text)
+    scaled = {name for point in corner_points for name in point.supply_waveforms}
+    for name in sorted(scaled):
+        # Fail closed on anything the rewrite cannot reproduce exactly.
+        sim_supply_waveform.find_source(
+            text, name, option="corners.supply_waveforms", error_cls=SimError
+        )
     for target in targets:
         waveform = waveforms.get(target.strip().lower())
-        if waveform is not None:
+        if waveform is not None and target not in scaled:
+            hint = (
+                "; to scale its levels per corner instead, list it in "
+                "corners.supply_waveforms (supported for "
+                + "/".join(k.upper() for k in sim_supply_waveform.SCALABLE_KINDS)
+                + " sources)"
+            )
             raise SimError(
                 f"corners.supply_v override of source {target!r} is not "
                 f"supported: the netlist declares it with an explicit "
@@ -7003,7 +8832,7 @@ def _validate_supply_override_targets(
                 f"{target}=<value>` has no effect on it (the run would "
                 "silently simulate the netlist's own waveform). Declare the "
                 "source as a plain DC value, or remove it from "
-                "corners.supply_v"
+                "corners.supply_v" + hint
             )
     for target, sources in _param_only_targets(netlist_path, targets).items():
         raise SimError(
@@ -7187,6 +9016,30 @@ def _expand_netlist_includes(
     return rewritten, diagnostics
 
 
+def _scale_supply_waveforms(
+    run_netlist_path: str, original_path: str, corner_dir: str, point: CornerPoint
+) -> tuple[str, dict[str, Any]]:
+    """Write the corner's netlist copy with each ``point.supply_waveforms``
+    source rescaled to its ``supply_v`` value (issue #2902); returns
+    ``(copy_path, disclosure)``. Relative ``.include`` targets that resolve
+    beside the original netlist are made absolute, as in
+    :func:`_expand_netlist_includes`. A corner with no waveform sources
+    passes the netlist through untouched with an empty disclosure."""
+    if not point.supply_waveforms:
+        return run_netlist_path, {}
+    with open(run_netlist_path, encoding="utf-8", errors="surrogateescape") as fh:
+        text = fh.read()
+    scaled, disclosure = sim_supply_waveform.scale_netlist(
+        text, point.supply_v, point.supply_waveforms, error_cls=SimError
+    )
+    base = os.path.dirname(os.path.abspath(original_path))
+    final = [_absolutize_relative_include(line, base) for line in scaled.split("\n")]
+    out_path = os.path.join(corner_dir, "netlist.supply_waveforms.cir")
+    with open(out_path, "w", encoding="utf-8", errors="surrogateescape") as fh:
+        fh.write("\n".join(final))
+    return out_path, disclosure
+
+
 def _prepare_corner_run(
     *,
     corner_dir: str,
@@ -7202,7 +9055,9 @@ def _prepare_corner_run(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     extra_options_card: str | None = None,
 ) -> tuple[list[str], str, str | None, str]:
     """Write the engine's per-corner deck and build its command line.
@@ -7258,7 +9113,9 @@ def _prepare_corner_run(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             save_vectors=save_vectors,
+            complex_vectors=complex_vectors,
             ngspice_options=ngspice_options,
+            stimulus_lines=stimulus_lines,
             extra_options_card=extra_options_card,
         )
         _write_spiceinit(corner_dir, ngspice_init)
@@ -7333,6 +9190,51 @@ def _require_params_echo(
             "every row; update the runner image to this klt release, or "
             "use a local backend. No result was reported",
             code=PARAMS_UNSUPPORTED_WORKER_CODE,
+        )
+
+
+OPTIONS_UNSUPPORTED_WORKER_CODE = "options_unsupported_worker"
+
+
+def _require_options_echo(
+    points: list[CornerPoint],
+    corners: list[dict[str, Any]],
+    *,
+    backend: str = "remote",
+) -> None:
+    """Fail the request when an off-host worker did not honor a
+    ``corners.options`` axis (issue #3125) -- the counterpart of
+    :func:`_require_params_echo`. A worker that predates the axis ignores
+    it and would run every rung at the default tolerance under the legacy
+    corner ID; a supporting worker echoes each point's ``options`` and its
+    option-suffixed ``corner_id``."""
+    if backend not in _OFFHOST_BACKENDS or not any(p.options for p in points):
+        return
+    problem: str | None = None
+    if len(corners) != len(points):
+        problem = (
+            f"it returned {len(corners)} corner report(s) for "
+            f"{len(points)} dispatched point(s)"
+        )
+    else:
+        for point, corner in zip(points, corners, strict=True):
+            if corner.get("corner_id") != point.corner_id or (
+                corner.get("options") or {}
+            ) != (point.options or {}):
+                problem = (
+                    f"corner {point.corner_id!r} came back as "
+                    f"{corner.get('corner_id')!r} with options "
+                    f"{corner.get('options')!r}"
+                )
+                break
+    if problem is not None:
+        raise SimError(
+            "the remote/batch worker did not honor corners.options -- "
+            f"{problem}. A worker built before the options axis (issue "
+            "#3125) ignores it and would simulate the default solver "
+            "tolerances for every rung; update the runner image to this klt "
+            "release, or use a local backend. No result was reported",
+            code=OPTIONS_UNSUPPORTED_WORKER_CODE,
         )
 
 
@@ -7569,6 +9471,28 @@ def _effective_threads_per_worker(
     return None
 
 
+def _write_corner_manifest(corner_dir: str, point: CornerPoint) -> None:
+    """Record the full ``corner_id`` in ``corner.json`` when the directory
+    slug is not the readable form (bounded or parameter-axis slugs)."""
+    if point.slug == point.readable_slug:
+        return
+    with open(os.path.join(corner_dir, "corner.json"), "w", encoding="utf-8") as handle:
+        json.dump(
+            {"corner_id": point.corner_id, "readable_slug": point.readable_slug},
+            handle,
+            indent=2,
+        )
+
+
+def _mc_seed_optional_echo(mc_seed: dict[str, Any]) -> dict[str, Any]:
+    """The per-sample ``monte_carlo`` fields that are echoed only when the
+    request declared them: ``seed_scope`` (issue #2899) and ``mismatch_scale``
+    (issue #3942)."""
+    return {
+        key: mc_seed[key] for key in ("seed_scope", "mismatch_scale") if key in mc_seed
+    }
+
+
 def _run_corner(
     *,
     extra_options_card: str | None = None,
@@ -7588,9 +9512,11 @@ def _run_corner(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     ngspice_options: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Run one corner point through the selected engine's batch binary and
@@ -7642,11 +9568,15 @@ def _run_corner(
     if keep_artifacts:
         corner_dir = os.path.join(artifacts_dir, point.slug)
         os.makedirs(corner_dir, exist_ok=True)
+        _write_corner_manifest(corner_dir, point)
     else:
         corner_dir = _tmp_work_dir()
 
     run_netlist_path, include_diagnostics = _expand_netlist_includes(
         netlist_path, corner_dir
+    )
+    run_netlist_path, supply_waveform_report = _scale_supply_waveforms(
+        run_netlist_path, netlist_path, corner_dir, point
     )
     command, log_path, raw_path, deck_path = _prepare_corner_run(
         corner_dir=corner_dir,
@@ -7662,7 +9592,9 @@ def _run_corner(
         osdi_preload=osdi_preload,
         save_mode=save_mode,
         save_vectors=save_vectors,
+        complex_vectors=complex_vectors,
         ngspice_options=ngspice_options,
+        stimulus_lines=stimulus_lines,
         extra_options_card=extra_options_card,
     )
 
@@ -7670,6 +9602,7 @@ def _run_corner(
     started = time.monotonic()
     timed_out = False
     engine_aborted = False
+    analysis_never_started = False
     engine_version: str | None = None
     stdout_text = ""
     stderr_text = ""
@@ -7740,8 +9673,12 @@ def _run_corner(
             engine_aborted = True
         classified = _classify_engine_diagnostics(log_text, netlist_path, engine)
         diagnostics.extend(classified)
+        analysis_never_started = not is_xyce and _mark_analysis_not_started(
+            classified, log_text
+        )
         no_log_reported = False
         diagnostics.extend(_alterparam_failures(point, log_text + "\n" + stdout_text))
+        diagnostics.extend(_nodeset_failures(point, log_text + "\n" + stdout_text))
         if engine_exit_code and not log_text and not os.path.exists(log_path):
             diagnostics.append(
                 {
@@ -7781,7 +9718,9 @@ def _run_corner(
     # Issue #2868: crossings series are read from this corner's own working
     # directory now, before it is cleaned up below -- so the reduced array is
     # what leaves the corner, on every backend, whatever `keep_artifacts` is.
-    crossings = sim_crossings.extract_corner_crossings(measurements_spec, corner_dir)
+    crossings = sim_crossings.extract_corner_crossings(
+        measurements_spec, corner_dir, point.supply_v
+    )
     # Issue #3033: same for the energy reduction.
     energy = sim_energy.extract_corner_energy(measurements_spec, corner_dir)
     cycle_means = sim_cycle_mean.extract_corner_cycle_means(
@@ -7790,6 +9729,15 @@ def _run_corner(
     transfers = sim_transfer_meas.extract_corner_transfers(
         measurements_spec, corner_dir
     )
+    snms = sim_snm_meas.extract_corner_snms(measurements_spec, corner_dir)
+    # Issue #3160: each pass's rawfile is decoded once, shared by the tian
+    # reduction below and the corner's `passes` field.
+    pass_results = (
+        sim_passes.extract_corner_passes(analysis, corner_dir)
+        if sim_passes.is_passes_analysis(analysis)
+        else []
+    )
+    tians = sim_tian.extract_corner_tians(measurements_spec, pass_results)
     measurement_results, measurement_diagnostics, step_fields = (
         _corner_measurement_results(
             measurement_values,
@@ -7797,17 +9745,32 @@ def _run_corner(
             analysis=analysis,
             log_text=log_text,
             is_xyce=is_xyce,
-            save_mode=save_mode,
+            save_mode=_effective_save_mode(save_mode, diagnostics),
             crossings=crossings,
             energy=energy,
             cycle_means=cycle_means,
             transfers=transfers,
+            snms=snms,
+            tians=tians,
+            engine_diagnostics=diagnostics,
         )
     )
     measurement_diagnostics = _demote_abort_cascade(
-        measurement_diagnostics, engine_aborted
+        measurement_diagnostics, engine_aborted or analysis_never_started
     )
     diagnostics.extend(measurement_diagnostics)
+    pass_fields, pass_diagnostics = sim_passes.corner_fields(
+        analysis, corner_dir, keep_artifacts=keep_artifacts, results=pass_results
+    )
+    diagnostics.extend(pass_diagnostics)
+    # Issue #3337: decode the declared vectors into the sidecar before the
+    # corner is graded, so a missing or non-finite one fails it.
+    complex_outcome = sim_complex_vectors.extract_corner(complex_vectors, corner_dir)
+    diagnostics.extend(complex_outcome.diagnostics)
+    # Issue #3338: reduce a two-port corner's two excitations to S; a missing
+    # or non-finite rawfile is an error diagnostic, so it cannot grade `pass`.
+    twoport_outcome = sim_twoport.extract_corner(analysis, corner_dir)
+    diagnostics.extend(twoport_outcome.diagnostics)
 
     # Issue #3016: the engine ran (any exit status, including 0) yet left no
     # log text and not a single requested measurement has a value -- the
@@ -7834,6 +9797,15 @@ def _run_corner(
                 ),
             }
         )
+
+    # Issue #2846: the engine's abort trailer gets its own analysis-level
+    # diagnostic, always at `severity: "error"`, reported alongside (not
+    # instead of) the per-measurement ones. Appended before
+    # `disqualifying` is sampled so `fail_on_diagnostic` can name it.
+    aborted_re = _XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE
+    aborted_diagnostic = _analysis_aborted_diagnostic(log_text, aborted_re)
+    if aborted_diagnostic is not None:
+        diagnostics.append(aborted_diagnostic)
 
     # A recovered `singular_matrix`/`nonconvergence` classification (the
     # engine's own stepping-recovery narration -- routine noise on the way
@@ -7865,7 +9837,7 @@ def _run_corner(
         measurements_spec,
         measurement_results,
         log_text,
-        aborted_re=(_XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE),
+        aborted_re=aborted_re,
         waveform_complete=waveform_complete,
     ):
         _downgrade_stepping_diagnostics(diagnostics, bool(measurements_spec))
@@ -7880,6 +9852,10 @@ def _run_corner(
     }
     # Additive (issue #3006): only for a `noise` corner whose rawfile parsed.
     noise_fields: dict[str, str] = {}
+    artifacts.update(
+        sim_complex_vectors.artifact_fields(complex_vectors, complex_outcome)
+    )
+    artifacts.update(sim_twoport.artifact_fields(analysis, twoport_outcome))
     if keep_artifacts:
         if os.path.isfile(log_path):
             artifacts["log"] = log_path
@@ -7942,8 +9918,7 @@ def _run_corner(
             "process_seed": point.mc_seed["process_seed"],
             "mismatch_seed": point.mc_seed["mismatch_seed"],
         }
-        if "seed_scope" in point.mc_seed:
-            monte_carlo["seed_scope"] = point.mc_seed["seed_scope"]
+        monte_carlo.update(_mc_seed_optional_echo(point.mc_seed))
         if point.mc_injected is not None:
             monte_carlo["injected"] = [
                 {k: v for k, v in item.items() if k not in ("param", "scale")}
@@ -7956,6 +9931,9 @@ def _run_corner(
         "supply_v": point.supply_v,
         "temperature_c": point.temperature_c,
         **_params_report_field(point),
+        **_nodeset_report_field(point),
+        **_ic_report_field(point),
+        **_options_report_field(point),
         "status": status,
         "runtime_s": runtime_s,
         # Additive (issue #2848): the engine process's raw outcome. Both are
@@ -7968,9 +9946,28 @@ def _run_corner(
         "artifacts": artifacts,
         **noise_fields,
         "monte_carlo": monte_carlo,
+        # Additive/optional (issue #3252): the `corners.variants[]` name,
+        # present only for a variant-axis request.
+        **({"variant": point.variant} if point.variant is not None else {}),
         # Additive/optional (issue #2482): `steps` -- per-step outcomes --
         # only for an `analysis_steps[]` request; empty for every other one.
         **step_fields,
+        # Additive/optional (issue #3159): per-pass status for an
+        # `analysis.passes` request; absent for every other one.
+        **pass_fields,
+        # Additive/optional (issue #3337): the declared complex vectors'
+        # names and point count; the arrays are in `artifacts.complex_vectors`.
+        **sim_complex_vectors.corner_fields(complex_vectors, complex_outcome),
+        # Additive/optional (issue #3338): per-frequency S-parameters of an
+        # `analysis.kind: "twoport"` request; the `.s2p` is in `artifacts`.
+        **sim_twoport.corner_fields(analysis, twoport_outcome),
+        # Additive/optional (issue #2902): the effective per-corner waveform
+        # levels, only for a request that scales a PWL/PULSE supply source.
+        **(
+            {"supply_waveforms": supply_waveform_report}
+            if supply_waveform_report
+            else {}
+        ),
     }
     return corner, engine_version
 
@@ -7998,7 +9995,8 @@ def _engine_aborted_diagnostic(
 def _demote_abort_cascade(
     measurement_diagnostics: list[dict], engine_aborted: bool
 ) -> list[dict]:
-    """After an ``engine_aborted`` the per-measurement "produced no value"
+    """After an ``engine_aborted`` -- or an ngspice deck-abort cause with no
+    analysis ever started (#3879) -- the per-measurement "produced no value"
     errors are consequences of the abort (the measurement results themselves
     stay ``error``), so drop them rather than crowd ``diagnostics[0]``
     (#3067)."""
@@ -8070,6 +10068,9 @@ def _corner_measurement_results(
     energy: dict[int, sim_energy.EnergyOutcome] | None = None,
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
+    snms: dict[int, sim_snm_meas.SnmOutcome] | None = None,
+    tians: dict[int, sim_tian.TianOutcome] | None = None,
+    engine_diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
     from its harvested log values.
@@ -8087,6 +10088,12 @@ def _corner_measurement_results(
     other corner takes the original single-analysis path below, unchanged:
     one result per spec in declared order, a ``measurement`` diagnostic for
     each one that produced no value, and ``extra_corner_fields`` empty.
+
+    ``engine_diagnostics`` (issue #3108) are the corner's diagnostics so far
+    (solver/timeout classification); a ``spice`` measurement declaring
+    ``on_unreached: "null"`` is graded :data:`NOT_REACHED_STATUS` instead of
+    ``error`` only when none of them is error-severity. Not applied to an
+    ``analysis_steps[]`` corner.
     """
     if sim_steps.is_steps_analysis(analysis):
         return sim_steps.grade_step_measurements(
@@ -8099,6 +10106,7 @@ def _corner_measurement_results(
     measurement_results: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
     meas_errors = {} if is_xyce else _parse_meas_errors(log_text)
+    unreached_names = set() if is_xyce else _parse_meas_unreached_names(log_text)
     attributed: set[str] = set()
     # Forms whose value comes from a rawfile reduction rather than the log:
     # (spec predicate, response-entry builder, position -> outcome map).
@@ -8114,6 +10122,8 @@ def _corner_measurement_results(
         (sim_energy.is_energy, _energy_measurement_result, energy),
         (sim_cycle_mean.is_cycle_mean, _cycle_mean_measurement_result, cycle_means),
         (sim_transfer_meas.is_transfer, _transfer_measurement_result, transfers),
+        (sim_tian.is_tian, _tian_measurement_result, tians),
+        (sim_snm_meas.is_snm, _snm_measurement_result, snms),
     )
     for position, spec in enumerate(measurements_spec):
         sidecar = next(
@@ -8135,6 +10145,31 @@ def _corner_measurement_results(
         name = spec["name"]
         value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
         unit = spec.get("unit")
+        if value is None and _is_unreached(
+            spec,
+            unreached_names=unreached_names,
+            diagnostics=engine_diagnostics or [],
+        ):
+            attributed.add(str(name).lower())
+            measurement_results.append(
+                {
+                    "name": name,
+                    "value": None,
+                    "unit": unit,
+                    "status": NOT_REACHED_STATUS,
+                    "margin": None,
+                }
+            )
+            diagnostics.append(
+                {
+                    "severity": "info",
+                    "code": NOT_REACHED_DIAGNOSTIC_CODE,
+                    "message": f"measurement '{name}' target not reached: the "
+                    "analysis completed but ngspice's .meas never satisfied "
+                    f"its condition ({spec['spice'].strip()})",
+                }
+            )
+            continue
         if value is None:
             result, diagnostic, was_attributed = _no_value_measurement(
                 spec, meas_errors, save_mode=save_mode
@@ -8370,9 +10405,14 @@ def _transfer_measurement_result(
     A failure is ``status: "error"``, ``value: null`` (so it can never pass a
     limit) with a ``code: "measurement"`` diagnostic whose message starts with
     a ``[<reason>]`` token from
-    :data:`klayout_tools.sim_transfer_meas.ERROR_CODES`."""
+    :data:`klayout_tools.sim_transfer_meas.ERROR_CODES`.
+
+    The all-crossing margin tokens (issue #3088) are graded by
+    :func:`_margin_measurement_result`."""
     name = spec["name"]
     unit = spec.get("unit")
+    if outcome is not None and outcome.margins is not None:
+        return _margin_measurement_result(spec, outcome)
     if outcome is None or outcome.value is None:
         message = (
             outcome.error
@@ -8412,6 +10452,204 @@ def _transfer_measurement_result(
         "transfer": outcome.report(spec),
     }
     return result, grading_diagnostics
+
+
+def _snm_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_snm_meas.SnmOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``snm`` measurement's response entry (issue #3895).
+
+    ``value`` is the butterfly SNM in volts, graded through
+    :func:`_grade_measurement_value` like any scalar; the request echo and the
+    two per-eye sides ride the additive ``snm`` sibling. A failure is
+    ``status: "error"``, ``value: null`` (so it can never pass a limit) with a
+    ``code: "measurement"`` diagnostic whose message starts with a
+    ``[<reason>]`` token from :data:`klayout_tools.sim_snm_meas.ERROR_CODES`."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.value is None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no snm value"
+        )
+        reason = (
+            outcome.code
+            if outcome is not None and outcome.code is not None
+            else "snm_vector_missing"
+        )
+        if save_mode == "netlist" and reason == "snm_vector_missing":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {
+                "severity": "error",
+                "code": "measurement",
+                "message": f"[{reason}] {message}",
+            }
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(
+        spec, outcome.value
+    )
+    result = {
+        "name": name,
+        "value": outcome.value,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "snm": outcome.report(spec),
+    }
+    return result, grading_diagnostics
+
+
+def _tian_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_tian.TianOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``tian`` measurement's response entry (issue #3160).
+
+    ``value`` is the metric, graded through :func:`_grade_measurement_value`
+    like any scalar; the request echo rides the additive ``tian`` sibling. A
+    failure is ``status: "error"``, ``value: null`` (so it can never pass a
+    limit) with a ``code: "measurement"`` diagnostic whose message starts with
+    a ``[<reason>]`` token from :data:`klayout_tools.sim_tian.ERROR_CODES`."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.value is None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no tian value"
+        )
+        reason = (
+            outcome.code
+            if outcome is not None and outcome.code is not None
+            else "tian_pass_missing"
+        )
+        if save_mode == "netlist" and reason == "tian_vector_missing":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {
+                "severity": "error",
+                "code": "measurement",
+                "message": f"[{reason}] {message}",
+            }
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(
+        spec, outcome.value
+    )
+    result = {
+        "name": name,
+        "value": outcome.value,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "tian": outcome.report(spec),
+    }
+    return result, grading_diagnostics
+
+
+def _margin_measurement_result(
+    spec: dict[str, Any], outcome: sim_transfer_meas.TransferOutcome
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """A ``transfer`` margin-metric entry (issue #3088).
+
+    ``value`` is graded through :func:`_grade_measurement_value` like any
+    scalar, then the AC band's verdict is applied: a limit that is *met* on a
+    band that cannot support a pass is :data:`_INCONCLUSIVE_STATUS` with a
+    :data:`MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE` warning -- never ``pass`` -- and a
+    violation is a sound ``fail`` only when ``grade_margins`` found it among
+    the crossings actually seen (a hidden crossing can only lower a minimum).
+    A metric with no crossing at all is vacuously ``pass`` on a clean band.
+    Without ``limits`` the entry is report-only and the band never downgrades
+    it; a valueless metric is then an ordinary ``transfer_metric_unavailable``
+    error."""
+    assert outcome.margins is not None
+    name = spec["name"]
+    metric = spec["transfer"]["metric"]
+    limits = spec.get("limits") or {}
+    has_limits = limits.get("min") is not None or limits.get("max") is not None
+    ambiguity = outcome.margins.ambiguity
+    diagnostics: list[dict[str, Any]] = []
+    status: str
+    margin: float | None = None
+    downgrade = False
+    if outcome.value is None:
+        if has_limits and sim_transfer_meas.is_vacuous(outcome, spec):
+            status = "pass"
+        elif has_limits and ambiguity:
+            status, downgrade = _INCONCLUSIVE_STATUS, True
+        else:
+            reason = sim_transfer_meas.unavailable_reason(outcome, metric)
+            return (
+                {
+                    "name": name,
+                    "value": None,
+                    "unit": spec.get("unit"),
+                    "status": "error",
+                    "margin": None,
+                    "transfer": outcome.report(spec),
+                },
+                [
+                    {
+                        "severity": "error",
+                        "code": "measurement",
+                        "message": (
+                            f"[transfer_metric_unavailable] measurement "
+                            f"'{name}': {metric} is unavailable ({reason})"
+                        ),
+                    }
+                ],
+            )
+    else:
+        status, margin, diagnostics = _grade_measurement_value(spec, outcome.value)
+        if (
+            has_limits
+            and ambiguity
+            and (status == "pass" or (status == "fail" and outcome.verdict != "fail"))
+        ):
+            status, margin, downgrade = _INCONCLUSIVE_STATUS, None, True
+    if downgrade:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE,
+                "message": (
+                    f"measurement {name!r}: {metric} cannot be graded -- the AC "
+                    f"band is ambiguous ({', '.join(ambiguity)}) -- graded "
+                    f"{_INCONCLUSIVE_STATUS} rather than pass/fail"
+                ),
+            }
+        )
+    return (
+        {
+            "name": name,
+            "value": outcome.value,
+            "unit": spec.get("unit"),
+            "status": status,
+            "margin": margin,
+            "transfer": outcome.report(spec),
+        },
+        diagnostics,
+    )
 
 
 def _energy_measurement_result(
@@ -8487,6 +10725,56 @@ def _parse_meas_errors(log_text: str) -> dict[str, str]:
     return errors
 
 
+#: The additive measurement status (and ``code``) for an unreached target.
+NOT_REACHED_STATUS = "not_reached"
+NOT_REACHED_DIAGNOSTIC_CODE = "measurement_not_reached"
+
+
+#: ngspice-46's reason line for a ``.meas`` target the completed sweep never
+#: reached (``WHEN``/``AT``/``TRIG``/``TARG`` outside the swept range), e.g.
+#: ``Error: measure  x  when(WHEN) : out of interval`` (verified empirically:
+#: a malformed card or a missing vector logs a different reason, or none).
+#: Unlike :data:`_MEAS_ERROR_RE` this is uncapped -- a deck can have dozens.
+_MEAS_UNREACHED_RE = re.compile(
+    r"^\s*Error:\s*measure\s+(\S+)\s+\S+\s*:\s*out of interval\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _parse_meas_unreached_names(log_text: str) -> set[str]:
+    """Lower-cased names of ``.meas`` cards that ngspice logged as both
+    ``out of interval`` and ``failed!`` (the latter guards against the
+    reason text appearing without the card actually failing)."""
+    text = log_text or ""
+    failed = {
+        match.group(1).lower()
+        for raw in text.splitlines()
+        if (match := _MEAS_FAILED_RE.match(raw.strip()))
+    }
+    return {
+        match.group(1).lower()
+        for match in _MEAS_UNREACHED_RE.finditer(text)
+        if match.group(1).lower() in failed
+    }
+
+
+def _is_unreached(
+    spec: dict[str, Any],
+    *,
+    unreached_names: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> bool:
+    """True when this value-less ``spice`` measurement opted into
+    ``on_unreached: "null"``, ngspice reported exactly "out of interval" for
+    it, and the corner carries no error-severity diagnostic (solver
+    divergence, timeout, ...) -- i.e. the analysis itself completed."""
+    if spec.get("on_unreached") != "null" or spec.get("spice") is None:
+        return False
+    if str(spec["name"]).lower() not in unreached_names:
+        return False
+    return not any(d["severity"] == "error" for d in diagnostics)
+
+
 def _harvest_measurement_value(
     measurement_values: dict[str, float],
     spec: dict[str, Any],
@@ -8523,6 +10811,24 @@ def _harvest_measurement_value(
     if value is None:
         return measurement_values.get(str(name).lower())
     return value
+
+
+def _effective_save_mode(save_mode: str, diagnostics: list[dict[str, Any]]) -> str:
+    """The save mode the no-value wording should assume (issue #3963).
+
+    The ``save_mode: "netlist"`` hint blames a signal the netlist's ``.save``
+    cards no longer retain. When the corner already carries an error-severity
+    engine diagnostic (``timeout``, ``engine_killed``, ``timestep_too_small``,
+    ...), the missing value has a known cause and the hint would mislead, so
+    the default wording is used instead. ``no_such_vector`` is exempt: it is
+    the retention symptom the hint exists to explain. The diagnostics
+    themselves are kept."""
+    if any(
+        d.get("severity") == "error" and d.get("code") != "no_such_vector"
+        for d in diagnostics
+    ):
+        return DEFAULT_SAVE_MODE
+    return save_mode
 
 
 def _no_value_message(
@@ -8648,7 +10954,9 @@ def _write_corner_deck(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
     extra_options_card: str | None = None,
 ) -> None:
     """Generate the corner-specific ngspice deck: an optional Monte Carlo
@@ -8687,12 +10995,38 @@ def _write_corner_deck(
         lines.append(f".param mc_mismatch_seed={point.mc_seed['mismatch_seed']}")
         if point.mc_injected is not None:
             lines.extend(sim_injected.deck_lines(point.mc_injected))
+    if point.options:
+        # Issue #3125: the swept solver options. ngspice honors the FIRST
+        # `.options` card that sets a name (measured on ngspice-46: a card
+        # after the `.include`d body, or after `options.ngspice_options`,
+        # is ignored), so this sits ahead of both -- the corner value wins
+        # over a body-level or request-level setting of the same option.
+        lines.append(
+            ".options "
+            + " ".join(
+                f"{name}={_format_param_value(value)}"
+                for name, value in sorted(point.options.items())
+            )
+        )
     # The corner's `.lib` cards: one per section for a multi-section bundle
     # (e.g. gf180mcu's per-device-family cards, each optionally against its
     # own library file -- issue #2522), a single card for a bare-string
     # process corner, none without a process axis. See `_corner_lib_lines`.
     lines.extend(_corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
+    if point.mc_seed is not None and "mismatch_scale" in point.mc_seed:
+        # Issue #3942: the sigma scale. Must come after the `.lib` (whose
+        # section sets the switch itself, e.g. sky130 `.param mc_mm_switch=0`
+        # or `=1` in the `_mm` sections) so the request's value is the last
+        # definition and wins.
+        lines.append(
+            f".param {point.mc_seed['mismatch_param']}="
+            f"{_format_param_value(point.mc_seed['mismatch_scale'])}"
+        )
+    # Issue #2977: the request's declared `stimulus`, expanded to PWL sources.
+    lines.extend(sim_stimulus.lines_for_corner(stimulus_lines, point.supply_v))
+    # Issue #3338: the two-port's per-port z0 + AC-source cards.
+    lines.extend(sim_twoport.deck_lines(analysis))
     lines.append(f".temp {point.temperature_c}")
     options_card = _ngspice_options_card(ngspice_options)
     if options_card is not None:
@@ -8706,6 +11040,13 @@ def _write_corner_deck(
         # same key, the retry policy wins and the second attempt actually
         # differs from the first.
         lines.append(extra_options_card)
+    # Issue #3036: after the `.include`, so a request hint beats a body-level
+    # `.nodeset` on the same node; nothing is emitted for a legacy point.
+    lines.extend(_nodeset_cards(point))
+    # Issue #3881: file-scope `.ic` cards, after the `.include` so a request
+    # start state beats a body-level `.ic` on the same node; the matching
+    # `uic` is added to the analysis command in `_corner_deck_control_lines`.
+    lines.extend(_ic_cards(point))
 
     for spec in measurements_spec:
         if spec.get("spice") is not None:
@@ -8720,6 +11061,7 @@ def _write_corner_deck(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             save_vectors=save_vectors,
+            complex_vectors=complex_vectors,
             corner_dir=os.path.dirname(os.path.abspath(deck_path)),
         )
     )
@@ -8748,6 +11090,36 @@ def _param_reset_lines(point: CornerPoint) -> list[str]:
     ]
 
 
+def _save_control_lines(
+    measurements_spec: list[dict[str, Any]],
+    raw_path: str | None,
+    save_mode: str,
+    save_vectors: tuple[str, ...],
+) -> list[str]:
+    """The ``save`` card :func:`_corner_deck_control_lines` emits (step 2 of
+    its ordering contract), or no lines when the corner has nothing to save
+    or ``save_mode`` opts out."""
+    if save_mode != DEFAULT_SAVE_MODE or not (
+        measurements_spec or raw_path is not None
+    ):
+        return []
+    if save_vectors:
+        return [
+            "save " + " ".join(_required_save_vectors(save_vectors, measurements_spec))
+        ]
+    return ["save all"]
+
+
+def _supply_alter_lines(point: CornerPoint) -> list[str]:
+    """One ``alter`` per swept supply rail, skipping the sources rescaled in
+    the corner's netlist copy instead (issue #2902)."""
+    return [
+        f"alter {key}={value}"
+        for key, value in sorted(point.supply_v.items())
+        if key not in point.supply_waveforms
+    ]
+
+
 def _corner_deck_control_lines(
     *,
     point: CornerPoint,
@@ -8757,6 +11129,7 @@ def _corner_deck_control_lines(
     osdi_preload: tuple[str, ...],
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
+    complex_vectors: tuple[str, ...] = (),
     corner_dir: str = ".",
 ) -> list[str]:
     """The ``.control``/``.endc`` block of :func:`_write_corner_deck`'s
@@ -8845,6 +11218,11 @@ def _corner_deck_control_lines(
        (:func:`klayout_tools.sim_transfer_meas.control_lines`), after the
        cycle_mean lines; same ``set filetype=ascii`` rule. None of this
        appears without a transfer entry.
+    9. Per unique ``measurements[].snm`` ``x``/``y1``/``y2`` triple (issue
+       #3895), three ``let`` lines and one ``write`` of the vectors
+       (:func:`klayout_tools.sim_snm_meas.control_lines`), after the transfer
+       lines; same ``set filetype=ascii`` rule. None of this appears without
+       an snm entry.
 
     An ``analysis_steps[]`` request (issue #2482) replaces step 3's analysis
     and 4's ``expr`` lines with the ordered step sequence
@@ -8859,16 +11237,10 @@ def _corner_deck_control_lines(
     # Issue #3035: the parameter reset must come first -- `reset` reloads the
     # circuit, so everything after it (save/alter/analysis) re-applies on top.
     prefix: list[str] = _param_reset_lines(point)
-    if save_mode == DEFAULT_SAVE_MODE and (measurements_spec or raw_path is not None):
-        if save_vectors:
-            prefix.append(
-                "save "
-                + " ".join(_required_save_vectors(save_vectors, measurements_spec))
-            )
-        else:
-            prefix.append("save all")
-    for key, value in sorted(point.supply_v.items()):
-        prefix.append(f"alter {key}={value}")
+    prefix.extend(
+        _save_control_lines(measurements_spec, raw_path, save_mode, save_vectors)
+    )
+    prefix.extend(_supply_alter_lines(point))
     lines.extend(prefix)
     if sim_steps.is_steps_analysis(analysis):
         # Issue #3103: a `reset: true` step re-emits this same prefix after
@@ -8879,21 +11251,44 @@ def _corner_deck_control_lines(
         )
         lines.extend(["quit", ".endc"])
         return lines
+    if sim_passes.is_passes_analysis(analysis):
+        # Issue #3159: one `alter`/`setplot new`/`ac`/`write` group per
+        # pass; the corner prefix above already set the corner up.
+        lines.extend(sim_passes.control_lines(analysis, corner_dir, measurements_spec))
+        lines.extend(["quit", ".endc"])
+        return lines
+    if sim_twoport.is_twoport(analysis):
+        # Issue #3338: one `alter`/`setplot new`/`ac`/`write` group per port.
+        lines.extend(sim_twoport.control_lines(analysis, corner_dir))
+        lines.extend(["quit", ".endc"])
+        return lines
     crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)
     energy_lines = sim_energy.control_lines(measurements_spec, corner_dir)
     cycle_mean_lines = sim_cycle_mean.control_lines(measurements_spec, corner_dir)
     transfer_lines = sim_transfer_meas.control_lines(measurements_spec, corner_dir)
+    snm_lines = sim_snm_meas.control_lines(measurements_spec, corner_dir)
+    complex_vector_lines = sim_complex_vectors.control_lines(
+        complex_vectors, corner_dir
+    )
     if (
         raw_path is not None
         or crossings_lines
         or energy_lines
         or cycle_mean_lines
         or transfer_lines
+        or snm_lines
+        or complex_vector_lines
     ):
         lines.append("set filetype=ascii")
-    lines.append(f"{analysis['kind']} {analysis['args']}")
+    lines.append(f"{analysis['kind']} {_ic_analysis_args(point, analysis['args'])}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
+    if analysis.get("linearize") is True:
+        # Issue #4014: resample onto a uniform grid, after any rawfile
+        # `write` (which keeps the solver's own points) and before the
+        # `expr` lets, so time-weighted sums are not biased by the
+        # adaptive timestep distribution.
+        lines.append("linearize")
     expr_specs = _expr_measurements(measurements_spec)
     if expr_specs and analysis["kind"] == "noise":
         # Issue #2893: after `noise`, ngspice's current plot is the integrated
@@ -8902,12 +11297,15 @@ def _corner_deck_control_lines(
         # is unchanged) so bare names resolve while totals stay bare too.
         lines.extend(f"let {vec} = noise1.{vec}" for vec in NOISE_SPECTRUM_VECTORS)
     for spec in expr_specs:
+        lines.extend(spec.get("expr_prelude", ()))
         lines.append(f"let {spec['name']} = {spec['expr']}")
         lines.append(f"print {spec['name']}")
     lines.extend(crossings_lines)
     lines.extend(energy_lines)
     lines.extend(cycle_mean_lines)
     lines.extend(transfer_lines)
+    lines.extend(snm_lines)
+    lines.extend(complex_vector_lines)
     lines.append("quit")
     lines.append(".endc")
     return lines
@@ -8982,6 +11380,84 @@ def _write_xyce_deck(
 
     with open(deck_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
+
+
+#: Bound on the recorded ``--version`` banner; matches the worker capture's
+#: ``WORKER_CAPTURE_BANNER_MAX`` so the two sides compare like for like.
+_ENGINE_BANNER_MAX = 2000
+_ENGINE_BANNER_TIMEOUT_S = 10
+
+
+def _engine_build_with_comparison(
+    ngspice_binary: str | None,
+    remote_environment: dict[str, Any] | None,
+    backend: str,
+    staged_model_inputs: list[dict[str, Any]] | None = None,
+    request: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Probe the local build and, for a batch sweep, compare it with each
+    worker's build in ``remote_environment`` (issue #3095), and the staged
+    model digests with what each worker hashed (issue #4020)."""
+    engine_build = _probe_engine_build(ngspice_binary)
+    if remote_environment is not None and backend == "batch":
+        attach_engine_build_comparison(remote_environment, engine_build)
+        attach_staged_model_comparison(remote_environment, staged_model_inputs, request)
+    return engine_build
+
+
+def _probe_engine_build(ngspice_binary: str | None) -> dict[str, Any] | None:
+    """``environment.engine_build`` (issue #3095): the local ngspice build
+    identity -- ``--version`` banner plus binary sha256 -- probed once per
+    sweep. ``engine_version`` is the major version only and two builds of one
+    major can differ in options (FFTW vs. padded FFT). ``None`` for engines
+    without a probe (xyce). A failed probe never fails the run: the banner is
+    ``None`` and ``probe`` / ``reason`` say why."""
+    if ngspice_binary is None:
+        return None
+    build: dict[str, Any] = {
+        "version_banner": None,
+        "binary_sha256": None,
+        "probe": "ok",
+        "reason": None,
+    }
+    try:
+        build["binary_sha256"] = sha256_file(ngspice_binary)
+    except OSError:
+        pass
+    try:
+        proc = subprocess.run(
+            [ngspice_binary, "--version"],
+            capture_output=True,
+            text=False,
+            timeout=_ENGINE_BANNER_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        build.update(
+            probe="timeout", reason=f"--version exceeded {_ENGINE_BANNER_TIMEOUT_S}s"
+        )
+        return build
+    except Exception as exc:  # the probe must never fail the sweep
+        build.update(probe="error", reason=f"could not run --version: {exc}"[:200])
+        return build
+    raw = proc.stdout or proc.stderr or b""
+    text: str = (
+        raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+    )[: _ENGINE_BANNER_MAX * 4]
+    banner = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in text).strip()[
+        :_ENGINE_BANNER_MAX
+    ]
+    if proc.returncode != 0 or not banner:
+        build.update(
+            probe="error",
+            reason=(
+                f"--version exited {proc.returncode}"
+                if proc.returncode != 0
+                else "--version printed no banner"
+            ),
+        )
+        return build
+    build["version_banner"] = banner
+    return build
 
 
 def _extract_engine_version(stdout: str) -> str | None:
@@ -9376,6 +11852,7 @@ def _run_calibration_probe(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run one short, bounded ``tran`` slice -- the calibration half of the
     two-pass probe model -- and report how it went.
@@ -9439,6 +11916,7 @@ def _run_calibration_probe(
         osdi_preload=osdi_preload,
         save_mode=save_mode,
         ngspice_options=ngspice_options,
+        stimulus_lines=stimulus_lines,
     )
     _write_spiceinit(probe_dir, ngspice_init)
 
@@ -9488,6 +11966,7 @@ def _run_fail_fast_probe(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    stimulus_lines: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """The two-pass probe model's dispatch-time entry point (issue #1694):
     run one short, bounded calibration ``tran`` slice on the grid's first
@@ -9534,6 +12013,7 @@ def _run_fail_fast_probe(
         osdi_preload=osdi_preload,
         save_mode=save_mode,
         ngspice_options=ngspice_options,
+        stimulus_lines=stimulus_lines,
     )
     if probe["error"] is not None:
         return None
@@ -9679,6 +12159,10 @@ def _classify_diagnostics(
             message = _diagnose_modelname_error(netlist_path) or message
         elif code in _PREREQUISITE_MESSAGES:
             message = _PREREQUISITE_MESSAGES[code].format(raw=message.strip())
+        if code == "ngspice_fatal" and any(
+            d["code"] in _NGSPICE_FATAL_CODES for d in diagnostics
+        ):
+            continue
         diagnostics.append({"severity": "error", "code": code, "message": message})
     return diagnostics
 
@@ -9906,6 +12390,42 @@ def _recovered_from_stepping(
     return True
 
 
+_ABORT_CONTEXT_LINES = 12
+_ABORT_MAX_QUOTED = 4
+_ABORT_ERROR_LINE_RE = re.compile(r"\b(?:error|fatal)\b", re.IGNORECASE)
+
+
+def _analysis_aborted_diagnostic(
+    log_text: str,
+    aborted_re: re.Pattern[str],
+) -> dict[str, str] | None:
+    """The analysis-level ``analysis_aborted`` diagnostic (issue #2846), or
+    ``None`` when the engine's abort trailer is absent.
+
+    Quotes the engine's own error line(s) preceding the trailer. Always
+    ``severity: "error"``: the trailer means the analysis never produced a
+    trustworthy result regardless of which measurement values happen to be
+    parseable -- the same rule :func:`_recovered_from_stepping` applies
+    (issue #205). A stepping-recovered corner has no trailer, so it never
+    gets this diagnostic at all.
+    """
+    match = aborted_re.search(log_text or "")
+    if match is None:
+        return None
+    lines = log_text[: match.end()].splitlines()
+    window = lines[-_ABORT_CONTEXT_LINES:]
+    quoted = [ln.strip() for ln in window if _ABORT_ERROR_LINE_RE.search(ln)]
+    trailer = lines[-1].strip() if lines else ""
+    if trailer and trailer not in quoted:
+        quoted.append(trailer)
+    quoted = quoted[-_ABORT_MAX_QUOTED:]
+    return {
+        "severity": "error",
+        "code": "analysis_aborted",
+        "message": "analysis aborted by the engine: " + " | ".join(quoted),
+    }
+
+
 def _capture_only_waveform_complete(
     measurements_spec: list[dict[str, Any]],
     raw_path: str | None,
@@ -10038,6 +12558,9 @@ def _measurement_coverage(
     # would make a distrusted corner look uncovered instead.
     implausible = measurement.get("status") == _INCONCLUSIVE_STATUS
     measured = has_value and measurement.get("status") in {"pass", "fail"}
+    # Issue #3108: an unreached target is an answered question (an
+    # observation) but no bound was applied to it, like `implausible`.
+    not_reached = measurement.get("status") == NOT_REACHED_STATUS
     checked = []
     skipped = []
     inapplicable = []
@@ -10045,7 +12568,7 @@ def _measurement_coverage(
         inapplicable.append(
             {"id": identity + "/limits", "reason": "characterization_without_limits"}
         )
-        if measured or implausible:
+        if measured or implausible or not_reached:
             checked.append(identity + "/observation")
         else:
             skipped.append(
@@ -10062,7 +12585,16 @@ def _measurement_coverage(
             # specifically (not the merged `inconclusive` status), because
             # that is the question a coverage reader is asking: which bound
             # was never applied, and why.
-            skipped.append({"id": bound_id, "reason": IMPLAUSIBLE_DIAGNOSTIC_CODE})
+            # Issue #3088: an ambiguous AC band (not a plausibility bound) is
+            # the other route here, and its skip names the real cause.
+            reason = (
+                MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE
+                if (measurement.get("transfer") or {}).get("verdict") == "ambiguous"
+                else IMPLAUSIBLE_DIAGNOSTIC_CODE
+            )
+            skipped.append({"id": bound_id, "reason": reason})
+        elif not_reached:
+            skipped.append({"id": bound_id, "reason": NOT_REACHED_STATUS})
         elif not measured:
             skipped.append({"id": bound_id, "reason": "unavailable_measurement"})
         else:
@@ -10560,6 +13092,25 @@ def _monte_carlo_rollup(
     return rollup
 
 
+def _attach_not_reached_count(
+    report: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    corners: list[dict[str, Any]],
+) -> None:
+    """Additive/optional (issue #3108): the top-level ``not_reached`` count,
+    present only when some measurement declared ``on_unreached`` so a request
+    that never opts in keeps its exact report shape. Counts corner x
+    measurement results, kept apart from ``errored`` (which counts corners)."""
+    if not any("on_unreached" in spec for spec in measurements_spec):
+        return
+    report["not_reached"] = sum(
+        1
+        for corner in corners
+        for m in corner["measurements"]
+        if m["status"] == NOT_REACHED_STATUS
+    )
+
+
 def _aggregate_measurement_status(
     entries: list[tuple[dict[str, Any], dict[str, Any]]],
 ) -> str:
@@ -10596,6 +13147,8 @@ def _aggregate_measurement_status(
         return _INCONCLUSIVE_STATUS
     if "fail" in statuses:
         return "fail"
+    if statuses == {NOT_REACHED_STATUS}:
+        return NOT_REACHED_STATUS
     if statuses == {_ABSENT_STATUS}:
         return _ABSENT_STATUS
     return "pass"
@@ -10686,6 +13239,11 @@ def _rollup_measurements(
             # diagnostic, without re-deriving the default-vs-override
             # resolution itself.
             entry["plausible_range"] = plausible_range
+        if spec.get("spec_row") is not None:
+            # Additive/optional (issue #3778): the spec row this measurement
+            # grades, echoed only when declared so `klt signoff` can derive
+            # row coverage from the envelope.
+            entry["spec_row"] = spec["spec_row"]
 
         if monte_carlo is not None:
             mc_stats = _monte_carlo_rollup(
@@ -11007,30 +13565,66 @@ def _measurement_diagnostic_hints(spice: str) -> dict[str, Any]:
     return {"signal": signal, "window": window, "target": target}
 
 
-def _slugify_corner_id(corner_id: str) -> str:
-    """Filesystem-safe transform of a corner's own ``corner_id`` (e.g.
-    ``ss/1.620V/125C`` -> ``ss_1p620V_125C``), mirroring
-    :attr:`CornerPoint.slug`'s transform exactly (that property is not
-    reachable from a plain corner report dict, only from the pre-run
-    :class:`CornerPoint` this same corner was produced from)."""
-    match = _PARAMS_ID_RE.fullmatch(corner_id)
-    if match is None:
-        return _slugify_label(corner_id)
-    # Issue #3035: a parameter point keeps its PVT slug and appends the full
-    # SHA-256 of the whole ID (MC suffix included) -- parameter values never
-    # reach the filesystem, so close values cannot collide and no value can
-    # inject a path character.
-    digest = hashlib.sha256(corner_id.encode("utf-8")).hexdigest()
-    return f"{_slugify_label(match.group('pvt'))}_params_{digest}"
-
-
 def _slugify_label(label: str) -> str:
     label = label.replace("/", "_")
-    return label.replace(".", "p").replace("=", "").replace("-", "n")
+    return label.replace(".", "p").replace("=", "").replace("-", "n").replace("@", "v_")
 
 
-#: ``<pvt>/params:<pairs>[/mc<n>]`` -- the shape of a parameter-axis ID.
-_PARAMS_ID_RE = re.compile(r"(?P<pvt>.*?)/params:[^/]*(?:/mc\d+)?")
+def _readable_slug(corner_id: str) -> str:
+    return _slugify_label(corner_id)
+
+
+#: ``<pvt>[/params:<pairs>][/options:<pairs>][/mc<n>]`` with at least one of
+#: the two axis segments -- the shape of a parameter- or options-axis ID.
+_PARAMS_ID_RE = re.compile(
+    r"(?P<pvt>.*?)(?:/params:[^/]*/options:[^/]*|/params:[^/]*|/options:[^/]*)"
+    r"(?:/mc\d+)?"
+)
+
+#: A readable slug longer than this many UTF-8 bytes is replaced by a bounded
+#: form (readable prefix + hash of the full corner id) so the artifact
+#: directory name stays well under the filesystem's ``NAME_MAX`` (255 bytes)
+#: even with the ``__probe`` suffix or a ``__<signal>.svg`` plot filename.
+_SLUG_MAX_BYTES = 100
+_SLUG_PREFIX_BYTES = 80
+_SLUG_HASH_CHARS = 12
+
+
+def _bound_slug(readable: str) -> str:
+    """Cut ``readable`` to ``_SLUG_PREFIX_BYTES`` UTF-8 bytes when it exceeds
+    ``_SLUG_MAX_BYTES``; shorter slugs are returned unchanged."""
+    encoded = readable.encode("utf-8")
+    if len(encoded) <= _SLUG_MAX_BYTES:
+        return readable
+    return encoded[:_SLUG_PREFIX_BYTES].decode("utf-8", errors="ignore")
+
+
+def _slugify_corner_id(corner_id: str) -> str:
+    """Filesystem-safe, bounded transform of a corner's own ``corner_id``
+    (e.g. ``ss/1.620V/125C`` -> ``ss_1p620V_125C``). Shared by
+    :attr:`CornerPoint.slug` and the plot writer (which only has the report
+    dict's ``corner_id``) so the two cannot drift.
+
+    A parameter point (issue #3035) keeps its PVT slug (bounded like the
+    readable form below) and appends the full
+    SHA-256 of the whole ID (MC suffix included) -- parameter values never
+    reach the filesystem, so close values cannot collide and no value can
+    inject a path character.
+
+    Otherwise short ids keep their readable form. When that exceeds
+    ``_SLUG_MAX_BYTES`` bytes (many swept ``supply_v`` keys), it becomes a
+    readable prefix plus a deterministic SHA-256 digest of the full
+    ``corner_id`` (so ``mc<N>`` samples stay distinct); the full id is
+    recoverable from the directory's ``corner.json``."""
+    match = _PARAMS_ID_RE.fullmatch(corner_id)
+    digest = hashlib.sha256(corner_id.encode("utf-8")).hexdigest()
+    if match is not None:
+        return f"{_bound_slug(_slugify_label(match.group('pvt')))}_params_{digest}"
+    readable = _readable_slug(corner_id)
+    prefix = _bound_slug(readable)
+    if prefix == readable:
+        return readable
+    return f"{prefix}_{digest[:_SLUG_HASH_CHARS]}"
 
 
 #: Any run of characters that is not alphanumeric/underscore, collapsed to a

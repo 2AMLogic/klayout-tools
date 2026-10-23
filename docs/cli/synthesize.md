@@ -92,7 +92,9 @@ One post-processing stage is **not** Yosys: after `write_verilog` produces
 the mapped netlist, `klt-statime-native` (a compiled Rust extension, called
 in process — see "`sta`" below) analyzes that netlist's timing graph. It is
 optional and additive: a missing extension reports `"sta": null` and changes
-nothing else about the run.
+nothing else about the run. The extension is not shipped with the published
+`klayout-tools` package, so an installed package always reports `"sta": null`
+(see "`sta` is `null`" below).
 
 ## Generated `.ys` script
 
@@ -105,11 +107,13 @@ debuggable, saveable artifact (`script_path` in the response), never
 deleted — the same discipline `klt sim`'s generated corner decks already
 follow.
 
+`.klt/` is scratch, regenerable output: add it to your `.gitignore`.
+
 The generated script is the Yosys survey's own verified pass sequence, with
 the `abc` line carrying the constraint/exclusion flags described below:
 
 ```
-read_verilog <source-1>
+read_verilog <source-1>        # `read_verilog -sv` for .sv/.svh sources
 read_verilog <source-2>
 ...
 hierarchy -check -top <hdl_toplevel>
@@ -219,6 +223,17 @@ A pipeline that must prepare a downstream request in advance may supply its own
 letter or digit. An existing directory is an error, even after failure; retry
 with a new ID. Exclusive directory creation also rejects concurrent callers
 that supply the same ID, while automatically allocated runs remain isolated.
+
+A request may instead choose the directory with `outputs.dir` (a non-empty
+string, relative to the request file's directory unless absolute). It *is* the
+run directory: every artifact that would go to `.klt/synthesize/<run_id>/` is
+written there and the `{path, scope}` fields report it, so the netlist lands at
+a stable, caller-chosen path (an absolute path outside the repo reports
+`scope: "external"`). The directory is claimed exclusively: it must not exist
+or must be an empty directory; a non-empty one is an error and nothing in it is
+overwritten. `outputs.dir` together with `run_id` is an error, unknown keys
+inside `outputs` are rejected, and the response `run_id` is the directory's
+basename. Requests without `outputs` behave exactly as above.
 
 A zero engine exit is insufficient: the current run must contain a readable,
 nonempty netlist, parseable synthesis statistics, and its ABC log when the
@@ -764,7 +779,12 @@ here, so it does not have to be inferred from the caveat lists above:
 - the optional `klt_statime_native` extension is not installed (it needs a
   Rust toolchain, like every other native `klt` engine; from a checkout,
   `uv sync --group statime`, or `maturin develop --release` inside
-  `native/statime/`), or
+  `native/statime/`). **A published `klayout-tools` install never
+  populates `sta`**: there is no `klayout-tools[statime]` extra and no
+  published `klt-statime-native` wheel, so `sta` is `null` with the
+  reason below. From an installed package, use `klt sta` with a `verilog`
+  request instead (OpenSTA-backed, needs the OpenROAD/OpenSTA toolchain;
+  see [`docs/cli/sta.md`](sta.md)), or
 - the engine could not analyze this particular netlist/liberty pair — e.g. a
   mapped cell type with no liberty entry.
 
@@ -782,7 +802,7 @@ those call for opposite responses. The always-present
 
 ```json
 "sta": null,
-"sta_unavailable_reason": "the optional klt_statime_native extension is not installed, so no gate-level static timing analysis was attempted -- from a repo checkout, run `uv sync --group statime` (or `maturin develop --release` inside native/statime/) and re-run to populate `sta`"
+"sta_unavailable_reason": "the optional klt_statime_native extension is not installed (it is not shipped with the published klayout-tools package), so no gate-level static timing analysis was attempted -- from a repo checkout, run `uv sync --group statime` (or `maturin develop --release` inside native/statime/) and re-run to populate `sta`; from an installed package, `klt sta` with a `verilog` request gives a netlist-level timing estimate (needs OpenSTA)"
 ```
 
 ```json
@@ -1206,7 +1226,7 @@ separately if it turns out to matter for evidence-record committing.
 | --- | --- | --- |
 | `schema` | string | Request contract identifier + major version. Not validated — user-authored input, never emitted by this tool. |
 | `engine` | string | `"yosys"` (default; only value implemented). |
-| `sources` | array\<string\> | RTL source file paths (`read_verilog` inputs), resolved relative to the request file's own directory. Required, non-empty. |
+| `sources` | array\<string\> | RTL source file paths (`read_verilog` inputs), resolved relative to the request file's own directory. Required, non-empty. Sources with a `.sv` or `.svh` extension (case-insensitive) are read with `read_verilog -sv` so ordinary SystemVerilog (`logic`, `always_ff`) parses; every other extension keeps plain `read_verilog` (Verilog-2005). Which SystemVerilog constructs parse is whatever Yosys's `-sv` front end supports; anything beyond it surfaces as a raw Yosys error. The same rule applies in the arithmetic probe, the memory evidence pass and the `--verify-equivalence` gold side (issue #3797). |
 | `hdl_toplevel` | string | The design's top module name. Required; must not contain path separators. |
 | `parameters` | object \| omitted | Top-level Verilog `parameter` overrides, `name -> value` (issue #3466), applied with Yosys `chparam -set` after the `read_verilog` lines and before `hierarchy`, so one committed RTL file can be synthesised at several parameterisations without per-point source rewrites. Keys must be Verilog identifiers; values must be integers or plain strings (booleans, floats, and strings containing quotes, backslashes, `;`, `#` or control characters are rejected — values land in a generated `.ys` script). A name the top module does not declare fails the run (`yosys synthesis failed: … Can't find object for defparam`). Only parameters of `hdl_toplevel` itself are reachable; a sub-module's parameter cannot be overridden this way. The same override is applied to every pass that re-elaborates the sources (arithmetic probe and trial runs, the memory-mapping evidence pass, and the `--verify-equivalence` gold side), so all reported numbers describe one elaboration. Echoed as the response's `parameters` and `provenance.parameters`. |
 | `run_id` | string \| omitted | Optional safe identifier for an exclusively created invocation directory; see "Artifacts". Omit to allocate a new ID automatically. Reusing an existing ID fails. |
@@ -1656,7 +1676,10 @@ recovered from the committed report; the CLI passes whatever flags you give
 this invocation, and the corresponding blocks legitimately drift if they
 differ. A request pinning an explicit `run_id` cannot be re-run at all — the
 run directory is retained and never reused — and that refusal surfaces as a
-clean exit `1` ("could not verify"), never a false `"match"`.
+clean exit `1` ("could not verify"), never a false `"match"`. A request using
+`outputs.dir` *can* be re-run: `--rerun` ignores that stable directory (already
+populated by the first run) and writes to a fresh `.klt/synthesize/run-<uuid>/`
+scratch directory, leaving the committed artifacts untouched.
 
 ### Exit codes for `--check` / `--rerun`
 

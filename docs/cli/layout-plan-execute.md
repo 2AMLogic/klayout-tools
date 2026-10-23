@@ -11,16 +11,35 @@ generated/placed/routed layout. Phases A
 [`layout-plan.md`](layout-plan.md)) are the prerequisites this phase builds
 on; [`klt gen`](gen.md) and [`klt gen-compose`](gen-compose.md) are the two
 already-shipped verbs it compiles onto — this phase adds no new
-generator, no new placement/routing engine, and (per the same "library
-first" posture Phase B chose) no new `klt` CLI subcommand.
+generator and no new placement/routing engine; it is reachable from the
+shell as `klt layout-plan execute` (below).
 
-> **There is no `klt layout-plan execute` verb.** Like Phase B, this ships
-> as a **library-level** module
-> ([`src/klayout_tools/layout_plan_execute.py`](../../src/klayout_tools/layout_plan_execute.py)).
-> This file lives under `docs/cli/` because it documents a request/response
-> contract in the field-table convention every other `klt`-family verb's
-> doc uses, not because a subcommand exists. Revisit once a real caller
-> wants to run this from the shell rather than from a larger pipeline.
+## Command line
+
+```sh
+klt layout-plan execute request.json --format json
+```
+
+`klt layout-plan execute <request>` reads a `klt.layout_plan.request/1`
+JSON file and calls `execute_layout_plan_document()` with the request
+file's directory as `request_dir` (so a relative `netlist.path` resolves
+as it does for [`klt gen-compose`](gen-compose.md)). `--format json` emits
+the response below unchanged through the shared envelope
+([`json-contract.md`](../json-contract.md)); `--format text` is a summary.
+It adds no routing, placement or geometry logic, and no `--output` /
+`--work-dir` flags — set `options.output` in the request.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Executed; every net routed and mapped |
+| 1 | Unreadable request file, invalid JSON, plan validation failure (`LayoutPlanError`/`LayoutPlanUsageError`), or execution failure (`LayoutPlanExecuteError`) |
+| 2 | Usage error from argparse (missing path, bad `--format`) |
+| 3 | Placed, but `unrouted_nets[]` or `unmapped_netlist_nets[]` is non-empty; full payload still on stdout |
+
+Existing limits apply unchanged: topologies are generator-keyed and there
+is no "row of unlike devices" topology — see
+[`custom-transistor-layout-study.md`](../design/custom-transistor-layout-study.md)
+§3.
 
 ## What execution does
 
@@ -363,7 +382,7 @@ than only in a PR description:
 - **`unmapped_netlist_nets[]` reports a deliberately-unrouted supply net
   unconditionally** — no request-schema extension (e.g.
   `netlist.ignore_nets[]`) was added.
-- **No `klt` CLI subcommand** — library-only surface, mirroring Phase B.
+- **Shell surface is a thin wrapper** — `klt layout-plan execute` (see "Command line"); no `validate` verb, Phase B stays library-only.
 - **`request.routing`** — Phase B's merged schema has no `routing` field;
   this module accepts an optional, additive one (`layer_role`/`width_um`,
   defaulting to `{"layer_role": "metal", "width_um": 0.17}` when omitted,

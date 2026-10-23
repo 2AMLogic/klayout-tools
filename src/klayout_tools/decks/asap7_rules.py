@@ -495,8 +495,16 @@ _LISD_EXACT_3 = (
 )
 _EXACT_W = "exact width across the metal track needs the metal routing direction"
 _SADP_TRACK = (
-    "defined against the routing tracks (adjacent tracks, number of tracks "
-    "spanned); the deck has no per-shape track assignment"
+    "defined against the routing tracks (adjacent tracks, parallel run "
+    "length); the deck has no per-shape track assignment, and the DRM leaves "
+    "'adjacent' and the track pitch undefined (Fig. 3.14.2 shows only min-"
+    "width tracks at 2 x W.1 pitch), so any reading would be a guess"
+)
+_SADP_TRACK_COUNT = (
+    "'spans an even number of minimum-width tracks' is, for the AUX.1 "
+    "grid the deck enforces, the same condition as W.3's even multiple of "
+    "the minimum width, which the deck already reports; a separate check "
+    "would add no violations at the default 0 nm offset"
 )
 _WIDE_EDGE = (
     "'wide' is not defined, and with the default 0 nm offset every multiple "
@@ -534,7 +542,7 @@ def _gaps(
 
 def _sadp_metal_gaps(layer: str, t1: str, t2: str) -> tuple[Asap7RuleGap, ...]:
     return (
-        Asap7RuleGap(f"{layer}.W.4", t1, _SADP_TRACK, "#3155"),
+        Asap7RuleGap(f"{layer}.W.4", t1, _SADP_TRACK_COUNT, "#3155"),
         *_gaps(tuple(f"{layer}.S.{n}" for n in (3, 4, 5)), t1, _SADP_TRACK, "#3155"),
         Asap7RuleGap(f"{layer}.AUX.4", t2, _WIDE_EDGE, "#3155"),
     )
@@ -628,6 +636,52 @@ DENSITY_DISPOSITION = (
     "has no density rule type and no table in sections 3.1-3.19 gives a "
     "density threshold, window or fill requirement, so the deck checks none"
 )
+
+#: PAD stream layer the deck reads (``pad = input(96, 0)``): DRM mask 96
+#: (Table 2.3.1). The DRM is the authority the deck is transcribed from. The
+#: pinned lambdapdk v0.2.17 files do not settle the number: ``asap7.layermap``
+#: names ``Pad`` only as ``Pad/SPNET|PIN|LEFPIN 95/251`` (its ``Pad/NET`` line
+#: is commented out), which collides with V9's ``95``; ``asap7.lyp`` has no
+#: PAD entry; ``asap7_tech.lef`` gives layer ``Pad`` no stream number. The
+#: deck is not renumbered to 95 for that reason.
+PAD_LAYER = (96, 0)
+
+#: PAD-layer disposition (#3807). The DRM has no rule for PAD itself: the
+#: only PAD rules are ``V9.PAD.EN.2`` and ``V9.AUX.1`` (Table 3.19.1). The
+#: tech LEF's ``Pad`` width, spacing table and 20 % / 80 % density are
+#: router settings outside the DRM (see ``DENSITY_DISPOSITION``) and are not
+#: taken as rules.
+PAD_DISPOSITION = (
+    "the ASAP7 DRM (" + DRM_SOURCE + ") has no rule for the PAD layer itself "
+    "(no width, spacing, area, enclosure-by-V9 or density); the deck reads "
+    "PAD (stream 96/0, DRM mask 96) only as the layer enclosing V9 "
+    "(V9.PAD.EN.2, V9.AUX.1), so shapes on PAD are not checked"
+)
+
+#: Unchecked areas surfaced as ``coverage.unchecked_rules`` by
+#: ``klt drc --engine klayout`` when the packaged deck runs on a layout with
+#: shapes on the layer: ``{id: (layer, datatype, description)}``.
+UNCHECKED_AREAS: dict[str, tuple[int, int, str]] = {
+    "PAD.*": (PAD_LAYER[0], PAD_LAYER[1], PAD_DISPOSITION),
+}
+
+
+#: Boundary-sensitive rules surfaced as ``coverage.isolation_only_rules`` by
+#: ``klt drc --engine klayout`` when the packaged deck runs on a layout with
+#: shapes on the layer (#4029): ``{id: (layer, datatype, description)}``.
+#: ``klt drc`` judges the top cell in free space, so a width or spacing rule
+#: on a shape that ends at the cell outline fires for a cell built to be
+#: abutted (the shipped-cell gate places each cell between two ``INVx1``
+#: neighbours for this reason). The five are the horizontal width / pitch
+#: rules the shipped cells trip in isolation; the vertical rules and the
+#: other select layers are not listed until a cell is shown to trip them.
+ISOLATION_ONLY_RULES: dict[str, tuple[int, int, str]] = {
+    "FIN.W.2": (2, 0, "min horizontal FIN width 108 nm"),
+    "GATE.S.3": (7, 0, "every GATE needs another GATE within 54 nm horizontally"),
+    "NSELECT.W.1": (12, 0, "min horizontal NSELECT width 108 nm"),
+    "PSELECT.W.1": (13, 0, "min horizontal PSELECT width 108 nm"),
+    "WELL.W.1": (1, 0, "min horizontal WELL width 108 nm"),
+}
 
 
 @dataclass(frozen=True)

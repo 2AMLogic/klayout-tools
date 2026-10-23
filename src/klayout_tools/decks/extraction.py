@@ -30,6 +30,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import chain
 from typing import Any
 
 from .rules import RuleProvenance
@@ -442,6 +443,50 @@ class MOSFlavour:
 
 
 @dataclass(frozen=True)
+class MosCapacitorDevice:
+    """One MOS-capacitor recognition entry for an :class:`ExtractionDeck`'s
+    optional ``mos_capacitors`` field (issue #2919) -- gf180mcu's
+    ``cap_nmos_*``/``cap_pmos_*`` family, drawn as an ordinary poly-over-COMP
+    gate under a marker layer (``MOS_CAP_MK``, 166/5) rather than with a
+    purpose-drawn plate layer the way :class:`CapacitorDevice` expects.
+
+    Recognition mirrors the PDK's own LVS runset
+    (``moscap_derivations.lvs``/``moscap_extraction.lvs``) at the granularity
+    the MOS recogniser already uses for :class:`MOSFlavour`: an active
+    (``COMP``) *island* that ``interacting``-overlaps ``marker`` and carries a
+    poly gate is a capacitor, never a transistor -- the island is removed
+    from the MOS source/drain/gate split before it runs, exactly as the PDK
+    removes ``mos_cap_mk`` shapes from its MOS derivations. The two device
+    terminals are the gate poly and the (merged) source/drain diffusion; the
+    well/body is not a terminal. Capacitance parameters ``A``/``P`` are the
+    gate region's area and perimeter, as the runset reports them.
+
+    An island is claimed by the first entry (declaration order) for which
+    every test below holds: it ``interacting``-overlaps ``marker`` and
+    ``implant``; it overlaps *every* ``requires`` layer and *none* of the
+    ``excludes`` layers; and ``in_well`` equals whether it overlaps the
+    deck's ``nwell``. ``requires``/``excludes`` carry the voltage-domain
+    (``Dualgate``) and deep-well (``DNWELL``) splits plus the PDK's
+    ``moscap_exclude`` marker set; ``implant`` is the doping (``Nplus`` for an
+    NMOS-style gate, ``Pplus`` for a PMOS-style one).
+
+    ``name`` is the extracted device-class name and the PDK model name
+    (e.g. ``cap_nmos_03v3_b``); ``area_cap_f_um2`` is the runset's
+    ``capacitor(<name>, <area_cap>, MosCap)`` coefficient in F/um^2 -- the
+    reported ``C`` is ``area_cap_f_um2 * A``.
+    """
+
+    name: str
+    marker: tuple[int, int]
+    implant: tuple[int, int]
+    in_well: bool
+    area_cap_f_um2: float
+    requires: tuple[tuple[int, int], ...] = ()
+    excludes: tuple[tuple[int, int], ...] = ()
+    provenance: RuleProvenance | None = None
+
+
+@dataclass(frozen=True)
 class CapacitorVariant:
     """One caller-selectable alternative **capacitor set** for an
     :class:`ExtractionDeck` (issue #2920) -- for a PDK whose capacitor family
@@ -718,7 +763,14 @@ class ExtractionDeck:
     :class:`UnsupportedDeviceMarker` entries naming marker layers that flag a
     device class the deck cannot yet extract; shapes on one are reported in
     ``unsupported_devices[]``/``warnings[]``. Empty (the default) reports
-    nothing.
+    nothing. A marker component that an entry of ``mos_capacitors`` (below)
+    recognised is *not* reported -- only the residue the deck could not
+    classify stays loud.
+
+    ``mos_capacitors`` (issue #2919) is an optional tuple of
+    :class:`MosCapacitorDevice` entries recognising marker-scoped MOS
+    capacitors (gf180mcu's ``cap_nmos_*``/``cap_pmos_*``). Empty (the
+    default) recognises none, leaving MOS recognition untouched.
     """
 
     active: tuple[int, int]
@@ -745,8 +797,10 @@ class ExtractionDeck:
     mom_capacitors: tuple[MomCapacitorDevice, ...] = ()
     resistors: tuple[ResistorDevice, ...] = ()
     diodes: tuple[DiodeDevice, ...] = ()
+    unmodelled_families: tuple[UnmodelledDeviceFamily, ...] = ()
     mos_flavours: tuple[MOSFlavour, ...] = ()
     unsupported_device_markers: tuple[UnsupportedDeviceMarker, ...] = ()
+    mos_capacitors: tuple[MosCapacitorDevice, ...] = ()
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
     capacitor_variants: tuple[CapacitorVariant, ...] = ()
@@ -798,22 +852,16 @@ class ExtractionDeck:
         :class:`MomCapacitorDevice`'s docstring) but share the same "device-
         class role" position in this list.
         """
-        classes = ["nfet", "pfet"]
-        for bipolar in self.bipolars:
-            if bipolar.class_name not in classes:
-                classes.append(bipolar.class_name)
-        for capacitor in self.capacitors:
-            if capacitor.name not in classes:
-                classes.append(capacitor.name)
-        for mom_capacitor in self.mom_capacitors:
-            if mom_capacitor.name not in classes:
-                classes.append(mom_capacitor.name)
-        if self.resistors and "resistor" not in classes:
-            classes.append("resistor")
-        for diode in self.diodes:
-            if diode.name not in classes:
-                classes.append(diode.name)
-        return tuple(classes)
+        groups = (
+            (bipolar.class_name for bipolar in self.bipolars),
+            (capacitor.name for capacitor in self.capacitors),
+            (mom_capacitor.name for mom_capacitor in self.mom_capacitors),
+            (mos_capacitor.name for mos_capacitor in self.mos_capacitors),
+            ("resistor",) if self.resistors else (),
+            (diode.name for diode in self.diodes),
+        )
+        # `dict.fromkeys` keeps first-declared order and drops repeats.
+        return tuple(dict.fromkeys(("nfet", "pfet", *chain.from_iterable(groups))))
 
     @property
     def resolved_option_values(self) -> dict[str, str]:
@@ -943,6 +991,11 @@ class ExtractionDeck:
                 layers.add(diode.anode)
             if diode.cathode is not None:
                 layers.add(diode.cathode)
+        for mos_capacitor in self.mos_capacitors:
+            layers.add(mos_capacitor.marker)
+            layers.add(mos_capacitor.implant)
+            layers.update(mos_capacitor.requires)
+            layers.update(mos_capacitor.excludes)
         for mos_flavour in self.mos_flavours:
             layers.add(mos_flavour.marker)
         return frozenset(layers)
@@ -2048,6 +2101,26 @@ class MomCapacitorDevice:
     marker: tuple[int, int]
     metal_pins: tuple[tuple[int, int] | None, ...]
     provenance: RuleProvenance | None = None
+
+
+@dataclass(frozen=True)
+class UnmodelledDeviceFamily:
+    """A device family this deck deliberately does **not** recognise (issue
+    #3137), declared so a diagnostic can say so.
+
+    Purely informational: it never changes connectivity or ``device_count``.
+    ``extract.py``'s diode near-miss warning appends a one-sentence note
+    naming ``name`` when a candidate region overlaps ``signature`` -- the
+    geometry looks like a diode one marker short, but is really this family
+    (e.g. SG13G2's SiGe HBT diffusion matches the antenna-diode predicates).
+
+    ``signature`` is the drawn layer (or :class:`LayerExpr`) that identifies
+    the family; ``reference`` is the pointer text the note ends with.
+    """
+
+    name: str
+    signature: tuple[int, int] | LayerExpr
+    reference: str
 
 
 @dataclass(frozen=True)

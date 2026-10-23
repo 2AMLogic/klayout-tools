@@ -241,6 +241,55 @@ def _resolve_resistors(
     )
 
 
+def _detect_unclaimed_resistor_markers(
+    layout: kdb.Layout, top_cell: kdb.Cell, deck: ExtractionDeck
+) -> list[str]:
+    """Warn once per declared resistor-marker layer whose drawn shapes no
+    :class:`ResistorDevice` claims (issue #3138).
+
+    :func:`_resolve_resistors` silently drops a spec whose body region comes
+    out empty, so a marker the deck declares but whose geometry does not
+    overlap the body conductor (e.g. an abutting-head primitive cell on an
+    overlap-topology deck) extracts as a clean, device-less layout. The
+    unmodelled-poly diagnostic does not fire either: the marker *is*
+    declared, and each head is its own single-contact component.
+
+    A marker shape is *claimed* when it interacts with the union of every
+    spec's pre-``dummy`` candidate body sharing that marker layer (all body
+    layers, not only poly), so a body fully consumed by the ``dummy`` cut
+    stays quiet (issue #462) and a marker shared by several flavours is
+    judged against the union of their bodies. Bodies are recomputed without
+    black-box masking, which can only make the check quieter. Warning only.
+    """
+    by_marker: dict[tuple[int, int], list[ResistorDevice]] = {}
+    for spec in deck.resistors:
+        by_marker.setdefault(spec.marker, []).append(spec)
+
+    warnings: list[str] = []
+    for marker_layer, specs in by_marker.items():
+        marker = _region(layout, top_cell, marker_layer).merged()
+        if marker.is_empty():
+            continue
+        bodies = _resistor_body_region(layout, top_cell, specs[0])
+        for spec in specs[1:]:
+            bodies = bodies + _resistor_body_region(layout, top_cell, spec)
+        count = marker.not_interacting(bodies.merged()).count()
+        if count == 0:
+            continue
+        shape_word = "shape" if count == 1 else "shapes"
+        classes = ", ".join(sorted({spec.name for spec in specs}))
+        warnings.append(
+            f"{count} resistor-marker {shape_word} on layer "
+            f"{marker_layer[0]}/{marker_layer[1]} are drawn but claimed by no "
+            f"declared resistor class ({classes}): the marker does not overlap "
+            "a body that passes the class's requires/excludes conditions, so "
+            "no resistor device was extracted for them and their terminals "
+            "are ordinary interconnect -- see docs/cli/extract.md's 'Known "
+            "limitation: unmodelled device geometry'."
+        )
+    return warnings
+
+
 def _capacitor_plate_regions(
     layout: kdb.Layout, top_cell: kdb.Cell, capacitor: CapacitorDevice
 ) -> tuple[kdb.Region, kdb.Region]:

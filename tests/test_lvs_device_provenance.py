@@ -776,6 +776,84 @@ def test_golden_pair_sky130_pnp_extracts_with_provenance_cited_device(
     assert device["nets"] == {"c": "vsubs", "b": "BASE", "e": "EMIT"}
 
 
+# Flavour -> (is n+/p-substrate, implant layers drawn over the diffusion),
+# per `sky130.lvs`'s diode derivations (issue #3803).
+_SKY130_DIODE_FLAVOURS = {
+    "diode_pw2nd_05v5": (True, ()),
+    "diode_pw2nd_05v5_lvt": (True, ((125, 44),)),  # lvtn
+    "diode_pw2nd_05v5_nvt": (True, ((125, 44), (75, 20))),  # lvtn + hvi
+    "diode_pw2nd_11v0": (True, ((75, 20),)),  # hvi
+    "diode_pd2nw_05v5": (False, ()),
+    "diode_pd2nw_05v5_lvt": (False, ((125, 44),)),  # lvtn
+    "diode_pd2nw_05v5_hvt": (False, ((78, 44),)),  # hvtp
+    "diode_pd2nw_11v0": (False, ((75, 20),)),  # hvi
+}
+
+
+def _make_sky130_diode_layout(name: str, *, marked: bool = True) -> kdb.Layout:
+    """One 1um x 1um sky130 junction diode of flavour `name`: a contacted,
+    labelled `diff` region under `nsdm` (n+/p-substrate) or `psdm` (p+ in an
+    `nwell`), plus the flavour's `hvi`/`lvtn`/`hvtp` implants. `marked=False`
+    omits the `areaid.diode` mark -- the ordinary-MOS-source/drain look-alike."""
+    n_plus, implants = _SKY130_DIODE_FLAVOURS[name]
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    if not n_plus:
+        draw(64, 20, _box_um(-1, -1, 2, 2))  # nwell.drawing (cathode)
+    if marked:
+        draw(81, 23, _box_um(-0.2, -0.2, 1.2, 1.2))  # areaid.diode
+    draw(65, 20, _box_um(0, 0, 1, 1))  # diff.drawing
+    sdm = (93, 44) if n_plus else (94, 20)  # nsdm / psdm
+    draw(*sdm, _box_um(-0.1, -0.1, 1.1, 1.1))
+    for layer, datatype in implants:
+        draw(layer, datatype, _box_um(-0.3, -0.3, 1.3, 1.3))
+    draw(66, 44, _box_um(0.4, 0.4, 0.6, 0.6))  # licon1
+    draw(67, 20, _box_um(0.3, 0.3, 0.7, 0.7))  # li1
+    top.shapes(layout.layer(67, 5)).insert(
+        kdb.Text("TERM", kdb.Trans(round(0.5 / _DBU_UM), round(0.5 / _DBU_UM)))
+    )
+    return layout
+
+
+@pytest.mark.parametrize("name", sorted(_SKY130_DIODE_FLAVOURS))
+def test_golden_pair_sky130_diode_extracts_with_provenance_cited_device(
+    tmp_path: Path, name: str
+):
+    """Each sky130 diode flavour extracts to exactly one `D` device of its own
+    class, with the diffusion terminal on the labelled net, the other terminal
+    on the substrate (n+/p-sub) or well (p+/nwell) node, and the drawn area /
+    perimeter (issue #3803). The same layout without `areaid.diode` extracts
+    nothing -- an ordinary MOS source/drain is never a diode."""
+    by_name = {d.name: d for d in EXTRACTION_DECK.diodes}
+    assert by_name[name].provenance.rule_id == f"sky130_fd_pr__{name}"
+
+    path = _write_gds(_make_sky130_diode_layout(name), tmp_path / "diode.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "diode.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["class"] == name
+    assert device["params"] == {"area_um2": 1.0, "perimeter_um": 4.0}
+    if _SKY130_DIODE_FLAVOURS[name][0]:
+        assert device["nets"] == {"a": EXTRACTION_DECK.substrate_net, "c": "TERM"}
+    else:
+        assert device["nets"]["a"] == "TERM"
+        # The cathode is the (unlabelled) nwell node: present, and neither the
+        # anode net nor the substrate.
+        cathode = device["nets"]["c"]
+        assert cathode and cathode not in ("TERM", EXTRACTION_DECK.substrate_net)
+
+    bare = _write_gds(
+        _make_sky130_diode_layout(name, marked=False), tmp_path / "bare.gds"
+    )
+    bare_report = run_extract(bare, "sky130", output=str(tmp_path / "bare.spice"))
+    assert bare_report["device_counts"] == {}
+
+
 # --------------------------------------------------------------------------- #
 # Golden layout -> netlist pairs, gf180mcu (issue #904, Epic #711 Phase 3a):
 # one per provenance-backfilled device entry above, mirroring the sky130
@@ -1269,6 +1347,14 @@ _GOLDEN_PAIR_TESTED_RULE_IDS: dict[str, frozenset[str]] = {
             "sky130_fd_pr__model__cap_mim",
             "sky130_fd_pr__model__cap_mim_m4",
             "sky130_fd_pr__pnp_05v5_W0p68L0p68",
+            "sky130_fd_pr__diode_pw2nd_05v5",
+            "sky130_fd_pr__diode_pw2nd_05v5_lvt",
+            "sky130_fd_pr__diode_pw2nd_05v5_nvt",
+            "sky130_fd_pr__diode_pw2nd_11v0",
+            "sky130_fd_pr__diode_pd2nw_05v5",
+            "sky130_fd_pr__diode_pd2nw_05v5_lvt",
+            "sky130_fd_pr__diode_pd2nw_05v5_hvt",
+            "sky130_fd_pr__diode_pd2nw_11v0",
         }
     ),
     "gf180mcu": frozenset(

@@ -246,6 +246,7 @@ location.
 | `klt_sdf_annotate.v` | The generated `$sdf_annotate` elaboration root, on `options.sdf` runs only — kept, so the exact annotation call a run used is inspectable after the fact. |
 | `klt_sdf_dut_wrapper.v` | The generated transparent pass-through wrapper the DUT is nested under, on `options.sdf` runs only — works around Icarus's inability to resolve a bare top-level-port `INTERCONNECT` entry against a module elaborated as its own `-s` root (issue #1056). Kept alongside `klt_sdf_annotate.v` for the same reason. |
 | `klt_sdf_safe.sdf` / `klt_sdf_deferred_bus_ports.sdf` | Written only when the input SDF contains an `INTERCONNECT` entry touching a bit-selected top-level *vector* port (e.g. `y[0]`) — works around a second Icarus `INTERCONNECT`-resolution failure where such an entry can poison a same-net sibling entry annotated in the same `$sdf_annotate` call (issue #1619). `klt_sdf_safe.sdf` is the input SDF with every such entry removed (annotated first); `klt_sdf_deferred_bus_ports.sdf` holds only the removed entries (annotated second, via a later `$sdf_annotate` call in `klt_sdf_annotate.v`). Absent when the input SDF has no vector-port-touching `INTERCONNECT` entry, which is unchanged from before this issue. |
+| `klt_sdf_renamed.sdf` / `klt_sdf_renamed_sources/<n>/<file>` | Written only when the input SDF names an instance whose escaped identifier contains a hierarchy divider (a flattened `generate` array's `\g[0].sub.u1`; issue #2897). The SDF copy and a copy of each request source declaring such an instance, with each one renamed to a plain identifier; `environment.sdf.renamed` lists the renames. The caller's own files are untouched. |
 | `sim_build_icarus/<hdl_toplevel>.fst` (Icarus) or `dump.vcd` (Verilator) | The waveform trace, on `options.trace: true` runs only (Epic #1585 Phase 3, issue #1845) — location and format are cocotb's own per-engine convention, not a request choice: Icarus writes into `sim_build_icarus/`, Verilator writes directly into `.klt/functional-verification/`. Echoed by path/format/size in the response's `trace` field. Feed it straight into [`klt wave build`](wave.md) to query it. |
 
 ## Coverage
@@ -575,33 +576,69 @@ job ([`klt place-and-route`](place-and-route.md)'s `spef_sta`). A genuine
 timing failure still surfaces here as a *functional* failure the testbench
 catches, which is the signal this feature is scoped around.
 
-**Known limitation, inherited from Icarus: an `INTERCONNECT` entry naming an
-escaped identifier containing a literal occurrence of the SDF's own
-`DIVIDER` character is rejected up front** (issue #1890) — e.g.
-`INTERCONNECT a g\[0\]\.sub\/x.a` with `(DIVIDER .)`, the exact shape any
-synthesis/place-and-route flow produces the moment RTL uses a `generate`
-block to instantiate an array of sub-modules and the backend flattens that
-hierarchy into one module (Yosys `flatten`, and OpenROAD's post-route
-`write_verilog`/`write_sdf` both do this). Confirmed live against Icarus
-13.0: `$sdf_annotate`'s `INTERCONNECT` path splitter tokenizes an endpoint on
-every literal occurrence of the `DIVIDER` character without honoring a
-preceding backslash-escape, producing a nonexistent intermediate scope
-reference — and the VPI resolution code that walks it calls `vpi_scan` on
-the resulting `NULL` handle without a `NULL` check, crashing `vvp` outright
-(`ERROR: NULL handle passed to vpi_scan.`, an assertion-failure `SIGABRT`
-with a core dump) rather than failing to resolve the entry the way a
-malformed `IOPATH` does. This is independent of hierarchy depth, of the
-top-level-port wrapper above (issue #1056), and of which of the two legal
-`DIVIDER` characters (`.` or `/`) is in play, so no generated shim/wrapper
-shape can work around it — it is a genuine Icarus upstream limitation, not
-a `klt`-side resolution failure. `klt` scans the SDF's `INTERCONNECT`
-entries for this shape before writing any build artifact and rejects the
-request (exit 1) with a clear message instead of reaching that crash. An
-escaped identifier that does **not** contain the file's own `DIVIDER`
-character (e.g. an escaped bracket alone, `g\[0\]`, with no embedded `.`)
-is unaffected and resolves normally — avoid flattening a `generate` block's
-hierarchy before generating the SDF this option consumes if this limitation
-is hit.
+**An escaped instance name containing a hierarchy divider is renamed before
+annotation, and reported** (issue #2897, following #1890). The moment RTL
+uses a `generate` block to instantiate an array of sub-modules and the
+backend flattens that hierarchy into one module (Yosys `flatten`, and
+OpenROAD's post-route `write_verilog`/`write_sdf` both do this), every leaf
+cell becomes an escaped Verilog identifier whose *name* contains a literal
+`.` — `\g[0].sub.u1` in the netlist, `g\[0\]\.sub\.u1` in the SDF.
+Icarus 13.0 cannot use that name, confirmed live against raw
+`iverilog -gspecify -ginterconnect` + `vvp`:
+
+- in an `INTERCONNECT` endpoint, `$sdf_annotate`'s path splitter tokenizes
+  on the escaped `.` without honoring the backslash, walks a nonexistent
+  scope, and calls `vpi_scan` on the resulting `NULL` handle — crashing
+  `vvp` outright (`ERROR: NULL handle passed to vpi_scan.`, an
+  assertion-failure `SIGABRT`, exit 134);
+- in a `CELL`'s `(INSTANCE ...)`, it fails with `SDF ERROR: Cannot find
+  g[0] in scope ...`.
+
+Neither depends on the SDF's `(DIVIDER ...)` header: rewriting the header to
+`(DIVIDER /)` and only the unescaped separators to `/` still aborts `vvp`
+identically, because Icarus splits on an escaped `.` whatever the declared
+divider is (an escaped `/` is only a problem under `(DIVIDER /)`; under
+`(DIVIDER .)` it annotates normally and is left alone). What works is
+removing the shape: `klt` renames each such instance to a plain identifier
+(every character outside `[A-Za-z0-9_]` becomes `_`, so `g[0].sub.u1` →
+`g_0__sub_u1`, with a `_klt<n>` suffix if that name is already in use)
+consistently in a build-dir copy of the SDF (`klt_sdf_renamed.sdf`) and of
+every request source that declares it (`klt_sdf_renamed_sources/<n>/`). The
+caller's own SDF and netlist are never modified, `environment.sdf.file`
+still names the caller's SDF, and each rename is reported in the additive
+`environment.sdf.renamed` list as `{"from": "g[0].sub.u1", "to":
+"g_0__sub_u1"}` — use it to map waveform scopes and simulator messages back
+to the original names. Only the SDF-named instances are renamed (an escaped
+*net* the SDF never names keeps its name). A design without this shape is
+byte-identical to before: nothing is copied and `renamed` is absent.
+
+One residual shape is still **rejected up front** (exit 1, before any build
+artifact is written) instead of reaching that crash: an `INTERCONNECT`
+endpoint whose *pin or bare top-level port* — the endpoint's final
+component — is an escaped identifier containing a `.` or the file's own
+divider. `klt` never renames a pin or port (the testbench addresses
+top-level ports by name), so rename that port to a plain identifier in the
+netlist and SDF yourself if you hit it. An escaped identifier with no
+embedded divider (e.g. an escaped bracket alone, `g\[0\]`) is unaffected
+and resolves normally.
+
+**An `INTERCONNECT` endpoint naming an instance the netlist does not have is
+rejected up front** (issue #3740). Icarus 13.0 aborts `vvp` the same way
+(`ERROR: NULL handle passed to vpi_scan.`, `Assertion 0 failed`, return code
+-6) for any `<instance><DIVIDER><pin>` endpoint whose `<instance>` is not in
+the DUT's scope — on either side of the entry, for scalar or bus ports and
+for both `DIVIDER` characters. The usual producers are the design name used
+as a port prefix (`top/a` instead of a bare `a`) and an SDF generated from a
+different netlist than the one being simulated. `klt` checks the top cell's
+`INTERCONNECT` endpoints against the top module's instance list before
+launching `vvp` and fails with a `FunctionalVerificationError` naming the SDF
+line and endpoint. Supported: top-level ports as bare names, and instance
+pins as `<instance><DIVIDER><pin>` with `<instance>` declared in the top
+module. A bare unknown name (no divider) is not an abort — Icarus reports it
+as `Could not find handles for both ports!`, which the diagnostic gate
+already surfaces. The check is skipped when the top module's instance list
+cannot be derived (ANSI header, RTL top) and does not inspect hierarchy
+below a top-level instance.
 
 **A zero-delay `INTERCONNECT` onto an `assign`-aliased top-level port bit is
 dropped before annotation, and counted** (issue #2285). A P&R backend drives
@@ -883,7 +920,8 @@ things, in order:
    on this design class is `options.sdf.entries: "interconnect"` (below).
 1. **`environment.sdf.dropped`** — if it is `{}` (or only `timingcheck`,
    `zero_delay_alias_port_interconnect` and
-   `zero_delay_physical_only_interconnect`, none of which can change a
+   `zero_delay_physical_only_interconnect` and
+   `zero_delay_bus_port_source_interconnect`, none of which can change a
    delay), every delay applied and no annotation failed. An
    `iopath_ifnone_edge_modpath` class means the arcs it lists ran with no
    module-path delay. A genuinely failed annotation
@@ -985,24 +1023,37 @@ entry population — `"all"` or `"interconnect"` — so a stored report is
 self-describing about which delay population its verdict was measured
 against.
 
-Five `dropped` classes exist today. The first three cannot change a
-simulated delay; the fourth deliberately does — it is the requested
-net-delay-only mode, and the count is what makes that choice honest; the
-fifth cannot change a delay relative to annotating (its entries have no
-modpath to land on) but marks arcs that run with no module-path delay, so it
-also names them in `arcs`:
+Seven `dropped` classes exist today. The first four (`timingcheck` and the
+three zero-delay `INTERCONNECT` classes) cannot change a simulated delay;
+`iopath_interconnect_only` deliberately does — it is the requested
+net-delay-only mode, and the count is what makes that choice honest; the two
+`iopath_*_modpath` classes cannot change a delay relative to annotating (their
+entries have no modpath to land on) but mark arcs that run with no module-path
+delay, so they also name them in `arcs`:
 
 | Class | Source | Meaning |
 |---|---|---|
 | `timingcheck` | Transcript scan (issue #1102) | Icarus implements SDF delays but not SDF `TIMINGCHECK`; every `TIMINGCHECK` section in the SDF was dropped by the simulator. |
 | `zero_delay_alias_port_interconnect` | SDF-text normalization (issue #2285) | An `INTERCONNECT` entry whose destination is a top-level port bit the netlist drives through an `assign` alias, carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath across that join. |
 | `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a pin of a physical-only instance (a router-inserted antenna diode, or any filler/tapcell whose model has no `specify` block and no output pin), carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath onto a modpath-free destination. |
+| `zero_delay_bus_port_source_interconnect` | SDF-text normalization (issue #2984) | An `INTERCONNECT` entry whose source is a bit-selected top-level **input** port (`ui_in[3] u1.A`), whatever its destination, carrying zero delay at every corner, was removed before annotation because Icarus can fail to insert an intermodpath from such a source (`Could not find intermodpath!`). Entries the `zero_delay_physical_only_interconnect` pass already removed are not counted again. A non-zero entry of the same shape is left in place and still fails the run. |
 | `iopath_interconnect_only` | Requested mode (issue #2364) | The request selected `options.sdf.entries: "interconnect"`, so every non-`INTERCONNECT` delay entry — on a real `write_sdf` output, the `IOPATH` module-path delays — was removed before annotation and counted here. Only ever present on a run that selected the mode. |
 | `iopath_ifnone_edge_modpath` | SDF-text normalization (issue #2885) | An `IOPATH` entry onto a cell arc whose only module paths in the cell's own Verilog model are `ifnone` + edge-sensitive (gf180mcu XOR/XNOR/MUX-select/half-adder-sum arcs) was removed before annotation, because Icarus discards those paths at elaboration and no `IOPATH` can match them. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc, sorted — naming every arc that ran with no module-path delay. |
 | `iopath_bus_bit_modpath` | SDF-text normalization (issue #2958) | A bit-selected `IOPATH` entry (`IOPATH A_CLK A_DOUT[0]`) onto a bus output that the cell's own Verilog model reaches only through a whole-vector module path (a hard macro's `(A_CLK *> A_DOUT)`) was removed before annotation, because Icarus registers no per-bit modpath. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc (`to` is the bus, bit-select dropped), sorted. |
 
 New classes may be added; a consumer should treat `dropped` as an open map
 keyed by class name, not as a fixed set of keys.
+
+### Limitation: `value_change` triggers on combinational outputs
+
+Observed by a reporter on Icarus 13.0 (issue #2984; not independently
+reproduced here): with module-path delays active (`options.sdf.entries:
+"all"`), cocotb `value_change` triggers on **combinational** DUT outputs —
+nets driven by annotated gates — did not fire, while the same triggers fire
+in the unannotated run and on flop-driven outputs. If you measure output
+latency from a testbench under SDF, prefer observing registered outputs, and
+treat a `value_change` timeout on a combinational output as possibly this
+limitation rather than a design fault.
 
 ## Run identity — **proposed v1 pilot, NOT yet emitted** (issue #2097)
 
@@ -1397,7 +1448,7 @@ set `options.trace: true`; on such a run it looks like this — the identical
 | `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `sim_time_ns` is read from whichever shape the installed cocotb writes into `results.xml` — the `<testcase sim_time_ns="...">` attribute cocotb 2.0.x emitted, or the `<properties>` block (`sim_time_duration` scaled by the reported `sim_time_unit`, never assumed to be `ns`) cocotb 2.1.0 replaced it with (issue #2592) — so the field carries the same nanosecond value either way. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the absolute paths of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`. See "SDF back-annotation" for the full shape. |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the absolute paths of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363; `zero_delay_bus_port_source_interconnect`, issue #2984) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`; plus `renamed` (issue #2897, additive, present only when non-empty) — `[{from, to}]`, each escaped-divider instance renamed to a plain identifier for annotation. See "SDF back-annotation" for the full shape. | See "SDF back-annotation" for the full shape. |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
 and no rule deck (see `docs/json-contract.md` → "Shared `provenance`

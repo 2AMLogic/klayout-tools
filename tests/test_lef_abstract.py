@@ -21,10 +21,10 @@ from klayout_tools.cli import main
 from klayout_tools.lef_abstract import (
     LefAbstractError,
     _polygon_to_um_shape,
-    _resolve_layer_map,
     run_lef_abstract,
 )
 from klayout_tools.lef_header import read_lef_header
+from klayout_tools.pdk import resolve_klayout_layer_map
 
 DBU_UM = 0.001
 
@@ -106,7 +106,7 @@ def _make_pdk_install(
     convention) lets a caller instead write the family-level filename a
     real gf180mcu install ships (``"gf180mcu.map"`` shared across
     ``gf180mcuC``/``gf180mcuD``, never a per-variant file -- issue #1029),
-    to exercise :func:`klayout_tools.lef_abstract._resolve_layer_map`'s
+    to exercise :func:`klayout_tools.pdk.resolve_klayout_layer_map`'s
     family fallback end to end."""
     variant_dir = root / variant
     (variant_dir / "libs.tech").mkdir(parents=True, exist_ok=True)
@@ -209,7 +209,8 @@ def _run(
 def test_basic_run_emits_macro_with_class_and_size(tmp_path, monkeypatch):
     report = _run(tmp_path, monkeypatch)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
+    assert report["file"]["scope"] in {"repo", "external"}
     assert report["macro_name"] == "analog_block"
     assert report["class"] == "BLOCK"
     assert report["size_um"] == {"width": 5.0, "height": 5.0}
@@ -613,9 +614,8 @@ def test_no_layer_map_raises(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# `_resolve_layer_map` -- variant-exact vs. family-fallback vs. none found
-# (issue #1029), this module's own duplicate of
-# `place_and_route._resolve_layer_map`'s equivalent coverage.
+# `resolve_klayout_layer_map` -- variant-exact vs. family-fallback vs. none
+# found (issue #1029); also covered in tests/test_place_and_route.py.
 # --------------------------------------------------------------------------- #
 
 
@@ -629,7 +629,7 @@ def test_resolve_layer_map_prefers_exact_variant_match(tmp_path, monkeypatch):
         "assets": {"klayout": str(install_root / "sky130A" / "libs.tech" / "klayout")},
     }
 
-    path, resolution = _resolve_layer_map(pdk_info)
+    path, resolution = resolve_klayout_layer_map(pdk_info)
 
     assert path == str(
         install_root / "sky130A" / "libs.tech" / "klayout" / "tech" / "sky130A.map"
@@ -652,7 +652,7 @@ def test_resolve_layer_map_falls_back_to_family_level_file(tmp_path, monkeypatch
         },
     }
 
-    path, resolution = _resolve_layer_map(pdk_info)
+    path, resolution = resolve_klayout_layer_map(pdk_info)
 
     assert path == str(
         install_root / "gf180mcuC" / "libs.tech" / "klayout" / "tech" / "gf180mcu.map"
@@ -666,7 +666,7 @@ def test_resolve_layer_map_returns_none_when_neither_file_exists(tmp_path):
         "assets": {"klayout": str(tmp_path / "no-such-klayout-dir")},
     }
 
-    path, resolution = _resolve_layer_map(pdk_info)
+    path, resolution = resolve_klayout_layer_map(pdk_info)
 
     assert path is None
     assert resolution == "none"

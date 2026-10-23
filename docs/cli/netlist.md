@@ -142,6 +142,20 @@ xschem's release notes). It applies to `--check` too, which fails with this
 cause instead of reporting `drifted`, and nothing is written. Under
 `--backend batch` the same code is returned.
 
+## An unresolved symbol is a failure, not a netlist
+
+When an instance refers to a symbol xschem cannot find, xschem still writes a
+"fresh" `.spice`; the only trace is a comment line such as
+`*  E1 -  no_such_device  IS MISSING !!!!`, and the device is absent from the
+netlist. After the export (and after `--block` post-processing) the netlist is
+scanned — **including** `*` comment lines, since the marker lives in one — for
+`IS MISSING`. A hit is an error (exit `1`) with
+`error.code: "unresolved_symbol"`; the message names the first offending line
+number and text. It applies to `--check` too, which fails with this cause
+instead of reporting `drifted`, and nothing is written. Under `--backend batch`
+the same code is returned. This is on by default; there is no flag. xschem's
+ERC pass and its stdout/stderr are not consulted.
+
 ## Success is the output file, not the exit status
 
 `xschem -n -s -q -x` returns a **non-zero** status after a *successful* batch
@@ -204,8 +218,11 @@ predecessor and whitespace runs are collapsed (comment lines are left as
 lines; CRLF and trailing whitespace are ignored), so a netlist whose long
 cards a project post-processor re-wrapped still reports `"match"`. Only
 layout is normalized, never a token: a changed device card, parameter value,
-node or pin order still reports `"drifted"`. When the files match only
-because of this, `drift.layout_differs` is `true`. This does not hide the
+node or pin order still reports `"drifted"`. The one exception is the port
+order of xschem's informational `**.subckt <name> <ports...>` comment line,
+which differs between xschem versions and is compared order-insensitively
+(issue #3743); the electrical `.subckt` card's port order is still strict.
+When the files match only because of this, `drift.layout_differs` is `true`. This does not hide the
 `.subckt`/`.ends` wrapper difference — for a committed netlist wrapped as a
 real `.subckt`, pass `--block`, which `--check` applies before comparing
 ([Block mode](#block-mode-an-includable-subckt)).
@@ -255,9 +272,11 @@ envelope's `error.code` classifies it:
 | `batch_concurrency_cap` | The launch was refused because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES` (retryable; waited out under `batch.capacity_wait_s`). |
 | `batch_runner_version_mismatch` / `batch_runner_version_unknown` | The runner's `klt` differs from this client's, or could not be read; nothing ran. A mismatch that the AMI manifest already publishes is refused before upload, with no job launched ([sim.md](sim.md), "Pre-launch check from the AMI manifest"). |
 | `batch_poll_timeout` | The job did not finish within the poll budget. It may still finish on the runner; nothing was collected. |
+| `batch_job_interrupted` | The job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than the default 1800 s grace ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)), so polling stopped before the poll budget. It may still be recoverable on the fleet; the client does not re-launch it. `klt netlist` has no request to carry `batch.interrupted_grace_s`, and prints no progress lines (its stderr carries the error envelope). |
 | `batch_job_timeout` | The harness stopped the job at its `timeout_seconds`. |
 | `batch_job_failed` | The job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted (and its `error.code` used, when it has one). |
 | `unevaluated_expr` | The netlist still contains a literal `expr(...)` (see above). Also returned by the local backend. |
+| `unresolved_symbol` | The netlist contains an `IS MISSING` marker: xschem could not resolve a symbol (see above). Also returned by the local backend. |
 | `batch_input_too_large` | The input tree is above the size cap (below). Raised before any upload. |
 
 **What is uploaded.** The job instance holds no forge credential and cannot
@@ -363,7 +382,10 @@ is a reusable block meant to be `.include`d elsewhere: the including deck
 already has its own `.end`, so a second one would terminate it early.
 
 `--block` post-processes the export: the first commented `.subckt`/`.ends`
-pair is uncommented, and the trailing `.end` is dropped. The result carries a
+pair is uncommented, and the trailing `.end` is dropped. When xschem wrapped a
+long port list onto commented continuation lines (`*+ ...`) directly after the
+header, those lines are rewritten to real `+` continuations so the `.subckt`
+card carries the whole port list. The result carries a
 `block` object in the JSON payload:
 
 | Field | Type | Description |
@@ -483,7 +505,7 @@ error: the netlist is still produced and the exit code is unchanged.
 | `committed_bytes` | integer \| null | Size of the committed netlist, or `null` when absent. |
 | `committed_content_hash` | string \| null | `sha256:<hex>` of the committed netlist, or `null` when absent. |
 | `path_comments_differ` | boolean | `true` when the files differ only in the directories of xschem's `** sch_path:` / `** sym_path:` comments, which `--check` ignores (status is then `"match"`). Additive (issue #3010). |
-| `layout_differs` | boolean | `true` when the files match only after `--check` ignored `+` continuation layout and whitespace runs. Additive (issue #3324). |
+| `layout_differs` | boolean | `true` when the files match only after `--check` ignored `+` continuation layout, whitespace runs, or the port order of the `**.subckt` comment line (issue #3743). Additive (issue #3324). |
 | `diff` | array\<string\> | Unified diff lines, committed → regenerated. `[]` on `"match"`. Capped at 200 lines. |
 | `diff_truncated` | boolean | Whether `diff` was cut off at the cap. |
 | `reason` | string \| null | Human-readable explanation of the verdict; `null` on `"match"`. |

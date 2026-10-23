@@ -28,11 +28,12 @@ document" section for the schema.
 
 ``--check <report>`` (issue #1149) switches ``klt extract`` from running a
 fresh extraction into *verifying a previously committed* ``--format json``
-report still reproduces -- see ``docs/cli/extract.md``, "--check" -- and is
-mutually exclusive with the positional ``file`` argument (the input path is
-read from the committed report itself). Cheap mode (default): re-hash the
-input/deck named in the report and compare against its own recorded
-``content_hash`` values, no extraction engine re-run. Full mode (``--check
+report still reproduces -- see ``docs/cli/extract.md``, "--check". The input
+path is read from the committed report itself unless the positional ``file``
+is also given (issue #2699), which then overrides it unconditionally. Cheap
+mode (default): re-hash the input/deck named in the report and compare
+against its own recorded ``content_hash`` values, no extraction engine re-run. Full
+mode (``--check
 <report> --rerun``): actually re-run the extraction the report describes
 and diff verdict-bearing fields. Both reuse ``status: "match"`` /
 ``"drifted"`` and the same 0/3 exit-code split described above (see
@@ -44,6 +45,7 @@ import sys
 from typing import Any
 
 from .._paths import looks_like_request_document
+from ..env_provenance import render_path_field
 from ..extract import (
     REQUEST_SCHEMA,
     ExtractError,
@@ -366,6 +368,7 @@ _REQUEST_FIELD_DESTS = {
         "parasitic_variants",
         "parasitics_top_cell_only",
         "resistance_graph",
+        "resistance_graph_r_cut",
         "distributed_rc",
         "substrate_tie_ohms",
         "resistance_paths",
@@ -478,6 +481,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "parasitic_variants": _str_list("parasitic_variants"),
             "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
             "resistance_graph": _bool("resistance_graph"),
+            "resistance_graph_r_cut": _number("resistance_graph_r_cut"),
             "distributed_rc": _bool("distributed_rc"),
             "substrate_tie_ohms": _number("substrate_tie_ohms"),
             "resistance_paths": _request_resistance_paths(request),
@@ -531,9 +535,10 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> int:
-    # `file` and `--check` are a required, mutually exclusive argparse group
-    # (parser.py) -- omitting both, or giving both, is already a usage error
-    # (exit 2) by the time `run()` is ever called.
+    # `file` or `--check` is required -- omitting both is a usage error
+    # (exit 2) enforced by `parser._require_one_input` before `run()` is ever
+    # called. `file` may accompany `--check` (issue #2699) as an explicit
+    # input override.
     if args.check is not None:
         return _run_check(args)
 
@@ -664,6 +669,9 @@ def run(args: argparse.Namespace) -> int:
             # `parasitics.nets[].resistance_graph`. `False` when the flag
             # was never given, unchanged from every call site before it.
             resistance_graph=args.resistance_graph,
+            # `--resistance-graph-r-cut` (issue #2983): per-cut via
+            # resistance for the graph; `None` when never given.
+            resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
             # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
             # the star/Gamma-shunt R/C model with a distributed ladder for
             # every `--critical-net`-named net. `False` when the flag was
@@ -747,9 +755,9 @@ def run(args: argparse.Namespace) -> int:
 def _run_check(args: argparse.Namespace) -> int:
     try:
         if args.rerun:
-            result = rerun_extract_report(args.check)
+            result = rerun_extract_report(args.check, input_path=args.file)
         else:
-            result = check_extract_report(args.check)
+            result = check_extract_report(args.check, input_path=args.file)
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
 
@@ -813,7 +821,12 @@ def _print_substrate_spreading(block: dict | None) -> None:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    # `file` is the `{path, scope}` object `env_provenance.repo_relative_path`
+    # defines (issue #2659) -- rendered through the same courtesy helper
+    # `klt sim`/`klt pex` use, so the absolute path is never printed even in
+    # text mode (`<outside repo>`/`<unresolved>` instead). `netlist_path`
+    # below is an output path, still a plain string, and prints as-is.
+    print(f"file: {render_path_field(report['file'])}")
     print(f"deck: {report['deck']}")
     # Present whenever this deck declares a caller-selectable option at all
     # (issues #595, #2394) -- mirrors `provenance.deck.options` in the JSON

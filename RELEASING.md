@@ -183,7 +183,12 @@ Let `X.Y.Z` be the new version.
    The workflow builds the tagged commit with `uv build` and publishes the
    resulting sdist/wheel with `uv publish` under PyPI trusted publishing.
 
-4. **Regenerate the deck history table** now that the new tag exists (the
+4. **Fill in availability notes.** Replace "the next release after 0.7.0"
+   in the `--attest` / `--inventory` availability notes in
+   `docs/cli/signoff.md` with `X.Y.Z` (and likewise for any later "not in
+   release" note), in the same release PR or a follow-up.
+
+5. **Regenerate the deck history table** now that the new tag exists (the
    generator can only see tags that have already been pushed — see
    `docs/cli/deck.md`'s "Regenerating" section):
 
@@ -198,6 +203,13 @@ Let `X.Y.Z` be the new version.
    relative to `git tag`, which fails
    `tests/test_deck_history.py::test_checked_in_history_table_covers_every_release`
    on the next `main` checkout.
+
+**Changelog convention for deck changes.** Any `CHANGELOG.md` entry that
+alters a built-in deck's content hash (rules added, removed or adjusted in
+`sky130`, `gf180mcu`, `sg13g2`, ...) must include the literal phrase
+`deck hash changes`, so consumers pinning `provenance.deck.content_hash` can
+search for it. Hashes are stable only per package version; see
+`docs/cli/deck.md` "Reproducing a run under a pinned deck".
 
 ## Verifying a release
 

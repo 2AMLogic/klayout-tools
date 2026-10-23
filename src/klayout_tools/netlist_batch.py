@@ -70,6 +70,7 @@ from .netlist import (
     STATUS_GENERATED,
     NetlistError,
     _check_no_unevaluated_expr,
+    _check_no_unresolved_symbol,
     _check_result,
     _netlist_block,
     _sha256_file_hash,
@@ -750,7 +751,7 @@ def _transport_error(job_id: str, exc: sim_batch.BatchError) -> NetlistError:
         return NetlistError(
             f"batch job {job_id}: {exc} -- it may still finish on the fleet, but "
             f"no netlist was collected {_NO_FALLBACK}",
-            code=BATCH_POLL_TIMEOUT_CODE,
+            code=exc.code or BATCH_POLL_TIMEOUT_CODE,
             job_id=job_id,
         )
     return NetlistError(
@@ -767,11 +768,14 @@ def _submit_and_wait(
     sleep: Callable[[float], None],
 ) -> dict[str, Any]:
     """Upload, launch and poll to a terminal ``status.json``. Every transport
-    failure, the poll timeout included, becomes a :class:`NetlistError`."""
+    failure, the poll timeout included, becomes a :class:`NetlistError`.
+    No progress lines: `klt netlist` carries its error envelope on stderr."""
     try:
-        sim_batch.submit_job(config, job_id, spec, runner=runner)
+        sim_batch.submit_job(config, job_id, spec, runner=runner, progress=False)
         sim_batch.launch_job(config, job_id, runner=runner, sleep=sleep)
-        return sim_batch.poll_status(config, job_id, runner=runner, sleep=sleep)
+        return sim_batch.poll_status(
+            config, job_id, runner=runner, sleep=sleep, progress=False
+        )
     except sim_batch.BatchError as exc:
         raise _transport_error(job_id, exc) from exc
 
@@ -811,7 +815,8 @@ def _collect(
         runner_error=runner_error,
         note=note,
         stderr_tail=stderr_tail,
-        harness_log=sim_batch.job_uri(config, job_id).rstrip("/") + "/harness.log",
+        harness_log=sim_batch.report_job_uri(config, job_id).rstrip("/")
+        + "/harness.log",
     )
 
 
@@ -917,6 +922,7 @@ def run_netlist_batch(
         data = _rewrite_runner_paths(data, _read_tree_roots(collected), tree.root)
         # The runner's klt gates too; this keeps the guarantee client-side.
         _check_no_unevaluated_expr(data, report["xschem"].get("version"))
+        _check_no_unresolved_symbol(data)
         remote = {
             **sim_batch._batch_environment(config, job_id, status),
             **sim_batch._read_runner_identity(collected),

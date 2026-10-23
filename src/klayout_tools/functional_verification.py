@@ -230,16 +230,22 @@ from .functional_verification_sdf import (
     _drop_sdf_non_interconnect_entries,
     _drop_sdf_unsupported_edge_modpath_iopaths,
     _drop_sdf_zero_delay_alias_port_interconnects,
+    _drop_sdf_zero_delay_bus_port_source_interconnects,
     _drop_sdf_zero_delay_physical_only_interconnects,
     _normalize_sdf_header_triples,
     _parse_toplevel_ports,
     _reject_sdf_escaped_divider_interconnects,
+    _reject_sdf_unresolvable_interconnect_instances,
     _reject_sdf_with_functional_models,
     _resolve_sdf_option,
     _scan_sdf_diagnostics,
     _split_sdf_bus_port_interconnects,
     _write_sdf_annotate_shim,
     _write_sdf_dut_wrapper,
+)
+from .functional_verification_sdf_rename import (
+    _apply_sdf_escaped_divider_rename,
+    _sdf_renamed_report,
 )
 from .reset_coverage import ResetCoverageError, sequential_elements
 
@@ -394,6 +400,17 @@ SDF_ALIAS_PORT_DROPPED_CLASS = "zero_delay_alias_port_interconnect"
 #: never emits a diagnostic for them at all.
 SDF_PHYSICAL_ONLY_DROPPED_CLASS = "zero_delay_physical_only_interconnect"
 
+#: ``INTERCONNECT`` entries removed before annotation because they run from a
+#: bit-selected top-level input port (any destination not already claimed by
+#: :data:`SDF_PHYSICAL_ONLY_DROPPED_CLASS`) and carry zero delay at every
+#: corner. Icarus can fail to insert an intermodpath for such a source
+#: (``Could not find intermodpath!``); an all-zero entry models no delay, so
+#: dropping it cannot change simulated timing. Issue #2984's counted
+#: exemption; a non-zero entry of the same shape is left in place and still
+#: fails loudly. Pre-dropped from the SDF text, not derived from a
+#: diagnostic substring.
+SDF_BUS_PORT_SOURCE_DROPPED_CLASS = "zero_delay_bus_port_source_interconnect"
+
 #: The ``environment.sdf.dropped`` class counting the non-``INTERCONNECT``
 #: delay entries -- on a real ``write_sdf`` output, the ``IOPATH`` population
 #: -- removed before annotation because the request selected
@@ -473,6 +490,15 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "zero are therefore removed before annotation and counted here "
         "instead of failing the run -- a non-zero-delay entry on the same "
         "destination is left in place and still fails loudly"
+    ),
+    SDF_BUS_PORT_SOURCE_DROPPED_CLASS: (
+        "Icarus Verilog can fail to insert an intermodpath for an "
+        "INTERCONNECT entry whose source is a bit-selected top-level input "
+        "port -- such an entry fails with 'Could not find intermodpath!'. "
+        "Entries whose every min:typ:max delay value is zero model no delay "
+        "at any corner, so they are removed before annotation and counted "
+        "here instead of failing the run -- a non-zero-delay entry on the "
+        "same source is left in place and still fails loudly"
     ),
     SDF_IOPATH_DROPPED_CLASS: (
         "The request selected options.sdf.entries: 'interconnect' "
@@ -2742,6 +2768,36 @@ def _apply_sdf_physical_only_drop(
     return new_path
 
 
+def _apply_sdf_bus_port_source_drop(
+    annotate_source_path: str,
+    output_dir: str,
+    ports: list[tuple[str, str, str]],
+    sdf_pre_dropped_counts: dict[str, int],
+) -> str:
+    """Issue #2984's zero-delay bit-selected-input-source SDF-text drop, the
+    sibling of :func:`_apply_sdf_physical_only_drop` and kept as its own
+    function for the same reason (no new branch in
+    :func:`run_functional_verification`). Runs after the physical-only pass,
+    so entries that pass claimed keep their class and are not double counted.
+    Counts under :data:`SDF_BUS_PORT_SOURCE_DROPPED_CLASS`.
+
+    Returns ``annotate_source_path`` unchanged when nothing was dropped, or
+    a new normalized-copy path otherwise.
+    """
+    drop = _drop_sdf_zero_delay_bus_port_source_interconnects(
+        annotate_source_path,
+        {name for direction, width, name in ports if width and direction == "input"},
+    )
+    if drop is None:
+        return annotate_source_path
+    text, count = drop
+    new_path = os.path.join(output_dir, "klt_sdf_bus_port_source_dropped.sdf")
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    sdf_pre_dropped_counts[SDF_BUS_PORT_SOURCE_DROPPED_CLASS] = count
+    return new_path
+
+
 # ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
@@ -2876,6 +2932,9 @@ def run_functional_verification(
     sdf_pre_dropped_counts: dict[str, int] = {}
     # Per-class dropped cell arcs, for a class that names them (issue #2885).
     sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]] = {}
+    # Instances renamed by issue #2897's escaped-divider rewrite, reported
+    # as `environment.sdf.renamed` (absent when empty).
+    sdf_renamed: list[dict[str, str]] = []
     if coverage_requested:
         build_args += list(COVERAGE_BUILD_ARGS)
     if sdf is not None:
@@ -2886,11 +2945,17 @@ def run_functional_verification(
         _check_sdf_engine_capability(_engine_version(engine))
         # Issue #1890: an escaped identifier containing a literal
         # occurrence of the SDF's own DIVIDER character in an INTERCONNECT
-        # entry crashes vvp outright (a genuine Icarus upstream limitation,
-        # not something the wrapper/shim below can work around) -- caught
-        # here, before any build artifact is written, rather than surfacing
-        # as a bare SIGABRT core dump four layers down.
+        # entry crashes vvp outright (a genuine Icarus upstream limitation)
+        # -- caught here, before any build artifact is written, rather than
+        # surfacing as a bare SIGABRT core dump four layers down. Narrowed
+        # by issue #2897 to a *pin/port* of that shape: an *instance* of
+        # that shape is renamed below instead.
         _reject_sdf_escaped_divider_interconnects(sdf["file"])
+        # Issue #3740: an INTERCONNECT endpoint naming an instance the
+        # netlist does not have aborts vvp the same way -- caught here too.
+        _reject_sdf_unresolvable_interconnect_instances(
+            sdf["file"], sources, hdl_toplevel
+        )
         if parameters:
             # cocotb's own Icarus parameter-override syntax is always
             # `-P<hdl_toplevel>.<name>=<value>` (its Runner, not this
@@ -2934,7 +2999,20 @@ def run_functional_verification(
         # which `iverilog -T typ` (the default corner) rejects as `Chosen
         # value not defined`. Always-on, header-only, and a no-op on an SDF
         # whose header is already complete.
-        annotate_source_path = _apply_sdf_header_normalization(sdf["file"], output_dir)
+        # Issue #2897: an instance name that is an escaped identifier
+        # containing a literal `.` (or the SDF's own DIVIDER) -- a flattened
+        # `generate` array's `\g[0].sub.u1` -- crashes vvp in an
+        # INTERCONNECT endpoint and fails to resolve in a CELL's INSTANCE,
+        # under either DIVIDER. Renamed to a plain identifier consistently
+        # in build-dir copies of the SDF and of every source declaring it
+        # (the caller's own files are untouched); reported as
+        # `environment.sdf.renamed`. A no-op on any other SDF.
+        annotate_source_path, sources, sdf_renamed = _apply_sdf_escaped_divider_rename(
+            sdf["file"], sources, output_dir
+        )
+        annotate_source_path = _apply_sdf_header_normalization(
+            annotate_source_path, output_dir
+        )
         annotate_source_path = _apply_sdf_interconnect_only_drop(
             annotate_source_path, output_dir, sdf_pre_dropped_counts, sdf["entries"]
         )
@@ -3020,6 +3098,14 @@ def run_functional_verification(
             hdl_toplevel,
             ports,
             sdf_pre_dropped_counts,
+        )
+
+        # Issue #2984: the remaining zero-delay sub-shape of shape (b) -- the
+        # same bit-selected-input-port source with a destination that is not
+        # physical-only. Zero-delay entries model no delay at any corner, so
+        # dropping them is timing-neutral; non-zero ones stay and still fail.
+        annotate_source_path = _apply_sdf_bus_port_source_drop(
+            annotate_source_path, output_dir, ports, sdf_pre_dropped_counts
         )
 
         split = _split_sdf_bus_port_interconnects(annotate_source_path, vector_ports)
@@ -3228,6 +3314,9 @@ def run_functional_verification(
                     "dropped": _sdf_dropped_report(
                         sdf_dropped_counts, sdf_pre_dropped_arcs
                     ),
+                    # Additive (issue #2897): `{from, to}` per escaped-
+                    # divider instance renamed for annotation.
+                    **_sdf_renamed_report(sdf_renamed),
                 }
             ),
         },

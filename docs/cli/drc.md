@@ -6,10 +6,11 @@ report violations as structured data.
 ```
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
 klt drc --deck sky130|gf180mcu|sg13g2|sg13cmos5l --list-rules [--format text|json]
+klt drc <file> --engine both --deck <name> [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--format text|json]
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
 klt drc <file> --deck <name> --waivers <waivers.json> [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
-klt drc --check <report.json> [--rerun] [--format text|json]
+klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -28,8 +29,9 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   check every top cell (today's default, unchanged). `coverage` (see below)
   is scoped along with it — `layers_in_stream_without_rules`/`layers_checked`
   reflect only `<cell>`'s own hierarchy, not the whole stream. A named cell
-  absent from the stream exits `1` with a clean error. **Not supported yet
-  for `--engine klayout`** (see "Engine" → "klayout" below).
+  absent from the stream exits `1` with a clean error. With `--engine
+  klayout`, a multi-top stream **requires** `--top` (see "Engine" →
+  "klayout" below).
 - `--engine` — `curated` (default) or `klayout` (issue #565, opt-in). See
   "Engine" below.
 - `--deck-file` — explicit path to a KLayout DRC-DSL script (`.lydrc`/`.drc`)
@@ -82,9 +84,9 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   names is rejected before `klayout` is launched. See "Engine" → `"klayout"`
   → "Opt-in rule-category set assertion".
 - `--check` — verify a previously committed `--format json` report instead
-  of running a fresh check (issue #1106). Mutually exclusive with `<file>`
-  (the input path is read from the report itself) — see "`--check` /
-  `--rerun`" below.
+  of running a fresh check (issue #1106). The input path is read from the
+  report itself unless `<file>` is also given, which overrides it
+  (issue #2699) — see "`--check` / `--rerun`" below.
 - `--rerun` — full mode for `--check`: actually re-run the DRC deck the
   report names, instead of only re-hashing its inputs. Requires `--check`.
 - `--list-rules` — list the curated `--deck`'s registered rules instead of
@@ -237,7 +239,7 @@ also the order a `--rules` subset executes in.
   "mode": "list_rules",
   "deck": "sky130",
   "engine": "curated",
-  "rule_count": 143,
+  "rule_count": 150,
   "groups": {
     "check": { "angle": 37, "area": 10, "enclosing": 17, "...": 0 },
     "scope": { "m1": 5, "poly": 1, "...": 0 }
@@ -319,7 +321,7 @@ A `--rules` run adds one top-level block, `rule_selection`, relative to the
   "selectors": ["met1.*"],
   "selected": ["met1.width.1", "met1.space.1", "met1.enclosing.mcon.1", "..."],
   "omitted": ["poly.width.1", "diff.width.1", "..."],
-  "deck_rule_count": 143,
+  "deck_rule_count": 150,
   "subset": true
 }
 ```
@@ -359,7 +361,7 @@ in either envelope aggregation or numbered-citation grading — see
 Before signoff, re-run without `--rules`.
 
 The text form adds one line, e.g.
-`rule selection: 5 of 143 rules (138 omitted; partial run) -- selectors: met1.*`,
+`rule selection: 5 of 150 rules (145 omitted; partial run) -- selectors: met1.*`,
 and does not list `not_selected` rules one per line under "skipped requested
 rules".
 
@@ -581,6 +583,17 @@ flag — passing it alongside `--engine curated` (the default) is silently
 ignored, not rejected, the same treatment `--deck-file`/`--timeout-s`
 already get for that engine mismatch.
 
+**Discovering a deck's globals, and the `deck_globals_not_supplied` warning
+(issue #3816).** `klt pdk decks --pdk <variant>` lists the sibling decks a PDK
+ships and the `-rd` globals each reads. When the deck handed to the klayout
+engine reads a global with no default (`required_by_caller`) and the run
+supplied none via `--deck-var`, the report gains an additive top-level
+`warnings` array of shared-contract entries
+(`{"category": "deck_globals_not_supplied", "count": 1, "text": ...}`). It never
+changes `status`, `violation_count` or the exit code, and does not fire for a
+self-contained deck such as `sky130A.lydrc`. The scan is the same static
+heuristic `klt pdk decks` uses.
+
 **Deck resolution.** `<deck_file>` is resolved, in order: `--deck-file` (an
 explicit path) if given; otherwise `klayout_tools.pdk.drc_deck_file(variant=
 --pdk, root=--pdk-root)` (issue #565), which resolves a PDK-native,
@@ -611,11 +624,13 @@ real open_pdks install never pays for the extra probe.
 
 **Known limitations, relative to the curated engine:**
 
-- **No `--top` support yet.** An arbitrary PDK-native DRC-DSL script has no
-  standard `-rd`-settable "restrict to this one top cell" variable this
-  engine can rely on generically — `sky130A.lydrc`, e.g., always reads the
-  whole `$input` stream. Passing `--top` alongside `--engine klayout` is a
-  clean error rather than a silently-ignored request.
+- **`--top` selects a single top cell.** A PDK-native DRC-DSL script reads
+  the whole `$input` stream as one single-top layout, so with `--top <cell>`
+  klt runs the deck against a temporary stream holding only `<cell>` and its
+  subtree (your input file is untouched). A stream with more than one top
+  cell and no `--top` exits `1` before KLayout is launched, with
+  `error.code` `multiple_top_cells` and a message listing the top cells.
+  Single-top streams are passed to the deck as-is.
 - **External rule execution is unknown without instrumentation.** A deck
   gated by `--deck-var` can produce an empty RDB, but neither an empty report
   nor nonempty category declarations proves which checks executed. DRC v2
@@ -861,6 +876,20 @@ Contract:
   shortcuts apply. The default (`False`) keeps the #318 behaviour, so shared
   populations such as gf180mcu Contact vs Poly2/Comp are unaffected.
 
+### `report_escapes=False` — extension rules without the escape term (issue #3001)
+
+The #318 zero-overlap escape term (above) is right for a *containment* rule
+(a cut must sit inside its conductor) and wrong for an *extension* rule whose
+enclosed layer is legitimately wider than the enclosing one in other
+directions. gf180mcu's `SB.10` (`sab.enclosed(poly_sab, 0.22)`: poly must
+extend 0.22 um past the SAB edge) is the case: a correct SAB-blocked poly
+resistor has SAB overhanging the poly sideways, and the default escape term
+would flag that overhang on every cell. A `DrcRule` with
+`report_escapes=False` reports only the marginal facing-edge shortfall —
+exactly the DRC-DSL statement, which has no escape term. The default (`True`)
+keeps every other rule's behaviour unchanged; the flag is ignored by every
+check kind except `"enclosing"`/`"enclosed"`.
+
 The `sg13cmos5l` deck opts in for all eight via-stack relationships (cut /
 lower / upper): Via1 Metal1/Metal2, Via2 Metal2/Metal3, Via3 Metal3/Metal4,
 TopVia1 Metal4/TopMetal1. The lower sides reuse the existing
@@ -1024,6 +1053,14 @@ rule still encodes the 3.3 V column, which is what
 [`coverage.voltage_domain_warnings`](#coveragevoltage_domain_warnings) now
 warns about — see that section for how the warning's gate distinguishes
 them.
+
+**Dualgate's own rules (issue #3791).** The deck checks `Dualgate` (55/0)
+itself only for `dualgate.width.1` (`DV.5`, 0.7 um) and `dualgate.space.1`
+(`DV.2`, 0.44 um), plus `dualgate.ongrid.1`. The remaining official
+`dualgate.drc` rules (`DV.1`, `DV.3`, `DV.6`, `DV.7`, `DV.8`, `DV.9`, which
+need compound or cross-layer expressions) and the other `_MV` columns are not
+transcribed; they are listed in `coverage.unmodeled_rules`, so a `clean`
+verdict on a layout that draws `Dualgate` does not mean full 5 V/6 V coverage.
 
 ### Fixed-size rules: `"width"` with a maximum (`threshold_max_dbu`, issue #2370)
 
@@ -1212,6 +1249,87 @@ marker (241/0).
 - `klt drc rules` lists the covering and marker layers in the rule's
   `layers`.
 
+### `"tap_distance"` check kind (issue #3607)
+
+A second region rule, declared with `DrcRule(check="tap_distance",
+region_spec=TapDistanceSpec(...))`. It reports every *whole* active polygon
+that does not lie within `max_distance_um` of a tap. gf180mcu's
+`comp.tap_distance.nwell.lv.1` (DRM `DF.13_LV`: PCOMP inside a well, taps are
+NCOMP inside the well) and `comp.tap_distance.psub.lv.1` (DRM `DF.14_LV`:
+NCOMP outside any well, taps are PCOMP outside the well) are the first users,
+both at 20 µm for the 3.3 V column. Their 5 V/6 V siblings
+`comp.tap_distance.nwell.mv.1` (`DF.13_MV`) and
+`comp.tap_distance.psub.mv.1` (`DF.14_MV`) apply a 15 µm reach to active
+overlapping `Dualgate` (issue #3793). The `latchup_mk` marker rules are not
+declared.
+
+The descriptor carries `well_domain` (`"inside"` / `"outside"`), `voltage`
+(`"lv"` / `"mv"`), `max_distance_um`, `step_um` (default 0.5) and the
+`nwell`/`dnwell`/`lvpwell`/`nplus`/`pplus`/`res_mk`/`dualgate`/`v5_xtor` layers
+it reads. A malformed descriptor (unknown domain/voltage, non-positive
+distance or step, distance not a multiple of the step) raises `ValueError`
+when the deck module is imported.
+
+- **Semantics** follow the pinned upstream deck, not a per-point reading of the
+  DRM text: selection is of whole polygons that do not interact with the tap
+  reach region, so a long active with one end near a tap is legal. `inside`
+  grows the tap in `step_um` octagon steps, clipping every step with the raw
+  `nwell` layer; `outside` uses a diamond candidate filter refined by a
+  Euclidean separation check. The two do not share one boundary metric. See
+  `docs/design/gf180mcu-comp-checks-spike.md` and the gf180mcu deck's "Known
+  approximations" (D1–D3, D7).
+- **Reporting**: one violation per selected polygon (`check: "tap_distance"`,
+  real `bbox` and `polygon`). Evaluated flat, per top cell, on merged regions.
+- **Empty tap layers never skip the rule**: with active present and no tap
+  drawn (or every tap under a `res_mk` marker), the active is reported.
+- **Voltage markers**: `dualgate` / `v5_xtor` are marker reads. `lv` selects
+  active touching neither; `mv` selects active overlapping `dualgate`. A rule
+  that reads the marker is not part of `coverage.voltage_domain_warnings`.
+- **Coverage**: `comp` absent → `inapplicable` (`no_applicable_geometry`).
+  `comp` drawn but the voltage-selected active region empty →
+  `inapplicable` (`inapplicable_empty_checked_region`), not counted in
+  `rules_checked`. A `max_distance_um` or `step_um` that is not a whole number
+  of database units on the layout's `dbu` is *skipped* with reason
+  `grid_not_representable` rather than rounded.
+- `klt drc rules` reports `value_um: null` for these rules and exposes
+  `well_domain`, `voltage`, `max_distance_um` and `step_um` under `limits`.
+
+- **Generator output is tap-clean on gf180mcu.** DF.13_LV/DF.14_LV are in the
+  default deck and are not suppressed or relaxed (the 20 µm limit is the
+  published rule). `klt gen mos_array` / `diff_pair` draw well/substrate tap
+  pads (or the guard ring, when `add_guard_ring` is set) of the right polarity
+  on gf180mcu, so their output and `gen-compose` output of those blocks passes
+  the whole deck. An array deeper than about 17 µm from every side is out of
+  reach of perimeter pads and still reports `comp.tap_distance.*`; that is a
+  real missing-tap finding, as is any hand-drawn layout without taps.
+
+### `"net_space"` check kind (issue #3572)
+
+A net-aware spacing check: it measures `layer` against itself at
+`threshold_dbu` like `"space"`, but reports only facing edges of polygons on
+**different nets**. Declared with `DrcRule(check="net_space",
+net_spec=NetSpaceSpec(tap_and=..., chain=...))`. sg13cmos5l's `nwell.space.2`
+(`NW.b1`, 1.80 um between NWells of different nets) is the first user, so
+`NW.b1` is no longer listed in `coverage.unchecked_rules`.
+
+- **Connectivity model** (`NetSpaceSpec`): KLayout `LayoutToNetlist` over a
+  straight chain. The *tap* is `layer` intersected with every `tap_and` layer
+  (sg13cmos5l: `Activ` & `nSD`, an n+ well tie); it joins the well it sits in,
+  then `chain[0]`, `chain[1]`, ... in order (sg13cmos5l: `Cont`, then
+  `Metal1`). Touching shapes on one layer join. A well with no tap is its own
+  net.
+- **What is not modelled** (never silently treated as connected, so such wells
+  may be *over*-flagged, not passed): connections through layers outside the
+  chain (Metal2+/Via*, TopMetal*, poly/Activ jumpers), `NWell.pin` labels and
+  substrate connectivity. Each deck states its own list next to the rule.
+- **Reporting**: ordinary edge-pair violations (`check: "net_space"`, real
+  `bbox` and `polygon`, rule id, provenance), identical in shape to `"space"`.
+  Evaluated flat per top cell. Corner-to-corner gaps use Euclidean distance;
+  wells that touch or overlap merge into one polygon and are never flagged.
+- **Contract**: additive only -- a new `check` string and no new JSON field.
+  `nwell.space.1` (geometric, same- and different-net) is unchanged and still
+  over-flags same-net pairs between 0.62 um and its threshold.
+
 ### `"ongrid"` / `"angle"` check kinds (issue #2642)
 
 Two single-layer **vertex** check kinds, as opposed to the distance checks
@@ -1285,15 +1403,70 @@ are vacuous when their layer is absent (no polygons, so no vertices and no
 corners), so an absent layer classifies as `inapplicable`, like every other
 single-layer kind.
 
+### `"both"` — cross-check the two engines (issue #3973)
+
+```
+klt drc <file> --engine both --deck <name> [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--format text|json]
+```
+
+Runs the curated deck (`--deck`) and the PDK-native deck on the **same
+layout** and reports where they differ. It is a comparison surface over the
+two existing engines, not a third verification engine: the response embeds
+both raw reports **verbatim** under `reports.curated` / `reports.native`
+(each keeps its own `status`, coverage and findings), and adds an `identity`
+block (layout `content_hash`, PDK, curated and native deck identity, klt and
+klayout versions) and a `comparison` block. If the two runs hashed different
+layouts or resolved different PDK variants, the command fails (exit 1)
+rather than comparing them. `--rules` and `--waivers` are refused (the
+cross-check compares whole-deck reports); the native-engine flags
+(`--deck-var`, `--timeout-s`, `--allow-deck-errors`, ...) pass through. The
+request document accepts `"engine": "both"`.
+
+Comparison is by **region, not by rule id or count**: zero vs non-zero plus
+bbox overlap (the precedent is `docs/design/magic-oracle.md`), so 1 vs 2
+markers over the same spot agree. Only rules an explicit mapping group pairs
+up (`drc_crosscheck.RULE_MAPPING`, curated rule ids ↔ native RDB categories)
+are compared. **The shipped mapping is empty**: a wrong pairing manufactures
+false agreement or disagreement, so groups are added one at a time with a
+verified equivalence. Until then every real run is `not_comparable`, and the
+per-engine reports are the useful output.
+
+| `comparison.state` | Meaning |
+|---|---|
+| `agree_clean` | every mapped group covered by both sides, no findings, and **no unmapped rule ran on either side** |
+| `agree_violations` | as above, both sides flag the same regions |
+| `disagreement` | in a covered mapped group, one engine flagged a region the other did not (`groups[].only_curated` / `only_native` list the bboxes) |
+| `not_comparable` | a group not covered by both sides, no groups, or rules on either side outside the mapping (`unmapped.curated` / `unmapped.native`) — an unmapped rule can never produce `agree_*` |
+| `native_unavailable` | no native deck, no `klayout` binary, or missing host tools; `reports.native` is `null` |
+| `engine_failed` | the native run raised any other error; `reports.native` is `null` |
+
+`status` is `violations` if either engine found some, else the first
+no-verdict token, else `clean_partial`/`clean`. A native run that did not
+complete is `not_checked` (exit 4) — **never clean** — and does not mask
+curated violations (still `violations`, exit 3). Exit codes are the usual
+0/3/4, derived from each embedded report's own rollup code. A curated-side
+error (bad file, unknown deck) is an ordinary exit-1 error.
+
+**Live comparison prerequisite (documented, not run here).** A live
+comparison needs: the `klayout` binary on `PATH`; an open PDK checkout whose
+native deck the packaged PDK resolver finds (e.g. `klt pdk` for `gf180mcuD`),
+or an explicit `--deck-file`; and the deck's host tools (`--allow-missing-host-tools`
+only for a debug probe). The case to try first is the study's wide-metal
+gf180mcu gap (`docs/design/custom-transistor-layout-study.md` §4.3 item 5):
+a wide-metal layout where the native deck flags spacing the curated deck does
+not model. Expected outcome today: `not_comparable` with the native finding
+visible in `reports.native` — i.e. the gap is exposed, not silently passed. No
+live run is required for merge.
+
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 143
+design rule manual (which spans hundreds of rules). It currently covers 150
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
 `tap` (issue #2321), `rpm`/`urpm` marker width (issue #3030),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
-`nwell` (issue #1420) layers, plus the source deck's entire
+`nwell` (issue #1420; `nwell.enclosed.hvi.1`, issue #3031), and `npc`/`nsdm`/`psdm` (issue #2934) layers, plus the source deck's entire
 manufacturing-grid/corner-angle (`OFFGRID`) group across 38 layers (issue
 #2642, see "Manufacturing grid and corner angle" below) — transcribed
 directly from the official
@@ -1312,17 +1485,27 @@ Broken down by check kind:
 
 | kind         | count |
 | ------------ | ----: |
-| `width`      |    20 |
+| `width`      |    23 |
 | `space`      |    13 |
-| `isolated`   |     1 |
+| `isolated`   |     4 |
 | `enclosing`  |    17 |
-| `enclosed`   |     1 |
+| `enclosed`   |     2 |
 | `enclosing_adjacent` | 4 |
 | `separation` |     2 |
 | `area`       |    10 |
 | `ongrid`     |    38 |
 | `angle`      |    37 |
-| **total**    |**143**|
+| **total**    |**150**|
+
+(`enclosed` includes `nwell.enclosed.hvi.1`, issue #3031 — `sky130A_mr.drc`'s
+`nwell.9`, "HVnwell must be enclosed by hv marker": a well that touches `hvi`
+(75/20) must lie wholly inside it, with no margin required; a well that never
+touches `hvi` is not an HV well and is not flagged. **Approximation**: the
+runset's marker is `hvi | rdl | uhvi | vhvi`; only `hvi` is read here, so a
+well touching `hvi` while also sitting inside an `rdl` (74/20), `uhvi` (74/22)
+or `vhvi` (74/21) marker would be flagged. The `m1.5`/`m2.5`/`via.5a`/`via2.5`/
+`via3.5` refinements are not modelled and are listed in
+`coverage.unmodeled_rules`.)
 
 (`enclosing_adjacent` is the four two-adjacent-edges enclosure rules, issue #3316 — see "`enclosing_adjacent`" below. `isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
 five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
@@ -1330,7 +1513,7 @@ five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
 paragraph. `ongrid`/`angle` are the `OFFGRID` group, issue #2642 — the
 angle count is one short of the grid count because one layer,
 `areaid.rfdiode`, is grid-checked but not angle-checked by the source deck.
-`enclosed` is `poly.endcap.diff.1`, issue #2936 — see below.)
+`enclosed` also includes `poly.endcap.diff.1`, issue #2936 — see below.)
 
 `poly.endcap.diff.1` (issue #2936) transcribes `poly.8` ("min. poly extention
 gate (endcap)", 0.13 µm): gate poly must extend at least 0.13 µm past the
@@ -1579,10 +1762,23 @@ Three transcribed absences, recorded rather than inferred — the issue's own
   `tests/test_drc_offgrid.py` fails if a future layer joins the deck without
   landing in one list or the other.
 
-**Other decks remain uncovered.** `gf180mcu`, `sg13g2`, and `sg13cmos5l`
-author no `"ongrid"`/`"angle"` rule yet: the check kinds are PDK-agnostic, but
-each deck's grid/angle values have to be transcribed from *its own* signoff
-deck, which is separate work per PDK and is not done here.
+**gf180mcu has the grid half only (issue #3001).** The PDK runset's
+`rule_decks/geom.drc` opens with the same on-by-default `if OFFGRID` group
+(`run_drc.py --no_offgrid` disables it), and the `gf180mcu` deck now carries
+29 `<layer>.ongrid.1` rules at its single published grid, 0.005 um — one per
+curated layer the runset grid-checks (`_OFFGRID_ROWS` in
+`src/klayout_tools/decks/gf180mcu.py`; the runset layers with no curated GDS
+number are listed in its `OFFGRID_UNCHECKED_LAYERS`). There is **no**
+`"angle"` rule: the runset's `<layer>_angle` statements are
+`edges.without_angle(0).without_angle(45)…` edge-direction checks, not the
+`with_angle` corner-angle primitive sky130 uses, and no `DrcRule` check kind
+expresses them. Before this, a `klt gen mos_array` guard-ring cell the runset
+failed with `contact_OFFGRID` read `clean` here.
+
+**`sg13g2` and `sg13cmos5l` remain uncovered.** They author no
+`"ongrid"`/`"angle"` rule yet: the check kinds are PDK-agnostic, but each
+deck's grid/angle values have to be transcribed from *its own* signoff deck,
+which is separate work per PDK and is not done here.
 
 Antenna coverage, unlike density, is **not** a gap in the toolset — it is
 simply a different verb. `klt erc` (issue #860) produces a per-gate
@@ -1592,7 +1788,7 @@ the per-net connectivity a real process-antenna-area-ratio check needs and
 not have. See [`docs/cli/erc.md`](erc.md); this deck's *not* authoring an
 `"antenna"`-kind `DrcRule` is a scoping choice, not missing capability.
 
-The `gf180mcu` deck is likewise a **curated starter subset**: 56 rules —
+The `gf180mcu` deck is likewise a **curated starter subset**: 89 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`
 (diffusion/active), `Nplus`/`Pplus` (implant), `Contact`, `Via1`-`Via4`,
 `Metal1`-`Metal5`, and `MetalTop`
@@ -1662,6 +1858,40 @@ run, since this sandbox has none; this deck itself still transcribes none of
 the six, so `klt drc --deck gf180mcu` staying clean neither confirms nor
 denies that fix either.
 
+**Salicide-block (`SB.*`) rules (issue #3001).** The deck transcribes the four
+`rule_decks/sab.drc` rules the existing check kinds express exactly: `SB.1`/
+`SB.2` (`sab.width.1`/`sab.space.1`, 0.42 um), `SB.4`
+(`sab.separation.contact.1`, SAB to contact, 0.15 um) and `SB.10`
+(`poly2.enclosing.sab.1`, poly extension past SAB, 0.22 um, with
+`report_escapes=False` — see above). Until then a poly-resistor cell with SAB
+too close to a contact or a poly that stops short of the SAB read `clean`. The
+rest of the group is deliberately not transcribed, and the module docstring of
+`decks/gf180mcu.py` names each rule with its reason: `SB.3`/`SB.5a`/`SB.5b`/
+`SB.9`/`SB.15a`/`SB.15b` are scoped to "unrelated" COMP/Poly2/implant
+(`not_overlapping` derivations the `DerivedLayer` modes cannot state
+exactly), `SB.6`/`SB.7`/`SB.11` need COMP-side enclosure/overlap variants,
+`SB.8` is a Boolean `contact & sab`, `SB.12`/`SB.14*`/`SB.16` need `ESD_MK`/
+`LVS_IO`/gate recognition, and `SB.13` (minimum area) is a follow-up. `SB.4`
+also does not report SAB drawn *over* a contact (`Region.separation_check`
+reports nothing for overlapping shapes; the runset reports it under `SB.4`
+and `SB.8`).
+
+**ESD implant (`ESD.*`) and guard-ring marker (`GR.*`) rules (issue #3792).**
+The deck transcribes the `esd.rb` / `guard_ring.rb` rules the existing check
+kinds express exactly, under scopes `ESD` and `GR`: `ESD.1`/`ESD.2` (ESD
+width / space, 0.6 um), `ESD.4b` (overlap of COMP, 0.45 um), `ESD.5a`/`ESD.5b`
+(ESD area / enclosed-hole area, 0.49 um^2), `ESD.8` (space to Nplus / Pplus,
+0.3 um, one rule per implant) and `GR.2` (COMP, Nwell, Poly2, Metal1-5 and
+MetalTop at least 10 um from `GUARD_RING_MK`, 167/5). The remaining upstream
+rules (`ESD.3a`/`3b`/`4a`/`6`/`7`/`9`/`10`/`pl`, `GR.1`/`3`/`4`/`6`/`11`) need
+derived layers (NCOMP/PCOMP), gate recognition, `LVS_IO` or polygon selectors
+the check kinds lack. They are listed in the deck's `UNTRANSCRIBED_RULES` with
+a reason each, and every `klt drc --deck gf180mcu` report names them in
+`coverage.unmodeled_rules` (whatever the stream draws). That field is
+informational and not graded, so a violation-free run stays `clean` and still
+passes `klt eval` / `klt signoff`; read `unmodeled_rules` to see what a `clean`
+does not cover.
+
 The conductor *above* a cut is checked as well as the layers below it
 (issue #551). `Contact` previously had `CO.3` (Poly2) and `CO.4` (Comp) —
 both *below* the cut — and nothing above it, so a contact whose Metal1 strap
@@ -1676,7 +1906,7 @@ form — the same pair of conditions `klt drc` reports for an `"enclosing"`
 rule (see "`"enclosing"` / `"enclosed"` also catch zero-overlap escapes"
 above) — so none of the nine is an approximation. Their **end-of-line**
 companions (`CO.6a`/`CO.6b`, `Vn.3c`/`Vn.3d`, `Vn.4b`/`Vn.4c`) are *not*
-transcribed: each conditions a 0.06 um margin on a narrow-metal
+transcribed (they are listed in `coverage.unmodeled_rules`, issue #3968): each conditions a 0.06 um margin on a narrow-metal
 end-of-line predicate that `DrcRule`'s vocabulary cannot express, the same
 class of gap as sky130's `m2.6` above.
 
@@ -1747,6 +1977,19 @@ where the context is positively identified: selection is whole-polygon (a
 branches (`NP.3bii`, `PP.5ci`) are **not** relaxed -- anything within reach of
 a `Dnwell` stays on the strict near rule. The mirrored `pplus.space.ncomp.1`
 and `nplus.enclosing.comp.1` keep the flat strict value.
+
+`DerivedLayer` also takes an optional **second context stage**
+(`context2_layers`, `context2_sized_by_um`, `context2`, issue #3682): the same
+near/far whole-polygon partition applied *sequentially* to the stage-1
+result, so the stages AND together (`near` then `far` = inside the first
+context but outside the second; `near` then `near` = inside both). Stage 2
+requires stage 1, and `context2`/`context2_layers` must be set together
+(`DrcError` naming the rule id otherwise). A context layer absent from the
+stream is empty: stage-2 `near` yields nothing, `far` keeps everything, and
+the rule is not skipped. `klt drc --format json` emits the `context2*` keys
+under a rule's `derived_layer` block only when set, so other rules' JSON is
+unchanged. The sg13cmos5l `nwell.enclosing.{pactiv,nactiv}.hv.1` /
+`.dig.1` pairs use it (ThickGateOx `near`, then DigiBnd `far` / `near`).
 
 The DRM's two MiM capacitor rules scoped to the "virtual bottom plate" —
 `MIMTM.1` (minimum bottom-plate spacing to other bottom-plate-or-routing
@@ -2084,11 +2327,45 @@ it is installed with the package, next to its declared rule-id list
 [`asap7_rules.py`](../../src/klayout_tools/decks/asap7_rules.py)
 (`klayout_tools.decks.asap7_rules.DECK_PATH`).
 
+### ASAP7 capability by release
+
+What each published `klayout-tools` release ships for ASAP7, derived from
+`CHANGELOG.md` and the tagged tree (`git show vX.Y.Z:src/klayout_tools/decks/asap7.drc`).
+Pick a pin from this table, not from the unreleased examples in this page.
+
+| Release | DRC deck (`asap7.drc`) | FinFET LVS | Extraction |
+|---|---|---|---|
+| `0.5.0` | none (no ASAP7 deck) | no | none |
+| `0.6.0` | none (no ASAP7 deck) | no | none |
+| `0.7.0` | 106 rule categories, FEOL + MOL only (no M1-M9 / V1-V9) | refused: `klt lvs` with `layout.deck: asap7` errors "does not yet compare FinFET devices" (#2813) | `asap7` FinFET extraction deck |
+| Unreleased (`main`) | 263 rule categories, FEOL + MOL + BEOL M1-M9 / V0-V9 | supported (`options.finfet_bulk`) | `asap7` FinFET extraction deck |
+
+`--expect-rule-categories 263` in the example below, and FinFET LVS, apply
+to the **unreleased tree only**. A user on `0.7.0` needs a git pin until the
+next release ships them:
+
+```bash
+uvx --from "git+https://github.com/2AMLogic/klayout-tools@<sha>" klt drc ...
+```
+
+`klt deck info --deck asap7` reports the extraction deck module and the
+packaged `asap7.drc` as separate artifacts (`content_hash` vs
+`drc_deck.content_hash`); see [`deck.md`](deck.md#klt-deck-info).
+
 ```bash
 klt drc layout.gds --engine klayout \
-    --deck-file src/klayout_tools/decks/asap7.drc \
+    --deck-file "$(klt deck path --deck asap7 --format json | jq -r .path)" \
     --expect-rule-categories 263 --format json
 ```
+
+`klt deck path --deck asap7` ([`docs/cli/deck.md`](deck.md)) prints the
+installed script's absolute path, so the invocation works from a wheel /
+`uv tool` install, not only a source checkout.
+
+`asap7` is deliberately not a curated DRC deck, so it is absent from
+`klt drc --help`'s `--deck` list and `klt drc --deck asap7` exits 1 with an
+error naming this route; `klt deck info` reports it as
+`provides: ["extraction", "klayout_drc"]`.
 
 `--pdk asap7` does not resolve this deck: `klt pdk` finds an ASAP7 process
 tree (#2759) but not a deck inside it, so pass `--deck-file`. The output is
@@ -2128,6 +2405,43 @@ The 0.00025 um dbu from `asap7.lyt` represents every DRM value.
 **Layers.** GDS numbers are those the pinned `asap7.lyp` names (`fin
 drawing - 2/0`, ...), which equal the DRM mask IDs (Tables 2.1.1-2.4.1). A
 test cross-checks the deck against the fetched `.lyp`.
+
+**PAD (`96/0`) and the PAD layer's rules (#3807).** PAD is the one layer the
+deck reads that `asap7.lyp` does not name. The deck reads it as DRM mask `96`
+(Table 2.3.1, cited from the deck; not re-read against the PDF for #3807),
+and the DRM is the authoritative source because the deck is transcribed from
+it. The pinned lambdapdk v0.2.17 files do not agree and do not settle it:
+`asap7.layermap` names `Pad` only as `Pad/SPNET|PIN|LEFPIN 95/251` (its
+`Pad/NET 95/1` line is commented out), which puts it on V9's number `95`;
+`asap7.lyp` has no PAD entry; `asap7_tech.lef` defines a `Pad` routing layer
+with no stream number. The deck is not renumbered to `95`, which would collide
+with V9. A test pins these file facts so a pin bump that changes them fails.
+
+**The deck has no rule for the PAD layer itself.** The DRM states none (no
+width, spacing, area, enclosure-by-V9 or density rule for PAD); the only PAD
+rules are `V9.PAD.EN.2` and `V9.AUX.1` (Table 3.19.1). The tech LEF's `Pad`
+width (0.04 um), spacing table and 20 % / 80 % density are router settings,
+not DRM rules (see "Density"), so no threshold is taken from them. A `clean`
+verdict therefore says nothing about shapes on PAD, and a pad pitch or array
+constraint cannot be stated. `klt drc --engine klayout` with the packaged
+`asap7.drc` reports this in `coverage.unchecked_rules` as
+`{"rule": "PAD.*", "layer": "96/0", "description": ...}` whenever the layout
+has shapes on `96/0`; a layout without them reports `[]` as before. The
+declaration is `asap7_rules.UNCHECKED_AREAS`, and the rule-category contract
+(`--expect-rule-categories`) is unchanged.
+
+### Checking abutment-designed cells
+
+`klt drc` judges the top cell alone, in free space. A standard cell built to
+be abutted in a row can therefore report width or pitch violations
+(`FIN.W.2`, `GATE.S.3`, `NSELECT.W.1`, `PSELECT.W.1`, `WELL.W.1`) that a
+placed row does not have, because its shapes end at the cell outline. The
+shipped-cell gate avoids this by placing each cell between two `INVx1`
+neighbours. `coverage.isolation_only_rules` names these rules, with
+`"reason": "isolation_only"`, whenever their layer is present, so a boundary
+artifact is not read as a real violation. To check the abutted context, instance
+the cell two or three times edge to edge in a new top cell and run `klt drc`
+on that; the marker stays, because it describes the check, not the outcome.
 
 ### Rule ids (the contract)
 
@@ -2414,7 +2728,9 @@ dbu. The shipped-cell regression needed no new deviation.
 
 ### Not implemented
 
-DRM rules in Tables 3.1-3.19 that the deck does not check yet. Rows group
+DRM rules in Tables 3.1-3.19 that the deck does not check yet. The same ids
+are reported, sorted, in `coverage.unmodeled_rules` of a `--engine klayout`
+run with this deck. Rows group
 ids that share a table, reason and tracking issue. Section 3.13 extends the
 V1 rules to V2 and V3 (and note 2 adds `V3.M3.EN.1`); sections 3.14-3.19 do
 the same for M5, V5, M7, V7, M9 and V9, whose V9 enclosure is by PAD (mask 96,
@@ -2444,13 +2760,17 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `V3.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V3.S.2`, `V3.S.3`, `V3.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
 | `V3.M4.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
-| `M4.W.4`, `M4.S.3`, `M4.S.4`, `M4.S.5` | Table 3.14.1 | defined against the routing tracks (adjacent tracks, number of tracks spanned); the deck has no per-shape track assignment | #3155 |
+| `M4.W.4` | Table 3.14.1 | 'spans an even number of minimum-width tracks' is, for the AUX.1 grid the deck enforces, the same condition as W.3's even multiple of the minimum width, which the deck already reports; a separate check would add no violations at the default 0 nm offset | #3155 |
+| `M4.S.3`, `M4.S.4`, `M4.S.5` | Table 3.14.1 | defined against the routing tracks (adjacent tracks, parallel run length); the deck has no per-shape track assignment, and the DRM leaves 'adjacent' and the track pitch undefined (Fig. 3.14.2 shows only min-width tracks at 2 x W.1 pitch), so any reading would be a guess | #3155 |
 | `M4.AUX.4` | Table 3.14.2 | 'wide' is not defined, and with the default 0 nm offset every multiple of the AUX.1 grid is a track edge, so the rule has no checkable reading | #3155 |
-| `M5.W.4`, `M5.S.3`, `M5.S.4`, `M5.S.5` | Table 3.14.1 | defined against the routing tracks (adjacent tracks, number of tracks spanned); the deck has no per-shape track assignment | #3155 |
+| `M5.W.4` | Table 3.14.1 | 'spans an even number of minimum-width tracks' is, for the AUX.1 grid the deck enforces, the same condition as W.3's even multiple of the minimum width, which the deck already reports; a separate check would add no violations at the default 0 nm offset | #3155 |
+| `M5.S.3`, `M5.S.4`, `M5.S.5` | Table 3.14.1 | defined against the routing tracks (adjacent tracks, parallel run length); the deck has no per-shape track assignment, and the DRM leaves 'adjacent' and the track pitch undefined (Fig. 3.14.2 shows only min-width tracks at 2 x W.1 pitch), so any reading would be a guess | #3155 |
 | `M5.AUX.4` | Table 3.14.2 | 'wide' is not defined, and with the default 0 nm offset every multiple of the AUX.1 grid is a track edge, so the rule has no checkable reading | #3155 |
-| `M6.W.4`, `M6.S.3`, `M6.S.4`, `M6.S.5` | Table 3.16.1 | defined against the routing tracks (adjacent tracks, number of tracks spanned); the deck has no per-shape track assignment | #3155 |
+| `M6.W.4` | Table 3.16.1 | 'spans an even number of minimum-width tracks' is, for the AUX.1 grid the deck enforces, the same condition as W.3's even multiple of the minimum width, which the deck already reports; a separate check would add no violations at the default 0 nm offset | #3155 |
+| `M6.S.3`, `M6.S.4`, `M6.S.5` | Table 3.16.1 | defined against the routing tracks (adjacent tracks, parallel run length); the deck has no per-shape track assignment, and the DRM leaves 'adjacent' and the track pitch undefined (Fig. 3.14.2 shows only min-width tracks at 2 x W.1 pitch), so any reading would be a guess | #3155 |
 | `M6.AUX.4` | Table 3.16.2 | 'wide' is not defined, and with the default 0 nm offset every multiple of the AUX.1 grid is a track edge, so the rule has no checkable reading | #3155 |
-| `M7.W.4`, `M7.S.3`, `M7.S.4`, `M7.S.5` | Table 3.16.1 | defined against the routing tracks (adjacent tracks, number of tracks spanned); the deck has no per-shape track assignment | #3155 |
+| `M7.W.4` | Table 3.16.1 | 'spans an even number of minimum-width tracks' is, for the AUX.1 grid the deck enforces, the same condition as W.3's even multiple of the minimum width, which the deck already reports; a separate check would add no violations at the default 0 nm offset | #3155 |
+| `M7.S.3`, `M7.S.4`, `M7.S.5` | Table 3.16.1 | defined against the routing tracks (adjacent tracks, parallel run length); the deck has no per-shape track assignment, and the DRM leaves 'adjacent' and the track pitch undefined (Fig. 3.14.2 shows only min-width tracks at 2 x W.1 pitch), so any reading would be a guess | #3155 |
 | `M7.AUX.4` | Table 3.16.2 | 'wide' is not defined, and with the default 0 nm offset every multiple of the AUX.1 grid is a track edge, so the rule has no checkable reading | #3155 |
 | `V4.S.2`, `V5.S.2` | Table 3.15.1 | needs net connectivity to tell different-net pairs from same-net ones; the threshold equals S.1's, and the deck's net-independent S.1 check reports these pairs | #3155 |
 | `V6.S.2`, `V7.S.2` | Table 3.17.1 | needs net connectivity to tell different-net pairs from same-net ones; the threshold equals S.1's, and the deck's net-independent S.1 check reports these pairs | #3155 |
@@ -2608,7 +2928,7 @@ The gate has two parts, run for each library:
    ```bash
    klt drc <cells.gds> --engine klayout \
        --deck-file src/klayout_tools/decks/asap7.drc \
-       --expect-rule-categories 232 --format json
+       --expect-rule-categories 263 --format json
    ```
 
    and requires exit 0, `status: "clean"`, no violations, a satisfied
@@ -2808,8 +3128,8 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 
 ```json
 {
-  "schema_version": 2,
-  "file": "design.gds",
+  "schema_version": 3,
+  "file": { "path": "design.gds", "scope": "repo" },
   "deck": "sky130",
   "dbu_um": 0.001,
   "status": "clean",
@@ -2860,8 +3180,8 @@ On a run with findings:
 
 ```json
 {
-  "schema_version": 2,
-  "file": "design.gds",
+  "schema_version": 3,
+  "file": { "path": "design.gds", "scope": "repo" },
   "deck": "sky130",
   "dbu_um": 0.001,
   "status": "violations",
@@ -2908,8 +3228,8 @@ On a run with findings:
 
 | Field             | Type                     | Description                                                             |
 | ----------------- | ------------------------ | ------------------------------------------------------------------------ |
-| `schema_version`  | integer                  | Version of this command's JSON shape (`2`; per-command).       |
-| `file`            | string                   | The input path exactly as provided on the command line.                  |
+| `schema_version`  | integer                  | Version of this command's JSON shape (`3`; per-command).       |
+| `file`            | object                   | The input layout this run read and hashed, as the committable `{"path", "scope"}` envelope (issue #2659, `schema_version` 3 — it was the raw input path string through `schema_version` 2): `scope: "repo"` with a repo-relative POSIX `path` when the layout lives inside the repo the invocation resolved, `{"path": null, "scope": "external"}` when it does not. The producing host's absolute path is never echoed. This is the field `provenance.input.content_hash` covers, so it is also the one a consumer re-hashes to verify that hash against the artifact rather than against another claim — `klt signoff --manifest`'s `input_verified` gate resolves `scope: "repo"` against the repo root of the *evidence file's* own location, which is what lets a committed `klt drc` envelope be re-verified from any clone instead of only on the machine that wrote it. Same shape `klt sim`'s `netlist` and `klt pex`'s `layout` carry (issue #1261); see [`docs/json-contract.md`](../json-contract.md)'s "Path fields: envelope vs. plain string". |
 | `deck`            | string                   | `--engine curated`: the deck name used (`"sky130"` or `"gf180mcu"`). `--engine klayout`: the resolved/given deck script's own path (no separate short name exists for an arbitrary PDK-native script). |
 | `engine`          | string                   | Present only for `--engine klayout` (always `"klayout"`) — purely additive; the curated engine's own output carries no `engine` key at all, unchanged since it was the sole engine until issue #565. |
 | `engine_deck_errors` | object                | Present only on an `--engine klayout` run that tolerated a failed deck run via `--allow-deck-errors` (issue #1941): `{"exit_status": <int>, "error_lines": [<klayout's own `ERROR` lines>]}`. Omitted entirely otherwise (including on every run that predates the flag being passed), so an ordinary payload is unchanged. Its presence means the deck may have aborted part-way through and the `status`/`violation_count` below cover only the rules that ran before the abort — see "Engine" → `"klayout"`. |
@@ -2922,7 +3242,7 @@ On a run with findings:
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
 | `waived_count`, `waived_rule_counts`, `waived`, `unused_waivers` | integer, object\<string, int\>, array\<object\>, array\<object\> | Present only on a `--waivers` run (issue #3483): the markers a reviewed waiver file moved out of `violations`, with their justification; see "Waivers". Absent otherwise, so a default run's report is byte-identical. |
 | `rule_selection`  | object                   | Present only on a `--rules` run (issue #2768): `{"selectors", "selected", "omitted", "deck_rule_count", "subset"}`, relative to the full registered deck — see "Rule listing and selection" above. Absent otherwise, so a default run's report is unchanged. |
-| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. A `--waivers` run additionally carries `waivers` (issue #3483): `{"file", "content_hash"}` pinning the waiver file by `sha256:` hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
+| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. A deck hash is stable only per package version; to re-run under a previously pinned deck see [`deck.md`](deck.md#reproducing-a-run-under-a-pinned-deck). A `--waivers` run additionally carries `waivers` (issue #3483): `{"file", "content_hash"}` pinning the waiver file by `sha256:` hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
 
 ### `metrics` object
 
@@ -2947,7 +3267,7 @@ zero-violation case (where `drc__error__count` is `0`).
 | ------------- | ------------------- | ----------------------------------------------------------------------------- |
 | `rule`        | string               | Stable rule id (e.g. `"poly.width.1"`) — never renumbered once shipped.       |
 | `description` | string               | Human-readable rule description.                                              |
-| `check`       | string               | The check kind (`"width"`, `"space"`, `"enclosing"`, etc.). For `"enclosing"`/`"enclosed"`, `check` does not distinguish a marginal-distance violation from a zero-overlap escape violation — both are reported under the same `check` string; see "`\"enclosing\"`/`\"enclosed\"` also catch zero-overlap escapes" above. |
+| `check`       | string               | The check kind (`"width"`, `"space"`, `"enclosing"`, `"net_space"`, etc.). For `"enclosing"`/`"enclosed"`, `check` does not distinguish a marginal-distance violation from a zero-overlap escape violation — both are reported under the same `check` string; see "`\"enclosing\"`/`\"enclosed\"` also catch zero-overlap escapes" above. |
 | `layer`       | string               | The deck's own layer name (e.g. sky130's `"poly.drawing"` or gf180mcu's `"Poly2"`) if the deck names the layer, else `"<layer>/<datatype>"`. |
 | `cell`        | string               | Name of the top cell the violation was found under. (The check is flattened per top cell — see "Limitation: whole-layout, flattened" — so this is always a top cell, never a sub-instance.) |
 | `source_cell` | string \| null       | Cell-definition name of the *innermost placed instance* whose bounding box fully contains this violation's `bbox` — the originating standard cell for a hierarchical, machine-generated layout. `null` when the violation is contained in no single instance: top-level geometry, or a `bbox` that straddles an instance boundary (a violation *between* two placements belongs to neither). See "Per-instance attribution" below. |
@@ -2965,9 +3285,10 @@ builds regardless of the engine's internal shape-enumeration order.
 ### `coverage`
 
 The [common v1 coverage fields](../coverage-contract.md) accompany the
-verb-specific fields below. New DRC reports use envelope `schema_version: 2`
+verb-specific fields below. DRC reports moved to envelope `schema_version: 2`
 because external `rules_checked` now denotes proven checks, not declared
-categories. Known zero curated work becomes `not_checked` (exit 4);
+categories (issue #2659 took the envelope to `3` for an unrelated reason —
+`file`'s retype above; the `coverage` block itself is unchanged by it). Known zero curated work becomes `not_checked` (exit 4);
 unknown external execution becomes `coverage_unknown` (exit 4). Actual
 violations take precedence. Partial curated work is `clean_partial` (exit 0,
 issue #2110) — see "`coverage.skipped` vs. `coverage.inapplicable`" below
@@ -2981,8 +3302,11 @@ for which skipped rules make a run partial and which do not.
 | `layers_in_stream_without_rules`   | array\<string\> | `"<layer>/<datatype>"` pairs present in the input stream that no active rule in the selected deck references at all — the load-bearing field: turns `"clean"` into "clean, and here is exactly what was not looked at." Sorted ascending by `(layer, datatype)`. |
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because a layer they read was absent from this stream — `layer`/`other_layer`, or a `derived_layer` input (with one documented exception: a `"not_interacting"` derived rule still runs when its marker layer is absent, see "Voltage-domain rule pairs" above). Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
-| `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; e.g. `sg13cmos5l`'s net-aware `NW.b1`), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
+| `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; `sg13cmos5l`'s net-aware `NW.b1` was the first, now checked by `net_space`, #3572, so the map is currently empty), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
+| `isolation_only_rules`             | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "reason": "isolation_only", "description": string}` — `--engine klayout` with the packaged `asap7.drc` only (issue #4029): boundary-sensitive rules (`FIN.W.2`, `GATE.S.3`, `NSELECT.W.1`, `PSELECT.W.1`, `WELL.W.1`) whose layer is in the stream. `klt drc` judges the top cell in free space, so a shape ending at the cell outline can trip them for a cell built to be abutted; see "Checking abutment-designed cells". Describes the check, not the outcome: listed on `clean` and `violations` runs alike, and purely informational (does not change `status`, violations or the exit code). Sorted by rule id; `[]` for any other deck or a byte-different deck file. Additive. |
+| `marker_blind_layers_in_stream`    | array\<string\> | `"<layer>/<datatype>"` area-marker layers present in the stream that the selected deck declares it does **not** model rule-switching for (issue #3815; sky130: `81/2` `areaid.ce`). The curated deck evaluates every rule uniformly, so the marker changes no result — a `clean` or an identical violation set with and without the marker is not marker-aware evidence. Purely informational: does not change `status`, violations or the exit code. Sorted; `[]` when none is present or the deck declares none. Curated engine only. Additive. Deck-static counterpart: `klt deck rules` `marker_blind_layers`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
+| `unmodeled_rules`                  | array\<string\> | Official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. For sky130 this includes the enclosure refinements and the thick-oxide/marker-layer width and spacing rules (`UNMODELED_RULES` in `decks/sky130.py` is the authoritative list); sg13g2: the `Pad.*` and `LU.*` ids; gf180mcu: `MT30.*`, `MT.2b`/`MT.3`/`MT.4`, `MSLOT.*`, the Metal1–5 wide-metal `M1.2b`–`M5.2b` and narrow-line end-of-line `CO.6a`/`CO.6b`, `V1.3c`–`V4.4c` ids (issue #3968), and the untranscribed `ESD.*`/`GR.*` remainder (issues #3796, #3792). `--engine klayout` with the packaged `asap7.drc`: the ids under "Not implemented" in the ASAP7 deck section; any other deck script gets `[]`. See below. Sorted alphabetically; empty for a deck that declares none. |
 | `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |
 | `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
 | `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |
@@ -3121,9 +3445,9 @@ such as a `Dualgate`-narrowed ESD diode) likewise produces no entry —
 avoiding a warning with nothing behind it. Always a list, empty for a deck
 that registers no such marker, or a layout that draws none of it overlapping
 unscoped checked geometry. sky130's curated deck registers `hvi` (75/20) as
-of issue #1369 — unlike gf180mcu's partially-modelled `Dualgate`, *no* rule
-in that deck reads `hvi`, so any `hvi` shape overlapping checked geometry
-warns (e.g. `diff.width.1` checks `difftap.1`'s 0.15 µm where the DRM's
+of issue #1369 — unlike gf180mcu's partially-modelled `Dualgate`, only one rule
+in that deck reads `hvi` (`nwell.enclosed.hvi.1`, issue #3031), so an `hvi`
+shape overlapping any other checked geometry warns (e.g. `diff.width.1` checks `difftap.1`'s 0.15 µm where the DRM's
 medium-voltage column, `difftap.14`, requires 0.29 µm).
 
 **What this field does and does not guarantee**: it flags that the checked
@@ -3137,6 +3461,67 @@ domain," not as a corrected verdict. The converse also holds and is the
 point of the per-rule gate: an *empty* `voltage_domain_warnings` on a layout
 that draws the marker means every rule that touched marked geometry read the
 marker, not that the marker was ignored quietly.
+
+#### `coverage.unmodeled_rules`
+
+`deck_scope` says what a deck claims; `unmodeled_rules` says what it knowingly
+leaves out, so a `clean` verdict is not read as full coverage of the foundry
+runset (issue #3031). For sky130 these are:
+
+- the "two-adjacent-edges-relaxed" enclosure refinements (`m1.5`, `m2.5`,
+  `via.5a`, `via2.5`, `via3.5`, ...), which need a per-edge-pair primitive
+  `DrcRule` does not have; the deck checks only each family's primary
+  (stricter-margin, all-edges) rule;
+- the wide-metal spacing exceptions (`m1.3ab`, `m2.3ab`, `m3.3ab`, `m4.5ab`),
+  which need a wide-metal predicate `DrcRule` does not have; the deck checks
+  only each metal's ordinary minimum spacing;
+- the width, spacing and overlap rules on the thick-oxide and marker layers
+  (`hvi.1`, `hvi.2a`, `hvntm.1`, `hvntm.2`, `hvtp.1`, `hvtp.2`, `hvtr.1`,
+  `hvtr.2`, `hvtr.2_a`, `pad.2`, `rdl.1`, `rdl.2`; issue #3802). The deck
+  gives those layers only ongrid/angle rules, so geometry on them is not
+  checked for width or spacing.
+
+A layout can therefore pass `klt drc --deck sky130` and still fail the runset
+on exactly these. The field is purely additive and deck-static (identical
+across inputs); re-check those rules with the PDK's own `sky130A_mr.drc`
+before signoff.
+
+**Latch-up and ESD are not covered, and have no id to list.** The open
+`sky130A_mr.drc` runset defines no latch-up (tap distance, guard ring) and no
+ESD rules, so a clean `klt drc --deck sky130` says nothing about either, and
+`unmodeled_rules` cannot name them. Use the PDK design-rule manual and the
+foundry signoff flow for those checks.
+
+For gf180mcu the field lists the `ESD.*`/`GR.*` rules in the deck's
+`UNTRANSCRIBED_RULES` (issue #3792); like sky130's it is informational and a
+violation-free run stays `clean`.
+
+For sg13g2 the list is the runset's pad rules (`Pad.a1`, `Pad.aR`, `Pad.bR`,
+`Pad.d`, `Pad.dR`, `Pad.d1R`, `Pad.gR`, `Pad.jR`, `Pad.kR`; the `*R` ids are
+recommended-only) and latch-up rules (`LU.a`, `LU.c`, `LU.c1`, `LU.d`,
+`LU.d1`; gated by `$latchUpRules`) from `sg13g2_maximal.drc` (issue #3854), so
+a `clean` sg13g2 verdict says nothing about pads or latch-up. ESD structures
+are not in this list because the runset has no ESD rule id to name: the deck
+also has no ESD device class (protection diodes and clamps extract as nothing;
+see `device_classes` in `klt deck info --deck sg13g2`), so a clean verdict says
+nothing about them either.
+
+`--engine klayout` fills the field too, but only when the `--deck-file` is
+byte-identical (sha256) to the packaged `asap7.drc`: it then lists every id
+under "Not implemented" in the ASAP7 deck section. An edited copy or any other
+deck script yields `[]` (the engine has no deck identity beyond content).
+`status` and the exit code are unchanged.
+
+gf180mcu (issue #3796) lists the thick-MetalTop `MT30.*` (30 kÅ option),
+wide-metal/die-level `MT.2b`/`MT.3`/`MT.4`, and metal-slotting `MSLOT.1`–`MSLOT.8`
+rules (DRM 7.15, 7.16, 14.6.3), plus (issue #3968) Metal1–5 wide-metal spacing
+`M1.2b`–`M5.2b` (DRM `Mn.2b`) and the narrow-line end-of-line rules `CO.6a`/`CO.6b`,
+`V1.3c`/`V1.3d`/`V1.4b`/`V1.4c` and `V2`–`V4` equivalents. The curated deck has no PDK-variant selection
+and models only standard-thickness MetalTop (`MT.1`/`MT.2a`), so `0 violations`
+on e.g. `--pdk gf180mcuA` (30K) does not cover them. The same list is reported
+by `klt deck info` and `klt deck rules` (`unmodeled_rules`, kept apart from the
+enforced `rules`), and `klt drc`'s text output prints a one-line warning when it
+is non-empty.
 
 #### `coverage.deck_scope`
 
@@ -3232,8 +3617,9 @@ carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
 compound rule), issue #2594's `licon1.width.1`/`mcon.width.1` cite
 `licon.1`/`ct.1`, and every one of issue #2642's 75 `OFFGRID`-group rules
 (38 `ongrid` + 37 `angle`) cites its own `x.1b`/`x.3a`/`x.2`/`x.2c` source id,
-and #3316's four `enclosing_adjacent` rules cite `via.5a`/`m2.5`/`via2.5`/`via3.5`,
-so 123 of its 143 rules are covered.
+and issue #3031's `nwell.enclosed.hvi.1` cites `nwell.9`, and issue #2934's six `npc`/`nsdm`/`psdm` width and spacing rules cite `npc.1`/`npc.2`/`nsdm.1`/`psdm.1`/`n/psdm.1`, and #3316's four
+`enclosing_adjacent` rules cite `via.5a`/`m2.5`/`via2.5`/`via3.5`,
+so 130 of its 150 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 
@@ -3272,10 +3658,38 @@ klt drc --check design.drc.json                  # cheap mode (default)
 klt drc --check design.drc.json --rerun           # full mode
 ```
 
-`--check` is mutually exclusive with the positional `<file>` argument (and
-with `--deck`/`--top`/`--engine`/etc., which are ignored) — the input path,
-deck, and engine are all read from `<report.json>` itself, not given again
-on the command line.
+`--check` takes no `--deck`/`--top`/`--engine`/etc. (those are ignored) — the
+deck and engine are always read from `<report.json>` itself, not given again
+on the command line, and so is the input path unless you pass the positional
+`<file>` (below).
+
+**Both modes resolve the committed report's `file` field from *this*
+checkout (issue #2659).** Since `schema_version` 3 that field is the
+`{path, scope}` envelope, and a `scope: "repo"` entry is joined to the repo
+root discovered from **the committed report's own directory** — not from the
+current working directory — so a report committed beside its input verifies
+from any clone and from any cwd, which is the same resolution `klt signoff`'s
+`input_verified` gate applies to the same shape. A `scope:
+"external"`/`"absent"` entry names no path by construction (the absolute
+path is deliberately never emitted): cheap mode reports it as the
+unverifiable `actual: null` an absent field gets, and `--rerun` as the same
+clean "no `'file'` field to rerun" error. A report predating #2659, whose
+`file` is a bare path string, keeps resolving exactly as it always did —
+verbatim if absolute, against the current working directory if relative.
+
+**Explicit input (issue #2699).** When the report cannot locate its own
+input — a `scope: "external"` run, or a grading clone laid out differently
+from the producing one — supply the input yourself alongside `--check`:
+`klt drc design.gds --check design.drc.json [--rerun]` (the positional
+`<file>`). The explicit input **always overrides** the report's recorded
+one (not only when that one is unresolvable), the same rule on `klt drc`,
+`klt extract` and `klt lvs`; its hash is compared against the report's
+recorded `provenance.input.content_hash` (the deck hash is unaffected), so a file that disagrees reports
+`status: "drifted"` rather than being silently accepted. A relative path
+resolves against the current directory. Without it nothing changes: the
+`file`/`layout` field is resolved exactly as described above, and an
+external-scope report still reports `actual: null` / the clean "no field to
+rerun" error.
 
 ### Cheap mode (default)
 

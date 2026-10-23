@@ -34,6 +34,10 @@ adapter from ``_region_n_squares`` / ``_net_port_regions`` /
   ``via_resistance_unknown`` diagnostic, never silently ideal. The pieces a
   landing touches are found inside the polygon(s) it lands on via
   :func:`klayout_tools.resistor_mesh._rails_under_via`.
+  A landing end whose role and box equal a declared port's patch reuses that
+  port's node instead of adding its own (issue #2983): the port *is* the via
+  endpoint, as in the 3.D4 F4/F4v realisation, rather than being joined to a
+  second node only through the strip's end piece.
 * Overlap without a landing creates no edge between roles.
 
 **Determinism.** Every ordering derives from integer geometry, never from
@@ -278,6 +282,10 @@ def _too_large(message: str, detail: dict[str, Any]) -> ResistanceGraph:
     return _unsupported([GraphDiagnostic("graph_too_large", message, detail)])
 
 
+def _patch_key(role_name: str, box: kdb.Box) -> tuple[str, int, int, int, int]:
+    return (role_name, box.left, box.bottom, box.right, box.top)
+
+
 class _GraphBuilder:
     """One construction run; the methods are the numbered steps of the module
     docstring, kept small so each stays reviewable."""
@@ -317,6 +325,7 @@ class _GraphBuilder:
         self.rails: dict[str, list[dict[str, Any]]] = {}
         self.descriptors: list[_Descriptor] = []
         self.terminal_index: dict[str, int] = {}
+        self.port_at: dict[tuple[str, int, int, int, int], int] = {}
         self.via_links: list[tuple[int, int, float]] = []
         self._kdb = kdb
 
@@ -440,17 +449,23 @@ class _GraphBuilder:
 
     def attach(self, role_name: str, box: kdb.Box) -> _Attachment:
         """``(piece node id, edge resistance)`` for every piece ``box``
-        reaches on ``role_name``, scoped to the polygon(s) it lands on."""
+        reaches on ``role_name``, scoped to the polygon(s) it lands on.
+
+        A positive-area ``box`` has cut lines on all four sides, so it is
+        already whole pieces of its own; it contracts those (``0.0`` ohm) and
+        must not also attach to the neighbours it merely abuts, whose half-piece
+        edges would sit in parallel with the in-plane edges to this patch."""
         scope = _scope_region(box)
         if scope is None:
             return []
         hits = _rails_under_via(self.rails[role_name], scope, box)  # type: ignore[arg-type]
+        has_area = box.width() > 0 and box.height() > 0
         out: _Attachment = []
         for poly_index in sorted(h["index"] for h in hits):
             grid = self.grids.get((role_name, poly_index), {})
             for piece in sorted(grid.values(), key=lambda p: p.node_id):
                 factor = _contact_factor(piece.box, box)
-                if factor is not None:
+                if factor is not None and not (has_area and factor > 0.0):
                     r = _edge_resistance(self.sheet[role_name] * factor)
                     out.append((piece.node_id, r))
         return out
@@ -479,6 +494,10 @@ class _GraphBuilder:
                 attached.extend(hits)
             if port.terminal:
                 self.terminal_index[port.name] = len(self.descriptors)
+            for role_name, box in port.patches:
+                self.port_at.setdefault(
+                    _patch_key(role_name, box), len(self.descriptors)
+                )
             self.descriptors.append(((*min(keys), 0, port.name), attached))
 
     def add_landings(self) -> None:
@@ -504,20 +523,23 @@ class _GraphBuilder:
             n_cut = max(1, round(area_um2 / landing.cut_area_um2))
             r_via = (landing.r_cut_ohm or 0.0) / n_cut
             base = (landing.box.bottom, landing.box.left)
-            lo = len(self.descriptors)
-            self.descriptors.append(
-                (
-                    (self.role_order[landing.lower_role], *base, 1, landing_index, 0),
-                    lower,
-                )
-            )
-            self.descriptors.append(
-                (
-                    (self.role_order[landing.upper_role], *base, 1, landing_index, 1),
-                    upper,
-                )
-            )
-            self.via_links.append((lo, lo + 1, r_via))
+            ends = []
+            for side, role_name, pieces in (
+                (0, landing.lower_role, lower),
+                (1, landing.upper_role, upper),
+            ):
+                shared = self.port_at.get(_patch_key(role_name, landing.box))
+                if shared is None:
+                    shared = len(self.descriptors)
+                    self.descriptors.append(
+                        (
+                            (self.role_order[role_name], *base, 1, landing_index, side),
+                            pieces,
+                        )
+                    )
+                ends.append(shared)
+            if ends[0] != ends[1]:
+                self.via_links.append((ends[0], ends[1], r_via))
 
     # -- assembly ----------------------------------------------------------
 

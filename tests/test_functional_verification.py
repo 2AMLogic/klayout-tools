@@ -2277,12 +2277,20 @@ _ESCAPED_DIVIDER_INTERCONNECT_SDF = """\
 def test_sdf_option_rejects_escaped_divider_interconnect_identifier(
     tmp_path, monkeypatch
 ):
-    """The load-bearing regression for issue #1890: an `INTERCONNECT`
-    endpoint whose escaped identifier contains a literal `.` (the file's own
-    `DIVIDER` character) is rejected up front with a clear message, instead
-    of reaching `$sdf_annotate` and crashing `vvp` with a bare `SIGABRT`."""
+    """The load-bearing regression for issue #1890, narrowed by issue
+    #2897: an `INTERCONNECT` endpoint whose *pin/top-level port* is an
+    escaped identifier containing a literal `.` is still rejected up front
+    with a clear message, instead of reaching `$sdf_annotate` and crashing
+    `vvp` with a bare `SIGABRT`. (An escaped-divider *instance* -- the
+    fixture's `g\\[0\\]\\.sub\\/x` -- is renamed instead; see
+    `tests/test_functional_verification_sdf_escaped_divider.py`.)"""
     _setup_inputs(tmp_path)
-    _write(tmp_path / "route.sdf", _ESCAPED_DIVIDER_INTERCONNECT_SDF)
+    _write(
+        tmp_path / "route.sdf",
+        _ESCAPED_DIVIDER_INTERCONNECT_SDF.replace(
+            "(INTERCONNECT a ", "(INTERCONNECT a\\.b "
+        ),
+    )
     request_path = _write_request(
         tmp_path / "request.json",
         _base_request(options={"coverage": False, "sdf": {"file": "route.sdf"}}),
@@ -2291,29 +2299,64 @@ def test_sdf_option_rejects_escaped_divider_interconnect_identifier(
 
     with pytest.raises(
         FunctionalVerificationError,
-        match=r"escaped identifier that contains a literal '\.'",
+        match=r"pin or top-level port is an escaped identifier",
     ):
         run_functional_verification(request_path)
 
 
 @pytest.mark.parametrize(
+    ("divider", "interconnect_line"),
+    [
+        # An escaped `.` in a bare top-level port.
+        (".", "      (INTERCONNECT a\\.b u1.a (0.100:0.100:0.100))\n"),
+        # An escaped `.` in a cell pin.
+        (".", "      (INTERCONNECT a u1.p\\.q (0.100:0.100:0.100))\n"),
+        # An escaped `.` under `DIVIDER /` (issue #2897: Icarus mis-splits
+        # an escaped `.` whatever the declared divider).
+        ("/", "      (INTERCONNECT a u1/p\\.q (0.100:0.100:0.100))\n"),
+        # An escaped occurrence of the file's own `/` divider.
+        ("/", "      (INTERCONNECT a u1/p\\/q (0.100:0.100:0.100))\n"),
+    ],
+)
+def test_reject_sdf_escaped_divider_interconnects_catches_pin_shapes(
+    tmp_path, divider, interconnect_line
+):
+    """Unit-level: every escaped-divider shape left in an endpoint's final
+    (pin/port) component is caught -- the one shape issue #2897's instance
+    rename does not rewrite."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        "(DELAYFILE\n"
+        '  (SDFVERSION "3.0")\n'
+        '  (DESIGN "gcd")\n'
+        f"  (DIVIDER {divider})\n"
+        "  (TIMESCALE 1ns)\n"
+        "  (CELL\n"
+        '    (CELLTYPE "gcd")\n'
+        "    (INSTANCE)\n"
+        "    (DELAY (ABSOLUTE\n" + interconnect_line + "    ))\n"
+        "  )\n"
+        ")\n",
+    )
+    with pytest.raises(FunctionalVerificationError, match="pin or top-level port"):
+        fv._reject_sdf_escaped_divider_interconnects(sdf_path)
+
+
+@pytest.mark.parametrize(
     "interconnect_line",
     [
-        # `.` alone (no brackets) -- one of the issue's own bisected shapes.
+        # `.` alone (no brackets) -- one of #1890's own bisected shapes.
         "      (INTERCONNECT a g\\.sub.a (0.100:0.100:0.100))\n",
-        # The combined shape from the issue's own minimal reproduction.
+        # The combined shape from #1890's own minimal reproduction.
         "      (INTERCONNECT a g\\[0\\]\\.sub\\/x.a (0.100:0.100:0.100))\n",
     ],
 )
-def test_reject_sdf_escaped_divider_interconnects_catches_both_dot_shapes(
+def test_reject_sdf_escaped_divider_interconnects_admits_instance_shapes(
     tmp_path, interconnect_line
 ):
-    """Unit-level: both bisected shapes that embed a literal `.` are caught,
-    not just the combined shape -- the issue's own bisection notes that
-    either special character alone is sufficient to crash Icarus, but only
-    the literal `.` (the file's `DIVIDER` character) is the actual trigger
-    (see the module comment above `_reject_sdf_escaped_divider_interconnects`
-    for the confirmed root cause)."""
+    """Issue #2897: an escaped-divider *instance* component is no longer
+    rejected -- the run renames it to a plain identifier in build-dir copies
+    instead (see `functional_verification_sdf_rename.py`)."""
     sdf_path = _write(
         tmp_path / "route.sdf",
         "(DELAYFILE\n"
@@ -2328,8 +2371,7 @@ def test_reject_sdf_escaped_divider_interconnects_catches_both_dot_shapes(
         "  )\n"
         ")\n",
     )
-    with pytest.raises(FunctionalVerificationError, match="literal '\\.'"):
-        fv._reject_sdf_escaped_divider_interconnects(sdf_path)
+    fv._reject_sdf_escaped_divider_interconnects(sdf_path)  # must not raise
 
 
 def test_reject_sdf_escaped_divider_interconnects_admits_escaped_bracket_alone(
@@ -3543,12 +3585,14 @@ from cocotb.triggers import Timer
 
 
 @cocotb.test()
-async def test_never_reached(dut):
-    """This test body is never reached -- options.sdf's own request-
-    validation gate (issue #1890) must reject the request before cocotb
-    ever elaborates the design."""
+async def test_runs_annotated(dut):
+    """Issue #2897: reached -- the escaped-divider instance is renamed in
+    build-dir copies, so `vvp` no longer aborts and the design simulates."""
     dut.a.value = 0
     await Timer(5, unit="ns")
+    dut.a.value = 1
+    await Timer(5, unit="ns")
+    assert dut.y.value == 1
 '''
 
 
@@ -3579,15 +3623,16 @@ def _generate_flattened_sdf_text() -> str:
 @pytest.mark.skipif(
     not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
 )
-def test_integration_real_icarus_escaped_divider_interconnect_fails_loud_not_a_crash(
+def test_integration_real_icarus_escaped_divider_interconnect_annotates_not_a_crash(
     tmp_path,
 ):
     """Issue #1890's own scenario, end to end against the real toolchain: a
     `generate`-flattened-style escaped identifier (`\\g[0].sub/x`) in an
     `INTERCONNECT` entry used to crash `vvp` outright (`ERROR: NULL handle
-    passed to vpi_scan.`, SIGABRT/core dump). It must now be rejected as a
-    clear `FunctionalVerificationError` at request-validation time, before
-    `iverilog`/`vvp` ever run at all."""
+    passed to vpi_scan.`, SIGABRT/core dump), and #1890 then rejected it up
+    front. Issue #2897: it now annotates and simulates, with the instance
+    renamed to a plain identifier in build-dir copies and the rename
+    reported as `environment.sdf.renamed`."""
     tmp_path.joinpath("gen_flat_top.v").write_text(
         _GENERATE_FLATTENED_DUT_V, encoding="utf-8"
     )
@@ -3603,11 +3648,16 @@ def test_integration_real_icarus_escaped_divider_interconnect_fails_loud_not_a_c
         },
     )
 
-    with pytest.raises(
-        FunctionalVerificationError,
-        match=r"escaped identifier that contains a literal '\.'",
-    ):
-        run_functional_verification(request_path)
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert sdf["annotated"] is True
+    assert sdf["partial"] is False
+    assert sdf["renamed"] == [{"from": "g[0].sub/x", "to": "g_0__sub_x"}]
+    # The caller's own inputs are untouched.
+    assert "\\g[0].sub/x " in (tmp_path / "gen_flat_top.v").read_text()
+    assert _generate_flattened_sdf_text() == (tmp_path / "route.sdf").read_text()
 
 
 # --------------------------------------------------------------------------- #
@@ -5210,6 +5260,134 @@ def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tm
 
     with pytest.raises(fv.FunctionalVerificationError, match="did not fully apply"):
         run_functional_verification(annotated)
+
+
+def _bus_port_source_sdf_text(
+    u1_delay: str = "0.000:0.000:0.000", scalar_delay: str = "0.000:0.000:0.000"
+) -> str:
+    """Issue #2984's shape: a zero-delay entry from bit-selected input port
+    `a[0]` onto an ordinary (`specify`-bearing) cell pin, plus a scalar-port
+    entry and a non-port-source entry that must never be touched."""
+    return f"""\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "bus_fanout_in")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "bus_fanout_in")
+    (INSTANCE)
+    (DELAY (ABSOLUTE
+      (INTERCONNECT a[0] u1.in ({u1_delay}) ({u1_delay}))
+      (INTERCONNECT s u2.in ({scalar_delay}) ({scalar_delay}))
+      (INTERCONNECT u1.out u2.in (0.000:0.000:0.000) (0.000:0.000:0.000))
+    ))
+  )
+)
+"""
+
+
+def test_drop_sdf_zero_delay_bus_port_source_interconnects_drops_only_that_entry(
+    tmp_path,
+):
+    sdf_path = _write(tmp_path / "route.sdf", _bus_port_source_sdf_text())
+
+    result = fv._drop_sdf_zero_delay_bus_port_source_interconnects(sdf_path, {"a"})
+
+    assert result is not None
+    text, dropped = result
+    assert dropped == 1
+    assert "a[0]" not in text
+    assert "(INTERCONNECT s u2.in (0.000:0.000:0.000)" in text
+    assert "(INTERCONNECT u1.out u2.in (0.000:0.000:0.000)" in text
+
+
+def test_drop_sdf_zero_delay_bus_port_source_interconnects_keeps_a_nonzero_entry(
+    tmp_path,
+):
+    sdf_path = _write(
+        tmp_path / "route.sdf", _bus_port_source_sdf_text(u1_delay="0.000:0.000:1.000")
+    )
+
+    assert (
+        fv._drop_sdf_zero_delay_bus_port_source_interconnects(sdf_path, {"a"}) is None
+    )
+
+
+def test_drop_sdf_zero_delay_bus_port_source_interconnects_keeps_scalar_and_non_input(
+    tmp_path,
+):
+    """A scalar-port source, and a bus that is not a top-level input port,
+    are untouched even at zero delay."""
+    sdf_path = _write(tmp_path / "route.sdf", _bus_port_source_sdf_text())
+
+    # `s` is scalar (not in the bus-input set); `u1.out` is not a bus bit.
+    result = fv._drop_sdf_zero_delay_bus_port_source_interconnects(sdf_path, {"s"})
+    assert result is None
+    # `a` is not an input bus here, so its entry stays.
+    assert (
+        fv._drop_sdf_zero_delay_bus_port_source_interconnects(sdf_path, {"b"}) is None
+    )
+
+
+def test_drop_sdf_zero_delay_bus_port_source_interconnects_noop_without_bus_inputs(
+    tmp_path,
+):
+    """No bus input ports: returns None without even reading the file."""
+    missing = str(tmp_path / "does-not-exist.sdf")
+    assert fv._drop_sdf_zero_delay_bus_port_source_interconnects(missing, set()) is None
+
+
+def test_bus_port_source_class_has_a_reason():
+    assert fv.SDF_BUS_PORT_SOURCE_DROPPED_CLASS in fv.SDF_BENIGN_DIAGNOSTIC_REASONS
+
+
+def test_physical_only_pass_runs_first_so_classes_do_not_double_count(tmp_path):
+    """Entries the #2363 pass already removed are absent when the #2984 pass
+    runs on its output, so each entry is counted under exactly one class."""
+    sdf_path = _write(tmp_path / "route.sdf", _physical_only_diode_sdf_text())
+    first = fv._drop_sdf_zero_delay_physical_only_interconnects(
+        sdf_path, {"ui_in"}, _PHYSICAL_ONLY_DIODE_INSTANCES
+    )
+    assert first is not None
+    after = _write(tmp_path / "after.sdf", first[0])
+    assert (
+        fv._drop_sdf_zero_delay_bus_port_source_interconnects(after, {"ui_in"}) is None
+    )
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_zero_delay_bus_port_input_fanout_is_dropped(
+    tmp_path,
+):
+    """Issue #2984: the #1619 shape (b) fixture with the `a[0]` entries
+    zero-delay completes and reports the new class; the sibling non-zero
+    fixture above still raises."""
+    tmp_path.joinpath("bus_fanout_in.v").write_text(
+        _BUS_PORT_FANOUT_INPUT_DUT_V, encoding="utf-8"
+    )
+    _write(tmp_path / "test_bus_fanout_in.py", _BUS_PORT_FANOUT_INPUT_TESTBENCH_PY)
+    zero = "(0.000:0.000:0.000) (0.000:0.000:0.000)"
+    _write(
+        tmp_path / "route_bus_in.sdf",
+        _bus_port_fanout_input_sdf_text().replace(
+            "(1.000:5.000:9.000) (1.000:5.000:9.000)", zero
+        ),
+    )
+    request = {
+        "sources": ["bus_fanout_in.v"],
+        "hdl_toplevel": "bus_fanout_in",
+        "testbench": {"module": "test_bus_fanout_in"},
+        "options": {"sdf": {"file": "route_bus_in.sdf", "corner": "typ"}},
+    }
+    report = run_functional_verification(_write_request(tmp_path / "r.json", request))
+
+    sdf = report["environment"]["sdf"]
+    assert sdf["partial"] is True
+    assert sdf["dropped"][fv.SDF_BUS_PORT_SOURCE_DROPPED_CLASS]["count"] == 2
 
 
 # --------------------------------------------------------------------------- #

@@ -21,6 +21,11 @@ directory has its own README, start there.
   terminal" unit MOS device for `W` below `mos_array`/`diff_pair`'s
   `UNIT_MIN_W_UM` contact-fit floor, composed beside a real `klt gen
   mos_array` unit device in one cell (issue #1574). See its README.
+- [`row-mix-gf180/`](row-mix-gf180/) — a generic mixed-device, shared-diffusion,
+  fixed-pitch gf180mcu cell (inverter → transmission gate → NOR3 → inverter) with
+  an independent reference netlist, executed `klt drc`/`extract`/`lvs` receipts,
+  and a README separating committed source from receipts and listing what was
+  not run (issue #3969). See its README.
 - [`reset-coverage/`](reset-coverage/) — a `klt reset-coverage` worked example: a
   tiny netlist exercising every reason code against stand-in cell models
   (issue #2998). See its README.

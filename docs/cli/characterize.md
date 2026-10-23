@@ -767,7 +767,7 @@ because it is an *input* being pinned (matching `klt sim`'s own `netlist`).
 generated artifacts a caller opens or chains onward — the same role
 `klt extract`'s `netlist_path` and `klt sim`'s `corners[].artifacts.*` fill.
 Both shapes and the per-field inventory are documented in
-[`../json-contract.md`](../json-contract.md)'s "Output-artifact path fields".
+[`../json-contract.md`](../json-contract.md)'s "Path fields: envelope vs. plain string".
 A committed report must therefore not carry this envelope verbatim; see that
 document's "Repo-relative provenance in *committed* artifacts".
 

@@ -104,6 +104,21 @@ def test_all_six_metrics_are_accepted():
     assert len(sim_transfer_meas.METRICS) == 6
 
 
+def test_margin_metrics_are_accepted_and_the_first_six_are_unchanged():
+    assert sim_transfer_meas.MARGIN_METRICS == (
+        "phase_margin_min_deg",
+        "gain_margin_min_db",
+        "encirclement_count",
+    )
+    assert sim_transfer_meas.ALL_METRICS == (
+        sim_transfer_meas.METRICS + sim_transfer_meas.MARGIN_METRICS
+    )
+    for metric in sim_transfer_meas.MARGIN_METRICS:
+        sim._validate_measurement_forms(
+            [{"name": "t", "transfer": {**_BODY, "metric": metric}}]
+        )
+
+
 def test_selector_normalisation_is_case_insensitive():
     assert sim_transfer_meas.normalize_selector("V(OUT)") == "v(out)"
     assert sim_transfer_meas.normalize_selector(" v(out)") is None
@@ -555,3 +570,195 @@ def test_real_ngspice_save_mode_netlist_reports_unsaved_vector(tmp_path):
     corner, by_name = _only_corner(report)
     assert by_name["pm"]["status"] == "error"
     assert corner["diagnostics"][0]["message"].startswith("[transfer_vector_missing]")
+
+
+# --------------------------------------------------------------------------- #
+# All-crossing margin metrics (issue #3088)
+# --------------------------------------------------------------------------- #
+
+_PM_MIN = {**_BODY, "metric": "phase_margin_min_deg"}
+_GM_MIN = {**_BODY, "metric": "gain_margin_min_db"}
+_ENC = {**_BODY, "metric": "encirclement_count"}
+
+
+def _conditionally_stable_rawfile() -> str:
+    """|T| crosses 0 dB at 10 Hz (PM 80), rises again over 100 Hz and falls
+    through 0 dB near 200 Hz where the phase has sagged to -170 (PM 10)."""
+    freqs = [10 ** (k / 50) for k in range(0, 4 * 50 + 1)]
+    nums = []
+    for f in freqs:
+        x = math.log10(f)
+        mag_db = -20.0 * (x - 1.0) + 25.0 * math.exp(-(((x - 2.0) / 0.25) ** 2))
+        phase = -100.0 - 70.0 * 0.5 * (1.0 + math.tanh((x - 1.5) / 0.1))
+        nums.append(10 ** (mag_db / 20.0) * cmath.exp(1j * math.radians(phase)))
+    return _rawfile(freqs, nums, [1 + 0j] * len(freqs))
+
+
+def _coarse_rc_rawfile() -> str:
+    """The RC stage sampled at 5 points/decade: too coarse to bracket."""
+    freqs = [10 ** (k / 5) for k in range(0, 6 * 5 + 1)]
+    nums = [_GAIN / (1 + 1j * f / _FC) for f in freqs]
+    return _rawfile(freqs, nums, [1 + 0j] * len(freqs))
+
+
+def _margin_report(tmp_path, monkeypatch, specs, raw):
+    request = _request(tmp_path, specs)
+    _stub_ngspice(monkeypatch, raw=raw)
+    report = sim.run_sim(str(request))
+    corner, by_name = _only_corner(report)
+    return report, corner, by_name
+
+
+def test_minimum_margin_fails_where_the_first_crossing_passes(tmp_path, monkeypatch):
+    specs = [
+        {"name": "pm_first", "transfer": _BODY, "limits": {"min": 45}},
+        {"name": "pm_min", "transfer": _PM_MIN, "limits": {"min": 45}},
+    ]
+    report, corner, by_name = _margin_report(
+        tmp_path, monkeypatch, specs, _conditionally_stable_rawfile()
+    )
+
+    assert by_name["pm_first"]["status"] == "pass"
+    assert by_name["pm_min"]["status"] == "fail"
+    assert by_name["pm_min"]["value"] == pytest.approx(10.0, abs=1.0)
+    assert by_name["pm_min"]["margin"] < 0
+    margins = by_name["pm_min"]["transfer"]["margins"]
+    assert len(margins["phase_margins"]) == 3
+    assert margins["ambiguity"] == []
+    assert by_name["pm_min"]["transfer"]["verdict"] == "fail"
+    assert report["status"] == "fail"
+    assert corner["status"] == "fail"
+    # The six existing tokens' entry shape is unchanged.
+    assert set(by_name["pm_first"]["transfer"]) == {"num", "den", "metric"}
+
+
+def test_clean_band_passes_and_encirclement_is_zero(tmp_path, monkeypatch):
+    specs = [
+        {"name": "pm", "transfer": _PM_MIN, "limits": {"min": 45}},
+        {"name": "enc", "transfer": _ENC, "limits": {"max": 0}},
+    ]
+    report, _, by_name = _margin_report(tmp_path, monkeypatch, specs, _rc_rawfile())
+
+    assert by_name["pm"]["status"] == "pass"
+    assert by_name["pm"]["value"] == pytest.approx(95.7, abs=0.2)
+    assert by_name["enc"]["status"] == "pass"
+    assert by_name["enc"]["value"] == 0
+    assert report["status"] == "pass"
+
+
+def test_no_crossing_on_a_clean_band_is_vacuously_satisfied(tmp_path, monkeypatch):
+    specs = [{"name": "gm", "transfer": _GM_MIN, "limits": {"min": 6}}]
+    report, corner, by_name = _margin_report(
+        tmp_path, monkeypatch, specs, _rc_rawfile()
+    )
+
+    assert by_name["gm"]["value"] is None
+    assert by_name["gm"]["status"] == "pass"
+    assert by_name["gm"]["transfer"]["margins"]["reasons"] == {
+        "gain_margin_min_db": "no_phase_crossing"
+    }
+    assert corner["diagnostics"] == []
+    # Nothing was actually compared with the limit, so coverage -- and with it
+    # the run's own verdict -- reports "not_checked" rather than a clean pass.
+    assert report["status"] == "not_checked"
+
+
+def test_no_crossing_without_limits_is_an_unavailable_error(tmp_path, monkeypatch):
+    specs = [{"name": "gm", "transfer": _GM_MIN}]
+    _, corner, by_name = _margin_report(tmp_path, monkeypatch, specs, _rc_rawfile())
+
+    assert by_name["gm"]["status"] == "error"
+    assert "[transfer_metric_unavailable]" in corner["diagnostics"][0]["message"]
+
+
+def test_ambiguous_band_cannot_pass_a_min_limit_and_is_not_fail(
+    tmp_path, monkeypatch, capsys
+):
+    from klayout_tools.cli import main
+
+    specs = [{"name": "pm", "transfer": _PM_MIN, "limits": {"min": 45}}]
+    request = _request(tmp_path, specs)
+    _stub_ngspice(monkeypatch, raw=_coarse_rc_rawfile())
+
+    exit_code = main(["sim", str(request), "--format", "json"])
+
+    data = json.loads(capsys.readouterr().out)
+    (corner,) = data["corners"]
+    (pm,) = corner["measurements"]
+    assert pm["value"] == pytest.approx(95.7, abs=2.0)  # would pass 45 ...
+    assert pm["status"] == "inconclusive"  # ... but is never a pass or a fail
+    assert pm["transfer"]["verdict"] == "ambiguous"
+    assert "crossing_not_bracketed" in pm["transfer"]["margins"]["ambiguity"]
+    (diag,) = [d for d in corner["diagnostics"] if d["code"] == "margin_ambiguous"]
+    assert diag["severity"] == "warning"
+    assert "crossing_not_bracketed" in diag["message"]
+    assert corner["status"] == "inconclusive"
+    assert data["status"] == "inconclusive"
+    assert data["inconclusive"] == 1
+    assert {"reason": "margin_ambiguous"}.items() <= data["coverage"]["skipped"][
+        0
+    ].items()
+    assert exit_code == 4
+
+
+def test_violation_on_an_ambiguous_band_is_still_a_fail(tmp_path, monkeypatch):
+    specs = [{"name": "pm", "transfer": _PM_MIN, "limits": {"min": 120}}]
+    report, corner, by_name = _margin_report(
+        tmp_path, monkeypatch, specs, _coarse_rc_rawfile()
+    )
+
+    assert by_name["pm"]["status"] == "fail"
+    assert by_name["pm"]["transfer"]["verdict"] == "fail"
+    assert corner["diagnostics"] == []
+    assert report["status"] == "fail"
+
+
+def test_indeterminate_encirclement_is_never_zero(tmp_path, monkeypatch):
+    specs = [{"name": "enc", "transfer": _ENC, "limits": {"max": 0}}]
+    report, corner, by_name = _margin_report(
+        tmp_path, monkeypatch, specs, _coarse_rc_rawfile()
+    )
+
+    assert by_name["enc"]["value"] is None
+    assert by_name["enc"]["status"] == "inconclusive"
+    assert by_name["enc"]["transfer"]["margins"]["encirclement"] == "indeterminate"
+    assert corner["diagnostics"][0]["code"] == "margin_ambiguous"
+    assert report["status"] == "inconclusive"
+
+
+def test_ambiguity_does_not_downgrade_a_report_only_margin(tmp_path, monkeypatch):
+    specs = [{"name": "pm", "transfer": _PM_MIN}]
+    report, corner, by_name = _margin_report(
+        tmp_path, monkeypatch, specs, _coarse_rc_rawfile()
+    )
+
+    assert by_name["pm"]["status"] == "pass"
+    assert corner["diagnostics"] == []
+    assert report["status"] == "pass"
+
+
+def test_margin_tokens_are_a_mandatory_transfer_runner_feature():
+    # Margin tokens are ``transfer`` metrics, so the mandatory ``transfer``
+    # worker gate (issue #2924) covers them; they shipped in the same release
+    # segment as ``transfer`` itself, so no separate registry entry is needed.
+    for metric in sim_transfer_meas.MARGIN_METRICS:
+        request = {
+            "measurements": [{"name": "m", "transfer": {**_PM_MIN, "metric": metric}}]
+        }
+        assert sim_batch._request_features(request) == ["transfer"], metric
+    assert "transfer" in sim_batch._MANDATORY_RUNNER_FEATURES
+
+
+@pytest.mark.parametrize("backend", ["batch", "remote"])
+def test_margin_tokens_reach_the_offhost_backends(tmp_path, monkeypatch, backend):
+    """Issue #3626: like plain transfer (#2924), a margin request is no longer
+    refused locally; it reaches the backend, whose worker gate decides."""
+    reached: list[str] = []
+    _stub_offhost_backends(monkeypatch, reached)
+    monkeypatch.setattr(
+        sim.subprocess, "run", lambda *a, **k: pytest.fail("must not launch")
+    )
+    request = _request(tmp_path, [{"name": "pm", "transfer": _PM_MIN}], backend=backend)
+    with pytest.raises(sim.SimError, match="reached backend"):
+        sim.run_sim(str(request))
+    assert reached == [backend]
