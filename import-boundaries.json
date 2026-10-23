@@ -11,6 +11,14 @@
         "klayout_tools.cli.arith_gen_cmd"
       ]
     },
+    "artifact": {
+      "kind": "verb",
+      "description": "`klt artifact` implementation: fleet artifact-store client (issue #4063) plus CLI adapter.",
+      "modules": [
+        "klayout_tools.artifact_store",
+        "klayout_tools.cli.artifact_cmd"
+      ]
+    },
     "cells": {
       "kind": "verb",
       "description": "`klt cells` implementation: core modules plus CLI adapter.",
@@ -669,6 +677,11 @@
     }
   },
   "allowed_group_edges": [
+    {
+      "consumer": "artifact",
+      "exporter": "cli-infra",
+      "reason": "`klt artifact` adapter uses the shared CLI output envelope helpers (emit_success/emit_error), like every verb adapter."
+    },
     {
       "consumer": "corner_matrix",
       "exporter": "cli-infra",
