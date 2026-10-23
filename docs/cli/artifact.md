@@ -129,7 +129,18 @@ go to stderr. With `--format json`, the success payload is
 `verify` stats each entry, then fetches it and re-hashes it. It exits `0` when
 every entry is `ok`. It exits `3` when any entry is `missing`, `size_mismatch`,
 `hash_mismatch` or `key_mismatch`. It exits `1` on a malformed manifest or a
-broker refusal other than a missing object.
+broker refusal other than a missing object. A throttled broker (HTTP 429) is
+retried with backoff first (see below), so a rate limit that persists fails the
+run as `broker_rate_limited`, not as an unverified or mismatched entry.
+
+### Rate limiting
+
+Every broker call (`put`, `get`, `stat`, so `verify` too) retries HTTP 429 up to
+4 attempts. It sleeps for the broker's `Retry-After` (seconds form) when sent,
+else 1s, 2s, 4s, capped at 30s per sleep and 60s in total. Retries are silent on
+success and no other status is retried. When they run out the error has
+`code: "broker_rate_limited"` and `details` with `broker_status: 429`,
+`attempts` and, if sent, `retry_after_s`. The exit code stays `1`.
 
 `--format json`: `{schema_version: 1, manifest, status: "ok"|"failed",
 entry_count, failed_count, entries: [{sha256, name, size, status, ...}]}`.
@@ -162,7 +173,7 @@ Campaign outputs are cited the same way.
 | Code | Meaning |
 |---|---|
 | `0` | Done: stored, fetched and verified, or every entry ok |
-| `1` | Not done: no broker, a broker refusal (`error.code: "broker_refused"` with `broker_status`, `broker_error` and `broker_message`), an unreachable broker (`broker_unreachable`), a malformed manifest, unreadable input, or a `get` whose bytes failed verification |
+| `1` | Not done: no broker, a broker refusal (`error.code: "broker_refused"` with `broker_status`, `broker_error` and `broker_message`), a broker still rate-limiting after retries (`broker_rate_limited`), an unreachable broker (`broker_unreachable`), a malformed manifest, unreadable input, or a `get` whose bytes failed verification |
 | `2` | Usage error |
 | `3` | `verify` only: at least one entry is missing or mismatched |
 

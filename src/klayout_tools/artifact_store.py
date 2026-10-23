@@ -20,7 +20,9 @@ Broker wire contract (the broker is not part of this repo):
   digest, so that is success. ``get`` answers a presigned GET URL (or a 404).
   ``stat`` answers ``{exists, size}``.
 - A refusal is ``{"error", "message"}`` with a 4xx/5xx status, surfaced
-  verbatim as :class:`ArtifactError` code ``broker_refused``. There is no
+  verbatim as :class:`ArtifactError` code ``broker_refused``. HTTP 429 is
+  retried with bounded backoff (honoring ``Retry-After``); when the retries run
+  out it is code ``broker_rate_limited`` instead. There is no
   local fallback and no direct object-store path (no cloud SDK, no cloud
   credential).
 
@@ -73,6 +75,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import IO, Any
@@ -105,6 +108,14 @@ TRANSFER_TIMEOUT_S = 600
 _CHUNK = 1 << 20
 _MAX_BROKER_BODY = 1 << 20
 _MAX_ERROR_BODY = 64 << 10
+
+#: A throttled (HTTP 429) broker call is attempted this many times in all.
+RATE_LIMIT_ATTEMPTS = 4
+#: Longest single sleep, and the most time spent sleeping across one call.
+RATE_LIMIT_MAX_SLEEP_S = 30.0
+RATE_LIMIT_TOTAL_WAIT_S = 60.0
+_RATE_LIMIT_BASE_S = 1.0
+_sleep: Callable[[float], None] = time.sleep
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
@@ -189,7 +200,45 @@ class BrokerClient:
         return self._parts.path.rstrip("/") + "/v1/" + op
 
     def call(self, op: str, body: dict[str, Any]) -> dict[str, Any]:
-        """One broker call; returns the parsed success body or raises."""
+        """One broker call; returns the parsed success body or raises.
+
+        HTTP 429 is retried (``Retry-After`` seconds when the broker sends
+        them, else exponential backoff) within :data:`RATE_LIMIT_ATTEMPTS` and
+        :data:`RATE_LIMIT_TOTAL_WAIT_S`; exhausted retries raise
+        ``broker_rate_limited``. No other status is retried."""
+        waited = 0.0
+        attempt = 0
+        while True:
+            attempt += 1
+            status, raw, retry_after = self._once(op, body)
+            if status != 429:
+                break
+            delay = _RATE_LIMIT_BASE_S * (2 ** (attempt - 1))
+            if retry_after is not None:
+                delay = retry_after
+            delay = min(delay, RATE_LIMIT_MAX_SLEEP_S)
+            if (
+                attempt >= RATE_LIMIT_ATTEMPTS
+                or waited + delay > RATE_LIMIT_TOTAL_WAIT_S
+            ):
+                raise _rate_limited(op, raw, attempt, retry_after)
+            _sleep(delay)
+            waited += delay
+        if status != 200:
+            raise _refusal(op, status, raw)
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict):
+            raise ArtifactError(
+                f"the artifact broker's {op} answer is not a JSON object",
+                "broker_bad_response",
+            )
+        return payload
+
+    def _once(self, op: str, body: dict[str, Any]) -> tuple[int, bytes, float | None]:
+        """One POST: ``(status, body, Retry-After seconds or None)``."""
         data = json.dumps(body).encode("utf-8")
         conn = _connection(self._parts, self._timeout)
         try:
@@ -205,6 +254,7 @@ class BrokerClient:
             response = conn.getresponse()
             status = response.status
             raw = response.read(_MAX_BROKER_BODY)
+            retry_after = _parse_retry_after(response.getheader("Retry-After"))
         except (OSError, http.client.HTTPException) as exc:
             raise ArtifactError(
                 f"cannot reach the artifact broker: {type(exc).__name__}",
@@ -212,18 +262,7 @@ class BrokerClient:
             ) from None
         finally:
             conn.close()
-        if status != 200:
-            raise _refusal(op, status, raw)
-        try:
-            payload = json.loads(raw)
-        except ValueError:
-            payload = None
-        if not isinstance(payload, dict):
-            raise ArtifactError(
-                f"the artifact broker's {op} answer is not a JSON object",
-                "broker_bad_response",
-            )
-        return payload
+        return status, raw, retry_after
 
     def presign(
         self, op: str, kind: str, repo: str, sha256: str, size: int | None = None
@@ -232,6 +271,28 @@ class BrokerClient:
         if size is not None:
             body["size"] = size
         return _parse_presigned(self.call(op, body), op)
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """``Retry-After`` in delta-seconds form; the HTTP-date form is ignored."""
+    if value is None or not value.strip().isdigit():
+        return None
+    return float(int(value.strip()))
+
+
+def _rate_limited(
+    op: str, raw: bytes, attempts: int, retry_after: float | None
+) -> ArtifactError:
+    """The exhausted-429 error: the broker's refusal text, code
+    ``broker_rate_limited``, and how many attempts were made."""
+    refusal = _refusal(op, 429, raw)
+    details = dict(refusal.details)
+    details["attempts"] = attempts
+    if retry_after is not None:
+        details["retry_after_s"] = retry_after
+    return ArtifactError(
+        f"{refusal} (gave up after {attempts} attempts)", "broker_rate_limited", details
+    )
 
 
 def _refusal(op: str, status: int, raw: bytes) -> ArtifactError:
