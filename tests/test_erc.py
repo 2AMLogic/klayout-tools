@@ -28,6 +28,19 @@ DBU = 0.001
 CORPUS_DIR = Path(__file__).parent / "corpus"
 
 
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Path:
+    """Shadows pytest's `tmp_path` for this module (issue #2703): seeds a
+    `.git` marker so `tmp_path` is its own repo root. `file` is the
+    `{path, scope}` envelope, and `--check`/`--rerun` resolve a
+    `scope: "repo"` entry against the committed report's repo -- under a
+    bare `tmp_path` it is `scope: "external"` (correct, but unverifiable),
+    so this puts the tests in the realistic position of a design in a repo.
+    The external branch is covered via `tmp_path_factory` below."""
+    (tmp_path / ".git").mkdir()
+    return tmp_path
+
+
 def _um(v: float) -> int:
     return int(round(v / DBU))
 
@@ -179,8 +192,8 @@ def test_run_erc_reports_two_gates(tmp_path):
 
     report = run_erc(str(gds), str(spec))
 
-    assert report["schema_version"] == 1
-    assert report["file"] == str(gds)
+    assert report["schema_version"] == 2
+    assert report["file"] == {"path": "basic.gds", "scope": "repo"}
     assert report["spec"] == str(spec)
     assert report["gate_role"] == "poly"
     assert report["gate_count"] == 2
@@ -5459,7 +5472,7 @@ def test_cli_json_contract(tmp_path, capsys):
         "provenance",
         "ties_disclosure",
     }
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
     assert data["pdk"] is None
     assert data["gate_count"] == 2
     assert data["ties_disclosure"] is None
@@ -6330,7 +6343,7 @@ def test_active_layer_does_not_change_schema_version(tmp_path):
     _write_spec(spec, _antenna_spec_variant(active_layer="8/0"))
 
     report = run_erc(str(gds), str(spec), pdk="sky130")
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
 
 
 # --- devices[]: drawn device bodies are not wires (issue #2183) --------------
@@ -6781,7 +6794,7 @@ def test_label_layer_provenance_empty_layer_visible_on_cli_stdout(tmp_path, caps
     captured = capsys.readouterr()
     data = json.loads(captured.out)
 
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
     assert data["provenance"]["label_layers"] == [
         {"name": "li1", "label_layer": "3/5", "label_text_count": 0}
     ]
@@ -6816,7 +6829,7 @@ def test_device_body_layer_absent_from_layout_subtracts_nothing(tmp_path, capsys
 def test_devices_declaration_does_not_change_schema_version(tmp_path):
     report = _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
 
 
 def test_device_body_does_not_disturb_an_unrelated_layout(tmp_path):
@@ -7182,7 +7195,7 @@ def test_deck_selected_populates_provenance_deck(tmp_path):
 def test_deck_selected_does_not_change_schema_version(tmp_path):
     report = _run_gf180mcu_resistor_divider(tmp_path, deck="gf180mcu")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
 
 
 def test_explicit_devices_entry_wins_over_deck_auto_detection(tmp_path):
@@ -9006,7 +9019,7 @@ def test_cli_validate_spec_valid_needs_no_layout(tmp_path, capsys):
     assert main(["erc", "--validate-spec", str(spec_path), "--format", "json"]) == 0
     captured = capsys.readouterr()
     data = json.loads(captured.out)
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
     assert data["status"] == "valid"
     assert data["spec"] == str(spec_path)
     assert data["counts"] == {
@@ -9105,3 +9118,67 @@ def test_cli_validate_spec_conflicts_are_clear_errors(tmp_path, capsys):
         with pytest.raises(SystemExit) as excinfo:
             main(["erc", "--validate-spec", spec, *extra])
         assert excinfo.value.code == 2
+
+
+# --- `file` is the portable `{path, scope}` envelope (issue #2703) ----------
+
+
+def test_run_erc_file_is_external_outside_any_repo(tmp_path_factory):
+    """Outside any repo detail is lost, never leaked: no absolute path."""
+    out = tmp_path_factory.mktemp("outside-any-repo")
+    gds, spec = out / "basic.gds", out / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_erc(str(gds), str(spec))
+
+    assert report["file"] == {"path": None, "scope": "external"}
+
+
+def test_check_erc_report_verifies_from_another_checkout(tmp_path, monkeypatch):
+    """A report committed beside its layout re-verifies from a second clone."""
+    producer = tmp_path / "producer"
+    consumer = tmp_path / "consumer"
+    for root in (producer, consumer):
+        (root / ".git").mkdir(parents=True)
+    gds, spec, report_path = _committed_erc_report(producer)
+    for src in (gds, spec, report_path):
+        (consumer / src.name).write_bytes(src.read_bytes())
+    committed = json.loads(report_path.read_text())
+    # `spec` is still the producer's own path echo; point it at the clone.
+    committed["spec"] = str(consumer / spec.name)
+    (consumer / report_path.name).write_text(json.dumps(committed))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = erc.check_erc_report(str(consumer / report_path.name))
+
+    (check,) = [
+        c for c in result["checks"] if c["field"] == "provenance.input.content_hash"
+    ]
+    assert check["match"] is True
+
+
+def test_check_erc_report_still_resolves_a_pre_2703_bare_string_file(
+    tmp_path_factory,
+):
+    out = tmp_path_factory.mktemp("outside-any-repo")
+    gds, _, report_path = _committed_erc_report(out)
+    report = json.loads(report_path.read_text())
+    report["schema_version"] = 1
+    report["file"] = str(gds)
+    report_path.write_text(json.dumps(report))
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["status"] == "match"
+
+
+def test_check_erc_report_external_file_is_unverifiable(tmp_path_factory):
+    out = tmp_path_factory.mktemp("outside-any-repo")
+    _, _, report_path = _committed_erc_report(out)
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["status"] != "match"

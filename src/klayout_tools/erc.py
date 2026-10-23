@@ -348,6 +348,7 @@ import os
 import sys
 from typing import Any
 
+from . import env_provenance
 from ._devices import (
     _conductor_role_layers,
     _cut_device_bodies,
@@ -367,6 +368,7 @@ from ._report_verify import (
     build_rerun_result,
     get_path,
     hash_check,
+    resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
@@ -563,7 +565,15 @@ from .extract import (
 #: #2401 empty-label-layer condition is visible in JSON, not only on stderr.
 #: Evidence only: no finding, status or coverage value changes. A new key on
 #: an existing object is additive. No bump.
-SCHEMA_VERSION = 1
+#:
+#: Bumped 1 -> 2 (issue #2703): ``file`` changed from a raw (usually
+#: absolute) path string to the ``{path, scope}`` shape
+#: ``env_provenance.repo_relative_path`` defines, matching `klt drc`/`klt
+#: extract`/`klt lvs` (issue #2659): a committed `klt erc` envelope is cited
+#: verbatim by a `klt signoff` manifest, so an absolute path pinned the
+#: record to the producing host's filesystem and ``input_verified`` drifted
+#: on every other checkout. ``spec`` is unchanged. See `_report_path` below.
+SCHEMA_VERSION = 2
 
 
 #: The stable ``coverage`` skip reason for every non-gate antenna level of a
@@ -4033,7 +4043,9 @@ def run_erc(
     )
     report = {
         "schema_version": SCHEMA_VERSION,
-        "file": file,
+        # Normalised to `{path, scope}` (issue #2703) -- the layout
+        # `provenance.input.content_hash` above actually hashes.
+        "file": _report_path(file, repo_root=_report_repo_root(file)),
         "spec": spec_path,
         "pdk": pdk,
         # (issue #2219) Whether the per-gate antenna accumulation was
@@ -4080,6 +4092,21 @@ def run_erc(
         report["gates"] = []
         report["compact"] = compact_block
     return report
+
+
+def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
+    """Normalise ``file`` for this module's own JSON response (issue #2703) --
+    a thin wrapper over :func:`~klayout_tools.env_provenance.repo_relative_path`,
+    the same one `klt drc`/`klt extract`/`klt lvs` (issue #2659) use, so every
+    verb agrees on one ``{path, scope}`` shape. The reader counterpart is
+    :func:`~klayout_tools._report_verify.resolve_committed_path`."""
+    return env_provenance.repo_relative_path(path, repo_root=repo_root)
+
+
+def _report_repo_root(path: str) -> str | None:
+    """The repo root ``file`` is normalised against -- resolved once from the
+    layout's own location, as `klt drc` does."""
+    return env_provenance.find_repo_root(os.path.dirname(os.path.abspath(path)))
 
 
 # --------------------------------------------------------------------------- #
@@ -4149,7 +4176,7 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
         _input_hash_check(
             "provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
-            committed.get("file"),
+            resolve_committed_path(committed.get("file"), report_path=report_path),
             report_path,
         ),
         _input_hash_check(
@@ -4193,14 +4220,14 @@ def rerun_erc_report(report_path: str) -> dict[str, Any]:
     missing ``file``/``spec`` to rerun, or any error the rerun itself raises.
     """
     committed = _load_committed_report(report_path, ErcError)
-    for key in ("file", "spec"):
-        if not committed.get(key):
-            raise ErcError(
-                f"committed report has no '{key}' field to rerun: {report_path}"
-            )
+    file_path = resolve_committed_path(committed.get("file"), report_path=report_path)
+    if not file_path:
+        raise ErcError(f"committed report has no 'file' field to rerun: {report_path}")
+    if not committed.get("spec"):
+        raise ErcError(f"committed report has no 'spec' field to rerun: {report_path}")
     deck = get_path(committed, ("provenance", "deck"))
     fresh = run_erc(
-        committed["file"],
+        file_path,
         committed["spec"],
         top=None,
         pdk=committed.get("pdk"),
