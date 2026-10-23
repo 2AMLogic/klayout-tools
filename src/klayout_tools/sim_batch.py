@@ -3428,6 +3428,36 @@ def _read_worker_environment(
         return {**unknown, "capture": "malformed"}
 
 
+def _runner_feature_report(
+    request: dict[str, Any] | None, runner: str | None
+) -> dict[str, Any] | None:
+    """The ``runner_request_features`` block, or ``None`` if nothing is required.
+
+    ``decks`` (issue #4109) is judged by :func:`_runner_supports_decks`; the
+    rest are plain min-version entries in :data:`_RUNNER_REQUEST_FEATURES`.
+    ``missing`` is ``None`` (status ``unknown``) when the runner is unknown.
+    """
+    features = _request_features(request) if request else []
+    uses_decks = bool(request and request.get("decks"))
+    if uses_decks:
+        features.append("decks")
+    if not features:
+        return None
+    registry = [name for name in features if name != "decks"]
+    missing = _missing_runner_features(registry, runner) if registry else []
+    if uses_decks:
+        decks_ok = _runner_supports_decks(runner) if runner else None
+        if decks_ok is None:
+            missing = None
+        elif not decks_ok and missing is not None:
+            missing = [*missing, "decks"]
+    if missing is None:
+        status = "unknown"
+    else:
+        status = "unsupported" if missing else "supported"
+    return {"required": features, "missing": missing, "status": status}
+
+
 def _read_runner_identity(
     local_dir: str | None, request: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -3489,30 +3519,10 @@ def _read_runner_identity(
         "client_klt_version": client,
         "runner_compatibility": status,
     }
-    features = _request_features(request) if request else []
-    uses_decks = bool(request and request.get("decks"))
-    if uses_decks:
-        features.append("decks")
-    if features:
-        registry = [name for name in features if name != "decks"]
-        missing = _missing_runner_features(registry, runner) if registry else []
-        if uses_decks:
-            decks_ok = _runner_supports_decks(runner) if runner else None
-            if decks_ok is None:
-                missing = None
-            elif not decks_ok and missing is not None:
-                missing = [*missing, "decks"]
-        fields["runner_request_features"] = {
-            "required": features,
-            "missing": missing,
-            "status": (
-                "unknown"
-                if missing is None
-                else "unsupported"
-                if missing
-                else "supported"
-            ),
-        }
+    report = _runner_feature_report(request, runner)
+    if report is not None:
+        fields["runner_request_features"] = report
+        missing = report["missing"]
         if missing:
             fields["request_feature_diagnostic"] = _feature_diagnostic(
                 missing, str(runner), client, "runner"
