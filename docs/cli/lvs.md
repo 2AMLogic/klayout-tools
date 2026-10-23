@@ -7,7 +7,7 @@ Epic #153, following the layout-vs-schematic pattern
 
 ```
 klt lvs <request> [--format text|json]
-klt lvs --check <report.json> [--rerun] [--format text|json]
+klt lvs --check <report.json> [--layout <path>] [--rerun] [--format text|json]
 ```
 
 This is phase 3 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -4281,6 +4281,21 @@ klt lvs --check design.lvs.json --rerun           # full mode
 `--check` is mutually exclusive with the positional `<request>` argument —
 the layout/reference paths, engine, and (when used) extraction deck are all
 read from `<report.json>` itself, not given again on the command line.
+
+**Explicit input (issue #2699).** When the report cannot locate its own
+input — a `scope: "external"` run, or a grading clone laid out differently
+from the producing one — supply the input yourself alongside `--check`:
+`klt lvs --check design.lvs.json --layout design.spice [--rerun]`. The explicit input **always overrides** the report's recorded
+one (not only when that one is unresolvable), the same rule on `klt drc`,
+`klt extract` and `klt lvs`; its hash is compared against the report's
+recorded `provenance.input.content_hash`, and the reference/deck hashes are unaffected, so a file that disagrees reports
+`status: "drifted"` rather than being silently accepted. A relative path
+resolves against the current directory. Without it nothing changes: the
+`file`/`layout` field is resolved exactly as described above, and an
+external-scope report still reports `actual: null` / the clean "no field to
+rerun" error.
+`--layout` without `--check` is a clean error (exit 1). Only the layout can
+be supplied this way — `reference` is still the request's own verbatim echo.
 
 ### Cheap mode (default)
 

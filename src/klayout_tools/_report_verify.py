@@ -136,7 +136,9 @@ def load_committed_report(path: str, error_cls: type[Exception]) -> dict[str, An
     return data
 
 
-def resolve_committed_path(value: Any, *, report_path: str | None) -> str | None:
+def resolve_committed_path(
+    value: Any, *, report_path: str | None, override: str | None = None
+) -> str | None:
     """The filesystem path a committed report's own echoed input-path field
     names, resolved **from this checkout** -- ``None`` when the recorded
     value names no resolvable path here (issue #2659).
@@ -166,7 +168,20 @@ def resolve_committed_path(value: Any, *, report_path: str | None) -> str | None
     ``report_path`` may be ``None`` for a caller holding a decoded report but
     not the file it came from; the repo root is then discovered from the
     current working directory, the only other defensible anchor available.
+
+    ``override`` (issue #2699) is a caller-supplied explicit input path
+    (``klt drc``/``klt extract``'s positional ``file`` and ``klt lvs``'s
+    ``--layout``, alongside ``--check``). It **always wins** over the report's
+    own recorded value -- one precedence rule shared by all three verbs --
+    and is returned verbatim (a relative path anchors to the cwd, like any
+    other CLI path). This restores ``--check``/``--rerun`` for an input the
+    report cannot locate (``scope: "external"``) and gives an in-repo caller
+    an escape hatch when the grading clone is laid out differently; a file
+    that disagrees with the recorded hash is reported as ``drifted``, never
+    silently accepted.
     """
+    if override:
+        return override
     if isinstance(value, str):
         return value or None
     if isinstance(value, Mapping):

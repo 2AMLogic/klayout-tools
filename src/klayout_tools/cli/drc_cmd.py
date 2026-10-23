@@ -40,11 +40,12 @@ document" section for the schema.
 
 ``--check <report>`` (issue #1106) switches ``klt drc`` from running a fresh
 DRC into *verifying a previously committed* ``--format json`` report still
-reproduces -- see ``docs/cli/drc.md``, "--check" -- and is mutually exclusive
-with the positional ``file`` argument (the input path is read from the
-committed report itself). Cheap mode (default): re-hash the input/deck named
-in the report and compare against its own recorded ``content_hash`` values,
-no DRC engine re-run. Full mode (``--check <report> --rerun``): actually
+reproduces -- see ``docs/cli/drc.md``, "--check". The input path is read from
+the committed report itself unless the positional ``file`` is also given
+(issue #2699), which then overrides the recorded input unconditionally.
+Cheap mode (default): re-hash the input/deck named in the report and compare
+against its own recorded ``content_hash`` values, no DRC engine re-run. Full mode
+(``--check <report> --rerun``): actually
 re-run the deck the report names and diff verdict-bearing fields. Both reuse
 ``status: "match"`` / ``"drifted"`` and the same 0/3 exit-code split as a
 normal run (see ``klayout_tools._report_verify``).
@@ -83,9 +84,10 @@ EXIT_DRIFTED = EXIT_VIOLATIONS
 
 
 def run(args: argparse.Namespace) -> int:
-    # `file` and `--check` are a required, mutually exclusive argparse group
-    # (parser.py) -- omitting both, or giving both, is already a usage error
-    # (exit 2) by the time `run()` is ever called.
+    # `file`/`--check`/`--list-rules`: at least one is required and
+    # `--list-rules` stands alone -- both usage errors (exit 2) enforced by
+    # `parser._require_one_input` before `run()` is ever called. `file` may
+    # accompany `--check` (issue #2699) as an explicit input override.
     if args.check is not None:
         return _run_check(args)
 
@@ -188,9 +190,9 @@ def _run_check(args: argparse.Namespace) -> int:
         )
     try:
         if args.rerun:
-            result = rerun_drc_report(args.check)
+            result = rerun_drc_report(args.check, input_path=args.file)
         else:
-            result = check_drc_report(args.check)
+            result = check_drc_report(args.check, input_path=args.file)
     except DrcError as exc:
         return emit_error("drc", str(exc), args.format)
     except pdk_module.PdkNotFoundError as exc:

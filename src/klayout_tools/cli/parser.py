@@ -231,6 +231,36 @@ def _add_expect_version_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _require_one_input(
+    subparser: argparse.ArgumentParser,
+    *dests: str,
+    exclusive: tuple[str, ...] = (),
+):
+    """Post-parse usage check (exit 2) replacing a required mutually
+    exclusive argparse group (issue #2699).
+
+    ``klt drc``/``klt extract`` once grouped the positional ``file`` with
+    ``--check`` so argparse itself rejected combining them; ``file`` may now
+    accompany ``--check`` as an explicit input override, which a group cannot
+    express. This keeps the other half of that contract -- at least one of
+    ``dests`` must be given -- and rejects ``exclusive`` modes (``--list-rules``)
+    combined with any other input, both as usage errors exactly as before.
+    """
+
+    def check(args: argparse.Namespace) -> None:
+        given = [d for d in dests if getattr(args, d, None) not in (None, False)]
+        flag = {"file": "file", "check": "--check", "list_rules": "--list-rules"}
+        names = ", ".join(flag[d] for d in dests)
+        if not given:
+            subparser.error(f"one of the arguments {names} is required")
+        if len(given) > 1 and any(d in exclusive for d in given):
+            subparser.error(
+                f"argument {', '.join(flag[d] for d in given)}: not allowed together"
+            )
+
+    return check
+
+
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="klt",
@@ -2161,13 +2191,11 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "docs/cli/extract.md's 'Anonymous net numbering' section."
         ),
     )
-    # `file` (positional) and `--check` (issue #1149) are mutually exclusive
-    # input sources -- exactly one is required. See the matching
-    # `drc_input_group` comment in this file's `drc` subparser for why this
-    # is a required mutually-exclusive group rather than a manual runtime
-    # check.
-    extract_input_group = extract_parser.add_mutually_exclusive_group(required=True)
-    extract_input_group.add_argument(
+    # `file` (positional) or `--check` (issue #1149) is required; since issue
+    # #2699 they may be combined (`file` then overrides the report's recorded
+    # input). See the matching `drc` subparser comment for why the "one is
+    # required" rule is enforced after parsing by `_require_one_input`.
+    extract_parser.add_argument(
         "file",
         nargs="?",
         default=None,
@@ -2183,7 +2211,8 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "mutually exclusive with this command's own flags, which it "
             "carries as fields instead -- see docs/cli/extract.md, 'Request "
             "document'. Omit when using --check (the input path is read from "
-            "the committed report instead)"
+            "the committed report instead; give it alongside --check to "
+            "override that recorded path, issue #2699)"
         ),
     )
     extract_parser.add_argument(
@@ -3006,15 +3035,17 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "'Matched-device geometry check' section."
         ),
     )
-    extract_input_group.add_argument(
+    extract_parser.add_argument(
         "--check",
         default=None,
         metavar="REPORT",
         help=(
             "verify a previously committed 'klt extract --format json' "
-            "report (REPORT) instead of running a fresh extraction: "
-            "mutually exclusive with the positional 'file' argument, since "
-            "the input path is read from REPORT itself (issue #1149). "
+            "report (REPORT) instead of running a fresh extraction (issue "
+            "#1149). The input layout is read from REPORT itself unless the "
+            "positional 'file' is also given, which then overrides REPORT's "
+            "recorded input unconditionally (issue #2699: needed when "
+            "REPORT's input is outside any repository). "
             "Cheap mode (default): re-hash the input layout and deck named "
             "in REPORT's provenance block and compare against the "
             "recorded content_hash values, no extraction engine re-run. "
@@ -3039,7 +3070,10 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(extract_parser)
     _record_request_argv_flags(extract_parser)
-    extract_parser.set_defaults(func=extract_cmd.run)
+    extract_parser.set_defaults(
+        func=extract_cmd.run,
+        post_parse=_require_one_input(extract_parser, "file", "check"),
+    )
 
 
 def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -3095,6 +3129,22 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "re-run. Combine with --rerun for full mode (re-run the "
             "compare and diff verdict-bearing fields). Exits 0 if still "
             "consistent, 3 if drifted -- see docs/cli/lvs.md, '--check'"
+        ),
+    )
+    lvs_parser.add_argument(
+        "--layout",
+        default=None,
+        metavar="PATH",
+        help=(
+            "explicit layout/netlist input for --check/--rerun (issue "
+            "#2699): overrides the layout path REPORT recorded, "
+            "unconditionally (same rule as the positional 'file' of 'klt "
+            "drc --check'/'klt extract --check'). Use it when REPORT's "
+            "layout is outside any repository (recorded as scope "
+            "'external', so it cannot be located) or the verifying clone "
+            "is laid out differently. A layout that no longer hashes to "
+            "the recorded value reports 'drifted'. Requires --check; a "
+            "clean error (exit 1) otherwise"
         ),
     )
     lvs_parser.add_argument(
@@ -6023,15 +6073,15 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "instead (issue #565)."
         ),
     )
-    # `file` (positional) and `--check` (issue #1106) are mutually exclusive
-    # input sources -- exactly one is required. Grouping them this way lets
-    # argparse itself enforce both "one is required" and "not both at once"
-    # as usage errors (exit 2), preserving the pre-#1106 contract that
-    # omitting `file` entirely is a usage error, not an application-level
-    # one (see `test_cli_missing_request_arg_is_usage_error`'s `klt lvs`
-    # sibling in tests/test_lvs.py).
-    drc_input_group = drc_parser.add_mutually_exclusive_group(required=True)
-    drc_input_group.add_argument(
+    # `--check` (issue #1106) and `--list-rules` (issue #2768) are mutually
+    # exclusive input modes. `file` (positional) is *not* in the group: since
+    # issue #2699 it may accompany `--check` as an explicit input override.
+    # "One of file/--check/--list-rules is required" and "--list-rules takes
+    # no file" are still usage errors (exit 2), enforced after parsing by
+    # `_require_one_input` so the pre-#1106 contract (omitting `file` is a
+    # usage error, not an application-level one) is preserved.
+    drc_input_group = drc_parser.add_mutually_exclusive_group()
+    drc_parser.add_argument(
         "file",
         nargs="?",
         default=None,
@@ -6048,8 +6098,9 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "--deck-file/--deck-var/--pdk/--pdk-root/--timeout-s/--rules), "
             "which it carries as fields instead -- see docs/cli/drc.md, "
             "'Request document'. Omit when using --check (the input path is "
-            "read from the committed report instead) or --list-rules (no "
-            "layout is read)"
+            "read from the committed report instead; give it alongside "
+            "--check to override that recorded path, issue #2699) or "
+            "--list-rules (no layout is read)"
         ),
     )
     drc_parser.add_argument(
@@ -6258,9 +6309,11 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         metavar="REPORT",
         help=(
             "verify a previously committed 'klt drc --format json' report "
-            "(REPORT) instead of running a fresh check: mutually exclusive "
-            "with the positional 'file' argument, since the input path is "
-            "read from REPORT itself (issue #1106). Cheap mode (default): "
+            "(REPORT) instead of running a fresh check (issue #1106). The "
+            "input layout is read from REPORT itself unless the positional "
+            "'file' is also given, which then overrides REPORT's recorded "
+            "input unconditionally (issue #2699: needed when REPORT's input "
+            "is outside any repository). Cheap mode (default): "
             "re-hash the input layout and deck named in REPORT's "
             "provenance block and compare against the recorded "
             "content_hash values, no DRC engine re-run. Combine with "
@@ -6330,7 +6383,12 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
     _record_request_argv_flags(
         drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")
     )
-    drc_parser.set_defaults(func=drc_cmd.run)
+    drc_parser.set_defaults(
+        func=drc_cmd.run,
+        post_parse=_require_one_input(
+            drc_parser, "file", "check", "list_rules", exclusive=("list_rules",)
+        ),
+    )
 
 
 def _add_precheck_parser(subparsers: argparse._SubParsersAction) -> None:

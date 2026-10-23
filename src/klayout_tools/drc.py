@@ -2364,7 +2364,9 @@ def _deck_path_for_report(committed: dict[str, Any]) -> str | None:
     return deck_source_path(deck)
 
 
-def check_drc_report(report_path: str) -> dict[str, Any]:
+def check_drc_report(
+    report_path: str, *, input_path: str | None = None
+) -> dict[str, Any]:
     """``klt drc --check`` (cheap mode, issue #1106): verify a previously
     committed ``klt drc --format json`` report at ``report_path`` still
     reproduces, without re-running the DRC engine at all.
@@ -2394,7 +2396,11 @@ def check_drc_report(report_path: str) -> dict[str, Any]:
             "provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
             _content_hash(
-                resolve_committed_path(committed.get("file"), report_path=report_path)
+                resolve_committed_path(
+                    committed.get("file"),
+                    report_path=report_path,
+                    override=input_path,
+                )
             ),
         ),
         hash_check(
@@ -2454,7 +2460,9 @@ def _recorded_rule_selectors(committed: dict[str, Any]) -> list[str] | None:
     return parse_rule_selectors(selectors)
 
 
-def rerun_drc_report(report_path: str) -> dict[str, Any]:
+def rerun_drc_report(
+    report_path: str, *, input_path: str | None = None
+) -> dict[str, Any]:
     """``klt drc --check <report> --rerun`` (full mode, issue #1106):
     verify a previously committed ``klt drc --format json`` report at
     ``report_path`` by actually re-running the DRC deck it names and
@@ -2488,7 +2496,9 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
     raises (bad file, unknown deck, engine error) -- never a traceback.
     """
     committed = _load_committed_report(report_path, DrcError)
-    file_path = resolve_committed_path(committed.get("file"), report_path=report_path)
+    file_path = resolve_committed_path(
+        committed.get("file"), report_path=report_path, override=input_path
+    )
     if not file_path:
         raise DrcError(f"committed report has no 'file' field to rerun: {report_path}")
     deck = committed.get("deck")

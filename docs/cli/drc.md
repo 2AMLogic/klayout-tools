@@ -10,7 +10,7 @@ klt drc <file> --engine both --deck <name> [--deck-file <path> | --pdk <variant>
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
 klt drc <file> --deck <name> --waivers <waivers.json> [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
-klt drc --check <report.json> [--rerun] [--format text|json]
+klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -84,9 +84,9 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   names is rejected before `klayout` is launched. See "Engine" → `"klayout"`
   → "Opt-in rule-category set assertion".
 - `--check` — verify a previously committed `--format json` report instead
-  of running a fresh check (issue #1106). Mutually exclusive with `<file>`
-  (the input path is read from the report itself) — see "`--check` /
-  `--rerun`" below.
+  of running a fresh check (issue #1106). The input path is read from the
+  report itself unless `<file>` is also given, which overrides it
+  (issue #2699) — see "`--check` / `--rerun`" below.
 - `--rerun` — full mode for `--check`: actually re-run the DRC deck the
   report names, instead of only re-hashing its inputs. Requires `--check`.
 - `--list-rules` — list the curated `--deck`'s registered rules instead of
@@ -3658,10 +3658,10 @@ klt drc --check design.drc.json                  # cheap mode (default)
 klt drc --check design.drc.json --rerun           # full mode
 ```
 
-`--check` is mutually exclusive with the positional `<file>` argument (and
-with `--deck`/`--top`/`--engine`/etc., which are ignored) — the input path,
-deck, and engine are all read from `<report.json>` itself, not given again
-on the command line.
+`--check` takes no `--deck`/`--top`/`--engine`/etc. (those are ignored) — the
+deck and engine are always read from `<report.json>` itself, not given again
+on the command line, and so is the input path unless you pass the positional
+`<file>` (below).
 
 **Both modes resolve the committed report's `file` field from *this*
 checkout (issue #2659).** Since `schema_version` 3 that field is the
@@ -3676,6 +3676,20 @@ unverifiable `actual: null` an absent field gets, and `--rerun` as the same
 clean "no `'file'` field to rerun" error. A report predating #2659, whose
 `file` is a bare path string, keeps resolving exactly as it always did —
 verbatim if absolute, against the current working directory if relative.
+
+**Explicit input (issue #2699).** When the report cannot locate its own
+input — a `scope: "external"` run, or a grading clone laid out differently
+from the producing one — supply the input yourself alongside `--check`:
+`klt drc design.gds --check design.drc.json [--rerun]` (the positional
+`<file>`). The explicit input **always overrides** the report's recorded
+one (not only when that one is unresolvable), the same rule on `klt drc`,
+`klt extract` and `klt lvs`; its hash is compared against the report's
+recorded `provenance.input.content_hash` (the deck hash is unaffected), so a file that disagrees reports
+`status: "drifted"` rather than being silently accepted. A relative path
+resolves against the current directory. Without it nothing changes: the
+`file`/`layout` field is resolved exactly as described above, and an
+external-scope report still reports `actual: null` / the clean "no field to
+rerun" error.
 
 ### Cheap mode (default)
 

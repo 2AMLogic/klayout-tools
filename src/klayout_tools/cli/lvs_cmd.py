@@ -26,9 +26,10 @@ the one case where LVS genuinely cannot reach a verdict; see docs/cli/lvs.md's
 compare into *verifying a previously committed* ``--format json`` report
 still reproduces -- see ``docs/cli/lvs.md``, "--check" -- and is mutually
 exclusive with the positional ``request`` argument (inputs are read from the
-committed report itself). Cheap mode (default): re-hash the layout/
-reference netlists (and extraction deck, when one was used) named in the
-report and compare against its own recorded hash values, no compare engine
+committed report itself). ``--layout PATH`` (issue #2699) supplies the layout
+explicitly, overriding the recorded one unconditionally. Cheap mode (default):
+re-hash the layout/reference netlists (and extraction deck, when one was used)
+named in the report and compare against its own recorded hash values, no compare engine
 re-run. Full mode (``--check <report> --rerun``): best-effort re-run of the
 compare the report describes and diff verdict-bearing fields. Both reuse
 ``status: "match"`` / ``"drifted"`` and the same 0/3 exit-code split as a
@@ -79,6 +80,9 @@ def run(args: argparse.Namespace) -> int:
     if args.rerun:
         return emit_error("lvs", "--rerun requires --check <report>", args.format)
 
+    if args.layout is not None:
+        return emit_error("lvs", "--layout requires --check <report>", args.format)
+
     try:
         report = run_lvs(
             args.request,
@@ -113,9 +117,9 @@ def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
 def _run_check(args: argparse.Namespace) -> int:
     try:
         if args.rerun:
-            result = rerun_lvs_report(args.check)
+            result = rerun_lvs_report(args.check, layout_path=args.layout)
         else:
-            result = check_lvs_report(args.check)
+            result = check_lvs_report(args.check, layout_path=args.layout)
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
 

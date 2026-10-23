@@ -8114,6 +8114,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         rerun=False,
         deck_file=None,
         deck_var=None,
+        layout=None,
     )
     assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
     payload = json.loads(capsys.readouterr().out)
@@ -25428,3 +25429,101 @@ def test_run_lvs_sky130_diode_matches_and_mismatches_on_removal(tmp_path, flavou
             sub, flavour, layout_diode=layout_diode, reference_diode=reference_diode
         )
         assert report["status"] != "match", (layout_diode, reference_diode)
+
+
+# ---------------------------------------------------------------------------
+# Explicit --layout alongside --check / --rerun (issue #2699)
+# ---------------------------------------------------------------------------
+
+
+def _external_lvs_report(tmp_path_factory):
+    """A committed report whose layout is outside any repo (`scope:
+    "external"`), plus the layout's path."""
+    outside = tmp_path_factory.mktemp("outside-any-repo")
+    layout_path = _write(outside / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(outside / "ref.spice", _INVERTER_SPICE)
+    report_path = outside / "lvs.json"
+    _write_report(
+        report_path,
+        run_lvs(
+            _write_request(
+                outside / "request.json",
+                {
+                    "layout": {"netlist": layout_path, "top": "inv"},
+                    "reference": {"netlist": reference_path, "top": "inv"},
+                },
+            )
+        ),
+    )
+    return layout_path, report_path
+
+
+def test_check_lvs_report_explicit_layout_verifies_an_external_layout(
+    tmp_path_factory,
+):
+    layout_path, report_path = _external_lvs_report(tmp_path_factory)
+
+    result = check_lvs_report(str(report_path), layout_path=layout_path)
+
+    assert result["status"] == "match"
+
+
+def test_rerun_lvs_report_explicit_layout_reruns_an_external_layout(
+    tmp_path_factory,
+):
+    layout_path, report_path = _external_lvs_report(tmp_path_factory)
+
+    result = rerun_lvs_report(str(report_path), layout_path=layout_path)
+
+    assert result["status"] == "match"
+
+
+def test_lvs_explicit_layout_overrides_a_recorded_layout(tmp_path_factory):
+    """Precedence rule (always override): a disagreeing explicit layout is
+    reported `drifted`, never silently accepted."""
+    layout_path, report_path = _external_lvs_report(tmp_path_factory)
+    other = _write(
+        tmp_path_factory.mktemp("other") / "other.spice", _INVERTER_SPICE + "* x\n"
+    )
+
+    result = check_lvs_report(str(report_path), layout_path=other)
+
+    assert result["status"] == "drifted"
+
+
+def test_cli_lvs_check_rerun_with_explicit_layout_on_external_report(
+    tmp_path_factory, capsys
+):
+    layout_path, report_path = _external_lvs_report(tmp_path_factory)
+    capsys.readouterr()
+
+    for extra in ([], ["--rerun"]):
+        code = main(
+            [
+                "lvs",
+                "--check",
+                str(report_path),
+                "--layout",
+                layout_path,
+                *extra,
+                "--format",
+                "json",
+            ]
+        )
+        assert code == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+    # Without --layout the honest drift/error is unchanged.
+    assert main(["lvs", "--check", str(report_path), "--format", "json"]) == 3
+    capsys.readouterr()
+    assert (
+        main(["lvs", "--check", str(report_path), "--rerun", "--format", "json"]) == 1
+    )
+
+
+def test_cli_lvs_layout_without_check_is_rejected(tmp_path, capsys):
+    assert main(["lvs", "{}", "--layout", "x.spice", "--format", "json"]) == 1
+    assert (
+        "--layout requires --check"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
