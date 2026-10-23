@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt artifact delete`** (issue #4101, documented in
+  [`docs/cli/artifact.md`](docs/cli/artifact.md)). Deletes named objects
+  through a new broker `POST /v1/delete` op. Dry run unless `--yes`; each
+  `--keep MANIFEST` refuses the whole batch with `still_referenced` unless
+  `--force-referenced`; an absent object is success. The broker op lives
+  outside this repo, so end-to-end use awaits it. Additive.
 - **`klt artifact`: manifest `uri`s are logical `artifact:<key>` names**
   (issue #4069, operator ruling H1 in 2AMLogic/2am#5553, documented in
   [`docs/cli/artifact.md`](docs/cli/artifact.md)). `put` writes

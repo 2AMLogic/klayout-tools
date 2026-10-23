@@ -1,4 +1,4 @@
-"""``klt artifact put|get|verify``: the fleet artifact-store client (issue
+"""``klt artifact put|get|verify|delete``: the fleet artifact-store client (issue
 #4063). The logic lives in :mod:`klayout_tools.artifact_store`; this module
 only maps arguments and emits through the shared envelope in :mod:`.output`
 (``docs/json-contract.md``, ``docs/cli/artifact.md``).
@@ -15,6 +15,8 @@ Exit codes:
         malformed manifest, an unreadable input, or -- for get -- fetched
         bytes that did not re-hash to the manifest's digest and the key's
         (nothing is written) -- ``output.ERROR_EXIT_CODE``
+    (delete: 0 - dry run reported, or objects deleted / already absent; 1 - a
+        referenced object, a broker refusal or an unreachable broker.)
     3 - verify only: ran, and at least one entry is missing or mismatched
 (2 is reserved for argparse usage errors.)
 """
@@ -161,3 +163,30 @@ def _print_verify_text(payload: dict[str, Any]) -> None:
         f"{payload['manifest']}: {payload['status']} "
         f"({payload['failed_count']} of {payload['entry_count']} failed)"
     )
+
+
+def run_delete(args: argparse.Namespace) -> int:
+    try:
+        client = store.resolve_broker(args.broker)
+        targets = [_target_for_ref(ref, args.repo)[0] for ref in args.refs]
+        report = store.delete_objects(
+            client,
+            targets,
+            keep_manifests=args.keep,
+            yes=args.yes,
+            force_referenced=args.force_referenced,
+        )
+    except store.ArtifactError as exc:
+        return _error("delete", exc, args.format)
+    payload = {"schema_version": 1, **report}
+    emit_success(payload, args.format, _print_delete_text)
+    return 0
+
+
+def _print_delete_text(payload: dict[str, Any]) -> None:
+    for obj in payload["objects"]:
+        print(f"{obj['status']:<12} {obj['sha256']}")
+    if payload["status"] == "dry_run":
+        print("dry run: nothing deleted; pass --yes to delete")
+    if not payload["guard"]["checked"]:
+        print("no --keep manifest given: references were NOT checked")
