@@ -447,7 +447,27 @@ def _power_physical_only_masters(cell_library: str) -> list[str]:
     return masters + list(_FILLER_CELLS[cell_library])
 
 
-def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]:
+def _wire_rc_lines(
+    io_spec: dict[str, Any], library: dict[str, Any] | None
+) -> list[str]:
+    """``set_wire_rc`` line(s): the caller's ``request.library.wire_rc``
+    (issue #4086) as explicit signal/clock RC, else the tech-LEF layer RC
+    of ``io.layer_v`` exactly as before."""
+    if library is not None and "wire_rc" in library:
+        resistance, capacitance = library["wire_rc"]
+        return [
+            f"set_wire_rc -{kind} -resistance {resistance:g} "
+            f"-capacitance {capacitance:g}"
+            for kind in ("signal", "clock")
+        ]
+    return [f"set_wire_rc -layer {io_spec['layer_v']}"]
+
+
+def _power_delivery_lines(
+    power: dict[str, Any],
+    cell_library: str,
+    library: dict[str, Any] | None = None,
+) -> list[str]:
     """Tcl for the optional ``request.power`` PDN stage (issue #1091):
     ``tapcell`` well/substrate ties, ``add_global_connection``/
     ``global_connect`` power-pin wiring, and ``pdngen``'s strap grid -- all
@@ -490,7 +510,12 @@ def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]
     # in the global-connect/PDN sequence depends on `tapcell` having run.
     lines: list[str] = _tapcell_lines(cell_library, power.get("tapcell_distance_um"))
 
-    for net_role, pin_pattern, is_primary in _POWER_PIN_PATTERNS[cell_library]:
+    pin_patterns = (
+        library["power_pins"]
+        if library is not None and "power_pins" in library
+        else _POWER_PIN_PATTERNS[cell_library]
+    )
+    for net_role, pin_pattern, is_primary in pin_patterns:
         net = power_net if net_role == "power" else ground_net
         flag = ""
         if is_primary:
@@ -673,6 +698,7 @@ def _stage_script_lines(
     output_dir: str,
     route_critical_nets_percentage: int,
     max_antenna_repair_iterations: int,
+    library: dict[str, Any] | None = None,
 ) -> list[str]:
     from .place_and_route import (
         _ANTENNA_DIODE_CELLS,
@@ -727,7 +753,7 @@ def _stage_script_lines(
         # itself uses (see this module's own docstring "Power delivery"
         # section for the live-verified citation).
         if power is not None:
-            lines += _power_delivery_lines(power, cell_library)
+            lines += _power_delivery_lines(power, cell_library, library)
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
         lines += [f"write_db {checkpoint_out}"]
         return lines
@@ -754,7 +780,7 @@ def _stage_script_lines(
         lines += [
             f"place_pins -hor_layers {io_spec['layer_h']} "
             f"-ver_layers {io_spec['layer_v']}",
-            f"set_wire_rc -layer {io_spec['layer_v']}",
+            *_wire_rc_lines(io_spec, library),
             f"global_placement -density {_GLOBAL_PLACEMENT_DENSITY} "
             f"-routability_driven -timing_driven -random_seed {seed}",
             "estimate_parasitics -placement",
@@ -770,9 +796,13 @@ def _stage_script_lines(
         # runs -- see its own `stage_index >= STAGE_ORDER.index("place")`
         # check.
         assert clock_port is not None
-        buf_cell = _CTS_BUFFER_CELLS[cell_library]
+        buf_cell = (
+            library["cts_buffer"]
+            if library is not None and "cts_buffer" in library
+            else _CTS_BUFFER_CELLS[cell_library]
+        )
         lines += [
-            f"set_wire_rc -layer {io_spec['layer_v']}",
+            *_wire_rc_lines(io_spec, library),
             "estimate_parasitics -placement",
             # Issue #1506: `clock_tree_synthesis` (TritonCTS) segfaults --
             # confirmed live (a real `openroad/orfs:latest` container,

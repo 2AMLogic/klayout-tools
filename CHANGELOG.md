@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt place-and-route`: `request.library` supplies per-library inputs**
+  (issue #4086, documented in
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)). An optional,
+  additive block (`cts_buffer`, `power_pins`, `wire_rc`) lets a standard-cell
+  library with no built-in table reach `place`/`cts`; omitted, every script
+  is byte-identical. The per-library stage prerequisites are now checked
+  together, so one error lists every missing input and the field that
+  supplies it. No `schema_version` change.
 - **`klt artifact`: manifest `uri`s are logical `artifact:<key>` names**
   (issue #4069, operator ruling H1 in 2AMLogic/2am#5553, documented in
   [`docs/cli/artifact.md`](docs/cli/artifact.md)). `put` writes
