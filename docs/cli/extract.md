@@ -7260,12 +7260,12 @@ without the flag — output is byte-identical to a run that never had it):
 
 **Boundary conditions and limits.**
 
-- The graph builder attaches a port to every piece it touches, so a port in
-  the *interior* of a conductor would sit in parallel with the in-plane edge
-  it cuts. Contacts and vias are therefore only attached along a side that
-  lies on the conductor's outline (Stage 3.D4's end-edge ports); a contact
-  or via wholly inside a conductor makes the net `unsupported` with
-  `unsupported_geometry` (`detail.interior_landings`).
+- A contact or via with a side on the conductor's outline attaches along
+  that side (Stage 3.D4's end-edge ports). One wholly inside a conductor (a
+  strap's contact/via array) attaches by its whole footprint, which becomes
+  pieces of its own in the mesh. A net with thousands of such landings may
+  exceed the decomposition or node caps and report `graph_too_large`, keeping
+  the legacy scalar.
 - The shipped decks curate **no per-cut resistance**, so a net with a
   contact/via landing joining two *modelled* roles reports
   `via_resistance_unknown` rather than an assumed ideal via. Diffusion has no

@@ -26711,9 +26711,8 @@ def test_resistance_graph_unsupported_net_keeps_the_legacy_scalar(tmp_path):
     assert unsupported
     for entry in unsupported:
         graph = entry["resistance_graph"]
-        assert [d["code"] for d in graph["diagnostics"]] == ["unsupported_geometry"]
+        assert [d["code"] for d in graph["diagnostics"]] == ["via_resistance_unknown"]
         assert graph["terminals"] == [] and graph["pair_resistance_ohm"] == []
-        assert graph["nodes"] == 0 and graph["edges"] == 0
         assert graph["legacy_resistance_ohm"] == entry["resistance_ohm"]
     assert [e["resistance_ohm"] for e in report["parasitics"]["nets"]] == [
         e["resistance_ohm"] for e in base["parasitics"]["nets"]
@@ -26812,22 +26811,56 @@ def test_resistance_graph_report_two_level_series_matches_analytic(r_cut, expect
     assert report["pair_resistance_ohm"][0][1] == pytest.approx(expected, rel=1e-9)
 
 
-def test_resistance_graph_report_interior_contact_is_unsupported_geometry():
-    """A contact wholly inside the conductor has no boundary side to attach
-    to; it is reported, not solved with an attachment that doubles the
-    conductance across it."""
+def _strap_report(strapped):
     from klayout_tools.extract_parasitics import _resistance_graph_report
 
     um, region = _graph_report_regions()
-    roles = [("metal0", 10.0, region((0, 0, 20 * um, 2 * um)), None)]
-    contacts = region((0, 0, um // 2, 2 * um), (10 * um, 500, 10 * um + 500, 1500))
-    report = _resistance_graph_report(roles, contacts, [], 0.001, 7.0)
+    roles = [("metal0", 10.0, region((0, 0, 40 * um, 2 * um)), None)]
+    vias = []
+    if strapped:
+        roles.append(("metal1", 10.0, region((0, 0, 40 * um, 2 * um)), None))
+        vias = [
+            region(*[(x * um, um // 2, x * um + um // 2, um) for x in range(4, 36, 4)])
+        ]
+    # Terminals: metal0 contacts at both ends (not landings).
+    contacts = region((0, 0, um // 2, 2 * um), (39 * um, 0, 40 * um, 2 * um))
+    return _resistance_graph_report(roles, contacts, vias, 0.001, 400.0, 0.5)
+
+
+def test_resistance_graph_report_interior_landings_use_graph():
+    """Landings wholly inside a conductor no longer fall back to the legacy
+    scalar (issue #4061)."""
+    report = _strap_report(True)
+    assert report["status"] == "ok"
+    assert report["resistance_source"] == "graph"
+    assert "unsupported_geometry" not in [d["code"] for d in report["diagnostics"]]
+
+
+def test_resistance_graph_report_strapped_rail_is_lower_than_unstrapped():
+    strapped = _strap_report(True)["pair_resistance_ohm"][0][1]
+    bare = _strap_report(False)["pair_resistance_ohm"][0][1]
+    assert strapped < bare
+
+
+def test_resistance_graph_report_interior_landing_array_over_cap_is_too_large():
+    from klayout_tools.extract_parasitics import _resistance_graph_report
+
+    um, region = _graph_report_regions()
+    roles = [
+        ("metal0", 10.0, region((0, 0, 400 * um, 20 * um)), None),
+        ("metal1", 10.0, region((0, 0, 400 * um, 20 * um)), None),
+    ]
+    cuts = [
+        (x * um, y * um, x * um + um // 2, y * um + um // 2)
+        for x in range(2, 398, 2)
+        for y in range(2, 18, 2)
+    ]
+    contacts = region((0, 0, um // 2, 20 * um), (399 * um, 0, 400 * um, 20 * um))
+    report = _resistance_graph_report(roles, contacts, [region(*cuts)], 0.001, 9.0, 1.0)
     assert report["status"] == "unsupported"
-    assert report["legacy_resistance_ohm"] == 7.0
-    (diag,) = report["diagnostics"]
-    assert diag["code"] == "unsupported_geometry"
-    assert diag["detail"]["interior_landings"][0]["x_um"] == pytest.approx(10.25)
-    assert report["terminals"] == [] and report["nodes"] == 0
+    assert {d["code"] for d in report["diagnostics"]} == {"graph_too_large"}
+    assert report["resistance_source"] == "legacy"
+    assert report["selected_resistance_ohm"] == 9.0
 
 
 def test_cli_resistance_graph_json(tmp_path, capsys):

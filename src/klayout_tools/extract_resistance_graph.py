@@ -449,17 +449,23 @@ class _GraphBuilder:
 
     def attach(self, role_name: str, box: kdb.Box) -> _Attachment:
         """``(piece node id, edge resistance)`` for every piece ``box``
-        reaches on ``role_name``, scoped to the polygon(s) it lands on."""
+        reaches on ``role_name``, scoped to the polygon(s) it lands on.
+
+        A positive-area ``box`` has cut lines on all four sides, so it is
+        already whole pieces of its own; it contracts those (``0.0`` ohm) and
+        must not also attach to the neighbours it merely abuts, whose half-piece
+        edges would sit in parallel with the in-plane edges to this patch."""
         scope = _scope_region(box)
         if scope is None:
             return []
         hits = _rails_under_via(self.rails[role_name], scope, box)  # type: ignore[arg-type]
+        has_area = box.width() > 0 and box.height() > 0
         out: _Attachment = []
         for poly_index in sorted(h["index"] for h in hits):
             grid = self.grids.get((role_name, poly_index), {})
             for piece in sorted(grid.values(), key=lambda p: p.node_id):
                 factor = _contact_factor(piece.box, box)
-                if factor is not None:
+                if factor is not None and not (has_area and factor > 0.0):
                     r = _edge_resistance(self.sheet[role_name] * factor)
                     out.append((piece.node_id, r))
         return out
