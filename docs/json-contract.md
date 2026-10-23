@@ -1514,6 +1514,17 @@ All six share one contract:
   same clean "no `file`/`layout` field to rerun" error, never a traceback.
   A report predating #2659, whose field is a bare string, keeps the old
   anchoring described in the next bullet exactly as before.
+- **An explicit input restores the non-repo workflow (issue #2699).** For the
+  three verbs whose report echoes its own input, the caller may supply it
+  alongside `--check`/`--rerun` — `klt drc <file> --check REPORT`, `klt
+  extract <file> --check REPORT`, `klt lvs --check REPORT --layout PATH` —
+  for use when the report cannot locate the input (`scope: "external"`) or
+  the grading clone is laid out differently. **Precedence is one rule for all
+  three: the explicit input always overrides the report's recorded value**
+  (not only when that value is unresolvable); it is hashed and compared to
+  the recorded `content_hash`/`layout_sha256`, so a file that disagrees
+  reports `drifted`. With no explicit input the behaviour is unchanged
+  (additive; no `schema_version` bump, no new response field).
 - **An unresolvable input path is named, not silently `null` (issue #2595,
   `lvs` only so far).** A committed report that echoes an input back exactly
   as the request gave it re-hashes a *relative* echoed path against the
