@@ -29,6 +29,7 @@ docs/
   design-evidence-tiers.md  # four-tier evidence ladder (T1–T4) and per-tier artifact checklist
   cli/                   # per-verb CLI reference
     arith-gen.md
+    artifact.md
     cells.md
     characterize.md
     clip.md
