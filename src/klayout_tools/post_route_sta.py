@@ -2651,10 +2651,19 @@ def _write_script(script_path: str, lines: list[str]) -> None:
         ) from exc
 
 
+# Pins the session's command units so every unit-less ``_ns`` / ``_pF``
+# number the generated Tcl emits (clock period, I/O delays, design-rule
+# limits) and every ``report_*_metric`` it reads back are in ns / pF
+# whatever ``time_unit`` / ``capacitive_load_unit`` the Liberty declares
+# (issue #4089: a ``1ps`` Liberty otherwise read ``-period 1.0`` as 1 ps).
+_UNIT_PIN_LINE = "set_cmd_units -time ns -capacitance pF"
+
+
 def _clock_lines(clock_port: str, clock_period_ns: float) -> list[str]:
     return [
+        _UNIT_PIN_LINE,
         f"create_clock -name {clock_port} -period {clock_period_ns} "
-        f"[get_ports {clock_port}]"
+        f"[get_ports {clock_port}]",
     ]
 
 
