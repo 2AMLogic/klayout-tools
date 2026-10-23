@@ -15529,3 +15529,65 @@ def test_param_brace_in_step_analysis_args_rejected():
 
     with pytest.raises(sim.SimError, match="brace"):
         sim_steps._resolve_step_analysis({"kind": "tran", "args": "1n {stop_s}"}, "s1")
+
+
+# --- issue #4084: par() cap and too-few-points diagnostics ------------------
+
+
+def test_par_call_cap_log_classified():
+    log = "Circuit: x\nERROR: More than 99 function calls to par()\n"
+    diagnostics = sim._classify_diagnostics(log)
+    par = [d for d in diagnostics if d["code"] == "par_call_cap"]
+    assert len(par) == 1
+    assert par[0]["severity"] == "error"
+    assert "99 par() calls" in par[0]["message"]
+    assert "options.waveforms" in par[0]["message"]
+    assert "par_call_cap" in sim.DIAGNOSTIC_CODES
+
+
+def test_par_call_cap_preflight_boundary():
+    at_cap = "\n".join(f".meas dc m{i} FIND par('-i(v1)') AT={i}" for i in range(99))
+    assert sim._par_call_cap_preflight(at_cap) is None
+    over = at_cap + "\n.meas dc m99 FIND par('-i(v1)') AT=99"
+    warning = sim._par_call_cap_preflight(over)
+    assert warning is not None
+    assert warning["severity"] == "warning"
+    assert warning["code"] == "par_call_cap"
+    assert "100 par() calls" in warning["message"]
+
+
+def _ac_meas_spec(**extra):
+    return [{"name": "gain", "spice": "meas ac gain FIND vm(out) AT=30e9", **extra}]
+
+
+def _grade_ac(log_text, spec):
+    return sim._corner_measurement_results(
+        {},
+        spec,
+        analysis={"kind": "ac", "args": "lin 2 20e9 50e9"},
+        log_text=log_text,
+        is_xyce=False,
+        save_mode=sim.DEFAULT_SAVE_MODE,
+    )
+
+
+def test_ac_one_row_sweep_names_cause():
+    log = "No. of Data Rows : 1\n meas ac gain find vm(out) at=30e9 failed!\n"
+    results, diagnostics, _ = _grade_ac(log, _ac_meas_spec())
+    assert results[0]["status"] == "error"
+    assert diagnostics[0]["code"] == "measurement"
+    assert "fewer than 2 data points" in diagnostics[0]["message"]
+    assert "dec" in diagnostics[0]["message"]
+
+
+def test_ac_dense_sweep_keeps_generic_message():
+    log = "No. of Data Rows : 61\n"
+    _, diagnostics, _ = _grade_ac(log, _ac_meas_spec())
+    assert diagnostics[0]["message"] == "measurement 'gain' produced no value"
+
+
+def test_ac_one_row_optional_measurement_stays_absent():
+    log = "No. of Data Rows : 1\n"
+    results, diagnostics, _ = _grade_ac(log, _ac_meas_spec(optional=True))
+    assert results[0]["status"] == "absent"
+    assert diagnostics[0]["code"] == "measurement_absent"
