@@ -1717,7 +1717,14 @@ An entry whose minimum is `unreleased` has no detector and never counts as
 "every runner is too old".
 
 `decks[]` ([#3303](https://github.com/2AMLogic/klayout-tools/issues/3303)) is
-the next registry entry.
+not a registry row (its capability landed at `0.7.1.dev307`, so a plain
+minimum version cannot express it). It is judged by the same build-string
+check the pre-launch refusal uses and is reported as the `decks` feature in
+`runner_request_features` ([#4109](https://github.com/2AMLogic/klayout-tools/issues/4109)):
+`required` carries `decks` for a non-empty `decks[]`, `missing` is `["decks"]`
+for a runner that predates it (e.g. `0.7.0`), and `status` is `unsupported`,
+`supported`, or `unknown` (`missing: null`) when the runner version cannot be
+established. `runner_compatibility` itself stays a major.minor gate.
 
 - **Before launch**: when every image the AMI manifest publishes predates a
   feature the request uses, the request is refused once with

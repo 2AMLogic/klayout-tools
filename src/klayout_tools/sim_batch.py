@@ -3449,7 +3449,9 @@ def _read_runner_identity(
     carry ``runner_request_features`` (issue #3249): ``required`` names,
     ``missing`` names (``null`` when the runner version is unknown) and a
     ``status`` of ``supported`` / ``unsupported`` / ``unknown``; see
-    docs/cli/sim.md.
+    docs/cli/sim.md. A non-empty ``decks[]`` (issue #4109) adds ``decks``
+    to ``required``, judged by :func:`_runner_supports_decks` since it is
+    not a plain min-version entry.
     """
     client = _provenance._klt_version()
     runner: str | None = None
@@ -3488,8 +3490,18 @@ def _read_runner_identity(
         "runner_compatibility": status,
     }
     features = _request_features(request) if request else []
+    uses_decks = bool(request and request.get("decks"))
+    if uses_decks:
+        features.append("decks")
     if features:
-        missing = _missing_runner_features(features, runner)
+        registry = [name for name in features if name != "decks"]
+        missing = _missing_runner_features(registry, runner) if registry else []
+        if uses_decks:
+            decks_ok = _runner_supports_decks(runner) if runner else None
+            if decks_ok is None:
+                missing = None
+            elif not decks_ok and missing is not None:
+                missing = [*missing, "decks"]
         fields["runner_request_features"] = {
             "required": features,
             "missing": missing,
