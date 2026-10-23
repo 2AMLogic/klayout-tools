@@ -64,6 +64,14 @@ def merge_liberty(paths: list[str]) -> str:
         # Content-addressed: still validate nothing, inputs are unchanged.
         return out_path
 
+    header, bodies = _collect(paths, texts)
+    merged = header.rstrip() + "\n\n" + "\n".join(b.strip() for b in bodies) + "\n}\n"
+    _write_atomic(out_path, merged)
+    return out_path
+
+
+def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str]]:
+    """Validate headers/cell names across files; ``(header, bodies)``."""
     header = ""
     header_norm = ""
     first_path = paths[0]
@@ -87,8 +95,10 @@ def merge_liberty(paths: list[str]) -> str:
                 )
             seen[cell] = path
         bodies.append(body)
+    return header, bodies
 
-    merged = header.rstrip() + "\n\n" + "\n".join(b.strip() for b in bodies) + "\n}\n"
+
+def _write_atomic(out_path: str, merged: str) -> None:
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(out_path), suffix=".tmp")
     try:
@@ -99,7 +109,6 @@ def merge_liberty(paths: list[str]) -> str:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
-    return out_path
 
 
 def _read(path: str) -> str:
@@ -116,32 +125,34 @@ def _split(path: str, text: str) -> tuple[str, str, list[str]]:
     ``body`` runs from the first top-level ``cell (`` to just before the
     library's closing brace.
     """
-    first_cell: int | None = None
-    cells: list[str] = []
-    depth = 0
-    close: int | None = None
-    first_ident: str | None = None
-    for kind, pos, end in _tokens(text):
-        if kind == "ident" and first_ident is None:
-            first_ident = text[pos:end]
-        if kind == "{":
-            depth += 1
-        elif kind == "}":
-            depth -= 1
-            if depth == 0:
-                close = pos
-                break
-        elif kind == "ident" and depth == 1 and text[pos:end] == "cell":
-            match = _CELL_NAME_RE.match(text, _skip_ws(text, end))
-            if match:
-                cells.append(match.group(1))
-                if first_cell is None:
-                    first_cell = pos
+    first_ident = next((text[p:e] for k, p, e in _tokens(text) if k == "ident"), None)
+    first_cell, cells, close = _scan_cells(text)
     if close is None or first_ident != "library":
         raise LibertyMergeError(f"'{path}' is not a complete Liberty library group")
     if first_cell is None:
         raise LibertyMergeError(f"'{path}' defines no cells")
     return text[:first_cell], text[first_cell:close], cells
+
+
+def _scan_cells(text: str) -> tuple[int | None, list[str], int | None]:
+    """``(first top-level cell offset, cell names, closing-brace offset)``."""
+    first_cell: int | None = None
+    cells: list[str] = []
+    depth = 0
+    for kind, pos, end in _tokens(text):
+        if kind == "{":
+            depth += 1
+        elif kind == "}":
+            depth -= 1
+            if depth == 0:
+                return first_cell, cells, pos
+        elif depth == 1 and text[pos:end] == "cell":
+            match = _CELL_NAME_RE.match(text, _skip_ws(text, end))
+            if match:
+                cells.append(match.group(1))
+                if first_cell is None:
+                    first_cell = pos
+    return first_cell, cells, None
 
 
 def _skip_ws(text: str, index: int) -> int:
