@@ -1005,7 +1005,20 @@ jobs:
         # silently pass) if this step is ever unavailable, but CI always has it.
         run: scripts/fetch-cell-netlists.sh
 
+      - name: Cache pinned Yosys build
+        id: yosys-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/yosys-0.67
+          key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh', 'scripts/_install_common.sh') }}
+
       - name: Install Yosys build dependencies
+        # Cache-hit gate (issue #4100): these packages exist only to compile
+        # Yosys, and the compile step below is already skipped on a cache hit,
+        # so a warm-cache leg no longer touches the apt mirror at all. The
+        # cache step therefore runs before this one. Cache-miss runs still
+        # install and build, and remain exposed to mirror flakes by design.
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
         # scripts/install-yosys.sh builds Yosys from a pinned, checksum-
         # verified source release (issue #417) -- `apt-get install yosys`
         # would resolve Ubuntu 24.04's 0.33-5build2, ~30 releases stale
@@ -1068,13 +1081,6 @@ jobs:
           scripts/ci-apt-install.sh \
             cmake bison flex libfl-dev libreadline-dev gawk tcl-dev \
             libffi-dev pkg-config zlib1g-dev
-
-      - name: Cache pinned Yosys build
-        id: yosys-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ~/.cache/yosys-0.67
-          key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh', 'scripts/_install_common.sh') }}
 
       - name: Build + install pinned Yosys (cache miss only)
         if: steps.yosys-cache.outputs.cache-hit != 'true'

@@ -891,6 +891,23 @@ _CAP_REFUSAL = (
 )
 
 
+#: Verbatim shape of 2am's shared vCPU-budget refusal (issue #4103).
+_VCPU_REFUSAL = (
+    "error: 224 vCPU already running + 1 instance(s) of up to 32 vCPU exceeds "
+    "BATCH_MAX_VCPU=224, and only 0 type(s) fit the 0 vCPU left (floor 3) "
+    "-- the spot quota is shared with ci-spot"
+)
+
+
+def test_classify_launch_failure_matches_the_vcpu_budget_refusal():
+    assert sb._classify_launch_failure(_VCPU_REFUSAL) == "batch_no_capacity"
+    both = f"{_CAP_REFUSAL}; {_VCPU_REFUSAL}"
+    assert sb._classify_launch_failure(both) == "batch_concurrency_cap"
+    assert sb._classify_launch_failure(f"{_CAPACITY_REFUSAL}; {_VCPU_REFUSAL}") == (
+        "batch_no_capacity"
+    )
+
+
 def test_classify_launch_failure_matches_the_concurrency_cap_refusal():
     assert sb._classify_launch_failure(_CAP_REFUSAL) == "batch_concurrency_cap"
     assert sb.BATCH_CONCURRENCY_CAP_CODE == "batch_concurrency_cap"
