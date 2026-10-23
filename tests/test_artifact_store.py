@@ -29,7 +29,6 @@ from klayout_tools import signoff
 from klayout_tools.cli import main
 
 REPO = "acme/widgets"
-BUCKET = "test-bucket"
 SECRET = "X-Amz-Signature=fake0secret0signature0do0not0print"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -158,7 +157,6 @@ def broker(monkeypatch: pytest.MonkeyPatch):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     monkeypatch.setenv(store.ENV_BROKER, fake.base)
-    monkeypatch.setenv(store.ENV_BUCKET, BUCKET)
     monkeypatch.delenv(store.ENV_REPO, raising=False)
     try:
         yield fake
@@ -228,7 +226,7 @@ def test_put_uploads_with_broker_headers_and_writes_manifest(
             "loom.repo": REPO,
             "commit": "c0ffee",
         },
-        "uri": f"s3://{BUCKET}/{_key(REPO, sha256)}",
+        "uri": f"artifact:{_key(REPO, sha256)}",
         "name": "report.json",
         "media_type": "application/json",
     }
@@ -502,36 +500,139 @@ def test_no_broker_configured(monkeypatch, report, capsys):
     assert json.loads(err)["error"]["code"] == "broker_unconfigured"
 
 
-def test_bucket_required_when_broker_names_none(broker, report, monkeypatch, capsys):
-    monkeypatch.delenv(store.ENV_BUCKET)
-
-    code, _, err = _run(
-        ["artifact", "put", str(report), "--repo", REPO, "--format", "json"], capsys
-    )
-
-    assert code == 1
-    assert json.loads(err)["error"]["code"] == "bucket_unconfigured"
-    assert broker.objects == {}  # refused before any upload
-
-
-def test_broker_uri_is_preferred_over_config(broker, report, monkeypatch, capsys):
+def test_put_writes_the_broker_key_verbatim_as_an_artifact_uri(
+    broker, report, monkeypatch, capsys
+):
+    """The ``uri`` is ``artifact:<key>`` with whatever key the broker answers,
+    never one ``klt`` assembles, and names no storage location."""
     original = broker.answer
 
-    def with_uri(op, body):
+    def odd_layout(op, body):
         status, payload = original(op, body)
         if op == "put":
-            payload["uri"] = f"s3://broker-named/{payload['key']}"
+            payload["key"] = f"v2/Evidence/{body['sha256']}"
+            payload["uri"] = f"s3://somewhere/{payload['key']}"  # ignored
+            payload["bucket"] = "somewhere"  # ignored
         return status, payload
 
-    monkeypatch.setattr(broker, "answer", with_uri)
+    monkeypatch.setattr(broker, "answer", odd_layout)
     code, out, _ = _run(
         ["artifact", "put", str(report), "--repo", REPO, "--format", "json"], capsys
     )
 
     assert code == 0
-    assert json.loads(out)["entries"][0]["uri"].startswith(
-        "s3://broker-named/evidence/"
+    sha256 = _sha(report.read_bytes())
+    entry = json.loads(out)["entries"][0]
+    assert entry["uri"] == f"artifact:v2/Evidence/{sha256}"
+    assert "somewhere" not in out
+
+
+def test_put_refuses_a_key_that_cannot_round_trip(broker, report, monkeypatch, capsys):
+    original = broker.answer
+
+    def spaced(op, body):
+        status, payload = original(op, body)
+        payload["key"] = f"evidence/a b/{body['sha256']}"
+        return status, payload
+
+    monkeypatch.setattr(broker, "answer", spaced)
+    code, _, err = _run(
+        ["artifact", "put", str(report), "--repo", REPO, "--format", "json"], capsys
     )
+
+    assert code == 1
+    assert json.loads(err)["error"]["code"] == "broker_bad_response"
+    assert broker.objects == {}  # refused before any upload
+
+
+def test_bucket_option_is_gone(broker, report, capsys):
+    assert not hasattr(store, "ENV_BUCKET")
+    with pytest.raises(SystemExit) as excinfo:
+        main(["artifact", "put", str(report), "--repo", REPO, "--bucket", "b"])
+    assert excinfo.value.code == 2
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "s3://some-bucket/{key}",
+        "https://example.invalid/{key}",
+        "artifact://{key}",
+        "Artifact:{key}",
+        "{key}",
+        "artifact:",
+    ],
+)
+@pytest.mark.parametrize("command", ["get", "verify"])
+def test_get_and_verify_refuse_other_uri_schemes(
+    broker, report, tmp_path, capsys, uri, command
+):
+    manifest = tmp_path / "m.json"
+    _put(report, manifest, capsys)
+    data = json.loads(manifest.read_text())
+    key = _key(REPO, _sha(report.read_bytes()))
+    data["entries"][0]["uri"] = uri.format(key=key)
+    manifest.write_text(json.dumps(data))
+    fetches = len(broker.requests)
+
+    argv = ["artifact", command, str(manifest), "--format", "json"]
+    if command == "get":
+        argv[3:3] = ["-o", str(tmp_path / "x")]
+    code, _, err = _run(argv, capsys)
+
+    assert code == 1
+    assert json.loads(err)["error"]["code"] == "invalid_manifest"
+    assert len(broker.requests) == fetches  # refused before asking the broker
+    assert not (tmp_path / "x").exists()
+
+
+def _move_manifest_key(manifest: Path, sha256: str) -> None:
+    """Point the entry's uri at another key that still names the same digest
+    and repo, so only the uri-key == broker-key check can catch it."""
+    data = json.loads(manifest.read_text())
+    data["entries"][0]["uri"] = f"artifact:evidence/acme__widgets/zz/{sha256}"
+    manifest.write_text(json.dumps(data))
+
+
+def test_get_refuses_a_broker_key_other_than_the_uri_key(
+    broker, report, tmp_path, capsys
+):
+    manifest = tmp_path / "m.json"
+    _put(report, manifest, capsys)
+    _move_manifest_key(manifest, _sha(report.read_bytes()))
+
+    code, _, err = _run(
+        [
+            "artifact",
+            "get",
+            str(manifest),
+            "-o",
+            str(tmp_path / "x"),
+            "--format",
+            "json",
+        ],
+        capsys,
+    )
+
+    assert code == 1
+    assert json.loads(err)["error"]["code"] == "key_mismatch"
+    assert not (tmp_path / "x").exists()
+
+
+def test_verify_reports_a_broker_key_other_than_the_uri_key(
+    broker, report, tmp_path, capsys
+):
+    manifest = tmp_path / "m.json"
+    _put(report, manifest, capsys)
+    _move_manifest_key(manifest, _sha(report.read_bytes()))
+
+    code, out, _ = _run(
+        ["artifact", "verify", str(manifest), "--format", "json"], capsys
+    )
+
+    assert code == 3
+    assert json.loads(out)["entries"][0]["status"] == "key_mismatch"
 
 
 def test_entry_problems_rejects_extra_and_malformed_fields():
@@ -541,13 +642,16 @@ def test_entry_problems_rejects_extra_and_malformed_fields():
         size=3,
         kind="evidence",
         producer={"tool": "klt", "version": "0", "loom.repo": REPO, "commit": None},
-        uri=f"s3://{BUCKET}/{_key(REPO, sha256)}",
+        uri=f"artifact:{_key(REPO, sha256)}",
     )
     assert store.entry_problems(good) == []
     assert store.entry_problems({**good, "url": "x"}) == ["unknown field(s) url"]
+    assert store.entry_problems({**good, "uri": f"artifact:evidence/x/{'b' * 64}"}) == [
+        "uri key does not end in the entry's sha256"
+    ]
     assert store.entry_problems(
-        {**good, "uri": f"s3://{BUCKET}/evidence/x/{'b' * 64}"}
-    ) == ["uri key does not end in the entry's sha256"]
+        {**good, "uri": f"s3://some-bucket/{_key(REPO, sha256)}"}
+    ) == [f"uri 's3://some-bucket/{_key(REPO, sha256)}' is not artifact:<key>"]
     assert "kind must be one of" in store.entry_problems({**good, "kind": "blob"})[0]
 
 

@@ -46,18 +46,20 @@ Manifest format (``schema_version`` 1)::
           "kind": "evidence",
           "producer": {"tool": "klt", "version": "0.4.2",
                        "loom.repo": "owner/name", "commit": "<git sha>"},
-          "uri": "s3://<bucket>/<key>",
+          "uri": "artifact:<key>",
           "name": "sim/run1/report.json",      # optional
           "media_type": "application/json"     # optional
         }
       ]
     }
 
-An entry carries exactly those fields. ``uri``'s key is the broker's own
-answer, never assembled here. The broker's answer names the key but not the
-bucket, so the bucket half comes from the broker's answer when it carries one
-(``uri`` or ``bucket``) and otherwise from configuration
-(``--bucket`` / ``$KLT_ARTIFACT_BUCKET``); there is no default.
+An entry carries exactly those fields. ``uri`` is a **logical** URI,
+``artifact:<key>``, that only the artifact broker resolves (operator ruling
+H1, 2AMLogic/2am#5553): ``<key>`` is the broker's own answer, verbatim, never
+assembled here, and nothing about the storage location (no bucket, no
+endpoint) is written, so a manifest stays safe to commit to a public repo.
+``get`` and ``verify`` accept that scheme only; any other ``uri`` is an
+``invalid_manifest``.
 """
 
 from __future__ import annotations
@@ -82,9 +84,6 @@ from . import build_identity
 ENV_BROKER = "KLT_ARTIFACT_BROKER"
 #: Environment variable naming the ``owner/name`` repo objects are stored under.
 ENV_REPO = "KLT_ARTIFACT_REPO"
-#: Environment variable naming the bucket for a manifest ``uri`` when the
-#: broker's answer does not carry one.
-ENV_BUCKET = "KLT_ARTIFACT_BUCKET"
 
 MANIFEST_SCHEMA_VERSION = 1
 
@@ -109,7 +108,9 @@ _MAX_ERROR_BODY = 64 << 10
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
-_URI_RE = re.compile(r"^s3://([^/]+)/(.+)$")
+#: The manifest ``uri`` scheme: a logical name only the broker resolves.
+URI_SCHEME = "artifact"
+_URI_RE = re.compile(r"^artifact:([^/\s]\S*)$")
 _S3_CODE_RE = re.compile(r"<Code>([A-Za-z0-9_.-]{1,64})</Code>")
 _REMOTE_RE = re.compile(r"[:/]([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?/?$")
 
@@ -140,8 +141,6 @@ class Presigned:
     method: str | None = None
     url: str | None = field(default=None, repr=False)
     headers: dict[str, str] = field(default_factory=dict, repr=False)
-    uri: str | None = None
-    bucket: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -290,8 +289,6 @@ def _parse_presigned(payload: dict[str, Any], op: str) -> Presigned:
         method=_optional_str(payload, "method"),
         url=_optional_str(payload, "url"),
         headers=_parse_headers(payload.get("headers"), op),
-        uri=_optional_str(payload, "uri"),
-        bucket=_optional_str(payload, "bucket"),
     )
 
 
@@ -385,14 +382,15 @@ def repo_from_key(key: str) -> str | None:
     return parts[1].replace("__", "/")
 
 
-def split_uri(uri: str) -> tuple[str, str]:
-    """``(bucket, key)`` of an ``s3://bucket/key`` manifest URI."""
+def uri_key(uri: str) -> str:
+    """The broker key of an ``artifact:<key>`` manifest URI. Any other
+    scheme (``s3://`` included) is refused as ``invalid_manifest``."""
     match = _URI_RE.match(uri)
     if match is None:
         raise ArtifactError(
-            f"uri {uri!r} is not s3://<bucket>/<key>", "invalid_manifest"
+            f"uri {uri!r} is not {URI_SCHEME}:<key>", "invalid_manifest"
         )
-    return match.group(1), match.group(2)
+    return match.group(1)
 
 
 def _check_key(key: str, sha256: str) -> None:
@@ -420,24 +418,17 @@ def _check_checksum_header(headers: dict[str, str], sha256: str) -> None:
             )
 
 
-def _uri_for(answer: Presigned, bucket: str | None) -> str:
-    """The manifest ``uri``: the broker's own when it gave one, else
-    ``s3://<bucket>/<broker key>`` with the bucket from the answer or config."""
-    if answer.uri is not None:
-        _, key = split_uri(answer.uri)
-        if key != answer.key:
-            raise ArtifactError(
-                "the artifact broker's uri and key disagree", "broker_bad_response"
-            )
-        return answer.uri
-    chosen = answer.bucket or bucket
-    if not chosen:
+def uri_for_key(key: str) -> str:
+    """The manifest ``uri`` for a broker key: ``artifact:<key>``, the key
+    verbatim. A key that would not read back as itself is refused."""
+    uri = f"{URI_SCHEME}:{key}"
+    match = _URI_RE.match(uri)
+    if match is None or match.group(1) != key:
         raise ArtifactError(
-            "the broker's answer names the object key but not its bucket; set "
-            f"--bucket or ${ENV_BUCKET} so the manifest uri can be written",
-            "bucket_unconfigured",
+            "the artifact broker's key cannot be written as a manifest uri",
+            "broker_bad_response",
         )
-    return f"s3://{chosen}/{answer.key}"
+    return uri
 
 
 # --------------------------------------------------------------------------
@@ -546,7 +537,7 @@ def _uri_problems(uri: Any, sha256: Any) -> list[str]:
     if not isinstance(uri, str):
         return ["uri must be a string"]
     try:
-        _, key = split_uri(uri)
+        key = uri_key(uri)
     except ArtifactError as exc:
         return [str(exc)]
     if key_digest(key) != sha256:
@@ -699,7 +690,6 @@ def put_file(
     repo: str,
     producer: dict[str, Any],
     kind: str = "evidence",
-    bucket: str | None = None,
     name: str | None = None,
     media_type: str | None = None,
 ) -> dict[str, Any]:
@@ -718,7 +708,7 @@ def put_file(
         )
     answer = client.presign("put", kind, repo, sha256, size)
     _check_key(answer.key, sha256)
-    uri = _uri_for(answer, bucket)
+    uri = uri_for_key(answer.key)
     if not answer.exists:
         _check_checksum_header(answer.headers, sha256)
         with open(path, "rb") as handle:
@@ -755,7 +745,7 @@ def target_for_entry(entry: dict[str, Any]) -> FetchTarget:
             f"klt artifact fetches kind evidence only, not {entry['kind']!r}",
             "bad_kind",
         )
-    _, key = split_uri(entry["uri"])
+    key = uri_key(entry["uri"])
     repo = repo_from_key(key) or entry["producer"]["loom.repo"]
     return FetchTarget(
         kind=entry["kind"],

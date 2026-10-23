@@ -5309,12 +5309,6 @@ def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     put_parser.add_argument("--media-type", default=None, help="entry media_type")
     put_parser.add_argument(
-        "--bucket",
-        default=None,
-        help="bucket for the entry uri when the broker's answer names none "
-        f"(default: ${artifact_store.ENV_BUCKET})",
-    )
-    put_parser.add_argument(
         "--producer-tool", default=None, help="producer.tool (default: klt)"
     )
     put_parser.add_argument(

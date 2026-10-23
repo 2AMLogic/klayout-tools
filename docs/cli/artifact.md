@@ -8,7 +8,7 @@ writes beside it. `klt` and a reviewer then check the bytes by hash.
 
 ```
 klt artifact put FILE... [--manifest PATH] [--repo OWNER/NAME] [--name N]
-    [--media-type T] [--bucket B] [--producer-tool T] [--producer-version V]
+    [--media-type T] [--producer-tool T] [--producer-version V]
     [--commit SHA] [--broker URL] [--format text|json]
 klt artifact get REF -o OUT|- [--repo OWNER/NAME] [--force] [--broker URL]
     [--format text|json]
@@ -25,7 +25,6 @@ resolve its `uri`s. The broker has no public-read route.
 |---|---|---|---|
 | Broker base URL | `--broker` | `KLT_ARTIFACT_BROKER` | none: required |
 | Repo the objects belong to | `--repo` | `KLT_ARTIFACT_REPO` | the `origin` remote of the current directory |
-| Bucket for the manifest `uri` | `--bucket` | `KLT_ARTIFACT_BUCKET` | none (see below) |
 
 There is no credential. The broker identifies the caller by its network
 identity, so `klt` holds no token, key or cloud credential and does not use a
@@ -71,7 +70,7 @@ request.
       "kind": "evidence",
       "producer": {"tool": "klt", "version": "0.4.2", "loom.repo": "owner/name",
                    "commit": "0123456789abcdef0123456789abcdef01234567"},
-      "uri": "s3://<bucket>/evidence/owner__name/9f/9f86d081…",
+      "uri": "artifact:evidence/owner__name/9f/9f86d081…",
       "name": "sim/run1/report.json",
       "media_type": "application/json"
     }
@@ -83,11 +82,13 @@ Each entry carries exactly `sha256`, `size`, `kind`, `producer` (`tool`,
 `version`, `loom.repo`, `commit`) and `uri`. `name` and `media_type` are
 optional. An unknown field or a malformed one fails the whole manifest.
 
-- The `uri`'s key is always the broker's own `key`. `klt` never assembles it.
-  The broker's answer names the key but not the bucket. If the answer carries
-  a `uri` or `bucket`, `klt` uses it. Otherwise the bucket comes from
-  `--bucket` or `$KLT_ARTIFACT_BUCKET`, and `put` fails with
-  `bucket_unconfigured` before uploading when neither is set.
+- The `uri` is a logical name, `artifact:<key>`, that only the broker
+  resolves (operator ruling H1, 2AMLogic/2am#5553). `<key>` is the broker's
+  own `key`, verbatim; `klt` never assembles it. The `uri` names no storage
+  location, so there is nothing to configure and a manifest is safe to commit
+  to a public repo.
+- `get` and `verify` accept the `artifact:` scheme only. Any other `uri`,
+  `s3://` included, fails the manifest with `invalid_manifest`.
 - `name` defaults to the file's path relative to its git checkout, or to the
   bare file name outside a checkout. It is never an absolute path.
 - `producer.commit` defaults to `git rev-parse HEAD` in the current directory,
