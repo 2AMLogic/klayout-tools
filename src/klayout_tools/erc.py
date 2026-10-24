@@ -78,6 +78,7 @@ from .erc_spec import (
     DISCLOSURE_KIND_UNEXPRESSIBLE,
     REASON_NO_TIES_DECLARED,
     ErcError,
+    _validate_antenna_limits,
     _validate_nets,
     _validate_stackup,
     _validate_ties,
@@ -293,7 +294,8 @@ REASON_NO_GATES = "no_gates"
 REASON_EXTRACTOR_GLOBAL_NET = "extractor_global_net"
 
 #: The skip reason for a level that could have been graded had ``--pdk``
-#: named a PDK with an antenna-ratio table (or named one at all).
+#: named a PDK with an antenna-ratio table (or named one at all), or had the
+#: spec's ``antenna_limits`` carried an entry for its layer (issue #4090).
 REASON_MISSING_ANTENNA_PDK = "missing_antenna_pdk"
 
 
@@ -973,6 +975,32 @@ def _resolve_antenna_limits(pdk: str | None) -> dict[str, tuple[float, str]] | N
     return limits
 
 
+def _merge_antenna_limits(
+    pdk_limits: dict[str, tuple[float, str]] | None,
+    pdk: str | None,
+    spec_limits: list[dict[str, Any]],
+) -> dict[str, tuple[float, str]] | None:
+    """Layer name -> ``(limit, antenna_ratio_source)`` for every graded level
+    (issue #4090): the ``--pdk`` table's entries, each overridden by the
+    spec's caller-supplied ``antenna_limits`` entry for the same layer.
+    ``None`` when neither supplies a limit, so a spec-less run is unchanged.
+    """
+    merged: dict[str, tuple[float, str]] = {}
+    if pdk_limits is not None and pdk is not None:
+        for layer, (value, rule_id) in pdk_limits.items():
+            merged[layer] = (
+                value,
+                f"{_ANTENNA_SOURCE_URL_BY_PDK[pdk]} rule {rule_id!r}, "
+                f"{_ANTENNA_SOURCE_NOTE_BY_PDK[pdk]}",
+            )
+    for i, entry in enumerate(spec_limits):
+        merged[entry["layer"]] = (
+            entry["max_ratio"],
+            f"spec antenna_limits[{i}]: {entry['source']}",
+        )
+    return merged or None
+
+
 def _resolve_deck(deck: str | None) -> ExtractionDeck | None:
     """Resolve ``--deck`` to its curated :class:`~klayout_tools.decks.ExtractionDeck`
     (issue #2204) -- the deck-driven device-marker auto-detection this
@@ -1388,7 +1416,6 @@ def _accumulated_levels(
     gate_area_um2: float,
     dbu2_um2: float,
     antenna_limits: dict[str, tuple[float, str]] | None,
-    pdk: str | None,
 ) -> list[dict[str, Any]]:
     """One gate net's full ``levels[]``: the layer-by-layer accumulation of
     connected conductor area (Phase 1a), each non-gate level's antenna-ratio
@@ -1427,13 +1454,9 @@ def _accumulated_levels(
             if i == 0 or antenna_limits is None
             else antenna_limits.get(entry["name"])
         )
-        if limit_entry is not None and pdk is not None:
-            limit_value, rule_id = limit_entry
+        if limit_entry is not None:
+            limit_value, antenna_ratio_source = limit_entry
             antenna_ratio_max: float | None = limit_value
-            antenna_ratio_source: str | None = (
-                f"{_ANTENNA_SOURCE_URL_BY_PDK[pdk]} rule {rule_id!r}, "
-                f"{_ANTENNA_SOURCE_NOTE_BY_PDK[pdk]}"
-            )
             verdict = "violate" if antenna_ratio > limit_value else "pass"
         else:
             antenna_ratio_max = None
@@ -2990,7 +3013,8 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
     the two entry points cannot drift.
 
     Returns ``(spec, stackup, stackup_names, vias, nets_decl, ties,
-    ties_disclosure, devices)``; raises :class:`ErcError` on any defect.
+    ties_disclosure, devices, spec_antenna_limits)``; raises :class:`ErcError`
+    on any defect.
     """
     spec = _load_spec_json(spec_path, ErcError)
     _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", ErcError)
@@ -3015,6 +3039,7 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
         stackup_names + [via["name"] for via in vias],
         ErcError,
     )
+    spec_antenna_limits = _validate_antenna_limits(spec, spec_path, stackup)
     return (
         spec,
         stackup,
@@ -3024,6 +3049,7 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
         ties,
         ties_disclosure,
         devices,
+        spec_antenna_limits,
     )
 
 
@@ -3037,7 +3063,7 @@ def validate_erc_spec(spec_path: str) -> dict[str, Any]:
     :class:`ErcError` (with the same field-path message ``run_erc`` gives)
     for a missing/unreadable file or any malformed declaration.
     """
-    _, stackup, _, vias, nets_decl, ties, _, devices = _parse_erc_spec(spec_path)
+    _, stackup, _, vias, nets_decl, ties, _, devices, _ = _parse_erc_spec(spec_path)
     return {
         "schema_version": SCHEMA_VERSION,
         "mode": "validate_spec",
@@ -3267,7 +3293,9 @@ def run_erc(
         ties,
         ties_disclosure,
         devices,
+        spec_antenna_limits,
     ) = _parse_erc_spec(spec_path)
+    antenna_limits = _merge_antenna_limits(antenna_limits, pdk, spec_antenna_limits)
 
     layout = load_layout(file, ErcError)
     top_cells = select_top_cells(layout, top, ErcError)
@@ -3426,7 +3454,6 @@ def run_erc(
                 gate_area_um2,
                 dbu2_um2,
                 antenna_limits,
-                pdk,
             )
             is_floating = _levels_report_floating(levels)
 

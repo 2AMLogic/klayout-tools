@@ -476,6 +476,114 @@ def test_unknown_pdk_raises(tmp_path):
         run_erc(str(gds), str(spec), pdk="nope")
 
 
+# --- spec `antenna_limits` (issue #4090) ------------------------------------
+
+
+def _limits_spec(path, limits) -> None:
+    spec = json.loads((path.parent / "basic.erc.json").read_text())
+    spec["antenna_limits"] = limits
+    path.write_text(json.dumps(spec))
+
+
+def _limit(layer, max_ratio=100.0, source="vendor manual rev A, table 3"):
+    return {"layer": layer, "max_ratio": max_ratio, "source": source}
+
+
+def _met1_level(report):
+    return next(lvl for lvl in report["gates"][0]["levels"] if lvl["layer"] == "met1")
+
+
+def test_spec_antenna_limits_grade_without_pdk(tmp_path):
+    _basic_spec(tmp_path / "basic.erc.json")
+    spec = tmp_path / "limits.erc.json"
+    _limits_spec(spec, [_limit("met1", 100.0)])
+
+    over = tmp_path / "over.gds"
+    _antenna_fixture(over, li1_um2=0.1, met1_um2=150.0)
+    report = run_erc(str(over), str(spec))
+    level = _met1_level(report)
+    assert level["verdict"] == "violate"
+    assert level["antenna_ratio_max"] == pytest.approx(100.0)
+    assert level["antenna_ratio_source"] == (
+        "spec antenna_limits[0]: vendor manual rev A, table 3"
+    )
+    assert report["gates"][0]["antenna_verdict"] == "violate"
+    # An unlisted layer with no --pdk stays ungraded.
+    li1 = next(lvl for lvl in report["gates"][0]["levels"] if lvl["layer"] == "li1")
+    assert li1["verdict"] == "unchecked"
+    checked = report["coverage"]["checked"]
+    assert any("met1" in c for c in checked)
+
+    under = tmp_path / "under.gds"
+    _antenna_fixture(under, li1_um2=0.1, met1_um2=50.0)
+    assert _met1_level(run_erc(str(under), str(spec)))["verdict"] == "pass"
+
+
+def test_spec_antenna_limit_overrides_pdk_layer_only(tmp_path):
+    _basic_spec(tmp_path / "basic.erc.json")
+    spec = tmp_path / "limits.erc.json"
+    _limits_spec(spec, [_limit("met1", 100.0)])
+    gds = tmp_path / "x.gds"
+    _antenna_fixture(gds, li1_um2=1.0, met1_um2=150.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    levels = {lvl["layer"]: lvl for lvl in report["gates"][0]["levels"]}
+    assert levels["met1"]["antenna_ratio_max"] == pytest.approx(100.0)
+    assert levels["met1"]["antenna_ratio_source"].startswith("spec antenna_limits[0]")
+    assert levels["li1"]["antenna_ratio_max"] == pytest.approx(75.0)
+    assert "skywater-pdk" in levels["li1"]["antenna_ratio_source"]
+
+
+def test_spec_without_antenna_limits_is_unchanged_by_explicit_null(tmp_path):
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    gds = tmp_path / "x.gds"
+    _antenna_fixture(gds, li1_um2=1.0)
+    plain = run_erc(str(gds), str(spec))
+    nulled = tmp_path / "null.erc.json"
+    _limits_spec(nulled, None)
+    other = run_erc(str(gds), str(nulled))
+    assert plain["gates"] == other["gates"]
+    assert plain["coverage"] == other["coverage"]
+
+
+def test_spec_antenna_limits_findings_only_still_skips(tmp_path):
+    _basic_spec(tmp_path / "basic.erc.json")
+    spec = tmp_path / "limits.erc.json"
+    _limits_spec(spec, [_limit("met1")])
+    gds = tmp_path / "x.gds"
+    _antenna_fixture(gds, li1_um2=0.1, met1_um2=150.0)
+    report = run_erc(str(gds), str(spec), findings_only=True)
+    assert _met1_level(report)["verdict"] == "unchecked"
+
+
+@pytest.mark.parametrize(
+    ("limits", "match"),
+    [
+        ("nope", "must be an array"),
+        (["x"], "antenna_limits\\[0\\] must be a JSON object"),
+        ([{**_limit("met1"), "extra": 1}], "antenna_limits\\[0\\]"),
+        ([_limit("met9")], "not a stackup name"),
+        ([_limit("poly")], "gate role"),
+        ([_limit("met1"), _limit("met1")], "duplicates"),
+        ([_limit("met1", 0)], "finite number > 0"),
+        ([_limit("met1", -1)], "finite number > 0"),
+        ([_limit("met1", True)], "finite number > 0"),
+        ([_limit("met1", "400")], "finite number > 0"),
+        ([_limit("met1", source="")], "non-empty"),
+        ([{"layer": "met1", "max_ratio": 5.0}], "missing 'source'"),
+    ],
+)
+def test_spec_antenna_limits_rejections(tmp_path, limits, match):
+    _basic_spec(tmp_path / "basic.erc.json")
+    spec = tmp_path / "limits.erc.json"
+    _limits_spec(spec, limits)
+    gds = tmp_path / "x.gds"
+    _antenna_fixture(gds, li1_um2=1.0)
+    with pytest.raises(ErcError, match=match):
+        run_erc(str(gds), str(spec))
+
+
 @pytest.mark.parametrize(
     ("layer", "limit", "violate_kwargs", "pass_kwargs"),
     [
