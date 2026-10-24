@@ -172,9 +172,10 @@
     },
     "evidence": {
       "kind": "verb",
-      "description": "`klt evidence` implementation: CLI adapter for the evidence-record/1 writer.",
+      "description": "`klt evidence` implementation: CLI adapter for the evidence-record/1 writer plus the evidence lint.",
       "modules": [
-        "klayout_tools.cli.evidence_cmd"
+        "klayout_tools.cli.evidence_cmd",
+        "klayout_tools.evidence_lint"
       ]
     },
     "extract": {
@@ -861,6 +862,11 @@
       "reason": "`klt evidence` adapter uses the shared CLI output envelope helpers (emit_success/emit_error), like every verb adapter."
     },
     {
+      "consumer": "evidence",
+      "exporter": "sim",
+      "reason": "Issue #4043: `klt evidence lint` must re-derive result.status exactly as `klt sim` grades corners, so it calls sim's grader (lazily imported) rather than duplicating the grading rules."
+    },
+    {
       "consumer": "extract",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
@@ -1362,6 +1368,18 @@
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.evidence_lint",
+      "exporter": "klayout_tools.evidence_record",
+      "symbol": "_sha256_file",
+      "reason": "Issue #4043: the lint must verify sidecar hashes with the exact hashing the evidence writer used; promote to a public name when evidence_record is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.evidence_lint",
+      "exporter": "klayout_tools.sim",
+      "symbol": "_grade_corners",
+      "reason": "Issue #4043: verdict re-derivation must match `klt sim` grading by construction; make it public or move it to a shared module when sim is next split."
+    },
     {
       "consumer": "klayout_tools.evidence_record",
       "exporter": "klayout_tools.env_provenance",

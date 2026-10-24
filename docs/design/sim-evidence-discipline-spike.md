@@ -131,7 +131,7 @@ For each of item 3's five sub-items, ask which of two things is missing:
 
 | # | Sub-item | Kind | Disposition |
 | - | -------- | ---- | ----------- |
-| A | Append-only records with supersession chains | policy (storage/retention) | **Documented convention** |
+| A | Append-only records with supersession chains | policy (storage/retention) | **Documented convention** — *amended (#4043): reversed; `klt evidence lint` now enforces it, see `docs/cli/evidence.md`* |
 | B | Netlist snapshot per record | data-completeness gap | **`klt sim` contract addition** — follow-up issue filed (see below) |
 | C | PDK-pin (hash) enforcement | policy (expected-value + fail behavior) | **Documented convention** |
 | D | Subset-reason requirements | policy (what counts as "full" coverage) | **Documented convention** |

@@ -57,3 +57,46 @@ Errors use the standard envelope (`docs/json-contract.md`); exit codes are
 
 The schema, id format and `validate_record_shape()` live in
 `klayout_tools.evidence_record`, shared with the record linter (#4043).
+
+## `klt evidence lint`
+
+The sweep half (issue #4043, survey gap G1): audits every record under
+`<root>/evidence/sim/` so chip repos no longer fork their own
+`evidence_lint.py`. Toolchain-free and CI-runnable.
+
+```
+klt evidence lint [ROOT] [--base REF] [--schema FILE.json]
+    [--no-append-only] [--format text|json]
+```
+
+| Check | Finding codes |
+|---|---|
+| Shape (`validate_record_shape`), filename is a record id | `record_unreadable`, `record_shape`, `record_id_mismatch` |
+| Append-only: `git diff --name-status REF...HEAD` — any status but `A` under the evidence dir (`HEAD` pointer files exempt). `--base` defaults to `origin/main` | `append_only_violation` |
+| Supersession: targets exist, share `<block>/<scope>`, no forks, no cycles, a second record for a scope must supersede; `HEAD` file names an unsuperseded record | `supersedes_missing_target`, `supersedes_scope_mismatch`, `supersession_fork`, `supersession_cycle`, `supersedes_omitted`, `head_mismatch` |
+| Sidecar: files named by `artifacts.corners[]` exist; an optional `deck_sha256` / `log_sha256` must match | `sidecar_missing`, `sidecar_hash_mismatch` |
+| Verdict: `result.status` is re-derived from the embedded corners with `klt sim`'s own grading rule (`sim._grade_corners`); pex records are not re-derived | `verdict_mismatch` |
+| Repo schema (`--schema`) | `schema_violation` |
+
+`--schema FILE.json` is flat and declarative (no code hooks):
+
+```json
+{"required_fields": {"rate": "string"},
+ "extension_keys": ["rate", "lane"],
+ "corner_id_pattern": "^(tt|ss|ff)_\\d+v\\d+_\\d+C$"}
+```
+
+`required_fields` names extra top-level wrapper fields and their JSON type;
+`extension_keys` restricts the keys of `extensions`; `corner_id_pattern` is
+searched against every `result.corners[].corner_id`. Without `--schema` only
+the built-in checks run.
+
+Output (`--format json`): `{schema_version: 1, status: "clean"|"findings",
+records_checked, base, findings: [{code, record, message}]}`. Exit `0` clean,
+`1` findings, or an error envelope (`not_a_git_repo`, `bad_base`,
+`bad_schema`), `2` usage. A non-git `--root` needs `--no-append-only`.
+
+**Not covered (follow-up):** `mismatch_lint`-style Monte Carlo evidence
+directories keyed by their own SHA-256 manifest are covered only to the extent
+they are `evidence-record/1` sidecars (the `*_sha256` check above); a dedicated
+manifest check is a follow-up to be filed at `loom:triage`.
