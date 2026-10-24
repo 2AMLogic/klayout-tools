@@ -3001,6 +3001,27 @@ used; if this host can resolve the same corner's deck and the hashes differ,
 the unit fails with `batch_deck_mismatch` (the fleet image's PDK does not match
 this host's).
 
+#### Runner support for `--backend` (`batch_runner_lacks_place_and_route_backend`, issue #4124)
+
+Every job ends in `klt place-and-route ... --backend local`, which a runner
+`klt` older than `0.7.1.dev1091` (the build that added `--backend`, issue
+#3518; `0.7.0` included) rejects as an argparse error on every corner. The
+major.minor version gate cannot see this (`0.7.0` and `0.7.1.devN` share
+`0.7`), so there is a capability gate, the same shape as `decks[]` for
+`klt sim` ([`sim.md`](sim.md)):
+
+- **Submit side.** If the AMI manifest publishes only images whose `klt`
+  predates `--backend`, the request fails once with
+  `batch_runner_lacks_place_and_route_backend` (a normal error envelope, exit
+  `1`) before any upload or launch. An unreadable or legacy manifest entry, or
+  a mix with a new-enough image, proceeds to the runner-side check.
+- **Runner side.** The job's preflight reads the runner's `klt --version` and,
+  below the floor, exits `87` with an error envelope carrying the same code,
+  which lands in each corner's `corner_runs[].error_code`.
+
+Neither side is relaxed by `request.batch.runner_version_check: "warn"`: the
+job cannot succeed on such a runner. The fix is a rebuilt runner image.
+
 **There is never a local fallback.** A unit whose upload, launch, poll or run
 fails is a `failed` `corner_runs` entry with the error and job id, the other
 units still complete, and the command exits `1` with the aggregated report on
