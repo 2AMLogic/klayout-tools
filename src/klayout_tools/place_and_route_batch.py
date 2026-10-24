@@ -254,7 +254,7 @@ def build_job_spec(
             sim_batch._runner_preflight_script(
                 _provenance._klt_version(), enforce=version_check == "enforce"
             )
-            + sim_batch._par_backend_preflight_lines()
+            + sim_batch.par_backend_preflight_lines()
         )
     except Exception as exc:  # SimError: a client version unsafe to embed
         raise PlaceAndRouteError(str(exc)) from exc
@@ -517,7 +517,7 @@ def _preflight(
     timeout_s = _job_timeout_s(request)
     config = _resolve_config(request, pdk_variant, timeout_s)
     try:
-        sim_batch._assess_par_backend_support(
+        sim_batch.assess_par_backend_support(
             {"models": {"pdk": pdk_variant}} if pdk_variant else {}, config
         )
     except sim.SimError as exc:

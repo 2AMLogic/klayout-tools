@@ -1050,7 +1050,7 @@ def _deck_preflight_lines() -> str:
     )
 
 
-def _par_backend_preflight_lines() -> str:
+def par_backend_preflight_lines() -> str:
     """:func:`_deck_preflight_lines` for a ``place-and-route`` batch job
     (issue #4124): a runner whose ``klt place-and-route`` predates
     ``--backend`` exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` naming
@@ -1069,7 +1069,7 @@ def _capability_preflight_lines(
     *, command: str, code: str, first_dev: int, lacks: str, remedy: str
 ) -> str:
     """The shell behind :func:`_deck_preflight_lines` and
-    :func:`_par_backend_preflight_lines`: reject a runner older than
+    :func:`par_backend_preflight_lines`: reject a runner older than
     ``0.7.1.dev<first_dev>``. ``lacks`` and ``remedy`` are embedded in a
     double-quoted shell string, so they must not hold ``"``, ``$`` or a
     backtick."""
@@ -1120,7 +1120,7 @@ def _assess_deck_support(request: dict[str, Any], config: BatchConfig) -> None:
     )
 
 
-def _assess_par_backend_support(request: dict[str, Any], config: BatchConfig) -> None:
+def assess_par_backend_support(request: dict[str, Any], config: BatchConfig) -> None:
     """:func:`_assess_deck_support` for ``place-and-route --backend batch``
     (issue #4124); ``request`` only needs ``models.pdk``."""
     _assess_capability_support(
