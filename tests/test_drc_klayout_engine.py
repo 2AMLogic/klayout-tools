@@ -618,6 +618,21 @@ def test_klayout_engine_missing_binary_raises_actionable_error(tmp_path, monkeyp
         run_drc_klayout_engine(gds, deck_file)
 
 
+def test_klayout_engine_unlaunchable_binary_is_klayout_unavailable(
+    tmp_path, monkeypatch
+):
+    _stub_klayout_drc_subprocess(
+        monkeypatch, side_effect=PermissionError("[Errno 13] Permission denied")
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError, match="could not launch klayout") as excinfo:
+        run_drc_klayout_engine(gds, deck_file)
+
+    assert excinfo.value.code == "klayout_unavailable"
+
+
 def test_klayout_engine_timeout_raises(tmp_path, monkeypatch):
     _stub_klayout_drc_subprocess(
         monkeypatch,

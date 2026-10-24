@@ -129,7 +129,12 @@ from ..signoff import (
     check_tier_report,
     describe_grader,
 )
-from ..signoff_attest import build_attestation, check_attestation, write_attestation
+from ..signoff_attest import (
+    build_attestation,
+    check_attestation,
+    failed_output_tail,
+    write_attestation,
+)
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
     GeneratorExecution,
@@ -349,7 +354,12 @@ def _attestation_check_line(check: dict) -> str:
         what = (
             f"pin {check['role']}: {check['value'] if check['passed'] else 'missing'}"
         )
-    return f"[{marker}] {what}"
+    line = f"[{marker}] {what}"
+    if check["check"] == "command" and not check["passed"]:
+        tail = failed_output_tail(check)
+        if tail:
+            line += "\n" + "\n".join(f"    | {row}" for row in tail.splitlines())
+    return line
 
 
 def _print_attestation_text(result: dict) -> None:

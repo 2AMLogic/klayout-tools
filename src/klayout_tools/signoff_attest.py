@@ -424,18 +424,48 @@ def _file_check(root: str, path: str, role: str) -> dict[str, Any]:
     }
 
 
+# Bounded tail of a failing command's captured output, for the text renderer
+# only. Held out of band (never in a check dict) because it is host-specific
+# and the envelope -- and its content hash -- must stay reproducible.
+_OUTPUT_TAIL_MAX_LINES = 20
+_OUTPUT_TAIL_MAX_BYTES = 2048
+_failed_output: dict[tuple[tuple[str, ...], str], str] = {}
+
+
+def _bounded_tail(text: str) -> str:
+    lines = text.rstrip().splitlines()[-_OUTPUT_TAIL_MAX_LINES:]
+    tail = "\n".join(lines)
+    encoded = tail.encode("utf-8")
+    if len(encoded) > _OUTPUT_TAIL_MAX_BYTES:
+        tail = encoded[-_OUTPUT_TAIL_MAX_BYTES:].decode("utf-8", errors="replace")
+    return tail
+
+
+def failed_output_tail(check: Mapping[str, Any]) -> str:
+    """Bounded tail of the captured stdout+stderr of the failing command
+    ``check`` in the most recent attestation run, or ``""`` (a passing,
+    skipped or unlaunchable check has none). Render-only: never part of the
+    envelope."""
+    return _failed_output.get(
+        (tuple(check.get("argv") or ()), check.get("cwd", "")), ""
+    )
+
+
 def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
     """Run one declared command; return ``(exit_status, error)``. ``error``
     is ``"launch_failed"``/``"timeout"`` (stable tokens, not host-specific
-    messages, so the envelope stays reproducible) or ``None``."""
+    messages, so the envelope stays reproducible) or ``None``. A failing
+    command's output tail is kept for :func:`failed_output_tail`."""
     cwd = os.path.join(root, spec["cwd"]) if spec["cwd"] != "." else root
+    key = (tuple(spec["argv"]), spec["cwd"])
+    _failed_output.pop(key, None)
     try:
         completed = subprocess.run(
             spec["argv"],
             cwd=cwd,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             timeout=_COMMAND_EVIDENCE_TIMEOUT_S,
             check=False,
         )
@@ -443,6 +473,10 @@ def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | 
         return None, "timeout"
     except OSError:
         return None, "launch_failed"
+    if completed.returncode != 0:
+        tail = _bounded_tail(completed.stdout.decode("utf-8", errors="replace"))
+        if tail:
+            _failed_output[key] = tail
     return completed.returncode, None
 
 
