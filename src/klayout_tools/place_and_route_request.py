@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 
 from .lef_header import read_lef_header
@@ -1101,7 +1102,7 @@ def _validate_tapcell(
 
 
 def _effective_tapcell_distance(
-    power: dict[str, Any], table_distance_um: int | None
+    power: dict[str, Any], table_distance_um: int | float | None
 ) -> int | float | None:
     """The ``tapcell -distance`` pitch: the validated override, else the
     per-library table value."""
@@ -1717,6 +1718,25 @@ def _validate_library_filler(raw: Any) -> tuple[str, ...]:
     return tuple(_library_name(item, f"{where}[{i}]") for i, item in enumerate(raw))
 
 
+def _validate_library_cts_buffer(buf: Any) -> str:
+    if not isinstance(buf, str) or not buf.strip():
+        raise PlaceAndRouteError(
+            "request.library.cts_buffer must be a non-empty string"
+        )
+    return buf
+
+
+_LIBRARY_VALIDATORS: dict[str, Callable[[Any], Any]] = {
+    "cts_buffer": _validate_library_cts_buffer,
+    "power_pins": _validate_library_power_pins,
+    "wire_rc": _validate_library_wire_rc,
+    "route_layers": _validate_library_route_layers,
+    "antenna_diode": _validate_library_antenna_diode,
+    "tapcell": _validate_library_tapcell,
+    "filler": _validate_library_filler,
+}
+
+
 def _validate_library(library: Any) -> dict[str, Any] | None:
     """Optional ``request.library`` (issue #4086): per-library inputs for a
     standard-cell library the built-in tables
@@ -1739,25 +1759,9 @@ def _validate_library(library: Any) -> dict[str, Any] | None:
             f"request.library has unknown key(s): {', '.join(unknown)}"
         )
     out: dict[str, Any] = {}
-    if "cts_buffer" in library:
-        buf = library["cts_buffer"]
-        if not isinstance(buf, str) or not buf.strip():
-            raise PlaceAndRouteError(
-                "request.library.cts_buffer must be a non-empty string"
-            )
-        out["cts_buffer"] = buf
-    if "power_pins" in library:
-        out["power_pins"] = _validate_library_power_pins(library["power_pins"])
-    if "wire_rc" in library:
-        out["wire_rc"] = _validate_library_wire_rc(library["wire_rc"])
-    if "route_layers" in library:
-        out["route_layers"] = _validate_library_route_layers(library["route_layers"])
-    if "antenna_diode" in library:
-        out["antenna_diode"] = _validate_library_antenna_diode(library["antenna_diode"])
-    if "tapcell" in library:
-        out["tapcell"] = _validate_library_tapcell(library["tapcell"])
-    if "filler" in library:
-        out["filler"] = _validate_library_filler(library["filler"])
+    for key, validate in _LIBRARY_VALIDATORS.items():
+        if key in library:
+            out[key] = validate(library[key])
     return out
 
 

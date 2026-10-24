@@ -2070,6 +2070,27 @@ def _validate_stage_prerequisites(
         )
 
 
+def _audit_tapcell_masters(
+    cell_library: str, library: dict[str, Any] | None
+) -> tuple[str | None, str | None]:
+    """Tap/endcap masters the power audit looks for: ``request.library.
+    tapcell`` (issue #4127), else the built-in table; ``(None, None)`` for a
+    library with neither (the audit then skips those checks)."""
+    if library is not None and "tapcell" in library:
+        tap, endcap, _distance_um = library["tapcell"]
+        return tap, endcap
+    tap, endcap, _distance_um = _TAPCELL_CELLS.get(cell_library, (None, None, 0))
+    return tap, endcap
+
+
+def _audit_filler_masters(
+    cell_library: str, library: dict[str, Any] | None
+) -> tuple[str, ...]:
+    if library is not None and "filler" in library:
+        return library["filler"]
+    return _FILLER_CELLS.get(cell_library, ())
+
+
 def _run_single_corner(
     request_path: str,
     request: dict[str, Any],
@@ -2627,12 +2648,9 @@ def _run_single_corner(
     # audit there is no such instance to look for, so it *skips* the
     # tapcell/endcap checks rather than grading their absence as a hole --
     # which is exactly right for a library that has no tap cells to place.
-    if library is not None and "tapcell" in library:
-        audit_tap_master, audit_endcap_master, _audit_distance_um = library["tapcell"]
-    else:
-        audit_tap_master, audit_endcap_master, _audit_distance_um = _TAPCELL_CELLS.get(
-            cell_library, (None, None, 0)
-        )
+    audit_tap_master, audit_endcap_master = _audit_tapcell_masters(
+        cell_library, library
+    )
     audited_def_path = def_path or unrouted_def_path
     power_info["placed"] = audit_power_delivery(
         def_path=audited_def_path,
@@ -2643,11 +2661,7 @@ def _run_single_corner(
         ),
         tapcell_master=audit_tap_master,
         endcap_master=audit_endcap_master,
-        filler_masters=(
-            library["filler"]
-            if library is not None and "filler" in library
-            else _FILLER_CELLS.get(cell_library, ())
-        ),
+        filler_masters=_audit_filler_masters(cell_library, library),
         power_net=(
             power["power_net"] if power is not None else row_rail_info["power_net"]
         ),
