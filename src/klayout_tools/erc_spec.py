@@ -11,6 +11,7 @@ lives here. ``erc.py`` imports these names back, so
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from ._paths import (
@@ -89,6 +90,7 @@ _SPEC_KEYS = (
     "ties",
     "ties_disclosure",
     "devices",
+    "antenna_limits",
 )
 _STACKUP_KEYS = ("name", "layer", "label_layer", "active_layer", "role")
 _NET_KEYS = (
@@ -117,6 +119,7 @@ _TIE_KEYS = (
     "well_excludes_boxes",
 )
 _TIES_DISCLOSURE_KEYS = ("reason", "kind", "undeclared_classes")
+_ANTENNA_LIMIT_KEYS = ("layer", "max_ratio", "source")
 
 
 class ErcError(Exception):
@@ -224,6 +227,92 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
         )
 
     return entries
+
+
+def _validate_antenna_limits(
+    spec: dict[str, Any], spec_path: str, stackup: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The optional top-level ``antenna_limits`` spec key (issue #4090): a
+    caller-supplied per-layer antenna-ratio limit, for a process with no
+    built-in ``--pdk`` table. Each entry is ``{"layer": <stackup name>,
+    "max_ratio": <finite number > 0>, "source": <non-empty citation>}``.
+
+    ``layer`` must name a non-gate ``stackup`` entry, once. ``source`` is
+    required so every limit stays cited, as the built-in tables are. The
+    numbers are the caller's responsibility; none are vendored. Omitted or
+    ``null`` -> ``[]`` (behaviour unchanged).
+    """
+    raw = spec.get("antenna_limits")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ErcError(f"spec '{spec_path}': 'antenna_limits' must be an array")
+    gate_name = stackup[0]["name"]
+    stackup_names = [entry["name"] for entry in stackup]
+    seen: set[str] = set()
+    entries: list[dict[str, Any]] = []
+    for i, entry in enumerate(raw):
+        where = f"antenna_limits[{i}]"
+        parsed = _validate_antenna_limit_entry(
+            entry, spec_path, where, stackup_names, gate_name
+        )
+        if parsed["layer"] in seen:
+            raise ErcError(
+                f"spec '{spec_path}': {where}.layer {parsed['layer']!r} "
+                "duplicates an earlier antenna_limits entry"
+            )
+        seen.add(parsed["layer"])
+        entries.append(parsed)
+    return entries
+
+
+def _validate_antenna_limit_entry(
+    entry: Any,
+    spec_path: str,
+    where: str,
+    stackup_names: list[str],
+    gate_name: str,
+) -> dict[str, Any]:
+    """One ``antenna_limits[]`` entry: object shape, keys, then each field."""
+    if not isinstance(entry, dict):
+        raise ErcError(f"spec '{spec_path}': {where} must be a JSON object")
+    _reject_unknown_keys(entry, _ANTENNA_LIMIT_KEYS, spec_path, where, ErcError)
+    for key in _ANTENNA_LIMIT_KEYS:
+        if key not in entry:
+            raise ErcError(f"spec '{spec_path}': {where} missing {key!r}")
+    layer = entry["layer"]
+    if not isinstance(layer, str) or layer not in stackup_names:
+        raise ErcError(
+            f"spec '{spec_path}': {where}.layer {layer!r} is not a stackup "
+            f"name (known: {', '.join(stackup_names)})"
+        )
+    if layer == gate_name:
+        raise ErcError(
+            f"spec '{spec_path}': {where}.layer {layer!r} is the gate "
+            "role, which is never antenna-graded"
+        )
+    max_ratio = _validate_antenna_max_ratio(entry["max_ratio"], spec_path, where)
+    source = entry["source"]
+    if not isinstance(source, str) or not source.strip():
+        raise ErcError(
+            f"spec '{spec_path}': {where}.source must be a non-empty "
+            "string citing where the limit comes from"
+        )
+    return {"layer": layer, "max_ratio": max_ratio, "source": source}
+
+
+def _validate_antenna_max_ratio(max_ratio: Any, spec_path: str, where: str) -> float:
+    if (
+        isinstance(max_ratio, bool)
+        or not isinstance(max_ratio, (int, float))
+        or not math.isfinite(max_ratio)
+        or max_ratio <= 0
+    ):
+        raise ErcError(
+            f"spec '{spec_path}': {where}.max_ratio must be a finite "
+            f"number > 0 (got {max_ratio!r})"
+        )
+    return float(max_ratio)
 
 
 def _validate_vias(

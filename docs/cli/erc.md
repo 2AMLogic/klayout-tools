@@ -220,7 +220,8 @@ filename and the complete field path (for example
 `spec 'spec.json': unknown field 'ties[0].well_boxess'`), exits `1`, prints
 no success report on stdout, and does so before the layout is read or any
 analysis/solver runs. This applies to the top level and to every nested object
-(`stackup[]`, `vias[]`, `nets[]`, `ties[]`, `ties_disclosure`, `devices[]`).
+(`stackup[]`, `vias[]`, `nets[]`, `ties[]`, `ties_disclosure`, `devices[]`,
+`antenna_limits[]`).
 A key that is valid in a *different* section is still unknown in the section it
 appears in.
 
@@ -2274,6 +2275,36 @@ An unrecognised `--pdk` name (anything other than `sky130` or `ihp-sg13g2`) is a
 exit-1 error, checked eagerly before the layout is even loaded — see "Exit
 codes" below.
 
+### Caller-supplied antenna limits (`antenna_limits`, issue #4090)
+
+A process with no built-in `--pdk` table (ASAP7, and gf180mcu / sg13cmos5l
+until #4003 adds a built-in gf180mcu table) can still be antenna-graded: the
+spec file takes an optional top-level `antenna_limits` array.
+
+```json
+"antenna_limits": [
+  {"layer": "M1", "max_ratio": 400.0, "source": "<where you got this number>"}
+]
+```
+
+- `layer` names a `stackup[]` entry other than the gate role, at most once.
+  `max_ratio` is a finite number > 0. `source` is a required non-empty
+  citation string, so every limit stays cited like the built-in tables.
+  Unknown keys, unknown or gate layers, duplicates and bad numbers are
+  rejected with the usual path-qualified error (exit 1).
+- **The numbers are the caller's responsibility.** `klt` vendors no ASAP7
+  limits; it grades against what the spec says and echoes the citation.
+- **Precedence:** a spec entry wins over the `--pdk` table for the same
+  layer; layers with no spec entry fall back to the `--pdk` table, and with
+  neither the level stays `unchecked`.
+- **Provenance:** a spec-graded level reports `antenna_ratio_max` = the
+  limit and `antenna_ratio_source` = `"spec antenna_limits[<i>]: <source>"`.
+  Same area-only, no-diode model as the built-in tables.
+- A level graded from a spec limit counts as checked in `coverage`. A level
+  still ungraded with no `--pdk` and no spec `antenna_limits` entry is
+  skipped with `missing_antenna_pdk`. With `--findings-only` the antenna
+  accumulation is still skipped; `antenna_limits` is accepted and ignored.
+
 ## Antenna-violation fix guidance (Phase 3, issue #908)
 
 Every `levels[]` entry with `verdict: "violate"` gains a `remedy` object
@@ -2724,8 +2755,8 @@ forward regardless (a `diode_insertion` remedy):
 | `levels[].step_area_um2` | number \| null | This net's own merged area on this role's layer, in µm². `null` on a `--findings-only` run (issue #2219) — the accumulation was not performed. |
 | `levels[].cumulative_area_um2` | number \| null | Running sum of `step_area_um2` from `stackup[0]` through this role, inclusive, in µm². `null` on a `--findings-only` run. |
 | `levels[].antenna_ratio` | number \| null | `cumulative_area_um2 / gate_area_um2` for this level; `null` on a `--findings-only` run. `1.0` at `stackup[0]` (the gate level) when `active_layer` is omitted; otherwise reflects the raw-poly-vs-`poly ∩ diff` area difference (see "Gate area: `poly ∩ diff` vs. raw poly area" above) — always `"unchecked"` there regardless. |
-| `levels[].antenna_ratio_max` | number \| null | The resolved PDK limit for this role, or `null` when unchecked (no `--pdk`, the gate level, or an unrecognised role name). |
-| `levels[].antenna_ratio_source` | string \| null | A citation for `antenna_ratio_max` (source URL + rule id + column), or `null` when unchecked. |
+| `levels[].antenna_ratio_max` | number \| null | The resolved limit for this role (the spec's `antenna_limits` entry if any, else the `--pdk` table), or `null` when unchecked (no limit for the role, or the gate level). |
+| `levels[].antenna_ratio_source` | string \| null | A citation for `antenna_ratio_max` (source URL + rule id + column), `"spec antenna_limits[<i>]: <source>"` for a caller-supplied limit, or `null` when unchecked. |
 | `levels[].verdict` | string        | `"pass"`, `"violate"`, or `"unchecked"` — see "Antenna-ratio verdict" above.                      |
 | `levels[].remedy` | object \| null | Fix guidance (issue #908, Phase 3) — `null` unless `verdict == "violate"`. See "Antenna-violation fix guidance" above and below. |
 | `remedy.type`    | string          | `"layer_jumping"` or `"diode_insertion"` — see "Antenna-violation fix guidance" above for the selection rule. |
@@ -2771,7 +2802,8 @@ this command's existing envelope. This command reports **two** scopes,
 because it performs two independent bodies of checked work (issue #2179):
 
 `coverage.scope` is `antenna`. Checked IDs name each gate/non-gate level
-actually compared against a limit. Missing PDK or level limits are skipped
+actually compared against a limit. Levels with no limit (no `--pdk` and no spec `antenna_limits` entry, or a
+`--pdk` table lacking the role) are skipped
 (`missing_antenna_pdk`/`missing_antenna_limit`), as is every non-gate level
 of a `--findings-only` run (`findings_only`, issue #2219 — the caller
 declined the accumulation, the same shape of caller-side skip as omitting
