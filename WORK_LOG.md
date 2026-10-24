@@ -4,6 +4,7 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-24
 
+- **PR #4148**: chore(decks): regenerate deck history table for v0.8.0
 - **Issue #3805** (closed): release: `klt signoff --attest` (#2844) is not in any PyPI release; latest 0.7.0 rejects it
 - **Issue #4146** (closed): batch backend: client does not detect a fleet runner too old for deck-list requests before submitting
 - **PR #4145**: chore(release): bump version to 0.8.0
