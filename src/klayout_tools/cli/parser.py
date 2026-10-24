@@ -5308,6 +5308,40 @@ def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_format_arg(record_parser)
     record_parser.set_defaults(func=evidence_cmd.run_record)
 
+    lint_parser = evidence_sub.add_parser(
+        "lint",
+        help="lint the evidence-record/1 files under a repo",
+        description=(
+            "Audit <root>/evidence/sim: record shape, id/filename, append-only "
+            "history (git diff vs --base), supersession chains, sidecar "
+            "SHA-256s and re-derivation of the klt sim verdict. Exits 0 clean, "
+            "1 on findings. --schema adds repo-specific required fields, "
+            "allowed extensions keys and a corner-id pattern."
+        ),
+    )
+    lint_parser.add_argument(
+        "root", nargs="?", default=".", help="git work tree to lint (default: cwd)"
+    )
+    lint_parser.add_argument(
+        "--base",
+        default="origin/main",
+        help="ref the append-only check diffs against (default: origin/main)",
+    )
+    lint_parser.add_argument(
+        "--schema",
+        metavar="FILE.json",
+        default=None,
+        help="flat declarative repo schema: required_fields, extension_keys, "
+        "corner_id_pattern",
+    )
+    lint_parser.add_argument(
+        "--no-append-only",
+        action="store_true",
+        help="skip the git-diff append-only check (e.g. no base ref available)",
+    )
+    _add_format_arg(lint_parser)
+    lint_parser.set_defaults(func=evidence_cmd.run_lint)
+
 
 def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``artifact`` verb with nested ``put``/``get``/``verify``/``delete``
