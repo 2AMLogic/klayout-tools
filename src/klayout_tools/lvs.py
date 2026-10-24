@@ -656,6 +656,27 @@ class _ReferenceNetlistParseError(LvsError):
     """
 
 
+def _compare_netlists(
+    comparer: Any, layout_netlist: Any, reference_netlist: Any
+) -> bool:
+    """Run ``NetlistComparer.compare`` and turn an engine-internal failure
+    into :class:`LvsError` (issue #4134).
+
+    KLayout's comparer can trip an internal assertion (e.g. ``bt_count !=
+    failed_match``) that surfaces as ``RuntimeError``. That is a tool failure,
+    not a verdict, so it must not be reported as ``status: "mismatch"``; the
+    CLI maps ``LvsError`` to the standard error envelope and exit code 1.
+    """
+    try:
+        return comparer.compare(layout_netlist, reference_netlist)
+    except RuntimeError as exc:
+        raise LvsError(
+            "KLayout's netlist comparer failed internally and could not "
+            f"reconcile the layout and reference netlists ({exc}); no LVS "
+            "verdict was reached"
+        ) from exc
+
+
 _REQUIRED_REQUEST_FIELDS = ("layout", "reference")
 
 
@@ -2066,7 +2087,7 @@ def run_lvs(
         # `logger` is already bound via the `NetlistComparer(logger)` constructor
         # above, so the 2-arg overload is used here (not the 3-arg one, which
         # would pass a second, redundant logger reference).
-        compare_result = comparer.compare(layout_netlist, reference_netlist)
+        compare_result = _compare_netlists(comparer, layout_netlist, reference_netlist)
 
         if not compare_result and parameter_tolerance is not None:
             # Issue #589: `options.parameter_tolerance` is opted in and the
@@ -2126,7 +2147,9 @@ def run_lvs(
                         *_constant_binding_pairs(constant_bindings),
                     ],
                 )
-                compare_result = comparer.compare(layout_netlist, reference_netlist)
+                compare_result = _compare_netlists(
+                    comparer, layout_netlist, reference_netlist
+                )
                 if compare_result:
                     break
 

@@ -4568,7 +4568,7 @@ any other application-level failure.
 | Code | Meaning |
 | ---- | ------- |
 | `0` | LVS clean — layout matches reference (`status: "match"`). Under `--check`: the committed report still holds (`status: "match"`). |
-| `1` | Failed to run — bad request, unresolvable layout/reference input, unknown `--deck`, unparseable reference netlist, unsupported engine, or an engine error. Under `--check`: a missing/unparseable committed report. |
+| `1` | Failed to run — bad request, unresolvable layout/reference input, unknown `--deck`, unparseable reference netlist, unsupported engine, or an engine error (including a KLayout comparer-internal failure such as a `bt_count != failed_match` assertion — an application error with no verdict, never reported as `mismatch`). Under `--check`: a missing/unparseable committed report. |
 | `2` | Usage error (missing argument, bad `--format` value, or combining `<request>` with `--check`) — from argparse. |
 | `3` | Ran successfully; mismatches found (`status: "mismatch"`); the documented payload is on stdout. Under `--check`: drifted (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
 | `4` | Ran, but the compare the request asked for could not be performed, so no verdict about the design was reached (`status: "inconclusive"`, issue #1370). The documented payload is still on stdout. Never `0`, and never folded into `3`. |
