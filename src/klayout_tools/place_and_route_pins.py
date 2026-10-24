@@ -148,6 +148,48 @@ def pin_constraint_lines(constraints: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+_PPL_0110_RE = re.compile(
+    r"PPL-0110\]?\s*Constraint has (?P<pins>\d+) pins?, "
+    r"but only (?P<slots>\d+) available slots?"
+)
+
+
+def slot_shortage_hint(
+    log: str,
+    constraints: list[dict[str, Any]] | None,
+    ports: list[str] | None,
+) -> str | None:
+    """Hint for a failed ``place`` whose log holds ``PPL-0110`` lines, else
+    ``None`` (issue #4155).
+
+    OpenROAD's ``PPL-0111`` summary only counts the over-subscribed
+    constraints; the useful ``PPL-0110`` line (pins vs. slots) does not name
+    the entry. An entry is named only when its glob-expanded pin count equals
+    the line's pin count and no other entry does; otherwise the ``PPL-0110``
+    line is quoted verbatim.
+    """
+    found = list(_PPL_0110_RE.finditer(log))
+    if not found:
+        return None
+    parts: list[str] = []
+    for match in found:
+        want = int(match.group("pins"))
+        candidates: list[int] = []
+        if constraints and ports is not None:
+            for index, entry in enumerate(constraints):
+                bits = {hit for pat in entry["pins"] for hit in match_pins(pat, ports)}
+                if len(bits) == want:
+                    candidates.append(index)
+        if len(candidates) == 1:
+            parts.append(
+                f"io.pin_constraints[{candidates[0]}] has {want} pins but its "
+                f"range has only {match.group('slots')} available slots"
+            )
+        else:
+            parts.append(match.group(0))
+    return "; ".join(parts) + " -- widen range_um or drop it for those entries"
+
+
 def _tcl_word(pattern: str) -> str:
     # Inside a braced word `[`/`]` are literal, which is what `a[3]` needs.
     return pattern

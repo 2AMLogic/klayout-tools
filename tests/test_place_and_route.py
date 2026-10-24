@@ -11261,3 +11261,49 @@ def test_place_and_route_clock_lines_pin_units_issue_4089():
         "create_clock -name clk -period 1.0 [get_ports clk]",
     ]
     assert place_and_route._clock_lines(None, None) == []
+
+
+_PPL_0110_STDOUT = (
+    "[ERROR PPL-0110] Constraint has 4 pins, but only 2 available slots.\n"
+    "[ERROR PPL-0111] 1 constraint(s) does not have available slots.\n"
+)
+
+
+def test_engine_error_message_names_over_subscribed_pin_constraint():
+    completed = fake_completed(returncode=1, stdout=_PPL_0110_STDOUT)
+    constraints = [
+        {"pins": ["a[*]"], "edge": "west", "range_um": [0, 2]},
+        {"pins": ["b[*]"], "edge": "east"},
+    ]
+    ports = [f"a[{i}]" for i in range(4)] + ["b[0]", "b[1]"]
+
+    message = place_and_route._engine_error_message(
+        "place", completed, pin_constraints=constraints, top_ports=ports
+    )
+
+    assert "openroad 'place' stage failed: [ERROR PPL-0110]" in message
+    assert "io.pin_constraints[0] has 4 pins" in message
+    assert "only 2 available slots" in message
+
+
+def test_engine_error_message_quotes_ppl_0110_when_entry_unmappable():
+    completed = fake_completed(returncode=1, stdout=_PPL_0110_STDOUT)
+
+    message = place_and_route._engine_error_message("place", completed)
+
+    assert "Constraint has 4 pins, but only 2 available slots" in message
+    assert "io.pin_constraints[" not in message
+
+
+def test_engine_error_message_ppl_0111_alone_is_unchanged():
+    completed = fake_completed(
+        returncode=1,
+        stdout="[ERROR PPL-0111] 2 constraint(s) does not have available slots\n",
+    )
+
+    message = place_and_route._engine_error_message("place", completed)
+
+    assert message == (
+        "openroad 'place' stage failed: [ERROR PPL-0111] 2 constraint(s) "
+        "does not have available slots"
+    )

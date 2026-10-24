@@ -104,7 +104,9 @@ from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
 from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
 from .place_and_route_pins import (
     check_io_pin_constraints,
+    netlist_top_ports,
     read_def_pins,
+    slot_shortage_hint,
 )
 from .place_and_route_portable import portable_response
 
@@ -1723,7 +1725,13 @@ def _run_single_corner(
         with completed.diagnostics(PlaceAndRouteError):
             if completed.returncode != 0:
                 raise PlaceAndRouteError(
-                    _engine_error_message(stage, completed, pdk_info=pdk_info)
+                    _engine_error_message(
+                        stage,
+                        completed,
+                        pdk_info=pdk_info,
+                        pin_constraints=(io_spec or {}).get("pin_constraints"),
+                        top_ports=netlist_top_ports(netlist_path, hdl_toplevel),
+                    )
                 )
 
             metrics = _read_metrics(metrics_path, stage)
@@ -2423,6 +2431,8 @@ def _engine_error_message(
     completed: _OpenRoadResult,
     *,
     pdk_info: dict[str, Any] | None = None,
+    pin_constraints: list[dict[str, Any]] | None = None,
+    top_ports: list[str] | None = None,
 ) -> str:
     """Build an actionable error message from a failed per-stage OpenROAD
     run.
@@ -2478,6 +2488,13 @@ def _engine_error_message(
     hint = _mount_namespace_hint(completed, pdk_info)
     if hint is not None:
         message = f"{message} -- {hint}"
+    slot_hint = slot_shortage_hint(
+        f"{completed.stdout or ''}\n{completed.stderr or ''}",
+        pin_constraints,
+        top_ports,
+    )
+    if slot_hint is not None:
+        message = f"{message} -- {slot_hint}"
     return message
 
 
