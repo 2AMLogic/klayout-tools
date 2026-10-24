@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt place-and-route --backend batch` fails fast on a runner that predates
+  `--backend`** (issue #4124, documented in
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)). New error code
+  `batch_runner_lacks_place_and_route_backend`, raised before any upload when
+  the AMI manifest publishes only runners older than `0.7.1.dev1091`, and by
+  the runner-side preflight (exit 87) otherwise, instead of every corner
+  failing on an argparse error after the fleet is paid for. Additive.
 - **`klt place-and-route`: `request.library` supplies per-library inputs**
   (issue #4086, documented in
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)). An optional,

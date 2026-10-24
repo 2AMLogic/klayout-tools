@@ -250,8 +250,11 @@ def build_job_spec(
     ``$EDA_OUTPUT_DIR/artifacts/`` whether or not the run succeeded.
     """
     try:
-        preflight = sim_batch._runner_preflight_script(
-            _provenance._klt_version(), enforce=version_check == "enforce"
+        preflight = (
+            sim_batch._runner_preflight_script(
+                _provenance._klt_version(), enforce=version_check == "enforce"
+            )
+            + sim_batch._par_backend_preflight_lines()
         )
     except Exception as exc:  # SimError: a client version unsafe to embed
         raise PlaceAndRouteError(str(exc)) from exc
@@ -513,6 +516,14 @@ def _preflight(
     files = package_tree(request, request_dir)
     timeout_s = _job_timeout_s(request)
     config = _resolve_config(request, pdk_variant, timeout_s)
+    try:
+        sim_batch._assess_par_backend_support(
+            {"models": {"pdk": pdk_variant}} if pdk_variant else {}, config
+        )
+    except sim.SimError as exc:
+        raise PlaceAndRouteError(
+            f"{exc} {_NO_FALLBACK}", code=getattr(exc, "code", None)
+        ) from exc
     return input_hash, cell_library, files, timeout_s, config
 
 

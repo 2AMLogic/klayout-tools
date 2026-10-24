@@ -194,6 +194,15 @@ BATCH_RUNNER_LACKS_DECKS_CODE = "batch_runner_lacks_decks"
 _DECKS_BASE_RELEASE = (0, 7)
 _DECKS_FIRST_DEV = 307
 
+#: ``klt place-and-route --backend`` (what every ``place-and-route`` batch job
+#: ends in) landed in ``7fd087787`` (#3518), 1091 commits after ``v0.7.0``
+#: (``git describe``: ``v0.7.0-1091-g7fd087787``). A runner that predates it
+#: rejects the argument on every corner (issue #4124).
+BATCH_RUNNER_LACKS_PLACE_AND_ROUTE_BACKEND_CODE = (
+    "batch_runner_lacks_place_and_route_backend"
+)
+_PAR_BACKEND_FIRST_DEV = 1091
+
 #: Exit code the preflight rejects with. Deliberately outside
 #: :data:`_BATCH_SIM_SUCCESS_EXIT_CODES` so the job is never mistaken for a
 #: sweep that ran.
@@ -995,6 +1004,19 @@ def _runner_supports_decks(version: str) -> bool | None:
     ``0.7.1.dev<N>`` build with ``N`` at/after :data:`_DECKS_FIRST_DEV`, or in
     any later minor. :func:`_deck_preflight_lines` repeats this in shell.
     """
+    return _runner_supports_since(version, _DECKS_FIRST_DEV)
+
+
+def _runner_supports_par_backend(version: str) -> bool | None:
+    """Whether a runner ``klt --version`` build string accepts ``--backend``
+    on ``place-and-route`` (issue #4124); same rule as
+    :func:`_runner_supports_decks` with :data:`_PAR_BACKEND_FIRST_DEV`."""
+    return _runner_supports_since(version, _PAR_BACKEND_FIRST_DEV)
+
+
+def _runner_supports_since(version: str, first_dev: int) -> bool | None:
+    """A capability that arrived at ``0.7.1.dev<first_dev>``: ``None`` when
+    ``version`` cannot be read."""
     release = _release_segment(version)
     if release is None:
         return None
@@ -1009,7 +1031,7 @@ def _runner_supports_decks(version: str) -> bool | None:
     if parts[2] == 0:
         return False
     dev = re.search(r"\.dev(\d+)", version.split("+", 1)[0])
-    return dev is None or int(dev.group(1)) >= _DECKS_FIRST_DEV
+    return dev is None or int(dev.group(1)) >= first_dev
 
 
 def _deck_preflight_lines() -> str:
@@ -1019,6 +1041,38 @@ def _deck_preflight_lines() -> str:
     runner that cannot read ``decks[]`` fails the job for certain, so the
     job exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` with a klt error envelope
     naming :data:`BATCH_RUNNER_LACKS_DECKS_CODE` before ``klt sim`` runs."""
+    return _capability_preflight_lines(
+        command="sim",
+        code=BATCH_RUNNER_LACKS_DECKS_CODE,
+        first_dev=_DECKS_FIRST_DEV,
+        lacks="deck-list (decks[]) requests",
+        remedy="rebuild the runner image from a klt that includes decks[]",
+    )
+
+
+def _par_backend_preflight_lines() -> str:
+    """:func:`_deck_preflight_lines` for a ``place-and-route`` batch job
+    (issue #4124): a runner whose ``klt place-and-route`` predates
+    ``--backend`` exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` naming
+    :data:`BATCH_RUNNER_LACKS_PLACE_AND_ROUTE_BACKEND_CODE`."""
+    return _capability_preflight_lines(
+        command="place-and-route",
+        code=BATCH_RUNNER_LACKS_PLACE_AND_ROUTE_BACKEND_CODE,
+        first_dev=_PAR_BACKEND_FIRST_DEV,
+        lacks="--backend on place-and-route",
+        remedy="rebuild the runner image from a klt that includes "
+        "place-and-route --backend",
+    )
+
+
+def _capability_preflight_lines(
+    *, command: str, code: str, first_dev: int, lacks: str, remedy: str
+) -> str:
+    """The shell behind :func:`_deck_preflight_lines` and
+    :func:`_par_backend_preflight_lines`: reject a runner older than
+    ``0.7.1.dev<first_dev>``. ``lacks`` and ``remedy`` are embedded in a
+    double-quoted shell string, so they must not hold ``"``, ``$`` or a
+    backtick."""
     report_path = f'"$EDA_OUTPUT_DIR/{BATCH_REPORT_FILENAME}"'
     base_major, base_minor = _DECKS_BASE_RELEASE
     return (
@@ -1035,13 +1089,12 @@ def _deck_preflight_lines() -> str:
         f'elif [ "$dma" -eq {base_major} ] && [ "$dmi" -eq {base_minor} ]; then '
         'if [ "$dpa" -ge 2 ]; then dk=yes; '
         'elif [ "$dpa" -eq 1 ] && { [ -z "$dn" ] || '
-        f'[ "$dn" -ge {_DECKS_FIRST_DEV} ]; }}; then dk=yes; fi; fi ;; esac; '
+        f'[ "$dn" -ge {first_dev} ]; }}; then dk=yes; fi; fi ;; esac; '
         'if [ -z "$dk" ]; then '
         'dmsg="the fleet runner runs klt ${rv:-<unknown>}, which does not know '
-        "deck-list (decks[]) requests -- the request was not run (rebuild the "
-        'runner image from a klt that includes decks[])"; '
-        'printf \'{"schema_version": 1, "error": {"command": "sim", '
-        f'"code": "{BATCH_RUNNER_LACKS_DECKS_CODE}", "message": "%s"}}}}\\n\' '
+        f'{lacks} -- the request was not run ({remedy})"; '
+        'printf \'{"schema_version": 1, "error": {"command": "' + command + '", '
+        f'"code": "{code}", "message": "%s"}}}}\\n\' '
         '"$dmsg" >' + report_path + "; "
         'echo "$dmsg" >&2; '
         "exit " + str(_BATCH_PREFLIGHT_REJECT_EXIT) + "; fi; "
@@ -1056,6 +1109,41 @@ def _assess_deck_support(request: dict[str, Any], config: BatchConfig) -> None:
     a legacy entry without ``klt_version``, a mix) proceeds to the
     runner-side probe in :func:`_deck_preflight_lines`. Raises regardless of
     ``runner_version_check``: the job could not run on any such image."""
+    _assess_capability_support(
+        request,
+        config,
+        supports=_runner_supports_decks,
+        code=BATCH_RUNNER_LACKS_DECKS_CODE,
+        predates="deck-list (decks[]) support",
+        remedy="rebuild the runner image from a klt that includes decks[]; "
+        "see docs/cli/sim.md",
+    )
+
+
+def _assess_par_backend_support(request: dict[str, Any], config: BatchConfig) -> None:
+    """:func:`_assess_deck_support` for ``place-and-route --backend batch``
+    (issue #4124); ``request`` only needs ``models.pdk``."""
+    _assess_capability_support(
+        request,
+        config,
+        supports=_runner_supports_par_backend,
+        code=BATCH_RUNNER_LACKS_PLACE_AND_ROUTE_BACKEND_CODE,
+        predates="place-and-route --backend (needs klt "
+        f"0.7.1.dev{_PAR_BACKEND_FIRST_DEV} or later)",
+        remedy="rebuild the runner image from a klt that includes "
+        "place-and-route --backend; see docs/cli/place-and-route.md",
+    )
+
+
+def _assess_capability_support(
+    request: dict[str, Any],
+    config: BatchConfig,
+    *,
+    supports: Callable[[str], bool | None],
+    code: str,
+    predates: str,
+    remedy: str,
+) -> None:
     from .sim import SimError
 
     pdk = (request.get("models") or {}).get("pdk")
@@ -1066,7 +1154,7 @@ def _assess_deck_support(request: dict[str, Any], config: BatchConfig) -> None:
     if not images:
         return
     support = [
-        _runner_supports_decks(image["klt_version"]) if image["klt_version"] else None
+        supports(image["klt_version"]) if image["klt_version"] else None
         for image in images
     ]
     if any(item is not False for item in support):
@@ -1080,10 +1168,9 @@ def _assess_deck_support(request: dict[str, Any], config: BatchConfig) -> None:
     raise SimError(
         f"backend 'batch' refused before submission: the AMI manifest "
         f"publishes the fleet runner image as {published}, which predates "
-        "deck-list (decks[]) support -- the request was not submitted and no "
-        "instance was launched (rebuild the runner image from a klt that "
-        "includes decks[]; see docs/cli/sim.md)",
-        code=BATCH_RUNNER_LACKS_DECKS_CODE,
+        f"{predates} -- the request was not submitted and no "
+        f"instance was launched ({remedy})",
+        code=code,
     )
 
 
