@@ -44,12 +44,11 @@ import shlex
 import tarfile
 import tempfile
 import time
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import _provenance, netlist_batch, remote_transport, sim_batch
+from . import _batch_common, _provenance, netlist_batch, remote_transport, sim_batch
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -592,7 +591,7 @@ def run_approved_generator(
     except Exception as exc:  # SimError / BatchError: unresolvable fleet config
         return _fail(FAIL_CONFIG, f"batch backend not usable: {exc}", evidence)
 
-    job_id = f"klt-signoff-gen-{uuid.uuid4().hex[:12]}"
+    job_id = _batch_common.make_job_id("signoff-gen")
     with tempfile.TemporaryDirectory(prefix="klt-signoff-generator-") as scratch:
         try:
             tarball, input_tree = _package(root, approval, scratch)

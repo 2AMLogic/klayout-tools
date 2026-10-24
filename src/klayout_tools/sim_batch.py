@@ -98,13 +98,13 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from . import (
+    _batch_common,
     _provenance,
     remote_transport,
     sim_search,
@@ -2611,7 +2611,7 @@ def new_job_id() -> str:
     """A fresh job id. Constrained to ``[A-Za-z0-9._-]+`` because it becomes
     both an S3 prefix and an EC2 tag (``batch-fleet-provision.sh``'s
     ``cmd_launch`` refuses anything else)."""
-    return f"klt-sim-{uuid.uuid4().hex[:12]}"
+    return _batch_common.make_job_id("sim")
 
 
 def _aws_argv(config: BatchConfig, *args: str) -> list[str]:
