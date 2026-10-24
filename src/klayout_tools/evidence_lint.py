@@ -254,6 +254,88 @@ def _check_verdict(rel: str, record: Mapping[str, Any]) -> list[dict]:
 # --------------------------------------------------------------------------- #
 
 
+def _check_supersedes_targets(
+    rel: str, record: Mapping[str, Any], loaded: dict[str, Mapping[str, Any]], root: str
+) -> tuple[list[str], list[dict]]:
+    """Normalised ``supersedes`` targets of one record, plus per-target findings."""
+    targets: list[str] = []
+    out: list[dict] = []
+    for target in record.get("supersedes") or []:
+        if not isinstance(target, str):
+            continue
+        norm = os.path.normpath(target)
+        targets.append(norm)
+        if norm not in loaded and not os.path.isfile(os.path.join(root, norm)):
+            out.append(
+                _finding(F_SUPERSEDES_MISSING, rel, f"{target!r} does not exist")
+            )
+        elif os.path.dirname(norm) != os.path.dirname(rel):
+            out.append(
+                _finding(
+                    F_SUPERSEDES_SCOPE,
+                    rel,
+                    f"{target!r} is not in the same <block>/<scope> directory",
+                )
+            )
+        if norm == rel:
+            out.append(_finding(F_SUPERSEDES_CYCLE, rel, "record supersedes itself"))
+    return targets, out
+
+
+def _check_forks(superseded_by: dict[str, list[str]]) -> list[dict]:
+    return [
+        _finding(
+            F_SUPERSEDES_FORK,
+            target,
+            f"superseded by more than one record: {sorted(successors)}",
+        )
+        for target, successors in sorted(superseded_by.items())
+        if len(successors) > 1
+    ]
+
+
+def _check_tips(
+    members: list[str],
+    tips: list[str],
+    loaded: dict[str, Mapping[str, Any]],
+    directory: str,
+) -> list[dict]:
+    """Cycle / omitted-supersedes findings for one <block>/<scope> directory."""
+    if not tips and members:
+        return [
+            _finding(
+                F_SUPERSEDES_CYCLE, directory, "every record is superseded (cycle)"
+            )
+        ]
+    return [
+        _finding(
+            F_SUPERSEDES_OMITTED,
+            m,
+            "a record already exists for this <block>/<scope> "
+            "and this one does not supersede it",
+        )
+        for m in tips[1:]
+        if not loaded[m].get("supersedes")
+    ]
+
+
+def _check_head(root: str, directory: str, tips: list[str]) -> list[dict]:
+    head_path = os.path.join(root, directory, HEAD_FILE)
+    if not (os.path.isfile(head_path) and tips):
+        return []
+    with open(head_path, encoding="utf-8") as handle:
+        named = handle.read().strip()
+    if named in {os.path.basename(t) for t in tips}:
+        return []
+    return [
+        _finding(
+            F_HEAD,
+            os.path.join(directory, HEAD_FILE),
+            f"HEAD names {named!r}, not an unsuperseded record",
+        )
+    ]
+
+
 def _check_supersession(
     loaded: dict[str, Mapping[str, Any]], root: str, evidence_root: str
 ) -> list[dict]:
@@ -263,70 +345,16 @@ def _check_supersession(
     groups: dict[str, list[str]] = {}
     for rel, record in loaded.items():
         groups.setdefault(os.path.dirname(rel), []).append(rel)
-        for target in record.get("supersedes") or []:
-            if not isinstance(target, str):
-                continue
-            norm = os.path.normpath(target)
+        targets, findings = _check_supersedes_targets(rel, record, loaded, root)
+        out += findings
+        for norm in targets:
             superseded_by.setdefault(norm, []).append(rel)
-            if norm not in loaded and not os.path.isfile(os.path.join(root, norm)):
-                out.append(
-                    _finding(F_SUPERSEDES_MISSING, rel, f"{target!r} does not exist")
-                )
-            elif os.path.dirname(norm) != os.path.dirname(rel):
-                out.append(
-                    _finding(
-                        F_SUPERSEDES_SCOPE,
-                        rel,
-                        f"{target!r} is not in the same <block>/<scope> directory",
-                    )
-                )
-            if norm == rel:
-                out.append(
-                    _finding(F_SUPERSEDES_CYCLE, rel, "record supersedes itself")
-                )
-
-    for target, successors in sorted(superseded_by.items()):
-        if len(successors) > 1:
-            out.append(
-                _finding(
-                    F_SUPERSEDES_FORK,
-                    target,
-                    f"superseded by more than one record: {sorted(successors)}",
-                )
-            )
-
+    out += _check_forks(superseded_by)
     for directory, members in sorted(groups.items()):
         members.sort()
         tips = [m for m in members if m not in superseded_by]
-        if not tips and members:
-            out.append(
-                _finding(
-                    F_SUPERSEDES_CYCLE, directory, "every record is superseded (cycle)"
-                )
-            )
-        elif len(tips) > 1:
-            for m in tips[1:]:
-                if not loaded[m].get("supersedes"):
-                    out.append(
-                        _finding(
-                            F_SUPERSEDES_OMITTED,
-                            m,
-                            "a record already exists for this <block>/<scope> "
-                            "and this one does not supersede it",
-                        )
-                    )
-        head_path = os.path.join(root, directory, HEAD_FILE)
-        if os.path.isfile(head_path) and tips:
-            with open(head_path, encoding="utf-8") as handle:
-                named = handle.read().strip()
-            if named not in {os.path.basename(t) for t in tips}:
-                out.append(
-                    _finding(
-                        F_HEAD,
-                        os.path.join(directory, HEAD_FILE),
-                        f"HEAD names {named!r}, not an unsuperseded record",
-                    )
-                )
+        out += _check_tips(members, tips, loaded, directory)
+        out += _check_head(root, directory, tips)
     return out
 
 
