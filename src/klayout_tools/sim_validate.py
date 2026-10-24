@@ -19,6 +19,7 @@ from . import (
     sim_cycle_mean,
     sim_energy,
     sim_noise,
+    sim_search,
     sim_snm_meas,
     sim_tian,
     sim_transfer_meas,
@@ -291,8 +292,17 @@ def _require_measurement_form(name: Any, has_form: bool) -> None:
             "'noise' (a spot/band-integrated noise-spectrum value) or "
             "'transfer' (an AC return-ratio metric), "
             "'tian' (a dual-injection AC stability metric) or "
-            "'snm' (a butterfly static noise margin of a DC sweep)"
+            "'snm' (a butterfly static noise margin of a DC sweep) or "
+            "'search' (a bisection boundary over a source value)"
         )
+
+
+_EXCLUSIVE_FORM_VALIDATORS = (
+    sim_search.validate_form_exclusive,
+    sim_snm_meas.validate_form_exclusive,
+    sim_tian.validate_form_exclusive,
+    sim_transfer_meas.validate_form_exclusive,
+)
 
 
 def _validate_measurement_form(spec: dict[str, Any]) -> None:
@@ -300,15 +310,10 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
     the round trip through the deck and back out of the log. See
     :func:`_validate_measurement_forms` for why each rule exists."""
-    if sim_snm_meas.validate_form_exclusive(spec):
-        # Issue #3895: a seventh, mutually exclusive form.
-        return
-    if sim_tian.validate_form_exclusive(spec):
-        # Issue #3160: a sixth, mutually exclusive form.
-        return
-    if sim_transfer_meas.validate_form_exclusive(spec):
-        # Issue #2923: a fifth, mutually exclusive form.
-        return
+    # Newest-first: #4121 search, #3895 snm, #3160 tian, #2923 transfer.
+    for validator in _EXCLUSIVE_FORM_VALIDATORS:
+        if validator(spec):
+            return
     name = spec.get("name")
     has_spice = spec.get("spice") is not None
     has_expr = spec.get("expr") is not None

@@ -113,6 +113,17 @@ one) — the "new optional member, absent when not applicable" rule above.
 No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Threshold-crossing time series (`measurements[].crossings`)".
 
+`measurements[].search` (issue #4121) is a scalar form like `snm`: `value` stays
+a number (the midpoint of the converged bisection bracket) and is graded by
+`limits`, `monte_carlo` statistics and `klt yield` unchanged. The response
+entry gains one optional `search` object (`source`, `direction`, `iterations`,
+`lo`, `hi`, `converged`), present on a converged entry and, with
+`converged: false`, on an errored one that ran probes; absent otherwise. A
+failure is `status: "error"` with `value: null` and a `code: "measurement"`
+diagnostic led by a `[search_*]` token. Additive; no `schema_version` bump. See
+[`docs/cli/sim.md`](cli/sim.md)'s "Bisection / threshold search
+(`measurements[].search`)".
+
 `analysis.kind: "twoport"` (issue #3338) is a new accepted value of the
 already-shipped `klt sim` `analysis.kind`, with its own `ports`/`freq` fields.
 Every request valid before is unchanged; the *response* gains only an optional

@@ -530,6 +530,7 @@
         "klayout_tools.sim_portable",
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
+        "klayout_tools.sim_search",
         "klayout_tools.sim_set",
         "klayout_tools.sim_snm",
         "klayout_tools.sim_snm_meas",
