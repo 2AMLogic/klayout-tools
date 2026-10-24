@@ -856,7 +856,12 @@ well shape and `voltage_flavor`'s marker already enclose) plus
 `ring_padding_um`, so it always clears every real and dummy unit device
 regardless of `flavor`. Reports `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` ports
 (local-metal) when `add_guard_ring` is `true` (and a `GAP_<side>` marker when
-the ring carries a routing opening). Unlike `diff_pair`'s `add_guard_ring`
+the ring carries a routing opening). On `gf180mcu`, with `add_guard_ring` `false`, the generator draws contacted
+well/substrate tap pads around the footprint (issue #3648, for `DF.13`/`DF.14`)
+and reports each as a `TAP_PAD<k>` port (`net` `null`, local-metal, `x_um`/`y_um`
+the pad centre, `width_um` the pad side, `direction_deg` the outward normal of its
+side) so a route can avoid them; no `TAP_PAD*` port appears with a ring or on
+other families. Unlike `diff_pair`'s `add_guard_ring`
 (which defaults `true`, since a guard ring is that generator's own primary
 composition), `mos_array`'s defaults to `false` — the ring is a strictly
 additive, opt-in capability here, so a request that omits it draws
@@ -1607,6 +1612,8 @@ named `Q1_<n>_S`/`_D`/`_G` and `Q2_<n>_S`/`_D`/`_G` (or `M1_`/`M2_` when
 is identical either way), plus `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` when
 `add_guard_ring` is `true` (and a `GAP_<side>` marker when the ring carries a
 routing opening — see `guard_ring`'s "Ring routing openings" above).
+With `add_guard_ring` `false` on `gf180mcu` it reports one `TAP_PAD<k>` port per
+contacted tap pad it draws (see `mos_array`).
 `device_count` is `2 * splits`.
 `drc_hints.matched_group_id` is `"diff_pair:pair:<splits>"` (or
 `"diff_pair:mirror:<splits>"` with `params.mirror`; `flavor` is not folded in

@@ -61,6 +61,7 @@ from .gen_layer_params import (
     GUARD_RING_DEFAULT_WIDTH_UM,
     PAD_OPENING_GUIDELINE_MIN_UM,
     PAD_TOP_METAL_ENCLOSURE_MIN_UM,
+    TAP_PAD_REACH_UM,
     UNIT_MIN_W_UM,
     _cap_family_layers,
     _cap_geometry_min_um,
@@ -80,6 +81,7 @@ from .gen_layer_params import (
     _ring_implant_margin_um,
     _role_layer_info,
     _sd_implant_margin_um,
+    _tap_pads_wanted,
     _voltage_flavor_mark_layer,
     mfg_grid_um,
 )
@@ -700,6 +702,7 @@ def _mos_array_describe(
         pitch_x_um=params["pitch_x_um"],
         pitch_y_um=params["pitch_y_um"],
         top_endcap_um=_gate_top_endcap_um(family),
+        tap_reach_um=_tap_reach_um(family),
         share_sd=params["share_sd"],
         mirror=params["mirror"],
     )
@@ -806,6 +809,9 @@ def _mos_array_describe(
                 metal_layer,
             )
         )
+
+    # Contacted well/substrate tie pads a ring-less gf180mcu array draws (#4143).
+    ports.extend(_tap_pad_ports(info["tap_pads"], metal_layer))
 
     # Unlike `diff_pair` (`add_guard_ring` defaults `True`, so an *explicit*
     # opt-out earns a note), `mos_array`'s guard ring defaults `False` (issue
@@ -1390,6 +1396,51 @@ def _validate_ring_gap(
             "that reaches a corner would split the ring into two disconnected "
             "arcs"
         )
+
+
+def _tap_reach_um(family: str) -> float:
+    """The ``tap_reach_um`` the PCell hands its layout (issue #3648): the
+    tap-distance reach for a family whose deck enforces one, else ``0.0``
+    (the layout itself drops the pads when a ring is drawn)."""
+    return TAP_PAD_REACH_UM if _tap_pads_wanted(family) else 0.0
+
+
+def _tap_pad_ports(
+    tap_pads: dict[str, Any] | None, layer: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Reported ``TAP_PAD<k>`` ports for the contacted tap pads a ring-less
+    gf180mcu ``mos_array``/``diff_pair`` draws (issue #4143), in drawn order.
+
+    Like ring tap ports they carry ``net: null``; ``x_um``/``y_um`` is the pad
+    centre, ``width_um`` its side and ``direction_deg`` the outward normal of
+    the footprint side it sits on. Empty when no pads are drawn."""
+    if tap_pads is None:
+        return []
+    ox0, oy0, ox1, oy1 = tap_pads["outer_box_um"]
+    tol = 0.02  # pad origins are snapped to 0.01um
+    ports = []
+    for k, pad in enumerate(tap_pads["pads"]):
+        x0, y0, x1, y1 = pad["box_um"]
+        if abs(y0 - oy0) <= tol:
+            direction = 270
+        elif abs(y1 - oy1) <= tol:
+            direction = 90
+        elif abs(x0 - ox0) <= tol:
+            direction = 180
+        else:
+            direction = 0
+        ports.append(
+            {
+                "name": f"TAP_PAD{k}",
+                "net": None,
+                "layer": layer,
+                "x_um": (x0 + x1) / 2.0,
+                "y_um": (y0 + y1) / 2.0,
+                "width_um": x1 - x0,
+                "direction_deg": direction,
+            }
+        )
+    return ports
 
 
 def _ring_ports(
@@ -2217,6 +2268,7 @@ def _diff_pair_describe(
         _contact_gate_extra_offset_um(family),
         _gate_bottom_endcap_um(family),
         top_endcap_um=_gate_top_endcap_um(family),
+        tap_reach_um=_tap_reach_um(family),
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -2280,6 +2332,9 @@ def _diff_pair_describe(
                 metal_layer,
             )
         )
+
+    # Contacted well/substrate tie pads a ring-less gf180mcu array draws (#4143).
+    ports.extend(_tap_pad_ports(info["tap_pads"], metal_layer))
 
     notes = _ring_gap_notes(
         info["ring"] if ring_drawn else None, params["ring_gap_side"]
