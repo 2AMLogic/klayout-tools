@@ -405,7 +405,7 @@ primitives — not the official sky130 `.lydrc` script executed verbatim. See
 Wraps the standalone `klayout` application binary as a subprocess, the same
 "wrap a proven engine" pattern `klt lvs`'s `"netgen"` engine uses (issue
 #343) — see [`klt lvs`](lvs.md) → "Engine" → `"netgen"` for the sibling
-writeup this one mirrors closely. Requires a `klayout` binary on `$PATH` —
+writeup this one mirrors closely. Requires a system KLayout `klayout` binary on `$PATH` (`pip install klayout-tools` ships only the `klayout` Python module, not the application) —
 not the pip `klayout` package this repo otherwise depends on exclusively; a
 missing binary is a clear, actionable error (exit 1), never a traceback.
 
