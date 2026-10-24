@@ -25574,3 +25574,74 @@ def test_cli_lvs_layout_without_check_is_rejected(tmp_path, capsys):
         "--layout requires --check"
         in json.loads(capsys.readouterr().err)["error"]["message"]
     )
+
+
+_COMPARER_ASSERTION = (
+    "Internal error: bt_count != failed_match (dbNetlistCompareCore.cc:1003)"
+)
+
+
+def _inverter_request(tmp_path, **extra) -> str:
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    return _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            **extra,
+        },
+    )
+
+
+def _raise_comparer_assertion(self, *args):
+    raise RuntimeError(_COMPARER_ASSERTION)
+
+
+def test_comparer_internal_error_raises_lvs_error_issue_4134(tmp_path, monkeypatch):
+    import klayout.db as kdb
+
+    monkeypatch.setattr(kdb.NetlistComparer, "compare", _raise_comparer_assertion)
+    with pytest.raises(LvsError, match="bt_count != failed_match"):
+        run_lvs(_inverter_request(tmp_path))
+
+
+def test_comparer_internal_error_in_tolerance_pass_raises_lvs_error_issue_4134(
+    tmp_path, monkeypatch
+):
+    import klayout.db as kdb
+
+    real_compare = kdb.NetlistComparer.compare
+    calls = []
+
+    def real_then_raise(self, *args):
+        calls.append(1)
+        if len(calls) == 1:
+            return real_compare(self, *args)
+        raise RuntimeError(_COMPARER_ASSERTION)
+
+    monkeypatch.setattr(kdb.NetlistComparer, "compare", real_then_raise)
+    with pytest.raises(LvsError, match="bt_count != failed_match"):
+        _tolerance_report(
+            tmp_path,
+            _RESISTOR_LAYOUT_SPICE,
+            _RESISTOR_REFERENCE_SPICE,
+            tolerance=0.01,
+            top="rblock",
+        )
+    assert len(calls) == 2
+
+
+def test_comparer_internal_error_cli_emits_error_envelope_exit_1_issue_4134(
+    tmp_path, monkeypatch, capsys
+):
+    import klayout.db as kdb
+
+    monkeypatch.setattr(kdb.NetlistComparer, "compare", _raise_comparer_assertion)
+    rc = main(["lvs", _inverter_request(tmp_path), "--format", "json"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    err = json.loads(captured.err)["error"]
+    assert err["command"] == "lvs"
+    assert "bt_count != failed_match" in err["message"]
