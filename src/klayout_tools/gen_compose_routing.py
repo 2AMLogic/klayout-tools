@@ -1271,7 +1271,10 @@ _RING_SIDES = ("N", "S", "E", "W")
 
 def _block_has_ring_taps(block: dict[str, Any]) -> bool:
     """Whether ``block`` reports a guard/collector ring (any tap port)."""
-    return any(name.startswith(_RING_TAP_PORT_PREFIXES) for name in block["port_names"])
+    return any(
+        name.startswith(_RING_TAP_PORT_PREFIXES) and _ring_port_side(name) is not None
+        for name in block["port_names"]
+    )
 
 
 def _ring_port_side(name: str) -> str | None:
@@ -2778,8 +2781,9 @@ def _closed_ring_pins(
     ring_pins: list[tuple[dict[str, Any], dict[str, Any]]] = []
     if pin_a["block"] != pin_b["block"]:
         for pin, block in ((pin_a, block_a), (pin_b, block_b)):
-            if not _block_has_ring_taps(block) or pin["port"].startswith(
-                _RING_TAP_PORT_PREFIXES
+            if not _block_has_ring_taps(block) or (
+                pin["port"].startswith(_RING_TAP_PORT_PREFIXES)
+                and _ring_port_side(pin["port"]) is not None
             ):
                 continue
             if _leg_plane_clears_ring(

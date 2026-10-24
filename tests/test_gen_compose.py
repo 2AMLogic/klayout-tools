@@ -17386,3 +17386,13 @@ def test_compose_ties_off_mos_array_dummy_units_without_dead_metal(tmp_path, pdk
     ]
     assert [d for d in before["dead_metal"] if arr_right(d)], "fixture must float"
     assert in_dummy == [], in_dummy
+
+
+def test_tap_pad_ports_are_not_mistaken_for_a_closed_guard_ring():
+    # #4143: ring-less gf180mcu arrays report `TAP_PAD<k>` ports; only the
+    # `TAP_<side>`/`COLL_<side>` ring ports mean a closed ring surrounds the block.
+    from klayout_tools.gen_compose_routing import _block_has_ring_taps
+
+    assert not _block_has_ring_taps({"port_names": ["U0_D", "TAP_PAD0", "TAP_PAD1"]})
+    assert _block_has_ring_taps({"port_names": ["U0_D", "TAP_N", "TAP_PAD0"]})
+    assert _block_has_ring_taps({"port_names": ["COLL_E"]})
