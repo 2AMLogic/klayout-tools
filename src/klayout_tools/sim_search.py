@@ -149,25 +149,7 @@ def _number(name: Any, body: dict[str, Any], key: str) -> float:
     return float(value)
 
 
-def validate_search_spec(name: Any, body: Any) -> None:
-    if not isinstance(body, dict):
-        raise SimError(
-            f"measurement '{name}': 'search' must be an object, e.g. "
-            '{"source": "Ibl", "lo": 0, "hi": 1e-4, "tol": 1e-7, '
-            '"max_iter": 20, "analysis": {"kind": "tran", "args": "10p 5n"}, '
-            '"predicate": {"expr": "v(q) > 0.5"}}'
-        )
-    unknown = sorted(set(body) - _ALLOWED_KEYS)
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown search key(s) {unknown}; "
-            f"allowed: {sorted(_ALLOWED_KEYS)}"
-        )
-    missing = [key for key in _KEYS if body.get(key) is None]
-    if missing:
-        raise SimError(
-            f"measurement '{name}': search requires {list(_KEYS)}; missing {missing}"
-        )
+def _validate_bracket(name: Any, body: dict[str, Any]) -> tuple[float, float, float]:
     source = body["source"]
     if not isinstance(source, str) or not _SOURCE_RE.match(source):
         raise SimError(
@@ -196,6 +178,12 @@ def validate_search_spec(name: Any, body: Any) -> None:
             f"(need tol >= {_TOL_RESOLUTION * max(abs(lo), abs(hi)):g}); "
             "narrow the bracket or relax tol"
         )
+    return lo, hi, tol
+
+
+def _validate_max_iter(
+    name: Any, body: dict[str, Any], width: float, tol: float
+) -> None:
     max_iter = body["max_iter"]
     if isinstance(max_iter, bool) or not isinstance(max_iter, int):
         raise SimError(
@@ -207,13 +195,16 @@ def validate_search_spec(name: Any, body: Any) -> None:
             f"measurement '{name}': search.max_iter must be in "
             f"[1, {MAX_ITER_CAP}]; got {max_iter}"
         )
-    needed = math.ceil(math.log2((hi - lo) / tol))
+    needed = math.ceil(math.log2(width / tol))
     if needed > max_iter:
         raise SimError(
             f"measurement '{name}': search.max_iter {max_iter} can never "
-            f"reach tol {tol:g} from a bracket of {hi - lo:g} (needs "
+            f"reach tol {tol:g} from a bracket of {width:g} (needs "
             f"{needed} halvings); raise max_iter or relax tol"
         )
+
+
+def _validate_options(name: Any, body: dict[str, Any]) -> None:
     if body.get("direction", "rising") not in _DIRECTIONS:
         raise SimError(
             f"measurement '{name}': search.direction must be one of "
@@ -224,6 +215,30 @@ def validate_search_spec(name: Any, body: Any) -> None:
             f"measurement '{name}': search.report must be \"boundary\"; "
             f"got {body.get('report')!r}"
         )
+
+
+def validate_search_spec(name: Any, body: Any) -> None:
+    if not isinstance(body, dict):
+        raise SimError(
+            f"measurement '{name}': 'search' must be an object, e.g. "
+            '{"source": "Ibl", "lo": 0, "hi": 1e-4, "tol": 1e-7, '
+            '"max_iter": 20, "analysis": {"kind": "tran", "args": "10p 5n"}, '
+            '"predicate": {"expr": "v(q) > 0.5"}}'
+        )
+    unknown = sorted(set(body) - _ALLOWED_KEYS)
+    if unknown:
+        raise SimError(
+            f"measurement '{name}': unknown search key(s) {unknown}; "
+            f"allowed: {sorted(_ALLOWED_KEYS)}"
+        )
+    missing = [key for key in _KEYS if body.get(key) is None]
+    if missing:
+        raise SimError(
+            f"measurement '{name}': search requires {list(_KEYS)}; missing {missing}"
+        )
+    lo, hi, tol = _validate_bracket(name, body)
+    _validate_max_iter(name, body, hi - lo, tol)
+    _validate_options(name, body)
     _validate_analysis(name, body["analysis"])
     _validate_predicate(name, body["predicate"])
 
@@ -508,7 +523,7 @@ def _outcome(spec: dict[str, Any], state: dict[str, float] | None) -> SearchOutc
         )
     lo, hi, n, st = state["lo"], state["hi"], int(state["n"]), int(state["st"])
     body = spec["search"]
-    common = {"iterations": n, "lo": lo, "hi": hi}
+    common: dict[str, Any] = {"iterations": n, "lo": lo, "hi": hi}
     if st == 0:
         return SearchOutcome(value=(lo + hi) / 2, **common)
     if st == 1:

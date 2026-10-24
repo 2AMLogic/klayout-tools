@@ -297,23 +297,23 @@ def _require_measurement_form(name: Any, has_form: bool) -> None:
         )
 
 
+_EXCLUSIVE_FORM_VALIDATORS = (
+    sim_search.validate_form_exclusive,
+    sim_snm_meas.validate_form_exclusive,
+    sim_tian.validate_form_exclusive,
+    sim_transfer_meas.validate_form_exclusive,
+)
+
+
 def _validate_measurement_form(spec: dict[str, Any]) -> None:
     """One ``request.measurements[]`` entry's form: a ``name`` plus exactly
     one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
     the round trip through the deck and back out of the log. See
     :func:`_validate_measurement_forms` for why each rule exists."""
-    if sim_search.validate_form_exclusive(spec):
-        # Issue #4121: an eighth, mutually exclusive form.
-        return
-    if sim_snm_meas.validate_form_exclusive(spec):
-        # Issue #3895: a seventh, mutually exclusive form.
-        return
-    if sim_tian.validate_form_exclusive(spec):
-        # Issue #3160: a sixth, mutually exclusive form.
-        return
-    if sim_transfer_meas.validate_form_exclusive(spec):
-        # Issue #2923: a fifth, mutually exclusive form.
-        return
+    # Newest-first: #4121 search, #3895 snm, #3160 tian, #2923 transfer.
+    for validator in _EXCLUSIVE_FORM_VALIDATORS:
+        if validator(spec):
+            return
     name = spec.get("name")
     has_spice = spec.get("spice") is not None
     has_expr = spec.get("expr") is not None
