@@ -751,8 +751,8 @@ and not cross-checked against the exact pinned build #783 used
 (`26Q3-1080-gab6fd26351`). Both new fields below default to reproducing
 today's exact behaviour for this reason, and neither was evaluated with a
 real A/B run against actual OpenROAD (also unavailable in this task's
-environment) — see `place_and_route.py`'s own module docstring for the full
-citations and findings.
+environment). The `detailed_route` flag audit and the `repair_antennas`
+iteration finding below are the full record.
 
 - **`global_route`** does carry a real timing-aware congestion knob,
   `-critical_nets_percentage <percent>` — the percentage of worst-slack
@@ -1022,8 +1022,7 @@ more OpenROAD subprocess launch per swept corner beyond the first — for the
 16-corner `sky130_fd_sc_hd` measurement above, that is up to 15 more
 per-corner invocations on top of the ~5–6 second combined-sweep cost already
 measured; not evaluated with a real OpenROAD container as of this field's
-introduction (see the module docstring's own methodology note for
-`_run_corner_sweep`). A caller with a real wall-clock budget and a
+introduction. A caller with a real wall-clock budget and a
 many-corner library should use `sweep_corners` to scope the sweep down to
 the corners the design actually operates at, which also caps this added
 cost at the scoped subset's own size.
@@ -1963,7 +1962,7 @@ live re-measurement above.
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation, same clock requirement, and same omitted-default behavior as `input_delay_ns` above; the two are independently optional (either alone is valid). Covers the *register → output port* half of the same gap. |
 | `seed` | integer | Placement/routing seed. **Required** — P&R is genuinely stochastic; a stored result must be reproducible. Echoed unchanged in the response. |
 | `target_stage` | string | One of `"floorplan"`, `"place"`, `"cts"`, `"route"` (default) — how far this run is asked to go. See "Partial completion" below. |
-| `route_critical_nets_percentage` | integer \| omitted | 0–100, default `0` (no flag emitted). Percentage of worst-slack nets `global_route` treats as timing-critical during congestion-removal iterations (`-critical_nets_percentage`, issue #939). `0` reproduces this command's prior behaviour exactly — the A/B disable path. Not evaluated with a real OpenROAD A/B run as of this field's introduction; see `place_and_route.py`'s module docstring for the audit methodology and its limitations. |
+| `route_critical_nets_percentage` | integer \| omitted | 0–100, default `0` (no flag emitted). Percentage of worst-slack nets `global_route` treats as timing-critical during congestion-removal iterations (`-critical_nets_percentage`, issue #939). `0` reproduces this command's prior behaviour exactly — the A/B disable path. Not evaluated with a real OpenROAD A/B run as of this field's introduction; see "Timing-driven/repair-iteration routing flags" for the audit methodology and its limitations. |
 | `max_antenna_repair_iterations` | integer \| omitted | 0–8, default `1`. Zero disables antenna repair/reroute passes; initial routing and the final antenna check still run. Repeats the `"route"` stage's `repair_antennas`/`detailed_route` reroute pair this many times (issue #939), a bounded flow-level generalisation of the single pass issue #759 shipped. No early exit on a zero-violation `check_antennas` result — every pass runs unconditionally. |
 | `library` | object \| omitted | Additive field (issue #4086): per-library inputs for a standard-cell library with no built-in table, or an override of a built-in entry. Unknown keys are rejected. All keys optional: `cts_buffer` (non-empty string, the `clock_tree_synthesis` buffer cell); `power_pins` (list of `{"net_role": "power"\|"ground", "pattern": str, "primary": bool}`, exactly one primary per role, emitted as the `add_global_connection` lines a table entry would produce); `wire_rc` (`{"resistance_ohm_per_um": >0, "capacitance_pf_per_um": >0}`, emitted as `set_wire_rc -signal`/`-clock -resistance … -capacitance …` in place of `set_wire_rc -layer <io.layer_v>` in the `place`, `cts` and post-route STA scripts; values are passed to OpenROAD verbatim, which reads them in the first Liberty file's units, so convert if the library is not ohm/pF). Omitted ⇒ scripts are byte-identical to before. A request missing several per-library inputs is rejected up front with **one** error listing all of them, each naming the `library` field that supplies it (or "no request override yet": routing-layer range, antenna diode, tapcell and filler have no field, so `route` and `request.power` stay unreachable for a no-table library). For a library with no built-in CTS/power table, a tech-LEF `io.layer_v` without `RESISTANCE RPERSQ` is also reported (it otherwise fails at `place` with OpenROAD `RSZ-0089`). |
 | `post_route_spef` | boolean \| omitted | Default `false`. Opts in to the real-parasitics A/B pass described in "Post-route SPEF STA" above — populates the response's `spef_sta` field. Off by default (real added wall-clock cost); has no effect unless `target_stage` reaches `"route"` (issue #948). |
@@ -2332,8 +2331,7 @@ at the end of the `"floorplan"` stage (immediately after
 
 1. `tapcell` — well/substrate ties, using the per-library master + distance
    this command already knows (sourced the same verified-not-guessed way as
-   the CTS buffer/routing-layer-range/antenna-diode tables — see
-   `place_and_route.py`'s own module docstring). **Omitted entirely** for a
+   the CTS buffer/routing-layer-range/antenna-diode tables, each cited next to its definition in `place_and_route.py`). **Omitted entirely** for a
    standard-cell library that verifiably ships no tap or endcap cells at
    all (`_NO_TAPCELL_LIBRARIES`; `sg13g2_stdcell` is its only member — see
    below); steps 2–5 are unchanged for it.
@@ -3242,6 +3240,9 @@ by
   power delivery were originally scoped out here too — see "Hard-macro
   placement" above and "Power delivery" below; issues #438 and #1091 closed
   those gaps.)
+- **Caller-supplied cell exclusion.** The built-in per-`cell_library`
+  exclusions `klt synthesize` applies are emitted as `set_dont_use` in every
+  post-floorplan stage script (issue #2378), with no request field.
 - **Macro-specific PDN grids.** `request.power`'s `pdngen` call builds only
   the flat standard-cell grid (`define_pdn_grid` with no `-macro`) — a
   design with hard macros needs a caller-supplied macro halo/grid spec this
