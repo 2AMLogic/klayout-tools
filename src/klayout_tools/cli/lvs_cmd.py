@@ -40,7 +40,7 @@ import argparse
 
 from ..env_provenance import render_path_field
 from ..lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
-from .output import emit_error, emit_success, render_rerun_drift
+from .output import emit_error, emit_success, render_check_text, render_rerun_drift
 
 EXIT_MATCH = 0
 EXIT_MISMATCH = 3
@@ -123,7 +123,7 @@ def _run_check(args: argparse.Namespace) -> int:
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
@@ -209,41 +209,4 @@ def _print_text(report: dict) -> None:
         print(
             f"[{entry['severity']}] {entry['category']}  ({entry['side']})  "
             f"{entry['description']}"
-        )
-
-
-def _print_check_text(result: dict) -> None:
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            # Issue #2595: an echoed `layout`/`reference` that resolves to no
-            # existing file re-hashes to `null`, which on its own reads as
-            # "the recorded hash moved". Say what actually happened, and --
-            # for the common cause, a committed request/report pair whose
-            # relative paths were written against the report's own directory
-            # -- where the input really is.
-            missing = check.get("input_not_found")
-            if missing is None:
-                print(f"      actual:   {check['actual']}")
-            else:
-                print(f"      actual:   None (input not found: {missing['resolved']})")
-                if missing["found_relative_to_report"] is not None:
-                    print(
-                        "      note:     it exists relative to the report's own "
-                        f"directory ({missing['found_relative_to_report']}); "
-                        "--check resolves relative paths against the current "
-                        "working directory -- re-run from there"
-                    )
-    # Issue #1373: engine-version drift is a non-fatal advisory, never folded
-    # into the `[OK]`/`[DRIFTED]` hash-integrity list above -- it does not
-    # affect `status`/exit code, so a scripted gate parsing that list alone
-    # never sees it.
-    for advisory in result.get("advisories", ()):
-        print(
-            f"  [DRIFT] {advisory['field']}: {advisory['report']} (report) "
-            f"vs {advisory['current']} (current)"
         )
