@@ -2,8 +2,88 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-24
+
+- **Issue #3805** (closed): release: `klt signoff --attest` (#2844) is not in any PyPI release; latest 0.7.0 rejects it
+- **Issue #4146** (closed): batch backend: client does not detect a fleet runner too old for deck-list requests before submitting
+- **PR #4145**: chore(release): bump version to 0.8.0
+- **Issue #3776** (closed): Live-verify klt sta set_driving_cell/set_load syntax and *NAME_MAP SPEF annotation against OpenROAD/OpenSTA
+- **Issue #4143** (closed): gen mos_array: contacted body taps are unreported and cannot be disabled
+- **PR #4144**: feat(gen): report gf180mcu tap pads as TAP_PAD ports
+- **PR #4142**: chore(loom): resync installed Loom to v0.19.1218
+- **PR #4141**: docs(size): trim module docstring to purpose and entry points
+- **Issue #4139** (closed): Consolidate 7 duplicated _print_check_text renderers into cli/output.py
+- **PR #4140**: refactor(cli): share one --check text renderer across seven verbs
+- **PR #4137**: docs(erc): trim module docstring to purpose and entry points
+- **Issue #4098** (closed): Consolidate duplicated batch helpers across netlist/place_and_route/sim/signoff batch modules
+- **PR #4116**: refactor: share batch job-id, tarball, runner-root and failure helpers
+- **Issue #4136** (closed): Patch affected Undici dependencies from October security advisories
+- **PR #4138**: fix(site): bump dev-only undici lock entry to 8.12.3
+- **PR #4131**: docs(place-and-route): trim module docstring to purpose and entry points
+- **Issue #4134** (closed): klt lvs: NetlistComparer.compare internal assertion (bt_count != failed_match) escapes as a traceback instead of a mismatch report
+- **PR #4135**: fix(lvs): report KLayout comparer-internal failures as LvsError
+- **Issue #4132** (closed): test flake: test_sim_set_forwards_resume_to_every_request fails on Tests (Python 3.13)
+- **PR #4133**: test(sim-set): assert resume forwarding by path, not call order
+- **Issue #4127** (closed): place-and-route: no request override for routing-layer range, antenna diode, tapcell or filler, so a no-table library cannot reach route
+- **PR #4130**: feat(place-and-route): accept route, antenna, tapcell and filler overrides in request.library
+- **Issue #4124** (closed): place-and-route --backend batch: fleet runner klt rejects '--backend local', all rebuild_corners jobs fail
+- **PR #4125**: feat(place-and-route): fail fast when the batch runner predates --backend
+- **PR #4129**: docs(signoff): trim module docstring to purpose and entry points
+- **Issue #4120** (closed): klt sim batch: feature preflight in --dry-run, OSDI local hint, no threshold-search measurement, bucket in stderr
+- **PR #4122**: feat(sim): batch pre-launch runner check on --dry-run, bucket redaction, OSDI toolchain hints
+- **Issue #4121** (closed): klt sim: bounded bisection / threshold-search measurement (graded scalar for limits, monte_carlo, yield)
+- **PR #4123**: feat(sim): add measurements[].search bisection measurement
+
 ### 2026-10-23
 
+- **Issue #4108** (closed): Live-verify klt sim par() cap diagnostic against a real >99 par() deck (follow-up to #4093)
+- **PR #4112**: test: pin real ngspice-46 par() cap log in classifier test
+- **Issue #4101** (closed): klt artifact: no delete/prune verb, so unreferenced stored objects cannot be removed
+- **PR #4106**: feat(artifact): add klt artifact delete with dry-run default and reference guard
+- **Issue #4081** (closed): klt lvs (klayout-runset): empty extraction gives an error with no report instead of a graded mismatch
+- **PR #4092**: fix(lvs): grade empty runset extraction as a mismatch with reference census
+- **Issue #4117** (closed): klt lvs: gate-level-verilog reference rejects nested concatenation / replication in assign RHS
+- **PR #4119**: feat: expand nested and replicated concatenations in gate-level assign
+- **Issue #4113** (closed): klt artifact verify: no retry/backoff on broker HTTP 429, exits 1 indistinguishably from a bad manifest
+- **PR #4114**: feat: retry broker 429 with backoff and report broker_rate_limited
+- **Issue #4118** (closed): klt artifact verify: hits broker per-caller rate limit on manifests with many entries
+- **PR #4110**: fix(sim-batch): report decks[] runner support in runner_request_features
+- **Issue #4072** (closed): ci(design-agent-benchmark): pin the live job's actions/upload-artifact to a SHA
+- **PR #4073**: ci(design-agent-benchmark): pin layout-live upload-artifact to a SHA
+- **Issue #4086** (closed): place-and-route: a library with no built-in tables cannot pass floorplan (no CTS buffer, power pin-pattern or wire-RC entry, no request override)
+- **PR #4111**: feat(place-and-route): add request.library for libraries with no built-in tables
+- **Issue #4115** (closed): test flake: ASAP7 DRC deck fixtures (klayout binary) fails installing klayout via apt
+- **Issue #4088** (closed): place-and-route: bare make_tracks aborts (IFP-0039) when a tech-LEF routing layer declares a negative OFFSET; no track override
+- **PR #4105**: feat(place-and-route): add floorplan.tracks and preflight negative-OFFSET tech LEFs
+- **Issue #4082** (closed): drc asap7: no absolute fin/gate grid-origin check, and no placement-context (row / flipped stack) request form
+- **PR #4094**: feat(drc): opt-in ASAP7 fin/gate absolute grid-origin rules
+- **Issue #4103** (closed): klt sim --batch-set: fleet vCPU-budget refusal carries no error code, is not retried by --capacity-retries
+- **PR #4107**: fix(sim-batch): treat vCPU-budget launch refusal as batch_no_capacity
+- **Issue #4100** (closed): CI flake: apt install fails in 'Install Yosys build dependencies' (recurrence of #1224)
+- **PR #4104**: ci: skip Yosys apt prerequisites on a Yosys cache hit
+- **Issue #4087** (closed): klt-pdk.json descriptor maps Liberty only: LEF/tech LEF still need open_pdks file naming, and one Liberty file per corner
+- **PR #4096**: feat(pdk): descriptor views and multi-file Liberty corners
+- **Issue #4083** (closed): functional-verification: no path to reuse an existing self-checking Verilog testbench for an SDF-annotated gate-level run
+- **PR #4095**: feat(functional-verification): run self-checking Verilog benches via testbench.verilog_top
+- **Issue #4097** (closed): batch backend: .lib path not rewritten; corners.params/expr runner-skew and models.pdk_root accepted but unusable
+- **PR #4102**: feat(sim-batch): catch .lib host paths, params skew and local pdk_root at submit
+- **Issue #4084** (closed): klt sim: swept curves only via per-point .meas; par() cap and out-of-interval AT report as generic 'produced no value'
+- **PR #4093**: feat(sim): name par() cap and one-row ac sweep causes in diagnostics
+- **Issue #4089** (closed): klt sta: Liberty with time_unit 1ps makes the aggregate slack fields and fmax_mhz 1000x off from the worst-path slack
+- **PR #4099**: fix(sta): pin ns/pF command units before create_clock
+- **Issue #4079** (closed): klt sim batch: job records commit the storage bucket name (cloud account ID) into canary repos
+- **PR #4080**: fix(sim-batch): omit bucket from on-disk receipts and shard manifest
+- **Issue #4085** (closed): klt sim: transient waveform-only request exits 4 (not_checked); vector expressions rejected as measurements
+- **PR #4056**: chore(loom): resync installed Loom to v0.19.1209
+- **Issue #2703** (closed): klt erc's file and klt sta's def_path/verilog_path are input-artifact fields but stayed plain strings after #2659
+- **PR #4077**: feat(erc,lef-abstract): emit input layout as portable {path, scope} envelope
+- **Issue #2702** (closed): Docs still describe the pre-#2659 path shape: signoff.md's checks[].detail examples (and the mom-fidelity generator docstring)
+- **PR #4076**: docs(signoff): show {path, scope} envelope in detail.file/layout examples
+- **Issue #2699** (closed): drc/extract/lvs --check/--rerun can no longer verify a report whose input lives outside any repository
+- **PR #4078**: feat(cli): explicit input override for drc/extract/lvs --check and --rerun
+- **Issue #2659** (closed): drc/extract responses embed the producing host's absolute input path; signoff's input_verified gate cannot re-verify them from another checkout
+- **PR #2701**: feat(drc,extract,lvs): emit echoed input paths as the portable {path, scope} envelope
+- **Issue #2252** (closed): Epic: layout-tier flow-comparison benchmark — draw-only vs generator-first vs generator+refine (AHRR, ICCAD'26)
 - **PR #4070**: klt artifact: write logical artifact:<key> URIs; drop the bucket setting
 - **PR #3913**: feat(benchmark): add report-layout for ledger-only layout comparison reports
 - **PR #3903**: test: add live OpenROAD klt sta tests for write_spef NAME_MAP and driving cell/load
