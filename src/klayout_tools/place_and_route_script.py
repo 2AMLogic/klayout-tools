@@ -389,39 +389,61 @@ def _pdn_connects_applied(power: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _tapcell_masters(cell_library: str) -> tuple[str | None, str | None, int | None]:
+def _tapcell_masters(
+    cell_library: str, library: dict[str, Any] | None = None
+) -> tuple[str | None, str | None, int | float | None]:
     """``(tapcell_master, endcap_master, distance_um)`` for this library's
-    ``request.power`` ``tapcell`` call -- all ``None`` for a library in
-    :data:`_NO_TAPCELL_LIBRARIES`, which has no tap/endcap masters to place
-    and therefore gets no ``tapcell`` line at all (issue #2441).
+    ``request.power`` ``tapcell`` call -- all ``None`` for a library with no
+    tap/endcap masters (:data:`_NO_TAPCELL_LIBRARIES`, or an explicit
+    ``request.library.tapcell: null``, issue #4127), which gets no
+    ``tapcell`` line at all (issue #2441). A supplied ``request.library.
+    tapcell`` takes precedence over the built-in tables.
 
-    Only ever reached after the ``request.power`` validation above has
-    established that ``cell_library`` is in one of the two tables, so the
-    ``KeyError`` a third, unverified library would raise here is
-    unreachable -- deliberately a hard failure rather than a silent
-    all-``None`` that would look identical to the verified no-tapcell case.
+    Only ever reached after the ``request.power`` validation has
+    established that the library is known, so the ``KeyError`` a third,
+    unverified library would raise here is unreachable -- deliberately a
+    hard failure rather than a silent all-``None`` that would look
+    identical to the verified no-tapcell case.
     """
     from .place_and_route import (
         _NO_TAPCELL_LIBRARIES,
         _TAPCELL_CELLS,
     )
 
+    if library is not None and "tapcell" in library:
+        return library["tapcell"]
     if cell_library in _NO_TAPCELL_LIBRARIES:
         return None, None, None
     return _TAPCELL_CELLS[cell_library]
 
 
+def _filler_masters(
+    cell_library: str, library: dict[str, Any] | None = None
+) -> tuple[str, ...]:
+    """Filler masters: ``request.library.filler`` (issue #4127), else the
+    built-in :data:`_FILLER_CELLS` entry (``KeyError`` if neither; callers
+    run after the up-front validation)."""
+    from .place_and_route import _FILLER_CELLS
+
+    if library is not None and "filler" in library:
+        return library["filler"]
+    return _FILLER_CELLS[cell_library]
+
+
 def _tapcell_lines(
-    cell_library: str, distance_um: int | float | None = None
+    cell_library: str,
+    distance_um: int | float | None = None,
+    library: dict[str, Any] | None = None,
 ) -> list[str]:
     """The ``request.power`` ``tapcell`` Tcl for ``cell_library`` -- one
-    line, or **none at all** for a library in
-    :data:`_NO_TAPCELL_LIBRARIES` (issue #2441), which has no tap/endcap
-    masters to place. ``-endcap_master`` is appended only for a library
-    whose :data:`_TAPCELL_CELLS` entry names one. ``distance_um`` (issue
-    #3051) overrides the table pitch; ``None`` keeps the table value.
+    line, or **none at all** for a library with no tap/endcap masters to
+    place (issue #2441). ``-endcap_master`` is appended only for a library
+    whose entry names one. ``distance_um`` (issue #3051) overrides the
+    table pitch; ``None`` keeps the table value.
     """
-    tap_master, endcap_master, table_distance_um = _tapcell_masters(cell_library)
+    tap_master, endcap_master, table_distance_um = _tapcell_masters(
+        cell_library, library
+    )
     if tap_master is None:
         return []
     if distance_um is None:
@@ -432,19 +454,19 @@ def _tapcell_lines(
     return [call]
 
 
-def _power_physical_only_masters(cell_library: str) -> list[str]:
+def _power_physical_only_masters(
+    cell_library: str, library: dict[str, Any] | None = None
+) -> list[str]:
     """The physical-only cell masters a ``request.power`` run inserts for
     ``cell_library``: its tapcell and (when it names one) endcap master,
-    followed by its filler masters. A :data:`_NO_TAPCELL_LIBRARIES` library
-    (issue #2441) contributes fillers only -- it places no tapcell/endcap
+    followed by its filler masters. A library with no tap cells (issue
+    #2441) contributes fillers only -- it places no tapcell/endcap
     instances, so naming any here would ask ``write_verilog
     -remove_cells`` to strip cells the layout does not contain.
     """
-    from .place_and_route import _FILLER_CELLS
-
-    tap_master, endcap_master, _distance_um = _tapcell_masters(cell_library)
+    tap_master, endcap_master, _distance_um = _tapcell_masters(cell_library, library)
     masters = [master for master in (tap_master, endcap_master) if master is not None]
-    return masters + list(_FILLER_CELLS[cell_library])
+    return masters + list(_filler_masters(cell_library, library))
 
 
 def _wire_rc_lines(
@@ -508,7 +530,9 @@ def _power_delivery_lines(
     # No `tapcell` line at all on a library that ships no tap/endcap cells
     # (issue #2441) -- everything below is unchanged for it, since nothing
     # in the global-connect/PDN sequence depends on `tapcell` having run.
-    lines: list[str] = _tapcell_lines(cell_library, power.get("tapcell_distance_um"))
+    lines: list[str] = _tapcell_lines(
+        cell_library, power.get("tapcell_distance_um"), library
+    )
 
     pin_patterns = (
         library["power_pins"]
@@ -703,7 +727,6 @@ def _stage_script_lines(
     from .place_and_route import (
         _ANTENNA_DIODE_CELLS,
         _CTS_BUFFER_CELLS,
-        _FILLER_CELLS,
         _GLOBAL_PLACEMENT_DENSITY,
         _ROUTING_LAYER_RANGE,
         _ROW_RAIL_STRAP,
@@ -884,8 +907,16 @@ def _stage_script_lines(
         cts_def_path = os.path.join(output_dir, f"{hdl_toplevel}.cts.def")
         lines += [f"write_def {cts_def_path}"]
     else:  # stage == "route"
-        routing_range = _ROUTING_LAYER_RANGE[cell_library]
-        diode_cell = _ANTENNA_DIODE_CELLS[cell_library][0]
+        routing_range = (
+            library["route_layers"]
+            if library is not None and "route_layers" in library
+            else _ROUTING_LAYER_RANGE[cell_library]
+        )
+        diode_cell = (
+            library["antenna_diode"][0]
+            if library is not None and "antenna_diode" in library
+            else _ANTENNA_DIODE_CELLS[cell_library][0]
+        )
         # `-critical_nets_percentage` (issue #939, native-routing survey
         # section 4.1): a real, documented `global_route` flag -- see this
         # module's own docstring, "Timing-driven global routing + bounded
@@ -990,7 +1021,7 @@ def _stage_script_lines(
         # zero `klt extract` `merged_net_labels[]` power/signal shorts
         # either way.
         if power is not None or row_rail_active:
-            filler_masters = " ".join(_FILLER_CELLS[cell_library])
+            filler_masters = " ".join(_filler_masters(cell_library, library))
             lines += [f"filler_placement {{{filler_masters}}}", "global_connect"]
         lines += ["estimate_parasitics -global_routing"]
 
@@ -1081,9 +1112,9 @@ def _stage_script_lines(
         # row-rail branch below, for the same reason.
         physical_only_masters: list[str] = []
         if power is not None:
-            physical_only_masters += _power_physical_only_masters(cell_library)
+            physical_only_masters += _power_physical_only_masters(cell_library, library)
         elif row_rail_active:
-            physical_only_masters += list(_FILLER_CELLS[cell_library])
+            physical_only_masters += list(_filler_masters(cell_library, library))
         if physical_only_masters:
             removed = " ".join(physical_only_masters)
             write_verilog_call += f" -remove_cells {{{removed}}}"
