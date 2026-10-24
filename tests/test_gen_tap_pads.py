@@ -175,3 +175,68 @@ def test_tap_pad_gate_margins_are_unique_to_tap_distance_families():
     }
     assert margins and all(m > 0.0 for m in margins)
     assert not {fam for fam, m in others.items() if m in margins}
+
+
+def _tap_pad_ports(report):
+    return [p for p in report["ports"] if p["name"].startswith("TAP_PAD")]
+
+
+def _drawn_pad_centres(output, report):
+    """Centres of the tap-only COMP squares (COMP not crossed by poly)."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    comp, poly = _region(layout, COMP), _region(layout, POLY)
+    pads = comp - comp.interacting(poly)
+    return sorted(
+        (
+            round(p.bbox().center().x * layout.dbu, 3),
+            round(p.bbox().center().y * layout.dbu, 3),
+        )
+        for p in pads.each_merged()
+    )
+
+
+@pytest.mark.parametrize(
+    ("generator", "params"),
+    [
+        ("mos_array", {"flavor": "nfet"}),
+        ("mos_array", {"flavor": "pfet", "rows": 1, "cols": 14, "dummy": 0}),
+        ("diff_pair", {"flavor": "nfet", "add_guard_ring": False}),
+        ("diff_pair", {"flavor": "pfet", "add_guard_ring": False}),
+    ],
+)
+def test_tap_pads_are_reported_as_ports(root, tmp_path, generator, params):
+    output, report = _gen(root, tmp_path, generator, params, f"ports_{generator}")
+    ports = _tap_pad_ports(report)
+    assert ports
+    assert [p["name"] for p in ports] == [f"TAP_PAD{k}" for k in range(len(ports))]
+    assert all(p["net"] is None for p in ports)
+    reported = sorted((round(p["x_um"], 3), round(p["y_um"], 3)) for p in ports)
+    assert reported == _drawn_pad_centres(output, report)
+
+
+def test_wide_array_reports_interior_pads(root, tmp_path):
+    _, narrow = _gen(root, tmp_path, "mos_array", {"rows": 1, "cols": 2}, "narrow")
+    _, wide = _gen(
+        root, tmp_path, "mos_array", {"rows": 1, "cols": 14, "dummy": 0}, "wide"
+    )
+    assert len(_tap_pad_ports(wide)) > len(_tap_pad_ports(narrow)) == 4
+
+
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair"])
+def test_no_pad_ports_with_ring_or_on_sky130(root, tmp_path, generator):
+    _, ringed = _gen(
+        root, tmp_path, generator, {"add_guard_ring": True}, f"ring_{generator}"
+    )
+    assert not _tap_pad_ports(ringed)
+    _, sky = _gen(
+        root,
+        tmp_path,
+        generator,
+        {"add_guard_ring": False},
+        f"sky_{generator}",
+        variant="sky130A",
+    )
+    assert not _tap_pad_ports(sky)
