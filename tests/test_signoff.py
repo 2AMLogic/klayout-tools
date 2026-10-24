@@ -17439,6 +17439,58 @@ def test_attest_check_cli_exit_codes_with_local_only(tmp_path, capsys):
     assert "[SKIP]" in capsys.readouterr().out
 
 
+_NOISY_FAIL = [
+    sys.executable,
+    "-c",
+    "import sys; print('out'+'-line'); print('boom'+'-on-stderr', file=sys.stderr); "
+    "[print(f'row {i}') for i in range(100)]; sys.exit(1)",
+]
+
+
+def test_attest_check_text_shows_bounded_tail_of_failing_command(tmp_path, capsys):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, argv=_NOISY_FAIL)
+    committed = _commit_attestation(repo, inventory)
+
+    code = _attest_cli(1, inventory, "--check", str(committed), "--format", "text")
+
+    out = capsys.readouterr().out
+    assert code != 0
+    assert "row 99" in out
+    assert "row 50" not in out  # only the last ~20 lines
+    assert "out-line" not in out
+
+
+def test_attest_text_shows_stderr_tail_but_passing_check_prints_none(tmp_path, capsys):
+    repo = _attest_repo(tmp_path)
+    failing = _local_only_inventory(
+        repo,
+        argv=[
+            sys.executable,
+            "-c",
+            "import sys; print('boom'+'-on-stderr', file=sys.stderr); sys.exit(1)",
+        ],
+    )
+    assert _attest_cli(1, failing, "--format", "text") != 0
+    assert "| boom-on-stderr" in capsys.readouterr().out
+
+    passing = _local_only_inventory(
+        repo, argv=[sys.executable, "-c", "print('quiet'+'-success')"]
+    )
+    assert _attest_cli(1, passing, "--format", "text") == 0
+    assert "quiet-success" not in capsys.readouterr().out
+
+
+def test_attest_failure_output_never_enters_the_envelope(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, argv=_NOISY_FAIL)
+
+    rendered = attest_module.render_envelope(build_attestation(1, inventory))
+
+    assert "row 99" not in rendered
+    assert build_attestation(1, inventory) == build_attestation(1, inventory)
+
+
 def test_attest_without_local_only_still_runs_every_command(tmp_path):
     repo = _attest_repo(tmp_path)
     inventory = _local_only_inventory(repo)

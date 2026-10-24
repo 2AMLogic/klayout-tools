@@ -65,7 +65,10 @@ Or with `pip`:
 pip install klayout-tools
 ```
 
-`klt` is now on `PATH`. For the latest development version, install from
+`klt` is now on `PATH`. Either install provides the `klayout` **Python
+module** only — `klt drc --engine klayout` additionally needs a system KLayout
+application with `klayout` on `PATH` (<https://www.klayout.de/build.html>).
+For the latest development version, install from
 source instead:
 
 ```bash

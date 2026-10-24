@@ -1696,6 +1696,14 @@ def run_drc_klayout_engine(
                 f"({exc})",
                 code=CODE_KLAYOUT_UNAVAILABLE,
             ) from exc
+        except OSError as exc:
+            raise DrcError(
+                f"could not launch klayout: {exc}. Check that a system "
+                "KLayout (https://www.klayout.de/build.html) is installed "
+                "and executable, or omit --engine klayout to use the "
+                "curated deck instead.",
+                code=CODE_KLAYOUT_UNAVAILABLE,
+            ) from exc
         except subprocess.TimeoutExpired as exc:
             raise DrcError(
                 f"klayout did not complete within {timeout_s}s (raise "
