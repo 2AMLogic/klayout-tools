@@ -855,6 +855,9 @@ from .place_and_route_script import (
     _dont_use_lines as _dont_use_lines,
 )
 from .place_and_route_script import (
+    _filler_masters as _filler_masters,
+)
+from .place_and_route_script import (
     _floorplan_init_lines as _floorplan_init_lines,
 )
 from .place_and_route_script import (
@@ -1897,17 +1900,25 @@ def _missing_stage_tables(
             f"'{cell_library}' (supported: {', '.join(sorted(_CTS_BUFFER_CELLS))}) "
             f"{tail} [supply request.library.cts_buffer]"
         )
-    if at_route and cell_library not in _ROUTING_LAYER_RANGE:
+    if (
+        at_route
+        and "route_layers" not in lib
+        and cell_library not in _ROUTING_LAYER_RANGE
+    ):
         missing.append(
             f"no routing-layer range known for standard-cell library "
             f"'{cell_library}' (supported: {', '.join(sorted(_ROUTING_LAYER_RANGE))}) "
-            f"{tail} [no request override yet]"
+            f"{tail} [supply request.library.route_layers]"
         )
-    if at_route and cell_library not in _ANTENNA_DIODE_CELLS:
+    if (
+        at_route
+        and "antenna_diode" not in lib
+        and cell_library not in _ANTENNA_DIODE_CELLS
+    ):
         missing.append(
             f"no antenna-diode cell known for standard-cell library "
             f"'{cell_library}' (supported: {', '.join(sorted(_ANTENNA_DIODE_CELLS))}) "
-            f"{tail} [no request override yet]"
+            f"{tail} [supply request.library.antenna_diode]"
         )
     return missing
 
@@ -1936,20 +1947,28 @@ def _missing_power_tables(
             f"'{cell_library}' (supported: {', '.join(sorted(_POWER_PIN_PATTERNS))}) "
             "-- cannot honor request.power [supply request.library.power_pins]"
         )
-    if cell_library not in _TAPCELL_CELLS and cell_library not in _NO_TAPCELL_LIBRARIES:
+    if (
+        "tapcell" not in lib
+        and cell_library not in _TAPCELL_CELLS
+        and cell_library not in _NO_TAPCELL_LIBRARIES
+    ):
         missing.append(
             f"no tapcell master known for standard-cell library "
             f"'{cell_library}' (supported: {', '.join(sorted(_TAPCELL_CELLS))}; "
             f"libraries with no tap/endcap cells at all: "
             f"{', '.join(sorted(_NO_TAPCELL_LIBRARIES))}) "
-            "-- cannot honor request.power [no request override yet]"
+            "-- cannot honor request.power [supply request.library.tapcell]"
         )
-    if stage_index >= STAGE_ORDER.index("route") and cell_library not in _FILLER_CELLS:
+    if (
+        stage_index >= STAGE_ORDER.index("route")
+        and "filler" not in lib
+        and cell_library not in _FILLER_CELLS
+    ):
         missing.append(
             f"no filler-cell masters known for standard-cell library "
             f"'{cell_library}' (supported: {', '.join(sorted(_FILLER_CELLS))}) "
             f"-- cannot honor request.power at target_stage '{target_stage}' "
-            "[no request override yet]"
+            "[supply request.library.filler]"
         )
     return missing
 
@@ -2015,7 +2034,7 @@ def _validate_stage_prerequisites(
         )
     # Every missing per-library input is collected and reported together
     # (issue #4086), each naming the `request.library` field that supplies it
-    # (or "no request override yet"), instead of one error per rerun.
+    # (`[supply request.library.<key>]`), instead of one error per rerun.
     lib = library or {}
     missing = _missing_stage_tables(stage_index, target_stage, cell_library, lib)
     missing += _missing_power_tables(
@@ -2041,6 +2060,7 @@ def _validate_stage_prerequisites(
         power is None
         and stage_index >= STAGE_ORDER.index("route")
         and cell_library in _ROW_RAIL_STRAP
+        and "filler" not in lib
         and cell_library not in _FILLER_CELLS
     ):
         raise PlaceAndRouteError(
@@ -2048,6 +2068,27 @@ def _validate_stage_prerequisites(
             f"'{cell_library}' -- cannot honor the row-rail fallback "
             f"(issue #1442) at target_stage '{target_stage}'"
         )
+
+
+def _audit_tapcell_masters(
+    cell_library: str, library: dict[str, Any] | None
+) -> tuple[str | None, str | None]:
+    """Tap/endcap masters the power audit looks for: ``request.library.
+    tapcell`` (issue #4127), else the built-in table; ``(None, None)`` for a
+    library with neither (the audit then skips those checks)."""
+    if library is not None and "tapcell" in library:
+        tap, endcap, _distance_um = library["tapcell"]
+        return tap, endcap
+    tap, endcap, _distance_um = _TAPCELL_CELLS.get(cell_library, (None, None, 0))
+    return tap, endcap
+
+
+def _audit_filler_masters(
+    cell_library: str, library: dict[str, Any] | None
+) -> tuple[str, ...]:
+    if library is not None and "filler" in library:
+        return library["filler"]
+    return _FILLER_CELLS.get(cell_library, ())
 
 
 def _run_single_corner(
@@ -2132,8 +2173,8 @@ def _run_single_corner(
     # no-op.
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
-    power = _validate_power(request.get("power"), cell_library)
     library = _validate_library(request.get("library"))
+    power = _validate_power(request.get("power"), cell_library, library)
     (
         clock_port,
         clock_period_ns,
@@ -2532,7 +2573,7 @@ def _run_single_corner(
             "layer": rail_layer,
             "power_net": rail_power_net,
             "ground_net": rail_ground_net,
-            "filler_masters": list(_FILLER_CELLS[cell_library]),
+            "filler_masters": list(_filler_masters(cell_library, library)),
         }
     else:
         row_rail_info = {
@@ -2558,7 +2599,9 @@ def _run_single_corner(
             "row_rail": row_rail_info,
         }
     else:
-        tap_master, endcap_master, table_distance_um = _tapcell_masters(cell_library)
+        tap_master, endcap_master, table_distance_um = _tapcell_masters(
+            cell_library, library
+        )
         tapcell_distance_um = _effective_tapcell_distance(power, table_distance_um)
         power_info = {
             "preset": power["preset"],
@@ -2570,7 +2613,9 @@ def _run_single_corner(
             "endcap_master": endcap_master,
             "tapcell_distance_um": tapcell_distance_um,
             "filler_masters": (
-                list(_FILLER_CELLS[cell_library]) if target_stage == "route" else []
+                list(_filler_masters(cell_library, library))
+                if target_stage == "route"
+                else []
             ),
             "straps": [
                 {"layer": strap["layer"], "spacing_um": strap["spacing_um"]}
@@ -2603,8 +2648,8 @@ def _run_single_corner(
     # audit there is no such instance to look for, so it *skips* the
     # tapcell/endcap checks rather than grading their absence as a hole --
     # which is exactly right for a library that has no tap cells to place.
-    audit_tap_master, audit_endcap_master, _audit_distance_um = _TAPCELL_CELLS.get(
-        cell_library, (None, None, 0)
+    audit_tap_master, audit_endcap_master = _audit_tapcell_masters(
+        cell_library, library
     )
     audited_def_path = def_path or unrouted_def_path
     power_info["placed"] = audit_power_delivery(
@@ -2616,7 +2661,7 @@ def _run_single_corner(
         ),
         tapcell_master=audit_tap_master,
         endcap_master=audit_endcap_master,
-        filler_masters=_FILLER_CELLS.get(cell_library, ()),
+        filler_masters=_audit_filler_masters(cell_library, library),
         power_net=(
             power["power_net"] if power is not None else row_rail_info["power_net"]
         ),

@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 
 from .lef_header import read_lef_header
@@ -804,7 +805,9 @@ def _resolve_pdn_preset(
 
 
 def _validate_power(
-    power: Any, cell_library: str | None = None
+    power: Any,
+    cell_library: str | None = None,
+    library: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Validate the optional ``request.power`` block (issue #1091) -- power
     delivery net names and PDN strap geometry, driving ``tapcell``/
@@ -1040,7 +1043,7 @@ def _validate_power(
     # diffusion-to-tap distance. A `_NO_TAPCELL_LIBRARIES` library emits no
     # `tapcell` line, so an override there is rejected rather than silently
     # ignored.
-    tapcell_distance_um = _validate_tapcell(power.get("tapcell"), cell_library)
+    tapcell_distance_um = _validate_tapcell(power.get("tapcell"), cell_library, library)
 
     return {
         "preset": preset_name,
@@ -1052,7 +1055,9 @@ def _validate_power(
     }
 
 
-def _validate_tapcell(tapcell: Any, cell_library: str | None) -> int | float | None:
+def _validate_tapcell(
+    tapcell: Any, cell_library: str | None, library: dict[str, Any] | None = None
+) -> int | float | None:
     """Validate ``request.power.tapcell`` (issue #3051); return its
     ``distance_um`` override, or ``None`` when ``tapcell`` is omitted."""
     # Deferred: defined in `place_and_route.py`, which imports this module at
@@ -1083,7 +1088,11 @@ def _validate_tapcell(tapcell: Any, cell_library: str | None) -> int | float | N
             "request.power.tapcell.distance_um is required and must be a "
             "positive number"
         )
-    if cell_library in _NO_TAPCELL_LIBRARIES:
+    if (
+        library["tapcell"][0] is None
+        if library is not None and "tapcell" in library
+        else cell_library in _NO_TAPCELL_LIBRARIES
+    ):
         raise PlaceAndRouteError(
             f"request.power.tapcell.distance_um cannot be honored: "
             f"standard-cell library '{cell_library}' has no tap/endcap "
@@ -1093,7 +1102,7 @@ def _validate_tapcell(tapcell: Any, cell_library: str | None) -> int | float | N
 
 
 def _effective_tapcell_distance(
-    power: dict[str, Any], table_distance_um: int | None
+    power: dict[str, Any], table_distance_um: int | float | None
 ) -> int | float | None:
     """The ``tapcell -distance`` pitch: the validated override, else the
     per-library table value."""
@@ -1566,7 +1575,15 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
     return float(value)
 
 
-_LIBRARY_KEYS = ("cts_buffer", "power_pins", "wire_rc")
+_LIBRARY_KEYS = (
+    "cts_buffer",
+    "power_pins",
+    "wire_rc",
+    "route_layers",
+    "antenna_diode",
+    "tapcell",
+    "filler",
+)
 
 
 def _positive_number(value: Any, where: str) -> float:
@@ -1633,6 +1650,93 @@ def _validate_library_wire_rc(rc: Any) -> tuple[float, float]:
     )
 
 
+def _library_name(value: Any, where: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise PlaceAndRouteError(f"{where} must be a non-empty string")
+    return value
+
+
+def _library_object(raw: Any, where: str, keys: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise PlaceAndRouteError(f"{where} must be a JSON object")
+    unknown = sorted(set(raw) - set(keys))
+    if unknown:
+        raise PlaceAndRouteError(f"{where} has unknown key(s): {', '.join(unknown)}")
+    return raw
+
+
+def _validate_library_route_layers(raw: Any) -> str:
+    where = "request.library.route_layers"
+    obj = _library_object(raw, where, ("low", "high"))
+    for key in ("low", "high"):
+        if key not in obj:
+            raise PlaceAndRouteError(f"{where}.{key} is required")
+    low = _library_name(obj["low"], f"{where}.low")
+    high = _library_name(obj["high"], f"{where}.high")
+    return f"{low}-{high}"
+
+
+def _validate_library_antenna_diode(raw: Any) -> tuple[str, str]:
+    where = "request.library.antenna_diode"
+    obj = _library_object(raw, where, ("cell", "pin"))
+    for key in ("cell", "pin"):
+        if key not in obj:
+            raise PlaceAndRouteError(f"{where}.{key} is required")
+    return (
+        _library_name(obj["cell"], f"{where}.cell"),
+        _library_name(obj["pin"], f"{where}.pin"),
+    )
+
+
+def _validate_library_tapcell(
+    raw: Any,
+) -> tuple[str | None, str | None, int | float | None]:
+    """``None`` (JSON ``null``) states the library has no tap/endcap cells;
+    an object names the masters and pitch."""
+    where = "request.library.tapcell"
+    if raw is None:
+        return None, None, None
+    obj = _library_object(raw, where, ("master", "endcap", "distance_um"))
+    for key in ("master", "distance_um"):
+        if key not in obj:
+            raise PlaceAndRouteError(f"{where}.{key} is required")
+    endcap = obj.get("endcap")
+    if endcap is not None:
+        endcap = _library_name(endcap, f"{where}.endcap")
+    distance = _positive_number(obj["distance_um"], f"{where}.distance_um")
+    return (
+        _library_name(obj["master"], f"{where}.master"),
+        endcap,
+        int(distance) if distance.is_integer() else distance,
+    )
+
+
+def _validate_library_filler(raw: Any) -> tuple[str, ...]:
+    where = "request.library.filler"
+    if not isinstance(raw, list) or not raw:
+        raise PlaceAndRouteError(f"{where} must be a non-empty list of strings")
+    return tuple(_library_name(item, f"{where}[{i}]") for i, item in enumerate(raw))
+
+
+def _validate_library_cts_buffer(buf: Any) -> str:
+    if not isinstance(buf, str) or not buf.strip():
+        raise PlaceAndRouteError(
+            "request.library.cts_buffer must be a non-empty string"
+        )
+    return buf
+
+
+_LIBRARY_VALIDATORS: dict[str, Callable[[Any], Any]] = {
+    "cts_buffer": _validate_library_cts_buffer,
+    "power_pins": _validate_library_power_pins,
+    "wire_rc": _validate_library_wire_rc,
+    "route_layers": _validate_library_route_layers,
+    "antenna_diode": _validate_library_antenna_diode,
+    "tapcell": _validate_library_tapcell,
+    "filler": _validate_library_filler,
+}
+
+
 def _validate_library(library: Any) -> dict[str, Any] | None:
     """Optional ``request.library`` (issue #4086): per-library inputs for a
     standard-cell library the built-in tables
@@ -1640,7 +1744,10 @@ def _validate_library(library: Any) -> dict[str, Any] | None:
     override of a built-in entry. ``None`` (field omitted) leaves every
     generated script byte-identical. Returns only the keys that were given:
     ``cts_buffer`` (str), ``power_pins`` (list of ``(net_role, pattern,
-    primary)``), ``wire_rc`` (``(resistance, capacitance)``).
+    primary)``), ``wire_rc`` (``(resistance, capacitance)``),
+    ``route_layers`` (``"low-high"``), ``antenna_diode`` (``(cell, pin)``),
+    ``tapcell`` (``(tap, endcap, distance_um)``, all ``None`` = the library
+    has no tap cells) and ``filler`` (tuple of masters; issue #4127).
     """
     if library is None:
         return None
@@ -1652,17 +1759,9 @@ def _validate_library(library: Any) -> dict[str, Any] | None:
             f"request.library has unknown key(s): {', '.join(unknown)}"
         )
     out: dict[str, Any] = {}
-    if "cts_buffer" in library:
-        buf = library["cts_buffer"]
-        if not isinstance(buf, str) or not buf.strip():
-            raise PlaceAndRouteError(
-                "request.library.cts_buffer must be a non-empty string"
-            )
-        out["cts_buffer"] = buf
-    if "power_pins" in library:
-        out["power_pins"] = _validate_library_power_pins(library["power_pins"])
-    if "wire_rc" in library:
-        out["wire_rc"] = _validate_library_wire_rc(library["wire_rc"])
+    for key, validate in _LIBRARY_VALIDATORS.items():
+        if key in library:
+            out[key] = validate(library[key])
     return out
 
 
