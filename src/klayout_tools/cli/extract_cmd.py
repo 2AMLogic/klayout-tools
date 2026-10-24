@@ -62,7 +62,13 @@ from ._parsing import (
     parse_label_layers,
     parse_probes,
 )
-from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_rerun_drift
+from .output import (
+    EXIT_USAGE_ERROR,
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+)
 
 EXIT_OK = 0
 EXIT_DRIFTED = 3
@@ -761,7 +767,7 @@ def _run_check(args: argparse.Namespace) -> int:
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
@@ -1072,14 +1078,3 @@ def _print_subcircuit_text(subcircuit: dict | None) -> None:
             f"{excluded['capacitance_ff']} fF  "
             f"{excluded['resistance_ohm']} ohm"
         )
-
-
-def _print_check_text(result: dict) -> None:
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")

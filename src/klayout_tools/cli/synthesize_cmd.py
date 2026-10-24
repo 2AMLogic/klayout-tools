@@ -48,7 +48,13 @@ from ..synthesize import (
     rerun_synthesize_report,
     run_synthesize,
 )
-from .output import emit_error, emit_success, render_rerun_drift, render_table
+from .output import (
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+    render_table,
+)
 
 #: Returned when a successful run's `structural.has_critical` is `true` --
 #: see this module's docstring "Exit codes" and `docs/cli/synthesize.md`.
@@ -124,23 +130,10 @@ def _run_check(args: argparse.Namespace) -> int:
     except SynthesizeError as exc:
         return emit_error("synthesize", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
-
-
-def _print_check_text(result: dict) -> None:
-    """`--format text` rendering of a cheap-mode `--check` result -- the same
-    shape `klt drc`/`klt lvs`/`klt extract` already print (issue #1106)."""
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")
 
 
 def _print_sta(report: dict) -> None:
