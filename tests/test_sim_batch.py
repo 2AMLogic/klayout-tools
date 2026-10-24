@@ -5352,12 +5352,16 @@ def test_sim_set_forwards_resume_to_every_request(tmp_path):
         return _fake_report()
 
     sim_set.run_sim_set(paths, outdir=str(tmp_path / "out"), run=fake_run, resume=True)
-    assert [p for p, _, _ in seen] == paths
-    assert all(resume is True for _, resume, _ in seen)
-    # Each request resumes from its own directory (where batch-shards.json lives).
-    assert [d for _, _, d in seen] == [
-        str(tmp_path / "out" / f"req{i}") for i in range(3)
-    ]
+    # run_sim_set dispatches concurrently, so fake_run call order is
+    # scheduler-dependent; key the observations by path instead.
+    by_path = {p: (resume, d) for p, resume, d in seen}
+    assert len(seen) == len(paths)
+    assert set(by_path) == set(paths)
+    for i, path in enumerate(paths):
+        resume, artifacts_dir = by_path[path]
+        assert resume is True
+        # Each request resumes from its own directory (where batch-shards.json lives).
+        assert artifacts_dir == str(tmp_path / "out" / f"req{i}")
 
     seen.clear()
     sim_set.run_sim_set(paths, outdir=str(tmp_path / "out2"), run=fake_run)
