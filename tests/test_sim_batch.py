@@ -6103,6 +6103,71 @@ def test_prelaunch_refuses_a_feature_every_published_image_predates(
     assert "analysis_steps" in str(raised.value)
 
 
+def _dry_run_request(tmp_path: Path) -> dict:
+    return {
+        "models": {"pdk": "sky130A"},
+        "analysis_steps": [{}],
+        "batch": {
+            "bucket": FAKE_BUCKET,
+            "provision_script_path": str(_provision_script(tmp_path)),
+        },
+    }
+
+
+def test_dry_run_check_refuses_a_feature_every_published_image_predates(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
+    with pytest.raises(sim.SimError) as raised:
+        sb.dry_run_runner_check(
+            _dry_run_request(tmp_path), corner_count=1, timeout_s=30.0
+        )
+    assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
+
+
+def test_dry_run_check_passes_when_the_manifest_supports_the_feature(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.1")])
+    request = _dry_run_request(tmp_path)
+    assert sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0) is None
+    # A legacy entry without klt_version is unknown, never a refusal.
+    _publish_manifest(tmp_path, monkeypatch, [_image()])
+    assert sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0) is None
+
+
+def test_dry_run_check_warn_mode_returns_the_diagnostic(tmp_path, monkeypatch):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
+    request = _dry_run_request(tmp_path)
+    request["batch"]["runner_version_check"] = "warn"
+    diagnostic = sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0)
+    assert diagnostic["features"] == ["analysis_steps"]
+
+
+def test_dry_run_check_is_skipped_without_a_batch_config(tmp_path, monkeypatch):
+    monkeypatch.delenv(sb.BUCKET_ENV, raising=False)
+    monkeypatch.delenv(sb.PROVISION_SCRIPT_ENV, raising=False)
+    request = {"models": {"pdk": "sky130A"}, "analysis_steps": [{}]}
+    assert sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0) is None
+
+
+def test_submit_progress_line_does_not_leak_the_bucket(tmp_path, capsys):
+    spec = sb._build_batch_job_spec(
+        {"models": {"pdk": "sky130A"}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    sb.submit_job(_config(tmp_path), "job-1", spec, runner=_FakeRunner())
+    err = capsys.readouterr().err
+    assert "submitting to s3://<bucket>/jobs/job-1" in err
+    assert FAKE_BUCKET not in err
+
+
 def test_prelaunch_feature_check_passes_when_unknown_or_supported(
     tmp_path, monkeypatch
 ):

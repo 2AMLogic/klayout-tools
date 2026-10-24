@@ -2148,6 +2148,8 @@ def test_osdi_abi_mismatch_names_the_missing_capability():
     assert diag["severity"] == "error"
     assert "prerequisite missing" in diag["message"]
     assert "ngspice >= 44" in diag["message"]
+    assert "fetch-asap7-sim-toolchain.sh" in diag["message"]
+    assert "fetch-sg13g2-sim-toolchain.sh" in diag["message"]
 
 
 def test_osdi_load_failure_names_the_missing_capability():
@@ -2158,6 +2160,7 @@ def test_osdi_load_failure_names_the_missing_capability():
     (diag,) = sim._classify_diagnostics(log)
     assert diag["code"] == "osdi_load_failed"
     assert "prerequisite missing" in diag["message"]
+    assert "fetch-sg13g2-sim-toolchain.sh" in diag["message"]
 
 
 def test_unsupported_model_level_corner_is_an_error_never_a_pass(tmp_path, monkeypatch):

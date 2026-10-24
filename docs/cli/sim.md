@@ -1805,6 +1805,16 @@ the packaged `data/` copy. See
   request's `models.pdk` is considered (every PDK when it names none), and
   only `batch.region` (every region when none is configured, because the
   fleet chooses its own Spot pool).
+- **`--dry-run`.** `klt sim --backend batch --dry-run` runs this same
+  pre-launch check (version mismatch and request-feature gaps), so a
+  request the published images cannot run is refused (or, under `warn`,
+  reported in `diagnostics[]`) without a submit. A host with no resolvable
+  batch configuration (no bucket or provision script) skips the check and
+  dry-runs as before. `options.initial_conditions` has no
+  registry row: its first-supported runner release is not recorded, so a
+  stale worker is still caught post-run by `initial_conditions_unsupported_worker`.
+- **Stderr progress.** The `submitting to` line shows the bucket as
+  `<bucket>` (the name embeds the account id), matching the report.
 - **Rule.** The check uses the same major.minor release-segment comparison
   as the runner-side gate (#3184, table above), so the two can never
   disagree. It reports a mismatch only when **every** candidate image

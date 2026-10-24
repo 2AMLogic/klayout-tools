@@ -164,6 +164,7 @@ from .sim_batch import (
     _validate_batch_models_lib,
     attach_engine_build_comparison,
     attach_staged_model_comparison,
+    dry_run_runner_check,
 )
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE
@@ -1166,13 +1167,17 @@ _PREREQUISITE_MESSAGES: dict[str, str] = {
     ),
     "osdi_abi_mismatch": (
         "prerequisite missing: ngspice cannot load the OSDI module's ABI "
-        "(an OpenVAF-Reloaded module needs ngspice >= 44; see "
-        "scripts/fetch-asap7-sim-toolchain.sh) -- ngspice said: {raw}"
+        "(an OpenVAF-Reloaded module needs ngspice >= 44; build it with "
+        "scripts/fetch-asap7-sim-toolchain.sh for ASAP7 or "
+        "scripts/fetch-sg13g2-sim-toolchain.sh for IHP SG13G2) -- "
+        "ngspice said: {raw}"
     ),
     "osdi_load_failed": (
         "prerequisite missing: ngspice could not load the OSDI module "
         "(wrong platform or OSDI ABI; rebuild it with "
-        "scripts/fetch-asap7-sim-toolchain.sh on this host's ngspice) -- "
+        "scripts/fetch-asap7-sim-toolchain.sh (ASAP7) or "
+        "scripts/fetch-sg13g2-sim-toolchain.sh (SG13G2) on this host's "
+        "ngspice) -- "
         "ngspice said: {raw}"
     ),
 }
@@ -3848,8 +3853,16 @@ def _run_sim_corners(
     )
 
     if dry_run:
+        feature_diagnostic = (
+            dry_run_runner_check(
+                request, corner_count=len(dispatch_points), timeout_s=timeout_s
+            )
+            if backend == "batch"
+            else None
+        )
         return _build_dry_run_report(
             request,
+            feature_diagnostic=feature_diagnostic,
             engine=engine,
             backend=backend,
             hosts=hosts,
@@ -4645,6 +4658,7 @@ def _build_dry_run_report(
     corner_points: list[CornerPoint],
     monte_carlo_info: dict[str, Any] | None,
     staged_model_environment: dict[str, list[dict[str, Any]]],
+    feature_diagnostic: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``klt sim --dry-run`` response (issue #3064): the request as
     :func:`_run_sim_corners` expanded it, with nothing simulated or submitted.
@@ -4671,7 +4685,7 @@ def _build_dry_run_report(
         f"unknown top-level request key '{key}' (ignored by klt sim)"
         for key in sorted(set(request) - _KNOWN_REQUEST_KEYS)
     ]
-    return {
+    report: dict[str, Any] = {
         "dry_run": True,
         "status": "valid",
         "engine": engine,
@@ -4685,6 +4699,9 @@ def _build_dry_run_report(
         "staged_files": staged_model_environment.get("staged_model_inputs", []),
         "warnings": warnings,
     }
+    if feature_diagnostic is not None:
+        report["diagnostics"] = [feature_diagnostic]
+    return report
 
 
 def _preflight_staged_model_inputs(
