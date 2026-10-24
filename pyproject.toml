@@ -245,7 +245,7 @@ packages = ["src/klayout_tools"]
 source = "code"
 path = "hatch_build.py"
 expression = "version_from_pyproject()"
-base-version = "0.7.0"
+base-version = "0.8.0"
 
 # Build identity (issue #1202). `hatch_build.py` records the commit/tag/dirty
 # state of the checkout each distribution is built from (plus the version the

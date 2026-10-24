@@ -109,15 +109,13 @@ klt signoff --attest {1,9,10} --inventory <file> --check <committed-envelope> [-
   for, plus its grading-code content hash. Mutually exclusive with
   `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`. See
   "Identifying the grading build" below.
-- `--attest` — **not in `klt` 0.7.0 (PyPI); ships in the next release after
-  0.7.0, until then pin a git commit.** `1`, `9` or `10`: produce the attestation envelope for that
+- `--attest` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** `1`, `9` or `10`: produce the attestation envelope for that
   T1 item from `--inventory` (issue #2844). Any other value is a usage error
   (exit `2`). Mutually exclusive with
   `<file>...`/`--manifest`/`--fleet`/`--describe-grader`/`--tiers-doc`.
   With `--check <committed-envelope>`, re-attests and diffs instead of
   writing. See "Attesting items 1, 9 and 10" below.
-- `--inventory` — **not in `klt` 0.7.0 (PyPI); ships in the next release
-  after 0.7.0.** With `--attest`: path to the attestation inventory (a
+- `--inventory` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** With `--attest`: path to the attestation inventory (a
   file inside a git repository, not `-`). Refused without `--attest`.
 - `-o`/`--output` — with `--attest`: also write the envelope to this path,
   only when it passes and only if its bytes changed. Refused without
@@ -1567,11 +1565,9 @@ these four included — is `"met"`.
 
 ### Attesting items 1, 9 and 10 (`--attest`, issue #2844)
 
-> **Availability:** `--attest` and `--inventory` are **not in `klt` 0.7.0**
-> (PyPI). They are on `main` and will ship in the next release after 0.7.0;
-> until then, pin a git commit (e.g. `uvx --from
-> "git+https://github.com/2AMLogic/klayout-tools@<commit>" klt signoff ...`).
-> Release-pinned installs of 0.7.0 fail with `unrecognized arguments`.
+> **Availability:** `--attest` and `--inventory` first ship in `klt` **0.8.0**
+> (PyPI). Release-pinned installs of 0.7.0 and earlier fail with
+> `unrecognized arguments`.
 
 `klt signoff --attest {1,9,10} --inventory FILE` is the producer for the
 artifact-anchored envelope above. It reads a versioned **attestation

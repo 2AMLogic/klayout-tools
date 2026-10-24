@@ -14,6 +14,8 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+## 0.8.0 (2026-10-24)
+
 - **`klt place-and-route --backend batch` fails fast on a runner that predates
   `--backend`** (issue #4124, documented in
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)). New error code

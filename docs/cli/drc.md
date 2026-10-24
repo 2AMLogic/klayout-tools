@@ -2338,15 +2338,11 @@ Pick a pin from this table, not from the unreleased examples in this page.
 | `0.5.0` | none (no ASAP7 deck) | no | none |
 | `0.6.0` | none (no ASAP7 deck) | no | none |
 | `0.7.0` | 106 rule categories, FEOL + MOL only (no M1-M9 / V1-V9) | refused: `klt lvs` with `layout.deck: asap7` errors "does not yet compare FinFET devices" (#2813) | `asap7` FinFET extraction deck |
-| Unreleased (`main`) | 263 rule categories, FEOL + MOL + BEOL M1-M9 / V0-V9 | supported (`options.finfet_bulk`) | `asap7` FinFET extraction deck |
+| `0.8.0` | 263 rule categories, FEOL + MOL + BEOL M1-M9 / V0-V9 | supported (`options.finfet_bulk`) | `asap7` FinFET extraction deck |
 
-`--expect-rule-categories 263` in the example below, and FinFET LVS, apply
-to the **unreleased tree only**. A user on `0.7.0` needs a git pin until the
-next release ships them:
-
-```bash
-uvx --from "git+https://github.com/2AMLogic/klayout-tools@<sha>" klt drc ...
-```
+`--expect-rule-categories 263` in the example below, and FinFET LVS, need
+`0.8.0` or later; on `0.7.0` use the 106-category deck and expect `klt lvs`
+to refuse FinFET devices.
 
 `klt deck info --deck asap7` reports the extraction deck module and the
 packaged `asap7.drc` as separate artifacts (`content_hash` vs
