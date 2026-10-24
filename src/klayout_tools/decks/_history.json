@@ -253,6 +253,84 @@
       "git_tag": "v0.7.0",
       "git_commit": "0e2362bda7309829398a35d54efaa989d5806065",
       "package_version": "0.7.0"
+    },
+    {
+      "deck": "asap7",
+      "content_hash": "sha256:30a8d86cc36f99ffc54b0c86ab69a737acd91ba0fd21f6de3c842f9fba9d2aaf",
+      "git_tag": "v0.8.0",
+      "git_commit": "c572046be644e0407f693f2410f3abb799d68a3a",
+      "package_version": "0.8.0"
+    },
+    {
+      "deck": "asap7_rules",
+      "content_hash": "sha256:55313616533895644698005870cdaf2e9123905a194a7083eacc639b671f6d82",
+      "git_tag": "v0.8.0",
+      "git_commit": "c572046be644e0407f693f2410f3abb799d68a3a",
+      "package_version": "0.8.0"
+    },
+    {
+      "deck": "extraction",
+      "content_hash": "sha256:c7db8ba3da00f50eafa37bfc44ef009adc6cbad48de4fa074b61b6aee1300472",
+      "git_tag": "v0.8.0",
+      "git_commit": "c572046be644e0407f693f2410f3abb799d68a3a",
+      "package_version": "0.8.0"
+    },
+    {
+      "deck": "finfet",
+      "content_hash": "sha256:8bc239ffae6c9fcb2460ee34af563fb48e0ba297df68f807ef91637392222e67",
+      "git_tag": "v0.8.0",
+      "git_commit": "c572046be644e0407f693f2410f3abb799d68a3a",
+      "package_version": "0.8.0"
+    },
+    {
+      "deck": "gf180mcu",
+      "content_hash": "sha256:0eb6df1bafc5106ec50bd58479dbd7cda36bb685f1ef18cd3a2244a6e7e48666",
+      "git_tag": "v0.8.0",
+      "git_commit": "c572046be644e0407f693f2410f3abb799d68a3a",
+      "package_version": "0.8.0"
+    },
+    {
+      "deck": "parasitics",
+      "content_hash": "sha256:28af8895884602fc789f8047c23cfbd1ce154fa5311afbf5e1f33445d070296a",
+      "git_tag": "v0.8.0",
+      "git_commit": "c572046be644e0407f693f2410f3abb799d68a3a",
+      "package_version": "0.8.0"
+    },
+    {
+      "deck": "rules",
+      "content_hash": "sha256:be7b94b8d5f0484f332be7ef66962a40d1017675cfc7b2ec83bad218bccb5a31",
+      "git_tag": "v0.8.0",
+      "git_commit": "c572046be644e0407f693f2410f3abb799d68a3a",
+      "package_version": "0.8.0"
+    },
+    {
+      "deck": "sg13cmos5l",
+      "content_hash": "sha256:5a43b8eb0e1a4c228169cd33d820bf75ca5640812587f68c07f24f4aa2a1738f",
+      "git_tag": "v0.8.0",
+      "git_commit": "c572046be644e0407f693f2410f3abb799d68a3a",
+      "package_version": "0.8.0"
+    },
+    {
+      "deck": "sg13g2",
+      "content_hash": "sha256:1c95db40596afc5412e216009bcf0b775d1d74895b32738447eccbc76336dd15",
+      "git_tag": "v0.8.0",
+      "git_commit": "c572046be644e0407f693f2410f3abb799d68a3a",
+      "package_version": "0.8.0"
+    },
+    {
+      "deck": "sky130",
+      "content_hash": "sha256:ba0f97887e3d231aec8b54f1f52f2941ded0228f0234b6759712bcaca0e942e6",
+      "git_tag": "v0.8.0",
+      "git_commit": "c572046be644e0407f693f2410f3abb799d68a3a",
+      "package_version": "0.8.0"
+    },
+    {
+      "deck": "asap7",
+      "artifact": "drc_deck",
+      "content_hash": "sha256:48ac590ab1567b68d95a28e73391ff983070d8ccba28f628e1a127dd4da80e7f",
+      "git_tag": "v0.8.0",
+      "git_commit": "c572046be644e0407f693f2410f3abb799d68a3a",
+      "package_version": "0.8.0"
     }
   ]
 }
