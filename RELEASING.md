@@ -222,6 +222,9 @@ search for it. Hashes are stable only per package version; see
 
 - [x] One-time PyPI trusted-publisher registration (see above) — completed
       before v0.1.0.
+- [ ] Every `klt-*-native` pin in `pyproject.toml`'s extras is on PyPI
+      (`docs/releasing-native.md`); `publish.yml` enforces this with
+      `scripts/check_native_extras.py`, which you can run first.
 - [ ] `base-version` bumped in `pyproject.toml`; `uv lock` re-run.
 - [ ] Bump commit merged to `main` via a PR.
 - [ ] Annotated tag `vX.Y.Z` created on the merged commit on `main`.

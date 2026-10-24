@@ -340,12 +340,13 @@ written to every block.
    verb needs the `yield` extra.** Unlike every other T1 item's
    evidence verb (`drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
    `functional-verification`, `erc`, `place-and-route`), `klt yield`
-   requires the `klt_yield_native` Rust extension. It is published as the
-   prebuilt `klt-yield-native` wheel (Linux x86_64, macOS arm64), reached by
-   `pip install 'klayout-tools[yield]'`; a bare `pip install klayout-tools`
-   and the git-pinned form do not include it. A consumer pinning a release
-   that predates the first `klt-yield-native` publication, or on another
-   platform, still needs a repo checkout with a Rust toolchain; see
+   requires the `klt_yield_native` Rust extension. Today that needs a repo
+   checkout with a Rust toolchain: the prebuilt `klt-yield-native` wheel
+   (Linux x86_64, macOS arm64) behind `pip install 'klayout-tools[yield]'` is
+   not yet on PyPI, so the extra resolves for no release to date and only for
+   releases published after the wheel is. A bare `pip install klayout-tools`
+   and the git-pinned form do not include it either. A consumer on another
+   platform likewise needs a repo checkout with a Rust toolchain; see
    `docs/cli/yield.md`'s "What the extra does and does not reach" callout and
    `docs/releasing-native.md`.
    **When "not applicable" is legitimate** (issue #2865): a block whose
