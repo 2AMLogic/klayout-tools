@@ -1567,11 +1567,9 @@ these four included — is `"met"`.
 
 ### Attesting items 1, 9 and 10 (`--attest`, issue #2844)
 
-> **Availability:** `--attest` and `--inventory` are **not in `klt` 0.7.0**
-> (PyPI). They are on `main` and will ship in the next release after 0.7.0;
-> until then, pin a git commit (e.g. `uvx --from
-> "git+https://github.com/2AMLogic/klayout-tools@<commit>" klt signoff ...`).
-> Release-pinned installs of 0.7.0 fail with `unrecognized arguments`.
+> **Availability:** `--attest` and `--inventory` first ship in `klt` **0.8.0**
+> (PyPI). Release-pinned installs of 0.7.0 and earlier fail with
+> `unrecognized arguments`.
 
 `klt signoff --attest {1,9,10} --inventory FILE` is the producer for the
 artifact-anchored envelope above. It reads a versioned **attestation
