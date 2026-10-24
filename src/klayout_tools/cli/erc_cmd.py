@@ -45,6 +45,7 @@ exclusive with ``file``/``--check`` and refuses the layout-only flags.
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..erc import (
     DISCLOSURE_KIND_UNEXPRESSIBLE,
     ErcError,
@@ -53,7 +54,7 @@ from ..erc import (
     run_erc,
     validate_erc_spec,
 )
-from .output import emit_error, emit_success, render_rerun_drift
+from .output import emit_error, emit_success, render_check_text, render_rerun_drift
 
 #: `status` -> exit code (issue #2115, applying the common rollup rule's
 #: exit codes, #2109). `"clean_partial"` reports the same exit `0` as
@@ -151,37 +152,10 @@ def _run_check(args: argparse.Namespace) -> int:
     except ErcError as exc:
         return emit_error("erc", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return 0 if result["status"] == "match" else 3
-
-
-def _print_check_text(result: dict) -> None:
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            missing = check.get("input_not_found")
-            if missing is None:
-                print(f"      actual:   {check['actual']}")
-            else:
-                print(f"      actual:   None (input not found: {missing['resolved']})")
-                if missing["found_relative_to_report"] is not None:
-                    print(
-                        "      note:     it exists relative to the report's own "
-                        f"directory ({missing['found_relative_to_report']}); "
-                        "--check resolves relative paths against the current "
-                        "working directory -- re-run from there"
-                    )
-    for advisory in result.get("advisories", ()):
-        print(
-            f"  [DRIFT] {advisory['field']}: {advisory['report']} (report) "
-            f"vs {advisory['current']} (current)"
-        )
 
 
 def _print_declared_nets(report: dict) -> None:
@@ -272,7 +246,7 @@ def _print_compact_note(report: dict) -> None:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    print(f"file: {render_path_field(report['file'])}")
     print(f"spec: {report['spec']}")
     print(f"pdk: {report['pdk']}")
     # `--deck` (issue #2204): omitted entirely when no deck was selected, so

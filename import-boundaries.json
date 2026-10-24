@@ -363,6 +363,7 @@
         "klayout_tools.decks.sg13cmos5l",
         "klayout_tools.decks.sg13g2",
         "klayout_tools.decks.sky130",
+        "klayout_tools.liberty_merge",
         "klayout_tools.pdk",
         "klayout_tools.pdk_capabilities",
         "klayout_tools.pdk_cells",
@@ -457,6 +458,7 @@
       "modules": [
         "klayout_tools",
         "klayout_tools._annotation",
+        "klayout_tools._batch_common",
         "klayout_tools._check_result",
         "klayout_tools._devices",
         "klayout_tools._layout",
@@ -529,6 +531,7 @@
         "klayout_tools.sim_portable",
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
+        "klayout_tools.sim_search",
         "klayout_tools.sim_set",
         "klayout_tools.sim_snm",
         "klayout_tools.sim_snm_meas",
@@ -996,6 +999,16 @@
       "consumer": "lvs",
       "exporter": "netlist",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "erc",
+      "exporter": "env_provenance",
+      "reason": "`klt erc` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #2703)."
+    },
+    {
+      "consumer": "lef_abstract",
+      "exporter": "env_provenance",
+      "reason": "`klt lef-abstract` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #2703)."
     },
     {
       "consumer": "lvs",

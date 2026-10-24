@@ -8114,6 +8114,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         rerun=False,
         deck_file=None,
         deck_var=None,
+        layout=None,
     )
     assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
     payload = json.loads(capsys.readouterr().out)
@@ -17334,7 +17335,10 @@ def test_convert_gate_level_verilog_concatenation_assign_end_to_end():
 @pytest.mark.parametrize(
     ("assign", "reason"),
     [
-        ("assign b = {2{a}};", "replication"),
+        ("assign b = {0{a}};", "positive integer"),
+        ("assign b = {N{a}};", "replication or nested"),
+        ("assign b = { a, {c };", "found"),
+        ("assign b = { a, c}};", "unbalanced"),
         ("assign b = { a, 1'b0 };", "literal"),
         ("assign b = { a[1:0], c };", "part-select"),
         ("assign b = { a, undeclared };", "no 'wire'"),
@@ -17345,7 +17349,7 @@ def test_convert_gate_level_verilog_concatenation_assign_end_to_end():
     ],
 )
 def test_parse_gate_level_verilog_unsupported_assign_still_rejected(assign, reason):
-    """Issue #2372 handles only the plain concatenation case; replication,
+    """Issue #2372/#4117 handle plain, nested and replicated concatenations;
     literals, part-selects, width mismatches and general expressions keep
     failing loudly with the "only a plain ... is supported" error."""
     text = (
@@ -17355,6 +17359,50 @@ def test_parse_gate_level_verilog_unsupported_assign_still_rejected(assign, reas
     with pytest.raises(VerilogNetlistError, match="only a plain 'assign") as exc:
         parse_gate_level_verilog(text)
     assert re.search(reason, str(exc.value))
+
+
+@pytest.mark.parametrize(
+    "rhs",
+    [
+        "{ { a1, a0 }, c }",
+        "{ {2{c}}, c }",
+        "{ {2{ {c} }}, c }",
+        "{ a1, a0, c }",
+    ],
+)
+def test_parse_gate_level_verilog_nested_and_replicated_assign(rhs):
+    """Issue #4117: nested concatenations and literal-count replications
+    expand MSB-first to the same aliases as the equivalent flat form."""
+    decls = "  wire a1;\n  wire a0;\n  wire c;\n  wire [2:0] y;"
+    aliases = _assign_aliases(decls, f"assign y = {rhs};")
+    flat = {"{ { a1, a0 }, c }": ["a1", "a0", "c"], "{ a1, a0, c }": ["a1", "a0", "c"]}
+    expected = flat.get(rhs, ["c", "c", "c"])
+    assert [aliases[f"y[{i}]"] for i in (2, 1, 0)] == expected
+
+
+def test_parse_gate_level_verilog_replicated_bus_and_issue_repro():
+    aliases = _assign_aliases(
+        "  wire [1:0] x;\n  wire tie0;\n  wire [4:0] y;\n  wire [3:0] z;",
+        "assign y = { { tie0, tie0 }, x, tie0 }; assign z = {2{x}};",
+    )
+    assert [aliases[f"y[{i}]"] for i in (4, 3, 2, 1, 0)] == [
+        "tie0",
+        "tie0",
+        "x[1]",
+        "x[0]",
+        "tie0",
+    ]
+    assert [aliases[f"z[{i}]"] for i in (3, 2, 1, 0)] == [
+        "x[1]",
+        "x[0]",
+        "x[1]",
+        "x[0]",
+    ]
+
+
+def test_parse_gate_level_verilog_replicated_assign_width_mismatch():
+    with pytest.raises(VerilogNetlistError, match="only a plain 'assign"):
+        _assign_aliases("  wire a;\n  wire [2:0] y;", "assign y = {4{a}};")
 
 
 def _assign_aliases(decls: str, assign: str) -> dict[str, str]:
@@ -25428,3 +25476,172 @@ def test_run_lvs_sky130_diode_matches_and_mismatches_on_removal(tmp_path, flavou
             sub, flavour, layout_diode=layout_diode, reference_diode=reference_diode
         )
         assert report["status"] != "match", (layout_diode, reference_diode)
+
+
+# ---------------------------------------------------------------------------
+# Explicit --layout alongside --check / --rerun (issue #2699)
+# ---------------------------------------------------------------------------
+
+
+def _external_lvs_report(tmp_path_factory):
+    """A committed report whose layout is outside any repo (`scope:
+    "external"`), plus the layout's path."""
+    outside = tmp_path_factory.mktemp("outside-any-repo")
+    layout_path = _write(outside / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(outside / "ref.spice", _INVERTER_SPICE)
+    report_path = outside / "lvs.json"
+    _write_report(
+        report_path,
+        run_lvs(
+            _write_request(
+                outside / "request.json",
+                {
+                    "layout": {"netlist": layout_path, "top": "inv"},
+                    "reference": {"netlist": reference_path, "top": "inv"},
+                },
+            )
+        ),
+    )
+    return layout_path, report_path
+
+
+def test_check_lvs_report_explicit_layout_verifies_an_external_layout(
+    tmp_path_factory,
+):
+    layout_path, report_path = _external_lvs_report(tmp_path_factory)
+
+    result = check_lvs_report(str(report_path), layout_path=layout_path)
+
+    assert result["status"] == "match"
+
+
+def test_rerun_lvs_report_explicit_layout_reruns_an_external_layout(
+    tmp_path_factory,
+):
+    layout_path, report_path = _external_lvs_report(tmp_path_factory)
+
+    result = rerun_lvs_report(str(report_path), layout_path=layout_path)
+
+    assert result["status"] == "match"
+
+
+def test_lvs_explicit_layout_overrides_a_recorded_layout(tmp_path_factory):
+    """Precedence rule (always override): a disagreeing explicit layout is
+    reported `drifted`, never silently accepted."""
+    layout_path, report_path = _external_lvs_report(tmp_path_factory)
+    other = _write(
+        tmp_path_factory.mktemp("other") / "other.spice", _INVERTER_SPICE + "* x\n"
+    )
+
+    result = check_lvs_report(str(report_path), layout_path=other)
+
+    assert result["status"] == "drifted"
+
+
+def test_cli_lvs_check_rerun_with_explicit_layout_on_external_report(
+    tmp_path_factory, capsys
+):
+    layout_path, report_path = _external_lvs_report(tmp_path_factory)
+    capsys.readouterr()
+
+    for extra in ([], ["--rerun"]):
+        code = main(
+            [
+                "lvs",
+                "--check",
+                str(report_path),
+                "--layout",
+                layout_path,
+                *extra,
+                "--format",
+                "json",
+            ]
+        )
+        assert code == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+    # Without --layout the honest drift/error is unchanged.
+    assert main(["lvs", "--check", str(report_path), "--format", "json"]) == 3
+    capsys.readouterr()
+    assert (
+        main(["lvs", "--check", str(report_path), "--rerun", "--format", "json"]) == 1
+    )
+
+
+def test_cli_lvs_layout_without_check_is_rejected(tmp_path, capsys):
+    assert main(["lvs", "{}", "--layout", "x.spice", "--format", "json"]) == 1
+    assert (
+        "--layout requires --check"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
+
+
+_COMPARER_ASSERTION = (
+    "Internal error: bt_count != failed_match (dbNetlistCompareCore.cc:1003)"
+)
+
+
+def _inverter_request(tmp_path, **extra) -> str:
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    return _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            **extra,
+        },
+    )
+
+
+def _raise_comparer_assertion(self, *args):
+    raise RuntimeError(_COMPARER_ASSERTION)
+
+
+def test_comparer_internal_error_raises_lvs_error_issue_4134(tmp_path, monkeypatch):
+    import klayout.db as kdb
+
+    monkeypatch.setattr(kdb.NetlistComparer, "compare", _raise_comparer_assertion)
+    with pytest.raises(LvsError, match="bt_count != failed_match"):
+        run_lvs(_inverter_request(tmp_path))
+
+
+def test_comparer_internal_error_in_tolerance_pass_raises_lvs_error_issue_4134(
+    tmp_path, monkeypatch
+):
+    import klayout.db as kdb
+
+    real_compare = kdb.NetlistComparer.compare
+    calls = []
+
+    def real_then_raise(self, *args):
+        calls.append(1)
+        if len(calls) == 1:
+            return real_compare(self, *args)
+        raise RuntimeError(_COMPARER_ASSERTION)
+
+    monkeypatch.setattr(kdb.NetlistComparer, "compare", real_then_raise)
+    with pytest.raises(LvsError, match="bt_count != failed_match"):
+        _tolerance_report(
+            tmp_path,
+            _RESISTOR_LAYOUT_SPICE,
+            _RESISTOR_REFERENCE_SPICE,
+            tolerance=0.01,
+            top="rblock",
+        )
+    assert len(calls) == 2
+
+
+def test_comparer_internal_error_cli_emits_error_envelope_exit_1_issue_4134(
+    tmp_path, monkeypatch, capsys
+):
+    import klayout.db as kdb
+
+    monkeypatch.setattr(kdb.NetlistComparer, "compare", _raise_comparer_assertion)
+    rc = main(["lvs", _inverter_request(tmp_path), "--format", "json"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    err = json.loads(captured.err)["error"]
+    assert err["command"] == "lvs"
+    assert "bt_count != failed_match" in err["message"]

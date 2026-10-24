@@ -33,9 +33,9 @@ never falls back to a local copy or a direct store path.
 
 ## The wire contract
 
-`klt` sends `POST <broker>/v1/put|get|stat` with a JSON body
+`klt` sends `POST <broker>/v1/put|get|stat|delete` with a JSON body
 `{"kind": "evidence", "repo": "owner/name", "sha256": "<hex>", "size": N}`.
-`size` is sent for `put` only.
+`size` is sent for `put` only. `delete` takes the `stat` body.
 
 - **put** answers `{key, url, method, headers, expires_at, exists: false}`.
   `klt` uploads the file with exactly those `headers`, plus `Content-Length`
@@ -47,6 +47,10 @@ never falls back to a local copy or a direct store path.
   that is a success and nothing is re-sent.
 - **get** answers a presigned GET URL, or a 404 `not_found`.
 - **stat** answers `{key, exists, size}`.
+- **delete** answers any 200 JSON object. The broker owns authorization and
+  any retention policy; the client has no list op, so it deletes only objects
+  it is told to name. A broker without `/v1/delete` answers a refusal, which
+  `klt` surfaces as `broker_refused` without retrying or falling back.
 - A **refusal** is `{"error", "message"}` with a 4xx or 5xx status. Examples
   are 403 `repo_firewalled`, `repo_unknown`, `not_granted` or `unknown_caller`,
   503 `fleet_unavailable`, 429, and 502 `store_error`.
@@ -129,10 +133,44 @@ go to stderr. With `--format json`, the success payload is
 `verify` stats each entry, then fetches it and re-hashes it. It exits `0` when
 every entry is `ok`. It exits `3` when any entry is `missing`, `size_mismatch`,
 `hash_mismatch` or `key_mismatch`. It exits `1` on a malformed manifest or a
-broker refusal other than a missing object.
+broker refusal other than a missing object. A throttled broker (HTTP 429) is
+retried with backoff first (see below), so a rate limit that persists fails the
+run as `broker_rate_limited`, not as an unverified or mismatched entry.
+
+### Rate limiting
+
+Every broker call (`put`, `get`, `stat`, so `verify` too) retries HTTP 429 up to
+4 attempts. It sleeps for the broker's `Retry-After` (seconds form) when sent,
+else 1s, 2s, 4s, capped at 30s per sleep and 60s in total. Retries are silent on
+success and no other status is retried. When they run out the error has
+`code: "broker_rate_limited"` and `details` with `broker_status: 429`,
+`attempts` and, if sent, `retry_after_s`. The exit code stays `1`.
 
 `--format json`: `{schema_version: 1, manifest, status: "ok"|"failed",
 entry_count, failed_count, entries: [{sha256, name, size, status, ...}]}`.
+
+## `delete`
+
+`klt artifact delete REF... [--keep MANIFEST]... [--yes] [--force-referenced]`.
+`REF` is as for `get`. Deletion is irreversible and objects are shared across
+manifests by digest, so it is a **dry run by default**: without `--yes` only
+`stat` is called and each object is reported as `would_delete` or `absent`.
+With `--yes`, `klt` sends `POST /v1/delete` through the broker only.
+
+Every `--keep MANIFEST` protects the objects it names. If any target's sha256
+is in one, `delete` exits `1` with `error.code: "still_referenced"` before
+the first delete call, so nothing is deleted; `--force-referenced` overrides.
+With no `--keep`, the guard cannot run, and the output says so
+(`guard.checked: false`). An object that is already absent is `absent` and a
+success. Duplicate targets are collapsed.
+
+`--format json`: `{schema_version: 1, status: "dry_run"|"deleted", objects:
+[{sha256, key, status}], guard: {keep_manifests, checked, forced}}`; in a dry
+run each object also carries `exists`, `size` and `would_delete`. `status` is
+`would_delete`, `deleted` or `absent`.
+
+Listing the store or finding unreferenced objects is out of scope: it needs a
+broker `list` op and a retention policy, which belong broker-side.
 
 ## Citing a stored artifact from `klt signoff --manifest`
 
@@ -161,8 +199,8 @@ Campaign outputs are cited the same way.
 
 | Code | Meaning |
 |---|---|
-| `0` | Done: stored, fetched and verified, or every entry ok |
-| `1` | Not done: no broker, a broker refusal (`error.code: "broker_refused"` with `broker_status`, `broker_error` and `broker_message`), an unreachable broker (`broker_unreachable`), a malformed manifest, unreadable input, or a `get` whose bytes failed verification |
+| `0` | Done: stored, fetched and verified, every entry ok, or delete (dry run, deleted or absent) |
+| `1` | Not done: no broker, a broker refusal (`error.code: "broker_refused"` with `broker_status`, `broker_error` and `broker_message`), a broker still rate-limiting after retries (`broker_rate_limited`), an unreachable broker (`broker_unreachable`), a malformed manifest, unreadable input, a `get` whose bytes failed verification, or a `delete` of a still-referenced object (`still_referenced`) |
 | `2` | Usage error |
 | `3` | `verify` only: at least one entry is missing or mismatched |
 

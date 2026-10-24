@@ -113,6 +113,17 @@ one) — the "new optional member, absent when not applicable" rule above.
 No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Threshold-crossing time series (`measurements[].crossings`)".
 
+`measurements[].search` (issue #4121) is a scalar form like `snm`: `value` stays
+a number (the midpoint of the converged bisection bracket) and is graded by
+`limits`, `monte_carlo` statistics and `klt yield` unchanged. The response
+entry gains one optional `search` object (`source`, `direction`, `iterations`,
+`lo`, `hi`, `converged`), present on a converged entry and, with
+`converged: false`, on an errored one that ran probes; absent otherwise. A
+failure is `status: "error"` with `value: null` and a `code: "measurement"`
+diagnostic led by a `[search_*]` token. Additive; no `schema_version` bump. See
+[`docs/cli/sim.md`](cli/sim.md)'s "Bisection / threshold search
+(`measurements[].search`)".
+
 `analysis.kind: "twoport"` (issue #3338) is a new accepted value of the
 already-shipped `klt sim` `analysis.kind`, with its own `ports`/`freq` fields.
 Every request valid before is unchanged; the *response* gains only an optional
@@ -1332,6 +1343,8 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `drc` | `file` (the hashed input layout; both engines) | 3 | #2659 |
 | `extract` | `file` (the hashed input layout; both response builders) | 4 | #2659 |
 | `lvs` | `layout` (the hashed layout side — **not** `reference`) | 2 | #2659 |
+| `erc` | `file` (the hashed input layout; `spec` stays a plain string) | 2 | #2703 |
+| `lef-abstract` | `file` (the hashed input layout; `socket` and `output` stay plain strings) | 2 | #2703 |
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
@@ -1349,7 +1362,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `gen-compose` | `gds_path` (top-level and per-block) | 1 |
 | `draw` | `gds_path` | 1 |
 | `layout-plan-execute` | `gds_path` | 1 |
-| `lef-abstract` | `output` | 1 |
+| `lef-abstract` | `output`, `socket` | 2 |
 | `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
 | `functional-verification` | `info_path`, `log_path`, `options.trace.path` | 1 |
 | `yield-campaign` | `campaign.sim_report_path`, `campaign.request_path` | 1 (`yield_analysis.py`) |
@@ -1514,6 +1527,17 @@ All six share one contract:
   same clean "no `file`/`layout` field to rerun" error, never a traceback.
   A report predating #2659, whose field is a bare string, keeps the old
   anchoring described in the next bullet exactly as before.
+- **An explicit input restores the non-repo workflow (issue #2699).** For the
+  three verbs whose report echoes its own input, the caller may supply it
+  alongside `--check`/`--rerun` — `klt drc <file> --check REPORT`, `klt
+  extract <file> --check REPORT`, `klt lvs --check REPORT --layout PATH` —
+  for use when the report cannot locate the input (`scope: "external"`) or
+  the grading clone is laid out differently. **Precedence is one rule for all
+  three: the explicit input always overrides the report's recorded value**
+  (not only when that value is unresolvable); it is hashed and compared to
+  the recorded `content_hash`/`layout_sha256`, so a file that disagrees
+  reports `drifted`. With no explicit input the behaviour is unchanged
+  (additive; no `schema_version` bump, no new response field).
 - **An unresolvable input path is named, not silently `null` (issue #2595,
   `lvs` only so far).** A committed report that echoes an input back exactly
   as the request gave it re-hashes a *relative* echoed path against the
@@ -1821,14 +1845,15 @@ the exit code alone is authoritative.
   | `sim` | `engine_version_unmet` | The request's `engine_version` pin (`"MAJOR"` or `"MAJOR.MINOR"`) is not satisfied by the engine that would run it, or the version could not be determined (fail closed). Raised before any corner simulates on the `local`/`local-parallel` backends; on `remote`/`batch` the pin is checked against the runner report's `engine_version` after the run. The *tool* is unavailable. See [docs/cli/sim.md](cli/sim.md) "Pinning the simulator version". |
   | `sim` | `pdk_version_unmet` | The request's `models.pdk_version` pin is not satisfied by the installed PDK (`mismatch` or `unknown` identity), the PDK could not be resolved, or the pin was given with neither `models.pdk` nor `models.pdk_root`. Raised before any corner simulates on `local`/`local-parallel`; `remote`/`batch` reject the field with an uncoded request error (worker-side check tracked in #3462). See [docs/cli/sim.md](cli/sim.md) "Pinning the PDK revision". |
   | `sim` | `unsupported_analysis` | The request names a periodic analysis (`pss`, `pnoise`, `pac`) that `klt sim` does not implement. The *capability* is absent regardless of simulator build. Raised before any corner runs. See [docs/cli/sim.md](cli/sim.md) "Supported analyses". |
-  | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
+  | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool, or because the shared vCPU/Spot-quota budget (`BATCH_MAX_VCPU`) is exhausted (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
   | `sim` | `batch_concurrency_cap` | `--backend batch`: 2am's fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES` (after any `batch.capacity_wait_s` budget was spent). Transient slot contention, distinct from a Spot shortage; retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
   | `sim` | `batch_runner_version_mismatch` | `--backend batch` under `batch.runner_version_check: "enforce"` (the default): the AMI manifest publishes a runner `klt` whose major.minor differs from this client's, for every image the request could boot. Refused once, before any upload or launch, so no report and no per-corner diagnostics exist (issue #2851). Not retryable without a matching runner image or client. A mismatch found only on the runner keeps reporting through per-corner `batch_job_failed` diagnostics with `runner_code`. See [docs/cli/sim.md](cli/sim.md) "Pre-launch check from the AMI manifest". |
-  | `netlist` | `batch_no_capacity` | `--backend batch`: the fleet launcher refused the job for lack of Spot capacity. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_no_capacity` | `--backend batch`: the fleet launcher refused the job for lack of Spot capacity or shared vCPU/Spot-quota budget. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `sim` | `batch_runner_feature_unsupported` | `--backend batch` under `batch.runner_version_check: "enforce"`: the request uses a feature (currently `analysis_steps`) that every runner image the AMI manifest publishes predates. Refused once, before any upload or launch (issue #3249). The same code appears as `runner_code` on per-corner `batch_job_failed` diagnostics when the runner-side preflight finds it. See [docs/cli/sim.md](cli/sim.md) "Request-feature capability check". |
   | `sim` | `batch_runner_request_feature_predated` | A **warning** (top-level `diagnostics[]` entry, not an error code): `--backend batch` under `batch.runner_version_check: "warn"` and the request uses fields (`options.osdi_preload`, `measurements[].expr`, ...) the fleet runner `klt` predates. Lists `features[]`, `runner_klt_version`, `source` (`manifest` before launch, `runner` post-run). See [docs/cli/sim.md](cli/sim.md) "Request-feature capability check" (issue #2901). |
   | `netlist` | `batch_concurrency_cap` | `--backend batch`: the fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES`. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `sim` | `batch_runner_lacks_decks` | `--backend batch` with a deck-list (`decks[]`) request: the AMI manifest publishes only runner images whose `klt` predates `decks[]` support, so the request was refused once, before any upload or launch (issue #3303). Also the `error.code` of a runner-side preflight envelope (exit 87) when the runner's own `klt --version` lacks `decks[]`; `runner_version_check: "warn"` does not relax it. Not retryable without a rebuilt runner image. See [docs/cli/sim.md](cli/sim.md) "Runner support for `decks[]` on the batch backend". |
+  | `place-and-route` | `batch_runner_lacks_place_and_route_backend` | `--backend batch` (a `pdk.rebuild_corners` request): the runner's `klt` predates `place-and-route --backend` (older than `0.7.1.dev1091`, which includes `0.7.0`), so every corner's job would fail on the argument (issue #4124). Raised once as an error envelope before any upload or launch when the AMI manifest publishes only such images; otherwise the runner-side preflight exits 87 with an envelope carrying this code, recorded as each `corner_runs[].error_code`. `runner_version_check: "warn"` does not relax it. Not retryable without a rebuilt runner image. See [docs/cli/place-and-route.md](cli/place-and-route.md) "Runner support for `--backend`". |
   | `netlist` | `batch_runner_version_mismatch` | `--backend batch`: the runner's `klt` version differs from this client's; the job was refused before netlisting, or before submission when the AMI manifest already publishes the mismatch (issue #2851). Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_runner_version_unknown` | `--backend batch`: the runner's `klt` version could not be read; the job was refused before netlisting. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_poll_timeout` | `--backend batch`: the job did not finish within the client's poll budget. It may still finish on the runner; nothing was collected. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |

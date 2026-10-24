@@ -656,6 +656,27 @@ class _ReferenceNetlistParseError(LvsError):
     """
 
 
+def _compare_netlists(
+    comparer: Any, layout_netlist: Any, reference_netlist: Any
+) -> bool:
+    """Run ``NetlistComparer.compare`` and turn an engine-internal failure
+    into :class:`LvsError` (issue #4134).
+
+    KLayout's comparer can trip an internal assertion (e.g. ``bt_count !=
+    failed_match``) that surfaces as ``RuntimeError``. That is a tool failure,
+    not a verdict, so it must not be reported as ``status: "mismatch"``; the
+    CLI maps ``LvsError`` to the standard error envelope and exit code 1.
+    """
+    try:
+        return comparer.compare(layout_netlist, reference_netlist)
+    except RuntimeError as exc:
+        raise LvsError(
+            "KLayout's netlist comparer failed internally and could not "
+            f"reconcile the layout and reference netlists ({exc}); no LVS "
+            "verdict was reached"
+        ) from exc
+
+
 _REQUIRED_REQUEST_FIELDS = ("layout", "reference")
 
 
@@ -2066,7 +2087,7 @@ def run_lvs(
         # `logger` is already bound via the `NetlistComparer(logger)` constructor
         # above, so the 2-arg overload is used here (not the 3-arg one, which
         # would pass a second, redundant logger reference).
-        compare_result = comparer.compare(layout_netlist, reference_netlist)
+        compare_result = _compare_netlists(comparer, layout_netlist, reference_netlist)
 
         if not compare_result and parameter_tolerance is not None:
             # Issue #589: `options.parameter_tolerance` is opted in and the
@@ -2126,7 +2147,9 @@ def run_lvs(
                         *_constant_binding_pairs(constant_bindings),
                     ],
                 )
-                compare_result = comparer.compare(layout_netlist, reference_netlist)
+                compare_result = _compare_netlists(
+                    comparer, layout_netlist, reference_netlist
+                )
                 if compare_result:
                     break
 
@@ -2893,7 +2916,11 @@ def _finish_response(
 
 
 def _input_hash_check(
-    field: str, expected: str | None, echoed: Any, report_path: str
+    field: str,
+    expected: str | None,
+    echoed: Any,
+    report_path: str,
+    override: str | None = None,
 ) -> dict[str, Any]:
     """One :func:`~klayout_tools._report_verify.hash_check` entry for an
     input path the committed report echoes back (``layout``/``reference``),
@@ -2942,7 +2969,7 @@ def _input_hash_check(
     report with no such field) resolves to ``None`` and renders exactly as
     an absent one always has.
     """
-    path = resolve_committed_path(echoed, report_path=report_path)
+    path = resolve_committed_path(echoed, report_path=report_path, override=override)
     check = hash_check(field, expected, sha256_file(path))
     if path is None or os.path.isfile(path):
         return check
@@ -2959,7 +2986,9 @@ def _input_hash_check(
     return check
 
 
-def check_lvs_report(report_path: str) -> dict[str, Any]:
+def check_lvs_report(
+    report_path: str, *, layout_path: str | None = None
+) -> dict[str, Any]:
     """``klt lvs --check`` (cheap mode, issue #1106): verify a previously
     committed ``klt lvs --format json`` report at ``report_path`` still
     reproduces, without re-running the compare engine at all.
@@ -2998,6 +3027,11 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
     report whose ``layout`` is a bare string keeps the old anchoring, and
     the diagnostic above with it.
 
+    ``layout_path`` (issue #2699, ``klt lvs --layout``) is an explicit layout
+    that overrides the report's recorded ``layout`` unconditionally (see
+    :func:`~klayout_tools._report_verify.resolve_committed_path`) -- the way
+    to verify a report whose layout is ``scope: "external"``.
+
     Raises :class:`LvsError` for a missing/unparseable committed report --
     never a traceback.
 
@@ -3017,6 +3051,7 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
             get_path(committed, ("environment", "layout_sha256")),
             committed.get("layout"),
             report_path,
+            override=layout_path,
         ),
         _input_hash_check(
             "environment.reference_sha256",
@@ -3069,12 +3104,14 @@ def _strict_top_level_pin_count_replay_options(
     return replay
 
 
-def _reconstruct_runset_request(committed: dict[str, Any]) -> dict[str, Any]:
+def _reconstruct_runset_request(
+    committed: dict[str, Any], layout: str | None = None
+) -> dict[str, Any]:
     """Issue #2849: replay a ``klayout-runset`` report from its own echo
     (``layout``/``reference``/``top``/``deck_file``/``deck_vars``/``options``).
     Re-running needs the same standalone ``klayout`` application; there is no
     fallback to another engine."""
-    layout_spec: dict[str, Any] = {"file": committed.get("layout")}
+    layout_spec: dict[str, Any] = {"file": layout or committed.get("layout")}
     if committed.get("top"):
         layout_spec["top"] = committed["top"]
     reference_spec: dict[str, Any] = {"netlist": committed.get("reference")}
@@ -3094,7 +3131,10 @@ def _reconstruct_runset_request(committed: dict[str, Any]) -> dict[str, Any]:
 
 
 def _reconstruct_lvs_request(
-    committed: dict[str, Any], *, report_path: str | None = None
+    committed: dict[str, Any],
+    *,
+    report_path: str | None = None,
+    layout_path: str | None = None,
 ) -> dict[str, Any]:
     """Best-effort reconstruction of a ``klt lvs`` request document from a
     previously committed report, for :func:`rerun_lvs_report`.
@@ -3175,7 +3215,10 @@ def _reconstruct_lvs_request(
     # Issue #2659: the `{path, scope}` object resolved back to a path on this
     # checkout (a bare string passes through unchanged) -- see this
     # function's `report_path` docstring note.
-    layout = resolve_committed_path(committed.get("layout"), report_path=report_path)
+    # Issue #2699: an explicit `--layout` wins over the recorded value.
+    layout = resolve_committed_path(
+        committed.get("layout"), report_path=report_path, override=layout_path
+    )
 
     layout_spec: dict[str, Any] = {"top": top} if top else {}
     if has_deck:
@@ -3446,7 +3489,9 @@ def _run_reconstructed_lvs(request: dict[str, Any]) -> dict[str, Any]:
         ) from exc
 
 
-def rerun_lvs_report(report_path: str) -> dict[str, Any]:
+def rerun_lvs_report(
+    report_path: str, *, layout_path: str | None = None
+) -> dict[str, Any]:
     """``klt lvs --check <report> --rerun`` (full mode, issue #1106):
     verify a previously committed ``klt lvs --format json`` report at
     ``report_path`` by best-effort re-running the compare it describes
@@ -3489,21 +3534,29 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     closed going forward. Use cheap ``--check`` on reports that predate it
     when the original request used either.)
 
+    ``layout_path`` (issue #2699, ``klt lvs --layout``) is an explicit layout
+    that overrides the report's recorded ``layout`` unconditionally -- the way
+    to rerun a report whose layout is ``scope: "external"``.
+
     Raises :class:`LvsError` for a missing/unparseable committed report, a
     report missing ``layout``/``reference`` to rerun, or any error the
     rerun itself raises -- never a traceback.
     """
     committed = _load_committed_report(report_path, LvsError)
-    layout = resolve_committed_path(committed.get("layout"), report_path=report_path)
+    layout = resolve_committed_path(
+        committed.get("layout"), report_path=report_path, override=layout_path
+    )
     if layout is None or committed.get("reference") is None:
         raise LvsError(
             f"committed report has no 'layout'/'reference' field to rerun: "
             f"{report_path}"
         )
     request = (
-        _reconstruct_runset_request(committed)
+        _reconstruct_runset_request(committed, layout)
         if committed.get("engine") == RUNSET_ENGINE
-        else _reconstruct_lvs_request(committed, report_path=report_path)
+        else _reconstruct_lvs_request(
+            committed, report_path=report_path, layout_path=layout_path
+        )
     )
     fresh = _run_reconstructed_lvs(request)
     exclude = set(_LVS_RERUN_EXCLUDE_PATHS)

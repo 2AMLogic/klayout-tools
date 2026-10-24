@@ -8980,19 +8980,19 @@ def test_cli_check_rerun_exits_three_on_drift(tmp_path, capsys):
     assert data["status"] == "drifted"
 
 
-def test_cli_check_with_file_argument_is_a_usage_error(tmp_path):
-    """`file` and `--check` are a required, mutually exclusive argparse
-    group (issue #1106) -- combining them is a usage error (exit 2), the
-    same as any other mutually exclusive argparse pair, not an
-    application-level (`--format json` error envelope) one."""
+def test_cli_check_with_file_argument_is_an_explicit_input_override(tmp_path, capsys):
+    """`file` alongside `--check` is the explicit-input override (issue
+    #2699), no longer a usage error: it names the layout to verify."""
     path = tmp_path / "clean.gds"
     _make_clean_layout().write(str(path))
     report_path = tmp_path / "clean.drc.json"
     _write_report(report_path, run_drc(str(path), "sky130"))
+    capsys.readouterr()
 
-    with pytest.raises(SystemExit) as exc_info:
-        main(["drc", str(path), "--check", str(report_path), "--format", "json"])
-    assert exc_info.value.code == 2
+    code = main(["drc", str(path), "--check", str(report_path), "--format", "json"])
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "match"
 
 
 def test_cli_rerun_without_check_is_rejected(tmp_path, capsys):
@@ -11304,3 +11304,84 @@ def test_run_drc_deck_without_marker_declaration_reports_empty(tmp_path):
     assert get_marker_blind_layers("gf180mcu") == []
     assert get_marker_blind_layers("no-such-deck") == []
     assert get_marker_blind_layers("sky130") == [(81, 2)]
+
+
+# ---------------------------------------------------------------------------
+# Explicit input alongside --check / --rerun (issue #2699)
+# ---------------------------------------------------------------------------
+
+
+def _external_drc_report(tmp_path_factory):
+    """A committed report whose layout is outside any repo (`scope:
+    "external"`), plus the layout's path."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+    assert report["file"] == {"path": None, "scope": "external"}
+    report_path = tmp_path / "violation.drc.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    return path, report_path
+
+
+def test_check_drc_report_explicit_input_verifies_an_external_file(tmp_path_factory):
+    path, report_path = _external_drc_report(tmp_path_factory)
+
+    result = check_drc_report(str(report_path), input_path=str(path))
+
+    assert result["status"] == "match"
+
+
+def test_rerun_drc_report_explicit_input_reruns_an_external_file(tmp_path_factory):
+    path, report_path = _external_drc_report(tmp_path_factory)
+
+    result = rerun_drc_report(str(report_path), input_path=str(path))
+
+    assert result["status"] == "match"
+
+
+def test_drc_explicit_input_overrides_a_resolvable_recorded_input(tmp_path):
+    """Precedence rule (always override): an in-repo report whose recorded
+    layout resolves fine still verifies the *explicit* file, so a file that
+    disagrees with the committed hash is reported `drifted`."""
+    repo = _make_fake_repo(tmp_path / "repo")
+    _make_violation_layout().write(str(repo / "violation.gds"))
+    report = run_drc(str(repo / "violation.gds"), "sky130")
+    report_path = repo / "violation.drc.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    other = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(other))
+
+    assert check_drc_report(str(report_path))["status"] == "match"
+    result = check_drc_report(str(report_path), input_path=str(other))
+
+    assert result["status"] == "drifted"
+    (input_check,) = [
+        c for c in result["checks"] if c["field"] == "provenance.input.content_hash"
+    ]
+    assert input_check["match"] is False
+
+
+def test_cli_drc_check_rerun_with_explicit_input_on_external_report(
+    tmp_path_factory, capsys
+):
+    path, report_path = _external_drc_report(tmp_path_factory)
+    capsys.readouterr()
+
+    for extra in ([], ["--rerun"]):
+        code = main(
+            ["drc", str(path), "--check", str(report_path), *extra, "--format", "json"]
+        )
+        assert code == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+    # Without the explicit input the honest drift/error is unchanged.
+    assert main(["drc", "--check", str(report_path), "--format", "json"]) == 3
+    capsys.readouterr()
+    assert (
+        main(["drc", "--check", str(report_path), "--rerun", "--format", "json"]) == 1
+    )
+    assert (
+        "no 'file' field to rerun"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )

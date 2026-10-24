@@ -209,7 +209,8 @@ def _run(
 def test_basic_run_emits_macro_with_class_and_size(tmp_path, monkeypatch):
     report = _run(tmp_path, monkeypatch)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
+    assert report["file"]["scope"] in {"repo", "external"}
     assert report["macro_name"] == "analog_block"
     assert report["class"] == "BLOCK"
     assert report["size_um"] == {"width": 5.0, "height": 5.0}

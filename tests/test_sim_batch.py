@@ -891,6 +891,23 @@ _CAP_REFUSAL = (
 )
 
 
+#: Verbatim shape of 2am's shared vCPU-budget refusal (issue #4103).
+_VCPU_REFUSAL = (
+    "error: 224 vCPU already running + 1 instance(s) of up to 32 vCPU exceeds "
+    "BATCH_MAX_VCPU=224, and only 0 type(s) fit the 0 vCPU left (floor 3) "
+    "-- the spot quota is shared with ci-spot"
+)
+
+
+def test_classify_launch_failure_matches_the_vcpu_budget_refusal():
+    assert sb._classify_launch_failure(_VCPU_REFUSAL) == "batch_no_capacity"
+    both = f"{_CAP_REFUSAL}; {_VCPU_REFUSAL}"
+    assert sb._classify_launch_failure(both) == "batch_concurrency_cap"
+    assert sb._classify_launch_failure(f"{_CAPACITY_REFUSAL}; {_VCPU_REFUSAL}") == (
+        "batch_no_capacity"
+    )
+
+
 def test_classify_launch_failure_matches_the_concurrency_cap_refusal():
     assert sb._classify_launch_failure(_CAP_REFUSAL) == "batch_concurrency_cap"
     assert sb.BATCH_CONCURRENCY_CAP_CODE == "batch_concurrency_cap"
@@ -2889,7 +2906,12 @@ def test_receipt_is_written_before_the_first_poll_and_records_terminal_state(
     assert seen_before_poll[0]["job_id"] == "job-1"
     final = json.loads(receipt_path.read_text())
     assert final["state"] == "done"
-    assert {"bucket", "region", "launched_at", "request_sha256"} <= set(final)
+    assert {"region", "launched_at", "request_sha256"} <= set(final)
+    for record in (final, seen_before_poll[0]):
+        raw = json.dumps(record)
+        assert "bucket" not in record
+        assert "s3://" not in raw
+        assert "arn:" not in raw
     assert not list(receipt_path.parent.glob("*.tmp.*"))
 
 
@@ -5330,12 +5352,16 @@ def test_sim_set_forwards_resume_to_every_request(tmp_path):
         return _fake_report()
 
     sim_set.run_sim_set(paths, outdir=str(tmp_path / "out"), run=fake_run, resume=True)
-    assert [p for p, _, _ in seen] == paths
-    assert all(resume is True for _, resume, _ in seen)
-    # Each request resumes from its own directory (where batch-shards.json lives).
-    assert [d for _, _, d in seen] == [
-        str(tmp_path / "out" / f"req{i}") for i in range(3)
-    ]
+    # run_sim_set dispatches concurrently, so fake_run call order is
+    # scheduler-dependent; key the observations by path instead.
+    by_path = {p: (resume, d) for p, resume, d in seen}
+    assert len(seen) == len(paths)
+    assert set(by_path) == set(paths)
+    for i, path in enumerate(paths):
+        resume, artifacts_dir = by_path[path]
+        assert resume is True
+        # Each request resumes from its own directory (where batch-shards.json lives).
+        assert artifacts_dir == str(tmp_path / "out" / f"req{i}")
 
     seen.clear()
     sim_set.run_sim_set(paths, outdir=str(tmp_path / "out2"), run=fake_run)
@@ -6079,6 +6105,71 @@ def test_prelaunch_refuses_a_feature_every_published_image_predates(
         sb._enforce_published_runner_features(request, assessment)
     assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
     assert "analysis_steps" in str(raised.value)
+
+
+def _dry_run_request(tmp_path: Path) -> dict:
+    return {
+        "models": {"pdk": "sky130A"},
+        "analysis_steps": [{}],
+        "batch": {
+            "bucket": FAKE_BUCKET,
+            "provision_script_path": str(_provision_script(tmp_path)),
+        },
+    }
+
+
+def test_dry_run_check_refuses_a_feature_every_published_image_predates(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
+    with pytest.raises(sim.SimError) as raised:
+        sb.dry_run_runner_check(
+            _dry_run_request(tmp_path), corner_count=1, timeout_s=30.0
+        )
+    assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
+
+
+def test_dry_run_check_passes_when_the_manifest_supports_the_feature(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.1")])
+    request = _dry_run_request(tmp_path)
+    assert sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0) is None
+    # A legacy entry without klt_version is unknown, never a refusal.
+    _publish_manifest(tmp_path, monkeypatch, [_image()])
+    assert sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0) is None
+
+
+def test_dry_run_check_warn_mode_returns_the_diagnostic(tmp_path, monkeypatch):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
+    request = _dry_run_request(tmp_path)
+    request["batch"]["runner_version_check"] = "warn"
+    diagnostic = sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0)
+    assert diagnostic["features"] == ["analysis_steps"]
+
+
+def test_dry_run_check_is_skipped_without_a_batch_config(tmp_path, monkeypatch):
+    monkeypatch.delenv(sb.BUCKET_ENV, raising=False)
+    monkeypatch.delenv(sb.PROVISION_SCRIPT_ENV, raising=False)
+    request = {"models": {"pdk": "sky130A"}, "analysis_steps": [{}]}
+    assert sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0) is None
+
+
+def test_submit_progress_line_does_not_leak_the_bucket(tmp_path, capsys):
+    spec = sb._build_batch_job_spec(
+        {"models": {"pdk": "sky130A"}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    sb.submit_job(_config(tmp_path), "job-1", spec, runner=_FakeRunner())
+    err = capsys.readouterr().err
+    assert "submitting to s3://<bucket>/jobs/job-1" in err
+    assert FAKE_BUCKET not in err
 
 
 def test_prelaunch_feature_check_passes_when_unknown_or_supported(
@@ -7316,7 +7407,11 @@ def test_shard_map_tracks_launch_state_and_is_self_describing(tmp_path, monkeypa
     _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
     fleet()
     document = json.loads(manifest_path.read_text())
-    assert document["bucket"] == FAKE_BUCKET
+    raw = manifest_path.read_text()
+    assert "bucket" not in document
+    assert FAKE_BUCKET not in raw
+    assert "s3://" not in raw
+    assert "arn:" not in raw
     for entry in document["shards"]:
         assert entry["state"] == "collected"
         assert all(entry[k] for k in ("submitted_at", "launched_at", "collected_at"))
@@ -7837,6 +7932,10 @@ def test_refused_shard_rolls_back_to_submitted_for_resume(tmp_path, monkeypatch)
     # The refused shard is "submitted" (resume launches it); the other,
     # launched and collected, is not.
     assert sorted(entry["state"] for entry in shards) == ["collected", "submitted"]
+    raw = (tmp_path / "artifacts" / "batch-shards.json").read_text()
+    assert "bucket" not in raw
+    assert "s3://" not in raw
+    assert "arn:" not in raw
 
 
 def test_capacity_watch_throttles_to_the_heartbeat_interval():
@@ -7855,3 +7954,40 @@ def test_capacity_watch_throttles_to_the_heartbeat_interval():
     assert len(lines) == 3
     assert "3 of 3 shards pending" in lines[0]
     assert "(last refusal: batch_no_capacity)" in lines[0]
+
+
+def test_models_pdk_root_local_directory_is_refused(tmp_path):
+    request = _lib_request(
+        tmp_path, models={"pdk": "gf180mcuD", "pdk_root": str(tmp_path)}
+    )
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_pdk_root_host_path"
+
+
+def test_models_pdk_root_runner_only_path_passes(tmp_path):
+    sb._validate_batch_pdk_root({"models": {"pdk_root": "/runner/only/pdks"}})
+    sb._validate_batch_pdk_root({"models": {"pdk": "sky130A"}})
+
+
+def test_corners_params_is_a_registry_feature():
+    request = {"corners": {"params": {"vdd": [1.6, 1.8]}}}
+    assert sb._request_features(request) == ["corners.params"]
+    assert sb._missing_runner_features(["corners.params"], "0.6.0") == [
+        "corners.params"
+    ]
+    assert sb._missing_runner_features(["corners.params"], None) is None
+
+
+def test_expr_no_value_offhost_carries_runner_hint():
+    report: dict = {}
+    corners = [{"measurements": [{"name": "v", "value": None}]}]
+    sim._attach_expr_runner_hint(
+        report, [{"name": "v", "expr": "v(out)"}], corners, backend="batch"
+    )
+    assert report["diagnostics"][0]["code"] == "expr_runner_may_predate"
+    local: dict = {}
+    sim._attach_expr_runner_hint(
+        local, [{"name": "v", "expr": "v(out)"}], corners, backend="local"
+    )
+    assert local == {}

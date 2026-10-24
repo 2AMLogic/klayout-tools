@@ -22584,36 +22584,22 @@ def test_cli_extract_check_rerun_exits_three_on_drift(tmp_path, capsys):
     assert data["status"] == "drifted"
 
 
-def test_cli_extract_check_with_file_argument_is_a_usage_error(tmp_path):
-    """`file` and `--check` are a required, mutually exclusive argparse
-    group (issue #1149) -- combining them is a usage error (exit 2), the
-    same as any other mutually exclusive argparse pair, not an
-    application-level (`--format json` error envelope) one."""
+def test_cli_extract_check_with_file_argument_is_an_explicit_input_override(
+    tmp_path, capsys
+):
+    """`file` alongside `--check` is the explicit-input override (issue
+    #2699), no longer a usage error: it names the layout to verify."""
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     report_path = tmp_path / "inv.extract.json"
     _write_report(
         report_path, run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
     )
-
-    with pytest.raises(SystemExit) as exc_info:
-        main(["extract", path, "--check", str(report_path), "--format", "json"])
-    assert exc_info.value.code == 2
-
-
-def test_cli_extract_rerun_without_check_is_rejected(tmp_path, capsys):
-    """`--rerun` alongside `file` (no `--check`) passes argparse's
-    mutually-exclusive-group check (`file` alone already satisfies "one of
-    file/--check required") but is still a semantic error at the
-    application level (exit 1) -- `--rerun` only means something for
-    `--check`."""
-    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     capsys.readouterr()
 
-    assert (
-        main(["extract", path, "--deck", "sky130", "--rerun", "--format", "json"]) == 1
-    )
-    err = json.loads(capsys.readouterr().err)
-    assert "requires --check" in err["error"]["message"]
+    code = main(["extract", path, "--check", str(report_path), "--format", "json"])
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "match"
 
 
 def test_cli_extract_no_file_no_check_is_a_usage_error():
@@ -27592,3 +27578,80 @@ def test_other_decks_do_not_register_unmodeled_device_markers(tmp_path):
     path = _write_gds(_esd_marker_layout(), tmp_path / "esd.gds")
     report = run_extract(path, "sky130", output=str(tmp_path / "esd.spice"))
     assert _esd_warnings(report) == []
+
+
+# ---------------------------------------------------------------------------
+# Explicit input alongside --check / --rerun (issue #2699)
+# ---------------------------------------------------------------------------
+
+
+def _external_extract_report(tmp_path_factory):
+    """A committed report whose layout is outside any repo (`scope:
+    "external"`), plus the layout's path."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    assert report["file"] == {"path": None, "scope": "external"}
+    report_path = tmp_path / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    return path, report_path
+
+
+def test_check_extract_report_explicit_input_verifies_an_external_file(
+    tmp_path_factory,
+):
+    path, report_path = _external_extract_report(tmp_path_factory)
+
+    assert check_extract_report(str(report_path), input_path=path)["status"] == "match"
+
+
+def test_rerun_extract_report_explicit_input_reruns_an_external_file(
+    tmp_path_factory,
+):
+    path, report_path = _external_extract_report(tmp_path_factory)
+
+    result = rerun_extract_report(str(report_path), input_path=path)
+
+    assert result["status"] == "match"
+
+
+def test_extract_explicit_input_overrides_a_resolvable_recorded_input(
+    tmp_path, tmp_path_factory
+):
+    """Precedence rule (always override): a disagreeing explicit file is
+    reported `drifted` even though the report's own recorded input resolves."""
+    repo = _make_fake_repo(tmp_path / "repo")
+    path = _write_gds(_make_inverter_layout(), repo / "inv.gds")
+    report = run_extract(path, "sky130", output=str(repo / "inv.spice"))
+    report_path = repo / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    other = _write_gds(
+        _make_floating_gate_nmos_layout(), tmp_path_factory.mktemp("other") / "o.gds"
+    )
+
+    assert check_extract_report(str(report_path))["status"] == "match"
+    result = check_extract_report(str(report_path), input_path=other)
+
+    assert result["status"] == "drifted"
+
+
+def test_cli_extract_check_rerun_with_explicit_input_on_external_report(
+    tmp_path_factory, capsys
+):
+    path, report_path = _external_extract_report(tmp_path_factory)
+    capsys.readouterr()
+
+    for extra in ([], ["--rerun"]):
+        code = main(
+            ["extract", path, "--check", str(report_path), *extra, "--format", "json"]
+        )
+        assert code == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+    # Without the explicit input the honest drift/error is unchanged.
+    assert main(["extract", "--check", str(report_path), "--format", "json"]) == 3
+    capsys.readouterr()
+    assert (
+        main(["extract", "--check", str(report_path), "--rerun", "--format", "json"])
+        == 1
+    )

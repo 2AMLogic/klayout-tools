@@ -83,6 +83,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import env_provenance
 from ._layout import load_layout, resolve_top_cell
 from ._provenance import build_provenance
 from .lef_header import read_lef_header
@@ -103,7 +104,14 @@ from .socket_check import (
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 1
+#:
+#: Bumped 1 -> 2 (issue #2703): ``file`` changed from a raw (usually
+#: absolute) path string to the ``{path, scope}`` shape
+#: ``env_provenance.repo_relative_path`` defines (as `klt drc`/`klt extract`/
+#: `klt lvs` did in issue #2659), so a committed report's
+#: ``provenance.input`` layout can be re-verified by `klt signoff` from any
+#: checkout. ``socket`` and ``output`` stay plain strings.
+SCHEMA_VERSION = 2
 
 #: The supply-pin name heuristic (``_GROUND_TOKENS``/``_POWER_TOKENS``) and
 #: :func:`_classify_pin` live in :mod:`klayout_tools.socket_check` since
@@ -152,7 +160,7 @@ def run_lef_abstract(
 
         {
             "schema_version": 1,
-            "file": <layout_path>,
+            "file": {"path", "scope"},  # layout_path, issue #2703
             "socket": <socket_path>,
             "output": <output_path>,
             "macro_name": <macro_name>,
@@ -324,7 +332,8 @@ def run_lef_abstract(
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "file": layout_path,
+        # `{path, scope}` (issue #2703): the layout `provenance.input` hashes.
+        "file": env_provenance.repo_relative_path(layout_path),
         "socket": socket_path,
         "output": output_path,
         "macro_name": macro_name,

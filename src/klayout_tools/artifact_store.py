@@ -5,12 +5,12 @@ a repo commits a small **manifest** that names each object by its sha256, and
 the bytes live in an object store reached only through an *artifact broker*.
 This module is the ``klt`` side of that arrangement: hash a file, ask the
 broker for a short-lived presigned URL, move the bytes over it, and write or
-check manifest entries. ``klt artifact put|get|verify``
+check manifest entries. ``klt artifact put|get|verify|delete``
 (:mod:`.cli.artifact_cmd`) is a thin adapter over it.
 
 Broker wire contract (the broker is not part of this repo):
 
-- ``POST <broker>/v1/{put,get,stat}`` with a JSON body ``{"kind", "repo",
+- ``POST <broker>/v1/{put,get,stat,delete}`` with a JSON body ``{"kind", "repo",
   "sha256", "size"}`` (``size`` for put only). The broker identifies the
   caller by its network identity, so the client sends **no credential** and
   holds none.
@@ -18,9 +18,12 @@ Broker wire contract (the broker is not part of this repo):
   "expires_at"?, "size"?}``. ``put`` of an object that already exists answers
   ``exists: true`` with no URL -- objects are immutable and named by their
   digest, so that is success. ``get`` answers a presigned GET URL (or a 404).
-  ``stat`` answers ``{exists, size}``.
+  ``stat`` answers ``{exists, size}``. ``delete`` takes the ``stat`` body and
+  answers any 200 JSON object; the broker owns authorization and retention.
 - A refusal is ``{"error", "message"}`` with a 4xx/5xx status, surfaced
-  verbatim as :class:`ArtifactError` code ``broker_refused``. There is no
+  verbatim as :class:`ArtifactError` code ``broker_refused``. HTTP 429 is
+  retried with bounded backoff (honoring ``Retry-After``); when the retries run
+  out it is code ``broker_rate_limited`` instead. There is no
   local fallback and no direct object-store path (no cloud SDK, no cloud
   credential).
 
@@ -73,6 +76,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import IO, Any
@@ -105,6 +109,14 @@ TRANSFER_TIMEOUT_S = 600
 _CHUNK = 1 << 20
 _MAX_BROKER_BODY = 1 << 20
 _MAX_ERROR_BODY = 64 << 10
+
+#: A throttled (HTTP 429) broker call is attempted this many times in all.
+RATE_LIMIT_ATTEMPTS = 4
+#: Longest single sleep, and the most time spent sleeping across one call.
+RATE_LIMIT_MAX_SLEEP_S = 30.0
+RATE_LIMIT_TOTAL_WAIT_S = 60.0
+_RATE_LIMIT_BASE_S = 1.0
+_sleep: Callable[[float], None] = time.sleep
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
@@ -189,7 +201,45 @@ class BrokerClient:
         return self._parts.path.rstrip("/") + "/v1/" + op
 
     def call(self, op: str, body: dict[str, Any]) -> dict[str, Any]:
-        """One broker call; returns the parsed success body or raises."""
+        """One broker call; returns the parsed success body or raises.
+
+        HTTP 429 is retried (``Retry-After`` seconds when the broker sends
+        them, else exponential backoff) within :data:`RATE_LIMIT_ATTEMPTS` and
+        :data:`RATE_LIMIT_TOTAL_WAIT_S`; exhausted retries raise
+        ``broker_rate_limited``. No other status is retried."""
+        waited = 0.0
+        attempt = 0
+        while True:
+            attempt += 1
+            status, raw, retry_after = self._once(op, body)
+            if status != 429:
+                break
+            delay = _RATE_LIMIT_BASE_S * (2 ** (attempt - 1))
+            if retry_after is not None:
+                delay = retry_after
+            delay = min(delay, RATE_LIMIT_MAX_SLEEP_S)
+            if (
+                attempt >= RATE_LIMIT_ATTEMPTS
+                or waited + delay > RATE_LIMIT_TOTAL_WAIT_S
+            ):
+                raise _rate_limited(op, raw, attempt, retry_after)
+            _sleep(delay)
+            waited += delay
+        if status != 200:
+            raise _refusal(op, status, raw)
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict):
+            raise ArtifactError(
+                f"the artifact broker's {op} answer is not a JSON object",
+                "broker_bad_response",
+            )
+        return payload
+
+    def _once(self, op: str, body: dict[str, Any]) -> tuple[int, bytes, float | None]:
+        """One POST: ``(status, body, Retry-After seconds or None)``."""
         data = json.dumps(body).encode("utf-8")
         conn = _connection(self._parts, self._timeout)
         try:
@@ -205,6 +255,7 @@ class BrokerClient:
             response = conn.getresponse()
             status = response.status
             raw = response.read(_MAX_BROKER_BODY)
+            retry_after = _parse_retry_after(response.getheader("Retry-After"))
         except (OSError, http.client.HTTPException) as exc:
             raise ArtifactError(
                 f"cannot reach the artifact broker: {type(exc).__name__}",
@@ -212,18 +263,7 @@ class BrokerClient:
             ) from None
         finally:
             conn.close()
-        if status != 200:
-            raise _refusal(op, status, raw)
-        try:
-            payload = json.loads(raw)
-        except ValueError:
-            payload = None
-        if not isinstance(payload, dict):
-            raise ArtifactError(
-                f"the artifact broker's {op} answer is not a JSON object",
-                "broker_bad_response",
-            )
-        return payload
+        return status, raw, retry_after
 
     def presign(
         self, op: str, kind: str, repo: str, sha256: str, size: int | None = None
@@ -232,6 +272,28 @@ class BrokerClient:
         if size is not None:
             body["size"] = size
         return _parse_presigned(self.call(op, body), op)
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """``Retry-After`` in delta-seconds form; the HTTP-date form is ignored."""
+    if value is None or not value.strip().isdigit():
+        return None
+    return float(int(value.strip()))
+
+
+def _rate_limited(
+    op: str, raw: bytes, attempts: int, retry_after: float | None
+) -> ArtifactError:
+    """The exhausted-429 error: the broker's refusal text, code
+    ``broker_rate_limited``, and how many attempts were made."""
+    refusal = _refusal(op, 429, raw)
+    details = dict(refusal.details)
+    details["attempts"] = attempts
+    if retry_after is not None:
+        details["retry_after_s"] = retry_after
+    return ArtifactError(
+        f"{refusal} (gave up after {attempts} attempts)", "broker_rate_limited", details
+    )
 
 
 def _refusal(op: str, status: int, raw: bytes) -> ArtifactError:
@@ -874,4 +936,82 @@ def verify_manifest(client: BrokerClient, path: str) -> dict[str, Any]:
         "entry_count": len(results),
         "failed_count": len(failed),
         "entries": results,
+    }
+
+
+def referenced_digests(keep_manifests: list[str]) -> dict[str, str]:
+    """sha256 -> the first ``--keep`` manifest path that names it."""
+    referenced: dict[str, str] = {}
+    for path in keep_manifests:
+        for entry in load_manifest(path)["entries"]:
+            referenced.setdefault(entry["sha256"], path)
+    return referenced
+
+
+def delete_objects(
+    client: BrokerClient,
+    targets: list[FetchTarget],
+    *,
+    keep_manifests: list[str],
+    yes: bool,
+    force_referenced: bool = False,
+) -> dict[str, Any]:
+    """Delete the named objects through the broker's ``delete`` op.
+
+    Without ``yes`` only ``stat`` is called (a dry run). Every target is
+    checked against the ``keep_manifests`` before the first delete call; one
+    referenced target refuses the whole batch with ``still_referenced``
+    unless ``force_referenced``. An absent object is success. The client
+    cannot enumerate the store, so only objects the caller names are touched.
+    """
+    unique: dict[tuple[str, str, str], FetchTarget] = {}
+    for target in targets:
+        unique.setdefault((target.kind, target.repo, target.sha256), target)
+    referenced = referenced_digests(keep_manifests)
+    if not force_referenced:
+        hits = {
+            t.sha256: referenced[t.sha256]
+            for t in unique.values()
+            if t.sha256 in referenced
+        }
+        if hits:
+            first = next(iter(hits))
+            raise ArtifactError(
+                f"refusing to delete {len(hits)} object(s) still referenced by a "
+                f"--keep manifest (e.g. {first} in {hits[first]}); pass "
+                "--force-referenced to override",
+                "still_referenced",
+                {"referenced": [{"sha256": s, "manifest": m} for s, m in hits.items()]},
+            )
+    stats = [
+        (t, client.presign("stat", t.kind, t.repo, t.sha256)) for t in unique.values()
+    ]
+    objects: list[dict[str, Any]] = []
+    for target, stat in stats:
+        item: dict[str, Any] = {"sha256": target.sha256, "key": stat.key}
+        if not yes:
+            objects.append(
+                {
+                    **item,
+                    "status": "would_delete" if stat.exists else "absent",
+                    "exists": stat.exists,
+                    "size": stat.size,
+                    "would_delete": stat.exists,
+                }
+            )
+            continue
+        if stat.exists:
+            client.call(
+                "delete",
+                {"kind": target.kind, "repo": target.repo, "sha256": target.sha256},
+            )
+        objects.append({**item, "status": "deleted" if stat.exists else "absent"})
+    return {
+        "status": "deleted" if yes else "dry_run",
+        "objects": objects,
+        "guard": {
+            "keep_manifests": len(keep_manifests),
+            "checked": bool(keep_manifests),
+            "forced": force_referenced,
+        },
     }

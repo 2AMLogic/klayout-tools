@@ -6,594 +6,29 @@ Pure library: :func:`run_place_and_route` returns plain Python data (a
 ``synthesize.py``/``lvs.py``. Serialisation and human-readable formatting
 live in the CLI command module (``cli/place_and_route_cmd.py``).
 
-This is Phase 4 of [Epic #391](https://github.com/2AMLogic/klayout-tools/issues/391)
-("adopt the digital engine class -- Yosys + OpenROAD -- RTL->GDS as a first-
-class ``klt`` flow"), the build carried by two accepted Phase 1 documents --
-read them first:
-
-- ``docs/design/openroad-invocation-survey.md`` (#397) settles the
-  invocation shape (``openroad -no_init -exit script.tcl``, wrapping
-  OpenROAD's native Tcl API stage-by-stage rather than
-  OpenROAD-flow-scripts' (ORFS) Makefile) and the DEF->GDS merge approach
-  (``def2stream.py``'s plain-``pya``-function structure, ported in-process
-  onto ``klayout.db``).
-- ``docs/design/digital-flow-contracts-spike.md`` section 5 (#399) settles
-  the request/response JSON contract, the ``target_stage`` partial-
-  completion design, and the exit-code table this module implements.
-
 Like ``klt synthesize``/``klt lvs``/``klt sim``, ``klt place-and-route``
-takes a **request document**, not positional file args.
+takes a **request document**, not positional file args. The only engine is
+``"openroad"``, invoked as a subprocess (``openroad -no_init -exit -metrics
+<file>.json <script>.tcl``), one process per stage in :data:`STAGE_ORDER`
+(``floorplan``/``place``/``cts``/``route``), chained by ODB checkpoints.
+``target_stage`` selects how many stages run. A routed run then merges the
+DEF into GDS in-process with ``klayout.db``.
 
-Engine: ``"openroad"`` (only value implemented today; ``request.engine``
-exists from day one so a later engine is an additive enum value, per the
-contract spike section 2). OpenROAD is invoked as a **subprocess**
-(``openroad -no_init -exit -metrics <file>.json <script>.tcl``), once per
-logical stage -- never in-process, there is no Python binding for OpenROAD.
+Public entry points: :func:`run_place_and_route` (the verb) and
+:class:`PlaceAndRouteError` (request or engine failure). Structural
+Verilog and macro-pin pre-flight checks run before any OpenROAD process
+(:func:`_reject_unsupported_netlist_constructs`, :func:`_validate_macros`).
+Power delivery, SPEF/SDF post-route STA, and the CTS and routing-layer
+reference tables (:data:`_CTS_BUFFER_CELLS`, :data:`_ROUTING_LAYER_RANGE`)
+live in the helpers named in their own docstrings.
 
-Stage granularity and invocation shape
----------------------------------------
-
-The request/response contract names exactly four stages
-(``"floorplan"``/``"place"``/``"cts"``/``"route"``, see :data:`STAGE_ORDER`)
-via ``target_stage`` -- this module invokes **one OpenROAD process per named
-stage**, chained via ``write_db``/``read_db`` ODB checkpoints between
-invocations (verified live against ORFS's own real per-stage scripts,
-``flow/scripts/load.tcl``'s ``load_design`` proc: every stage re-reads
-liberty and either builds fresh from RTL or ``read_db``s the prior
-checkpoint -- Sta's linked-library/SDC state is **not** carried across a
-process boundary by ``write_db``/``read_db``, so every stage's generated
-script re-issues ``read_liberty``/``create_clock``). This is a deliberate
-per-stage-invocation design, not the survey's other option (a single
-monolithic script) -- it is what makes ``target_stage`` a simple "how many
-processes to run" decision, and what gives each ``stages[]`` entry its own
-clean ``-metrics <file>.json`` snapshot (OpenROAD's ``-metrics`` flag dumps
-the *whole process's* accumulated metrics DB at ``-exit``, so a fresh
-process per stage is what isolates one stage's own metrics from the next
-stage's).
-
-``-metrics <file>.json`` confirmed working end-to-end
---------------------------------------------------------
-
-The OpenROAD survey (section 6, point 1) flagged this as the open risk this
-phase had to confirm or fall back from: **confirmed live** (this repo's own
-worked example, run via a real ``openroad/orfs`` container against a real
-volare-fetched ``sky130A`` install) that ``-metrics <file>.json`` captures a
-flat JSON object of every named metric a stage's own commands populated --
-both explicit ``report_*_metric`` proc calls (``report_worst_slack_metric``
--> ``timing__setup__ws`` (``-hold`` -> ``timing__hold__ws``, issue #1826),
-``report_tns_metric`` -> ``timing__setup__tns``,
-``report_fmax_metric`` -> ``timing__fmax``, ``report_power_metric`` ->
-``power__total``, ``report_design_area_metrics`` -> ``design__die__area``/
-``design__core__area``/``design__instance__utilization``, and (``"cts"``/
-``"route"`` stages only, issue #783) ``report_clock_skew_metric`` ->
-``clock__skew__setup`` -- verified live via ``openroad -no_init -exit``'s
-own ``info body report_clock_skew_metric`` against a real
-``openroad/orfs:latest`` container, ``26Q3-1080-gab6fd26351``) *and* metrics
-several stage commands populate automatically as a side effect
-(``global_route``/``detailed_route`` -> ``route__wirelength``,
-``detailed_placement`` -> ``route__wirelength__estimated``). No fallback to
-scraping ``report_*`` text output was needed for these fields -- see
-:func:`_extract_stage_metrics` for the exact key mapping. The one exception:
-OpenROAD has **no** ``*_metric`` proc for setup/hold timing-*violation
-counts* (only the scalar WNS/TNS) -- :func:`_count_violations` falls back to
-counting ``"(VIOLATED)"`` lines in ``report_check_types ... -violators
--format end``'s own stdout, exactly the fallback the contract spike's
-build/wrap section authorises (setup side ``-max_delay -recovery
--clock_gating_setup``, hold side ``-min_delay -removal -clock_gating_hold``
--- the same check families the WNS/TNS metrics measure, issue #2741; see
-:func:`_violation_count_lines`). Issue #1709's post-route
-max-transition/max-capacitance verdict
-(:func:`_design_rule_check_lines`, ``max_transition_violation_count``/
-``max_capacitance_violation_count``) reuses that same fallback for the same
-reason.
-
-Floorplan methods
-------------------
-
-Three of ORFS's four floorplan-initialization methods are supported (the
-fourth, IO-ring/footprint, is out of scope for a core-only block per the
-survey section 2): ``"utilization"`` (``initialize_floorplan -utilization``),
-``"explicit"`` (``initialize_floorplan -die_area/-core_area``), and
-``"def"`` (``read_def -floorplan_initialize``, reusing an existing DEF's
-floorplan). A request naming fields belonging to more than one method is
-rejected, mirroring ORFS's own ``methods_defined > 1`` check
-(``flow/scripts/floorplan.tcl``).
-
-DEF->GDS merge
----------------
-
-Ported directly from ``def2stream.py``'s own plain-``pya``-function
-structure (survey section 4) onto this repo's already-installed
-``klayout.db`` package, in-process -- never a ``klayout.sh -zz -rd ... -r
-def2stream.py`` subprocess the way ORFS itself invokes it. Verified live
-against the same real worked example above: a full floorplan->place->cts
-->route run's ``write_def`` output, merged with the resolved standard-cell
-GDS view and the tech+cell LEF (for layer/pin geometry), through zero
-missing/orphan cells.
-
-As-built netlist export (issue #996)
---------------------------------------
-
-The ``"route"`` stage writes an OpenROAD ``write_verilog`` netlist
-(``verilog_path``) alongside its ``write_def``/``def_path``: the design as
-this command's own ``clock_tree_synthesis``/``repair_design``/
-``repair_timing``/``repair_antennas`` calls actually left it, buffers,
-resizes, and diodes included. Without it, the only netlist available to
-build a golden-reference gate-level LVS from is ``klt synthesize``'s
-**pre-CTS** output, which is *guaranteed* to differ from the routed layout
-by however many cells P&R touched -- a divergence ``klt lvs`` has no way to
-attribute (one real run: 40 of ~720 instances). ``write_verilog`` is a
-top-level command of OpenROAD's always-loaded ``dbSta`` module
-(``src/dbSta/src/dbReadVerilog.tcl`` -> ``sta::write_verilog_cmd``,
-``src/dbSta/src/dbSta.i``), reading the OpenROAD network -- unrelated to
-Yosys's identically-named command that ``klt synthesize`` drives. See
-:func:`_stage_script_lines`'s own ``"route"`` branch for which flags are
-deliberately not passed, and why the artifact is written at ``"route"``
-only, never at ``"cts"``.
-
-Standard-cell PDK plumbing
-----------------------------
-
-``pdk.cell_library``/``corner`` resolve a liberty exactly as ``klt
-synthesize`` already does (:func:`_resolve_liberty`, a thin wrapper around
-the shared :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
-resolution both modules call, issue #1652 -- PDK-resolution helpers are the
-one exception to this repo's otherwise-self-contained verb modules, since
-letting them drift independently is a live-bug risk, not a design feature),
-and, like that module, accepts the CLI's
-own ``--pdk``/``--pdk-root`` flags (mirroring ``klt extract``'s identical
-pair) to pin a specific installed PDK variant/root rather than always
-falling back to ``find_pdk()``'s own default search order. The tech +
-merged-cell LEF pair resolves via the new :func:`klayout_tools.pdk.lef_files`
-resolver (issue #397/#425 -- ``_ASSET_LAYOUT`` never carried a ``lef`` key),
-pinned to whatever variant/root :func:`_resolve_liberty` already resolved.
-The optional ``pdk.interconnect_corner`` (issue #1100, one of ``"min"``/
-``"nom"``/``"max"``, default ``"nom"``) independently selects which tech-LEF
-*parasitic* corner ``lef_files`` resolves -- a wire-model choice orthogonal
-to the liberty (device) corner ``pdk.corner`` names, echoed back as its own
-top-level ``interconnect_corner`` response field (distinct from ``deck_name``,
-which encodes only the liberty corner).
-
-Neither resolver is restricted to a single PDK family -- any standard-cell
-library the resolved install ships ``libs_ref``/LEF assets for resolves the
-same way. The one genuinely per-family gap is the ``cts``/``route`` stages'
-own small reference-data tables (:data:`_CTS_BUFFER_CELLS`,
-:data:`_ROUTING_LAYER_RANGE`, issue #629): a clock-tree buffer cell name and
-a signal routing-layer range are not derivable from the resolved PDK install
-itself the way liberty/LEF paths are, so each supported ``cell_library``
-needs its own verified entry here (sourced from ORFS's own
-``platforms/<variant>/config.mk`` where an ORFS platform exists, or
-otherwise directly from the resolved install's own LEF/liberty content --
-never guessed). A ``cell_library`` with no entry in either table still fails
-with a clear error once a run reaches the stage that needs it, rather than
-guessing. This reference data is never a runtime dependency; nothing in this
-module shells out to, reads, or requires an ORFS checkout.
-
-Deliberately out of scope for this v1 (a core-only block, matching the
-contract's own IO-ring/footprint exclusion): metal fill (density fill, not
-gap-filler cells -- see "Power delivery" below for those) and a
-*caller-supplied* ``DONT_USE_CELLS``-style cell exclusion field -- neither is
-part of the request/response contract this phase implements, and each can be
-added later as an additive request field without a contract-shape change.
-(The built-in per-``cell_library`` exclusions ``klt synthesize`` already
-applies *are* emitted as ``set_dont_use`` in every post-floorplan stage script,
-before placement/repair/CTS -- issue #2378 -- with no request-contract change.) Tapcell
-insertion and power-grid generation (PDN) were also originally scoped out
-here; see "Power delivery" below for the additive field that closes that gap
-(issue #1091), exactly per this same note's own precedent (the "Hard-macro
-placement" section above closed the identical kind of v1 exclusion for
-macros).
-
-Hard-macro placement (issue #438, Epic #393 Phase 2 Capability A)
---------------------------------------------------------------------
-
-The v1 docstring above originally scoped *macro placement* out entirely;
-this is the additive request field that closes that gap, exactly per its
-own note ("can be added later as additive request fields"). An optional
-``request.macros`` array names hard-macro instances (e.g. a LEF abstract
-:mod:`klayout_tools.lef_abstract` emitted from an analog block) to fix at a
-caller-given location during the ``"floorplan"`` stage, via OpenROAD's own
-``place_macro -macro_name <instance> -location {x y} -orientation
-<orientation>`` Tcl command (verified live against a real
-``openroad/orfs`` container, ``help place_macro``'s own usage string) --
-never OpenROAD's automatic macro placer (``rtl_macro_placer``), since a
-socket-driven macro's location is a caller decision, not an optimization.
-Each macro's LEF is ``read_lef``'d alongside the tech/cell LEF, before
-``read_verilog``/``link_design`` (LEF must be loaded before the netlist that
-references it structurally); the RTL's own top module must instantiate a
-module whose name matches the macro LEF's own ``MACRO`` name, with a
-matching port list, for ``link_design`` to resolve the instance's physical
-view. An optional per-macro ``gds`` field also merges the macro's own GDS
-view into the final ``gds_path`` output (mirroring the standard-cell GDS
-merge below) -- when omitted, the DEF->GDS merge tolerates that instance's
-cell being empty (a caller using this field purely for the DEF-level
-placement/obstruction verification this issue's acceptance criteria call
-for does not need to supply one).
-
-Macro-pin routability cross-check (issue #464)
--------------------------------------------------
-
-``klt lef-abstract`` (issue #438's other half) deliberately emits a ``PIN``
-block with **no** ``PORT`` geometry when a socket-descriptor pin's declared
-layer does not resolve to a routing-type tech-LEF layer (e.g. a device gate
-pin on bare poly) -- a structurally valid LEF, reported via that command's
-own ``warnings[]``/``unroutable_pins[]``, never an error there. Left
-unchecked, wiring such a pin into a real net and placing the macro here
-used to surface only as an opaque OpenROAD ``GRT-0029`` failure several
-stages into a real run (global routing, well after floorplan/place/cts have
-already succeeded) -- accurate, but useless for tracing the failure back to
-its actual root cause (an earlier ``lef-abstract`` run, a different process
-entirely).
-
-:func:`_validate_macros` now catches this **before** OpenROAD is invoked at
-all: for each declared macro, it reads the macro LEF's own ``PIN`` blocks
-(:func:`klayout_tools.lef_header.read_lef_header`, whose ``pins[].has_port``
-field this cross-check exists for) to find pins with no ``PORT`` at all,
-then does a best-effort structural-Verilog scan of the netlist
-(:func:`_macro_instance_port_connections`) for that instance's own named
-port connections (``.PIN(NET)``). A ``PORT``-less pin that connects to a
-non-empty net is rejected with a specific :class:`PlaceAndRouteError` naming
-the instance, pin, and net -- before any OpenROAD subprocess runs. A
-``PORT``-less pin the netlist leaves unconnected (``.PIN()``, or simply
-absent from the instantiation's own port list) is not an error -- an
-internally-terminated node is a legitimate macro-pin state, not a routing
-request. The netlist scan is deliberately conservative: when the specific
-``<cell_name> <instance>( ... )`` instantiation cannot be confidently
-located in the netlist text (e.g. a positional-connection instantiation, a
-non-Verilog/stubbed netlist, or the instance simply not referenced there),
-the cross-check is skipped entirely for that macro rather than risk a false
-positive or false negative on text it cannot actually parse -- OpenROAD's
-own ``link_design`` remains the authority on whether the netlist and LEF
-actually agree structurally.
-
-Netlist pre-flight: ``signed`` qualifiers and bare-``x`` constants (issue #1973)
----------------------------------------------------------------------------------
-
-Two structural-Verilog constructs reach this command routinely and fail it
-deterministically, each several stages into a real OpenROAD run and each
-with a diagnostic that points at a generated file the caller never wrote:
-
-- A ``signed`` port/wire qualifier (``output signed [15:0] sample;``).
-  Yosys's ``write_verilog`` preserves it and offers no flag to suppress it;
-  OpenSTA's Verilog reader -- the very first thing the ``"floorplan"`` stage
-  runs -- rejects the keyword outright with a bare ``[ERROR STA-0171]
-  <file> line N, syntax error``.
-- A bare ``x``-valued constant (``assign \\foo$func$..o = 5'hxx;``, most
-  often a Verilog ``function``'s own dangling argument wire). OpenSTA reads
-  it as a constant and materialises an empty ``GROUND``-typed net from it
-  (conventionally ``zero_``), which TritonRoute then refuses with
-  ``DRT-0305`` -- **after** floorplan, placement and CTS have all already
-  succeeded, so it costs a full route attempt to discover.
-
-:func:`_reject_unsupported_netlist_constructs` catches both **before** any
-OpenROAD subprocess runs, raising a :class:`PlaceAndRouteError` that names
-the construct, the 1-based netlist line number, and the offending source
-line -- and, for the ``x`` case, says what to do about it. The scan is
-comment-aware (a ``signed`` inside Yosys's own header banner, or an
-``x``-constant quoted in a comment, is not a construct) and deliberately
-narrow: the ``signed`` pattern is anchored to a preceding declaration
-keyword so an expression-level ``$signed(...)`` cast -- valid everywhere
-downstream, and the recommended RTL replacement for a ``signed`` port -- is
-never flagged.
-
-This is a **safety net for netlists that did not come from `klt
-synthesize`** (hand-written, third-party, or post-edited). ``klt
-synthesize`` itself now prevents both constructs at the source: it strips
-``signed`` declarations after ``write_verilog``, and runs ``setundef -zero``
-ahead of its existing ``hilomap`` pass so every ``x`` bit is resolved to a
-concrete ``0`` and then tie-cell-mapped exactly like an ordinary
-``1'b0``/``1'b1`` literal (issue #854's own fix, which alone covered only
-``0``/``1``).
-
-Timing-driven global routing + bounded antenna-repair iteration (issue #939)
-------------------------------------------------------------------------------
-
-Epic #700 Phase 2's native-routing survey (``docs/design/native-routing-
-survey.md`` #934, section 4.1) named this its own Priority 1 item: audit
-``detailed_route``/``global_route``'s documented flag surface for a
-timing-driven or congestion-tuning mode not currently passed, and evaluate
-``repair_antennas``'s optional iteration count as a bounded multi-pass
-alternative to the single-pass call issue #759 shipped.
-
-**Methodology note (limitation, stated up front):** issue #783's own audit
-of ``clock_tree_synthesis`` used live introspection (``info body
-<proc>``/``help <proc>``) against a real ``openroad/orfs:latest`` container.
-No such container was reachable in this task's environment (a Docker daemon
-is present but this task has no permission to use it). This audit instead
-reads OpenROAD's/OpenROAD-flow-scripts' own upstream Tcl **and C++** source
-directly from ``The-OpenROAD-Project/OpenROAD``@``9b2de5c``/
-``The-OpenROAD-Project/OpenROAD-flow-scripts``@``ef52564`` (``master``,
-fetched 2026-08-13) -- a real, citable, but *not independently
-container-verified* source; it has not been cross-checked against the exact
-pinned build #783 used (``26Q3-1080-gab6fd26351``), so there is a small
-residual risk of version drift between what this audit read and what any
-given deployed OpenROAD binary actually accepts. Both new flags below are
-additive and off by default specifically so a caller can still get today's
-exact behaviour if this risk ever manifests as a real mismatch.
-
-- **``global_route``'s flag surface** (``src/grt/src/GlobalRouter.tcl``/
-  ``src/grt/README.md``) does carry a genuine timing-aware congestion knob:
-  ``-critical_nets_percentage <percent>`` (0-100, default ``0``) -- "the
-  percentage of nets with the worst slack value that are considered timing
-  critical, having preference over other nets during congestion
-  iterations." (``src/grt/README.md``). Traced into
-  ``GlobalRouter::setCriticalNetsPercentage`` (``src/grt/src/
-  GlobalRouter.cpp``): it forwards straight into FastRoute's/CUGR's own net
-  ordering and is force-reset to ``0`` (with a logged warning) when no
-  liberty/timing is loaded -- never silently wrong, always a real no-op
-  when timing data is unavailable. This module's ``"route"`` stage always
-  has a linked liberty + clock by the time it runs (`_validate_constraints`
-  already requires a clock from ``"place"`` onward), so the flag is live
-  whenever it is set. Exposed as the optional
-  ``request.route_critical_nets_percentage`` field
-  (:func:`_validate_route_critical_nets_percentage`, 0-100, default ``0``)
-  -- ``0`` reproduces ``global_route``'s own default and emits no flag at
-  all, the explicit A/B disable path this issue's acceptance criteria
-  require. **Not evaluated with a real A/B run in this
-  pass** (no OpenROAD available in this task's environment either, see
-  below) -- shipped as an opt-in, off-by-default option rather than an
-  always-on flag like #783's CTS pair, precisely because its QoR effect on
-  this repo's own corpus is unmeasured.
-- **``detailed_route``'s flag surface** (``src/drt/src/TritonRoute.tcl``,
-  every key/flag in its ``sta::define_cmd_args``/``parse_key_args`` block
-  transcribed) has **no** timing-driven or congestion-tuning flag at all --
-  a genuine negative result, not an absence of searching: ``-or_seed``/
-  ``-or_k`` (already passed), ``-droute_end_iter`` (a rip-up-reroute
-  iteration cap, default/max 64, not scored by timing), ``-db_process_node``,
-  ``-disable_via_gen``, ``-via_in_pin_bottom_layer``/``-via_in_pin_top_layer``/
-  ``-via_access_layer``, ``-bottom_routing_layer``/``-top_routing_layer``
-  (both deprecated -- use ``set_routing_layers``, already what this stage
-  does), ``-verbose``, distributed-routing flags, ``-clean_patches``,
-  ``-no_pin_access``, ``-min_access_points``, ``-save_guide_updates``,
-  ``-repair_pdn_vias``, and an internal-only ``-single_step_dr`` (the
-  source's own comment: "not a user option ... intended for algorithm
-  development"). This confirms the survey's own open question (section 1)
-  the honest way -- no flag was added to ``detailed_route`` itself.
-- **``repair_antennas``'s iteration surface** (``src/grt/src/
-  GlobalRouter.tcl``) does carry a real ``-iterations <n>`` flag (default
-  ``1``, matching this stage's current single-pass call exactly) -- but
-  ``GlobalRouter.cpp``'s own implementation explicitly warns
-  (``"repair_antennas should perform only one iteration when the routing
-  source is detailed routing."``) when called with ``iterations != 1``
-  *after* ``detailed_route`` has already run -- exactly this stage's own
-  call pattern. Passing ``-iterations`` directly on the existing call would
-  therefore either warn-and-do-nothing-useful or (per the surrounding
-  ``IncrementalGRoute`` loop body) drift the global-route guides across
-  multiple internal iterations without ever legalizing them through a real
-  ``detailed_route`` pass in between -- the wrong tool for this stage's
-  shape. OpenROAD-flow-scripts' own canonical flow
-  (``flow/scripts/detail_route.tcl``, its ``MAX_REPAIR_ANTENNAS_ITER_DRT``
-  variable) instead loops at the **flow level**: a plain (default
-  1-iteration) ``repair_antennas`` call, a full ``detailed_route`` reroute,
-  then ``check_antennas``, repeated up to a bound. This stage now mirrors
-  that exact shape via the optional ``request.max_antenna_repair_iterations``
-  field (:func:`_validate_max_antenna_repair_iterations`, integer
-  ``0``-``8``, default ``1``). Zero skips repair; the default keeps a
-  single repair/reroute pass; a higher value repeats the ``repair_antennas``/
-  ``detailed_route`` pair that many times unconditionally (no Tcl-level
-  early exit on a zero-violation ``check_antennas`` result -- a deliberate
-  simplification: every other generated script in this module is a flat,
-  branch-free command sequence, and adding the first Tcl-level control flow
-  here to save wall-clock on an already-rare residual-violation case was
-  judged not worth that departure; a caller who wants the cost of extra
-  passes only when needed should leave this at its default).
-- **A/B measurement**: **not performed with real OpenROAD in this pass** --
-  no ``openroad`` binary or ``openroad/orfs`` container was available in
-  this task's environment (same constraint noted above), so
-  ``antenna_violation_count``/``route_drc_violation_count`` (the latter
-  still unimplemented -- survey section 4.5, a separate, not-yet-filed
-  issue)/``wirelength_um``/``worst_slack_ns``/wall-clock deltas on the
-  ``gcd``/``modexp``/``mult8`` corpus trio remain **unverified** against a
-  real engine run. Both new fields are additive, off-by-default, and
-  covered by unit tests asserting the exact generated Tcl (mirroring this
-  module's own existing per-flag test style) instead.
-
-Post-route SPEF STA (``request.post_route_spef``, issue #948, Epic #700
-Phase 3, ``docs/design/post-route-sta-survey.md`` section 4.1): the
-``"route"`` stage's own top-level timing fields are computed from
-``estimate_parasitics -global_routing`` -- a coarse global-routing Steiner
-estimate, not parasitics extracted from the detailed-routed geometry
-``write_def`` actually commits. The optional ``post_route_spef`` boolean
-(default ``false``) opts in to a real-parasitics **A/B** pass, never a
-replacement: once the DEF->GDS merge completes, ``klt extract --parasitics``
-runs against the merged routed GDS and writes its per-net R/C model as SPEF
-(:func:`_post_route_spef_metrics`); a second ``openroad`` invocation, seeded
-from the ``"route"`` stage's own ODB checkpoint, loads that SPEF via
-``read_spef`` and re-reports the identical slack/violation-count metrics
-(:func:`_spef_sta_script_lines`) into the additive ``spef_sta`` response
-field. That extraction runs with ``def_net_names=True`` (issue #951), so each
-routed net is named from the DEF net name KLayout's LEF/DEF reader recorded on
-its geometry rather than from GDS text labels -- the merge emits labels for
-top-level pins only, and naming from them left correlation at literally 0% of
-nets when #948 shipped. Correlation against OpenSTA's own linked-design net
-list -- the survey's own flagged open risk -- is still checked explicitly
-*before* ``read_spef`` runs and reported in both directions
-(``spef_sta.nets_annotated``/``nets_total`` and
-``spef_sta.design_nets_annotated``/``design_nets_total``,
-:func:`_count_spef_nets_annotated`), never assumed. See
-``docs/cli/place-and-route.md``'s "Post-route SPEF STA" section for the full
-contract.
-
-Post-route SDF export (``request.post_route_sdf``, issue #1002, Epic #700
-Phase 3, ``docs/design/post-route-sta-survey.md`` §4.3): the survey's §4.3
-names ``write_sdf`` as the *upstream* half of an SDF-annotated gate-level
-re-simulation, and is explicit about where it belongs -- "after §4.1's
-``read_spef``, so the written SDF reflects real routed-parasitic delays, not
-the global-routing estimate". The optional ``post_route_sdf`` boolean
-(default ``false``, and a request error unless ``post_route_spef`` is also
-``true``) adds exactly that: one ``write_sdf`` call inside the *same*
-``post_route_spef`` OpenSTA session, immediately after its ``read_spef``, so
-the emitted IEEE-1497 delays are computed from the design's own resolved
-liberty (``request.pdk.corner``) plus the extracted routed parasitics rather
-than from a synthetic or uniform delay model. The written file is reported as
-``spef_sta.sdf_path`` and is the artifact ``klt functional-verification``'s
-own ``options.sdf`` block consumes (see
-``docs/design/sdf-annotate-feasibility-spike.md`` for the Icarus half's own
-verified invocation recipe).
-
-Power delivery (``request.power``, issue #1091)
---------------------------------------------------
-
-Before this field existed, this module's generated Tcl never called
-``global_connect``/``pdngen`` and never inserted tapcells or filler cells --
-the routed DEF it wrote had no ``SPECIALNETS`` section at all, every standard
-cell's ``VDD``/``VSS`` LEF pin belonged to no net, and cell rows were
-discontinuous wherever placement left a gap. That is a "signals route"
-result, not a "block is implemented" one -- DRC (well/substrate ties, rail
-continuity), LVS (power nets in the reference netlist), and any real handoff
-all need power delivery first. The optional ``request.power`` block closes
-this gap: net names for the power/ground rails, plus the PDN strap
-layers/pitch/width, drive ``tapcell``/``add_global_connection``/
-``global_connect``/``pdngen`` at the end of the ``"floorplan"`` stage (right
-after ``place_macro``/``make_tracks``, before that stage's own ``write_db``)
-and ``filler_placement``/``global_connect`` at the end of the ``"route"``
-stage (right after the antenna-repair loop, before ``write_def``).
-
-This insertion ordering is not invented -- it mirrors OpenROAD-flow-scripts'
-own stage sequence exactly, confirmed live against real ORFS flow scripts
-fetched 2026-08-17 from ``The-OpenROAD-Project/OpenROAD-flow-scripts``@
-``master``: ``flow/scripts/tapcell.tcl`` runs immediately after
-``macro_place.tcl`` and checkpoints before ``flow/scripts/pdn.tcl``, which
-itself checkpoints right before that flow's own global-placement stage
-begins -- exactly this module's own ``"floorplan"``->``"place"`` checkpoint
-boundary. ``flow/scripts/fillcell.tcl`` likewise runs after
-``detail_route.tcl`` (post antenna-repair), before the flow's own
-``final_connect.tcl`` -- which itself re-runs a plain ``global_connect`` with
-no new ``add_global_connection`` rules, specifically because
-``filler_placement``/``repair_antennas`` can add instances whose PG pins
-still need wiring to the connection rules already registered; this module's
-own ``"route"``-stage ``global_connect`` call after ``filler_placement``
-mirrors that same need.
-
-``tapcell``/``add_global_connection``/``global_connect``/``pdngen``/
-``filler_placement`` are all real, top-level OpenROAD Tcl commands --
-verified live (``openroad -no_init``, ``help <command>``, this repo's own
-sandboxed OpenROAD 26Q3-1278-g4421880472 install, 2026-08-17), not guessed
-from documentation. The per-library masters/pin-patterns/distances/fill-cell
-lists themselves live in :data:`_TAPCELL_CELLS`/:data:`_POWER_PIN_PATTERNS`/
-:data:`_FILLER_CELLS` -- the same "not derivable from the resolved PDK
-install itself" table convention :data:`_CTS_BUFFER_CELLS`/
-:data:`_ROUTING_LAYER_RANGE`/:data:`_ANTENNA_DIODE_CELLS` already established
-(see each table's own docstring for its exact ORFS source citation). A
-``cell_library`` with no entry in any of the three new tables fails with a
-clear error as soon as a ``request.power``-bearing run reaches the stage
-that needs it, exactly like the existing CTS/routing-layer/antenna-diode
-checks.
-
-One deliberate exception (issue #2441): a standard-cell library that
-verifiably ships **no** tap or endcap cells at all is listed in
-:data:`_NO_TAPCELL_LIBRARIES` instead, and a ``request.power`` run against
-it emits no ``tapcell`` line while running every other step above
-unchanged -- nothing in the global-connect/PDN/filler sequence depends on
-``tapcell`` having run. That allowlist is explicit per library, never a
-"missing from :data:`_TAPCELL_CELLS` => skip it" fallback: an unverified
-library must keep failing loudly rather than silently losing its well-tie
-step. ``sg13g2_stdcell`` is its only member today; its response's
-``power.tapcell_master``/``endcap_master`` are ``null`` even though
-``power.pdn``/``global_connect`` are ``true``.
-
-**Scope deliberately excluded from this v1 of ``request.power``:**
-macro-specific PDN grids (``define_pdn_grid -macro``, with their own
-halo/orientation config) -- a design with hard macros needs a caller-supplied
-macro halo/grid spec this field does not yet expose, so ``pdngen`` here
-builds only the flat standard-cell grid (:func:`_power_delivery_lines`).
-This exclusion changes no existing field's behaviour, and can be added later
-as an additive request/response field without a contract-shape change --
-the same precedent every other v1 exclusion in this module's docstring
-already follows.
-
-Real per-instance tapcell/endcap/filler *placement counts* were originally
-excluded here too, on the grounds that OpenROAD reports them only via
-``report_design_area``'s free-text summary or a custom ``get_cells
--filter``/``utl::metric_integer`` combination this module does not thread
-through its per-stage ``-metrics <file>.json`` mechanism. Issue #2086
-closed that gap from the other side -- by reading the DEF the run already
-wrote -- because the exclusion had a cost the original scoping missed: a
-``request.power``-less run *completes*, exits 0, and produces a layout
-whose power delivery (none at all on a library with no row-rail fallback;
-rails and fill but no taps, straps or PDN vias on one that has it) was
-indistinguishable in the response from a power-complete one. The additive
-``power.placed`` block now reports those counts plus the ``SPECIALNETS``
-grid structure, and the additive top-level ``warnings`` field says --
-quoting the measured numbers, never a fixed template -- exactly which of
-them are zero. See :mod:`klayout_tools.place_and_route_power_audit`.
-
-``straps[].spacing_um`` and ``connects[]`` (issue #1133) close a further gap:
-sourcing strap geometry from a real platform's own PDN config (e.g. gf180's
-``flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg``) previously
-had no way to express that config's ``add_pdn_stripe -spacing`` (the paired
-power/ground stripe spacing on one layer) or its ``add_pdn_connect`` via-stack
-tuning (``-max_columns``/``-ongrid``/``-split_cuts``) -- both silently
-dropped, with nothing in the request or response recording that a deviation
-from the cited platform config was taken. ``straps[].spacing_um`` (optional,
-per-strap) drives ``-spacing`` on that strap's own ``add_pdn_stripe`` call.
-``connects[]`` (optional; each entry: ``layers`` naming one of ``straps[]``'s
-own consecutive pairs, plus optional ``max_columns``/``ongrid``/
-``split_cuts``) drives the matching pair's ``add_pdn_connect`` call; a pair
-with no matching ``connects[]`` entry keeps this module's prior bare
-``add_pdn_connect -grid {grid} -layers {lower upper}`` call, unchanged. Both
-fields are purely additive -- a request omitting them produces byte-identical
-Tcl to before this field existed -- and the response's own ``power`` field
-echoes exactly what was applied (``power.straps[].spacing_um``,
-``power.connects[]``), for every consecutive pair, not just the ones a
-caller's ``connects[]`` tuned (see :func:`_pdn_connect_spec`/
-:func:`_pdn_connects_applied`).
-
-``tapcell.distance_um`` (issue #3051, optional) overrides the per-library
-``tapcell -distance`` pitch in :data:`_TAPCELL_CELLS`; omitted, the Tcl is
-byte-identical to before. It is a placement input, **not** evidence of any
-diffusion-to-tap boundary distance -- measure the resulting stream. The
-effective pitch is echoed as ``power.tapcell_distance_um``. A
-:data:`_NO_TAPCELL_LIBRARIES` library emits no ``tapcell`` call, so an
-override there is rejected rather than silently ignored.
-
-``preset`` (issue #2123) closes the gap those two fields left open from the
-other side. Being *able* to express a platform's PDN config is not the same
-as not having to transcribe it: the working blocks callers arrived at were
-produced by copying ORFS's own ``pdn_grid_strategy_*.cfg``/``pdn.tcl`` field
-for field, which is exactly the kind of thing that half-works silently.
-``request.power.preset`` names one of :data:`_PDN_PRESETS`' per-platform
-recipes (this repo's own cited transcription of those same configs) instead,
-and :func:`_resolve_pdn_preset` expands it into the identical
-``straps``/``connects`` an explicit request would carry -- validated by the
-same checks, emitted as the same Tcl, echoed in the same response fields,
-plus an additive ``power.preset`` naming which recipe was used. ``preset``
-and explicit ``straps``/``connects`` are **mutually exclusive** (not merged
-per-field): a per-field override would recreate the "cites a platform config
-but silently carries one hand-edited value" failure mode this field exists
-to remove.
-
-``request.power`` omitted (the default) still emits **no**
-``tapcell``/full-PDN ``add_global_connection``/``pdngen -- straps`` line
-anywhere -- the caller-configured PDN this section otherwise describes
-never runs -- and the response's additive ``power`` field's own
-``pdn``/``global_connect``/``tapcell_master``/``endcap_master``/
-``straps``/``connects`` all still report that nothing ran, exactly as
-before. It is **not**, however, byte-identical Tcl to before issue #1442:
-the ``"route"`` stage now always emits a small, separate,
-``request.power``-independent row-rail fallback
-(:func:`_row_rail_lines`/:data:`_ROW_RAIL_STRAP`) on every
-``cell_library`` where the real defect exists -- a single
-``add_global_connection``/``global_connect`` pair binding the library's
-own literal ``VPWR``/``VGND`` pins, plus a ``pdngen`` drawing just that
-library's row-rail ``-followpins`` stripe (no straps, no tapcells, no
-caller-net aliasing) -- *and*, once that rail exists, this stage's own
-``filler_placement``/``global_connect`` pair now also runs (previously
-gated on ``request.power`` alone), closing every row gap the same way a
-full PDN's own filler pass would. See :data:`_ROW_RAIL_STRAP`'s own
-docstring for the full root-cause citation: without the row-rail
-obstruction, a ``request.power``-less run left every unfilled standard-
-cell row gap as genuine free routing space on the same layer the row's
-own power rail lives on, letting a signal net route straight across it --
-a real, DRC-invisible short once a filler cell's PG strap later landed in
-that same gap; live-verified (issue #1442's own PR description) that the
-row-rail obstruction closes that gap with zero
-``merged_net_labels[]`` power/signal shorts, whether or not
-``filler_placement`` also runs. The response's own additive
-``power.row_rail`` field (``emitted``/``layer``/``power_net``/
-``ground_net``/``filler_masters``) reports exactly what this fallback
-did -- see ``docs/cli/place-and-route.md``'s "Power delivery" section for
-the full request/response contract.
+The request/response contract, floorplan methods, PDK/LEF resolution,
+macro placement, power delivery, post-route STA, exit codes and the
+out-of-scope list are specified in ``docs/cli/place-and-route.md``. Design
+background is in ``docs/design/openroad-invocation-survey.md`` and
+``docs/design/digital-flow-contracts-spike.md``. Nothing here shells out to
+or requires an OpenROAD-flow-scripts checkout; per-library reference data
+in the tables above is hand-verified, never guessed.
 """
 
 from __future__ import annotations
@@ -794,6 +229,9 @@ from .place_and_route_request import (
     _validate_io_delay as _validate_io_delay,
 )
 from .place_and_route_request import (
+    _validate_library as _validate_library,
+)
+from .place_and_route_request import (
     _validate_macros as _validate_macros,
 )
 from .place_and_route_request import (
@@ -826,6 +264,9 @@ from .place_and_route_request import (
 from .place_and_route_request import (
     _validate_target_stage as _validate_target_stage,
 )
+from .place_and_route_request import (
+    validate_tech_lef_track_offsets as validate_tech_lef_track_offsets,
+)
 
 # The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
 # `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
@@ -847,6 +288,9 @@ from .place_and_route_script import (
 )
 from .place_and_route_script import (
     _dont_use_lines as _dont_use_lines,
+)
+from .place_and_route_script import (
+    _filler_masters as _filler_masters,
 )
 from .place_and_route_script import (
     _floorplan_init_lines as _floorplan_init_lines,
@@ -883,6 +327,9 @@ from .place_and_route_script import (
 )
 from .place_and_route_script import (
     _violation_count_lines as _violation_count_lines,
+)
+from .place_and_route_script import (
+    _wire_rc_lines as _wire_rc_lines,
 )
 from .place_and_route_script import (
     _write_script as _write_script,
@@ -1860,6 +1307,135 @@ def run_place_and_route(
     )
 
 
+def _layer_has_rc(tech_lef: str, layer: str) -> bool:
+    """``True`` unless ``tech_lef`` is readable and its ``layer`` states no
+    ``RESISTANCE RPERSQ`` (an unreadable LEF is not this check's to report)."""
+    try:
+        header = read_lef_header(tech_lef)
+    except Exception:
+        return True
+    for entry in header["layers"]:
+        if entry["name"] == layer:
+            return entry["resistance_rpersq"] is not None
+    return True
+
+
+def _missing_stage_tables(
+    stage_index: int, target_stage: str, cell_library: str, lib: dict[str, Any]
+) -> list[str]:
+    """CTS-buffer / routing-layer-range / antenna-diode gaps for
+    ``target_stage`` (issue #4086: collected, not raised one at a time)."""
+    missing: list[str] = []
+    at_cts = stage_index >= STAGE_ORDER.index("cts")
+    at_route = stage_index >= STAGE_ORDER.index("route")
+    tail = f"-- cannot reach target_stage '{target_stage}'"
+    if at_cts and "cts_buffer" not in lib and cell_library not in _CTS_BUFFER_CELLS:
+        missing.append(
+            f"no clock-tree buffer cell known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_CTS_BUFFER_CELLS))}) "
+            f"{tail} [supply request.library.cts_buffer]"
+        )
+    if (
+        at_route
+        and "route_layers" not in lib
+        and cell_library not in _ROUTING_LAYER_RANGE
+    ):
+        missing.append(
+            f"no routing-layer range known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_ROUTING_LAYER_RANGE))}) "
+            f"{tail} [supply request.library.route_layers]"
+        )
+    if (
+        at_route
+        and "antenna_diode" not in lib
+        and cell_library not in _ANTENNA_DIODE_CELLS
+    ):
+        missing.append(
+            f"no antenna-diode cell known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_ANTENNA_DIODE_CELLS))}) "
+            f"{tail} [supply request.library.antenna_diode]"
+        )
+    return missing
+
+
+def _missing_power_tables(
+    stage_index: int,
+    target_stage: str,
+    cell_library: str,
+    lib: dict[str, Any],
+    power: dict[str, Any] | None,
+) -> list[str]:
+    """``request.power`` pin-pattern / tapcell / filler gaps (issue #1091).
+
+    Unconditional on ``stage_index`` for the first two (the PDN/tapcell Tcl
+    runs at the end of ``"floorplan"``). A ``_NO_TAPCELL_LIBRARIES`` library
+    (issue #2441) is the one deliberate tapcell exception: its PDK ships no
+    tap/endcap cells, so the ``tapcell`` line is skipped; a library in
+    *neither* table is "unverified", not "none exist", and is reported.
+    """
+    if power is None:
+        return []
+    missing: list[str] = []
+    if "power_pins" not in lib and cell_library not in _POWER_PIN_PATTERNS:
+        missing.append(
+            f"no power pin-pattern table known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_POWER_PIN_PATTERNS))}) "
+            "-- cannot honor request.power [supply request.library.power_pins]"
+        )
+    if (
+        "tapcell" not in lib
+        and cell_library not in _TAPCELL_CELLS
+        and cell_library not in _NO_TAPCELL_LIBRARIES
+    ):
+        missing.append(
+            f"no tapcell master known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_TAPCELL_CELLS))}; "
+            f"libraries with no tap/endcap cells at all: "
+            f"{', '.join(sorted(_NO_TAPCELL_LIBRARIES))}) "
+            "-- cannot honor request.power [supply request.library.tapcell]"
+        )
+    if (
+        stage_index >= STAGE_ORDER.index("route")
+        and "filler" not in lib
+        and cell_library not in _FILLER_CELLS
+    ):
+        missing.append(
+            f"no filler-cell masters known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_FILLER_CELLS))}) "
+            f"-- cannot honor request.power at target_stage '{target_stage}' "
+            "[supply request.library.filler]"
+        )
+    return missing
+
+
+def _missing_wire_rc(
+    stage_index: int,
+    cell_library: str,
+    lib: dict[str, Any],
+    io_spec: dict[str, Any] | None,
+    tech_lef: str | None,
+) -> list[str]:
+    """Wire-RC gap, checked only for a library with no built-in table at all
+    (neither CTS nor power-pin), so built-in libraries' runs stay unchanged.
+    ``set_wire_rc -layer`` reads the tech LEF layer's ``RESISTANCE RPERSQ``;
+    without one OpenROAD stops with RSZ-0089 at ``place``."""
+    if (
+        stage_index < STAGE_ORDER.index("place")
+        or io_spec is None
+        or tech_lef is None
+        or "wire_rc" in lib
+        or cell_library in _CTS_BUFFER_CELLS
+        or cell_library in _POWER_PIN_PATTERNS
+        or _layer_has_rc(tech_lef, io_spec["layer_v"])
+    ):
+        return []
+    return [
+        f"tech LEF layer '{io_spec['layer_v']}' carries no resistance, so "
+        f"`set_wire_rc -layer` cannot work (OpenROAD RSZ-0089) "
+        f"[supply request.library.wire_rc]"
+    ]
+
+
 def _validate_stage_prerequisites(
     *,
     stage_index: int,
@@ -1868,6 +1444,8 @@ def _validate_stage_prerequisites(
     clock_port: str | None,
     io_spec: dict[str, Any] | None,
     power: dict[str, Any] | None,
+    library: dict[str, Any] | None = None,
+    tech_lef: str | None = None,
 ) -> None:
     """Fail with a clear request error when ``target_stage`` (or
     ``request.power``) needs inputs or per-library tables this request lacks
@@ -1889,70 +1467,21 @@ def _validate_stage_prerequisites(
             f"request.io.layer_h/layer_v are required to reach target_stage "
             f"'{target_stage}'"
         )
-    if (
-        stage_index >= STAGE_ORDER.index("cts")
-        and cell_library not in _CTS_BUFFER_CELLS
-    ):
+    # Every missing per-library input is collected and reported together
+    # (issue #4086), each naming the `request.library` field that supplies it
+    # (`[supply request.library.<key>]`), instead of one error per rerun.
+    lib = library or {}
+    missing = _missing_stage_tables(stage_index, target_stage, cell_library, lib)
+    missing += _missing_power_tables(
+        stage_index, target_stage, cell_library, lib, power
+    )
+    missing += _missing_wire_rc(stage_index, cell_library, lib, io_spec, tech_lef)
+    if len(missing) == 1:
+        raise PlaceAndRouteError(missing[0])
+    if missing:
         raise PlaceAndRouteError(
-            f"no clock-tree buffer cell known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_CTS_BUFFER_CELLS))}) "
-            f"-- cannot reach target_stage '{target_stage}'"
-        )
-    if (
-        stage_index >= STAGE_ORDER.index("route")
-        and cell_library not in _ROUTING_LAYER_RANGE
-    ):
-        raise PlaceAndRouteError(
-            f"no routing-layer range known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_ROUTING_LAYER_RANGE))}) "
-            f"-- cannot reach target_stage '{target_stage}'"
-        )
-    if (
-        stage_index >= STAGE_ORDER.index("route")
-        and cell_library not in _ANTENNA_DIODE_CELLS
-    ):
-        raise PlaceAndRouteError(
-            f"no antenna-diode cell known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_ANTENNA_DIODE_CELLS))}) "
-            f"-- cannot reach target_stage '{target_stage}'"
-        )
-    # `request.power` (issue #1091): its own PDN/tapcell Tcl always runs at
-    # the end of the "floorplan" stage (the first stage every run reaches),
-    # so these table lookups are unconditional on `stage_index` -- unlike
-    # the CTS/routing-layer/antenna-diode checks above, which only apply
-    # once a run actually reaches the stage that needs them.
-    if power is not None and cell_library not in _POWER_PIN_PATTERNS:
-        raise PlaceAndRouteError(
-            f"no power pin-pattern table known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_POWER_PIN_PATTERNS))}) "
-            "-- cannot honor request.power"
-        )
-    # A library in `_NO_TAPCELL_LIBRARIES` (issue #2441) is the one
-    # deliberate exception: its PDK states it ships no tap/endcap cells at
-    # all, so `request.power` skips the `tapcell` line and runs every other
-    # power-delivery step. A library in *neither* table still raises -- the
-    # absence there means "unverified", not "none exist".
-    if (
-        power is not None
-        and cell_library not in _TAPCELL_CELLS
-        and cell_library not in _NO_TAPCELL_LIBRARIES
-    ):
-        raise PlaceAndRouteError(
-            f"no tapcell master known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_TAPCELL_CELLS))}; "
-            f"libraries with no tap/endcap cells at all: "
-            f"{', '.join(sorted(_NO_TAPCELL_LIBRARIES))}) "
-            "-- cannot honor request.power"
-        )
-    if (
-        power is not None
-        and stage_index >= STAGE_ORDER.index("route")
-        and cell_library not in _FILLER_CELLS
-    ):
-        raise PlaceAndRouteError(
-            f"no filler-cell masters known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_FILLER_CELLS))}) "
-            f"-- cannot honor request.power at target_stage '{target_stage}'"
+            f"standard-cell library '{cell_library}' is missing "
+            f"{len(missing)} required input(s): " + "; ".join(missing)
         )
     # Row-rail fallback (issue #1442): once `stage_index` reaches `"route"`
     # on a `cell_library` with a verified `_ROW_RAIL_STRAP` entry (`power`
@@ -1966,6 +1495,7 @@ def _validate_stage_prerequisites(
         power is None
         and stage_index >= STAGE_ORDER.index("route")
         and cell_library in _ROW_RAIL_STRAP
+        and "filler" not in lib
         and cell_library not in _FILLER_CELLS
     ):
         raise PlaceAndRouteError(
@@ -1973,6 +1503,27 @@ def _validate_stage_prerequisites(
             f"'{cell_library}' -- cannot honor the row-rail fallback "
             f"(issue #1442) at target_stage '{target_stage}'"
         )
+
+
+def _audit_tapcell_masters(
+    cell_library: str, library: dict[str, Any] | None
+) -> tuple[str | None, str | None]:
+    """Tap/endcap masters the power audit looks for: ``request.library.
+    tapcell`` (issue #4127), else the built-in table; ``(None, None)`` for a
+    library with neither (the audit then skips those checks)."""
+    if library is not None and "tapcell" in library:
+        tap, endcap, _distance_um = library["tapcell"]
+        return tap, endcap
+    tap, endcap, _distance_um = _TAPCELL_CELLS.get(cell_library, (None, None, 0))
+    return tap, endcap
+
+
+def _audit_filler_masters(
+    cell_library: str, library: dict[str, Any] | None
+) -> tuple[str, ...]:
+    if library is not None and "filler" in library:
+        return library["filler"]
+    return _FILLER_CELLS.get(cell_library, ())
 
 
 def _run_single_corner(
@@ -2057,7 +1608,8 @@ def _run_single_corner(
     # no-op.
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
-    power = _validate_power(request.get("power"), cell_library)
+    library = _validate_library(request.get("library"))
+    power = _validate_power(request.get("power"), cell_library, library)
     (
         clock_port,
         clock_period_ns,
@@ -2085,6 +1637,7 @@ def _run_single_corner(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
+    validate_tech_lef_track_offsets(floorplan, tech_lef)
 
     # Issue #2170: the joint floorplan/PDN pre-flight -- see
     # `_validate_pdn_core_fit`'s own docstring for why it lives outside this
@@ -2108,6 +1661,8 @@ def _run_single_corner(
         clock_port=clock_port,
         io_spec=io_spec,
         power=power,
+        library=library,
+        tech_lef=tech_lef,
     )
 
     output_dir = os.path.join(request_dir, ".klt", "place-and-route")
@@ -2155,6 +1710,7 @@ def _run_single_corner(
             output_dir=output_dir,
             route_critical_nets_percentage=route_critical_nets_percentage,
             max_antenna_repair_iterations=max_antenna_repair_iterations,
+            library=library,
         )
         _write_script(script_path, lines)
 
@@ -2269,6 +1825,7 @@ def _run_single_corner(
                 output_delay_ns=output_delay_ns,
                 output_dir=output_dir,
                 hdl_toplevel=hdl_toplevel,
+                library=library,
             )
 
         stages.append(
@@ -2451,7 +2008,7 @@ def _run_single_corner(
             "layer": rail_layer,
             "power_net": rail_power_net,
             "ground_net": rail_ground_net,
-            "filler_masters": list(_FILLER_CELLS[cell_library]),
+            "filler_masters": list(_filler_masters(cell_library, library)),
         }
     else:
         row_rail_info = {
@@ -2477,7 +2034,9 @@ def _run_single_corner(
             "row_rail": row_rail_info,
         }
     else:
-        tap_master, endcap_master, table_distance_um = _tapcell_masters(cell_library)
+        tap_master, endcap_master, table_distance_um = _tapcell_masters(
+            cell_library, library
+        )
         tapcell_distance_um = _effective_tapcell_distance(power, table_distance_um)
         power_info = {
             "preset": power["preset"],
@@ -2489,7 +2048,9 @@ def _run_single_corner(
             "endcap_master": endcap_master,
             "tapcell_distance_um": tapcell_distance_um,
             "filler_masters": (
-                list(_FILLER_CELLS[cell_library]) if target_stage == "route" else []
+                list(_filler_masters(cell_library, library))
+                if target_stage == "route"
+                else []
             ),
             "straps": [
                 {"layer": strap["layer"], "spacing_um": strap["spacing_um"]}
@@ -2522,8 +2083,8 @@ def _run_single_corner(
     # audit there is no such instance to look for, so it *skips* the
     # tapcell/endcap checks rather than grading their absence as a hole --
     # which is exactly right for a library that has no tap cells to place.
-    audit_tap_master, audit_endcap_master, _audit_distance_um = _TAPCELL_CELLS.get(
-        cell_library, (None, None, 0)
+    audit_tap_master, audit_endcap_master = _audit_tapcell_masters(
+        cell_library, library
     )
     audited_def_path = def_path or unrouted_def_path
     power_info["placed"] = audit_power_delivery(
@@ -2535,7 +2096,7 @@ def _run_single_corner(
         ),
         tapcell_master=audit_tap_master,
         endcap_master=audit_endcap_master,
-        filler_masters=_FILLER_CELLS.get(cell_library, ()),
+        filler_masters=_audit_filler_masters(cell_library, library),
         power_net=(
             power["power_net"] if power is not None else row_rail_info["power_net"]
         ),

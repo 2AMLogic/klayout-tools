@@ -8010,9 +8010,9 @@ klt extract --check design.extract.json                  # cheap mode (default)
 klt extract --check design.extract.json --rerun          # full mode
 ```
 
-`--check` is mutually exclusive with the positional `<file>` argument (and
-with `--deck`/`--top`/etc., which are ignored) — the input path and deck are
-both read from `<report.json>` itself, not given again on the command line.
+`--check` takes no `--deck`/`--top`/etc. (those are ignored) — the deck is
+read from `<report.json>` itself, not given again on the command line, and so
+is the input path unless you pass the positional `<file>` (below).
 
 **Both modes resolve the committed report's `file` from *this* checkout
 (issue #2659).** Since `schema_version` 4 it is the `{path, scope}`
@@ -8028,6 +8028,20 @@ clean "no `'file'` field to rerun" error. `netlist_path` is untouched by
 as the re-run's own `--output`. A report predating #2659, whose `file` is a
 bare path string, keeps resolving exactly as it always did — verbatim if absolute, against the current working
 directory if relative.
+
+**Explicit input (issue #2699).** When the report cannot locate its own
+input — a `scope: "external"` run, or a grading clone laid out differently
+from the producing one — supply the input yourself alongside `--check`:
+`klt extract design.gds --check design.extract.json [--rerun]` (the
+positional `<file>`). The explicit input **always overrides** the report's recorded
+one (not only when that one is unresolvable), the same rule on `klt drc`,
+`klt extract` and `klt lvs`; its hash is compared against the report's
+recorded `provenance.input.content_hash` (the deck hash is unaffected), so a file that disagrees reports
+`status: "drifted"` rather than being silently accepted. A relative path
+resolves against the current directory. Without it nothing changes: the
+`file`/`layout` field is resolved exactly as described above, and an
+external-scope report still reports `actual: null` / the clean "no field to
+rerun" error.
 
 ### Cheap mode (default)
 

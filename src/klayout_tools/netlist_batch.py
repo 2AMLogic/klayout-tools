@@ -57,12 +57,11 @@ import subprocess
 import tarfile
 import tempfile
 import time
-import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from . import _provenance, remote_transport, sim_batch
+from . import _batch_common, _provenance, remote_transport, sim_batch
 from .netlist import (
     _PATH_COMMENT_RE,
     DEFAULT_XSCHEM_BINARY,
@@ -392,13 +391,6 @@ def package_tree(
     )
 
 
-def _scrub_tarinfo(info: tarfile.TarInfo) -> tarfile.TarInfo:
-    """No submitting-host user or group names in the archive."""
-    info.uid = info.gid = 0
-    info.uname = info.gname = ""
-    return info
-
-
 def build_tarball(tree: BatchTree, path: str) -> None:
     """Write ``tree``'s files into a gzip tarball at ``path``, with
     root-relative member names. Symlinks are stored as symlinks."""
@@ -408,7 +400,7 @@ def build_tarball(tree: BatchTree, path: str) -> None:
                 os.path.join(tree.root, rel),
                 arcname=rel,
                 recursive=False,
-                filter=_scrub_tarinfo,
+                filter=_batch_common.scrub_tarinfo,
             )
 
 
@@ -503,7 +495,7 @@ def build_job_spec(
 def new_job_id() -> str:
     """A fresh job id in the ``[A-Za-z0-9._-]+`` alphabet the launch script
     accepts, prefixed so a netlist job is recognisable in the bucket."""
-    return f"klt-netlist-{uuid.uuid4().hex[:12]}"
+    return _batch_common.make_job_id("netlist")
 
 
 # --------------------------------------------------------------------------- #
@@ -580,59 +572,23 @@ def _job_failure(
     stderr_tail: str = "",
     harness_log: str | None = None,
 ) -> NetlistError:
-    state = str(status.get("state") or "")
-    exit_code = sim_batch._status_exit_code(status)
-    detail = str(status.get("detail") or "").strip()
-    head = f"batch job {job_id} finished {state!r}" + (
-        f" (exit {exit_code})" if exit_code is not None else ""
+    message, code, details = _batch_common.job_failure_parts(
+        job_id=job_id,
+        state=str(status.get("state") or ""),
+        exit_code=sim_batch._status_exit_code(status),
+        detail=str(status.get("detail") or "").strip(),
+        runner_error=runner_error,
+        note=note,
+        stderr_tail=stderr_tail,
+        harness_log=harness_log,
     )
-    if detail:
-        head += f" ({detail})"
-    if runner_error is not None:
-        message = f"{head}: the runner's klt reported: {runner_error['message']}"
-        code = runner_error.get("code")
-    else:
-        message = f"{head} without a usable report"
-        if note:
-            message += f" [output recovery: {note}]"
-        message += (
-            f" -- full log: {harness_log}"
-            if harness_log
-            else " -- see harness.log under the job's S3 prefix"
-        )
-        if stderr_tail:
-            message += f"\nlast of the runner's stderr.log:\n{stderr_tail}"
-        code = None
-    if code is None:
-        code = BATCH_JOB_TIMEOUT_CODE if state == "timeout" else BATCH_JOB_FAILED_CODE
     message += f" {_NO_FALLBACK}"
-    details: dict[str, Any] = {}
-    if runner_error is None:
-        details["remote_exit_code"] = exit_code
-        details["remote_state"] = state
-        if harness_log:
-            details["harness_log"] = harness_log
-        if stderr_tail:
-            details["remote_stderr_tail"] = stderr_tail
     return NetlistError(message, code=code, job_id=job_id, details=details or None)
 
 
 # --------------------------------------------------------------------------- #
 # Collected output
 # --------------------------------------------------------------------------- #
-
-
-def _read_tree_roots(collected: str) -> list[str]:
-    try:
-        with open(
-            os.path.join(collected, BATCH_TREE_ROOT_FILENAME), encoding="utf-8"
-        ) as handle:
-            lines = [line.strip() for line in handle.read().splitlines()]
-    except OSError:
-        return []
-    roots = [line.rstrip("/") for line in lines if line.startswith("/")]
-    # Longest first, so a resolved path is rewritten before a prefix of it.
-    return sorted(set(roots), key=len, reverse=True)
 
 
 def _rewrite_runner_paths(
@@ -919,7 +875,9 @@ def run_netlist_batch(
         _collect(config, job_id, status, collected, runner=runner)
         report = _read_runner_report(collected, job_id)
         data = _read_collected_netlist(collected, report, job_id)
-        data = _rewrite_runner_paths(data, _read_tree_roots(collected), tree.root)
+        data = _rewrite_runner_paths(
+            data, _batch_common.read_runner_roots(collected), tree.root
+        )
         # The runner's klt gates too; this keeps the guarantee client-side.
         _check_no_unevaluated_expr(data, report["xschem"].get("version"))
         _check_no_unresolved_symbol(data)

@@ -7,7 +7,7 @@ Epic #153, following the layout-vs-schematic pattern
 
 ```
 klt lvs <request> [--format text|json]
-klt lvs --check <report.json> [--rerun] [--format text|json]
+klt lvs --check <report.json> [--layout <path>] [--rerun] [--format text|json]
 ```
 
 This is phase 3 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -267,6 +267,19 @@ a non-zero exit whose database is unreadable or has no cross-reference.
 unmatched devices, nets, pins and circuits become `mismatches[]` entries using
 the shared categories (`device.unmatched`, `device.property`, `net.unmatched`,
 `pin.unmatched`, `topology`).
+
+**An empty extraction is graded, not an error (issue #4081).** When the runset
+extracts zero devices from the layout its compare step never runs, so the
+`.lvsdb` has no cross-reference. If the extracted netlist is also device-free,
+`klt lvs` reports `status: "mismatch"` (exit 2): `device_census.layout` is
+`{}`, `device_census.reference` counts the reference devices, each reference
+device is a `device.unmatched` finding (`side: "reference"`), and `coverage`
+(including `declared_not_recognized`) is populated for the reference side. The
+reference netlist is taken from the db when it carries one, else parsed from
+`reference.netlist`. A reference that is also empty stays `inconclusive` with
+`coverage.no_devices_recognized`. A db with no cross-reference but *with*
+extracted layout devices (the runset genuinely did not compare) is still an
+error, as is a crashed runset. Additive; no `schema_version` bump.
 
 **Coverage honesty.** Additive fields:
 
@@ -1276,10 +1289,12 @@ forms under "Vector-ported macros" below), a simple `assign
 vector alias or tie-off padding). A concatenation is expanded MSB-first into
 one per-bit alias using the module's own `wire`/`input`/`output`/`inout`
 declared widths; both sides must be exactly the same total width, and each
-operand must be a plain net or single-index bit-select — replication
-(`{N{x}}`), literals (`1'b0`), and part-selects (`a[7:4]`) inside a
-concatenation remain unsupported and fail with the same "only a plain
-`assign`" error. A Verilog **escaped identifier** (`\name`) is
+operand must be a plain net, a single-index bit-select, a nested
+concatenation (`{ {a, b}, x }`), or a replication with a literal positive
+integer count (`{2{a}}`, `{2{ {a, b} }}`; issue #4117). Literals (`1'b0`) and
+part-selects (`a[7:4]`) inside a concatenation, a zero or non-integer
+replication count, and unbalanced braces remain unsupported and fail with the
+same "only a plain `assign`" error. A Verilog **escaped identifier** (`\name`) is
 accepted wherever a name is, and is read exactly as Verilog defines it —
 one atomic token running from the backslash to the next whitespace, so
 every character in between belongs to the literal name. A backend-emitted
@@ -4282,6 +4297,21 @@ klt lvs --check design.lvs.json --rerun           # full mode
 the layout/reference paths, engine, and (when used) extraction deck are all
 read from `<report.json>` itself, not given again on the command line.
 
+**Explicit input (issue #2699).** When the report cannot locate its own
+input — a `scope: "external"` run, or a grading clone laid out differently
+from the producing one — supply the input yourself alongside `--check`:
+`klt lvs --check design.lvs.json --layout design.spice [--rerun]`. The explicit input **always overrides** the report's recorded
+one (not only when that one is unresolvable), the same rule on `klt drc`,
+`klt extract` and `klt lvs`; its hash is compared against the report's
+recorded `provenance.input.content_hash`, and the reference/deck hashes are unaffected, so a file that disagrees reports
+`status: "drifted"` rather than being silently accepted. A relative path
+resolves against the current directory. Without it nothing changes: the
+`file`/`layout` field is resolved exactly as described above, and an
+external-scope report still reports `actual: null` / the clean "no field to
+rerun" error.
+`--layout` without `--check` is a clean error (exit 1). Only the layout can
+be supplied this way — `reference` is still the request's own verbatim echo.
+
 ### Cheap mode (default)
 
 Reconciles all three hashes an LVS report can carry (unlike `klt drc`'s
@@ -4538,7 +4568,7 @@ any other application-level failure.
 | Code | Meaning |
 | ---- | ------- |
 | `0` | LVS clean — layout matches reference (`status: "match"`). Under `--check`: the committed report still holds (`status: "match"`). |
-| `1` | Failed to run — bad request, unresolvable layout/reference input, unknown `--deck`, unparseable reference netlist, unsupported engine, or an engine error. Under `--check`: a missing/unparseable committed report. |
+| `1` | Failed to run — bad request, unresolvable layout/reference input, unknown `--deck`, unparseable reference netlist, unsupported engine, or an engine error (including a KLayout comparer-internal failure such as a `bt_count != failed_match` assertion — an application error with no verdict, never reported as `mismatch`). Under `--check`: a missing/unparseable committed report. |
 | `2` | Usage error (missing argument, bad `--format` value, or combining `<request>` with `--check`) — from argparse. |
 | `3` | Ran successfully; mismatches found (`status: "mismatch"`); the documented payload is on stdout. Under `--check`: drifted (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
 | `4` | Ran, but the compare the request asked for could not be performed, so no verdict about the design was reached (`status: "inconclusive"`, issue #1370). The documented payload is still on stdout. Never `0`, and never folded into `3`. |

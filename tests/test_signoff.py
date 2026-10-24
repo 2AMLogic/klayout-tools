@@ -14877,6 +14877,61 @@ def test_resolver_still_handles_a_pre_2659_bare_string_citation(tmp_path):
     assert item_3["citation"]["input_verified"] is True
 
 
+def test_erc_citation_input_verified_true_from_a_different_checkout(tmp_path):
+    """Issue #2703: `klt erc`'s `file` is the same `{path, scope}` envelope,
+    so an `erc` citation re-verifies from a second clone."""
+    layout_bytes = b"GDS-ERC"
+    recorded = _hash_of_bytes(layout_bytes)
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "schema_version": 2,
+        "file": {"path": "block.gds", "scope": "repo"},
+        "provenance": {
+            **ERC_CLEAN_ENVELOPE["provenance"],
+            "input": {"content_hash": recorded, "role": "layout"},
+        },
+    }
+    erc_path, root = _repo_committed_evidence(
+        tmp_path, "consumer", envelope, "block.gds", layout_bytes
+    )
+
+    candidates = signoff_module._input_artifact_candidates(
+        "erc", envelope, {}, erc_path
+    )
+    verified = signoff_module._verify_input_artifact(
+        "erc", envelope, {}, recorded, erc_path
+    )
+
+    assert candidates == [str(root / "block.gds")]
+    assert verified is True
+
+
+def test_lef_abstract_citation_input_verified_true_from_a_different_checkout(
+    tmp_path,
+):
+    """Issue #2703: the same, for `klt lef-abstract`'s `file`."""
+    layout_bytes = b"GDS-LEF"
+    recorded = _hash_of_bytes(layout_bytes)
+    envelope = {
+        "schema_version": 2,
+        "file": {"path": "block.gds", "scope": "repo"},
+        "provenance": {"input": {"content_hash": recorded, "role": "layout"}},
+    }
+    lef_path, root = _repo_committed_evidence(
+        tmp_path, "consumer", envelope, "block.gds", layout_bytes
+    )
+
+    candidates = signoff_module._input_artifact_candidates(
+        "lef-abstract", envelope, {}, lef_path
+    )
+    verified = signoff_module._verify_input_artifact(
+        "lef-abstract", envelope, {}, recorded, lef_path
+    )
+
+    assert candidates == [str(root / "block.gds")]
+    assert verified is True
+
+
 # --------------------------------------------------------------------------- #
 # `klt drc --rules` subsets (issue #2768): a report that executed only part of
 # its deck never earns full DRC credit, in either entry point.

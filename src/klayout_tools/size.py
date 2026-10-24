@@ -1,336 +1,41 @@
-"""``klt size``: solve a single device's operating point from a gm/Id target
-and a current budget, with ``ngspice`` on the real PDK models as the
-evaluator -- never a closed-form surrogate as the final word.
+"""``klt size``: solve a device's operating point from a gm/Id target and a
+current budget, with ``ngspice`` on the real PDK models as the evaluator --
+never a closed-form surrogate as the final word.
 
-Phase 0 (issue #721) of the analog-sizing epic #705: define the request/
-response interface, wire ``ngspice`` in as the in-loop evaluator (reusing
-the model-library resolution and subprocess-invocation conventions
-``sim.py`` already established, per that module's own docstring and
-``docs/cli/sim.md``'s "Model library resolution"/"Engine" sections), and
-solve the single-device gm/Id MVP: given a fixed channel length, a target
-current, and a target gm/Id, find the channel width that hits it.
+Entry points
+------------
+- :func:`load_request`: read and validate a request JSON file.
+- :func:`run_size`: solve one device, a corner set, or a coupled topology and
+  return the JSON response (the contract is in ``docs/json-contract.md``).
 
-Why this is not a thin wrapper around :func:`klayout_tools.sim.run_sim`
-------------------------------------------------------------------------
-``run_sim`` evaluates a **caller-supplied netlist** against a **caller-
-supplied ``.meas`` card list** over a PVT corner matrix -- it is not shaped
-for what this module needs: a bespoke, dynamically generated single-device
-testbench (diode-connected bias, swept across many candidate widths) whose
-"measurement" is the MOSFET's own internal small-signal operating-point
-state (``gm``, ``id``, ``vgs``, ``vth``, ``vdsat``), which ngspice exposes
-only via ``@<device>[<param>]`` vector access inside a ``.control`` block --
-there is no ``.MEASURE OP`` (``sim.py``'s own ``_validate_meas_card`` already
-documents why) and no sweep variable for a ``.meas dc``/``.meas tran`` card
-to search over here. What *is* reused, rather than reimplemented, is the
-model-library resolution (:func:`klayout_tools.sim._resolve_models_lib`,
-PDK-aware, identical ``models.pdk``/``models.lib``/``models.pdk_root``
-shape) and the ``ngspice -b <deck> -o <log>`` subprocess-invocation/timeout/
-engine-version-extraction pattern ``sim.py``'s own ``_run_corner`` uses.
+What it solves
+--------------
+Given a PDK subcircuit (called as an ``X`` element, per the
+``sky130_fd_pr__*`` convention), a fixed channel length, a target current and
+a target gm/Id, find the channel width that hits the target. One coarse
+log-spaced width sweep runs in a single ``ngspice`` invocation (the model
+library parse dominates wall-clock time, so it is paid once), the
+interpolated answer is confirmed by a fresh single-point run, and ``gm/Id``
+is assumed monotonically increasing in ``W`` at fixed current. Optional
+modes, each specified in ``docs/cli/size.md``:
 
-Device convention (sky130-first, per CLAUDE.md)
-------------------------------------------------
-A request names a PDK subcircuit (e.g. ``sky130_fd_pr__nfet_01v8``), called
-as an ``X`` element the way every sky130/gf180 PDK deck this repo already
-targets expects (see ``sim.py``'s ``_SUBCKT_FAMILY_KEYWORDS`` comment) --
-never a bare SPICE-native ``M`` element bound straight to a ``.model`` card.
-The subcircuit must accept ``l``/``w``/``nf``/``mult`` parameters, matching
-the ``sky130_fd_pr__*`` convention (confirmed against the installed sky130A
-PDK while building this module). ngspice's internal op-point vector for a
-device instantiated this way lives at ``@m.<instance>.<inner-name>[<param>]``,
-where ``<inner-name>`` is, by the same sky130 convention, ``m`` prefixed
-onto the subcircuit's own name (e.g. ``msky130_fd_pr__nfet_01v8``) --
-:func:`_default_op_point_element` derives this default; ``device.
-op_point_element`` overrides it for a PDK that does not follow the
-convention.
+- fixed-``Vds`` bias (``target.vds_v``) with a feedback-regulated gate bias;
+- corner sets and the ``worst_case_margin`` objective
+  (:func:`_run_worst_case_margin`);
+- ``design_centering`` growth of ``mult`` for the dominant mismatch
+  contributor (:func:`_apply_design_centering`);
+- a coupled ``diff_pair_mirror_tail`` topology solved jointly
+  (:func:`_run_joint_solve`).
 
-Method: gm/Id lookup via a diode-connected bias sweep
-------------------------------------------------------
-The classical gm/Id sizing methodology (Silveira/Flandre/Jespers) looks up
-current density (``Id/W``) for a target gm/Id from a pre-characterized curve
-at a *fixed* ``Vds``. This MVP uses the simpler, closely related
-diode-connected variant instead (``Vds = Vgs``, gate tied to drain): an ideal
-current source fixes ``Id`` exactly, ngspice's own DC operating-point solver
-finds the ``Vgs`` (and therefore ``gm``) the device settles at for a given
-width -- so the only free variable driving the search is ``W``, and no
-feedback/regulation loop is needed to hold an independently chosen ``Vds``
-against the swept device. ``gm/Id`` at fixed ``Id`` is monotonically
-increasing in ``W`` (larger ``W`` -> lower current density -> weaker
-inversion -> higher ``gm/Id``, verified empirically against the installed
-sky130A PDK's ``sky130_fd_pr__nfet_01v8``/``__pfet_01v8`` while building this
-module), which is what makes a bracket-and-interpolate search well-posed.
-Decoupling ``Vds`` from ``Vgs`` (the fully general fixed-``Vds`` lookup-table
-method) is available as an opt-in mode -- see "Fixed-``Vds`` bias mode"
-below.
+Caveat kept here: the op-point vector is read as
+``@m.<instance>.<inner-name>[<param>]``, with ``<inner-name>`` defaulting to
+``m`` + the subcircuit name (:func:`_default_op_point_element`);
+``device.op_point_element`` overrides it for a PDK that breaks the
+convention. Corner-set sections may not name their own ``lib`` (this command
+resolves one ``models_lib`` per request).
 
-Fixed-``Vds`` bias mode (issue #1015)
-----------------------------------------
-Setting ``request.target.vds_v`` switches the generated deck's bias topology
-from the diode-connected tie above to the fully general fixed-``Vds``
-lookup-table method: an ideal voltage source holds the device's ``Vds`` at
-exactly the requested value, and a **feedback-regulated gate bias** --
-implemented as an ngspice behavioral (``B``) source expressing the gate
-voltage as a clamped, high-loop-gain function of the measured drain current
-error, ``V(gate) = clip(Vdd/2 + K*(Id_measured - Id_target)/Id_target, 0,
-Vdd)`` -- servos ``Vgs`` until the device settles at the target current,
-*at that fixed Vds*. This is a single nonlinear algebraic constraint ngspice's
-own DC Newton-Raphson solver resolves directly inside each ``op`` point,
-exactly the same way SPICE resolves any other closed-loop feedback network
-(e.g. an op-amp macro-model) at DC -- no extra ngspice invocation or outer
-Python-level search loop is needed versus the diode-connected mode's own
-one-invocation-per-sweep design (see "Two-invocation-per-request design"
-below): the identical bracket-and-interpolate-then-confirm width search
-(:func:`_find_bracket`, :func:`_log_interp`, then a fresh single-point
-confirmation run) runs unchanged, only :func:`_write_sweep_deck`'s generated
-bias topology differs.
-
-The loop-gain constant ``K`` (:data:`_FIXED_VDS_FEEDBACK_GAIN`) is
-*normalized* by the target current (dividing the raw current error by
-``Id_target`` before multiplying by ``K``) rather than an absolute
-volts-per-amp gain, so the same constant gives comparable *relative*
-precision on the confirmed current across many decades of target current
--- verified empirically against this module's own synthetic square-law
-device library (see ``examples/size/``) from sub-nanoamp to milliamp targets
-while building this feature: an absolute (non-normalized) gain converges
-each candidate width's confirmed current to a roughly *constant absolute*
-residual (set by the solver's own voltage precision divided by the gain),
-which is a negligible relative error at a typical ~10uA target but a huge
-one at a sub-nanoamp target; normalizing by ``Id_target`` fixes the
-confirmed current's *relative* precision at ~1e-4 (0.01%) regardless of
-scale, comfortably inside every default ``tolerance.gm_id_rel`` this module
-documents. ``K`` itself was picked empirically 100x below the value
-(``3e6``) at which the normalized loop stopped converging in that same
-sweep -- a comfortable margin below realistic PVT/model nonlinearity for a
-real PDK's own compact model.
-
-Because the target current is enforced by *feedback*, not an ideal current
-source, ``margins.id_rel_error`` in this mode is a genuinely measured
-quantity (not "near-zero by construction" the way the diode-connected
-mode's ideal current source guarantees) -- a caller whose declared
-``target.vds_v``/``target.id_a`` combination cannot be reached by any gate
-bias inside ``[0, Vdd]`` (an over-constrained request, e.g. too little
-``Vds`` headroom for the requested current at the narrowest allowed width)
-sees the feedback bias saturate against a supply rail and
-``margins.id_rel_error`` report the resulting mismatch honestly, rather
-than silently reporting an unreachable point as met. See
-``docs/cli/size.md``'s "Fixed-Vds bias mode" section for the request/
-response shape and a worked cascode-device example.
-
-Two-invocation-per-request design (performance)
--------------------------------------------------
-A real PDK's combined-corner ``ngspice`` model library is large (every
-device family in one file) -- parsing it costs the overwhelming majority of
-a single ``ngspice -b`` invocation's wall-clock time (tens of seconds,
-independent of how many operating points are then evaluated; measured
-against the installed sky130A PDK while building this module). Naively
-re-invoking ``ngspice`` once per candidate width (a classic bisection) would
-pay that parse cost on every iteration. Instead, this module pays it
-**once**: the whole coarse, log-spaced width sweep (:data:`DEFAULT_SWEEP_POINTS`
-points by default) runs inside a *single* ``ngspice`` invocation, using
-``alterparam``/``reset`` (re-elaborate the already-parsed circuit with a new
-``.param`` value -- cheap, no re-read from disk) between each ``op`` point.
-A second, single-point invocation then *confirms* the interpolated answer
-(never trusts the coarse grid or the interpolation alone as the final
-word) -- see :func:`run_size`.
-
-Corner *set* input, one sizing corner (issue #729)
-----------------------------------------------------
-A request declares either the original single ``request.corner`` object
-(``process``/``vdd_v``/``temperature_c`` scalars, unchanged) or a corner
-*set* via ``request.corners``, reusing ``sim.py``'s own
-``corners.process``/``corners.temperature_c`` axis semantics verbatim
-(:func:`klayout_tools.sim._expand_corners`) rather than inventing a third
-spelling -- ``vdd_v`` stays a single scalar across the whole set, since this
-command biases one fixed supply rather than sweeping it. Exactly **one**
-declared point, ``corners.sizing`` (defaulting to the first point on each
-axis), is the *sizing* corner: the width search (the sweep + confirm
-described above) runs only there, because re-solving per corner would
-return a different width per corner, which is not a device. The confirmed
-width is then *verified* -- a fresh single-point ngspice confirmation, no
-further search -- at every other declared corner, reporting each corner's
-own operating point, margins, and ``pass``/``fail``/``error`` status
-(:func:`_parse_corner_set`, :func:`run_size`). The sizing corner's status
-alone sets the response's aggregate ``status`` unless the request opts in
-via ``targets.hold_across_corners: true``; an evaluator error at *any*
-declared corner always makes the aggregate ``status`` ``"error"``, mirroring
-``klt sim``'s own error > fail > pass precedence -- see
-``docs/cli/size.md``'s "Corner sets" section for the full response shape.
-
-One deliberate narrowing versus ``klt sim``'s axis semantics: a bundle
-section may **not** name its own model library
-(``sections: [{"lib": ..., "section": ...}]``, issue #2522). ``klt sim``
-resolves those per-section refs and emits one ``.lib`` card per library;
-this command resolves exactly one ``models_lib`` per request and binds every
-section to it, so ``_parse_corner_set`` refuses the shape with a
-:class:`SizeError` rather than dropping the ref and emitting a deck that
-reads the named section out of the wrong file.
-
-Worst-corner margin objective (issue #769)
---------------------------------------------
-The above ("sizing_corner", the default) optimizes for exactly one nominal
-corner and only *reports* the spread elsewhere -- a device sized that way
-can still be the worst-margin choice across the declared PVT set. Setting
-``request.corners.objective: "worst_case_margin"`` instead searches for the
-single width that maximizes the *worst* per-corner gm/Id margin across
-*every* declared corner (:func:`_run_worst_case_margin`).
-
-Every declared corner's ``gm_id(w)`` curve is monotonically increasing in
-width at fixed current (this module's own documented, empirically verified
-assumption -- see "Method" above), so each corner's relative error
-``error_c(w) = (gm_id_c(w) - target) / target`` is monotonically increasing
-too, which makes both ``U(w) = max_c error_c(w)`` and ``L(w) = min_c
-error_c(w)`` monotonically non-decreasing in ``w`` (the max/min of a finite
-family of non-decreasing functions is itself non-decreasing). The width
-that minimizes the worst-case absolute error, ``max_c |error_c(w)| =
-max(U(w), -L(w))``, is therefore exactly the unique zero crossing of
-``h(w) = U(w) + L(w)`` (or a bound of ``[w_min_um, w_max_um]`` when ``h``
-never crosses zero within it -- every declared corner sits on the same side
-of the target throughout the searchable range). A plain bisection on
-``h(ln w)`` finds that crossing to :data:`_WORST_CASE_BISECTION_ITERS`
-digits of precision in pure Python against each corner's own already-swept
-curve -- no additional ngspice invocation per bisection step.
-
-Unlike the ``"sizing_corner"`` objective (one full-grid sweep, plus one
-single-point verification per *other* declared corner: ``N+1`` invocations
-total for ``N`` corners), this objective needs every corner's own full-grid
-curve to search against, so it costs one full-grid sweep invocation *per
-declared corner* plus one single-point confirmation invocation per corner
-at the converged width: ``2N`` invocations. The top-level ``corner``/
-``operating_point``/``margins`` fields mirror the *worst-margin* corner
-among those confirmations under this objective (not the declared
-``corners.sizing`` corner, which is still echoed and still flagged
-``is_sizing`` in ``corners.results`` for reference) -- see
-``docs/cli/size.md``'s "Worst-corner margin objective" section.
-
-A single declared corner makes ``"sizing_corner"`` and ``"worst_case_margin"``
-mathematically equivalent, but this module never routes a single-corner
-request through the new code path unless the request explicitly opts in via
-``corners.objective`` -- the legacy ``request.corner`` shape has no
-``objective`` field at all, so a single-corner request is bit-for-bit
-unaffected by this feature (issue #769's regression requirement).
-
-Design-centering objective (issue #1326)
--------------------------------------------
-The objectives above all optimize *this device's own width* against a
-gm/Id target -- they have no notion of which device, among several, is the
-one a mismatch/yield analysis says is actually worth growing.
-``design_centering.py`` (issue #924, Phase 3 of the statistical/yield epic
-#710) already defines that contract -- a ``klt yield-sensitivity``-shaped
-``ranking[].parameter``/``ranking[].contribution`` array plus a
-``parameter_map`` bridging each ranked mismatch parameter to a sized-device
-instance -- but shipped with no consumer: its own docstring explicitly
-reserved this wiring for #705 once it grew a real design-centering stage.
-
-Setting ``request.design_centering: {"ranking": [...], "parameter_map":
-{...}}`` opts a sizing run into that stage: **additive** to
-``corners.objective`` above (an independent request field a caller may set
-alongside any objective, not a new ``corners.objective`` value), it grows
-whichever instance(s) the ranking flags as the dominant mismatch
-contributor(s) and re-solves at the grown geometry, all inside this one
-``klt size`` invocation -- rather than requiring a caller to run ``klt
-size``, then ``klt design-centering`` on the result, then hand-edit and
-re-run ``klt size`` a second time.
-
-Method: reuse the ranking bridge, grow by MULT, re-verify with ngspice
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-1. This module's own just-solved geometry stands in for the ``sized_device``
-   payload a standalone ``klt design-centering`` call would need supplied
-   separately -- there is nothing to load, the run already has it.
-2. :func:`design_centering.rank_mapped_parameters` and
-   :func:`design_centering.suggested_area_multiplier` -- the same pure
-   ranking-bridge and Pelgrom-law area-multiplier helpers
-   ``design_centering.py``'s own reference consumer uses -- resolve each
-   mapped candidate's suggested area multiplier against the sized geometry
-   from step 1 (:func:`_apply_design_centering`).
-3. Every candidate whose multiplier exceeds ``1x`` grows that instance's
-   ``mult`` (parallel-device count) -- never its ``W``, so the growth never
-   perturbs the gm/Id target the search already met -- rounded up to the
-   next whole device (:func:`_grow_mult`). Single-device mode has exactly
-   one instance to grow; topology mode (see below) may grow more than one
-   role at once when the ranking flags instances in different roles.
-4. The **whole sizing search re-runs** at the grown geometry (a second full
-   sweep+confirm, or a second full joint solve in topology mode) -- turning
-   Pelgrom's law's own "first-pass, order-of-magnitude heuristic, re-verify
-   with a fresh sizing pass" caveat (``design_centering.py``'s docstring)
-   into an actual ngspice-confirmed operating point, not an unverified
-   number. The response's top-level device/operating-point/margins fields
-   are this **grown** run's own result; a ``design_centering`` block
-   reports what was flagged, what was grown, and by how much.
-
-Cost: one extra full solve (the same cost as the base objective already
-ran) only when ``request.design_centering`` opts in and at least one mapped
-candidate's multiplier exceeds ``1x`` -- a request that does not set this
-field pays nothing extra, and a request that sets it but whose ranking's
-top mapped candidate is already the weakest (multiplier ``1.0``, nothing to
-grow) also pays nothing extra. See ``docs/cli/size.md``'s "Design-centering
-objective" section for the full request/response shape.
-
-Coupled multi-device topology sizing (issue #768)
---------------------------------------------------
-Everything above sizes **one** device. A request may instead declare a
-coupled multi-device topology via ``request.topology`` -- Phase 1a of the
-analog-sizing epic (#705) -- and get back a sized operating point for every
-device in it, solved *jointly*. The shipped topology is
-``"diff_pair_mirror_tail"``: an NMOS differential input pair, a PMOS
-current-mirror load, and an NMOS tail current source with its
-diode-connected bias replica -- six device instances, three solved widths,
-the same structure as this repo's own hand-sized 5T OTA canary
-(``examples/design-pipeline/ota_5t.spice``).
-
-Why this cannot be three single-device solves
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The three roles' operating points are *coupled*, along two axes the request
-declares under ``request.budget`` rather than per device:
-
-- **Tail current split.** The tail device sources the whole bias current;
-  each input-pair leg carries half of it. Widening the tail changes both
-  legs' current, hence both legs' gm/Id *and* the mirror's.
-- **Mirror ratio.** ``budget.tail_mirror_ratio`` sets how much the tail
-  device multiplies the diode-connected replica's reference current, and
-  the PMOS load mirror then carries whatever branch current the input pair
-  settles at.
-
-On top of that, none of the six devices actually sits at ``Vds = Vgs`` in
-the real circuit (only the two diode-connected ones do), and the input
-pair's sources sit at a raised tail node, so its body effect is real.
-Sizing each device alone against a diode-connected surrogate and stopping
-there would report an operating point the assembled circuit never reaches.
-
-Method: seed from per-role curves, then solve on the assembled circuit
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-1. **Characterize** (one ngspice invocation per role): the same
-   diode-connected, log-spaced width sweep single-device mode uses, at each
-   role's nominal current, producing that role's ``gm_id(W)`` curve. This
-   only *seeds* the search and supplies its local slope -- it is never the
-   final word.
-2. **Solve jointly** (:func:`_run_joint_solve`, one ngspice DC
-   operating-point invocation per candidate point): write the *whole*
-   topology at the candidate ``(W_tail, W_input, W_mirror)``, read back
-   every instance's real in-circuit ``gm``/``Id``/``Vgs``/``Vth``/``Vdsat``
-   at its actual coupled ``Vds``, and correct **all three widths at once**
-   from that single coupled measurement by inverting each role's own curve
-   shifted by its measured offset::
-
-       offset_r   = gm_id_measured_r(W_k) - curve_r(W_k)
-       W_{k+1, r} = curve_r^-1(target_r - offset_r)
-
-   The offset absorbs whatever the diode-connected surrogate could not model
-   (real ``Vds``, the current the circuit actually settled at, body effect);
-   the curve supplies the slope. Iteration stops when every role's control
-   device is inside ``tolerance.gm_id_rel``, when the correction step stops
-   moving, or at ``options.max_joint_iterations``.
-
-The assembled deck holds its output at the common-mode point with the same
-DC-only feedback network (short at DC, open at AC) the canary's own netlist
-uses, rather than letting a single-ended output float to a fragile,
-corner-dependent balance point -- see :func:`_write_topology_deck`.
-
-Every instance's response entry carries its own measured gm/Id, inversion
-level, and a rationale sentence explaining both (issue #768's third
-acceptance criterion); ``budget.measured`` reports the coupled quantities
-the circuit actually delivered (real tail current, the two legs' split, the
-realized mirror ratio). Corner *sets* are not yet supported in topology
-mode. See ``docs/cli/size.md``'s "Coupled multi-device topology sizing"
-section for the full request/response shape and worked example.
+Behaviour, request/response shape and worked examples:
+``docs/cli/size.md``.
 """
 
 from __future__ import annotations

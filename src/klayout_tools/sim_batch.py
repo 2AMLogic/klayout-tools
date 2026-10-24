@@ -98,15 +98,16 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from . import (
+    _batch_common,
     _provenance,
     remote_transport,
+    sim_search,
     sim_snm_meas,
     sim_staging,
     sim_transfer_meas,
@@ -194,6 +195,15 @@ BATCH_RUNNER_LACKS_DECKS_CODE = "batch_runner_lacks_decks"
 _DECKS_BASE_RELEASE = (0, 7)
 _DECKS_FIRST_DEV = 307
 
+#: ``klt place-and-route --backend`` (what every ``place-and-route`` batch job
+#: ends in) landed in ``7fd087787`` (#3518), 1091 commits after ``v0.7.0``
+#: (``git describe``: ``v0.7.0-1091-g7fd087787``). A runner that predates it
+#: rejects the argument on every corner (issue #4124).
+BATCH_RUNNER_LACKS_PLACE_AND_ROUTE_BACKEND_CODE = (
+    "batch_runner_lacks_place_and_route_backend"
+)
+_PAR_BACKEND_FIRST_DEV = 1091
+
 #: Exit code the preflight rejects with. Deliberately outside
 #: :data:`_BATCH_SIM_SUCCESS_EXIT_CODES` so the job is never mistaken for a
 #: sweep that ran.
@@ -221,6 +231,9 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     "corners.process[].sections[] (object form)": "0.7.0",
     # 1b51954f options.ngspice_init (#2530); first in v0.7.0.
     "options.ngspice_init": "0.7.0",
+    # 7849a377c corners.params parameter axis (#3035); first in v0.7.0
+    # (`git tag --contains 7849a377c`).
+    "corners.params": "0.7.0",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
@@ -228,6 +241,10 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # d4d497ee ordered analysis_steps[] (#2482), 2026-10-09, after v0.7.0:
     # the only route to .meas cards on a noise analysis. Untagged.
     "analysis_steps[].measurements[] (noise analysis .meas cards)": None,
+    # measurements[].search (#4121), after v0.7.0: a mandatory feature (an
+    # older runner would drop the measurement). Untagged; its runner-side
+    # detector is the "search" row of _RUNNER_REQUEST_FEATURES.
+    "measurements[].search": None,
 }
 
 #: Upper bound on how much of the collected stderr file recovery reads (its
@@ -652,7 +669,8 @@ def _runner_gate_release(version: str) -> str | None:
 #: #3159/#3160/#3161), ``complex_vectors`` (``options.complex_vectors``,
 #: #3337), ``twoport`` (``analysis.kind: "twoport"``, #3338), and
 #: ``twoport_noise`` (``analysis.noise``, #3339), and ``snm``
-#: (``measurements[].snm``, #3895).
+#: (``measurements[].snm``, #3895), and ``search`` (``measurements[].search``,
+#: #4121).
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
@@ -668,6 +686,12 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: bool(
             sim_snm_meas.snm_measurements(request.get("measurements") or [])
+        ),
+    ),
+    "search": (
+        (0, 7, 1),
+        lambda request: bool(
+            sim_search.search_measurements(request.get("measurements") or [])
         ),
     ),
     "stimulus": (
@@ -714,6 +738,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "transfer",
         "snm",
+        "search",
         "stimulus",
         "dual_injection",
         "complex_vectors",
@@ -762,6 +787,9 @@ def _uses_option(name: str) -> Any:
 _RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
     "measurements[].expr": _uses_measurement_expr,
     "corners.process[].sections[]": _uses_process_section_objects,
+    "corners.params": lambda request: bool(
+        (request.get("corners") or {}).get("params")
+    ),
     "options.ngspice_init": _uses_option("ngspice_init"),
     "options.osdi_preload": _uses_option("osdi_preload"),
     "options.stage_model_inputs": _uses_option("stage_model_inputs"),
@@ -989,6 +1017,19 @@ def _runner_supports_decks(version: str) -> bool | None:
     ``0.7.1.dev<N>`` build with ``N`` at/after :data:`_DECKS_FIRST_DEV`, or in
     any later minor. :func:`_deck_preflight_lines` repeats this in shell.
     """
+    return _runner_supports_since(version, _DECKS_FIRST_DEV)
+
+
+def _runner_supports_par_backend(version: str) -> bool | None:
+    """Whether a runner ``klt --version`` build string accepts ``--backend``
+    on ``place-and-route`` (issue #4124); same rule as
+    :func:`_runner_supports_decks` with :data:`_PAR_BACKEND_FIRST_DEV`."""
+    return _runner_supports_since(version, _PAR_BACKEND_FIRST_DEV)
+
+
+def _runner_supports_since(version: str, first_dev: int) -> bool | None:
+    """A capability that arrived at ``0.7.1.dev<first_dev>``: ``None`` when
+    ``version`` cannot be read."""
     release = _release_segment(version)
     if release is None:
         return None
@@ -1003,7 +1044,7 @@ def _runner_supports_decks(version: str) -> bool | None:
     if parts[2] == 0:
         return False
     dev = re.search(r"\.dev(\d+)", version.split("+", 1)[0])
-    return dev is None or int(dev.group(1)) >= _DECKS_FIRST_DEV
+    return dev is None or int(dev.group(1)) >= first_dev
 
 
 def _deck_preflight_lines() -> str:
@@ -1013,6 +1054,38 @@ def _deck_preflight_lines() -> str:
     runner that cannot read ``decks[]`` fails the job for certain, so the
     job exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` with a klt error envelope
     naming :data:`BATCH_RUNNER_LACKS_DECKS_CODE` before ``klt sim`` runs."""
+    return _capability_preflight_lines(
+        command="sim",
+        code=BATCH_RUNNER_LACKS_DECKS_CODE,
+        first_dev=_DECKS_FIRST_DEV,
+        lacks="deck-list (decks[]) requests",
+        remedy="rebuild the runner image from a klt that includes decks[]",
+    )
+
+
+def par_backend_preflight_lines() -> str:
+    """:func:`_deck_preflight_lines` for a ``place-and-route`` batch job
+    (issue #4124): a runner whose ``klt place-and-route`` predates
+    ``--backend`` exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` naming
+    :data:`BATCH_RUNNER_LACKS_PLACE_AND_ROUTE_BACKEND_CODE`."""
+    return _capability_preflight_lines(
+        command="place-and-route",
+        code=BATCH_RUNNER_LACKS_PLACE_AND_ROUTE_BACKEND_CODE,
+        first_dev=_PAR_BACKEND_FIRST_DEV,
+        lacks="--backend on place-and-route",
+        remedy="rebuild the runner image from a klt that includes "
+        "place-and-route --backend",
+    )
+
+
+def _capability_preflight_lines(
+    *, command: str, code: str, first_dev: int, lacks: str, remedy: str
+) -> str:
+    """The shell behind :func:`_deck_preflight_lines` and
+    :func:`par_backend_preflight_lines`: reject a runner older than
+    ``0.7.1.dev<first_dev>``. ``lacks`` and ``remedy`` are embedded in a
+    double-quoted shell string, so they must not hold ``"``, ``$`` or a
+    backtick."""
     report_path = f'"$EDA_OUTPUT_DIR/{BATCH_REPORT_FILENAME}"'
     base_major, base_minor = _DECKS_BASE_RELEASE
     return (
@@ -1029,13 +1102,12 @@ def _deck_preflight_lines() -> str:
         f'elif [ "$dma" -eq {base_major} ] && [ "$dmi" -eq {base_minor} ]; then '
         'if [ "$dpa" -ge 2 ]; then dk=yes; '
         'elif [ "$dpa" -eq 1 ] && { [ -z "$dn" ] || '
-        f'[ "$dn" -ge {_DECKS_FIRST_DEV} ]; }}; then dk=yes; fi; fi ;; esac; '
+        f'[ "$dn" -ge {first_dev} ]; }}; then dk=yes; fi; fi ;; esac; '
         'if [ -z "$dk" ]; then '
         'dmsg="the fleet runner runs klt ${rv:-<unknown>}, which does not know '
-        "deck-list (decks[]) requests -- the request was not run (rebuild the "
-        'runner image from a klt that includes decks[])"; '
-        'printf \'{"schema_version": 1, "error": {"command": "sim", '
-        f'"code": "{BATCH_RUNNER_LACKS_DECKS_CODE}", "message": "%s"}}}}\\n\' '
+        f'{lacks} -- the request was not run ({remedy})"; '
+        'printf \'{"schema_version": 1, "error": {"command": "' + command + '", '
+        f'"code": "{code}", "message": "%s"}}}}\\n\' '
         '"$dmsg" >' + report_path + "; "
         'echo "$dmsg" >&2; '
         "exit " + str(_BATCH_PREFLIGHT_REJECT_EXIT) + "; fi; "
@@ -1050,6 +1122,41 @@ def _assess_deck_support(request: dict[str, Any], config: BatchConfig) -> None:
     a legacy entry without ``klt_version``, a mix) proceeds to the
     runner-side probe in :func:`_deck_preflight_lines`. Raises regardless of
     ``runner_version_check``: the job could not run on any such image."""
+    _assess_capability_support(
+        request,
+        config,
+        supports=_runner_supports_decks,
+        code=BATCH_RUNNER_LACKS_DECKS_CODE,
+        predates="deck-list (decks[]) support",
+        remedy="rebuild the runner image from a klt that includes decks[]; "
+        "see docs/cli/sim.md",
+    )
+
+
+def assess_par_backend_support(request: dict[str, Any], config: BatchConfig) -> None:
+    """:func:`_assess_deck_support` for ``place-and-route --backend batch``
+    (issue #4124); ``request`` only needs ``models.pdk``."""
+    _assess_capability_support(
+        request,
+        config,
+        supports=_runner_supports_par_backend,
+        code=BATCH_RUNNER_LACKS_PLACE_AND_ROUTE_BACKEND_CODE,
+        predates="place-and-route --backend (needs klt "
+        f"0.7.1.dev{_PAR_BACKEND_FIRST_DEV} or later)",
+        remedy="rebuild the runner image from a klt that includes "
+        "place-and-route --backend; see docs/cli/place-and-route.md",
+    )
+
+
+def _assess_capability_support(
+    request: dict[str, Any],
+    config: BatchConfig,
+    *,
+    supports: Callable[[str], bool | None],
+    code: str,
+    predates: str,
+    remedy: str,
+) -> None:
     from .sim import SimError
 
     pdk = (request.get("models") or {}).get("pdk")
@@ -1060,7 +1167,7 @@ def _assess_deck_support(request: dict[str, Any], config: BatchConfig) -> None:
     if not images:
         return
     support = [
-        _runner_supports_decks(image["klt_version"]) if image["klt_version"] else None
+        supports(image["klt_version"]) if image["klt_version"] else None
         for image in images
     ]
     if any(item is not False for item in support):
@@ -1074,10 +1181,9 @@ def _assess_deck_support(request: dict[str, Any], config: BatchConfig) -> None:
     raise SimError(
         f"backend 'batch' refused before submission: the AMI manifest "
         f"publishes the fleet runner image as {published}, which predates "
-        "deck-list (decks[]) support -- the request was not submitted and no "
-        "instance was launched (rebuild the runner image from a klt that "
-        "includes decks[]; see docs/cli/sim.md)",
-        code=BATCH_RUNNER_LACKS_DECKS_CODE,
+        f"{predates} -- the request was not submitted and no "
+        f"instance was launched ({remedy})",
+        code=code,
     )
 
 
@@ -1785,6 +1891,36 @@ def _validate_batch_models_lib(request: dict[str, Any]) -> None:
     )
 
 
+#: ``SimError.code`` for a ``models.pdk_root`` that is a directory on the
+#: submitting host (issue #4097).
+BATCH_MODELS_PDK_ROOT_HOST_PATH_CODE = "models_pdk_root_host_path"
+
+
+def _validate_batch_pdk_root(request: dict[str, Any]) -> None:
+    """Refuse a ``models.pdk_root`` that exists on this host **before** any S3
+    write (issue #4097). The value is forwarded verbatim to the runner, where
+    a submitter-local path is absent, so the job would launch and die with
+    ``no supported-layout PDK install``. A path that is not a directory here
+    is assumed runner-valid and passes; ``models.pdk``-only requests are
+    unaffected."""
+    from .sim import SimError
+
+    models = request.get("models")
+    root = models.get("pdk_root") if isinstance(models, dict) else None
+    if not isinstance(root, str) or not root.strip() or "$" in root:
+        return
+    if not os.path.isdir(os.path.expanduser(root)):
+        return
+    raise SimError(
+        f"backend 'batch': models.pdk_root {root!r} is a directory on the "
+        "submitting host, but it is forwarded to the runner verbatim, where "
+        "that path does not exist. Drop models.pdk_root and name the variant "
+        "with models.pdk (the runner uses its own PDK install); nothing was "
+        "submitted",
+        code=BATCH_MODELS_PDK_ROOT_HOST_PATH_CODE,
+    )
+
+
 def _validate_batch_pdk_variant(request: dict[str, Any], region: str | None) -> None:
     """Refuse a ``models.pdk`` variant the fleet image does not ship,
     **before** any S3 write (issue #3251).
@@ -1857,6 +1993,7 @@ def _resolve_batch_config(
 
     _validate_batch_pdk(request)
     _validate_batch_models_lib(request)
+    _validate_batch_pdk_root(request)
     batch_spec = request.get("batch") or {}
     provision_script = _resolve_provision_script(batch_spec)
     fleet = _read_fleet_config(provision_script)
@@ -1930,6 +2067,35 @@ def _resolve_batch_config(
         # Issue #3251: refuse a PDK variant the published image does not ship.
         _validate_batch_pdk_variant(request, config.region)
     return config
+
+
+def dry_run_runner_check(
+    request: dict[str, Any], *, corner_count: int, timeout_s: float
+) -> dict[str, Any] | None:
+    """The pre-launch runner checks for ``klt sim --backend batch --dry-run``
+    (issue #4120): the same :func:`_resolve_batch_config` comparison a real
+    submit makes, so a request using a feature every published image predates
+    is refused (or, under ``warn``, diagnosed) without any S3 write or launch.
+
+    Returns the feature diagnostic a ``warn`` run reports, else ``None``. A
+    host with no resolvable batch configuration (no bucket, no provision
+    script) cannot run the check and is left to dry-run clean, as before;
+    only the runner version/feature refusals propagate.
+    """
+    from .sim import SimError
+
+    try:
+        config = _resolve_batch_config(
+            request, corner_count=corner_count, timeout_s=timeout_s
+        )
+    except SimError as exc:
+        if getattr(exc, "code", None) in (
+            BATCH_RUNNER_FEATURE_CODE,
+            BATCH_RUNNER_MISMATCH_CODE,
+        ):
+            raise
+        return None
+    return config.feature_diagnostic
 
 
 def _assess_published_runner(
@@ -2445,7 +2611,7 @@ def new_job_id() -> str:
     """A fresh job id. Constrained to ``[A-Za-z0-9._-]+`` because it becomes
     both an S3 prefix and an EC2 tag (``batch-fleet-provision.sh``'s
     ``cmd_launch`` refuses anything else)."""
-    return f"klt-sim-{uuid.uuid4().hex[:12]}"
+    return _batch_common.make_job_id("sim")
 
 
 def _aws_argv(config: BatchConfig, *args: str) -> list[str]:
@@ -2501,6 +2667,13 @@ _CAPACITY_REFUSAL_MARKER = "no capacity in any of the"
 #: opened (issue #2917).
 _CONCURRENCY_CAP_MARKER = "exceeds BATCH_MAX_CONCURRENT_INSTANCES"
 
+#: The fragment of the same script's shared vCPU-budget refusal (``fail "N
+#: vCPU already running + K instance(s) of up to M vCPU exceeds
+#: BATCH_MAX_VCPU=V ... the spot quota is shared with ci-spot"``). Transient
+#: shared-quota exhaustion, so it is classified with the Spot capacity refusal
+#: (issue #4103).
+_VCPU_BUDGET_MARKER = "exceeds BATCH_MAX_VCPU"
+
 #: The refusal codes :func:`submit_launch` waits out under ``capacity_wait_s``.
 _RETRYABLE_LAUNCH_CODES = frozenset(
     {BATCH_NO_CAPACITY_CODE, BATCH_CONCURRENCY_CAP_CODE}
@@ -2509,8 +2682,8 @@ _RETRYABLE_LAUNCH_CODES = frozenset(
 
 def _classify_launch_failure(stderr: str) -> str | None:
     """:data:`BATCH_NO_CAPACITY_CODE` when a failed ``launch``'s stderr is
-    the provisioner's Spot capacity refusal,
-    :data:`BATCH_CONCURRENCY_CAP_CODE` when it is the shared-fleet
+    the provisioner's Spot capacity refusal or its shared vCPU-budget
+    refusal, :data:`BATCH_CONCURRENCY_CAP_CODE` when it is the shared-fleet
     concurrency-cap refusal, else ``None``.
 
     **Coupling:** this is a text match against 2am's
@@ -2526,6 +2699,8 @@ def _classify_launch_failure(stderr: str) -> str | None:
         return BATCH_NO_CAPACITY_CODE
     if _CONCURRENCY_CAP_MARKER in stderr:
         return BATCH_CONCURRENCY_CAP_CODE
+    if _VCPU_BUDGET_MARKER in stderr:
+        return BATCH_NO_CAPACITY_CODE
     return None
 
 
@@ -2568,7 +2743,9 @@ def submit_job(
     run = runner if runner is not None else _run_subprocess
     prefix = job_uri(config, job_id)
     if progress:
-        _progress(f"klt: batch job {job_id} submitting to {prefix}")
+        _progress(
+            f"klt: batch job {job_id} submitting to {report_job_uri(config, job_id)}"
+        )
     with tempfile.TemporaryDirectory(prefix="klt-batch-") as staging:
         for item in spec.inputs:
             local_path = item.local_path
@@ -3391,6 +3568,36 @@ def _read_worker_environment(
         return {**unknown, "capture": "malformed"}
 
 
+def _runner_feature_report(
+    request: dict[str, Any] | None, runner: str | None
+) -> dict[str, Any] | None:
+    """The ``runner_request_features`` block, or ``None`` if nothing is required.
+
+    ``decks`` (issue #4109) is judged by :func:`_runner_supports_decks`; the
+    rest are plain min-version entries in :data:`_RUNNER_REQUEST_FEATURES`.
+    ``missing`` is ``None`` (status ``unknown``) when the runner is unknown.
+    """
+    features = _request_features(request) if request else []
+    uses_decks = bool(request and request.get("decks"))
+    if uses_decks:
+        features.append("decks")
+    if not features:
+        return None
+    registry = [name for name in features if name != "decks"]
+    missing = _missing_runner_features(registry, runner) if registry else []
+    if uses_decks:
+        decks_ok = _runner_supports_decks(runner) if runner else None
+        if decks_ok is None:
+            missing = None
+        elif not decks_ok and missing is not None:
+            missing = [*missing, "decks"]
+    if missing is None:
+        status = "unknown"
+    else:
+        status = "unsupported" if missing else "supported"
+    return {"required": features, "missing": missing, "status": status}
+
+
 def _read_runner_identity(
     local_dir: str | None, request: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -3412,7 +3619,9 @@ def _read_runner_identity(
     carry ``runner_request_features`` (issue #3249): ``required`` names,
     ``missing`` names (``null`` when the runner version is unknown) and a
     ``status`` of ``supported`` / ``unsupported`` / ``unknown``; see
-    docs/cli/sim.md.
+    docs/cli/sim.md. A non-empty ``decks[]`` (issue #4109) adds ``decks``
+    to ``required``, judged by :func:`_runner_supports_decks` since it is
+    not a plain min-version entry.
     """
     client = _provenance._klt_version()
     runner: str | None = None
@@ -3450,20 +3659,10 @@ def _read_runner_identity(
         "client_klt_version": client,
         "runner_compatibility": status,
     }
-    features = _request_features(request) if request else []
-    if features:
-        missing = _missing_runner_features(features, runner)
-        fields["runner_request_features"] = {
-            "required": features,
-            "missing": missing,
-            "status": (
-                "unknown"
-                if missing is None
-                else "unsupported"
-                if missing
-                else "supported"
-            ),
-        }
+    report = _runner_feature_report(request, runner)
+    if report is not None:
+        fields["runner_request_features"] = report
+        missing = report["missing"]
         if missing:
             fields["request_feature_diagnostic"] = _feature_diagnostic(
                 missing, str(runner), client, "runner"
@@ -3922,9 +4121,9 @@ class _ShardManifest:
 
     ``<artifacts_dir>/batch-shards.json`` holds the request fingerprint (the
     resume checkpoint's own, :func:`sim._checkpoint_fingerprint`), the shard
-    count, where the jobs live (``bucket``/``jobs_prefix``/``region``/
-    ``profile``, like ``batch-receipt.json``), and one entry per shard: its
-    index, the job id it was submitted as, a digest of the corner ids it
+    count, where the jobs live (``jobs_prefix``/``region``/``profile``,
+    like ``batch-receipt.json``; never the bucket, issue #4079), and one entry
+    per shard: its index, the job id it was submitted as, a digest of the corner ids it
     carries, and its client-side lifecycle -- ``state`` is ``pending`` (id
     minted, not yet submitted), ``submitted``, ``launching`` (``launch_job``
     started, outcome unknown), ``launched`` or ``collected``, with the
@@ -4355,7 +4554,8 @@ def _run_batch_job(
     receipt: dict[str, Any] = {
         "job_id": job_id,
         # getattr: the receipt is best-effort and must never break a run.
-        "bucket": getattr(config, "bucket", None),
+        # No bucket: its name carries the cloud account id and receipts get
+        # committed by canary repos (issue #4079).
         "jobs_prefix": getattr(config, "jobs_prefix", None),
         "region": getattr(config, "region", None),
         "profile": getattr(config, "profile", None),
@@ -4689,7 +4889,6 @@ def _open_shard_manifest(
         hosts,
         resume=resume,
         location={
-            "bucket": getattr(config, "bucket", None),
             "jobs_prefix": getattr(config, "jobs_prefix", None),
             "region": getattr(config, "region", None),
             "profile": getattr(config, "profile", None),

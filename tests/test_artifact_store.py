@@ -67,6 +67,9 @@ class FakeBroker:
                 "exists": present,
                 "size": len(self.objects.get(stored, b"")),
             }
+        if op == "delete":
+            self.objects.pop(stored, None)
+            return 200, {"key": key, "deleted": present}
         if op == "put":
             if present:
                 return 200, {"key": key, "exists": True}
@@ -437,6 +440,108 @@ def test_broker_refusal_is_surfaced_verbatim(broker, report, tmp_path, capsys, o
     assert "repo_firewalled" in error["message"]
 
 
+@pytest.fixture
+def sleeps(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr(store, "_sleep", slept.append)
+    return slept
+
+
+def _rate_limited_handler(monkeypatch, statuses, retry_after=None):
+    """Make the fake broker answer ``statuses`` (then 200s) on stat."""
+    queue = list(statuses)
+    real = FakeBroker.answer
+
+    def answer(self, op, body):
+        if queue:
+            return queue.pop(0), {
+                "error": "rate_limited",
+                "message": "per-caller rate limit",
+            }
+        return real(self, op, body)
+
+    monkeypatch.setattr(FakeBroker, "answer", answer)
+
+
+def test_429_is_retried_then_succeeds(broker, monkeypatch, sleeps):
+    _rate_limited_handler(monkeypatch, [429, 429])
+    client = store.BrokerClient(broker.base)
+
+    out = client.call("stat", {"kind": "evidence", "repo": REPO, "sha256": "a" * 64})
+
+    assert out["exists"] is False
+    assert sleeps == [1.0, 2.0]
+    assert len(broker.requests) == 3
+
+
+def test_429_exhaustion_is_broker_rate_limited(broker, monkeypatch, sleeps):
+    _rate_limited_handler(monkeypatch, [429] * 10)
+    client = store.BrokerClient(broker.base)
+
+    with pytest.raises(store.ArtifactError) as info:
+        client.call("stat", {"kind": "evidence", "repo": REPO, "sha256": "a" * 64})
+
+    assert info.value.code == "broker_rate_limited"
+    assert info.value.details["broker_status"] == 429
+    assert info.value.details["attempts"] == store.RATE_LIMIT_ATTEMPTS
+    assert "retry_after_s" not in info.value.details
+    assert len(sleeps) == store.RATE_LIMIT_ATTEMPTS - 1
+
+
+def test_non_429_is_never_retried(broker, sleeps):
+    broker.refuse["stat"] = (503, "fleet_unavailable", "down")
+    client = store.BrokerClient(broker.base)
+
+    with pytest.raises(store.ArtifactError) as info:
+        client.call("stat", {"kind": "evidence", "repo": REPO, "sha256": "a" * 64})
+
+    assert info.value.code == "broker_refused"
+    assert sleeps == [] and len(broker.requests) == 1
+
+
+def test_retry_after_is_honored_and_clamped(monkeypatch, sleeps):
+    class Resp:
+        def __init__(self, status, ra):
+            self.status, self._ra = status, ra
+
+        def read(self, n):
+            return b"{}" if self.status == 200 else b'{"error":"rate_limited"}'
+
+        def getheader(self, name):
+            return self._ra
+
+    answers = [Resp(429, "5"), Resp(429, "9999"), Resp(200, None)]
+
+    class Conn:
+        def request(self, *a, **k): ...
+        def getresponse(self):
+            return answers.pop(0)
+
+        def close(self): ...
+
+    monkeypatch.setattr(store, "_connection", lambda *a, **k: Conn())
+    out = store.BrokerClient("http://x").call("stat", {})
+
+    assert out == {}
+    assert sleeps == [5.0, store.RATE_LIMIT_MAX_SLEEP_S]
+
+
+def test_verify_reports_broker_rate_limited(
+    broker, report, tmp_path, capsys, monkeypatch, sleeps
+):
+    manifest = tmp_path / "m.json"
+    _put(report, manifest, capsys)
+    _rate_limited_handler(monkeypatch, [429] * 10)
+
+    code, out, err = _run(
+        ["artifact", "verify", str(manifest), "--format", "json"], capsys
+    )
+
+    assert code == 1
+    assert out == ""
+    assert json.loads(err)["error"]["code"] == "broker_rate_limited"
+
+
 def test_refusal_text_format(broker, report, capsys):
     broker.refuse["put"] = (
         503,
@@ -724,3 +829,106 @@ def test_no_presigned_url_in_argv_or_environment_of_children(
     assert all(argv[0] == "git" for argv in spawned)
     assert not any("fake0secret" in part for argv in spawned for part in argv)
     assert "fake0secret" not in json.dumps(dict(os.environ))
+
+
+def _stored(broker, report, tmp_path, capsys):
+    manifest = tmp_path / "m.json"
+    code, payload = _put(report, manifest, capsys)
+    assert code == 0
+    return manifest, payload["entries"][0]["sha256"]
+
+
+def _ops(broker, op):
+    return [r for r in broker.requests if r[0] == "POST" and r[1] == op]
+
+
+def test_delete_is_a_dry_run_without_yes(broker, report, tmp_path, capsys):
+    _, sha = _stored(broker, report, tmp_path, capsys)
+    code, out, _ = _run(
+        ["artifact", "delete", sha, "--repo", REPO, "--format", "json"], capsys
+    )
+    payload = json.loads(out)
+    assert code == 0 and payload["status"] == "dry_run"
+    assert payload["objects"][0]["would_delete"] is True
+    assert payload["guard"]["checked"] is False
+    assert not _ops(broker, "delete") and len(broker.objects) == 1
+
+
+def test_delete_yes_removes_and_get_then_fails(broker, report, tmp_path, capsys):
+    manifest, sha = _stored(broker, report, tmp_path, capsys)
+    code, out, _ = _run(
+        ["artifact", "delete", f"{manifest}", "--yes", "--format", "json"], capsys
+    )
+    payload = json.loads(out)
+    assert code == 0 and payload["status"] == "deleted"
+    assert payload["objects"][0]["status"] == "deleted"
+    assert not broker.objects
+    code, _, err = _run(
+        [
+            "artifact",
+            "get",
+            sha,
+            "--repo",
+            REPO,
+            "-o",
+            str(tmp_path / "o"),
+            "--format",
+            "json",
+        ],
+        capsys,
+    )
+    assert code == 1 and json.loads(err)["error"]["code"] == "broker_refused"
+
+
+def test_delete_absent_is_success_and_dedupes(broker, tmp_path, capsys):
+    sha = "ab" * 32
+    code, out, _ = _run(
+        ["artifact", "delete", sha, sha, "--repo", REPO, "--yes", "--format", "json"],
+        capsys,
+    )
+    payload = json.loads(out)
+    assert code == 0
+    assert [o["status"] for o in payload["objects"]] == ["absent"]
+    assert not _ops(broker, "delete")
+
+
+def test_delete_keep_refuses_all_then_force_overrides(broker, report, tmp_path, capsys):
+    manifest, sha = _stored(broker, report, tmp_path, capsys)
+    other = "cd" * 32
+    argv = [
+        "artifact",
+        "delete",
+        other,
+        sha,
+        "--repo",
+        REPO,
+        "--yes",
+        "--keep",
+        str(manifest),
+        "--keep",
+        str(manifest),
+        "--format",
+        "json",
+    ]
+    code, _, err = _run(argv, capsys)
+    error = json.loads(err)["error"]
+    assert code == 1 and error["code"] == "still_referenced"
+    assert str(manifest) in error["message"]
+    assert not _ops(broker, "delete") and len(broker.objects) == 1
+    code, out, _ = _run([*argv, "--force-referenced"], capsys)
+    assert code == 0 and not broker.objects
+
+
+def test_delete_refusal_and_missing_selector(broker, report, tmp_path, capsys):
+    manifest, sha = _stored(broker, report, tmp_path, capsys)
+    broker.refuse["delete"] = (404, "not_found", "no delete op")
+    code, _, err = _run(
+        ["artifact", "delete", sha, "--repo", REPO, "--yes", "--format", "json"],
+        capsys,
+    )
+    assert code == 1 and json.loads(err)["error"]["code"] == "broker_refused"
+    code, _, err = _run(
+        ["artifact", "delete", f"{manifest}#nope", "--yes", "--format", "json"],
+        capsys,
+    )
+    assert code == 1

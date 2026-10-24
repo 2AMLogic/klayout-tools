@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt place-and-route --backend batch` fails fast on a runner that predates
+  `--backend`** (issue #4124, documented in
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)). New error code
+  `batch_runner_lacks_place_and_route_backend`, raised before any upload when
+  the AMI manifest publishes only runners older than `0.7.1.dev1091`, and by
+  the runner-side preflight (exit 87) otherwise, instead of every corner
+  failing on an argparse error after the fleet is paid for. Additive.
+- **`klt place-and-route`: `request.library` supplies per-library inputs**
+  (issue #4086, documented in
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)). An optional,
+  additive block (`cts_buffer`, `power_pins`, `wire_rc`) lets a standard-cell
+  library with no built-in table reach `place`/`cts`; omitted, every script
+  is byte-identical. The per-library stage prerequisites are now checked
+  together, so one error lists every missing input and the field that
+  supplies it. No `schema_version` change.
+- **`klt artifact delete`** (issue #4101, documented in
+  [`docs/cli/artifact.md`](docs/cli/artifact.md)). Deletes named objects
+  through a new broker `POST /v1/delete` op. Dry run unless `--yes`; each
+  `--keep MANIFEST` refuses the whole batch with `still_referenced` unless
+  `--force-referenced`; an absent object is success. The broker op lives
+  outside this repo, so end-to-end use awaits it. Additive.
 - **`klt artifact`: manifest `uri`s are logical `artifact:<key>` names**
   (issue #4069, operator ruling H1 in 2AMLogic/2am#5553, documented in
   [`docs/cli/artifact.md`](docs/cli/artifact.md)). `put` writes

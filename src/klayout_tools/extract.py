@@ -4445,7 +4445,9 @@ def _write_subcircuit_deck(
     return report
 
 
-def check_extract_report(report_path: str) -> dict[str, Any]:
+def check_extract_report(
+    report_path: str, *, input_path: str | None = None
+) -> dict[str, Any]:
     """``klt extract --check`` (cheap mode, issue #1149): verify a previously
     committed ``klt extract --format json`` report at ``report_path`` still
     reproduces, without re-running the extraction engine at all.
@@ -4504,7 +4506,11 @@ def check_extract_report(report_path: str) -> dict[str, Any]:
             "provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
             _content_hash(
-                resolve_committed_path(committed.get("file"), report_path=report_path)
+                resolve_committed_path(
+                    committed.get("file"),
+                    report_path=report_path,
+                    override=input_path,
+                )
             ),
         ),
         hash_check(
@@ -4784,7 +4790,9 @@ def _strip_net_id_and_rewrite_names(value: Any, name_map: Mapping[str, str]) -> 
     return _rewrite_net_name(value, name_map)
 
 
-def rerun_extract_report(report_path: str) -> dict[str, Any]:
+def rerun_extract_report(
+    report_path: str, *, input_path: str | None = None
+) -> dict[str, Any]:
     """``klt extract --check <report> --rerun`` (full mode, issue #1149):
     verify a previously committed ``klt extract --format json`` report at
     ``report_path`` by actually re-running the extraction it describes and
@@ -4865,7 +4873,9 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     file, unknown deck, engine error) -- never a traceback.
     """
     committed = _load_committed_report(report_path, ExtractError)
-    file_path = resolve_committed_path(committed.get("file"), report_path=report_path)
+    file_path = resolve_committed_path(
+        committed.get("file"), report_path=report_path, override=input_path
+    )
     if not file_path:
         raise ExtractError(
             f"committed report has no 'file' field to rerun: {report_path}"

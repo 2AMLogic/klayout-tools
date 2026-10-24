@@ -2523,8 +2523,8 @@ the shared envelope (`schema_version`, error shape, exit codes).
 
 ```json
 {
-  "schema_version": 1,
-  "file": "routed.gds",
+  "schema_version": 2,
+  "file": {"path": "routed.gds", "scope": "repo"},
   "spec": "erc.json",
   "pdk": "sky130",
   "gate_role": "poly",
@@ -2705,8 +2705,8 @@ forward regardless (a `diode_insertion` remedy):
 
 | Field            | Type            | Description                                                                                    |
 | ---------------- | --------------- | ------------------------------------------------------------------------------------------------ |
-| `schema_version` | integer         | `1`, unchanged since Phase 1a — Phase 1b's and Phase 1c's fields were both added additively (see "Phase scope" above). |
-| `file`           | string          | The input layout path exactly as provided.                                                       |
+| `schema_version` | integer         | `2` (issue #2703: `file` became a `{path, scope}` envelope; 1 → 2). Every Phase 1b/1c field was added additively (see "Phase scope" above). |
+| `file`           | object          | (issue #2703) The input layout as `{path, scope}`: `scope: "repo"` with a repo-relative `path`, or `scope: "external"` with `path: null` outside any repo (the absolute path is never emitted). `--check`/`--rerun` still accept a schema-1 bare string. |
 | `spec`           | string          | The spec file path exactly as provided.                                                          |
 | `pdk`            | string \| null  | The `--pdk` value exactly as provided; `null` if omitted.                                        |
 | `findings_only`  | boolean         | (issue #2219) Whether `--findings-only` was passed — i.e. whether the per-gate antenna accumulation was skipped. `false` for every ordinary run. When `true`, `levels[].step_area_um2`/`cumulative_area_um2`/`antenna_ratio` are `null` and every level is in `coverage.skipped` for reason `findings_only` — see "Findings-only runs" above. |

@@ -185,7 +185,6 @@ def launch_prepared_job(
             os.path.join(artifacts_dir, BATCH_RECEIPT_FILENAME),
             {
                 "job_id": job_id,
-                "bucket": config.bucket,
                 "jobs_prefix": config.jobs_prefix,
                 "region": config.region,
                 "profile": getattr(config, "profile", None),

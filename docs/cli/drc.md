@@ -10,7 +10,7 @@ klt drc <file> --engine both --deck <name> [--deck-file <path> | --pdk <variant>
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
 klt drc <file> --deck <name> --waivers <waivers.json> [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
-klt drc --check <report.json> [--rerun] [--format text|json]
+klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -84,9 +84,9 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   names is rejected before `klayout` is launched. See "Engine" → `"klayout"`
   → "Opt-in rule-category set assertion".
 - `--check` — verify a previously committed `--format json` report instead
-  of running a fresh check (issue #1106). Mutually exclusive with `<file>`
-  (the input path is read from the report itself) — see "`--check` /
-  `--rerun`" below.
+  of running a fresh check (issue #1106). The input path is read from the
+  report itself unless `<file>` is also given, which overrides it
+  (issue #2699) — see "`--check` / `--rerun`" below.
 - `--rerun` — full mode for `--check`: actually re-run the DRC deck the
   report names, instead of only re-hashing its inputs. Requires `--check`.
 - `--list-rules` — list the curated `--deck`'s registered rules instead of
@@ -2443,6 +2443,60 @@ artifact is not read as a real violation. To check the abutted context, instance
 the cell two or three times edge to edge in a new top cell and run `klt drc`
 on that; the marker stays, because it describes the check, not the outcome.
 
+To check flipped row stacks that share a rail, build the placements with
+`klayout.db` and run `klt drc` on the result. A minimal MX / MY / R180 recipe
+(`cell` is your cell's name, `H` its height and `W` its width in dbu):
+
+```python
+import klayout.db as db
+
+ly = db.Layout()
+ly.read("cell.gds")
+src = ly.cell("cell")
+top = ly.create_cell("stack_top")
+H, W = 270 * 4, 54 * 4 * 6  # 270 nm tall, six gate pitches wide, at 0.25 nm dbu
+for row, trans in enumerate((db.Trans.R0, db.Trans.M0, db.Trans.R0, db.Trans.M0)):
+    # M0 mirrors about the x axis: shift it up one height so the rails meet.
+    dy = (row + (1 if trans == db.Trans.M0 else 0)) * H
+    for col in range(3):
+        top.insert(db.CellInstArray(src.cell_index(), db.Trans(trans, col * W, dy)))
+# For R180 offset by (W, H); for MY (db.Trans.M90) offset x by W.
+ly.write("stack.gds")
+```
+
+Then `klt drc stack.gds --engine klayout --deck-file <deck> --top stack_top`.
+A per-case placement request form (a cell plus a row / flipped-stack /
+neighbour context, reported per case) is **out of scope** for klt: it would
+duplicate the placement `klayout.db` already does in a few lines, and the
+placements are the consumer's to own.
+
+### Opt-in fin / gate grid origin (`FIN.GRID.1`, `GATE.GRID.1`)
+
+`FIN.S.1` and `GATE.S.1` judge neighbour spacing only, so a cell whose shapes
+all moved by the same off-grid offset is still reported `clean`. Two opt-in
+rules check the absolute origin. They are not among the 263 default ids; they
+run only when a `--deck-var` declares the origin (nanometres, the drawn 1x
+scale), and with neither set the deck output, categories and coverage are
+unchanged:
+
+| `--deck-var` | Rule id | Checks |
+|---|---|---|
+| `fin_y_origin_nm` | `FIN.GRID.1` | the lower edge of every FIN sits a whole number of 27 nm vertical pitches from the origin (DRM Table 3.3.1) |
+| `gate_x_origin_nm` | `GATE.GRID.1` | the left edge of every GATE sits a whole number of 54 nm horizontal pitches from the origin (DRM Table 3.4.1) |
+
+```bash
+klt drc cell.gds --engine klayout --deck-file "$(klt deck path --deck asap7 --format json | jq -r .path)" \
+    --deck-var gate_x_origin_nm=17 --deck-var fin_y_origin_nm=10
+```
+
+The DRM states the pitches but no absolute origin, so the origin is yours to
+declare (a cell drawn like the shipped `INVx1`, with gates at x = 17 + 54k nm
+and fins at y = 10 + 27k nm, passes with `17` / `10`; the same cell with `0` /
+`0` fails). Only the FIN lower edge and GATE left edge are held to the grid,
+so a fin or gate whose width is wrong is `FIN.W.1` / `GATE.W.1`, not a second
+grid report. `--expect-rule-categories` stays `263` for the default run;
+add the opt-in ids to the count when you set the vars.
+
 ### Rule ids (the contract)
 
 Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
@@ -3658,10 +3712,10 @@ klt drc --check design.drc.json                  # cheap mode (default)
 klt drc --check design.drc.json --rerun           # full mode
 ```
 
-`--check` is mutually exclusive with the positional `<file>` argument (and
-with `--deck`/`--top`/`--engine`/etc., which are ignored) — the input path,
-deck, and engine are all read from `<report.json>` itself, not given again
-on the command line.
+`--check` takes no `--deck`/`--top`/`--engine`/etc. (those are ignored) — the
+deck and engine are always read from `<report.json>` itself, not given again
+on the command line, and so is the input path unless you pass the positional
+`<file>` (below).
 
 **Both modes resolve the committed report's `file` field from *this*
 checkout (issue #2659).** Since `schema_version` 3 that field is the
@@ -3676,6 +3730,20 @@ unverifiable `actual: null` an absent field gets, and `--rerun` as the same
 clean "no `'file'` field to rerun" error. A report predating #2659, whose
 `file` is a bare path string, keeps resolving exactly as it always did —
 verbatim if absolute, against the current working directory if relative.
+
+**Explicit input (issue #2699).** When the report cannot locate its own
+input — a `scope: "external"` run, or a grading clone laid out differently
+from the producing one — supply the input yourself alongside `--check`:
+`klt drc design.gds --check design.drc.json [--rerun]` (the positional
+`<file>`). The explicit input **always overrides** the report's recorded
+one (not only when that one is unresolvable), the same rule on `klt drc`,
+`klt extract` and `klt lvs`; its hash is compared against the report's
+recorded `provenance.input.content_hash` (the deck hash is unaffected), so a file that disagrees reports
+`status: "drifted"` rather than being silently accepted. A relative path
+resolves against the current directory. Without it nothing changes: the
+`file`/`layout` field is resolved exactly as described above, and an
+external-scope report still reports `actual: null` / the clean "no field to
+rerun" error.
 
 ### Cheap mode (default)
 
