@@ -161,6 +161,17 @@ def _refuse_crossings(spec: dict[str, Any]) -> None:
         )
 
 
+def _refuse_search(spec: dict[str, Any]) -> None:
+    """Issue #4121: a ``search`` bisection loop is emitted into the scalar
+    analysis' deck; search inside a step is not implemented."""
+    if spec.get("search") is not None:
+        raise SimError(
+            f"measurement {spec.get('name')!r}: 'search' is not supported "
+            "with analysis_steps -- use the scalar analysis for a "
+            "bisection/threshold-search measurement"
+        )
+
+
 def _refuse_optional(spec: dict[str, Any]) -> None:
     """Issue #2925: ``optional: true`` (a value-less measurement grades
     ``absent`` instead of ``error``) is implemented for the scalar analysis
@@ -442,6 +453,7 @@ def _resolve_step_measurements(
     for spec in specs:
         _validate_measurement_form(spec)
         _refuse_crossings(spec)
+        _refuse_search(spec)
         _refuse_optional(spec)
         _refuse_cycle_mean(spec)
         _refuse_noise(spec)
@@ -634,6 +646,7 @@ def _resolve_derived_measurements(
     for position, spec in enumerate(specs):
         name = spec["name"]
         _refuse_crossings(spec)
+        _refuse_search(spec)
         _refuse_optional(spec)
         _refuse_cycle_mean(spec)
         _refuse_noise(spec)

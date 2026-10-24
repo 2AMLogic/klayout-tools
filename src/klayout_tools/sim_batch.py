@@ -107,6 +107,7 @@ from typing import TYPE_CHECKING, Any
 from . import (
     _provenance,
     remote_transport,
+    sim_search,
     sim_snm_meas,
     sim_staging,
     sim_transfer_meas,
@@ -231,6 +232,10 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # d4d497ee ordered analysis_steps[] (#2482), 2026-10-09, after v0.7.0:
     # the only route to .meas cards on a noise analysis. Untagged.
     "analysis_steps[].measurements[] (noise analysis .meas cards)": None,
+    # measurements[].search (#4121), after v0.7.0: a mandatory feature (an
+    # older runner would drop the measurement). Untagged; its runner-side
+    # detector is the "search" row of _RUNNER_REQUEST_FEATURES.
+    "measurements[].search": None,
 }
 
 #: Upper bound on how much of the collected stderr file recovery reads (its
@@ -655,7 +660,8 @@ def _runner_gate_release(version: str) -> str | None:
 #: #3159/#3160/#3161), ``complex_vectors`` (``options.complex_vectors``,
 #: #3337), ``twoport`` (``analysis.kind: "twoport"``, #3338), and
 #: ``twoport_noise`` (``analysis.noise``, #3339), and ``snm``
-#: (``measurements[].snm``, #3895).
+#: (``measurements[].snm``, #3895), and ``search`` (``measurements[].search``,
+#: #4121).
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
@@ -671,6 +677,12 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: bool(
             sim_snm_meas.snm_measurements(request.get("measurements") or [])
+        ),
+    ),
+    "search": (
+        (0, 7, 1),
+        lambda request: bool(
+            sim_search.search_measurements(request.get("measurements") or [])
         ),
     ),
     "stimulus": (
@@ -717,6 +729,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "transfer",
         "snm",
+        "search",
         "stimulus",
         "dual_injection",
         "complex_vectors",
