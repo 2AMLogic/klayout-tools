@@ -1779,6 +1779,18 @@ not tolerated on the runner side:
   units, limits and diagnostics come back, so the rawfile never needs to be
   returned and the values, errors and rollups match local execution.
 
+**When the runner's envelope is not recovered** ([#4161](https://github.com/2AMLogic/klayout-tools/issues/4161)).
+A job that exits `87` but whose collected outputs hold neither a `report.json`
+nor an error envelope in `stderr.log` still gets a named diagnostic: the
+per-unit `batch_job_failed` message states that `87` is the runner preflight
+reject (version/feature gate) instead of leaving the bare `job command exited
+87`. If the post-run runner identity shows a major.minor mismatch with the
+client (`environment.remote.runner_compatibility: "mismatch"`), the diagnostic
+also carries `runner_code: "batch_runner_version_mismatch"` and both klt
+versions. `--job-status` is a `status.json` passthrough only and never
+fetches outputs, so it can show just `job command exited 87`; read the full
+report for the cause.
+
 #### Pre-launch check from the AMI manifest ([#2851](https://github.com/2AMLogic/klayout-tools/issues/2851))
 
 The runner-side preflight only runs once a Spot instance has booted. To catch
