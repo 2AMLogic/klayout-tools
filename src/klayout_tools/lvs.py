@@ -235,6 +235,13 @@ from .lvs_power import (
 )
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
 from .lvs_supply import parse_supply_nets, supply_fragmentation_findings
+from .lvs_timeout import (
+    COMPARE_TIMEOUT_CODE,
+    CompareTimeout,
+    heartbeat,
+    parse_compare_timeout,
+    run_with_deadline,
+)
 from .netlist_capacitor_recovery import (
     custom_device_classes_for_deck,
     make_capacitor_class_recovery_reader,
@@ -360,6 +367,9 @@ CATEGORY_DEVICE_PARAMETER_EXCLUDED = "device.parameter_excluded"
 CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED = "device.geometry_not_compared"
 CATEGORY_DEVICE_BODY_UNVERIFIED = "device.body_unverified"
 CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
+#: Issue #4165: `options.compare_timeout_s` expired; `status` is
+#: `"inconclusive"` and this is the only `mismatches[]` entry.
+CATEGORY_COMPARE_TIMEOUT = "compare.timeout"
 #: Issues #1497/#2374: KLayout's native `Netlist.combine_devices()` can
 #: return **normally** with a combined device's parameters inconsistent with
 #: the parallel group it folded -- with no exception raised and no
@@ -656,8 +666,88 @@ class _ReferenceNetlistParseError(LvsError):
     """
 
 
+def _compare_timeout_mismatch(
+    timeout: CompareTimeout, context: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The `compare.timeout` entry for an expired `options.compare_timeout_s`
+    (issue #4165): elapsed time and both sides' sizes in `details`."""
+    return _mismatch(
+        CATEGORY_COMPARE_TIMEOUT,
+        "error",
+        f"the netlist compare did not finish within "
+        f"options.compare_timeout_s={timeout.timeout_s:g}s; no LVS verdict "
+        "was reached (this is neither a match nor a mismatch)",
+        "both",
+        details={
+            "code": COMPARE_TIMEOUT_CODE,
+            "timeout_s": timeout.timeout_s,
+            "elapsed_s": round(timeout.elapsed_s, 3),
+            **context,
+        },
+    )
+
+
+def _compare_timeout_replay_options(echoed: Mapping[str, Any]) -> dict[str, Any]:
+    """`{"compare_timeout_s": n}` when set, else `{}` (issue #4165): used both
+    to echo the option and to replay it, so an unset option leaves the report
+    and the reconstructed request byte-identical to before."""
+    value = echoed.get("compare_timeout_s")
+    return {} if value is None else {"compare_timeout_s": value}
+
+
+def _compare_context(layout_circuit: Any, reference_circuit: Any) -> dict[str, int]:
+    """Device/net/pin counts of both sides, for the heartbeat and the
+    `compare.timeout` entry (issue #4165)."""
+    context: dict[str, int] = {}
+    for side, circuit in (("layout", layout_circuit), ("reference", reference_circuit)):
+        context[f"{side}_devices"] = sum(1 for _ in circuit.each_device())
+        context[f"{side}_nets"] = sum(1 for _ in circuit.each_net())
+        context[f"{side}_pins"] = circuit.pin_count()
+    return context
+
+
+def _guarded_compare(
+    comparer: Any,
+    layout_netlist: Any,
+    reference_netlist: Any,
+    timeout_s: float | None,
+    context: Mapping[str, Any],
+) -> tuple[bool, CompareTimeout | None]:
+    """`_compare_netlists`, with an expired deadline returned instead of
+    raised: `(False, timeout)` (issue #4165)."""
+    try:
+        return (
+            _compare_netlists(
+                comparer,
+                layout_netlist,
+                reference_netlist,
+                timeout_s=timeout_s,
+                context=context,
+            ),
+            None,
+        )
+    except CompareTimeout as exc:
+        return False, exc
+
+
+def _timeout_mismatches(
+    mismatches: list[dict[str, Any]],
+    timeout: CompareTimeout | None,
+    context: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """`mismatches` unchanged, or just the `compare.timeout` entry."""
+    if timeout is None:
+        return mismatches
+    return [_compare_timeout_mismatch(timeout, context)]
+
+
 def _compare_netlists(
-    comparer: Any, layout_netlist: Any, reference_netlist: Any
+    comparer: Any,
+    layout_netlist: Any,
+    reference_netlist: Any,
+    *,
+    timeout_s: float | None = None,
+    context: Mapping[str, Any] | None = None,
 ) -> bool:
     """Run ``NetlistComparer.compare`` and turn an engine-internal failure
     into :class:`LvsError` (issue #4134).
@@ -666,9 +756,21 @@ def _compare_netlists(
     failed_match``) that surfaces as ``RuntimeError``. That is a tool failure,
     not a verdict, so it must not be reported as ``status: "mismatch"``; the
     CLI maps ``LvsError`` to the standard error envelope and exit code 1.
+
+    Issue #4165: ``timeout_s`` (``options.compare_timeout_s``) first proves
+    the compare terminates inside the budget in a killable child, raising
+    :class:`~klayout_tools.lvs_timeout.CompareTimeout` otherwise; either way
+    a stderr heartbeat reports progress (see ``lvs_timeout``).
     """
     try:
-        return comparer.compare(layout_netlist, reference_netlist)
+        if timeout_s is not None:
+            run_with_deadline(
+                lambda: comparer.compare(layout_netlist, reference_netlist),
+                timeout_s,
+                context or {},
+            )
+        with heartbeat(context or {}):
+            return comparer.compare(layout_netlist, reference_netlist)
     except RuntimeError as exc:
         raise LvsError(
             "KLayout's netlist comparer failed internally and could not "
@@ -1231,6 +1333,8 @@ def run_lvs(
     # extract` is always flat, so a hierarchical reference/pre-extracted
     # layout netlist otherwise can never structurally match it).
     flatten_reference = bool(options.get("flatten_reference", False))
+    # Issue #4165: opt-in deadline for the `klayout` engine's compare.
+    compare_timeout_s = parse_compare_timeout(options, engine)
     flatten_layout = bool(options.get("flatten_layout", False))
     # Issue #1205: echoed verbatim (not resolved against `request_dir`), the
     # same convention `layout`/`reference` are echoed under -- so the
@@ -2087,7 +2191,14 @@ def run_lvs(
         # `logger` is already bound via the `NetlistComparer(logger)` constructor
         # above, so the 2-arg overload is used here (not the 3-arg one, which
         # would pass a second, redundant logger reference).
-        compare_result = _compare_netlists(comparer, layout_netlist, reference_netlist)
+        compare_context = _compare_context(layout_circuit, reference_circuit)
+        compare_result, compare_timeout = _guarded_compare(
+            comparer,
+            layout_netlist,
+            reference_netlist,
+            compare_timeout_s,
+            compare_context,
+        )
 
         if not compare_result and parameter_tolerance is not None:
             # Issue #589: `options.parameter_tolerance` is opted in and the
@@ -2147,10 +2258,14 @@ def run_lvs(
                         *_constant_binding_pairs(constant_bindings),
                     ],
                 )
-                compare_result = _compare_netlists(
-                    comparer, layout_netlist, reference_netlist
+                compare_result, compare_timeout = _guarded_compare(
+                    comparer,
+                    layout_netlist,
+                    reference_netlist,
+                    compare_timeout_s,
+                    compare_context,
                 )
-                if compare_result:
+                if compare_result or compare_timeout:
                     break
 
         mismatches = _build_mismatches(
@@ -2170,6 +2285,9 @@ def run_lvs(
             constant_bindings=constant_bindings,
             excluded_parameters=excluded_parameters,
         )
+        # Issue #4165: after a timeout nothing the (empty) logger produced
+        # describes the design; report only the timeout.
+        mismatches = _timeout_mismatches(mismatches, compare_timeout, compare_context)
         if not compare_result and not mismatches:
             # Safety net for the correctness invariant this module's docstring
             # states: `compare()` is always authoritative. If the engine says
@@ -2195,6 +2313,7 @@ def run_lvs(
                 )
             ]
         status = "match" if compare_result else "mismatch"
+        status = STATUS_INCONCLUSIVE if compare_timeout else status
         engine_version = _engine_version()
         # Issue #2373: the `klayout` engine launches no subprocess, so the
         # field is present-and-null here rather than omitted -- the same
@@ -2746,6 +2865,9 @@ def run_lvs(
             "combine_devices_max_attempts": combine_devices_max_attempts,
             "flatten_layout": flatten_layout,
             "flatten_reference": flatten_reference,
+            # Issue #4165: present only when the caller set it, so a request
+            # without the option produces a byte-identical report.
+            **_compare_timeout_replay_options({"compare_timeout_s": compare_timeout_s}),
             "netgen_setup": netgen_setup_echo,
             "parameter_tolerance": parameter_tolerance,
             # Issue #1928: `null` when the option was omitted, else the
@@ -3275,6 +3397,7 @@ def _reconstruct_lvs_request(
     combine_devices_per_circuit = echoed.get("combine_devices_per_circuit")
     if isinstance(combine_devices_per_circuit, dict) and combine_devices_per_circuit:
         options["combine_devices_per_circuit"] = dict(combine_devices_per_circuit)
+    options.update(_compare_timeout_replay_options(echoed))
     netgen_setup = echoed.get("netgen_setup")
     if netgen_setup is not None:
         options["netgen_setup"] = netgen_setup

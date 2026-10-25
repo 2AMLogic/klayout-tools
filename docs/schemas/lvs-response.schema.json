@@ -157,6 +157,7 @@
         "combine_devices_max_attempts": {"type": "integer", "minimum": 1},
         "flatten_layout": {"type": "boolean"},
         "flatten_reference": {"type": "boolean"},
+        "compare_timeout_s": {"type": "number", "exclusiveMinimum": 0, "description": "Issue #4165: options.compare_timeout_s as requested. Present only when set."},
         "netgen_setup": {"type": ["string", "null"]},
         "parameter_tolerance": {"type": ["number", "null"]},
         "compare_parameters": {
@@ -395,7 +396,7 @@
       "properties": {
         "category": {
           "type": "string",
-          "description": "Stable category id. Documented values: net.unmatched, net.merged, net.split, net.supply_fragmented, device.unmatched, device.class, device.class_arity, device.class_family_unsatisfiable, device.bulk_reconciled, device.finfet_bulk_tied, device.placeholder_value, device.property, device.parameter_tolerated, device.parameter_excluded, device.geometry_not_compared, device.body_unverified, device.combine_incomplete, device.combine_parameter_corrected, pin.unmatched, pin.count, pin.declared_short, topology, topology.flattened, topology.power_only_pruned, topology.reference_port_alias_joined, topology.top_level_pins_anchored, hints.rejected, hints.short_nets_applied, combine_devices_per_circuit.unmatched. Not an enum: new categories are additive."
+          "description": "Stable category id. Documented values: net.unmatched, net.merged, net.split, net.supply_fragmented, device.unmatched, device.class, device.class_arity, device.class_family_unsatisfiable, device.bulk_reconciled, device.finfet_bulk_tied, device.placeholder_value, device.property, device.parameter_tolerated, device.parameter_excluded, device.geometry_not_compared, device.body_unverified, device.combine_incomplete, device.combine_parameter_corrected, pin.unmatched, pin.count, pin.declared_short, topology, topology.flattened, topology.power_only_pruned, topology.reference_port_alias_joined, topology.top_level_pins_anchored, hints.rejected, hints.short_nets_applied, combine_devices_per_circuit.unmatched, compare.timeout. Not an enum: new categories are additive."
         },
         "severity": {"enum": ["error", "warning"]},
         "description": {"type": "string"},

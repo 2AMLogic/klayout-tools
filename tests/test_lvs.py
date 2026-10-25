@@ -25645,3 +25645,73 @@ def test_comparer_internal_error_cli_emits_error_envelope_exit_1_issue_4134(
     err = json.loads(captured.err)["error"]
     assert err["command"] == "lvs"
     assert "bt_count != failed_match" in err["message"]
+
+
+def _inverter_request_with_options(tmp_path, options):
+    path = _inverter_request(tmp_path)
+    request = json.loads(Path(path).read_text())
+    request["options"] = {**request.get("options", {}), **options}
+    return _write_request(Path(path), request)
+
+
+def _slow_compare(self, *args):
+    import time
+
+    time.sleep(60)
+    return True
+
+
+def test_compare_timeout_reports_inconclusive_issue_4165(tmp_path, monkeypatch, capsys):
+    import multiprocessing
+
+    import klayout.db as kdb
+
+    monkeypatch.setattr(kdb.NetlistComparer, "compare", _slow_compare)
+    path = _inverter_request_with_options(tmp_path, {"compare_timeout_s": 0.5})
+
+    rc = main(["lvs", path, "--format", "json"])
+
+    assert rc == 4
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "inconclusive"
+    assert report["options"]["compare_timeout_s"] == 0.5
+    assert [m["category"] for m in report["mismatches"]] == ["compare.timeout"]
+    details = report["mismatches"][0]["details"]
+    assert details["code"] == "compare_timeout"
+    assert details["layout_devices"] > 0
+    assert multiprocessing.active_children() == []
+
+
+def test_compare_timeout_not_reached_matches_untimed_issue_4165(tmp_path):
+    base = run_lvs(_inverter_request(tmp_path))
+    timed = run_lvs(_inverter_request_with_options(tmp_path, {"compare_timeout_s": 60}))
+
+    assert timed["status"] == base["status"] == "match"
+    assert "compare_timeout_s" not in base["options"]
+    assert timed["options"].pop("compare_timeout_s") == 60
+    assert timed["options"] == base["options"]
+
+
+@pytest.mark.parametrize("value", [0, -1, "5", True, float("nan")])
+def test_compare_timeout_invalid_value_rejected_issue_4165(tmp_path, value):
+    path = _inverter_request_with_options(tmp_path, {"compare_timeout_s": value})
+    with pytest.raises(LvsError, match="compare_timeout_s"):
+        run_lvs(path)
+
+
+def test_compare_heartbeat_goes_to_stderr_only_issue_4165(
+    tmp_path, monkeypatch, capsys
+):
+    import klayout.db as kdb
+
+    from klayout_tools import lvs_timeout
+
+    monkeypatch.setattr(lvs_timeout, "HEARTBEAT_INTERVAL_S", 0.1)
+    monkeypatch.setattr(kdb.NetlistComparer, "compare", _slow_compare)
+    path = _inverter_request_with_options(tmp_path, {"compare_timeout_s": 0.6})
+
+    main(["lvs", path, "--format", "json"])
+
+    captured = capsys.readouterr()
+    assert "comparing netlists" in captured.err
+    assert json.loads(captured.out)["status"] == "inconclusive"

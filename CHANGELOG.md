@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` gains `options.compare_timeout_s` and a stderr heartbeat for large
+  flat compares** (issue #4165, documented in
+  [`docs/cli/lvs.md`](docs/cli/lvs.md) "Large flat designs"). When the
+  deadline expires the report is `status: "inconclusive"` (exit 4) with one new
+  `compare.timeout` category entry (`details.code: "compare_timeout"`). The
+  option is echoed under `options.compare_timeout_s` only when set; output
+  without it is unchanged.
+
 ## 0.8.0 (2026-10-24)
 
 - **`klt place-and-route --backend batch` fails fast on a runner that predates
