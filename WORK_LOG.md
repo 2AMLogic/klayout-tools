@@ -4,6 +4,14 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-24
 
+- **PR #4158**: feat: add klt evidence lint for evidence-record/1 trees
+- **Issue #4043** (closed): klt gap: evidence-record lint for append-only sim records (G1)
+- **PR #4157**: feat: accept caller-supplied antenna_limits in klt erc spec
+- **Issue #4090** (closed): erc: no antenna-ratio limit table for ASAP7 (--pdk is sky130 / ihp-sg13g2 only), so every antenna level is skipped
+- **PR #4159**: feat: name over-subscribed pin_constraints entry in place-stage slot errors
+- **Issue #4155** (closed): place-and-route io.pin_constraints: slot-count error is opaque, ranges do not fix positions, no abutment check
+- **PR #4152**: fix: show failing attest command output and handle klayout launch OSError
+- **Issue #4151** (closed): Friction: --attest hides failing check output; klt drc leaks PermissionError traceback when launching klayout
 - **PR #4148**: chore(decks): regenerate deck history table for v0.8.0
 - **Issue #3805** (closed): release: `klt signoff --attest` (#2844) is not in any PyPI release; latest 0.7.0 rejects it
 - **Issue #4146** (closed): batch backend: client does not detect a fleet runner too old for deck-list requests before submitting
