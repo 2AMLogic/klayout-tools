@@ -7991,3 +7991,51 @@ def test_expr_no_value_offhost_carries_runner_hint():
         local, [{"name": "v", "expr": "v(out)"}], corners, backend="local"
     )
     assert local == {}
+
+
+def test_unrecovered_preflight_reject_is_named_and_classified_as_mismatch(
+    tmp_path, monkeypatch
+):
+    # Issue #4161: exit 87 with only the identity file collected (no
+    # report.json, no stderr.log) used to read as a bare "exited 87".
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="87", detail="job command exited 87")
+    )
+    runner.outputs = {"runner_identity.json": _identity("0.7.0")}
+    corners, _, environment = _run_one_job(tmp_path, monkeypatch, runner)
+
+    diagnostic = corners[0]["diagnostics"][0]
+    assert diagnostic["code"] == "batch_job_failed"
+    assert "runner preflight reject" in diagnostic["message"]
+    assert diagnostic["runner_code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+    assert diagnostic["runner_klt_version"] == "0.7.0"
+    assert diagnostic["client_klt_version"] == _CLIENT_VERSION
+    assert environment["runner_compatibility"] == "mismatch"
+
+
+def test_unrecovered_exit_87_with_unknown_runner_is_named_not_classified(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="87", detail="job command exited 87")
+    )
+    corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner)
+
+    diagnostic = corners[0]["diagnostics"][0]
+    assert "runner preflight reject" in diagnostic["message"]
+    assert "runner_code" not in diagnostic
+
+
+def test_unrecovered_non_preflight_exit_is_left_unannotated(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    runner.outputs = {"runner_identity.json": _identity("0.7.0")}
+    corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner)
+
+    diagnostic = corners[0]["diagnostics"][0]
+    assert "preflight reject" not in diagnostic["message"]
+    assert "runner_code" not in diagnostic

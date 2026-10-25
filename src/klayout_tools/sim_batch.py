@@ -3999,6 +3999,8 @@ def _recover_failed_job_corners(
         log_diagnostic=log_diagnostic,
     )
     _annotate_preflight_rejection(corners, runner_error, identity)
+    if runner_error is None:
+        _annotate_unrecovered_preflight_reject(corners, status, identity)
     return corners, identity
 
 
@@ -4020,6 +4022,43 @@ def _annotate_preflight_rejection(
     for corner in corners:
         for diagnostic in corner.get("diagnostics") or []:
             if diagnostic.get("runner_code") == runner_error["code"]:
+                diagnostic["runner_klt_version"] = identity["runner_klt_version"]
+                diagnostic["client_klt_version"] = identity["client_klt_version"]
+
+
+def _annotate_unrecovered_preflight_reject(
+    corners: list[dict[str, Any]],
+    status: dict[str, Any],
+    identity: dict[str, Any],
+) -> None:
+    """Issue #4161: a job that exited :data:`_BATCH_PREFLIGHT_REJECT_EXIT`
+    but whose klt error envelope could not be recovered (no ``report.json``,
+    no ``stderr.log``) would otherwise read as the bare ``job command exited
+    87``. Say what the exit means and, when the post-run runner identity
+    shows a major.minor mismatch, classify the failure as a version mismatch
+    (``runner_code`` :data:`BATCH_RUNNER_MISMATCH_CODE` plus both klt
+    identities). A no-op for any other exit code."""
+    if _status_exit_code(status) != _BATCH_PREFLIGHT_REJECT_EXIT:
+        return
+    note = (
+        f"exit {_BATCH_PREFLIGHT_REJECT_EXIT} is the runner preflight reject "
+        "(the fleet runner's klt version/feature gate refused the request "
+        "before klt sim ran); the runner's error envelope was not recovered"
+    )
+    mismatch = identity.get("runner_compatibility") == "mismatch"
+    if mismatch:
+        note += (
+            f"; the runner ran klt {identity.get('runner_klt_version')} but the "
+            f"client is {identity.get('client_klt_version')} -- update the "
+            "runner image or use a compatible client"
+        )
+    for corner in corners:
+        for diagnostic in corner.get("diagnostics") or []:
+            if diagnostic.get("code") != "batch_job_failed":
+                continue
+            diagnostic["message"] = f"{diagnostic['message']} [{note}]"
+            if mismatch:
+                diagnostic["runner_code"] = BATCH_RUNNER_MISMATCH_CODE
                 diagnostic["runner_klt_version"] = identity["runner_klt_version"]
                 diagnostic["client_klt_version"] = identity["client_klt_version"]
 
