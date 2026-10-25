@@ -2,6 +2,10 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-25
+
+- **PR #4162**: fix: name unrecovered runner preflight reject in batch job failures
+
 ### 2026-10-24
 
 - **PR #4158**: feat: add klt evidence lint for evidence-record/1 trees
