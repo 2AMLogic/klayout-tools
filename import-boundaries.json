@@ -316,7 +316,8 @@
         "klayout_tools.lvs_netgen",
         "klayout_tools.lvs_power",
         "klayout_tools.lvs_runset",
-        "klayout_tools.lvs_supply"
+        "klayout_tools.lvs_supply",
+        "klayout_tools.lvs_timeout"
       ]
     },
     "mcp": {

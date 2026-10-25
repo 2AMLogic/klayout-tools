@@ -1905,6 +1905,34 @@ per-macro boundary left for this option to scope on that side. See the
 explanation and the currently-working alternative (issue #1552's option 3:
 `klt extract --abstract-cells` plus a matching hand-authored reference).
 
+## Large flat designs: deadline, heartbeat and manual hierarchy (issue #4165)
+
+`NetlistComparer.compare()` is a single blocking call. On a flat design of
+tens of thousands of devices built from thousands of repeated cells it can run
+for tens of minutes with no output, which looks identical to a hang.
+
+- **Heartbeat.** While the compare runs, `klt lvs` writes a line to **stderr**
+  every 30 s (`klt lvs: comparing netlists, 120s elapsed (layout_devices=...)`).
+  stdout stays pure JSON. With `options.compare_timeout_s` set the lines come
+  from the waiting parent process; without it they come from a helper thread
+  and are best effort (they depend on the native compare releasing the
+  interpreter lock).
+- **Deadline.** Set `options.compare_timeout_s` to bound the compare. On
+  expiry the report is `status: "inconclusive"` with a `compare.timeout`
+  entry, and the exit code is 4 (the same as `klt equiv` timeouts). Treat it
+  as "no verdict", not as a failure of the design.
+- **Bounding the problem by hand.** `flatten_reference: true` forces the worst
+  case for large regular designs. KLayout extraction is flat, so there is no
+  built-in cell-by-cell mode; to approximate one, compare each repeated cell
+  as its own request (extract or abstract that cell, and compare it against
+  the matching reference subcircuit), then compare the top level with those
+  cells black-boxed on both sides (`layout.abstract_cells` and a reference
+  that instantiates the cells as subcircuit calls). Each request is small and
+  gets its own verdict.
+- **Not provided.** Net-ambiguity or symmetric-backtracking statistics:
+  KLayout's comparer is not known to expose them, so a slow match cannot be
+  told apart from a mismatch beyond the deadline.
+
 ## Request
 
 Accepted as a file path, `-` (stdin), or an inline JSON object string on the
@@ -1963,6 +1991,7 @@ each resolves relative paths inside the document.
 | `options.finfet_bulk` | object | Issue #2813. FinFET decks only (e.g. `asap7`): `{"nmos": "<layout net>", "pmos": "<layout net>"}` (either key optional) — opt-in tie of each polarity's bulk net to the named layout net before comparing, disclosed as `device.finfet_bulk_tied` warnings. Default off. A non-FinFET deck, an absent/ambiguous net or ambiguous bulk is an application error. See "FinFET decks" above. |
 | `options.netgen_setup` | string | Only used with `"engine": "netgen"`. Path to a netgen LVS setup `.tcl` file — see "Engine" -> `"netgen"` above. Omit to run with netgen's own default setup. |
 | `options.netgen_timeout_s` | number | Only used with `"engine": "netgen"`. Wall-clock budget (seconds) for the `netgen` subprocess. Default `300`. |
+| `options.compare_timeout_s` | number | Issue #4165. Only for the `"klayout"` engine; no default (omitted = unbounded, output unchanged). Wall-clock budget (positive seconds) for the netlist compare. The compare first runs in a killable child process; at the deadline the child is killed and the report is `status: "inconclusive"` (exit 4) with a single `compare.timeout` error entry whose `details` carry `code: "compare_timeout"`, `timeout_s`, `elapsed_s` and the layout/reference device, net and pin counts. A timeout is never a `match` or `mismatch`. **Cost:** a compare that finishes inside the budget is then repeated in-process (the comparer's event log cannot cross a process boundary), so a run near the limit takes up to twice its compare time. Echoed under `options.compare_timeout_s` only when set. A non-positive or non-number value, or use with `engine: "netgen"`, is an application error (exit 1). |
 | `options.flatten_reference` | boolean | When `true`, calls `klayout.db.Netlist.flatten()` on the **reference** netlist in-process, right after it is read and before circuit selection (issue #1085). `klt extract` always extracts a *flat* layout-side netlist — a single top circuit, no subcircuit calls (see `klt extract`'s "flat, not hierarchical" limitation note) — so a hierarchical reference (one leaf `.subckt` plus N instance calls of it, the shape a macro built by tiling one verified leaf cell naturally takes) can never structurally match it: `NetlistComparer` compares circuit-by-circuit, and the flat layout side simply has no subcircuit-call circuit to pair against the reference's, producing an undiagnosable `topology` "circuit could not be matched to a counterpart" mismatch on both sides. Flattening the reference first collapses every subcircuit-call instance in place, so only its top-level circuit(s) remain — directly comparable against the already-flat layout side. Default `false` (today's unconditional per-circuit matching, unchanged) — a caller who genuinely wants a hierarchy-preserving compare (e.g. because both sides are hierarchical, see `tests/test_lvs.py`'s `test_net_correspondence_scopes_dedup_by_circuit`) is never silently flattened out from under them. A `reference.top` name that only existed as an interior circuit flatten would inline away no longer resolves after flattening — pass the name of whatever remains a genuine top-level circuit. Each side that is actually flattened (its circuit count changes) is disclosed as a `severity: "warning"`, `category: "topology.flattened"` entry — see "`topology.flattened`" below — so a `"match"` reached after flattening is never silently indistinguishable from one reached against the netlist's original hierarchy; a netlist that already had only its top circuit(s) (nothing to flatten) adds no such entry. |
 | `options.flatten_layout` | boolean | The symmetric counterpart of `options.flatten_reference`, for the **layout** side (issue #1085's item 2): calls `Netlist.flatten()` on the layout netlist right after it is resolved, before circuit selection. Meaningful for the pre-extracted `layout.netlist` shape, which can itself be hierarchical (a hand-written or externally-extracted SPICE netlist is under no obligation to be flat the way `klt extract`'s own output always is) — a no-op for the `layout.file` (inline extraction) shape, since that netlist is already flat. Default `false`; same `topology.flattened` disclosure and no-op-on-an-already-flat-netlist behaviour as `options.flatten_reference` above. |
 
