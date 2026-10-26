@@ -4,6 +4,9 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-25
 
+- **PR #4166**: feat(lvs): add compare_timeout_s deadline and stderr heartbeat for large compares
+- **Issue #4165** (closed): klt lvs: no progress, timeout or hierarchical option on ~50k-device flat compares
+- **PR #4163**: chore(loom): resync installed Loom to v0.19.1225
 - **PR #4162**: fix: name unrecovered runner preflight reject in batch job failures
 
 ### 2026-10-24
