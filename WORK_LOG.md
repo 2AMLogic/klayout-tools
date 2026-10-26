@@ -2,6 +2,12 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-26
+
+- **PR #4171**: chore(deps): bump ruff from 0.16.10 to 0.17.0 in the uv-minor-patch group across 1 directory
+- **PR #4169**: chore(deps): bump the cargo-minor-patch group across 7 directories with 1 update
+- **PR #4168**: chore(loom): resync installed Loom to v0.19.1227
+
 ### 2026-10-25
 
 - **PR #4166**: feat(lvs): add compare_timeout_s deadline and stderr heartbeat for large compares
