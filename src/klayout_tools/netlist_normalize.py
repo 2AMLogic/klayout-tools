@@ -139,6 +139,7 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import replace
 from typing import Any, NamedTuple
 
+from . import _spice_number as spice_number
 from ._paths import _fold_spice_continuations
 from .pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
@@ -218,24 +219,6 @@ _CAPACITOR_TERMINALS = 2
 #: *last* one, for the subcircuit name itself). Matched case-insensitively,
 #: like every other SPICE keyword this module reads.
 _PARAMS_SEPARATOR = "params:"
-
-#: SPICE engineering-notation multiplier suffixes, longest-match first so
-#: ``meg`` is not shadowed by ``m``. The base unit for a MOS ``W``/``L`` is
-#: metres, so each value is normalised to metres and then to micrometres.
-_SPICE_SUFFIXES: tuple[tuple[str, float], ...] = (
-    ("meg", 1e6),
-    ("t", 1e12),
-    ("g", 1e9),
-    ("k", 1e3),
-    ("m", 1e-3),
-    ("u", 1e-6),
-    ("n", 1e-9),
-    ("p", 1e-12),
-    ("f", 1e-15),
-    ("a", 1e-18),
-)
-
-_NUMBER_RE = re.compile(r"^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)([a-zA-Z]*)$")
 
 #: Terminal count of the curated MOS primitive (``d g s b``).
 _MOS_TERMINALS = 4
@@ -340,7 +323,7 @@ def _parse_um(
       previously produced a plausible-looking but ~1e6x-mis-scaled netlist
       with no diagnostic (issue #1492).
     """
-    match = _NUMBER_RE.match(raw_value.strip())
+    match = spice_number.NUMBER_RE.match(raw_value.strip())
     if match is None:
         symbols = sorted(set(_IDENT_RE.findall(raw_value)) - {"e", "E"})
         hint = (
@@ -360,7 +343,7 @@ def _parse_um(
     mantissa = float(mantissa_text)
     raw_suffix = match.group(2)
     # An exponent (`1.5e-7`) is captured into the mantissa group by
-    # `_NUMBER_RE`, not the suffix group -- so an empty `raw_suffix` alone
+    # `spice_number.NUMBER_RE`, not the suffix group -- so an empty `raw_suffix` alone
     # does not mean "bare"; it must also lack an exponent marker to be a
     # genuinely ambiguous bare literal (issue #1492).
     has_exponent = "e" in mantissa_text.lower()
@@ -378,13 +361,7 @@ def _parse_um(
             )
         if geometry_style == GEOMETRY_STYLE_BARE_UM:
             return mantissa
-    suffix = raw_suffix.lower()
-    multiplier = 1.0
-    for name, value in _SPICE_SUFFIXES:
-        if suffix.startswith(name):
-            multiplier = value
-            break
-    metres = mantissa * multiplier
+    metres = mantissa * spice_number.suffix_scale(raw_suffix)
     return metres * 1e6
 
 
@@ -493,18 +470,13 @@ class _ExprEvaluator:
         number = _NUM_TOKEN_RE.match(self.text, self.pos)
         if number is not None:
             self.pos = number.end()
-            match = _NUMBER_RE.match(number.group(0))
+            match = spice_number.NUMBER_RE.match(number.group(0))
             if match is None:
                 raise _Unresolved(number.group(0))
-            suffix = match.group(2).lower()
-            multiplier = 1.0
-            for name, factor in _SPICE_SUFFIXES:
-                if suffix.startswith(name):
-                    multiplier = factor
-                    break
+            suffix = match.group(2)
             if suffix or "e" in match.group(1).lower():
                 self.scaled = True
-            return float(match.group(1)) * multiplier
+            return float(match.group(1)) * spice_number.suffix_scale(suffix)
         ident = _IDENT_RE.match(self.text, self.pos)
         if ident is None:
             raise _Unresolved(self.text[self.pos : self.pos + 1] or "<end>")
@@ -557,7 +529,7 @@ def _resolve_params(
     chain = [scopes.get(subckt_scope, {}), scopes[""]]
     out: dict[str, str] = {}
     for key, raw in params.items():
-        if _NUMBER_RE.match(raw.strip()):
+        if spice_number.NUMBER_RE.match(raw.strip()):
             out[key] = raw
             continue
         try:
