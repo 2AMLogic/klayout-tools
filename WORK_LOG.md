@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-26
 
+- **PR #4177**: test(sta): pin report_unannotated listing format to a real OpenSTA capture
+- **Issue #3664** (closed): Live-verify klt sta floating-driver / unannotated-driver listing against real OpenSTA (follow-up to #3663)
 - **PR #4174**: feat(sim): add monte_carlo.seed_mode to pin rndseed to seed + sample_index
 - **Issue #4173** (closed): klt sim monte_carlo: no way to pin per-sample rndseed (base+index or explicit list)
 - **PR #4171**: chore(deps): bump ruff from 0.16.10 to 0.17.0 in the uv-minor-patch group across 1 directory
