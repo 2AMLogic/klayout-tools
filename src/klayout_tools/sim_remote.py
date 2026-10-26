@@ -209,6 +209,8 @@ def _unrun_corner_report(
         }
         if "seed_scope" in point.mc_seed:
             monte_carlo["seed_scope"] = point.mc_seed["seed_scope"]
+        if "seed_mode" in point.mc_seed:
+            monte_carlo["seed_mode"] = point.mc_seed["seed_mode"]
     diagnostic: dict[str, Any] = {
         "severity": "error",
         "code": code,
@@ -629,7 +631,8 @@ def _points_to_push(
     re-derive ``per_corner`` seeds, so the already-derived seeds are shipped
     instead (the same wire a fleet shard uses). A declared
     ``monte_carlo.mismatch_scale`` (issue #3942) is resolved the same way, so
-    an older runner cannot silently run an unscaled sweep. The default
+    an older runner cannot silently run an unscaled sweep. A non-default
+    ``monte_carlo.seed_mode`` (issue #4173) is shipped the same way. The default
     forwards the request unchanged.
     """
     if explicit_points is not None:
@@ -637,6 +640,7 @@ def _points_to_push(
     mc_spec = request.get("monte_carlo")
     if isinstance(mc_spec, dict) and (
         mc_spec.get("seed_scope", "per_corner") != "per_corner"
+        or mc_spec.get("seed_mode", "derived") != "derived"
         or "mismatch_scale" in mc_spec
     ):
         return corner_points
