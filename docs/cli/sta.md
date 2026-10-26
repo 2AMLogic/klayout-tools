@@ -836,6 +836,10 @@ reader's own. It answers "does the SPEF name the nets this design has", not
   OpenSTA build cannot list the offending pins
   (`report_parasitic_annotation -report_unannotated`), in which case the raw
   `unannotated_driver_count` keeps gating.
+  Format verified against real OpenSTA 26Q3-1510-g6cb3f2b704 (issue #3664): one
+  pin per line after each `Found N ... drivers.` line; on a routed gf180mcu
+  design the floating set was exactly its 7 `clkload` cells and
+  `annotation_complete` was `true`.
 - `unannotated_driver_sample` — capped sample (at most 20) of the unannotated
   drivers that are *not* floating, i.e. the ones that gate. `null` when pins
   cannot be listed.

@@ -1287,6 +1287,58 @@ def test_real_capture_dummy_loads_only_is_complete():
     assert block["unannotated_driver_sample"] == []
 
 
+# Verbatim stdout (the WARNING STA-0101/0361 noise lines dropped) of the module's
+# `_parasitic_annotation_lines` against OpenROAD 26Q3-1510-g6cb3f2b704 +
+# gf180mcu_fd_sc_mcu9t5v0 tt_025C_3v30, on the routed gf180-tmds-tx
+# `tmds_encoder` (377 nets, 7 CTS `clkload` dummy cells) with the SPEF from
+# `klt extract --deck gf180mcu --parasitics --spef --def-net-names
+# --def-net-connections --def-pins`. Issue #3664: the one-pin-per-line listing
+# format assumed in #3662 holds, and the 7 floating drivers are exactly the
+# 7 clkload cells. Substitute design: the ~190-net macro of the original report
+# is not committed anywhere.
+_REAL_TMDS_ENCODER_CAPTURE = """\
+===KLT_STA_PARASITIC_ANNOTATION_BEGIN===
+Found 7 unannotated drivers.
+ clkload0/ZN
+ clkload1/ZN
+ clkload2/ZN
+ clkload3/ZN
+ clkload4/ZN
+ clkload5/Z
+ clkload6/ZN
+Found 0 partially unannotated drivers.
+===KLT_STA_PARASITIC_ANNOTATION_END===
+===KLT_STA_FLOATING_DRIVERS_BEGIN===
+KLT_FLOATING_DRIVER clkload0/ZN
+KLT_FLOATING_DRIVER clkload1/ZN
+KLT_FLOATING_DRIVER clkload2/ZN
+KLT_FLOATING_DRIVER clkload3/ZN
+KLT_FLOATING_DRIVER clkload4/ZN
+KLT_FLOATING_DRIVER clkload5/Z
+KLT_FLOATING_DRIVER clkload6/ZN
+===KLT_STA_FLOATING_DRIVERS_END===
+===KLT_STA_DRIVER_NETS_BEGIN===
+KLT_DRIVER_NET _594_/Q 1 tmds[0]
+KLT_DRIVER_NET _595_/Q 1 tmds[1]
+[ERROR STA-2204] get_property NULL is not an object.
+===KLT_STA_DRIVER_NETS_END===
+"""
+
+
+def test_real_tmds_encoder_capture_is_complete_with_clkloads_floating():
+    """Issue #3664, measured on real OpenSTA over a routed gf180mcu design."""
+    block = _annotation_from(_REAL_TMDS_ENCODER_CAPTURE)
+
+    assert block["unannotated_driver_count"] == 7
+    assert block["floating_driver_count"] == 7
+    assert block["floating_driver_sample"] == [
+        f"clkload{i}/{'Z' if i == 5 else 'ZN'}" for i in range(7)
+    ]
+    assert block["unannotated_driver_sample"] == []
+    assert block["partially_unannotated_driver_count"] == 0
+    assert block["annotation_complete"] is True
+
+
 def test_driver_net_evidence_loop_survives_a_null_net():
     """OpenSTA returns a one-element NULL-net list for an output pin on no net;
     the per-pin `catch` keeps one such pin from dropping later evidence."""
