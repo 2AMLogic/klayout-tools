@@ -528,6 +528,15 @@ SUPPORTED_MC_VARY = ("mismatch", "process", "both")
 SUPPORTED_MC_SEED_SCOPES = ("per_corner", "shared", "point")
 DEFAULT_MC_SEED_SCOPE = "per_corner"
 
+#: Recognised values for ``request.monte_carlo.seed_mode`` -- how each
+#: sample's ``rndseed`` (the integer written as ``.options seed=``) is
+#: produced (issue #4173). ``derived`` (the default) is the SHA-256
+#: construction; ``sequential`` pins it to ``seed + sample_index`` so a
+#: campaign with a documented ``base + draw_index`` rule can be re-expressed
+#: draw-for-draw. ``process_seed``/``mismatch_seed`` stay derived either way.
+SUPPORTED_MC_SEED_MODES = ("derived", "sequential")
+DEFAULT_MC_SEED_MODE = "derived"
+
 #: Per-``(pdk_family, device_family)`` mismatch-activity table consulted by
 #: :func:`_mismatch_family_report` (issue #355). A vendor model deck's global
 #: mismatch switch/section does not necessarily enable *every* device
@@ -6818,8 +6827,28 @@ def _validate_monte_carlo_spec(mc_spec: dict[str, Any]) -> tuple[int, int, str]:
         )
 
     _validate_mc_seed_scope(mc_spec)
+    seed_mode = _validate_mc_seed_mode(mc_spec)
+    if seed_mode == "sequential" and (seed < 0 or seed + n - 1 >= _MC_SEED_MODULUS):
+        raise SimError(
+            "request.monte_carlo.seed_mode 'sequential' needs "
+            f"0 <= seed and seed + n - 1 < {_MC_SEED_MODULUS} "
+            f"(got seed={seed}, n={n}); lower the seed or n, or use "
+            "seed_mode 'derived'"
+        )
 
     return n, seed, vary
+
+
+def _validate_mc_seed_mode(mc_spec: dict[str, Any]) -> str:
+    """Validate the optional ``request.monte_carlo.seed_mode`` (issue #4173)
+    and return it, defaulting to ``"derived"`` when absent."""
+    mode = mc_spec.get("seed_mode", DEFAULT_MC_SEED_MODE)
+    if mode not in SUPPORTED_MC_SEED_MODES:
+        raise SimError(
+            "request.monte_carlo.seed_mode must be one of "
+            f"{', '.join(SUPPORTED_MC_SEED_MODES)} (got {mode!r})"
+        )
+    return mode
 
 
 def _validate_mc_seed_scope(mc_spec: dict[str, Any]) -> str:
@@ -7276,6 +7305,49 @@ def _injected_family_report(
     return list(groups.values())
 
 
+def _mc_sample_seed(
+    mc_spec: dict[str, Any],
+    seeding: tuple[int, str, str],
+    varies: tuple[bool, bool],
+    scope_key: object,
+    sample_index: int,
+    mismatch_scale: tuple[float, str] | None,
+) -> dict[str, Any]:
+    """The ``mc_seed`` record of one Monte Carlo sample (see
+    :func:`_expand_monte_carlo`'s seed contract)."""
+    seed, seed_scope, seed_mode = seeding
+    vary_process, vary_mismatch = varies
+    process_seed = _derive_mc_seed(
+        seed, "process", scope_key, sample_index if vary_process else "fixed"
+    )
+    mismatch_seed = _derive_mc_seed(
+        seed, "mismatch", scope_key, sample_index if vary_mismatch else "fixed"
+    )
+    if seed_mode == "sequential":
+        # Issue #4173: the caller pins the integer ngspice receives.
+        rndseed = seed + sample_index
+    else:
+        rndseed = _derive_mc_seed(seed, "rndseed", process_seed, mismatch_seed)
+    mc_seed: dict[str, Any] = {
+        "process_seed": process_seed,
+        "mismatch_seed": mismatch_seed,
+        "rndseed": rndseed,
+    }
+    if "seed_scope" in mc_spec:
+        # Echoed only when the request declared it, like
+        # `quantiles`/`k_sigma`, so a request that omits the field
+        # keeps its pre-#2899 response shape.
+        mc_seed["seed_scope"] = seed_scope
+    if "seed_mode" in mc_spec:
+        # Echoed only when declared (issue #4173), like seed_scope.
+        mc_seed["seed_mode"] = seed_mode
+    if mismatch_scale is not None:
+        # Rides the point (and so the fleet wire and the deck
+        # writer); echoed only when declared (issue #3942).
+        mc_seed["mismatch_scale"], mc_seed["mismatch_param"] = mismatch_scale
+    return mc_seed
+
+
 def _expand_monte_carlo(
     corner_points: list[CornerPoint],
     mc_spec: dict[str, Any],
@@ -7322,6 +7394,7 @@ def _expand_monte_carlo(
     """
     n, seed, vary = _validate_monte_carlo_spec(mc_spec)
     seed_scope = _validate_mc_seed_scope(mc_spec)
+    seed_mode = _validate_mc_seed_mode(mc_spec)
     vary_process = vary in ("process", "both")
     vary_mismatch = vary in ("mismatch", "both")
 
@@ -7337,33 +7410,15 @@ def _expand_monte_carlo(
         else:
             scope_key = corner_index
         for sample_index in range(n):
-            process_seed = _derive_mc_seed(
-                seed,
-                "process",
+            mc_seed = _mc_sample_seed(
+                mc_spec,
+                (seed, seed_scope, seed_mode),
+                (vary_process, vary_mismatch),
                 scope_key,
-                sample_index if vary_process else "fixed",
+                sample_index,
+                mismatch_scale,
             )
-            mismatch_seed = _derive_mc_seed(
-                seed,
-                "mismatch",
-                scope_key,
-                sample_index if vary_mismatch else "fixed",
-            )
-            rndseed = _derive_mc_seed(seed, "rndseed", process_seed, mismatch_seed)
-            mc_seed: dict[str, Any] = {
-                "process_seed": process_seed,
-                "mismatch_seed": mismatch_seed,
-                "rndseed": rndseed,
-            }
-            if "seed_scope" in mc_spec:
-                # Echoed only when the request declared it, like
-                # `quantiles`/`k_sigma`, so a request that omits the field
-                # keeps its pre-#2899 response shape.
-                mc_seed["seed_scope"] = seed_scope
-            if mismatch_scale is not None:
-                # Rides the point (and so the fleet wire and the deck
-                # writer); echoed only when declared (issue #3942).
-                mc_seed["mismatch_scale"], mc_seed["mismatch_param"] = mismatch_scale
+            mismatch_seed = mc_seed["mismatch_seed"]
             sampled.append(
                 CornerPoint(
                     base.process,
@@ -7390,6 +7445,8 @@ def _expand_monte_carlo(
         info["injected_scale"] = injected[1]
     if "seed_scope" in mc_spec:
         info["seed_scope"] = seed_scope
+    if "seed_mode" in mc_spec:
+        info["seed_mode"] = seed_mode
     if mismatch_scale is not None:
         info["mismatch_scale"], info["mismatch_param"] = mismatch_scale
     return sampled, info
@@ -7465,6 +7522,26 @@ def _key_in_mc_mismatch_scale(
         payload["mc_mismatch_scale"] = mc_scales
 
 
+def _key_in_mc_seed_options(
+    payload: dict[str, Any], corner_points: Sequence[CornerPoint]
+) -> None:
+    """Issues #2899/#4173: corner IDs carry no seeds, so a resume under another
+    ``monte_carlo.seed_scope`` / ``seed_mode`` would reuse samples drawn from
+    other seeds. Each is keyed in off its default only, so an existing
+    checkpoint stays valid for a request that omits the field."""
+    for field, default, key in (
+        ("seed_scope", DEFAULT_MC_SEED_SCOPE, "mc_seed_scope"),
+        ("seed_mode", DEFAULT_MC_SEED_MODE, "mc_seed_mode"),
+    ):
+        values = {
+            point.mc_seed[field]
+            for point in corner_points
+            if point.mc_seed and field in point.mc_seed
+        } - {default}
+        if values:
+            payload[key] = sorted(values)
+
+
 def _checkpoint_fingerprint(
     *,
     netlist_path: str,
@@ -7530,17 +7607,7 @@ def _checkpoint_fingerprint(
         # checkpoint written under other options never applies. Only keyed
         # in when declared, leaving existing fingerprints untouched.
         payload["ngspice_options"] = ngspice_options
-    mc_scopes = {
-        point.mc_seed["seed_scope"]
-        for point in corner_points
-        if point.mc_seed and "seed_scope" in point.mc_seed
-    } - {DEFAULT_MC_SEED_SCOPE}
-    if mc_scopes:
-        # Issue #2899: corner IDs do not carry seeds, so a resume under a
-        # different `monte_carlo.seed_scope` would otherwise reuse samples
-        # drawn from other seeds. Only keyed in off the default, so an
-        # existing checkpoint stays valid for a request that omits the field.
-        payload["mc_seed_scope"] = sorted(mc_scopes)
+    _key_in_mc_seed_options(payload, corner_points)
     _key_in_mc_mismatch_scale(payload, corner_points)
     if stimulus_lines:
         # Issue #2977: the declared stimulus decides every corner's drive, so
@@ -9559,10 +9626,12 @@ def _write_corner_manifest(corner_dir: str, point: CornerPoint) -> None:
 
 def _mc_seed_optional_echo(mc_seed: dict[str, Any]) -> dict[str, Any]:
     """The per-sample ``monte_carlo`` fields that are echoed only when the
-    request declared them: ``seed_scope`` (issue #2899) and ``mismatch_scale``
-    (issue #3942)."""
+    request declared them: ``seed_scope`` (issue #2899), ``seed_mode``
+    (issue #4173) and ``mismatch_scale`` (issue #3942)."""
     return {
-        key: mc_seed[key] for key in ("seed_scope", "mismatch_scale") if key in mc_seed
+        key: mc_seed[key]
+        for key in ("seed_scope", "seed_mode", "mismatch_scale")
+        if key in mc_seed
     }
 
 

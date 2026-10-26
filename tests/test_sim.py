@@ -1815,6 +1815,113 @@ def test_points_to_push_resolves_non_default_scope_client_side():
 
 
 # --------------------------------------------------------------------------- #
+# monte_carlo.seed_mode (issue #4173)
+# --------------------------------------------------------------------------- #
+
+
+def _mc_rndseeds(sampled):
+    return [p.mc_seed["rndseed"] for p in sampled]
+
+
+def test_seed_mode_derived_is_bit_identical_to_default():
+    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    mc = {"n": 2, "seed": 42, "vary": "mismatch"}
+    base, base_info = sim._expand_monte_carlo(points, mc)
+    derived, info = sim._expand_monte_carlo(points, {**mc, "seed_mode": "derived"})
+    assert [p.mc_seed["rndseed"] for p in derived] == _mc_rndseeds(base)
+    assert [p.mc_seed["process_seed"] for p in derived] == [
+        p.mc_seed["process_seed"] for p in base
+    ]
+    assert "seed_mode" not in base_info
+    assert info["seed_mode"] == "derived"
+    assert "seed_mode" not in base[0].mc_seed
+
+
+@pytest.mark.parametrize("scope", ["per_corner", "shared", "point"])
+def test_seed_mode_sequential_is_seed_plus_index_at_every_corner(scope):
+    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    mc = {"n": 3, "seed": 20260909, "vary": "mismatch", "seed_scope": scope}
+    sampled, info = sim._expand_monte_carlo(points, {**mc, "seed_mode": "sequential"})
+    assert _mc_rndseeds(sampled) == [20260909, 20260910, 20260911] * 2
+    assert info["seed_mode"] == "sequential"
+    assert all(p.mc_seed["seed_mode"] == "sequential" for p in sampled)
+    # process/mismatch seeds are untouched by the mode.
+    derived, _ = sim._expand_monte_carlo(points, mc)
+    for a, b in zip(sampled, derived, strict=True):
+        assert a.mc_seed["process_seed"] == b.mc_seed["process_seed"]
+        assert a.mc_seed["mismatch_seed"] == b.mc_seed["mismatch_seed"]
+
+
+def test_seed_mode_sequential_keeps_negative_control():
+    points = sim._expand_corners({"process": ["tt"]}, [])
+    sampled, _ = sim._expand_monte_carlo(
+        points, {"n": 4, "seed": 3, "vary": "process", "seed_mode": "sequential"}
+    )
+    assert len({p.mc_seed["mismatch_seed"] for p in sampled}) == 1
+    assert len({p.mc_seed["process_seed"] for p in sampled}) == 4
+
+
+def test_seed_mode_edge_cases():
+    points = sim._expand_corners({"process": ["tt"]}, [])
+    for seed, n in ((0, 1), (0, 3)):
+        sampled, _ = sim._expand_monte_carlo(
+            points, {"n": n, "seed": seed, "vary": "both", "seed_mode": "sequential"}
+        )
+        assert _mc_rndseeds(sampled) == list(range(seed, seed + n))
+
+
+def test_seed_mode_rejects_unknown_value():
+    with pytest.raises(sim.SimError, match="monte_carlo.seed_mode"):
+        sim._validate_monte_carlo_spec(
+            {"n": 1, "seed": 1, "vary": "both", "seed_mode": "bogus"}
+        )
+
+
+@pytest.mark.parametrize("seed,n", [(-1, 2), (2_147_483_647, 1), (2_147_483_646, 2)])
+def test_seed_mode_sequential_rejects_out_of_range(seed, n):
+    with pytest.raises(sim.SimError, match="seed_mode.*sequential"):
+        sim._validate_monte_carlo_spec(
+            {"n": n, "seed": seed, "vary": "both", "seed_mode": "sequential"}
+        )
+    # The same seed is fine in derived mode.
+    sim._validate_monte_carlo_spec({"n": n, "seed": seed, "vary": "both"})
+
+
+def test_checkpoint_fingerprint_changes_with_seed_mode(tmp_path):
+    netlist = tmp_path / "n.cir"
+    netlist.write_text("* x\n.end\n")
+    points = sim._expand_corners({"process": ["tt"]}, [])
+
+    def fp(extra):
+        sampled, _ = sim._expand_monte_carlo(
+            points, {"n": 2, "seed": 1, "vary": "both", **extra}
+        )
+        return sim._checkpoint_fingerprint(
+            netlist_path=str(netlist),
+            models_lib=None,
+            analysis={"type": "op"},
+            measurements_spec=[],
+            corner_points=sampled,
+            timeout_s=1.0,
+            engine="ngspice",
+        )
+
+    assert fp({}) == fp({"seed_mode": "derived"})
+    assert fp({}) != fp({"seed_mode": "sequential"})
+
+
+def test_points_to_push_resolves_sequential_seed_mode_client_side():
+    from klayout_tools import sim_remote
+
+    points = sim._expand_corners({"process": ["tt"]}, [])
+    base = {"monte_carlo": {"n": 1, "seed": 1, "vary": "both"}}
+    derived = {"monte_carlo": {**base["monte_carlo"], "seed_mode": "derived"}}
+    assert sim_remote._points_to_push(derived, points, None) is None
+    seq = {"monte_carlo": {**base["monte_carlo"], "seed_mode": "sequential"}}
+    assert sim_remote._points_to_push(seq, points, None) is points
+
+
+# --------------------------------------------------------------------------- #
 # monte_carlo.mismatch_scale (issue #3942)
 # --------------------------------------------------------------------------- #
 
