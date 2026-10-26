@@ -38,6 +38,7 @@ import math
 import re
 from typing import Any
 
+from . import _spice_number as spice_number
 from . import sim_steps, sim_supply_relative
 
 #: Request key that carries the declaration, and the report key that echoes it.
@@ -147,17 +148,7 @@ def _tstop_s(analysis: dict[str, Any]) -> float | None:
     tokens = args.split()
     if len(tokens) < 2:
         return None
-    match = re.fullmatch(
-        r"([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(meg|mil|[tgkmunpf])?[a-z]*",
-        tokens[1].lower(),
-    )
-    if match is None:
-        return None
-    scale = {
-        "t": 1e12, "g": 1e9, "meg": 1e6, "k": 1e3, "mil": 25.4e-6, "m": 1e-3,
-        "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15, None: 1.0,
-    }  # fmt: skip
-    return float(match.group(1)) * scale[match.group(2)]
+    return spice_number.parse(tokens[1])
 
 
 def _signal_header(

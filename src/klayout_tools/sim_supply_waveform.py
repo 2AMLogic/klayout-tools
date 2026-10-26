@@ -22,38 +22,15 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import _spice_number as spice_number
+
 #: Waveform keywords this module can rewrite.
 SCALABLE_KINDS = ("pwl", "pulse")
 
-_SUFFIXES: tuple[tuple[str, float], ...] = (
-    ("meg", 1e6),
-    ("t", 1e12),
-    ("g", 1e9),
-    ("k", 1e3),
-    ("m", 1e-3),
-    ("u", 1e-6),
-    ("n", 1e-9),
-    ("p", 1e-12),
-    ("f", 1e-15),
-    ("a", 1e-18),
-)
-_NUMBER_RE = re.compile(r"^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)([a-zA-Z]*)$")
 _WAVE_RE = re.compile(r"\b(pwl|pulse)\s*\(([^()]*)\)", re.IGNORECASE)
 _ANY_WAVE_RE = re.compile(
     r"\b(pwl|pulse|sin|exp|sffm|am|trnoise|trrandom|external)\b", re.IGNORECASE
 )
-
-
-def _number(token: str) -> float | None:
-    match = _NUMBER_RE.match(token)
-    if match is None:
-        return None
-    value = float(match.group(1))
-    suffix = match.group(2).lower()
-    for name, scale in _SUFFIXES:
-        if suffix.startswith(name):
-            return value * scale
-    return value
 
 
 def _cards(text: str) -> list[tuple[int, int, str]]:
@@ -129,7 +106,7 @@ def find_source(
             )
         kind = match.group(1).lower()
         args = match.group(2).replace(",", " ").split()
-        values = [_number(token) for token in args]
+        values = [spice_number.parse(token) for token in args]
         if not args or any(v is None for v in values):
             raise error_cls(
                 f"{option} source {name!r}: {kind.upper()} arguments must be "

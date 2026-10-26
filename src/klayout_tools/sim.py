@@ -92,6 +92,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import IO, Any, NamedTuple
 
+from . import _spice_number as spice_number
 from . import (
     env_provenance,
     output_lock,
@@ -1670,12 +1671,8 @@ def _dc_sweep_bounds(analysis: dict[str, Any]) -> tuple[float, float] | None:
 
 def _spice_scale(raw: str) -> float:
     """The engineering-suffix multiplier of a numeric SPICE literal."""
-    match = _WIDTH_NUMBER_RE.match(raw.strip())
-    suffix = match.group(2).lower() if match else ""
-    for name, value in _WIDTH_UNIT_SUFFIXES:
-        if suffix.startswith(name):
-            return value
-    return 1.0
+    match = spice_number.NUMBER_RE.match(raw.strip())
+    return spice_number.suffix_scale(match.group(2)) if match else 1.0
 
 
 def _meas_at_lint(
@@ -11900,26 +11897,15 @@ def _classify_xyce_diagnostics(log_text: str) -> list[dict[str, str]]:
 
 def _parse_spice_seconds(raw: str) -> float | None:
     """Parse a SPICE time literal (``100u``, ``1e-4``, ``5n``) to seconds,
-    reusing :data:`_WIDTH_UNIT_SUFFIXES` -- the same engineering-notation
-    suffix table :func:`_parse_width_um` uses for geometry (itself
-    deliberately duplicated from ``netlist_normalize._SPICE_SUFFIXES``, see
-    that data's own docstring). Unlike a bare geometry literal, a SPICE
-    time literal has no ambiguous "bare" case -- seconds is always the
-    implicit base unit -- so, unlike :func:`_parse_width_um`, no additional
-    unit conversion is applied on top of the suffix multiplier. Returns
-    ``None`` for anything that is not a plain numeric literal.
+    via the shared :mod:`._spice_number` engineering-notation table, the
+    same one :func:`_parse_width_um` uses for geometry. Unlike a bare
+    geometry literal, a SPICE time literal has no ambiguous "bare" case --
+    seconds is always the implicit base unit -- so, unlike
+    :func:`_parse_width_um`, no additional unit conversion is applied on top
+    of the suffix multiplier. Returns ``None`` for anything that is not a
+    plain numeric literal.
     """
-    match = _WIDTH_NUMBER_RE.match(raw.strip())
-    if match is None:
-        return None
-    mantissa = float(match.group(1))
-    suffix = match.group(2).lower()
-    multiplier = 1.0
-    for name, value in _WIDTH_UNIT_SUFFIXES:
-        if suffix.startswith(name):
-            multiplier = value
-            break
-    return mantissa * multiplier
+    return spice_number.parse(raw)
 
 
 #: Deliberately generous floor used only by :func:`_preflight_timeout_warning`
@@ -12469,30 +12455,6 @@ _MOS_INSTANCE_RE = re.compile(r"^\s*([MX]\S+)\s+(?:\S+\s+){4}(\S+)(.*)$", re.IGN
 
 _PARAM_ASSIGN_RE = re.compile(r"(\w+)\s*=\s*(\S+)")
 
-#: SPICE engineering-notation multiplier suffixes for a bare geometry value
-#: (metres is the implicit base unit for W/L), longest-match first so
-#: ``meg`` is not shadowed by ``m``. Deliberately duplicated from (not
-#: imported from) ``netlist_normalize._SPICE_SUFFIXES``: that helper is
-#: private to a module with a different error-reporting contract
-#: (``NormalizeError``), and this diagnostic's parsing is best-effort
-#: (degrades to "no culprit found" on anything it cannot parse), not a
-#: netlist correctness check.
-_WIDTH_UNIT_SUFFIXES: tuple[tuple[str, float], ...] = (
-    ("meg", 1e6),
-    ("t", 1e12),
-    ("g", 1e9),
-    ("k", 1e3),
-    ("m", 1e-3),
-    ("u", 1e-6),
-    ("n", 1e-9),
-    ("p", 1e-12),
-    ("f", 1e-15),
-    ("a", 1e-18),
-)
-_WIDTH_NUMBER_RE = re.compile(
-    r"^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)([a-zA-Z]*)$"
-)
-
 
 def _parse_plain_number(raw: str) -> float | None:
     """Parse a bare, dimensionless SPICE numeric literal (e.g. an ``nf=``
@@ -12500,7 +12462,7 @@ def _parse_plain_number(raw: str) -> float | None:
     that is not a plain number -- an expression like ``{n*2}`` this
     diagnostic cannot evaluate.
     """
-    match = _WIDTH_NUMBER_RE.match(raw.strip().strip("'\""))
+    match = spice_number.NUMBER_RE.match(raw.strip().strip("'\""))
     if match is None:
         return None
     return float(match.group(1))
@@ -12511,17 +12473,10 @@ def _parse_width_um(raw: str) -> float | None:
     ``100n``) to micrometres. Returns ``None`` for anything that is not a
     plain numeric literal.
     """
-    match = _WIDTH_NUMBER_RE.match(raw.strip().strip("'\""))
+    match = spice_number.NUMBER_RE.match(raw.strip().strip("'\""))
     if match is None:
         return None
-    mantissa = float(match.group(1))
-    suffix = match.group(2).lower()
-    multiplier = 1.0
-    for name, value in _WIDTH_UNIT_SUFFIXES:
-        if suffix.startswith(name):
-            multiplier = value
-            break
-    return mantissa * multiplier * 1e6
+    return float(match.group(1)) * spice_number.suffix_scale(match.group(2)) * 1e6
 
 
 def _find_width_ceiling_culprit(

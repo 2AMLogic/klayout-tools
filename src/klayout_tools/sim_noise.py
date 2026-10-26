@@ -31,9 +31,9 @@ the harvest, grading, name-uniqueness and engine-refusal paths are the ones
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
+from . import _spice_number as spice_number
 from .sim_errors import SimError
 
 #: The ``noise.quantity`` values: input- or output-referred.
@@ -41,34 +41,10 @@ NOISE_QUANTITIES = ("inoise", "onoise")
 
 _ALLOWED_KEYS = frozenset({"quantity", "at_hz", "band_hz"})
 
-_SPICE_NUMBER_RE = re.compile(
-    r"^([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(meg|mil|[tgkmunpf])?[a-z]*$",
-    re.IGNORECASE,
-)
-_SUFFIX = {
-    "t": 1e12,
-    "g": 1e9,
-    "meg": 1e6,
-    "k": 1e3,
-    "mil": 25.4e-6,
-    "m": 1e-3,
-    "u": 1e-6,
-    "n": 1e-9,
-    "p": 1e-12,
-    "f": 1e-15,
-}
-
 
 def is_noise(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``noise``."""
     return spec.get("noise") is not None
-
-
-def _spice_number(token: str) -> float | None:
-    match = _SPICE_NUMBER_RE.match(token.strip())
-    if match is None:
-        return None
-    return float(match.group(1)) * _SUFFIX.get((match.group(2) or "").lower(), 1.0)
 
 
 def swept_range(analysis: dict[str, Any]) -> tuple[str, float, float] | None:
@@ -77,7 +53,10 @@ def swept_range(analysis: dict[str, Any]) -> tuple[str, float, float] | None:
     tokens = str(analysis.get("args", "")).split()
     for i, token in enumerate(tokens):
         if token.lower() in ("dec", "oct", "lin") and len(tokens) >= i + 4:
-            start, stop = _spice_number(tokens[i + 2]), _spice_number(tokens[i + 3])
+            start, stop = (
+                spice_number.parse(tokens[i + 2]),
+                spice_number.parse(tokens[i + 3]),
+            )
             if start is not None and stop is not None and 0 < start <= stop:
                 return token.lower(), start, stop
             return None

@@ -112,6 +112,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from . import _spice_number as spice_number
 from . import env_provenance
 from ._paths import (
     _fold_spice_continuations,
@@ -377,28 +378,7 @@ def _parse_number(raw: str, params: dict[str, float]) -> float | None:
     lowered = token.lower()
     if lowered in params:
         return params[lowered]
-    match = re.match(
-        r"^([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)"
-        r"(t|g|meg|k|mil|m|u|n|p|f)?",
-        lowered,
-    )
-    if match is None:
-        return None
-    value = float(match.group(1))
-    suffix = match.group(2)
-    scale = {
-        "t": 1e12,
-        "g": 1e9,
-        "meg": 1e6,
-        "k": 1e3,
-        "mil": 25.4e-6,
-        "m": 1e-3,
-        "u": 1e-6,
-        "n": 1e-9,
-        "p": 1e-12,
-        "f": 1e-15,
-    }
-    return value * scale.get(suffix or "", 1.0)
+    return spice_number.parse(token)
 
 
 def _mos_kind(name: str) -> str | None:

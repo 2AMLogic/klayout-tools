@@ -469,6 +469,7 @@
         "klayout_tools._paths",
         "klayout_tools._provenance",
         "klayout_tools._report_verify",
+        "klayout_tools._spice_number",
         "klayout_tools._text",
         "klayout_tools._unionfind",
         "klayout_tools._vendor",
