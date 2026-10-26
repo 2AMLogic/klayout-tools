@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-26
 
+- **PR #4174**: feat(sim): add monte_carlo.seed_mode to pin rndseed to seed + sample_index
+- **Issue #4173** (closed): klt sim monte_carlo: no way to pin per-sample rndseed (base+index or explicit list)
 - **PR #4171**: chore(deps): bump ruff from 0.16.10 to 0.17.0 in the uv-minor-patch group across 1 directory
 - **PR #4169**: chore(deps): bump the cargo-minor-patch group across 7 directories with 1 update
 - **PR #4168**: chore(loom): resync installed Loom to v0.19.1227
