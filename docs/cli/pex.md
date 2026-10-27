@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -132,6 +132,11 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   `--device-only-leg` or `--flatten-schematic` is exit 1 (error envelope).
   Off by default — without it, naming no testbench still fails with "at
   least one testbench request is required".
+- `--tie-net` — repeatable `<extracted-net>=<schematic-net>` (issue #4245).
+  Merges one reported-unbiased well/body net of the extracted netlist into a
+  schematic net before the extracted leg is simulated, so the leg is
+  physically meaningful without a hand-rolled `--measure-command`. See
+  "Tying an unbiased body net (`--tie-net`)" below.
 - `--label-layer` — repeatable `<role>=<layer>/<datatype>`, passed through
   to `klt extract --label-layer` (issue #2686); see
   [`extract.md`](extract.md)'s "Overriding a deck's label layers" section.
@@ -639,6 +644,63 @@ surfaces it on item 7's citation (`citation.body_bias`, see
 condition a `pex` citation is only valid under. Grading on it here would
 retroactively fail every design on a PDK whose deck has no well-tap
 mechanism, which is a separate decision from making the condition visible.
+
+### Tying an unbiased body net (`--tie-net`)
+
+Issue #4245. For a layout that cannot be relabelled, `--tie-net
+'<extracted-net>=<schematic-net>'` (repeatable) merges the named
+reported-unbiased net into a schematic net in the extracted netlist every
+simulated leg reads:
+
+```bash
+klt pex amp.gds tb.json --deck sky130 --tie-net '\$5=VDD'
+```
+
+- `<extracted-net>` must be one of an untied run's `body_bias.unbiased_nets`.
+  Any other name, or a layout with no unbiased net, is an error in the usual
+  envelope error shape (`error.code: "invalid_tie_net"`) that lists the valid
+  names; a malformed pair (no `=`, an empty half, one extracted net tied to two
+  different schematic nets) is rejected the same way. This confines the flag
+  to floating bodies — it cannot rewrite arbitrary nets.
+- Several extracted nets may be tied to one schematic net.
+- Anonymous names (`\$5`) are synthesized by KLayout and can change when the
+  layout changes, so a declared tie is **per extraction**: re-read
+  `unbiased_nets` after re-laying-out.
+- `extraction.netlist_sha256` is the digest of the netlist as rewritten by the
+  tie, so it always matches the file `netlist.path` points at.
+- Without the flag the output is byte-identical to a run that never had it.
+
+The tie is disclosed, not hidden. `body_bias` gains an additive `tied[]`:
+
+```json
+"body_bias": {
+  "status": "tied",
+  "unbiased_device_count": 3,
+  "unbiased_nets": ["\\$5", "\\$7"],
+  "unbiased_pmos_body_nets": [ ... ],
+  "tied": [
+    {"extracted_net": "\\$5", "schematic_net": "VDD", "source": "declared"},
+    {"extracted_net": "\\$7", "schematic_net": "VDD", "source": "declared"}
+  ]
+}
+```
+
+`unbiased_pmos_body_nets` keeps reporting what the layout drew; ties are
+additive. `status` stays `"unbiased"` while any unbiased net is left untied,
+and is `"tied"` — never `"biased"` — once every one is tied, so an item-7
+citation can tell "tied by declaration" (`source: "declared"`) from a drawn
+tap (`"biased"`). The *reported, not enforced* policy above is unchanged:
+`status` and the exit code do not depend on `body_bias`.
+
+**Check first: a well label may be enough.** If the layout can be relabelled,
+a text label on the deck's well label layer (`--label-layer well=<l>/<d>`; on
+sky130 `nwell.pin`, 64/5) names the well net, which then drops out of
+`unbiased_pmos_body_nets[]` with no `--tie-net` at all. Verified (issue
+#4245) on the sky130 deck with a tap-less inverter: without a label the PMOS
+body is the anonymous `\$8` and is reported unbiased; with an `nwell.pin`
+label it is the named net and `unbiased_pmos_body_nets` is empty. Decks with no
+well label layer (gf180mcu, per `extract.md`) cannot use this route, which is
+what `--tie-net` is for.
 
 **A clean run says so positively.** `status: "biased"` with a zero count is
 emitted for a run that checked and found every body biased — distinct from a
@@ -1317,7 +1379,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `netlist`            | object            | `{path, scope}` — the extracted (parasitic-annotated) netlist `klt extract` wrote, normalised the same way as `layout`. |
 | `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. `{path: null, scope: "absent"}` for `--extract-only` (issue #3739), which has no schematic side. |
 | `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), `parasitic_variant` (issue #3056 — the `--parasitic-variant` request echoed back; present only when the flag was given), `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list), `label_layers` (issue #2686 — `null` unless `--label-layer` was given, in which case `klt extract`'s own `label_layers` echo: `{"<role>": [layer, datatype] | null}`, sorted by role, `null` for a role cleared with `none`), `device_models` (issue #4234 — `null` unless `--device-model` was given, in which case the applied `{"<class>": "<subckt>"}` mapping), `resistance_graph` (issue #4037 — present only with `--resistance-graph`: `{r_cut_ohm, nets[]}` where each `nets[]` entry is `{net, net_id, resistance_source, selected_resistance_ohm, legacy_resistance_ohm}`; `resistance_source` says which value the extracted netlist's lumped R used), and `parasitic_integrity` (issue #2764 — the extraction's own per-net parasitic RC network integrity diagnostics; see below). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
-| `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. |
+| `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`, or `"tied"` when every unbiased net was declared tied with `--tie-net`), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim), and — only with `--tie-net` (issue #4245) — `tied[]` (`{extracted_net, schematic_net, source: "declared"}`). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. |
 | `measurement`        | object            | Issue #2478 (additive field, always present). How this run's two legs were measured, so a reader of a committed record never has to infer it from the presence/absence of `testbenches[]`. `mode` is `"testbench"` (the default path — `command`/`timeout_s`/`sides` are then all `null`) `"command"` (a caller-supplied `--measure-command` produced both legs) or `"extract-only"` (issue #3739: `--extract-only` measured nothing — `testbenches` and `delta` are empty, `status` is `not_checked`, and `command`/`timeout_s`/`sides` are `null`). For `"command"`: `command` is the argv **list** verbatim (never a shell string — it is never run through a shell), `timeout_s` the per-invocation cap in force, and `sides` an object keyed `schematic`/`extracted`, each carrying `netlist` (`{path, scope}`, the exact netlist that side was measured on), `exit_status`, `corner_count` and `measurement_names`. See "Measuring with a caller-supplied command" above. |
 | `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (`{path, scope}` — the `<testbench>` argument, normalised the same way as `layout`; issue #1261), `request_sha256`, `netlist` (`{path, scope}` — the simulation body the request names), `netlist_sha256`, `schematic_netlist` (`{path, scope}` — the resolved DUT path it `.include`d, normalised the same way), `schematic_netlist_sha256`, `corner_count`, `measurement_names`, and the issue #2872 `sides` / `nothing_simulated_corners` execution evidence (see "Per-side execution evidence" below). The `*_sha256` fields are the issue #2875 content identities, see "Schematic-side content identity" below. Informational — the full per-corner detail lives in `delta[]`. **Empty (`[]`) for a `--measure-command` run**, which has no testbenches at all; `measurement.sides` carries the equivalent per-leg detail there. |
 | `reference_netlist_sha256` | string | Issue #2875 (additive). `sha256:<64 lowercase hex>` of the exact bytes of `reference_netlist` — the schematic DUT (testbench mode) or `--reference-netlist` (`--measure-command` mode). `null` only if the file was unreadable. |

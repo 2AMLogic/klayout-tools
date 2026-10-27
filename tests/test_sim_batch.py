@@ -6278,6 +6278,21 @@ def test_request_features_detect_the_released_fields():
     assert sb._request_features(plain) == []
 
 
+def test_request_features_detect_the_v080_fields():
+    """#4212: both first shipped in v0.8.0; an empty value is not a use."""
+    request = {
+        "options": {"ngspice_options": {"reltol": 1e-4}},
+        "corners": {"params": {"names": ["w"], "rows": [[1]]}},
+    }
+    assert sorted(sb._request_features(request)) == [
+        "corners.params",
+        "options.ngspice_options",
+    ]
+    assert sb._request_features({"options": {"ngspice_options": {}}}) == []
+    for key in ("corners.params", "options.ngspice_options"):
+        assert sb.REQUEST_FEATURE_MIN_RUNNER_VERSION[key] == "0.8.0"
+
+
 def test_prelaunch_warn_returns_one_diagnostic_naming_every_field(
     tmp_path, monkeypatch
 ):

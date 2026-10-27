@@ -38,6 +38,7 @@ from ._parsing import (
     parse_declared_pins,
     parse_device_models,
     parse_label_layers,
+    parse_tie_nets,
 )
 
 # Issue #2686: the same one-line `label_layers:` text rendering `klt extract`
@@ -62,6 +63,9 @@ def run(args: argparse.Namespace) -> int:
         # --label-layer` uses (issue #2656), bound to `PexError`. Role names
         # are validated by the deck during extraction, not here.
         label_layers = parse_label_layers(args.label_layers, PexError)
+        # `--tie-net` (issue #4245): `EXTRACTED=SCHEMATIC` pairs; whether the
+        # extracted half is a reported unbiased net is checked by `run_pex`.
+        tie_nets = parse_tie_nets(args.tie_nets, PexError)
         # `--device-model` (issue #4234): shared parser, bound to `PexError`.
         device_models = parse_device_models(args.device_models, PexError)
         # `--measure-command` (issue #2478): one shell-quoted string on the
@@ -105,6 +109,10 @@ def run(args: argparse.Namespace) -> int:
             # was never given, unchanged from every call site that predates
             # it.
             label_layers=label_layers,
+            # `--tie-net` (issue #4245): merges reported-unbiased body nets
+            # into schematic nets in the simulated extracted netlist. `None`
+            # when the flag was never given, unchanged from before it.
+            tie_nets=tie_nets,
             # `--device-model` (issue #4234): passed straight through to
             # `klt extract --device-model`. `None` when never given.
             device_models=device_models,
