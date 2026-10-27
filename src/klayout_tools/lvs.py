@@ -431,6 +431,11 @@ CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED = "combine_devices_per_circuit.un
 #: on which side(s) actually instantiate it -- see
 #: `_prune_power_only_circuits`.
 CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED = "topology.power_only_pruned"
+#: Issue #4296: interchangeable same-cell instances whose outputs are
+#: one-terminal dangling nets on both sides (CTS dummy loads, unused flop
+#: outputs) that the comparer cannot pair. Always ``severity: "warning"``;
+#: ``status`` is still the engine's own verdict.
+CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS = "topology.dangling_output_ambiguous"
 #: Issue #2021: a `reference.form: "gate-level-verilog"` reference declared a
 #: port whose only Verilog-level connection was a plain `assign <port> =
 #: ...;` alias (e.g. `assign dbg_uart_byte[i] = rx_byte[i];`, two port names

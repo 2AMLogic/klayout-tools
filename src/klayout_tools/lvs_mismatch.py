@@ -828,6 +828,153 @@ def _device_class_family_findings(
     return entries
 
 
+class _DanglingSplit(NamedTuple):
+    """Result of :func:`_split_dangling_output_ambiguity`: the compare events
+    that remain for the ordinary classification, plus the warning entries
+    that replace the ones removed."""
+
+    net_mismatches: list[tuple[Any, Any]]
+    net_mismatch_keys: list[tuple[_NetKey | None, _NetKey | None]] | None
+    subcircuit_mismatches: list[tuple[Any, Any]]
+    entries: list[dict[str, Any]]
+
+
+def _is_dangling_net(net: Any) -> bool:
+    """A net with exactly one connection (a device terminal or a
+    subcircuit-instance pin) and no declared pin -- e.g. an unconnected
+    cell output. ``False`` for anything that does not expose the counts."""
+    try:
+        return bool(
+            net.pin_count() == 0
+            and net.terminal_count() + net.subcircuit_pin_count() == 1
+        )
+    except Exception:
+        return False
+
+
+def _has_dangling_pin(subcircuit: Any) -> bool:
+    """Whether any pin of ``subcircuit`` lands on a dangling net."""
+    try:
+        for pin in subcircuit.circuit_ref().each_pin():
+            net = subcircuit.net_for_pin(pin.id())
+            if net is not None and _is_dangling_net(net):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _split_dangling_output_ambiguity(logger: Any) -> _DanglingSplit:
+    """Peel interchangeable same-cell instances on one-terminal dangling
+    nets out of the comparer's mismatch events (issue #4296).
+
+    Identical cell instances whose outputs connect to nothing (CTS dummy
+    loads, unused flop outputs) have no distinguishing topology, so the
+    comparer cannot pair them even though nothing is wrong. This is a
+    report-side classification only -- ``status`` still comes from
+    ``compare()``. Three conditions keep it from masking a real defect:
+
+    * a ``net_mismatch`` event is peeled only when every net it names, on
+      either side, is dangling (so one side connected and the other
+      dangling stays an error), and only alongside balanced instances;
+    * an unmatched instance is peeled only if it has a dangling pin and its
+      ``(containing circuit, cell type)`` group has as many unmatched
+      layout instances as reference ones (a different cell type, or a
+      missing instance, leaves the counts unbalanced);
+    * nothing is peeled unless every instance group balances *and* every
+      net event is dangling-only: a swap on a connected net, or an extra
+      instance whose own dangling nets are mere collateral, stays an error.
+    """
+    from .lvs import (
+        CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS,
+        _name_or_none,
+        _subcircuit_parent_name,
+        _subcircuit_ref_name,
+    )
+
+    net_events: list[tuple[Any, Any]] = list(logger.net_mismatches)
+    event_keys = getattr(logger, "net_mismatch_keys", None)
+    keys = list(event_keys) if event_keys is not None else None
+    sub_events: list[tuple[Any, Any]] = list(logger.subcircuit_mismatches)
+
+    dangling_flags = [
+        all(_is_dangling_net(net) for net in event if net is not None)
+        and any(net is not None for net in event)
+        for event in net_events
+    ]
+
+    groups: dict[tuple[str | None, str | None], dict[str, list[Any]]] = {}
+    ineligible = False
+    for a, b in sub_events:
+        instance = a if a is not None else b
+        side = "layout" if b is None else "reference" if a is None else None
+        if side is None or not _has_dangling_pin(instance):
+            ineligible = True
+            break
+        group = groups.setdefault(
+            (_subcircuit_parent_name(instance), _subcircuit_ref_name(instance)),
+            {"layout": [], "reference": []},
+        )
+        group[side].append(instance)
+    balanced = (
+        bool(groups)
+        and not ineligible
+        and all(dangling_flags)
+        and all(len(g["layout"]) == len(g["reference"]) for g in groups.values())
+    )
+
+    entries: list[dict[str, Any]] = []
+    remaining_subs = sub_events
+    kept_nets = net_events
+    kept_keys = keys
+    peeled_nets: list[tuple[Any, Any]] = []
+    if balanced:
+        remaining_subs = []
+        kept_nets = []
+        kept_keys = [] if keys is not None else None
+        peeled_nets = net_events
+        for (parent, cell_type), group in sorted(
+            groups.items(), key=lambda item: (str(item[0][0]), str(item[0][1]))
+        ):
+            count = len(group["layout"])
+            entries.append(
+                _mismatch(
+                    CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS,
+                    "warning",
+                    f"{count} interchangeable instance(s) of cell "
+                    f"'{cell_type}' drive nets with no other connection on "
+                    "either side; the comparer cannot tell them apart, so "
+                    "they are reported as an ambiguity, not a layout defect",
+                    "both",
+                    details={
+                        "cell_type": cell_type,
+                        "instance_count": count,
+                        "layout_instances": sorted(
+                            _name_or_none(i) or "" for i in group["layout"]
+                        ),
+                        "reference_instances": sorted(
+                            _name_or_none(i) or "" for i in group["reference"]
+                        ),
+                    },
+                    circuit={"layout": parent, "reference": parent},
+                    subcircuit={"layout": cell_type, "reference": cell_type},
+                )
+            )
+    if peeled_nets:
+        entries.append(
+            _mismatch(
+                CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS,
+                "warning",
+                f"{len(peeled_nets)} net mismatch event(s) involve only nets "
+                "with a single connection and no pin on each side they "
+                "appear on (unconnected outputs); not a connectivity defect",
+                "both",
+                details={"net_event_count": len(peeled_nets)},
+            )
+        )
+    return _DanglingSplit(kept_nets, kept_keys, remaining_subs, entries)
+
+
 def _build_mismatches(
     logger: Any,
     layout_netlist: Any | None = None,
@@ -870,6 +1017,10 @@ def _build_mismatches(
         _same_nets_assertion_pairs(same_nets_hints, anchored_pins, constant_bindings),
     )
 
+    # Issue #4296: interchangeable same-cell instances on dangling outputs.
+    dangling = _split_dangling_output_ambiguity(logger)
+    mismatches.extend(dangling.entries)
+
     # Issue #1622 deliberately does NOT filter the `circuit_mismatches`/
     # `subcircuit_mismatches` loops below for power-only (filler/tap)
     # circuits. Two reasons: (a) a report-level filter cannot help anyway --
@@ -886,8 +1037,8 @@ def _build_mismatches(
     # universe classified as "power-only" and vanished from the report).
     mismatches.extend(
         _classify_net_mismatches(
-            logger.net_mismatches,
-            event_keys=getattr(logger, "net_mismatch_keys", None),
+            dangling.net_mismatches,
+            event_keys=dangling.net_mismatch_keys,
             explained_layout_nets=(
                 degraded.explained_layout_nets if degraded else frozenset()
             ),
@@ -996,7 +1147,7 @@ def _build_mismatches(
             )
         )
 
-    for a, b in logger.subcircuit_mismatches:
+    for a, b in dangling.subcircuit_mismatches:
         side = "layout" if b is None else ("reference" if a is None else "both")
         mismatches.append(
             _mismatch(
