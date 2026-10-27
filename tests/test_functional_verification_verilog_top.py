@@ -87,6 +87,12 @@ def test_cocotb_only_options_are_rejected(tmp_path, option, value):
         run_functional_verification(request)
 
 
+def test_env_is_rejected_with_verilog_top(tmp_path):
+    request = _edit(_stage(tmp_path), env={"X": "1"})
+    with pytest.raises(FunctionalVerificationError, match="request.env"):
+        run_functional_verification(request)
+
+
 def test_verilator_is_rejected(tmp_path):
     request = _edit(_stage(tmp_path), engine="verilator")
     with pytest.raises(FunctionalVerificationError, match="requires engine 'icarus'"):
@@ -131,7 +137,8 @@ def test_integration_pass_without_sdf(tmp_path):
     assert report["tests"][0]["name"] == "tb_and2"
     assert report["environment"]["cocotb_version"] is None
     assert report["environment"]["sdf"] is None
-    assert Path(report["environment"]["test_log"]).is_file()
+    assert Path(report.local_paths["test_log"]).is_file()
+    assert report["environment"]["results_xml"] == {"path": None, "scope": "absent"}
 
 
 @needs_icarus

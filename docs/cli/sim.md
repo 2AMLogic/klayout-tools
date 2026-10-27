@@ -770,6 +770,15 @@ plain `klt sim ... --backend local-parallel --format json` invocation on the
 fleet's own pinned image, so corner expansion, ordering, measurement
 extraction, and pass/fail classification are never reimplemented for it.
 
+**Launch progress.** A sharded run (`remote.hosts` > 1) prints one aggregate
+line on stderr as shards move through the fleet, for example
+`klt sim: shards 170/4200 launched, 40 launching, 3990 pending, 0 collected; launch rate 5.7/min, ETA 11h 49m`.
+It is emitted when the counts change, at most once per
+`BATCH_HEARTBEAT_INTERVAL_S` (300 s), plus once when the last shard has
+launched. The rate is observed launches per minute since the first launch; until
+two launches are seen it reads `unknown`. stdout and the JSON report are
+unchanged ([#4349](https://github.com/2AMLogic/klayout-tools/issues/4349)).
+
 **Retry contract, up front.** A launch refused for lack of Spot capacity is
 *not* retried unless you opt in: `batch.capacity_wait_s` defaults to `0` (one
 attempt), and the refusal then fails the request with
@@ -1597,14 +1606,19 @@ Older fleet runners reject some newer request fields loudly (for example
 silently ignore others. The minimum `klt` release that understands each field
 is recorded in `klayout_tools.sim_batch.REQUEST_FEATURE_MIN_RUNNER_VERSION`;
 this table is tested against it. `unreleased` means the feature is on `main`
-but no tagged release contains it yet.
+but no tagged release contains it yet. `corners.params` and
+`options.ngspice_options` need a fleet image reporting `>= 0.8.0`; a `0.7.0`
+runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)).
 
 | Request feature | Minimum runner `klt` |
 | --- | --- |
 | `measurements[].expr` | 0.7.0 |
 | `corners.process[].sections[]` (object form) | 0.7.0 |
 | `corners.params` | 0.8.0 |
+| `corners.units` | 0.8.0 |
+| `corners.temperature_param` | 0.8.0 |
 | `options.ngspice_init` | 0.7.0 |
+| `options.ngspice_options` | 0.8.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
@@ -1719,10 +1733,11 @@ release segment:
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
 | `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
+| `options.ngspice_options` ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)) | `options.ngspice_options` is set and non-empty | `0.8.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
 
-The last five rows are the released entries of
+The last six rows are the released entries of
 `REQUEST_FEATURE_MIN_RUNNER_VERSION` ([#2877](https://github.com/2AMLogic/klayout-tools/issues/2877)),
 the same table the checks below read ([#2901](https://github.com/2AMLogic/klayout-tools/issues/2901)).
 An entry whose minimum is `unreleased` has no detector and never counts as
@@ -1765,7 +1780,7 @@ established. `runner_compatibility` itself stays a major.minor gate.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121)).**
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
 undriven), so
@@ -2145,6 +2160,12 @@ aid, not a diagnosis. Equal PDK commits, equal library hashes and an equal
 ngspice major version do not by themselves show the two executions are
 equivalent.
 
+0. Read `environment.pdk_stamp_comparison` first (the worker's PDK
+   `SOURCES` stamp, or under `options.stage_model_inputs` the per-file sha256
+   of the shipped model files, against the submitter's). A `match` does not
+   prove the model closures are equal. The fatal ngspice line and its code
+   (`model_bin_range`, `ngspice_fatal`, ...) are on the errored unit's
+   `diagnostics` even without `options.keep_artifacts`.
 1. Run with `options.keep_artifacts` locally and on `batch`; diff the
    generated per-corner decks (`artifacts.deck`) and logs.
 2. Compare how every `.include`/`.lib` resolved: the expanded paths and
@@ -4386,6 +4407,59 @@ measurement, with no out-of-tool waveform post-processing:
   wrappers or cell templates. A bounded bisection over a source value is the
   separate [`measurements[].search`](#bisection--threshold-search-measurementssearch)
   form.
+
+## Eye / phase-fold measurement (`measurements[].eye`)
+
+Issue [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292). Eye
+height, width and best sampling phase of a repeating pattern are one built-in
+measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
+`vecmin` over a time-folded vector plus pairwise max):
+
+```json
+{"analysis": {"kind": "tran", "args": "5p 7n"},
+ "measurements": [
+   {"name": "eye_rx",
+    "eye": {"signal": "v(rx)", "ui": "100p", "uis": 64, "from": "500p"},
+    "unit": "V",
+    "limits": {"min": 0.1}}]}
+```
+
+- **Form.** `eye` is an object `{signal, ui, uis, from?, level?, metric?}`.
+  `signal` is a single-line ngspice vector expression (`"v(outp) - v(outn)"`
+  works); `ui` is the unit interval (seconds or a SPICE literal such as
+  `"100p"`); `uis` is the integer number of unit intervals in the window
+  (`>= 2`); `from` is the window start (default `0`); `level` is the decision
+  level (default: midpoint of the signal's min and max in the window); `metric`
+  selects which scalar becomes `value` (`height` default, `width`,
+  `best_phase`). A non-integer `uis`, unknown keys, or `eye` beside any other
+  value form is refused up front (exit 1), as is any `analysis.kind` other than
+  `tran` and a window `[from, from + uis * ui]` that runs past the transient
+  stop time. `engine: "xyce"` is refused.
+- **Method.** Every interpolated crossing of the level inside the window is
+  folded to its phase within a unit interval. `width` is the widest circular
+  gap between folded crossing phases (the UI minus the crossing spread -- the
+  horizontal opening at the level), `best_phase` is the middle of that gap
+  (seconds from the start of a UI), and `height` is read there: the minimum of
+  the samples above the level minus the maximum of those at or below it, one
+  sample per UI. The data pattern is not known, so decisions are threshold
+  decisions at the sampling phase.
+- **Value.** `value` is the selected metric, graded against `limits` like any
+  scalar. An additive `eye` sibling carries
+  `{height, width, best_phase, level, ui, uis}`.
+- **Errors.** `status: "error"`, `value: null`, and a `code: "measurement"`
+  diagnostic whose message starts with a reason token:
+
+  | Token | Meaning |
+  |---|---|
+  | `[eye_vector_missing]` | `signal` did not resolve, or its rawfile was unreadable |
+  | `[eye_window_outside_transient]` | the window is not inside the sampled transient |
+  | `[eye_no_levels]` | the signal never crosses the level inside the window, or sits on one side of it at the best phase |
+- **Backends.** The signal is dumped to a corner-local rawfile (`eye_<k>.raw`)
+  and reduced in Python on the worker, so `local`, `local-parallel`, `remote`
+  and `batch` return the same scalars. It is a mandatory runner feature (`eye`,
+  first `klt` release segment `0.8.1`): see "Mandatory features" under
+  "Runner/client `klt` version skew".
+- **Out of scope.** RJ/DJ jitter decomposition and bathtub curves.
 
 ## Bisection / threshold search (`measurements[].search`)
 

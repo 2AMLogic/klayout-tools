@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff` item 11: a partial `erc`/`lvs` set renders
+  `power_delivery_parts_missing`** (issue #4193, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)). A cited set lacking the `erc`
+  and/or `lvs` part used to render `unmet`/`wrong_kind` with an empty detail;
+  it now renders `unmet`/`power_delivery_parts_missing` with
+  `detail.power_delivery.{missing_parts,cited_parts}` and, when the ERC spec
+  resolved, `supply_nets`. Value change on an existing field for that case
+  only; never `met`.
+- **`klt lvs` `subckt-call` converts sky130 junction diodes** (issue #4319,
+  documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)): `X… sky130_fd_pr__diode_*
+  area=… perim=…` now converts to a `D` card in the deck's diode class instead
+  of raising `reference.unresolved_subckt_call`, for all 8 classes in the sky130
+  deck's `diodes`. Additive; other decks unchanged.
 - **`klt erc` discloses that substrate continuity is not modelled** (issue
   #4384, documented in [`docs/cli/erc.md`](docs/cli/erc.md)): a spec declaring
   two or more `kind: "supply"` nets gains one `erc_coverage.inapplicable`

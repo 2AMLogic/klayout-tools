@@ -738,6 +738,76 @@ def test_parameters_values_must_be_scalars(tmp_path, value):
         run_functional_verification(request_path)
 
 
+@pytest.mark.parametrize(
+    "env",
+    [["X", "1"], {"X": 1}, {"X": None}, {"": "1"}, {"A=B": "1"}],
+)
+def test_env_malformed_is_a_request_error(tmp_path, env):
+    """`request.env` must be an object of non-empty, `=`-free keys to string
+    values -- anything else is a clear error naming `request.env`."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request(env=env))
+    with pytest.raises(FunctionalVerificationError, match="request.env"):
+        run_functional_verification(request_path)
+
+
+def test_stubbed_run_forwards_env_to_test_only_and_echoes_it(tmp_path, monkeypatch):
+    """`request.env` -> `Runner.test(extra_env=...)` (not the build), echoed
+    verbatim as `environment.env` (issue #4338)."""
+    _setup_inputs(tmp_path)
+    env = {"EXPECTED_SUM": "5"}
+    request_path = _write_request(tmp_path / "request.json", _base_request(env=env))
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    response = run_functional_verification(request_path)
+
+    assert runner.test_kwargs["extra_env"] == env
+    assert "extra_env" not in runner.build_kwargs
+    assert response["environment"]["env"] == env
+
+
+def test_stubbed_run_without_env_echoes_an_empty_mapping(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    response = run_functional_verification(request_path)
+
+    assert runner.test_kwargs["extra_env"] == {}
+    assert response["environment"]["env"] == {}
+
+
+def test_mutation_variant_forwards_env_to_its_test_step(tmp_path, monkeypatch):
+    """The per-mutant build+test sees the same `env` as the baseline run."""
+    captured: dict = {}
+    monkeypatch.setattr(fv, "_import_runner", lambda: object())
+    monkeypatch.setattr(fv, "_run_build", lambda *a, **k: object())
+    monkeypatch.setattr(
+        fv, "_run_test", lambda runner, **kwargs: captured.update(kwargs)
+    )
+    fv._build_and_test_variant(
+        engine="icarus",
+        sources=[],
+        hdl_toplevel="top",
+        build_dir=str(tmp_path),
+        build_args=[],
+        defines={},
+        includes=[],
+        timescale=("1ns", "1ps"),
+        parameters={},
+        env={"X": "1"},
+        build_log=str(tmp_path / "b.log"),
+        module="m",
+        module_dir=str(tmp_path),
+        testcase=None,
+        random_seed=None,
+        test_dir=str(tmp_path),
+        results_xml=str(tmp_path / "r.xml"),
+        test_log=str(tmp_path / "t.log"),
+    )
+    assert captured["extra_env"] == {"X": "1"}
+
+
 def test_missing_cocotb_is_an_actionable_error(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "cocotb_tools", None)
     with pytest.raises(
@@ -1172,7 +1242,7 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
 
     report = run_functional_verification(request_path)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["engine"] == "icarus"
     assert report["hdl_toplevel"] == "gcd"
     assert report["testbench"] == "test_gcd"
@@ -1190,15 +1260,18 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         "engine": "icarus",
         "engine_version": "13.0",
         "cocotb_version": "2.0.1",
-        "results_xml": report["environment"]["results_xml"],
-        "test_log": report["environment"]["test_log"],
-        "build_log": report["environment"]["build_log"],
+        # Committable `{path, scope}` envelope (#4279): tmp_path is outside
+        # the invoking repo, so no absolute host path may appear here.
+        "results_xml": {"path": None, "scope": "external"},
+        "test_log": {"path": None, "scope": "external"},
+        "build_log": {"path": None, "scope": "external"},
         # `_RESULTS_XML_WITH_FAILURE` carries the exact `random_seed` value
         # the spike captured live (section 4) -- this is the authoritative
         # echo, read back from `results.xml` itself.
         "random_seed": 1785780800,
         # Additive (issue #3290): `{}` without `options.source_defines`.
         "source_defines": {},
+        "env": {},
         # Additive (issue #1002): `null` on any run without `options.sdf`,
         # so an unannotated verdict is never mistakable for an annotated one.
         "sdf": None,
@@ -1206,7 +1279,7 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         # `options.initial_state`.
         "initial_state": None,
     }
-    results_xml = report["environment"]["results_xml"]
+    results_xml = report.local_paths["results_xml"]
     assert os.path.isabs(results_xml)
     assert os.path.isfile(results_xml)
     assert ".klt/functional-verification" in results_xml.replace(os.sep, "/")
@@ -1325,7 +1398,7 @@ def test_stubbed_run_outdir_redirects_artifacts(tmp_path, monkeypatch):
 
     report = run_functional_verification(request_path, output_dir=str(outdir))
 
-    results_xml = Path(report["environment"]["results_xml"])
+    results_xml = Path(report.local_paths["results_xml"])
     assert results_xml.parent == outdir.resolve()
     assert results_xml.is_file()
     assert not (tmp_path / ".klt").exists()
@@ -1339,9 +1412,9 @@ def test_stubbed_run_two_outdirs_keep_both_result_sets(tmp_path, monkeypatch):
     first = run_functional_verification(request_path, output_dir=str(tmp_path / "a"))
     second = run_functional_verification(request_path, output_dir=str(tmp_path / "b"))
 
-    assert first["environment"]["results_xml"] != second["environment"]["results_xml"]
-    assert os.path.isfile(first["environment"]["results_xml"])
-    assert os.path.isfile(second["environment"]["results_xml"])
+    assert first.local_paths["results_xml"] != second.local_paths["results_xml"]
+    assert os.path.isfile(first.local_paths["results_xml"])
+    assert os.path.isfile(second.local_paths["results_xml"])
 
 
 def test_stubbed_run_default_output_dir_unchanged(tmp_path, monkeypatch):
@@ -1352,7 +1425,7 @@ def test_stubbed_run_default_output_dir_unchanged(tmp_path, monkeypatch):
     report = run_functional_verification(request_path)
 
     expected = tmp_path / ".klt" / "functional-verification" / "results_icarus.xml"
-    assert Path(report["environment"]["results_xml"]) == expected.resolve()
+    assert Path(report.local_paths["results_xml"]) == expected.resolve()
 
 
 def test_stubbed_run_relative_outdir_resolves_against_cwd(tmp_path, monkeypatch):
@@ -1367,7 +1440,7 @@ def test_stubbed_run_relative_outdir_resolves_against_cwd(tmp_path, monkeypatch)
 
     report = run_functional_verification(request_path, output_dir="out")
 
-    assert Path(report["environment"]["results_xml"]).parent == (cwd / "out").resolve()
+    assert Path(report.local_paths["results_xml"]).parent == (cwd / "out").resolve()
     assert not (req_dir / ".klt").exists()
 
 
@@ -1401,7 +1474,9 @@ def test_cli_outdir_flag_is_threaded_through(tmp_path, monkeypatch, capsys):
 
     payload = json.loads(capsys.readouterr().out)
     data = payload.get("data", payload)
-    assert Path(data["environment"]["results_xml"]).parent == outdir.resolve()
+    # JSON carries the envelope only; an outdir outside the repo is external.
+    assert data["environment"]["results_xml"] == {"path": None, "scope": "external"}
+    assert str(outdir) not in json.dumps(data)
 
 
 def test_stubbed_run_passes_testcase_filter_through(tmp_path, monkeypatch):
@@ -1920,8 +1995,9 @@ def test_cli_pass_exits_zero_json(tmp_path, monkeypatch, capsys):
     assert out["status"] == "pass"
     assert out["skipped_count"] == 1
     env = out["environment"]
-    assert os.path.basename(env["test_log"]) == "test_icarus.log"
-    assert os.path.basename(env["build_log"]) == "build_icarus.log"
+    # Default outdir is outside the invoking repo (tmp_path): envelope, no path.
+    assert env["test_log"] == {"path": None, "scope": "external"}
+    assert env["build_log"] == {"path": None, "scope": "external"}
 
 
 def test_cli_test_failure_exits_three(tmp_path, monkeypatch, capsys):
@@ -3065,7 +3141,7 @@ def test_integration_real_icarus_gcd_worked_example(tmp_path):
     assert report["coverage"] is None
     assert report["environment"]["cocotb_version"]
     assert report["environment"]["engine_version"]
-    assert os.path.isfile(report["environment"]["results_xml"])
+    assert os.path.isfile(report.local_paths["results_xml"])
 
 
 @pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
@@ -5943,6 +6019,9 @@ def _write_mutation_proposals(tmp_path: Path, *, indices=(1, 2)) -> str:
 
 
 def test_mutations_killed_and_survived_end_to_end(tmp_path, monkeypatch):
+    # Make tmp_path "the invoking repo" so log paths come back repo-relative.
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
     request_path = _write_mutation_request(tmp_path)
     proposals_path = _write_mutation_proposals(tmp_path)
     _stub_mutation_runner(
@@ -5970,11 +6049,11 @@ def test_mutations_killed_and_survived_end_to_end(tmp_path, monkeypatch):
     assert by_index[1]["category"] == "constant"
     assert by_index[1]["file"] == "dut.v"
     assert by_index[1]["line"] == 2
-    assert os.path.isfile(by_index[1]["log_path"])
+    assert (tmp_path / by_index[1]["log_path"]["path"]).is_file()
 
     assert by_index[2]["status"] == "survived"
     assert by_index[2]["first_killing_test"] is None
-    assert os.path.isfile(by_index[2]["log_path"])
+    assert (tmp_path / by_index[2]["log_path"]["path"]).is_file()
 
     # The mutation seam always restores the pristine source, even though two
     # sequential mutants were applied to the same file (issue #1592's own
@@ -6226,7 +6305,7 @@ def test_mutations_anchor_mismatch_is_rejected(tmp_path, monkeypatch):
     by_index = {entry["index"]: entry for entry in mutation_testing["results"]}
     assert by_index[2]["status"] == "rejected"
     assert "not found" in by_index[2]["reason"]
-    assert by_index[2]["log_path"] is None
+    assert by_index[2]["log_path"] == {"path": None, "scope": "absent"}
     assert by_index[1]["status"] == "killed"
 
 
@@ -6476,3 +6555,33 @@ def test_valueless_define_is_passed_as_build_arg_not_serialised(tmp_path):
     )
     assert captured["defines"] == {"MODE": "x"}
     assert captured["build_args"] == ["-g2012", "-DFUNCTIONAL"]
+
+
+def test_stubbed_run_paths_are_repo_relative_inside_the_repo(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    monkeypatch.chdir(tmp_path)
+
+    report = run_functional_verification(request_path, output_dir="out")
+
+    env = report["environment"]
+    assert env["results_xml"] == {"path": "out/results_icarus.xml", "scope": "repo"}
+    assert env["test_log"] == {"path": "out/test_icarus.log", "scope": "repo"}
+    assert env["build_log"] == {"path": "out/build_icarus.log", "scope": "repo"}
+    assert str(tmp_path) not in json.dumps(report)
+    assert os.path.isabs(report.local_paths["results_xml"])
+
+
+def test_cli_text_format_prints_real_paths(tmp_path, monkeypatch, capsys):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    outdir = tmp_path / "text_out"
+
+    main(["functional-verification", request_path, "--outdir", str(outdir)])
+
+    out = capsys.readouterr().out
+    assert f"results_xml: {outdir.resolve() / 'results_icarus.xml'}" in out
+    assert f"test_log: {outdir.resolve() / 'test_icarus.log'}" in out

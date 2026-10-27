@@ -142,12 +142,13 @@ from .signoff_power_delivery import (
     _strap_layers,
 )
 from .signoff_runset import (
-    REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
-)
-from .signoff_runset import (
+    PINNED_RUNSETS,
     runset_disclosure,
     runset_refusal,
     unrecognised_device_gaps,
+)
+from .signoff_runset import (
+    REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
 )
 
 __all__ = [
@@ -873,6 +874,10 @@ def describe_grader() -> dict[str, Any]:
         "not_applicable_items": {
             str(_STATISTICAL_CLAIMS_ITEM_ID): [_NOT_APPLICABLE_PARTITION]
         },
+        # Additive (issue #4309): the runset digests items 4/11 accept.
+        "pinned_runsets": {
+            digest: dict(pin) for digest, pin in sorted(PINNED_RUNSETS.items())
+        },
     }
 
 
@@ -1205,6 +1210,12 @@ _REASON_NEGATIVE_CONTROL_NOT_DETECTED = "negative_control_not_detected"
 #: refusals differ because they apply to an envelope that *passed*, where
 #: "cite a different artifact" really is the more actionable answer.
 _REASON_PARTIAL_COVERAGE = "partial_coverage"
+
+# Most ``skipped`` records a ``coverage_qualification`` quotes verbatim
+# (issue #4286). A run with no antenna table emits one record per
+# (gate, level), so an uncapped quote made the committed tier report
+# O(gates x levels); beyond this the full list stays in the cited envelope.
+_PARTIAL_COVERAGE_SKIPPED_CAP = 20
 
 # --- Item 6 ``not_applicable`` outcome (issue #2865) ----------------------- #
 #: The T1 item whose "statistical claims" requirement a block with no
@@ -3118,7 +3129,19 @@ def _partial_coverage_disclosure(envelope: dict[str, Any]) -> dict[str, Any] | N
     skipped = coverage_skipped_work(envelope)
     if not skipped:
         return None
-    return {"reason": _REASON_PARTIAL_COVERAGE, "skipped": skipped}
+    if len(skipped) <= _PARTIAL_COVERAGE_SKIPPED_CAP:
+        return {"reason": _REASON_PARTIAL_COVERAGE, "skipped": skipped}
+    by_reason: dict[str, int] = {}
+    for record in skipped:
+        reason = str(record.get("reason"))
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    return {
+        "reason": _REASON_PARTIAL_COVERAGE,
+        "skipped": skipped[:_PARTIAL_COVERAGE_SKIPPED_CAP],
+        "skipped_total": len(skipped),
+        "skipped_by_reason": dict(sorted(by_reason.items())),
+        "truncated": True,
+    }
 
 
 def _reports_partial_status(kind: str, envelope: dict[str, Any]) -> bool:
@@ -4423,8 +4446,12 @@ def build_tier_report(
       of it -- see :data:`_REASON_NEGATIVE_CONTROL_NOT_DETECTED`.
     - ``"no_pdn"`` (issue #2025, item 11 only) -- the cited `klt
       place-and-route` response says no power grid was built at all
-      (``power.pdn`` is not ``true``, or no ``power.tapcell_master`` was
-      placed). Re-run P&R with a ``request.power`` block.
+      (``power.pdn`` is not ``true``). Re-run P&R with a ``request.power``
+      block.
+    - ``"no_tapcell_master"`` (issue #4199, item 11 only) -- the grid was
+      built (``power.pdn: true``) but ``power.tapcell_master`` is null and
+      the response does not state ``power.tapless: true``. Re-run P&R on a
+      current ``klt``; a library documented tapless states it and grades.
     - ``"supply_spec_incomplete"`` (issue #2025, item 11 only) -- the cited
       `klt erc` run's own spec document does not ask the question item 11
       grades: unreadable, no ``"kind": "supply"`` net declared, no ``ties[]``
@@ -4470,6 +4497,13 @@ def build_tier_report(
       defect" and "this block cited no supply evidence at all" read
       identically. Fix: the LVS defect (item 4 is blocked on it too), never
       the ERC spec.
+    - ``"power_delivery_parts_missing"`` (issue #4193, item 11 only) -- the
+      cited set resolved cleanly but lacks the ``erc`` and/or ``lvs`` part.
+      Distinct from ``"wrong_kind"``: what is cited is right, the set is
+      incomplete. ``detail.power_delivery`` names ``missing_parts`` and
+      ``cited_parts`` and, when the ERC spec resolved, the ``supply_nets`` it
+      proved. An ERC part whose spec does not resolve reports its own reason
+      first. Never ``"met"``.
     - ``"ungradeable_by_build"`` (issue #2176) -- the manifest cited
       evidence for an item this build has no grading rules for at all
       (``graded_by_build: False``, see above). Not a statement about the
@@ -5485,6 +5519,17 @@ def _verify_pex_schematic_inputs(
     return results
 
 
+def _unresolved_evidence_detail(
+    spec: dict[str, Any], reason: str | None
+) -> dict[str, Any]:
+    """The ``failure_detail`` for evidence :func:`_resolve_evidence` could not
+    resolve: an unreadable evidence file names both the resolved path and the
+    process cwd it resolved against (evidence paths are cwd-relative)."""
+    if reason == _REASON_UNREADABLE_EVIDENCE and spec.get("file") is not None:
+        return {"path": os.path.abspath(spec["file"]), "cwd": os.getcwd()}
+    return {}
+
+
 def _grade_evidence(
     spec: dict[str, Any],
     *,
@@ -5603,7 +5648,7 @@ def _grade_evidence(
     """
     resolution, reason = _resolve_evidence(spec, repo_root)
     if resolution is None:
-        return "unmet", reason, None, {}
+        return "unmet", reason, None, _unresolved_evidence_detail(spec, reason)
 
     check_kind = resolution["kind"]
     envelope = resolution["envelope"]
@@ -5690,6 +5735,7 @@ def _grade_evidence(
             None,
             {**_input_members_detail(resolution), **execution_detail},
         )
+    _attach_characterization_attestation(check_kind, item_id, envelope, citation)
     _record_envelope(envelope_sink, envelope)
     return "met", None, citation, {}
 
@@ -6282,6 +6328,45 @@ def _generic_item_binding_refusal(
     ):
         return _REASON_UNANCHORED_EVIDENCE
     return None
+
+
+#: T1 item 8 (Characterization report): the one item that accepts a bare
+#: generic envelope, so a met citation always discloses whether
+#: ``klt signoff --attest 8`` produced it (issue #4311).
+_CHARACTERIZATION_ITEM = 8
+
+
+def _attach_characterization_attestation(
+    check_kind: str,
+    item_id: int | None,
+    envelope: Mapping[str, Any],
+    citation: dict[str, Any],
+) -> None:
+    """Add ``citation["attestation"]`` for a met item-8 generic citation; a
+    no-op for every other kind/item."""
+    if check_kind == "generic" and item_id == _CHARACTERIZATION_ITEM:
+        citation["attestation"] = _characterization_attestation_disclosure(envelope)
+
+
+def _characterization_attestation_disclosure(
+    envelope: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The ``citation.attestation`` block for a met item-8 generic citation:
+    ``tool_produced`` is ``True`` (with the producer and check counts) only
+    when the envelope carries a ``klt signoff --attest`` attestation block;
+    ``False`` for a hand-written one, so the absence is visible, not implied.
+    Disclosure only -- never graded."""
+    attestation = envelope.get("attestation")
+    if isinstance(attestation, Mapping) and isinstance(
+        attestation.get("producer"), str
+    ):
+        return {
+            "tool_produced": True,
+            "producer": attestation["producer"],
+            "check_count": attestation.get("check_count"),
+            "passed_count": attestation.get("passed_count"),
+        }
+    return {"tool_produced": False}
 
 
 def _generic_artifact_binding(
