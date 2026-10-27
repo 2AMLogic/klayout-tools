@@ -371,6 +371,27 @@ which fields each verb populates and why some are `null` by design (e.g.
 read — and now carries the layout side's `sha256:`-prefixed hash like every
 other populating verb.
 
+### Build drift: a verdict from a different `klt` build (issue #4223)
+
+Every `checks[]` entry carries a `build_drift` object comparing the cited
+envelope's `provenance.klt_version` with the running build's identity
+(`klt --version`):
+
+```json
+"build_drift": {"state": "stale", "cited_klt_version": "0.5.0+gabc123", "running_klt_version": "0.5.1+gdef456"}
+```
+
+| `state` | Meaning |
+| --- | --- |
+| `current` | `provenance.klt_version` equals the running build |
+| `stale` | Both are known and differ: the verdict was produced by another build, so a rule added since was never applied to it. Re-run the verb and re-cite the result |
+| `unverifiable` | The envelope records no `klt_version` (no `provenance` block: `yield`, `power`, `error`, many `generic` envelopes) or either side is a `+unknown` build. Absence of evidence is never reported as `stale` |
+
+The marker is **report-only**: it never changes a check's `passed`, the
+overall `status`, or the exit code, so existing green pipelines do not flip.
+Gate on it by reading `checks[].build_drift.state` from the JSON. It is an
+additive field; no existing field changes.
+
 ### What this does not do yet
 
 `klt signoff` combines what each `klt` verb's own JSON already asserts. It

@@ -58,7 +58,7 @@ from ._report_verify import (
     load_committed_report,
     strip_path_patterns,
 )
-from .build_identity import version_report
+from .build_identity import build_version, version_report
 from .coverage import (
     RESULT_PARTIAL,
     coverage_nothing_checked,
@@ -1636,6 +1636,12 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                     "passed": <bool>,
                     "detail": {...},  # kind-specific summary, see _detail()
                     "provenance": {...} | None,
+                    # Issue #4223, report-only: never changes `passed`/`status`.
+                    "build_drift": {
+                        "state": "current" | "stale" | "unverifiable",
+                        "cited_klt_version": <str> | None,
+                        "running_klt_version": <str>,
+                    },
                 },
                 ...
             ],
@@ -2316,7 +2322,39 @@ def _build_check(kind: str, envelope: _EvidenceEnvelope, source: str) -> dict[st
         "passed": _check_passed(kind, envelope) and coverage_refusal is None,
         "detail": _detail(kind, envelope),
         "provenance": envelope.get("provenance"),
+        "build_drift": _build_drift(envelope.get("provenance")),
     }
+
+
+#: ``build_drift.state`` values (issue #4223).
+_BUILD_DRIFT_CURRENT = "current"
+_BUILD_DRIFT_STALE = "stale"
+_BUILD_DRIFT_UNVERIFIABLE = "unverifiable"
+
+
+def _build_drift(provenance: Any) -> dict[str, Any]:
+    """Compare a cited envelope's ``provenance.klt_version`` with the running
+    build (issue #4223), for one ``checks[]`` entry.
+
+    ``klt_version`` is the full build identity (``klt --version``), so a
+    different string means a different build produced the verdict. Report-only:
+    the marker is disclosed, never folded into ``passed`` or the overall
+    ``status``. An envelope with no ``klt_version`` (no provenance block, a
+    generic envelope) or an identity either side could not resolve (``+unknown``)
+    is ``unverifiable`` -- absence of evidence, never ``stale``.
+    """
+    running = build_version()
+    cited = provenance.get("klt_version") if isinstance(provenance, dict) else None
+    if not isinstance(cited, str) or not cited:
+        state = _BUILD_DRIFT_UNVERIFIABLE
+        cited = None
+    elif "+unknown" in cited or "+unknown" in running:
+        state = _BUILD_DRIFT_UNVERIFIABLE
+    elif cited == running:
+        state = _BUILD_DRIFT_CURRENT
+    else:
+        state = _BUILD_DRIFT_STALE
+    return {"state": state, "cited_klt_version": cited, "running_klt_version": running}
 
 
 def _sta_corner_timing_passed(fields: dict[str, Any]) -> bool:

@@ -2999,6 +2999,31 @@ def test_missing_tie_does_not_flag_properly_connected_tap(tmp_path):
     assert findings == []
 
 
+def test_tie_to_a_non_supply_net_is_declarable_via_ties_net(tmp_path):
+    """Issue #4223: a well whose tap sits on a signal (source) net, not the
+    supply, is cleared by declaring that net in ``ties[].net`` -- no new key."""
+    layout, top, li1, label, nwell, tap = _ties_fixture_layout()
+    top.shapes(nwell).insert(kdb.Box.new(_um(20), _um(0), _um(24), _um(4)))
+    top.shapes(tap).insert(kdb.Box.new(_um(21), _um(1), _um(22), _um(2)))
+    top.shapes(li1).insert(kdb.Box.new(_um(20.5), _um(0.5), _um(22.5), _um(2.5)))
+    top.shapes(label).insert(kdb.Text("SRC", kdb.Trans(_um(21), _um(1.5))))
+
+    gds = tmp_path / "signal_tie.gds"
+    layout.write(str(gds))
+
+    def findings_for(tie_net):
+        spec = tmp_path / f"signal_tie_{tie_net}.erc.json"
+        tie = _ties_spec()["ties"][0] | {"net": tie_net}
+        _write_spec(spec, _nets_spec(ties=[tie]))
+        report = run_erc(str(gds), str(spec))
+        return [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+
+    # Declared against the supply, the bulk-on-signal well is a finding...
+    assert len(findings_for("VDD")) == 1
+    # ...declared against the net it is actually tied to, it is clean.
+    assert findings_for("SRC") == []
+
+
 # --- ties[]: well/tap connectivity scoping (issue #2169) --------------------
 
 

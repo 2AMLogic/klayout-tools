@@ -540,6 +540,13 @@ indistinguishable in the output, so a signoff claim can't be checked or
 reproduced. This block is **additive** (see above): adopting it required no
 `schema_version` bump on any verb.
 
+**Build drift in `klt signoff` (issue #4223).** `klt signoff` compares each
+cited check's `provenance.klt_version` with the running build and reports an
+additive, report-only `checks[].build_drift` object
+(`state` = `current` | `stale` | `unverifiable`, plus `cited_klt_version` and
+`running_klt_version`). See
+[`cli/signoff.md`](cli/signoff.md#build-drift-a-verdict-from-a-different-klt-build-issue-4223).
+
 **Client vs. worker scope (issue #2834).** `provenance` (and
 `environment.client_klt_version`) describes the *submitting client*. For
 `klt sim --backend batch`, what the executing worker actually resolved --
