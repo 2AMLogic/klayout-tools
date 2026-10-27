@@ -78,6 +78,10 @@ def run(args: argparse.Namespace) -> int:
         return emit_error(
             "synthesize", "--rerun requires --check <report>", args.format
         )
+    if args.skip_deck:
+        return emit_error(
+            "synthesize", "--skip-deck requires --check <report>", args.format
+        )
 
     try:
         report = run_synthesize(
@@ -109,6 +113,12 @@ def _run_check(args: argparse.Namespace) -> int:
     hashes but never the request that produced it, so there is nothing to
     reconstruct the inputs from. See `_report_verify.py`'s module docstring.
     """
+    if args.skip_deck and args.rerun:
+        return emit_error(
+            "synthesize",
+            "--skip-deck is cheap-mode only; --rerun runs Yosys and needs the liberty",
+            args.format,
+        )
     try:
         if args.rerun:
             result = rerun_synthesize_report(
@@ -129,6 +139,7 @@ def _run_check(args: argparse.Namespace) -> int:
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
                 netlist_override=args.netlist,
+                skip_deck=args.skip_deck,
             )
     except SynthesizeError as exc:
         return emit_error("synthesize", str(exc), args.format)

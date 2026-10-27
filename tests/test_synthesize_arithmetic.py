@@ -320,7 +320,8 @@ def _script_lines(tmp_path, **kwargs):
 
 def test_script_is_unchanged_without_the_arithmetic_field(tmp_path):
     lines = _script_lines(tmp_path)
-    assert lines[:3] == [
+    assert lines[:4] == [
+        "read_liberty -lib /abs/lib.lib",
         "read_verilog /abs/design.v",
         "hierarchy -check -top top",
         "synth -top top",
