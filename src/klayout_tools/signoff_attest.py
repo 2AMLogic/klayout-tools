@@ -60,7 +60,7 @@ from ._report_verify import (
     build_rerun_result,
     load_committed_report,
 )
-from .build_identity import _klayout_version, build_version
+from .build_identity import build_version, klayout_version
 from .env_provenance import find_repo_root
 from .signoff import (
     _COMMAND_EVIDENCE_TIMEOUT_S,
@@ -792,7 +792,7 @@ def _load_committed_attestation(committed_path: str) -> dict[str, Any]:
 
 
 def _drift_result(
-    committed_path: str, committed: Mapping[str, Any], fresh: dict[str, Any]
+    committed_path: str, committed: dict[str, Any], fresh: dict[str, Any]
 ) -> dict[str, Any]:
     # ``skipped`` marks a local_only check this run did not execute; its
     # (carried-through) outcome is the committed one, so it is reported beside
@@ -879,22 +879,11 @@ def _stream_checks(stream: str, digest: str) -> list[dict[str, Any]]:
     return checks
 
 
-def build_stream_attestation(
-    stream_path: str,
-    *,
-    generator: str | None = None,
-    regenerated_hash: str | None = None,
-    hash_kind: str = _HASH_KIND_BYTES,
-) -> dict[str, Any]:
-    """``klt signoff --attest 2 --input STREAM``: run the item-2 checks on a
-    committed GDS/OASIS stream and return the artifact-anchored generic
-    envelope (``status`` ``"pass"`` iff every check passed).
-
-    ``generator`` and ``regenerated_hash`` must be given together; they
-    populate ``provenance.regeneration`` exactly as the grader reads it
-    (:func:`~.signoff._regeneration_claim`). The generator is echoed, never
-    run. Raises :class:`AttestationError` for a missing, symlinked or
-    non-repository stream or a malformed regeneration claim."""
+def _validate_regeneration_claim(
+    generator: str | None, regenerated_hash: str | None, hash_kind: str
+) -> None:
+    """Refuse a malformed ``--generator`` / ``--regenerated-hash`` /
+    ``--hash-kind`` combination with :class:`AttestationError`."""
     if (generator is None) != (regenerated_hash is None):
         raise AttestationError(
             "--generator and --regenerated-hash must be given together: a "
@@ -913,6 +902,12 @@ def build_stream_attestation(
         raise AttestationError(
             "--regenerated-hash must be 'sha256:' followed by 64 lowercase hex digits"
         )
+
+
+def _resolve_stream(stream_path: str) -> tuple[str, str]:
+    """``(absolute path, repository-relative path)`` of a committed stream, or
+    :class:`AttestationError` for a missing, symlinked, non-file or
+    non-repository path."""
     if not os.path.exists(stream_path):
         raise AttestationError(f"stream not found: {stream_path}")
     if os.path.islink(stream_path):
@@ -929,7 +924,27 @@ def build_stream_attestation(
             f"stream '{stream_path}' is not inside a git repository -- the "
             "envelope pins it as a repository-relative path"
         )
-    stream_rel = os.path.relpath(absolute, root).replace(os.sep, "/")
+    return absolute, os.path.relpath(absolute, root).replace(os.sep, "/")
+
+
+def build_stream_attestation(
+    stream_path: str,
+    *,
+    generator: str | None = None,
+    regenerated_hash: str | None = None,
+    hash_kind: str = _HASH_KIND_BYTES,
+) -> dict[str, Any]:
+    """``klt signoff --attest 2 --input STREAM``: run the item-2 checks on a
+    committed GDS/OASIS stream and return the artifact-anchored generic
+    envelope (``status`` ``"pass"`` iff every check passed).
+
+    ``generator`` and ``regenerated_hash`` must be given together; they
+    populate ``provenance.regeneration`` exactly as the grader reads it
+    (:func:`~.signoff._regeneration_claim`). The generator is echoed, never
+    run. Raises :class:`AttestationError` for a missing, symlinked or
+    non-repository stream or a malformed regeneration claim."""
+    _validate_regeneration_claim(generator, regenerated_hash, hash_kind)
+    absolute, stream_rel = _resolve_stream(stream_path)
     raw_digest = sha256_file(absolute)
     if raw_digest is None:
         raise AttestationError(f"could not read stream '{stream_path}'")
@@ -939,7 +954,7 @@ def build_stream_attestation(
     status = "pass" if passed_count == len(checks) else "fail"
     provenance: dict[str, Any] = {
         "klt_version": build_version(),
-        "klayout_version": _klayout_version(),
+        "klayout_version": klayout_version(),
         "pdk": None,
         "deck": None,
         "input": {

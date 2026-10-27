@@ -287,6 +287,73 @@ def _run_describe_grader(
     return EXIT_PASS
 
 
+def _attest_flag_problem(
+    args: argparse.Namespace, inventory: str | None, stream: str | None
+) -> str | None:
+    """The refusal message for an invalid ``--attest`` flag combination (item 2
+    takes ``--input``; items 1, 9 and 10 take ``--inventory``), else ``None``."""
+    if args.attest == STREAM_ATTESTABLE_ITEM:
+        if inventory:
+            return (
+                "--inventory does not apply to --attest 2: the layout stream is "
+                "the artifact -- pass it with --input <stream>"
+            )
+        if not stream:
+            return (
+                "--attest 2 requires --input <stream> (the committed GDS/OASIS "
+                "layout stream; see docs/cli/signoff.md)"
+            )
+        return None
+    if stream or any(
+        getattr(args, attr, None) is not None
+        for attr in ("generator", "regenerated_hash", "hash_kind")
+    ):
+        return (
+            "--input/--generator/--regenerated-hash/--hash-kind only apply "
+            f"to --attest {STREAM_ATTESTABLE_ITEM} (items 1, 9 and 10 take "
+            "--inventory)"
+        )
+    if not inventory:
+        return (
+            "--attest requires --inventory <file> (the versioned attestation "
+            "inventory; see docs/cli/signoff.md)"
+        )
+    return None
+
+
+def _compute_attestation(
+    args: argparse.Namespace,
+    inventory: str | None,
+    stream: str | None,
+    committed: str | None,
+) -> dict:
+    """Build (or, with ``committed``, re-check) the attestation. The flag
+    combination was validated by :func:`_attest_flag_problem`."""
+    if args.attest == STREAM_ATTESTABLE_ITEM:
+        assert stream is not None
+        generator = getattr(args, "generator", None)
+        regenerated_hash = getattr(args, "regenerated_hash", None)
+        hash_kind = getattr(args, "hash_kind", None) or "bytes"
+        if committed is not None:
+            return check_stream_attestation(
+                stream,
+                committed,
+                generator=generator,
+                regenerated_hash=regenerated_hash,
+                hash_kind=hash_kind,
+            )
+        return build_stream_attestation(
+            stream,
+            generator=generator,
+            regenerated_hash=regenerated_hash,
+            hash_kind=hash_kind,
+        )
+    assert inventory is not None
+    if committed is not None:
+        return check_attestation(args.attest, inventory, committed)
+    return build_attestation(args.attest, inventory)
+
+
 def _run_attest(
     args: argparse.Namespace,
     manifest_source: str | None,
@@ -316,45 +383,9 @@ def _run_attest(
         )
     inventory = getattr(args, "inventory", None)
     stream = getattr(args, "attest_input", None)
-    claim = {
-        "generator": getattr(args, "generator", None),
-        "regenerated_hash": getattr(args, "regenerated_hash", None),
-        "hash_kind": getattr(args, "hash_kind", None) or "bytes",
-    }
-    if args.attest == STREAM_ATTESTABLE_ITEM:
-        if inventory:
-            return emit_error(
-                "signoff",
-                "--inventory does not apply to --attest 2: the layout stream is "
-                "the artifact -- pass it with --input <stream>",
-                args.format,
-            )
-        if not stream:
-            return emit_error(
-                "signoff",
-                "--attest 2 requires --input <stream> (the committed GDS/OASIS "
-                "layout stream; see docs/cli/signoff.md)",
-                args.format,
-            )
-    else:
-        if stream or any(
-            getattr(args, attr, None) is not None
-            for attr in ("generator", "regenerated_hash", "hash_kind")
-        ):
-            return emit_error(
-                "signoff",
-                "--input/--generator/--regenerated-hash/--hash-kind only apply "
-                f"to --attest {STREAM_ATTESTABLE_ITEM} (items 1, 9 and 10 take "
-                "--inventory)",
-                args.format,
-            )
-        if not inventory:
-            return emit_error(
-                "signoff",
-                "--attest requires --inventory <file> (the versioned attestation "
-                "inventory; see docs/cli/signoff.md)",
-                args.format,
-            )
+    problem = _attest_flag_problem(args, inventory, stream)
+    if problem is not None:
+        return emit_error("signoff", problem, args.format)
     committed = getattr(args, "check", None)
     output = getattr(args, "output", None)
     if committed is not None and output:
@@ -365,15 +396,7 @@ def _run_attest(
             args.format,
         )
     try:
-        if args.attest == STREAM_ATTESTABLE_ITEM:
-            if committed is not None:
-                result = check_stream_attestation(stream, committed, **claim)
-            else:
-                result = build_stream_attestation(stream, **claim)
-        elif committed is not None:
-            result = check_attestation(args.attest, inventory, committed)
-        else:
-            result = build_attestation(args.attest, inventory)
+        result = _compute_attestation(args, inventory, stream, committed)
     except SignoffError as exc:
         return emit_error("signoff", str(exc), args.format)
 
