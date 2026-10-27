@@ -1154,7 +1154,7 @@ def test_resolved_group_origins_snap_up_onto_mfg_grid(
     for offset in offsets.values():
         for value in offset.values():
             assert round(value / 0.005) * 0.005 == pytest.approx(value, abs=1e-9)
-    assert any("snapped up" in w and "'m1'" in w for w in response["warnings"])
+    assert any("snapped by" in w and "'m1'" in w for w in response["warnings"])
 
 
 def test_on_grid_origins_are_left_unchanged_and_unwarned(
@@ -1171,18 +1171,69 @@ def test_on_grid_origins_are_left_unchanged_and_unwarned(
     response = execute_layout_plan_document(request, request_dir=str(tmp_path))
     offsets = {g["id"]: g["offset_um"] for g in response["device_groups"]}
     assert offsets["b"] == pytest.approx({"x": 3.0, "y": 0.0})
-    assert not any("snapped up" in w for w in response["warnings"])
+    assert not any("snapped by" in w for w in response["warnings"])
 
 
-def test_snap_offsets_keeps_spacing_a_lower_bound_and_skips_unknown_grid():
-    from klayout_tools.layout_plan_execute import _snap_offsets_to_grid
+def _bbox(width, height=1.0):
+    return {"x0": 0.0, "y0": 0.0, "x1": width, "y1": height}
 
-    offsets = {"a": {"x": 0.0, "y": 0.0}, "b": {"x": 120.163, "y": 1.0}}
-    warnings = _snap_offsets_to_grid(offsets, 0.005)
-    assert offsets["b"] == pytest.approx({"x": 120.165, "y": 1.0})
-    assert offsets["a"] == {"x": 0.0, "y": 0.0}
-    assert len(warnings) == 1 and "'b'" in warnings[0]
 
-    unchanged = {"b": {"x": 120.163, "y": 1.0}}
-    assert _snap_offsets_to_grid(unchanged, 0.0) == []
-    assert unchanged["b"]["x"] == 120.163
+def test_row_snap_keeps_spacing_a_lower_bound_for_every_adjacent_pair():
+    from klayout_tools.layout_plan_execute import _resolve_placement
+
+    widths = {"a": 1.003, "b": 1.001, "c": 1.002}
+    offsets, warnings = _resolve_placement(
+        [{"order": ["a", "b", "c"], "spacing_um": 0.1, "align": "bottom"}],
+        [],
+        {k: _bbox(w) for k, w in widths.items()},
+        set(widths),
+        {},
+        0.005,
+    )
+    for left, right in (("a", "b"), ("b", "c")):
+        gap = offsets[right]["x"] - (offsets[left]["x"] + widths[left])
+        assert gap >= 0.1 - 1e-6
+    for offset in offsets.values():
+        for value in offset.values():
+            assert round(value / 0.005) * 0.005 == pytest.approx(value, abs=1e-9)
+    assert len(warnings) == 2
+
+
+def test_stack_and_abutment_snap_keep_margin_and_gap_lower_bounds():
+    from klayout_tools.layout_plan_execute import _resolve_placement
+
+    bboxes = {k: _bbox(1.003, 1.001) for k in ("a", "b", "c", "d")}
+    offsets, _ = _resolve_placement(
+        [
+            {"order": ["a"], "spacing_um": 0.0, "align": "center"},
+            {"order": ["b"], "spacing_um": 0.0, "align": "bottom", "margin_um": 0.1},
+        ],
+        [
+            {"a": "a", "b": "c", "edge": "left", "gap_um": 0.1},
+            {"a": "b", "b": "d", "edge": "top", "gap_um": 0.1},
+        ],
+        bboxes,
+        set(bboxes),
+        {},
+        0.005,
+    )
+    assert offsets["b"]["y"] - (offsets["a"]["y"] + 1.001) >= 0.1 - 1e-6
+    assert offsets["a"]["x"] - (offsets["c"]["x"] + 1.003) >= 0.1 - 1e-6
+    assert offsets["d"]["y"] - (offsets["b"]["y"] + 1.001) >= 0.1 - 1e-6
+    for offset in offsets.values():
+        for value in offset.values():
+            assert round(value / 0.005) * 0.005 == pytest.approx(value, abs=1e-9)
+
+
+def test_snap_is_disabled_without_a_grid():
+    from klayout_tools.layout_plan_execute import _resolve_placement
+
+    offsets, warnings = _resolve_placement(
+        [{"order": ["a", "b"], "spacing_um": 0.1, "align": "bottom"}],
+        [],
+        {"a": _bbox(1.003), "b": _bbox(1.001)},
+        {"a", "b"},
+        {},
+    )
+    assert offsets["b"]["x"] == pytest.approx(1.103)
+    assert warnings == []

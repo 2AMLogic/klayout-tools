@@ -216,6 +216,7 @@ from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._vendor import mutation_variants as _mutation_variants
+from .env_provenance import find_repo_root, repo_relative_path
 from .functional_verification_initial_state import (
     INITIAL_STATE_MODULE,
     SEED_PLUSARG,
@@ -251,7 +252,7 @@ from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: ``"icarus"`` first: it is the documented default, per the spike's own
 #: CI-cost finding (~0.7 s vs. Verilator's ~8 s for the worked example).
@@ -1003,6 +1004,24 @@ def _resolve_initial_state(
     }
 
 
+class _Report(dict):
+    """A report ``dict`` that also carries the resolved absolute artifact
+    paths (``local_paths``) for ``--format text``. The attribute is never
+    serialised: the JSON contract only ever sees the repo-relative
+    ``{path, scope}`` envelope (docs/json-contract.md, #2224)."""
+
+    local_paths: dict[str, str | None]
+
+
+def _path_envelope(path: str | None) -> dict[str, Any]:
+    """``path`` as the committable ``{path, scope}`` shape, relative to the
+    repo the process was invoked from (never the absolute host path)."""
+    root = find_repo_root()
+    if path is not None and root is None:
+        return {"path": None, "scope": "external"}
+    return repo_relative_path(path, repo_root=root)
+
+
 def _initial_state_run_specs(
     initial_state: dict[str, Any] | None,
     *,
@@ -1100,7 +1119,7 @@ def _collect_run_results(
                 {
                     "seed": spec["seed"],
                     "status": "fail" if counts[1] else "pass",
-                    "results_xml": spec["results_xml"],
+                    "results_xml": _path_envelope(spec["results_xml"]),
                 }
             )
         tests.extend(spec_tests)
@@ -3145,46 +3164,54 @@ def _run_verilog_top(
         entry["error_message"] = error_message
     failed_count = 1 if error_message else 0
 
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "engine": engine,
-        "hdl_toplevel": hdl_toplevel,
-        "testbench": top,
-        "status": "fail" if failed_count else "pass",
-        "test_count": 1,
-        "passed_count": 1 - failed_count,
-        "failed_count": failed_count,
-        "skipped_count": 0,
-        "tests": [entry],
-        "coverage": None,
-        "trace": None,
-        "environment": {
+    report = _Report(
+        {
+            "schema_version": SCHEMA_VERSION,
             "engine": engine,
-            "engine_version": _engine_version(engine),
-            "cocotb_version": None,
-            "results_xml": None,
-            "test_log": test_log,
-            "build_log": build_log,
-            "random_seed": None,
-            "source_defines": source_defines,
-            "initial_state": None,
-            "sdf": (
-                None
-                if sdf is None
-                else {
-                    "file": sdf["file"],
-                    "corner": sdf["corner"],
-                    "entries": sdf["entries"],
-                    "annotated": True,
-                    "partial": bool(sdf_dropped_counts),
-                    "dropped": _sdf_dropped_report(
-                        sdf_dropped_counts, sdf_pre_dropped_arcs
-                    ),
-                    **_sdf_renamed_report(sdf_renamed),
-                }
-            ),
-        },
+            "hdl_toplevel": hdl_toplevel,
+            "testbench": top,
+            "status": "fail" if failed_count else "pass",
+            "test_count": 1,
+            "passed_count": 1 - failed_count,
+            "failed_count": failed_count,
+            "skipped_count": 0,
+            "tests": [entry],
+            "coverage": None,
+            "trace": None,
+            "environment": {
+                "engine": engine,
+                "engine_version": _engine_version(engine),
+                "cocotb_version": None,
+                "results_xml": _path_envelope(None),
+                "test_log": _path_envelope(test_log),
+                "build_log": _path_envelope(build_log),
+                "random_seed": None,
+                "source_defines": source_defines,
+                "initial_state": None,
+                "sdf": (
+                    None
+                    if sdf is None
+                    else {
+                        "file": sdf["file"],
+                        "corner": sdf["corner"],
+                        "entries": sdf["entries"],
+                        "annotated": True,
+                        "partial": bool(sdf_dropped_counts),
+                        "dropped": _sdf_dropped_report(
+                            sdf_dropped_counts, sdf_pre_dropped_arcs
+                        ),
+                        **_sdf_renamed_report(sdf_renamed),
+                    }
+                ),
+            },
+        }
+    )
+    report.local_paths = {
+        "results_xml": None,
+        "test_log": test_log,
+        "build_log": build_log,
     }
+    return report
 
 
 def _reject_verilog_top_mutations(testbench: Any) -> None:
@@ -3670,87 +3697,95 @@ def run_functional_verification(
             hdl_toplevel=build_hdl_toplevel, build_dir=build_dir, test_dir=output_dir
         )
 
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "engine": engine,
-        "hdl_toplevel": hdl_toplevel,
-        "testbench": module,
-        "status": "fail" if failed_count else "pass",
-        "test_count": len(tests),
-        "passed_count": passed_count,
-        "failed_count": failed_count,
-        "skipped_count": skipped_count,
-        "tests": tests,
-        "coverage": coverage,
-        "trace": trace,
-        "environment": {
+    report = _Report(
+        {
+            "schema_version": SCHEMA_VERSION,
             "engine": engine,
-            "engine_version": _engine_version(engine),
-            "cocotb_version": _cocotb_version(),
-            "results_xml": results_xml,
-            # Additive (issue #3013): the simulator/cocotb console transcript
-            # and the build transcript the run wrote, named by path (never
-            # inlined) like `results_xml`.
-            "test_log": test_log,
-            "build_log": build_log,
-            "random_seed": _extract_random_seed_property(results_xml),
-            # Additive (issue #3290): `options.source_defines` keyed by the
-            # request.sources entry as resolved to an absolute path; `{}`
-            # when absent.
-            "source_defines": source_defines,
-            # Additive (issue #4338): `request.env` as given; `{}` when absent.
-            "env": env,
-            # Additive (issue #2998): `null` unless the request set
-            # `options.initial_state`. `seeds` echoes the effective seeds
-            # (empty for mode "x"); `runs` has one entry per seed.
-            "initial_state": _initial_state_echo(
-                initial_state, initial_state_info, run_reports
-            ),
-            # Additive (issue #1002, spike §4.2 item 5): `null` on an
-            # ordinary run, an object on an SDF-annotated one -- so a caller
-            # can tell an annotated run from an unannotated one *from the
-            # JSON*, without reading a transcript. `annotated: true` is
-            # load-bearing rather than redundant: reaching this point at all
-            # means the diagnostic scan above found nothing *actionable*,
-            # i.e. every non-benign diagnostic class applied cleanly.
-            #
-            # `annotated: true` alone cannot distinguish "every delay and
-            # every timing check applied" from "every IOPATH applied and
-            # every TIMINGCHECK section was dropped" -- the normal case on
-            # Icarus, which has no SDF TIMINGCHECK support at all (issue
-            # #1102). `partial`/`dropped` make that distinction
-            # machine-readable: `partial` is true whenever any benign class
-            # was filtered out of the diagnostic gate above, and `dropped`
-            # names each such class with the count of diagnostic lines
-            # filtered and a human-readable reason
-            # (:data:`SDF_BENIGN_DIAGNOSTIC_REASONS`). An ordinary fully
-            # -clean run reports `partial: false` and `dropped: {}`.
-            "sdf": (
-                None
-                if sdf is None
-                else {
-                    "file": sdf["file"],
-                    "corner": sdf["corner"],
-                    # Additive (issue #2364): echoes the request's entry
-                    # population -- "all" (every delay entry) or
-                    # "interconnect" (net delays only, every non-INTERCONNECT
-                    # delay entry dropped and counted in `dropped`). Absent
-                    # on no older reader's contract: the field is new, and a
-                    # consumer that ignores unknown keys (the JSON contract's
-                    # additive rule) is unaffected.
-                    "entries": sdf["entries"],
-                    "annotated": True,
-                    "partial": bool(sdf_dropped_counts),
-                    "dropped": _sdf_dropped_report(
-                        sdf_dropped_counts, sdf_pre_dropped_arcs
-                    ),
-                    # Additive (issue #2897): `{from, to}` per escaped-
-                    # divider instance renamed for annotation.
-                    **_sdf_renamed_report(sdf_renamed),
-                }
-            ),
-        },
+            "hdl_toplevel": hdl_toplevel,
+            "testbench": module,
+            "status": "fail" if failed_count else "pass",
+            "test_count": len(tests),
+            "passed_count": passed_count,
+            "failed_count": failed_count,
+            "skipped_count": skipped_count,
+            "tests": tests,
+            "coverage": coverage,
+            "trace": trace,
+            "environment": {
+                "engine": engine,
+                "engine_version": _engine_version(engine),
+                "cocotb_version": _cocotb_version(),
+                "results_xml": _path_envelope(results_xml),
+                # Additive (issue #3013): the simulator/cocotb console transcript
+                # and the build transcript the run wrote, named by path (never
+                # inlined) like `results_xml`.
+                "test_log": _path_envelope(test_log),
+                "build_log": _path_envelope(build_log),
+                "random_seed": _extract_random_seed_property(results_xml),
+                # Additive (issue #3290): `options.source_defines` keyed by the
+                # request.sources entry as resolved to an absolute path; `{}`
+                # when absent.
+                "source_defines": source_defines,
+                # Additive (issue #4338): `request.env` as given; `{}` when absent.
+                "env": env,
+                # Additive (issue #2998): `null` unless the request set
+                # `options.initial_state`. `seeds` echoes the effective seeds
+                # (empty for mode "x"); `runs` has one entry per seed.
+                "initial_state": _initial_state_echo(
+                    initial_state, initial_state_info, run_reports
+                ),
+                # Additive (issue #1002, spike §4.2 item 5): `null` on an
+                # ordinary run, an object on an SDF-annotated one -- so a caller
+                # can tell an annotated run from an unannotated one *from the
+                # JSON*, without reading a transcript. `annotated: true` is
+                # load-bearing rather than redundant: reaching this point at all
+                # means the diagnostic scan above found nothing *actionable*,
+                # i.e. every non-benign diagnostic class applied cleanly.
+                #
+                # `annotated: true` alone cannot distinguish "every delay and
+                # every timing check applied" from "every IOPATH applied and
+                # every TIMINGCHECK section was dropped" -- the normal case on
+                # Icarus, which has no SDF TIMINGCHECK support at all (issue
+                # #1102). `partial`/`dropped` make that distinction
+                # machine-readable: `partial` is true whenever any benign class
+                # was filtered out of the diagnostic gate above, and `dropped`
+                # names each such class with the count of diagnostic lines
+                # filtered and a human-readable reason
+                # (:data:`SDF_BENIGN_DIAGNOSTIC_REASONS`). An ordinary fully
+                # -clean run reports `partial: false` and `dropped: {}`.
+                "sdf": (
+                    None
+                    if sdf is None
+                    else {
+                        "file": sdf["file"],
+                        "corner": sdf["corner"],
+                        # Additive (issue #2364): echoes the request's entry
+                        # population -- "all" (every delay entry) or
+                        # "interconnect" (net delays only, every non-INTERCONNECT
+                        # delay entry dropped and counted in `dropped`). Absent
+                        # on no older reader's contract: the field is new, and a
+                        # consumer that ignores unknown keys (the JSON contract's
+                        # additive rule) is unaffected.
+                        "entries": sdf["entries"],
+                        "annotated": True,
+                        "partial": bool(sdf_dropped_counts),
+                        "dropped": _sdf_dropped_report(
+                            sdf_dropped_counts, sdf_pre_dropped_arcs
+                        ),
+                        # Additive (issue #2897): `{from, to}` per escaped-
+                        # divider instance renamed for annotation.
+                        **_sdf_renamed_report(sdf_renamed),
+                    }
+                ),
+            },
+        }
+    )
+    report.local_paths = {
+        "results_xml": results_xml,
+        "test_log": test_log,
+        "build_log": build_log,
     }
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -3985,7 +4020,7 @@ def run_functional_verification_with_mutations(
                     "status": "rejected",
                     "reason": doc_rejections[index],
                     "first_killing_test": None,
-                    "log_path": None,
+                    "log_path": _path_envelope(None),
                 }
             )
             rejected_count += 1
@@ -4043,7 +4078,7 @@ def run_functional_verification_with_mutations(
                     **base_result,
                     "status": "killed",
                     "first_killing_test": None,
-                    "log_path": combined_log,
+                    "log_path": _path_envelope(combined_log),
                 }
             )
             killed_count += 1
@@ -4056,7 +4091,7 @@ def run_functional_verification_with_mutations(
                     "status": "rejected",
                     "reason": detail,
                     "first_killing_test": None,
-                    "log_path": combined_log,
+                    "log_path": _path_envelope(combined_log),
                 }
             )
             rejected_count += 1
@@ -4071,7 +4106,7 @@ def run_functional_verification_with_mutations(
                     "status": "rejected",
                     "reason": str(exc),
                     "first_killing_test": None,
-                    "log_path": combined_log,
+                    "log_path": _path_envelope(combined_log),
                 }
             )
             rejected_count += 1
@@ -4084,7 +4119,7 @@ def run_functional_verification_with_mutations(
                     **base_result,
                     "status": "killed",
                     "first_killing_test": first_killing_test,
-                    "log_path": combined_log,
+                    "log_path": _path_envelope(combined_log),
                 }
             )
             killed_count += 1
@@ -4094,7 +4129,7 @@ def run_functional_verification_with_mutations(
                     **base_result,
                     "status": "survived",
                     "first_killing_test": None,
-                    "log_path": combined_log,
+                    "log_path": _path_envelope(combined_log),
                 }
             )
             survived_count += 1

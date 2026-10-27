@@ -261,8 +261,8 @@ and no per-case result parsing.
 
 **Report.** Same envelope as the cocotb path, with one synthetic `tests`
 entry named after `verilog_top` (a failure carries
-`error_type: "VerilogBenchFailure"`). `environment.cocotb_version` and
-`environment.results_xml` are `null`; `environment.test_log`/`build_log`
+`error_type: "VerilogBenchFailure"`). `environment.cocotb_version` is `null` and
+`environment.results_xml` is the absent envelope (`{path: null, scope: "absent"}`); `environment.test_log`/`build_log`
 name the transcripts and `environment.sdf` is populated as on the cocotb path.
 The SDF diagnostic gate is unchanged: a partial annotation is still exit 1.
 No pass-through wrapper is generated, since the bench already nests the DUT.
@@ -288,7 +288,8 @@ source and testbench paths still resolve against the request's own directory,
 and `--mutations` honours the flag too (`DIR/mutants/`). The run-identity
 digest does not fold in the output directory. The `environment.results_xml`,
 `trace.path`, coverage and mutation `log_path` fields report the chosen
-location.
+location (`environment.*` and mutation `log_path` as the repo-relative `{path, scope}`
+envelope — see [`docs/json-contract.md`](../json-contract.md)).
 
 | Artifact | What it is |
 | --- | --- |
@@ -1269,7 +1270,7 @@ The baseline run's own response fields (`status`, `test_count`, `tests[]`,
         "line": 75,
         "status": "survived",
         "first_killing_test": null,
-        "log_path": ".klt/functional-verification/mutants/mutant_1.log"
+        "log_path": {"path": ".klt/functional-verification/mutants/mutant_1.log", "scope": "repo"}
       },
       {
         "index": 2,
@@ -1278,7 +1279,7 @@ The baseline run's own response fields (`status`, `test_count`, `tests[]`,
         "line": 134,
         "status": "killed",
         "first_killing_test": "test_modexp_known_vectors",
-        "log_path": ".klt/functional-verification/mutants/mutant_2.log"
+        "log_path": {"path": ".klt/functional-verification/mutants/mutant_2.log", "scope": "repo"}
       }
     ]
   }
@@ -1293,7 +1294,7 @@ The baseline run's own response fields (`status`, `test_count`, `tests[]`,
 | `mutation_testing.rejected_count` | integer | Proposals that failed anchor validation (bad `file`/duplicate anchor/`original_code` not found or ambiguous on `line`/empty or identical text) or failed to build in isolation (a syntax error the mutation itself introduced) — never run against the testbench at all. |
 | `mutation_testing.killed_count` / `survived_count` | integer | Of the `valid_count` proposals actually run: how many produced at least one test failure the baseline did not (`killed`) vs. reproduced the baseline's own all-passing structure exactly (`survived`). **A timed-out variant counts as `killed`** — ported verbatim from booley's own rule: "a timed-out mutant counts as detected because the mutation can wedge the design." |
 | `mutation_testing.mutation_score` | number \| null | `killed_count / valid_count`, or `null` when `valid_count == 0` (every proposal was rejected, or the proposal set was empty) — never silently reported as a perfect or zero score. |
-| `mutation_testing.results[]` | array\<object\> | One entry per proposal, in the order `<proposals>.proposals[]` declared them. `status` is `"killed"`/`"survived"`/`"rejected"`. `reason` (string) is present **only** on `"rejected"`, naming the validation/build failure verbatim. `first_killing_test` (string \| null) is the first `@cocotb.test()` name whose failure the baseline did not have, `null` on `"survived"`/`"rejected"`/a timed-out `"killed"`. `log_path` is the isolated variant's own captured build+test transcript (`null` for a proposal rejected before any build ran — an out-of-scope `file` or an anchor mismatch) — the same "artifacts are paths, kept, never deleted" convention this document's "Artifacts" section already establishes, extended per-mutant under `.klt/functional-verification/mutants/`. |
+| `mutation_testing.results[]` | array\<object\> | One entry per proposal, in the order `<proposals>.proposals[]` declared them. `status` is `"killed"`/`"survived"`/`"rejected"`. `reason` (string) is present **only** on `"rejected"`, naming the validation/build failure verbatim. `first_killing_test` (string \| null) is the first `@cocotb.test()` name whose failure the baseline did not have, `null` on `"survived"`/`"rejected"`/a timed-out `"killed"`. `log_path` is the `{path, scope}` envelope of the isolated variant's own captured build+test transcript (`{path: null, scope: "absent"}` for a proposal rejected before any build ran — an out-of-scope `file` or an anchor mismatch) — the same "artifacts are paths, kept, never deleted" convention this document's "Artifacts" section already establishes, extended per-mutant under `.klt/functional-verification/mutants/`. |
 
 ### Isolation and the per-mutant subprocess timeout
 
@@ -1442,7 +1443,7 @@ exactly.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "icarus",
   "hdl_toplevel": "gcd",
   "testbench": "test_gcd",
@@ -1469,9 +1470,9 @@ exactly.
     "engine": "icarus",
     "engine_version": "13.0",
     "cocotb_version": "2.1.0",
-    "results_xml": "/abs/path/.klt/functional-verification/results_icarus.xml",
-    "test_log": "/abs/path/.klt/functional-verification/test_icarus.log",
-    "build_log": "/abs/path/.klt/functional-verification/build_icarus.log",
+    "results_xml": {"path": ".klt/functional-verification/results_icarus.xml", "scope": "repo"},
+    "test_log": {"path": ".klt/functional-verification/test_icarus.log", "scope": "repo"},
+    "build_log": {"path": ".klt/functional-verification/build_icarus.log", "scope": "repo"},
     "random_seed": 1785780800,
     "sdf": null,
     "initial_state": null
@@ -1495,7 +1496,7 @@ set `options.trace: true`; on such a run it looks like this — the identical
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `schema_version` | integer | Per-command version, per [`docs/json-contract.md`](../json-contract.md). |
+| `schema_version` | integer | Per-command version, per [`docs/json-contract.md`](../json-contract.md). `2` since #4279: `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml` and `mutation_testing.results[].log_path` changed from absolute strings to the `{path, scope}` envelope. |
 | `engine` | string | Echo of the request's engine. |
 | `hdl_toplevel` / `testbench` | string | Echo of the request's DUT / testbench-module identifiers. |
 | `status` | string | `"pass"` (`passed_count > 0` and `failed_count == 0`) or `"fail"` (`failed_count > 0`). Skips alongside executed tests are allowed. Never `"error"` in-band — a run that failed to *run*, including zero executed tests, emits no envelope at all (see "Exit codes"). |
@@ -1503,7 +1504,7 @@ set `options.trace: true`; on such a run it looks like this — the identical
 | `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `sim_time_ns` is read from whichever shape the installed cocotb writes into `results.xml` — the `<testcase sim_time_ns="...">` attribute cocotb 2.0.x emitted, or the `<properties>` block (`sim_time_duration` scaled by the reported `sim_time_unit`, never assumed to be `ns`) cocotb 2.1.0 replaced it with (issue #2592) — so the field carries the same nanosecond value either way. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the absolute paths of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363; `zero_delay_bus_port_source_interconnect`, issue #2984) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`; plus `renamed` (issue #2897, additive, present only when non-empty) — `[{from, to}]`, each escaped-divider instance renamed to a plain identifier for annotation. See "SDF back-annotation" for the full shape. | See "SDF back-annotation" for the full shape. |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the `{path, scope}` envelope of the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the envelopes of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; see [`docs/json-contract.md`](../json-contract.md); `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363; `zero_delay_bus_port_source_interconnect`, issue #2984) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`; plus `renamed` (issue #2897, additive, present only when non-empty) — `[{from, to}]`, each escaped-divider instance renamed to a plain identifier for annotation. See "SDF back-annotation" for the full shape. | See "SDF back-annotation" for the full shape. |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
 and no rule deck (see `docs/json-contract.md` → "Shared `provenance`

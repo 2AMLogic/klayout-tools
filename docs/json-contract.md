@@ -157,6 +157,12 @@ refused before simulating (exit 1, usual error envelope) with both stamps in
 the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "`environment.netlist_identity`".
 
+`klt sim --job-status` (issue #4291) passes an optional `progress` object
+(e.g. `sim_time_s`, `stop_time_s`) through from the fleet's `status.json` when
+the runner publishes one. Additive and absent otherwise; the existing fields
+and `schema_version` are unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s
+"Asynchronous submit and status".
+
 `measurements[].on_unreached` (issue #3108) is the same shape: an optional
 request field (`"error"` default, `"null"` opt-in) whose default reproduces
 today's response byte-for-byte. Opting in adds a new measurement `status`
@@ -540,6 +546,13 @@ indistinguishable in the output, so a signoff claim can't be checked or
 reproduced. This block is **additive** (see above): adopting it required no
 `schema_version` bump on any verb.
 
+**Build drift in `klt signoff` (issue #4223).** `klt signoff` compares each
+cited check's `provenance.klt_version` with the running build and reports an
+additive, report-only `checks[].build_drift` object
+(`state` = `current` | `stale` | `unverifiable`, plus `cited_klt_version` and
+`running_klt_version`). See
+[`cli/signoff.md`](cli/signoff.md#build-drift-a-verdict-from-a-different-klt-build-issue-4223).
+
 **Client vs. worker scope (issue #2834).** `provenance` (and
 `environment.client_klt_version`) describes the *submitting client*. For
 `klt sim --backend batch`, what the executing worker actually resolved --
@@ -738,6 +751,15 @@ report what it actually removed. Same reasoning as `provenance.devices`'
 disagree about a finding with nothing in either payload to say why, and a
 box over empty space is indistinguishable from one that bit. See
 [`docs/cli/erc.md`](cli/erc.md)'s "The remainder gates".
+
+Issue #4374 is additive on the same surface: an `erc.unlabelled_conductor`
+finding now populates `islands[]` (previously `null` for that rule) with
+`{bbox, layer, shape_count, kind}` entries, `kind` being `"device_connected"`
+or `"floating"`; the optional spec key `nets[].unlabelled_allow_device_connected`
+(default `false`) excuses the former; and a `provenance.net_exclusions` entry
+gains `allow_device_connected` / `excluded_device_connected_islands` only when
+that key is declared. Nothing is renamed or removed and `schema_version` is
+unchanged.
 
 Issue #2415 adds a fourth, `provenance.label_layers`: one entry per
 `stackup` role that declares a `label_layer`, in stackup order (`{name,
@@ -1156,6 +1178,12 @@ device-recognition-affecting — changes `content_hash`, and `--check`/
 `--rerun` are what turn that into a caller-visible signal instead of a
 silent mismatch.
 
+`klt synthesize --check <report.json> --skip-deck` (issue #4315) adds an
+optional top-level `skipped[]` (`{field, reason}` entries) to the cheap-mode
+payload, naming checks deliberately not run; the key is absent otherwise. It is
+an additive field — no `schema_version` bump. A consumer must treat a `match`
+with a non-empty `skipped` as a partial verification.
+
 `klt extract --check <report.json> --rerun` additionally normalizes every
 **bookkeeping** field (issue #1559 — see `docs/cli/extract.md`'s "Field
 classes: content, bookkeeping, tool metadata") before diffing, so a
@@ -1353,6 +1381,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 
 **Plain-string fields** — intentionally unchanged:
 
@@ -1369,7 +1398,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `layout-plan-execute` | `gds_path` | 1 |
 | `lef-abstract` | `output`, `socket` | 2 |
 | `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
-| `functional-verification` | `info_path`, `log_path`, `options.trace.path` | 1 |
+| `functional-verification` | `info_path`, `options.trace.path` | 2 (`log_path` moved to the envelope table) |
 | `yield-campaign` | `campaign.sim_report_path`, `campaign.request_path` | 1 (`yield_analysis.py`) |
 | `characterize` | `liberty.path`, `liberty.roundtrip.probe_netlist`, `simulation.{testbench,request,report}`, `cells[].simulation.{testbench,request,report}`, `comparison.{ours,reference}` | 1 |
 
