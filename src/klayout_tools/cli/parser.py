@@ -446,7 +446,11 @@ def _add_sta_parser(subparsers: argparse._SubParsersAction) -> None:
             "trip instead of N external invocations. "
             "`constraints.clock_port`/"
             "`clock_period_ns` are required (a standalone STA run has no "
-            "meaning without a clock). An optional `spef` path feeds a "
+            "meaning without a clock) -- or, for a multi-clock design, "
+            "`constraints.clocks` (a list of {port, period_ns}; the first is "
+            "primary) instead, with optional `constraints.clock_groups` "
+            "declaring asynchronous clock groups (issue #4241). An optional "
+            "`spef` path feeds a "
             "caller-supplied SPEF (e.g. from `klt extract --parasitics`) in "
             "via `read_spef`, with the same net-name-correlation sanity "
             "check `klt place-and-route`'s own `post_route_spef` pass runs. "
@@ -4349,6 +4353,18 @@ def _add_lef_abstract_parser(subparsers: argparse._SubParsersAction) -> None:
         "--output",
         default=None,
         help="output LEF path (default: <macro-name>.lef)",
+    )
+    lef_abstract_parser.add_argument(
+        "--obs-mode",
+        dest="obs_mode",
+        choices=["detailed", "coarse"],
+        default="detailed",
+        help=(
+            "obstruction granularity (issue #4283): 'detailed' (default) "
+            "emits every merged routing-layer region; 'coarse' emits one "
+            "bounding rectangle per routing layer minus the declared pin "
+            "ports, bounding the LEF size to O(pins)"
+        ),
     )
     lef_abstract_parser.add_argument(
         "--require-power-pins",

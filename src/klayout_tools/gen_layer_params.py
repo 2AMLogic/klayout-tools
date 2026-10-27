@@ -2746,3 +2746,35 @@ def _esd_device_layer_params(
             _ring_implant_margin_um(family) if ring_implant is not None else 0.0
         ),
     }
+
+
+def _diode_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
+    """Hidden layer params for ``diode`` (issue #4300). sky130 only: the
+    ``diode_mark`` (``areaid.diode``) and ``hvi`` roles exist only there, and
+    the other curated decks' diode recognition has not been exercised against
+    this geometry."""
+    from .gen import GenError
+
+    family = _pdk_family(pdk_info["variant"])
+    if family != "sky130":
+        raise GenError(
+            f"generator 'diode': PDK family '{family}' is not yet supported "
+            "by this generator -- see docs/cli/gen.md's 'PDK-family support' "
+            "section"
+        )
+    return {
+        f"{role}_layer": _role_layer_info(family, role)
+        for role in (
+            "active",
+            "tap",
+            "nplus",
+            "pplus",
+            "well",
+            "hvi",
+            "diode_mark",
+            "contact",
+            "metal",
+        )
+    }

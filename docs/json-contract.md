@@ -752,6 +752,15 @@ disagree about a finding with nothing in either payload to say why, and a
 box over empty space is indistinguishable from one that bit. See
 [`docs/cli/erc.md`](cli/erc.md)'s "The remainder gates".
 
+Issue #4374 is additive on the same surface: an `erc.unlabelled_conductor`
+finding now populates `islands[]` (previously `null` for that rule) with
+`{bbox, layer, shape_count, kind}` entries, `kind` being `"device_connected"`
+or `"floating"`; the optional spec key `nets[].unlabelled_allow_device_connected`
+(default `false`) excuses the former; and a `provenance.net_exclusions` entry
+gains `allow_device_connected` / `excluded_device_connected_islands` only when
+that key is declared. Nothing is renamed or removed and `schema_version` is
+unchanged.
+
 Issue #2415 adds a fourth, `provenance.label_layers`: one entry per
 `stackup` role that declares a `label_layer`, in stackup order (`{name,
 label_layer, label_text_count}`), `[]` when no role declares one. Always
