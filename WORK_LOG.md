@@ -4,6 +4,14 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-27
 
+- **PR #4420**: docs: clarify klt_git_commit is populated on a dirty tree
+- **PR #4418**: fix: parse real sby cover-reached line and add real-sby cover/prove tests
+- **PR #4359**: feat(lvs): accept layout.def_net_names/def_pins and --progress for inline extraction
+- **PR #4289**: feat: reject unknown top-level keys in klt place-and-route requests
+- **Issue #4416** (closed): docs: klt_git_commit is non-null on a dirty tree but docs say null (follow-on from PR #4413)
+- **Issue #4404** (closed): klt formal: verify cover-mode semantics and trace path against a real sby run
+- **Issue #4347** (closed): klt lvs: inline layout extraction cannot take DEF-derived pins/net names
+- **Issue #4230** (closed): place-and-route: unrecognized top-level request fields are silently accepted
 - **PR #4415**: feat: add place-and-route --resume to reuse committed stage artifacts
 - **PR #4413**: feat: record klt git commit and reinstall spec in report provenance
 - **PR #4407**: fix: reject device params that depend on a call-overridden subckt header parameter
