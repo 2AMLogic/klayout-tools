@@ -2254,11 +2254,12 @@ A PDK's PyCell package routinely imports third-party modules klt has no
 dependency on. klt does **not** vendor or reimplement those. Verified against
 the three real installs available when this landed:
 
-| Install | Ships `libs.tech/klayout/python/`? | Shape | Loadable with klt's own dependencies? |
+| Install | Ships `libs.tech/klayout/python/`? (or `tech/pymacros/`, probed second) | Shape | Loadable with klt's own dependencies? |
 | --- | --- | --- | --- |
 | `sky130A` (volare) | yes — `cells`, `import_netlist` | **plain `pya`** (`class pfet(pya.PCellDeclarationHelper)`, registered by `class sky130(pya.Library)`) — *not* Cadence-DLO/`cni`-based | no — its `__init__` chain reaches `import gdsfactory` (and `kfactory`), a genuine third-party PyPI dependency klt has no relationship to. The PDK's own `pymacros/sky130_pcells.lym` checks for exactly that import and disables the PCells when it is absent. |
 | `ihp-sg13g2` | yes — `sg13g2_native_pcell_lib`, `sg13g2_pycell_lib`, … | `sg13g2_native_pcell_lib` is plain `pya`, but transitively imports `sg13g2_pycell_lib`, whose first statement is `from cni.tech import Tech` | **yes, on a fully-provisioned install** (issue #1630) — `cni` is not a third-party PyPI package but the `pycell4klayout-api` compat layer *the PDK itself vendors*, at `pycell4klayout-api/source/python/cni`, one level deeper than the `sys.path` entry klt adds for every other package. klt adds that extra, PDK-relative directory to `sys.path` for this specific package before importing it (see `_VENDOR_COMPAT_SHIMS` in `src/klayout_tools/pdk_pcell.py`), and works around an unrelated `tkinter`-presence crash inside that same shim's PCell-instantiation path. Still reported `unavailable` when `pycell4klayout-api` itself checked out empty (an uninitialized git submodule) — see the `reason` breakdown below. |
-| `gf180mcuD` (volare) | **no** `python/` at all | — | n/a (`--list-pdk-pcells` enumerates empty, exit `0`) |
+| `gf180mcuC` (open_pdks) | no `python/`; packages `cells`, `klayout_api_cells`, `sealring_cells` under `libs.tech/klayout/tech/pymacros/` | PDK's `gf180mcu.lym` puts that dir on `sys.path` | per package; failures land in `unavailable` |
+| `gf180mcuD` (volare) | **no** `python/` or `tech/pymacros/` | — | n/a (`--list-pdk-pcells` enumerates empty, exit `0`) |
 
 A package that cannot be imported here is reported, never guessed at:
 
@@ -2286,6 +2287,7 @@ are told apart when a package still fails to load.
   "schema_version": 1,
   "pdk": { "name": "ihp-sg13g2", "variant": "ihp-sg13g2", "version": null },
   "pcell_lib_dir": "/…/ihp-sg13g2/libs.tech/klayout/python",
+  "searched_dirs": ["/…/ihp-sg13g2/libs.tech/klayout/python", "/…/ihp-sg13g2/libs.tech/klayout/tech/pymacros"],
   "libraries": [
     {
       "library": "SG13_native_pcell_lib",
@@ -2316,8 +2318,11 @@ imports and `sg13g2_pycell_lib` loads instead — see the table above (issue
 `{ "package": "cells", "missing_dependency": "gdsfactory", "reason": "requires
 Python module 'gdsfactory', which is not importable in this environment" }`.
 
-- `pcell_lib_dir` — the resolved `libs.tech/klayout/python` directory, or
-  `null` when the PDK ships none. A PDK with no such directory returns
+- `pcell_lib_dir` — the first existing of `libs.tech/klayout/python` then
+  `libs.tech/klayout/tech/pymacros`, or `null` when the PDK ships neither.
+- `searched_dirs` — the candidate directories probed, in order (empty when the
+  PDK has no `klayout` asset dir), so "not shipped" is distinguishable from
+  "not found". The text output lists them when nothing matched. A PDK with no such directory returns
   `libraries: []`, `unavailable: []` and exit `0` — a successful "this PDK
   ships none", never an error.
 - `library` — the name the vendor's own `pya.Library.register()` call used.
