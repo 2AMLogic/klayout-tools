@@ -4,6 +4,23 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-27
 
+- **PR #4378**: feat: select ERC well classes by cell name
+- **PR #4366**: fix: exclude and disclose well-layer LEF pins in lvs power_connectivity
+- **PR #4303**: feat(gen): esd_device voltage_flavor marker and total_width_um finger split
+- **PR #4394**: ci: cache klayout .deb closure in ASAP7 deck job
+- **PR #4401**: feat(signoff): optional per-command timeout_s for attest commands
+- **PR #4342**: feat(functional-verification): forward request.env to the cocotb test process
+- **PR #4380**: fix(erc): keep text-bearing undeclared layers under --deck coverage filter
+- **PR #4219**: feat: report missing erc/lvs parts for signoff item 11
+- **Issue #4193** (closed): signoff: T1 item 11 cannot be partially cited; no reason names the missing parts
+- **Issue #4376** (closed): klt erc: undeclared label purposes with text are hidden from layers_in_stream_without_declaration under --deck
+- **Issue #4338** (closed): functional-verification: no way to pass per-run environment to the cocotb testbench
+- **Issue #4400** (closed): signoff --attest: allow a per-command timeout above 1800 s for long-running cold-start commands
+- **Issue #4408** (closed): test flake: apt-get install klayout exhausts ci-apt-install budget on ASAP7 DRC deck fixtures job
+- **Issue #4392** (closed): CI: klayout apt install in ASAP7 deck job repeatedly slow/failing (recurs: #4059, #4075, #4372)
+- **Issue #4299** (closed): gen esd_device: no thick-oxide / ESD marker on sky130, and 20 um finger cap blocks a single 21.5 um finger
+- **Issue #4363** (closed): lvs power_connectivity: pwell-layer substrate pin (VNB) of abstracted std cells gets arbitrary signal nets
+- **Issue #4373** (closed): klt erc: well class selection for repeated, rotated cells needs top-coordinate boxes per placement
 - **PR #4382**: test: select macro liberty line past the std-cell read_liberty -lib
 - **PR #4377**: feat(erc): locate and classify unlabelled-conductor islands
 - **PR #4375**: docs(synthesize): correct macro lib area accounting in area_um2
