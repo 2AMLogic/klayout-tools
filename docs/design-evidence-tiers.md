@@ -494,7 +494,10 @@ written to every block.
       4's power/ground verdict having actually run. Concretely: the `klt
       place-and-route` response's `power.pdn` is `true` with a
       `power.tapcell_master` named (`docs/cli/place-and-route.md` → "Power
-      delivery"), every `power.straps[].layer` is covered by the cited
+      delivery") — or, for a library documented tapless (`sg13g2_stdcell`),
+      `power.tapless: true` with the master `null`, which the citation
+      records (a null master without `tapless` is `no_tapcell_master`, not
+      `no_pdn`) — every `power.straps[].layer` is covered by the cited
       `klt erc` spec's own stackup, and that same LVS report's
       `power_connectivity.status` is `"match"` — `"unchecked"` does **not**
       satisfy this item, unlike item 4 itself, where it means "the question
