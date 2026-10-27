@@ -1633,6 +1633,34 @@ def _audit_filler_masters(
     return _FILLER_CELLS.get(cell_library, ())
 
 
+def _select_sweep_corners(
+    corners: list[dict[str, Any]],
+    sweep_corners: list[str] | None,
+    cell_library: str,
+) -> list[dict[str, Any]]:
+    """Issue #1092: scope the sweep to `request.pdk.sweep_corners` when given
+    -- every requested name must actually be one of `cell_library`'s own
+    shipped corners, or this is a clear request error (matching this module's
+    existing unresolvable-request-field convention) rather than a
+    silently-dropped name."""
+    if sweep_corners is None:
+        return corners
+    available_names = {corner["name"] for corner in corners}
+    unknown_names = sorted(set(sweep_corners) - available_names)
+    if unknown_names:
+        raise PlaceAndRouteError(
+            "request.pdk.sweep_corners names unknown corner(s) "
+            f"{', '.join(unknown_names)} for cell_library "
+            f"'{cell_library}' -- available corners: "
+            + (
+                ", ".join(sorted(available_names))
+                if available_names
+                else "(none shipped)"
+            )
+        )
+    return [corner for corner in corners if corner["name"] in sweep_corners]
+
+
 def _run_single_corner(
     request_path: str,
     request: dict[str, Any],
@@ -1808,7 +1836,7 @@ def _run_single_corner(
     checkpoint_path: str | None = None
     previous_hash: str | None = None
     resumed_stages: list[str] = []
-    can_resume = True
+    can_resume = resume
 
     for stage in stages_to_run:
         script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_{stage}.tcl")
@@ -1851,33 +1879,32 @@ def _run_single_corner(
             previous_hash=previous_hash,
             request=request,
             script_lines=lines,
-            input_files=[
-                netlist_path,
-                tech_lef,
-                cell_lef,
-                liberty_path,
-                *macro_liberty_paths,
-                *(macro["lef"] for macro in macros),
-            ],
+            input_files=_resume.input_files(
+                [netlist_path, tech_lef, cell_lef, liberty_path],
+                macro_liberty_paths,
+                macros,
+            ),
         )
-        stage_artifacts = [
-            os.path.basename(next_checkpoint),
-            os.path.basename(metrics_path),
-        ]
-        if stage == "route":
-            stage_artifacts += [f"{hdl_toplevel}.def", f"{hdl_toplevel}.v"]
-        if resume and can_resume:
-            record = _resume.load_commit(output_dir, hdl_toplevel, stage, stage_hash)
-            if record is not None and set(stage_artifacts) <= set(record["artifacts"]):
-                stages.append(record["stage_entry"])
-                engine_logs.extend(record["engine_logs"])
-                placement_routability = record.get("placement_routability") or {}
-                resumed_stages.append(stage)
-                checkpoint_path = next_checkpoint
-                previous_hash = stage_hash
-                continue
-            can_resume = False
-        _resume.invalidate(output_dir, hdl_toplevel, stage)
+        stage_artifacts = _resume.stage_artifacts(
+            hdl_toplevel, stage, next_checkpoint, metrics_path
+        )
+        record = _resume.reuse_or_invalidate(
+            output_dir,
+            hdl_toplevel,
+            stage,
+            stage_hash,
+            stage_artifacts,
+            attempt=can_resume,
+        )
+        can_resume = record is not None
+        if record is not None:
+            stages.append(record["stage_entry"])
+            engine_logs.extend(record["engine_logs"])
+            placement_routability = record["placement_routability"]
+            resumed_stages.append(stage)
+            checkpoint_path = next_checkpoint
+            previous_hash = stage_hash
+            continue
         logs_before = len(engine_logs)
 
         completed = _run_openroad(
@@ -1948,28 +1975,7 @@ def _run_single_corner(
             # is a separate session rather than more Tcl appended above.
             assert io_spec is not None  # required to reach "route" (validated above)
             corners = list_lib_corners(cell_library, pdk_info)
-            # Issue #1092: scope the sweep to `request.pdk.sweep_corners`
-            # when given -- every requested name must actually be one of
-            # `cell_library`'s own shipped corners, or this is a clear
-            # request error (matching this module's existing unresolvable-
-            # request-field convention) rather than a silently-dropped name.
-            if sweep_corners is not None:
-                available_names = {corner["name"] for corner in corners}
-                unknown_names = sorted(set(sweep_corners) - available_names)
-                if unknown_names:
-                    raise PlaceAndRouteError(
-                        "request.pdk.sweep_corners names unknown corner(s) "
-                        f"{', '.join(unknown_names)} for cell_library "
-                        f"'{cell_library}' -- available corners: "
-                        + (
-                            ", ".join(sorted(available_names))
-                            if available_names
-                            else "(none shipped)"
-                        )
-                    )
-                corners = [
-                    corner for corner in corners if corner["name"] in sweep_corners
-                ]
+            corners = _select_sweep_corners(corners, sweep_corners, cell_library)
             (
                 worst_setup_slack_ns,
                 worst_hold_slack_ns,
@@ -2459,9 +2465,7 @@ def _run_single_corner(
         "warnings": warnings,
         "provenance": provenance,
     }
-    if resume:
-        # Additive field (issue #4411): present only under `--resume`.
-        response["resume"] = {"resumed_stages": resumed_stages}
+    _resume.annotate_response(response, resume, resumed_stages)
     return _finish_response(
         response,
         portable=portable_paths,

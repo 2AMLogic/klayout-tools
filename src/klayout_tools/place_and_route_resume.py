@@ -20,7 +20,7 @@ import json
 import os
 from typing import Any
 
-from ._provenance import _content_hash
+from ._provenance import sha256_file
 
 COMMIT_SCHEMA = "klt.place_and_route.stage_commit/1"
 
@@ -31,6 +31,13 @@ _REQUEST_HASH_EXCLUDE = ("target_stage",)
 
 def commit_path(output_dir: str, hdl_toplevel: str, stage: str) -> str:
     return os.path.join(output_dir, f"{hdl_toplevel}_{stage}.commit.json")
+
+
+def input_files(
+    base: list[str | None], macro_liberty_paths: list[str], macros: list[dict[str, Any]]
+) -> list[str | None]:
+    """Every file a stage's output depends on, in a stable order."""
+    return [*base, *macro_liberty_paths, *(macro["lef"] for macro in macros)]
 
 
 def stage_input_hash(
@@ -47,7 +54,7 @@ def stage_input_hash(
     digest.update(json.dumps(trimmed, sort_keys=True, default=str).encode())
     digest.update("\n".join(script_lines).encode())
     for path in input_files:
-        digest.update(((path and _content_hash(path)) or "-").encode())
+        digest.update((sha256_file(path) or "-").encode())
     return digest.hexdigest()
 
 
@@ -119,3 +126,43 @@ def invalidate(output_dir: str, hdl_toplevel: str, stage: str) -> None:
         os.unlink(commit_path(output_dir, hdl_toplevel, stage))
     except OSError:
         pass
+
+
+def stage_artifacts(
+    hdl_toplevel: str, stage: str, checkpoint_path: str, metrics_path: str
+) -> list[str]:
+    """File names (relative to the output dir) a committed ``stage`` must keep."""
+    names = [os.path.basename(checkpoint_path), os.path.basename(metrics_path)]
+    if stage == "route":
+        names += [f"{hdl_toplevel}.def", f"{hdl_toplevel}.v"]
+    return names
+
+
+def reuse_or_invalidate(
+    output_dir: str,
+    hdl_toplevel: str,
+    stage: str,
+    input_hash: str,
+    artifacts: list[str],
+    *,
+    attempt: bool,
+) -> dict[str, Any] | None:
+    """The record to reuse for ``stage``, or ``None`` after dropping any stale
+    record because the stage must (re)run. ``attempt`` is False when resume is
+    off or an earlier stage already re-ran."""
+    record = (
+        load_commit(output_dir, hdl_toplevel, stage, input_hash) if attempt else None
+    )
+    if record is not None and set(artifacts) <= set(record["artifacts"]):
+        record["placement_routability"] = record.get("placement_routability") or {}
+        return record
+    invalidate(output_dir, hdl_toplevel, stage)
+    return None
+
+
+def annotate_response(
+    response: dict[str, Any], resume: bool, resumed_stages: list[str]
+) -> None:
+    """Additive response field (issue #4411): present only under ``--resume``."""
+    if resume:
+        response["resume"] = {"resumed_stages": resumed_stages}
