@@ -4683,6 +4683,32 @@ def _insert_via_cuts(
             shapes.insert(kdb.Box(x - half, y - half, x + half, y + half))
 
 
+def _create_placed_sub_cell(
+    layout: Any,
+    block: dict[str, Any],
+    block_id: str,
+    src_cell_name: str,
+    warnings: list[str],
+) -> Any:
+    """Create the composed sub-cell for ``block`` and record its actual name.
+
+    blocks[].placed_cell_name (#4246) overrides the "<id>__<cell>" convention.
+    create_cell() applies KLayout's native "$n" suffix on a real collision
+    (another block, or the top cell); the name actually used is recorded on the
+    block for the response echo, and a collision adds a warning.
+    """
+    requested_name = block.get("placed_cell_name")
+    sub_cell = layout.create_cell(requested_name or f"{block_id}__{src_cell_name}")
+    block["placed_cell_name_actual"] = sub_cell.name
+    if requested_name and sub_cell.name != requested_name:
+        warnings.append(
+            f"block '{block_id}' requested placed_cell_name "
+            f"'{requested_name}' but it collides with an existing cell; "
+            f"placed as '{sub_cell.name}'"
+        )
+    return sub_cell
+
+
 def _write_composed_gds(
     blocks: dict[str, dict[str, Any]],
     order: list[str],
@@ -4879,19 +4905,9 @@ def _write_composed_gds(
                 f"'{src_cell_name}' (from its {_block_cell_name_source(block)})"
             )
 
-        # blocks[].placed_cell_name (#4246) overrides the "<id>__<cell>"
-        # convention. create_cell() applies KLayout's native "$n" suffix on a
-        # real collision (another block, or the top cell); the name actually
-        # used is recorded on the block for the response echo.
-        requested_name = block.get("placed_cell_name")
-        sub_cell = layout.create_cell(requested_name or f"{block_id}__{src_cell_name}")
-        block["placed_cell_name_actual"] = sub_cell.name
-        if requested_name and sub_cell.name != requested_name:
-            dbu_rescale_warnings.append(
-                f"block '{block_id}' requested placed_cell_name "
-                f"'{requested_name}' but it collides with an existing cell; "
-                f"placed as '{sub_cell.name}'"
-            )
+        sub_cell = _create_placed_sub_cell(
+            layout, block, block_id, src_cell_name, dbu_rescale_warnings
+        )
         sub_cell.copy_tree(src_cell)
 
         offset = offsets_um[block_id]
