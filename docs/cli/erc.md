@@ -863,6 +863,23 @@ the exit code. To make the declaration non-degenerate, affirm
 `tap_is_dedicated`, narrow with `tap_requires`, or assert `tap_boxes`
 (details below).
 
+**A well tied to a non-supply net (issue #4223).** `ties[].net` is not
+restricted to supply nets: it is the net the tap must be connected to, matched
+against the layout's net labels. A PMOS whose well is deliberately tied to its
+source/signal net is declared per well, by naming that net:
+
+```json
+"ties": [
+  {"name": "pmos_in_well", "well_layer": "64/20", "tap_layer": "65/44",
+   "connect_to": "li1", "net": "SRC"}
+]
+```
+
+Declared as `"net": "VDD"` instead, the same layout reports
+`erc.missing_tie` ("not connected to declared net 'VDD'"); declaring `SRC`
+clears it with no finding left recorded. One entry per well class; use
+`tap_boxes` to scope an entry to particular wells.
+
 A `ties[]` entry is evaluated in its own second extraction: the same
 `stackup`/`vias` graph, plus one extra conductor per tie — that tie's
 **tap sites**, i.e. `tap_layer` intersected with every `tap_requires`

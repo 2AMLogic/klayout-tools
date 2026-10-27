@@ -58,7 +58,7 @@ from ._report_verify import (
     load_committed_report,
     strip_path_patterns,
 )
-from .build_identity import version_report
+from .build_identity import build_version, version_report
 from .coverage import (
     RESULT_PARTIAL,
     coverage_nothing_checked,
@@ -1639,6 +1639,12 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                     "passed": <bool>,
                     "detail": {...},  # kind-specific summary, see _detail()
                     "provenance": {...} | None,
+                    # Issue #4223, report-only: never changes `passed`/`status`.
+                    "build_drift": {
+                        "state": "current" | "stale" | "unverifiable",
+                        "cited_klt_version": <str> | None,
+                        "running_klt_version": <str>,
+                    },
                 },
                 ...
             ],
@@ -2319,7 +2325,39 @@ def _build_check(kind: str, envelope: _EvidenceEnvelope, source: str) -> dict[st
         "passed": _check_passed(kind, envelope) and coverage_refusal is None,
         "detail": _detail(kind, envelope),
         "provenance": envelope.get("provenance"),
+        "build_drift": _build_drift(envelope.get("provenance")),
     }
+
+
+#: ``build_drift.state`` values (issue #4223).
+_BUILD_DRIFT_CURRENT = "current"
+_BUILD_DRIFT_STALE = "stale"
+_BUILD_DRIFT_UNVERIFIABLE = "unverifiable"
+
+
+def _build_drift(provenance: Any) -> dict[str, Any]:
+    """Compare a cited envelope's ``provenance.klt_version`` with the running
+    build (issue #4223), for one ``checks[]`` entry.
+
+    ``klt_version`` is the full build identity (``klt --version``), so a
+    different string means a different build produced the verdict. Report-only:
+    the marker is disclosed, never folded into ``passed`` or the overall
+    ``status``. An envelope with no ``klt_version`` (no provenance block, a
+    generic envelope) or an identity either side could not resolve (``+unknown``)
+    is ``unverifiable`` -- absence of evidence, never ``stale``.
+    """
+    running = build_version()
+    cited = provenance.get("klt_version") if isinstance(provenance, dict) else None
+    if not isinstance(cited, str) or not cited:
+        state = _BUILD_DRIFT_UNVERIFIABLE
+        cited = None
+    elif "+unknown" in cited or "+unknown" in running:
+        state = _BUILD_DRIFT_UNVERIFIABLE
+    elif cited == running:
+        state = _BUILD_DRIFT_CURRENT
+    else:
+        state = _BUILD_DRIFT_STALE
+    return {"state": state, "cited_klt_version": cited, "running_klt_version": running}
 
 
 def _sta_corner_timing_passed(fields: dict[str, Any]) -> bool:
@@ -6761,6 +6799,7 @@ def _build_tier_item(
         if item_id == 5 and partition_kind == "digital"
         else None
     )
+    lvs_report_list = item_id == _LVS_ITEM_ID and isinstance(raw_entry, list)
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
     elif (
@@ -6777,26 +6816,32 @@ def _build_tier_item(
             status, reason, not_applicable, failure_detail = _grade_not_applicable(
                 raw_entry["not_applicable"], partition_kind
             )
-    elif item_id in _ITEMS_ACCEPTING_MULTI_CITATION and (
-        raw_entry is not None
+    elif (
+        lvs_report_list
+        or item_id in _ITEMS_ACCEPTING_MULTI_CITATION
         and (
-            isinstance(raw_entry, list)
-            or spec_rows is not None
-            or spec_rows_invalid
-            or required_kind_pair is not None
+            raw_entry is not None
+            and (
+                isinstance(raw_entry, list)
+                or spec_rows is not None
+                or spec_rows_invalid
+                or required_kind_pair is not None
+            )
+            # Issue #4190: declared ``spec_rows`` with no evidence entry at
+            # all grade as a zero-citation set (every row uncovered or a
+            # declared gap), not as ``no_evidence``.
+            or (raw_entry is None and (spec_rows is not None or spec_rows_invalid))
         )
-        # Issue #4190: declared ``spec_rows`` with no evidence entry at
-        # all grade as a zero-citation set (every row uncovered or a
-        # declared gap), not as ``no_evidence``.
-        or (raw_entry is None and (spec_rows is not None or spec_rows_invalid))
     ):
         # Issue #2959: item 5 may cite several envelopes (and declare the
         # spec rows they must cover) -- graded per citation, then aggregated.
+        # Issue #4354: item 4 may cite one ``klt lvs`` report per cell;
+        # ``spec_rows`` has no meaning for LVS, so it is ignored there.
         status, reason, citation, failure_detail, extra = _grade_multi_citation(
             raw_entry,
             grade_spec,
-            spec_rows=spec_rows,
-            spec_rows_invalid=spec_rows_invalid,
+            spec_rows=None if lvs_report_list else spec_rows,
+            spec_rows_invalid=False if lvs_report_list else spec_rows_invalid,
             met_envelopes=met_envelopes,
             required_kind_pair=required_kind_pair,
         )
@@ -6833,6 +6878,11 @@ def _build_tier_item(
 #: ``spec_rows`` coverage (issue #2959). Item 5, and item 6 (issue #2908: a
 #: block whose spec has several statistical rows, only some evidenced).
 _ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5, 6})
+
+#: T1 item 4 (LVS): accepts a list of ``klt lvs`` reports -- one per cell of
+#: an analog partition (issue #4354) -- but never ``spec_rows``, so it is
+#: kept out of :data:`_ITEMS_ACCEPTING_MULTI_CITATION`.
+_LVS_ITEM_ID = 4
 
 #: Issue #3741: the RTL-flow evidence kinds of T1 item 5, digital -- the tier
 #: doc's "multi-corner STA **plus** a bit-exact functional test suite". A
