@@ -2857,7 +2857,8 @@ router's existing via-drop draws the stack there. Candidates are ranked by
 distance to the label (ties by `x`, then `y`), so the result is deterministic.
 `access` keys: `up_to` (required), `via_array` (`[rows, cols]`, default
 `[1, 1]`, each side at most 16), `keepout_layers`, `grid_um` (default a quarter of the pad side,
-snapped to the manufacturing grid) and `max_candidates` (default 20000; a hit
+snapped to the manufacturing grid; points are enumerated per net polygon, so long thin
+nets are fine, and a polygon the grid misses still gets one fallback point near its centre) and `max_candidates` (default 20000; a hit
 cap adds a `warnings[]` entry and `truncated: true`). When no point is legal
 the request fails (exit 1) with the per-category rejection counts and example
 candidates.
