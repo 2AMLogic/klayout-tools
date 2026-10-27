@@ -67,6 +67,7 @@ from .gen_layer_params import (
     _cap_geometry_min_um,
     _contact_gate_extra_offset_um,
     _cut_fixed_size_um,
+    _deck_min_width_um,
     _gate_bottom_endcap_um,
     _gate_pad_clearance_um,
     _gate_top_endcap_um,
@@ -76,6 +77,7 @@ from .gen_layer_params import (
     _pdk_family,
     _reject_deferred_family,
     _res_end_contact_um,
+    _res_flavor_layers,
     _res_flavor_min_width_um_floor,
     _res_sab_geometry_um,
     _ring_implant_margin_um,
@@ -505,6 +507,7 @@ def _mfg_grid_warnings(
     params: dict[str, Any],
     multiple: int = 1,
     multiple_label: str = "",
+    checks: tuple[tuple[str, str], ...] = (("w_um", "active"), ("l_um", "poly")),
 ) -> list[str]:
     """Top-level ``warnings[]`` entries for a MOS generator's ``w_um``/
     ``l_um`` that is not an exact multiple of the resolved family's
@@ -519,12 +522,15 @@ def _mfg_grid_warnings(
     whose total width is ``multiple`` unit widths of ``w_um`` each (e.g.
     ``diff_pair``'s ``splits``): every unit must be on-grid, so the total is
     representable only as a multiple of ``multiple x grid`` -- the nearest
-    such totals are reported alongside the unit-width neighbours."""
+    such totals are reported alongside the unit-width neighbours.
+
+    ``checks`` are the ``(param, role)`` pairs to check (issue #4203:
+    ``res_array`` passes ``(("length_um", "poly"),)``)."""
     from .gen import _mfg_grid_neighbours
 
     roles = _PDK_ROLE_LAYERS[family]
     warnings: list[str] = []
-    for param, role in (("w_um", "active"), ("l_um", "poly")):
+    for param, role in checks:
         grid_um = mfg_grid_um(family, roles.get(role))
         value_um = params[param]
         neighbours = _mfg_grid_neighbours(grid_um, value_um)
@@ -1033,6 +1039,33 @@ def _res_array_series_note(joints: list[dict[str, Any]], num: int) -> str:
     )
 
 
+def _res_short_length_warnings(family: str, params: dict[str, Any]) -> list[str]:
+    """Advisory ``warnings[]`` entry when a poly ``res_array``'s ``length_um``
+    is below the deck's minimum width of a body-sized mask (issue #4203).
+
+    Only where a salicide block is drawn (:func:`_res_sab_geometry_um`; today
+    gf180mcu): the SAB and the implant masks of the flavour span the resistor
+    body segment, whose length is exactly ``length_um``, so a shorter length
+    draws a mask narrower than the deck's ``*.width.*`` minimum. The minimum is
+    read from the deck rule, never restated."""
+    flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
+    if _res_sab_geometry_um(family, flavor) == (0.0, 0.0):
+        return []
+    worst: tuple[str, float] | None = None
+    for pair in _res_flavor_layers(family, flavor):
+        rule = _deck_min_width_um(family, pair)
+        if rule is not None and (worst is None or rule[1] > worst[1]):
+            worst = rule
+    if worst is None or params["length_um"] >= worst[1]:
+        return []
+    return [
+        f"generator 'res_array': params.length_um={_fmt_um(params['length_um'])} "
+        f"is below the '{family}' deck's {worst[0]} minimum mask width "
+        f"({_fmt_um(worst[1])}) -- the body-length SAB/implant mask will be "
+        "drawn narrower than that rule and expect a width DRC finding"
+    ]
+
+
 def _res_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1160,6 +1193,14 @@ def _res_array_describe(
             ["one or more dimensions were rounded to the technology grid"]
             if snapped
             else []
+        )
+        + (
+            []
+            if metal_level
+            else _mfg_grid_warnings(
+                "res_array", family, params, checks=(("length_um", "poly"),)
+            )
+            + _res_short_length_warnings(family, params)
         ),
     }
 
