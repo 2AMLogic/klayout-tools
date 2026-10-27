@@ -21,6 +21,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   a partial report. An empty plain separation now short-circuits the
   net-aware call; the rules are still declared, so coverage is unchanged.
   `provenance.deck` (sha256) changes.
+- **`klt place-and-route` rejects unknown top-level request keys** (issue
+  #4230, documented in [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)):
+  a misspelt or foreign key now exits 1 naming the key instead of being
+  dropped silently, matching `klt synthesize` (#3466). Behaviour change for
+  requests carrying stray keys; response schema unchanged.
+- **`signoff_runset.PINNED_RUNSETS` pins the gf180mcu LVS runset** (issue #4395):
+  `klayout/lvs/gf180mcu.lvs` at `fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pv`
+  commit `1a4e4b5` (sha256 `09a4f1f1…fde9`, byte-identical in all four open_pdks
+  gf180mcuA-D trees), so a gf180mcu `klayout-runset` LVS report is no longer
+  refused `runset_not_pinned`. Allowlist data only; no schema change.
 - **`erc` `ties[].well_requires_cells` / `well_excludes_cells`** (issue #4373).
   Select a drawn well class by the cell it is drawn in, evaluated in each
   instance's transformed frame, instead of hand-generated per-placement
@@ -35,11 +45,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   `detail.power_delivery.{missing_parts,cited_parts}` and, when the ERC spec
   resolved, `supply_nets`. Value change on an existing field for that case
   only; never `met`.
+- **New verb `klt formal`** (issue #4358, documented in
+  [`docs/cli/formal.md`](docs/cli/formal.md)): bounded model checking,
+  k-induction and cover via SymbiYosys on RTL or a `klt synthesize` netlist
+  plus liberty. Generates the `.sby` itself (inputs copied via `[files]`, so
+  WASI-sandboxed Yosys works); report carries `status` (`pass`|`fail`|
+  `unknown`), `depth_reached`, `trace_path`, `netlist_path`. Timeout is
+  `unknown`, never `pass`. Exit codes 0/1/3/4. New command; no existing
+  `schema_version` changes.
 - **`klt lvs` `subckt-call` converts sky130 junction diodes** (issue #4319,
   documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)): `X… sky130_fd_pr__diode_*
   area=… perim=…` now converts to a `D` card in the deck's diode class instead
   of raising `reference.unresolved_subckt_call`, for all 8 classes in the sky130
   deck's `diodes`. Additive; other decks unchanged.
+- **`klt erc` discloses that substrate continuity is not modelled** (issue
+  #4384, documented in [`docs/cli/erc.md`](docs/cli/erc.md)): a spec declaring
+  two or more `kind: "supply"` nets gains one `erc_coverage.inapplicable`
+  entry `{"id": "erc.supply_short", "reason": "substrate_continuity_not_modelled"}`,
+  so "no short found" is distinguishable from "short not observable". Additive;
+  `erc_status`, findings and exit code are unchanged.
 - **`klt place-and-route` gains `instance_groups` (request) and `instance_groups[]`
   (response)** (issue #4344, documented in
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)): name sets of

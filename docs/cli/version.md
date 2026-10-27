@@ -181,6 +181,11 @@ clone and may differ from the original build's. Compare `git_commit`, not
 `version`. A build with `reinstall_spec: null` (dirty tree or no recorded
 commit) cannot be reproduced and should not be used as a pin.
 
+Reports record the same handle: `provenance.klt_git_commit` and
+`provenance.klt_reinstall_spec` (issue #4412) equal `git_commit` and
+`reinstall_spec` above, so a committed report names a re-obtainable build
+without re-running `klt version`. Both are `null` when unrecoverable.
+
 ## How the identity is determined
 
 Two sources, in priority order:

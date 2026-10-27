@@ -315,6 +315,8 @@ def test_generate_report_includes_provenance_block(tmp_path, pdk_root):
     provenance = report["provenance"]
     assert set(provenance) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",

@@ -293,6 +293,15 @@ REASON_NO_GATES = "no_gates"
 #: ``erc_status`` untouched like every other ``inapplicable`` entry.
 REASON_EXTRACTOR_GLOBAL_NET = "extractor_global_net"
 
+#: ``erc_coverage.inapplicable[].reason`` (issue #4384) on
+#: ``erc.supply_short`` when the spec declares two or more ``kind: "supply"``
+#: nets: ``klt erc`` joins conductors only through the declared
+#: ``stackup``/``vias``, so supply rails that are one conductor through a
+#: shared substrate read as separate clean islands. A coverage disclosure,
+#: not a merge (substrate/well merging was rejected in #2192); additive and
+#: leaves ``erc_status`` untouched. Cross-check with ``klt lvs``.
+REASON_SUBSTRATE_CONTINUITY_NOT_MODELLED = "substrate_continuity_not_modelled"
+
 #: The skip reason for a level that could have been graded had ``--pdk``
 #: named a PDK with an antenna-ratio table (or named one at all), or had the
 #: spec's ``antenna_limits`` carried an entry for its layer (issue #4090).
@@ -819,6 +828,13 @@ def _connectivity_coverage(
     if not nets_decl:
         inapplicable.append(
             {"id": work_id("erc.net_connectivity"), "reason": "no_nets_declared"}
+        )
+    if sum(1 for decl in nets_decl if decl.get("kind") == "supply") >= 2:
+        inapplicable.append(
+            {
+                "id": "erc.supply_short",
+                "reason": REASON_SUBSTRATE_CONTINUITY_NOT_MODELLED,
+            }
         )
 
     for tie in ties:

@@ -142,6 +142,20 @@ xschem's release notes). It applies to `--check` too, which fails with this
 cause instead of reporting `drifted`, and nothing is written. Under
 `--backend batch` the same code is returned.
 
+### `--allow-unevaluated-expr`
+
+For a caller that evaluates `expr()` itself downstream, `--allow-unevaluated-expr`
+downgrades this one gate to a warning: the netlist is written (or, with
+`--check`, compared) as xschem produced it and the run exits `0`/`3` as usual.
+The condition is never silent: a `klt netlist: warning:` line goes to stderr
+and `--format json` gains an additive `warnings` array (present only when
+non-empty) with an entry
+`{"code": "unevaluated_expr", "line": N, "snippet": "...", "xschem_version": "..."}`
+for the first offending line. A netlist with no `expr(` is unchanged. It works
+with `--block`, does **not** relax the `unresolved_symbol` gate, and combined
+with `--backend batch` is a usage error (exit `1`) — the runner applies the
+gate itself.
+
 ## An unresolved symbol is a failure, not a netlist
 
 When an instance refers to a symbol xschem cannot find, xschem still writes a

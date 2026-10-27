@@ -2443,6 +2443,77 @@ def test_extractor_global_net_is_not_reported_unconnected_and_is_disclosed(tmp_p
     assert all(f["net"] != "SUB" for f in report["erc_findings"])
 
 
+def _supply_disclosure(report):
+    return [
+        e
+        for e in report["erc_coverage"]["inapplicable"]
+        if e["id"] == "erc.supply_short"
+    ]
+
+
+def test_two_supply_nets_disclose_substrate_continuity_not_modelled(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "two.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "two.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "VDD2", "kind": "supply"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+
+    assert _supply_disclosure(report) == [
+        {"id": "erc.supply_short", "reason": "substrate_continuity_not_modelled"}
+    ]
+
+
+def test_fewer_than_two_supply_nets_emit_no_substrate_disclosure(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "one.gds"
+    layout.write(str(gds))
+    for name, nets in (
+        ("zero", []),
+        ("one", [{"name": "VDD", "kind": "supply"}]),
+        (
+            "signals",
+            [{"name": "A", "kind": "signal"}, {"name": "B", "kind": "signal"}],
+        ),
+    ):
+        spec = tmp_path / f"{name}.erc.json"
+        _write_spec(spec, _nets_spec(nets=nets))
+        report = run_erc(str(gds), str(spec))
+        assert _supply_disclosure(report) == [], name
+
+
+def test_substrate_disclosure_leaves_erc_status_unchanged(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "status.gds"
+    layout.write(str(gds))
+    base = tmp_path / "base.erc.json"
+    two = tmp_path / "two.erc.json"
+    _write_spec(base, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+    _write_spec(
+        two,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "SUB", "kind": "supply", "extractor_global": True},
+            ]
+        ),
+    )
+
+    assert _supply_disclosure(run_erc(str(gds), str(two)))
+    assert (
+        run_erc(str(gds), str(two))["status"] == run_erc(str(gds), str(base))["status"]
+    )
+
+
 def test_same_net_without_extractor_global_is_still_reported(tmp_path):
     layout, top, poly, li1, label = _nets_fixture_layout()
     gds = tmp_path / "notglobal.gds"
