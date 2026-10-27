@@ -9,6 +9,7 @@ flow").
 ```
 klt synthesize <request> [--pdk VARIANT] [--pdk-root ROOT] \
     [--verify-equivalence] [--equiv-timeout-s SECONDS] \
+    [--equiv-engine yosys|yosys-sequential] \
     [--restructure-timing] [--restructure-max-iterations N] \
     [--format text|json]
 ```
@@ -45,6 +46,11 @@ flag line carries cleanly — not positional RTL file args.
   `--verify-equivalence` proof (default: `klt equiv`'s own `60`); no effect
   unless `--verify-equivalence` is given. Also bounds the `klt equiv` check
   `--restructure-timing` runs on any netlist it actually resizes.
+- `--equiv-engine` — `klt equiv` proof engine for the `--verify-equivalence`
+  gate: `yosys` (the default, combinational only) or `yosys-sequential`
+  (register-correspondence proof, for designs with flip-flops). No effect
+  unless `--verify-equivalence` is given. The `--restructure-timing` check
+  stays combinational. Must be re-passed with `--check --rerun`.
 - `--restructure-timing` — close (or reduce) a setup violation on the
   native `sta` critical path via a bounded cell-resizing loop, when it
   exceeds `constraints.clock_period_ns`. Requires
@@ -445,6 +451,7 @@ table:
 | `gf180mcu_fd_sc_mcu9t5v0` | `gf180mcu_fd_sc_mcu9t5v0__tieh` `Z` | `gf180mcu_fd_sc_mcu9t5v0__tiel` `ZN` |
 | `gf180mcu_fd_sc_mcu7t5v0` | `gf180mcu_fd_sc_mcu7t5v0__tieh` `Z` | `gf180mcu_fd_sc_mcu7t5v0__tiel` `ZN` |
 | `sg13g2_stdcell` | `sg13g2_tiehi` `L_HI` | `sg13g2_tielo` `L_LO` |
+| `asap7sc7p5t_rvt`, `asap7sc7p5t_28_R` | `TIEHIx1_ASAP7_75t_R` `H` | `TIELOx1_ASAP7_75t_R` `L` |
 
 The first three rows are ORFS's own `TIEHI_CELL_AND_PORT`/`TIELO_CELL_AND_PORT`
 for that platform, cross-checked against the installed liberty (the sky130
@@ -1190,12 +1197,14 @@ like every other file this command writes. The outcome:
   `"inconclusive"` verdict (timeout) is never treated as a pass, mirroring
   `klt equiv`'s own "timeout is never equivalent" discipline one level up.
 
-**Combinational designs only** — `klt equiv`'s Phase 0 MVP scope (#707) is
-combinational-only; a design containing flip-flops, latches, or memories
-(e.g. the GCD worked example below) makes the gate itself fail with a clear
-scope error, even though synthesis succeeded. `--verify-equivalence` is not
-yet usable on sequential designs — see `docs/cli/equiv.md`'s "Scope"
-section and Out of scope below.
+**Combinational by default; `--equiv-engine yosys-sequential` for sequential
+designs.** The default `yosys` engine is combinational-only; a design
+containing flip-flops, latches, or memories (e.g. the GCD worked example
+below) makes the gate fail with a clear scope error, even though synthesis
+succeeded. Pass `--equiv-engine yosys-sequential` to gate such a design
+through `klt equiv`'s register-correspondence engine instead; the engine that
+ran is echoed as `equivalence.engine`. See `docs/cli/equiv.md`'s "Scope"
+section.
 
 **`equivalence.artifacts` is not normalized (known gap, issue #1844).**
 Unlike `netlist_path`/`script_path` above, `equivalence.artifacts.
@@ -1370,8 +1379,8 @@ same check applies to `--check` and `--rerun`. Nested objects (`pdk`,
 | `leakage_by_type_nw` | object\<string, number\> \| null | Per-cell-type leakage, in nanowatts — the liberty `cell_leakage_power` entry `leakage_power_nw` was summed from, one entry per instantiated cell type that had one. Keys sorted for determinism. A caller can diff this object's keys against `instance_counts_by_type`'s to spot an instantiated cell type with no leakage data (e.g. a `-dont_use`d or otherwise-unmapped type) for free. `null` exactly when `leakage_power_nw` is `null`. |
 | `clock_targets` | object | Always present (issue #2883). `{clocks, delay_target_ps, delay_target_basis, per_clock_enforced}`: `clocks` echoes the validated `constraints.clocks` (`[]` when none); `delay_target_ps` equals `timing.delay_target_ps`; `delay_target_basis` is `"none"`, `"clock_period_ns"` (single global shorthand), or `"min_clocks_period_ns"` (tightest listed clock); `per_clock_enforced` is always `false` — only one global ABC target is used, so `timing.critical_path_ps` vs `delay_target_ps` is not a per-domain result for a multi-clock design. |
 | `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. **`critical_path_ps` contains no register content at all**: no clk-to-Q launch and no setup/hold — `dfflibmap` maps every flip-flop to a liberty cell *before* `abc` runs, so registers bound the cone ABC times rather than appearing in it. See "Registers, clk-to-Q, and setup/hold" above. |
-| `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair — `sta_unavailable_reason` below says which. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. **`worst_reg_to_reg_path.delay_ns` models the launching register's clk-to-Q but excludes setup/hold**, which are parsed and then dropped from delay propagation; see "Registers, clk-to-Q, and setup/hold" above. Additive as of issue #925 — `timing` is unaffected. |
-| `sta_unavailable_reason` | string \| null | **Always present** (issue #2628) — why `sta` is `null`, so "STA unavailable here" and "STA not applicable to this netlist" are not the same value. `null` **exactly when** `sta` is non-`null`; a non-`null` string exactly when `sta` is `null`. Two cases are distinguished: the optional `klt_statime_native` extension is not installed (the reason names the install path — `uv sync --group statime`; a caller can act on this one and retry), or the engine ran and raised `StaError` while analyzing this netlist/liberty pair (the reason carries `StaError`'s own message, e.g. a mapped cell type with no liberty entry). **Free text for humans, not a fixed vocabulary** — match on `sta`'s own `null`-ness for control flow, matching the `unavailable_reason` precedent in `klt place-and-route`'s `power.placed` block. Additive field, no `schema_version` bump. |
+| `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). For a multi-module design the analysis runs over a flattened temp copy of the netlist (hops carry flattened instance names). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair — `sta_unavailable_reason` below says which. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. **`worst_reg_to_reg_path.delay_ns` models the launching register's clk-to-Q but excludes setup/hold**, which are parsed and then dropped from delay propagation; see "Registers, clk-to-Q, and setup/hold" above. Additive as of issue #925 — `timing` is unaffected. |
+| `sta_unavailable_reason` | string \| null | **Always present** (issue #2628) — why `sta` is `null`, so "STA unavailable here" and "STA not applicable to this netlist" are not the same value. `null` **exactly when** `sta` is non-`null`; a non-`null` string exactly when `sta` is `null`. Two cases are distinguished: the optional `klt_statime_native` extension is not installed (the reason names the install path — `uv sync --group statime`; a caller can act on this one and retry), or the engine ran and raised `StaError` while analyzing this netlist/liberty pair (the reason carries `StaError`'s own message, e.g. a mapped cell type with no liberty entry). A multi-module (hierarchical) netlist is flattened into a throwaway copy for the `sta` stage only — the committed `netlist_path` stays hierarchical — and if that flatten fails the reason says the netlist is hierarchical and points to `klt sta` with a `verilog` request. **Free text for humans, not a fixed vocabulary** — match on `sta`'s own `null`-ness for control flow, matching the `unavailable_reason` precedent in `klt place-and-route`'s `power.placed` block. Additive field, no `schema_version` bump. |
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
 | `cell_exclusions` | object | **Always present** (issue #2382) — the standard-cell exclusion this run actually applied, and how it was arrived at: `{mode, requested, library_defaults, effective, validated, engine_supports_dont_use}`. `mode` is the resolved `constraints.dont_use_mode` (`"additive"` by default); `requested` is the request's own `constraints.dont_use`, normalized and deduplicated; `library_defaults` is the built-in per-library table's entry for the resolved `pdk.cell_library` (always reported, even when `mode` suppressed it, so a report says what was *not* excluded too); **`effective` is exactly the `-dont_use` glob list handed to ABC**, deduplicated and order-preserved. `validated` is `true` when every `requested` pattern was matched against the resolved liberty's cell names, or `null` when there was nothing to check or that cell list could not be established. `engine_supports_dont_use` is the `yosys -p 'help abc'` probe result, or `null` when there was nothing to exclude and no probe was made — `false` with a non-empty `requested` and an empty `effective` is the "older Yosys build dropped it" case, also surfaced as a `dont_use_unsupported` warning. Additive field, no `schema_version` bump. See "Request-level cell exclusion" above. |
 | `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log plus missing-library-capability warnings, never the raw log itself: `{total, by_category, representatives}`. `total` counts engine warning lines plus capability warnings (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`, `unsupported_cell_library`, `dont_use_unsupported`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
@@ -1676,7 +1685,10 @@ Actually re-synthesizes from the request and diffs the fresh report against
 the committed one, field by field, reporting `status: "drifted"` with a
 `drift[]` list of `{field, committed, fresh}` entries. A moved
 `instance_count`/`area_um2`/`timing`, a newly inferred latch under
-`structural`, a changed `provenance.input.content_hash` — all drift.
+`structural`, a changed `provenance.input.content_hash` — all drift. The
+optional flags are not echoed in the report, so re-pass them (including
+`--equiv-engine`, like `--equiv-timeout-s`); a different engine shows up as
+drift on `equivalence.engine`.
 
 Run-scoped bookkeeping is dropped from **both** sides before the diff:
 `run_id`, `netlist_path`, `script_path`, `run_script_path`,
@@ -1774,7 +1786,8 @@ cells — measured live on Yosys 0.67+post, CI's own pinned, from-source
 build (`scripts/install-yosys.sh`, run in CI's Linux/x86_64/gcc
 environment), against a volare `sky130A` install. Note this particular
 design is **sequential** (it has a clocked `always` block) — see
-"Equivalence gate" above, `--verify-equivalence` is not usable on it. GCD
+"Equivalence gate" above, `--verify-equivalence` needs
+`--equiv-engine yosys-sequential` on it. GCD
 carries no latches/comb loops/multi-driven nets, so `structural.has_critical`
 is `false` and the exit code is `0`.
 
@@ -1945,13 +1958,12 @@ the RTL `$readmemh`s its ROM tables relative to the synthesis cwd, which
   (issue #1626) are static leakage only. Dynamic power needs an activity
   factor — a testbench, vectors, or a toggle-rate estimate — this command
   has no way to know; that is a different, unaddressed ask.
-- **Sequential-design equivalence checking.** `--verify-equivalence` only
-  works on combinational designs today — `klt equiv`'s Phase 0 MVP scope
-  (#707). A future phase of #707 (temporal induction / BMC via SymbiYosys)
-  extends the gate to sequential designs; until then, running
-  `--verify-equivalence` against a design with flip-flops, latches, or
-  memories fails the gate with a clear scope error, not a misleadingly
-  confident verdict.
+- **Induction depth, resume and port-map plumbing for sequential
+  equivalence.** `--equiv-engine yosys-sequential` runs `klt equiv`'s
+  sequential engine with its defaults; `--restructure-timing`'s internal
+  equiv check and `klt techmap --verify-equivalence` stay combinational.
+  Running the default `yosys` engine against a design with flip-flops,
+  latches, or memories still fails the gate with a clear scope error.
 - **Signoff timing.** Neither delay this command reports is signoff STA.
   `timing` is ABC's pre-layout, wire-free, combinational-cone-only estimate
   (see "`timing`" above); `sta` walks the whole netlist and does report

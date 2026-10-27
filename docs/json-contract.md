@@ -157,6 +157,12 @@ refused before simulating (exit 1, usual error envelope) with both stamps in
 the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "`environment.netlist_identity`".
 
+`klt sim --job-status` (issue #4291) passes an optional `progress` object
+(e.g. `sim_time_s`, `stop_time_s`) through from the fleet's `status.json` when
+the runner publishes one. Additive and absent otherwise; the existing fields
+and `schema_version` are unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s
+"Asynchronous submit and status".
+
 `measurements[].on_unreached` (issue #3108) is the same shape: an optional
 request field (`"error"` default, `"null"` opt-in) whose default reproduces
 today's response byte-for-byte. Opting in adds a new measurement `status`
