@@ -3739,6 +3739,7 @@ def _synthesize_provenance_hashes(
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    skip_deck: bool = False,
 ) -> tuple[str | None, str | None]:
     """Re-derive ``(input_content_hash, deck_content_hash)`` for the request
     at ``request_path`` **without invoking Yosys** -- the cheap half of
@@ -3754,6 +3755,9 @@ def _synthesize_provenance_hashes(
     here would show up as permanent, unexplained drift on a report that never
     moved, so there is exactly one rule and both call sites follow it.
 
+    With ``skip_deck`` (issue #4315) the liberty is never resolved and the
+    deck hash is returned as ``None`` -- the PDK-less path.
+
     Raises :class:`SynthesizeError` for a request that cannot be read,
     validated, or resolved -- never a traceback.
     """
@@ -3767,17 +3771,18 @@ def _synthesize_provenance_hashes(
     cell_library = pdk_spec.get("cell_library")
     if not isinstance(cell_library, str) or not cell_library:
         raise SynthesizeError("request.pdk.cell_library is required")
+    if len(resolved_sources) == 1:
+        input_hash = _content_hash(resolved_sources[0])
+    else:
+        input_hash = _combined_content_hash(resolved_sources)
+    if skip_deck:
+        return input_hash, None
     liberty_path, _corner, _pdk_info = _resolve_liberty(
         cell_library,
         pdk_spec.get("corner"),
         variant=pdk_variant,
         root=pdk_root,
     )
-
-    if len(resolved_sources) == 1:
-        input_hash = _content_hash(resolved_sources[0])
-    else:
-        input_hash = _combined_content_hash(resolved_sources)
     return input_hash, _content_hash(liberty_path)
 
 
@@ -3860,6 +3865,7 @@ def check_synthesize_report(
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     netlist_override: str | None = None,
+    skip_deck: bool = False,
 ) -> dict[str, Any]:
     """``klt synthesize <request> --check <report>`` (cheap mode, issue
     #2224): verify a previously committed ``klt synthesize --format json``
@@ -3890,12 +3896,22 @@ def check_synthesize_report(
     path. It proves the committed bytes are the ones the report recorded, not
     that Yosys would still produce them -- that is ``--rerun``.
 
+    ``skip_deck`` (``--skip-deck``, issue #4315) never resolves the liberty,
+    so the check runs on a host with no PDK install. The
+    ``provenance.deck.content_hash`` entry is then omitted from ``checks[]``
+    and named in an additive ``skipped[]`` list; a ``match`` proves the RTL,
+    parameters, defines and netlist bytes, **not** that the library is the
+    one the report was mapped against.
+
     Raises :class:`SynthesizeError` for a missing/unparseable committed
     report or an unresolvable request -- never a traceback.
     """
     committed = load_committed_report(report_path, SynthesizeError)
     input_hash, deck_hash = _synthesize_provenance_hashes(
-        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root
+        request_path,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        skip_deck=skip_deck,
     )
     checks = [
         hash_check(
@@ -3918,7 +3934,19 @@ def check_synthesize_report(
         ),
         _netlist_sha256_check(committed, report_path, netlist_override),
     ]
-    return build_check_result(report_path=report_path, checks=checks)
+    if not skip_deck:
+        return build_check_result(report_path=report_path, checks=checks)
+    checks = [c for c in checks if c["field"] != "provenance.deck.content_hash"]
+    return build_check_result(
+        report_path=report_path,
+        checks=checks,
+        skipped=[
+            {
+                "field": "provenance.deck.content_hash",
+                "reason": "--skip-deck: liberty not resolved",
+            }
+        ],
+    )
 
 
 def rerun_synthesize_report(
