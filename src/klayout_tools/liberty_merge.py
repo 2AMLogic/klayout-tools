@@ -9,8 +9,11 @@ single file every ``liberty_path`` consumer (Yosys, OpenROAD, OpenSTA) expects.
 Merge rule: the header (text before the first ``cell (``) comes from the first
 file and must match the rest after normalisation -- whitespace, comments and
 the ``library (<name>)`` name are ignored, every other difference (units,
-templates, operating conditions, ...) is an error; each file's cell
-groups are appended in listed order; a duplicate cell name is an error. The
+operating conditions, ...) is an error. Top-level ``lu_table_template`` and
+``power_lut_template`` groups are the exception: they are unioned by name
+(same name with different content is an error) and the ones the first file
+lacks are appended after its header. Each file's cell groups are appended in
+listed order; a duplicate cell name is an error. The
 result is written content-addressed under a klt cache directory -- never into
 the PDK tree -- so repeated runs reuse it and its path (and hash) is stable.
 """
@@ -29,6 +32,7 @@ CACHE_ENV = "KLT_CACHE_DIR"
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.$]*")
 _LIBRARY_NAME_RE = re.compile(r"\blibrary\s*\([^)]*\)")
 _CELL_NAME_RE = re.compile(r"\(\s*\"?([^\")\s]+)\"?\s*\)")
+_TEMPLATE_KINDS = ("lu_table_template", "power_lut_template")
 
 
 class LibertyMergeError(Exception):
@@ -67,22 +71,29 @@ def merge_liberty(paths: list[str]) -> str:
         # Content-addressed: still validate nothing, inputs are unchanged.
         return out_path
 
-    header, bodies = _collect(paths, texts)
-    merged = header.rstrip() + "\n\n" + "\n".join(b.strip() for b in bodies) + "\n}\n"
+    header, extra_templates, bodies = _collect(paths, texts)
+    head = header.rstrip()
+    if extra_templates:
+        head += "\n" + "\n".join(extra_templates)
+    merged = head + "\n\n" + "\n".join(b.strip() for b in bodies) + "\n}\n"
     _write_atomic(out_path, merged)
     return out_path
 
 
-def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str]]:
-    """Validate headers/cell names across files; ``(header, bodies)``."""
+def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[str]]:
+    """Validate headers/cell names across files; ``(header, extra templates,
+    bodies)``. Extra templates are those the first header does not define."""
     header = ""
     header_norm = ""
     first_path = paths[0]
     seen: dict[str, str] = {}
+    templates: dict[str, tuple[str, str, str]] = {}  # name -> (norm, raw, path)
+    extra: list[str] = []
     bodies: list[str] = []
     for path, text in zip(paths, texts, strict=True):
         file_header, body, cells = _split(path, text)
-        norm = _normalize_header(file_header)
+        stripped, file_templates = _extract_templates(file_header)
+        norm = _normalize_header(stripped)
         if path is first_path:
             header, header_norm = file_header, norm
         elif norm != header_norm:
@@ -90,6 +101,18 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str]]:
                 f"Liberty headers differ: '{path}' does not match the header "
                 f"of '{first_path}' (cannot merge cell groups)"
             )
+        for name, raw in file_templates:
+            tnorm = _normalize_header(raw)
+            known = templates.get(name)
+            if known is None:
+                templates[name] = (tnorm, raw, path)
+                if path is not first_path:
+                    extra.append(raw)
+            elif known[0] != tnorm:
+                raise LibertyMergeError(
+                    f"Liberty template '{name}' differs between '{known[2]}' "
+                    f"and '{path}' (cannot merge cell groups)"
+                )
         for cell in cells:
             if cell in seen:
                 raise LibertyMergeError(
@@ -98,7 +121,35 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str]]:
                 )
             seen[cell] = path
         bodies.append(body)
-    return header, bodies
+    return header, extra, bodies
+
+
+def _extract_templates(header: str) -> tuple[str, list[tuple[str, str]]]:
+    """``(header without template groups, [(name, group text), ...])``."""
+    found: list[tuple[str, str]] = []
+    spans: list[tuple[int, int]] = []
+    depth = 0
+    start: int | None = None
+    name = ""
+    for kind, pos, end in _tokens(header):
+        if kind == "{":
+            depth += 1
+        elif kind == "}":
+            depth -= 1
+            if depth == 1 and start is not None:
+                found.append((name, header[start : pos + 1]))
+                spans.append((start, pos + 1))
+                start = None
+        elif depth == 1 and start is None and header[pos:end] in _TEMPLATE_KINDS:
+            match = _CELL_NAME_RE.match(header, _skip_ws(header, end))
+            if match:
+                start, name = pos, match.group(1)
+    stripped, last = [], 0
+    for lo, hi in spans:
+        stripped.append(header[last:lo])
+        last = hi
+    stripped.append(header[last:])
+    return " ".join(stripped), found
 
 
 def _normalize_header(header: str) -> str:

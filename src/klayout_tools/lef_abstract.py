@@ -128,6 +128,9 @@ _POWER_TOKENS = POWER_NAME_TOKENS
 #: last-resort so pin emission never raises for missing geometry data.
 _DEFAULT_SYNTHESIZED_PIN_UM = 0.1
 
+#: Accepted ``obs_mode`` values (issue #4283); the first is the default.
+OBS_MODES = ("detailed", "coarse")
+
 
 class LefAbstractError(Exception):
     """Raised when a LEF abstract cannot be emitted: a missing/unreadable
@@ -151,6 +154,7 @@ def run_lef_abstract(
     symmetry: list[str] | None = None,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    obs_mode: str = "detailed",
 ) -> dict[str, Any]:
     """Emit a LEF abstract for the block at ``layout_path`` per its socket
     descriptor at ``socket_path``, writing it to ``output_path``.
@@ -179,6 +183,7 @@ def run_lef_abstract(
             "unroutable_pins": [
                 {"name": <str>, "layer": [<gds_layer>, <gds_datatype>]}, ...
             ],
+            "obs_mode": "detailed" | "coarse",
             "obs": [{"layer": str, "shape_count": int}, ...],
             "obs_shape_count": <int>,
             "warnings": [...],
@@ -221,10 +226,16 @@ def run_lef_abstract(
     placement" docs section) -- either signal reflects the same underlying
     condition.
 
+    ``obs_mode`` (issue #4283) selects the obstruction granularity:
+    ``"detailed"`` (default) emits every merged routing-layer region;
+    ``"coarse"`` emits, per routing LEF layer, the merged region's bounding
+    rectangle minus the declared pin ports, so the OBS size is O(pins)
+    rather than O(shapes). Echoed as the additive ``obs_mode`` report field.
+
     Raises :class:`LefAbstractError` for a missing/unreadable layout or
-    socket descriptor, an ambiguous/missing top cell, an unresolvable PDK or
-    tech LEF for ``cell_library``, a write failure, or a failure to read the
-    written file back for its self-check.
+    socket descriptor, an invalid ``obs_mode``, an ambiguous/missing top cell,
+    an unresolvable PDK or tech LEF for ``cell_library``, a write failure, or
+    a failure to read the written file back for its self-check.
     """
     layout = load_layout(layout_path, LefAbstractError)
     top_cell = resolve_top_cell(layout, top, LefAbstractError, path=layout_path)
@@ -236,6 +247,10 @@ def run_lef_abstract(
 
     if not macro_name:
         raise LefAbstractError("macro_name must be a non-empty string")
+    if obs_mode not in OBS_MODES:
+        raise LefAbstractError(
+            f"obs_mode must be one of {', '.join(OBS_MODES)}; got {obs_mode!r}"
+        )
     if symmetry is not None and not all(isinstance(s, str) and s for s in symmetry):
         raise LefAbstractError("symmetry must be a list of non-empty strings")
 
@@ -299,6 +314,7 @@ def run_lef_abstract(
         width_dbu=round(width_um / dbu_um),
         height_dbu=round(height_um / dbu_um),
         dbu_um=dbu_um,
+        obs_mode=obs_mode,
     )
 
     _write_lef(
@@ -360,6 +376,7 @@ def run_lef_abstract(
         ],
         "pin_count": len(pins_report),
         "unroutable_pins": _unroutable_pins(pins_report, descriptor["pins"]),
+        "obs_mode": obs_mode,
         "obs": [
             {"layer": layer_name, "shape_count": len(shapes)}
             for layer_name, shapes in obs_report
@@ -417,6 +434,36 @@ def _invert_gds_to_lef(
 # --------------------------------------------------------------------------- #
 
 
+def _match_drawn_boxes(
+    layout: Any,
+    top_cell: Any,
+    search_layers: list[tuple[int, int]],
+    point: Any,
+) -> list[tuple[int, int, int, int]]:
+    """Return the placed bboxes of every polygon on ``search_layers`` that
+    contains ``point``.
+
+    Issue #4283: tests the polygon itself (edges inclusive), not its bbox --
+    a notched/holed polygon whose bbox merely covers the pin must not become
+    the pin's PORT.
+    """
+    boxes: list[tuple[int, int, int, int]] = []
+    for search_layer in search_layers:
+        layer_index = layout.find_layer(*search_layer)
+        if layer_index is None:
+            continue
+        iterator = top_cell.begin_shapes_rec(layer_index)
+        while not iterator.at_end():
+            polygon = iterator.shape().polygon
+            if polygon is not None:
+                placed = polygon.transformed(iterator.trans())
+                bbox = placed.bbox()
+                if bbox.contains(point) and placed.inside(point):
+                    boxes.append((bbox.left, bbox.bottom, bbox.right, bbox.top))
+            iterator.next()
+    return boxes
+
+
 def _resolve_pins(
     *,
     layout: Any,
@@ -444,6 +491,8 @@ def _resolve_pins(
     for pin in pins:
         layer_tuple = pin["layer"]
         lef_layer = gds_to_lef.get(layer_tuple)
+        if lef_layer is None:
+            lef_layer = _sibling_lef_layer(gds_to_lef, layer_tuple, routing_layers)
         if lef_layer is None or lef_layer not in routing_layers:
             warnings.append(
                 f"pin '{pin['name']}': layer {layer_tuple[0]}/{layer_tuple[1]} does "
@@ -481,26 +530,12 @@ def _resolve_pins(
         y_dbu = round(pin["y"] / dbu_um)
         point = kdb.Point(x_dbu, y_dbu)
 
-        drawn_boxes: list[tuple[int, int, int, int]] = []
-        for search_layer in search_layers:
-            layer_index = layout.find_layer(*search_layer)
-            if layer_index is None:
-                continue
-            iterator = top_cell.begin_shapes_rec(layer_index)
-            while not iterator.at_end():
-                shape = iterator.shape()
-                polygon = shape.polygon
-                if polygon is not None:
-                    bbox = polygon.transformed(iterator.trans()).bbox()
-                    if bbox.contains(point):
-                        drawn_boxes.append(
-                            (bbox.left, bbox.bottom, bbox.right, bbox.top)
-                        )
-                iterator.next()
+        drawn_boxes = _match_drawn_boxes(layout, top_cell, search_layers, point)
 
         if drawn_boxes:
             geometry_source = "drawn"
             boxes_dbu = drawn_boxes
+            _warn_oversize_pin_rects(pin, drawn_boxes, dbu_um, warnings)
         else:
             geometry_source = "synthesized"
             boxes_dbu = [
@@ -554,6 +589,54 @@ def _resolve_pins(
 
     pins_report.sort(key=lambda p: p["name"])
     return pins_report, pin_boxes_by_layer
+
+
+def _sibling_lef_layer(
+    gds_to_lef: dict[tuple[int, int], str],
+    layer_tuple: tuple[int, int],
+    routing_layers: dict[str, dict[str, Any]],
+) -> str | None:
+    """Resolve a declared ``(layer, datatype)`` absent from the layer map
+    through other datatypes of the same GDS layer number that map to a
+    routing LEF layer (issue #4283): a pin labelled on a non-drawing purpose
+    (sky130 ``met3.label`` 70/5) still belongs to that metal. The drawing
+    datatype (20) is preferred, then the lowest datatype."""
+    candidates = sorted(
+        (datatype, lef_layer)
+        for (layer, datatype), lef_layer in gds_to_lef.items()
+        if layer == layer_tuple[0] and lef_layer in routing_layers
+    )
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0] != 20, item[0]))
+    return candidates[0][1]
+
+
+def _warn_oversize_pin_rects(
+    pin: dict[str, Any],
+    boxes_dbu: list[tuple[int, int, int, int]],
+    dbu_um: float,
+    warnings: list[str],
+) -> None:
+    """Warn (never drop) when a matched drawn rect exceeds the pin's
+    declared ``width_um``/``height_um`` (issue #4283)."""
+    width_um = pin.get("width_um")
+    height_um = pin.get("height_um")
+    if width_um is None and height_um is None:
+        return
+    tol_um = dbu_um
+    for x0, y0, x1, y1 in boxes_dbu:
+        w_um = (x1 - x0) * dbu_um
+        h_um = (y1 - y0) * dbu_um
+        if (width_um is not None and w_um > width_um + tol_um) or (
+            height_um is not None and h_um > height_um + tol_um
+        ):
+            warnings.append(
+                f"pin '{pin['name']}': PORT rectangle "
+                f"({round(x0 * dbu_um, 6)}, {round(y0 * dbu_um, 6)}, "
+                f"{round(x1 * dbu_um, 6)}, {round(y1 * dbu_um, 6)}) um is larger "
+                f"than the declared {width_um} x {height_um} um pin size"
+            )
 
 
 def _unroutable_pins(
@@ -625,6 +708,7 @@ def _resolve_obs(
     width_dbu: int,
     height_dbu: int,
     dbu_um: float,
+    obs_mode: str = "detailed",
 ) -> list[tuple[str, list[dict[str, Any]]]]:
     """Build the obstruction geometry: every shape drawn on a GDS layer that
     maps to a routing-type LEF layer, unioned per LEF layer, shifted into
@@ -665,6 +749,10 @@ def _resolve_obs(
         region.merge()
         region = region & kdb.Region(outline_box_dbu)
         region = region.transformed(translation)
+        if obs_mode == "coarse" and not region.is_empty():
+            # Issue #4283: one bounding rectangle per layer; the pin
+            # subtraction below keeps declared ports unblocked.
+            region = kdb.Region(region.bbox())
 
         pin_boxes = pin_boxes_by_layer.get(lef_layer)
         if pin_boxes:

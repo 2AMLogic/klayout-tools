@@ -17425,3 +17425,111 @@ def test_compose_labels_esd_device_drain_port_via_pins(tmp_path, pdk_root):
         if s.is_text()
     ]
     assert "PAD" in texts
+
+
+# --------------------------------------------------------------------------- #
+# blocks[].placed_cell_name (#4246)
+# --------------------------------------------------------------------------- #
+
+
+def _placed_cell_name_request(tmp_path, pdk_root, names, strategy="row"):
+    """Two empty library-cell blocks (``a``, ``b``) with ``names`` mapping a
+    block id to its ``placed_cell_name`` (omitted when absent)."""
+    blocks = []
+    for block_id in ("a", "b"):
+        gds = _write_empty_library_gds(tmp_path / f"{block_id}.gds", f"src_{block_id}")
+        block = {
+            "id": block_id,
+            "cell": {
+                "gds_path": gds,
+                "cell_name": f"src_{block_id}",
+                "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 2.0, "y1": 1.0},
+            },
+        }
+        if block_id in names:
+            block["placed_cell_name"] = names[block_id]
+        blocks.append(block)
+    if strategy == "array":
+        blocks = blocks[:1]
+        placement = {
+            "strategy": "array",
+            "order": ["a"],
+            "rows": 2,
+            "cols": 2,
+            "row_pitch_um": 5.0,
+            "col_pitch_um": 5.0,
+        }
+    else:
+        placement = {
+            "strategy": "row",
+            "order": [b["id"] for b in blocks],
+            "spacing_um": 1.0,
+        }
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": blocks,
+        "placement": placement,
+        "options": {"cell_name": "top", "output": str(tmp_path / "out.gds")},
+    }
+
+
+def _composed_cell_names(tmp_path):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(tmp_path / "out.gds"))
+    top = layout.cell("top")
+    children = {layout.cell(i).name for i in top.called_cells()}
+    return layout, top, children
+
+
+def test_compose_placed_cell_name_sets_sub_cell_name(tmp_path, pdk_root):
+    report = compose(
+        _placed_cell_name_request(tmp_path, pdk_root, {"a": "inv", "b": "nand"})
+    )
+    _layout, _top, children = _composed_cell_names(tmp_path)
+    assert {"inv", "nand"} <= children
+    assert [b["placed_cell_name"] for b in report["blocks"]] == ["inv", "nand"]
+    assert not any("placed_cell_name" in w for w in report["warnings"])
+
+
+def test_compose_placed_cell_name_omitted_keeps_default_name(tmp_path, pdk_root):
+    report = compose(_placed_cell_name_request(tmp_path, pdk_root, {"a": "inv"}))
+    _layout, _top, children = _composed_cell_names(tmp_path)
+    assert "inv" in children and "b__src_b" in children
+    assert report["blocks"][1]["placed_cell_name"] == "b__src_b"
+
+
+def test_compose_placed_cell_name_collision_gets_suffix_and_warning(tmp_path, pdk_root):
+    report = compose(
+        _placed_cell_name_request(tmp_path, pdk_root, {"a": "dup", "b": "dup"})
+    )
+    _layout, _top, children = _composed_cell_names(tmp_path)
+    assert {"dup", "dup$1"} <= children
+    assert [b["placed_cell_name"] for b in report["blocks"]] == ["dup", "dup$1"]
+    assert any("'dup'" in w and "'dup$1'" in w for w in report["warnings"])
+
+
+def test_compose_placed_cell_name_on_array_block(tmp_path, pdk_root):
+    report = compose(
+        _placed_cell_name_request(tmp_path, pdk_root, {"a": "unit"}, strategy="array")
+    )
+    _layout, _top, children = _composed_cell_names(tmp_path)
+    assert "unit" in children
+    assert report["blocks"][0]["placed_cell_name"] == "unit"
+
+
+@pytest.mark.parametrize("value", ["", 3])
+def test_parse_blocks_rejects_invalid_placed_cell_name(value):
+    with pytest.raises(
+        GenComposeError, match=r"blocks\[0\] \(id 'a'\).placed_cell_name"
+    ):
+        _parse_blocks(
+            [
+                {
+                    "id": "a",
+                    "generator_report": _fake_mos_block_report(),
+                    "placed_cell_name": value,
+                }
+            ]
+        )

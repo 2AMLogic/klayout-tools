@@ -1440,6 +1440,29 @@ def _deck_cut_max_size_um(family: str, layer: tuple[int, int]) -> float | None:
     return round(min(bounds), 6) if bounds else None
 
 
+def _deck_min_width_um(family: str, layer: tuple[int, int]) -> tuple[str, float] | None:
+    """``(rule id, um)`` of the plain ``"width"`` rule in ``family``'s curated
+    deck with the largest minimum on ``layer`` (issue #4203), or ``None`` when
+    the deck declares none (or ``family`` has no registered deck)."""
+    from .decks import UnknownDeckError, get_deck, get_nominal_dbu
+
+    try:
+        rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+    except UnknownDeckError:
+        return None
+    mins = [
+        (rule.id, round(rule.threshold_dbu * nominal_dbu_um, 6))
+        for rule in rules
+        if rule.check == "width"
+        and rule.layer == layer
+        and rule.other_layer is None
+        and rule.derived_layer is None
+        and rule.threshold_dbu > 0
+    ]
+    return max(mins, key=lambda m: m[1]) if mins else None
+
+
 def _cut_fixed_size_um(family: str, layer: Any) -> float:
     """The fixed drawn side (um) a cut on ``layer`` must be clamped to on
     ``family`` (issue #2585), or ``0.0`` -- "no upper bound, draw the
@@ -2769,4 +2792,36 @@ def _esd_device_layer_params(
         "ring_implant_margin_um": (
             _ring_implant_margin_um(family) if ring_implant is not None else 0.0
         ),
+    }
+
+
+def _diode_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
+    """Hidden layer params for ``diode`` (issue #4300). sky130 only: the
+    ``diode_mark`` (``areaid.diode``) and ``hvi`` roles exist only there, and
+    the other curated decks' diode recognition has not been exercised against
+    this geometry."""
+    from .gen import GenError
+
+    family = _pdk_family(pdk_info["variant"])
+    if family != "sky130":
+        raise GenError(
+            f"generator 'diode': PDK family '{family}' is not yet supported "
+            "by this generator -- see docs/cli/gen.md's 'PDK-family support' "
+            "section"
+        )
+    return {
+        f"{role}_layer": _role_layer_info(family, role)
+        for role in (
+            "active",
+            "tap",
+            "nplus",
+            "pplus",
+            "well",
+            "hvi",
+            "diode_mark",
+            "contact",
+            "metal",
+        )
     }

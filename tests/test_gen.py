@@ -158,6 +158,35 @@ def test_generate_writes_gds_and_matches_contract(tmp_path, pdk_root):
     assert report["warnings"] == []
 
 
+def test_generate_child_cell_named_after_cell_name_no_collision(tmp_path, pdk_root):
+    import klayout.db as kdb
+
+    names = []
+    layout = kdb.Layout()
+    for cell_name, num in (("a", 2), ("b", 3)):
+        output = tmp_path / f"{cell_name}.gds"
+        generate(
+            {
+                "generator": "resistor_strip",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"num": num},
+                "options": {"cell_name": cell_name, "output": str(output)},
+            }
+        )
+        single = kdb.Layout()
+        single.read(str(output))
+        names.append(sorted(c.name for c in single.each_cell()))
+        layout.read(str(output))
+
+    assert names == [["a", "a__core"], ["b", "b__core"]]
+    assert sorted(c.name for c in layout.each_cell()) == [
+        "a",
+        "a__core",
+        "b",
+        "b__core",
+    ]
+
+
 def test_generate_defaults_cell_name_and_output(tmp_path, pdk_root, monkeypatch):
     monkeypatch.chdir(tmp_path)
     request = {
@@ -678,6 +707,7 @@ def test_list_generators_includes_all_four_phase2_families():
         "diff_pair",
         "bjt_array",
         "bond_pad",
+        "diode",
         "esd_device",
         "cap_array",
         "cap_vpp_array",
@@ -11990,3 +12020,67 @@ def test_esd_device_total_width_conflicts_with_explicit_split(
 def test_esd_device_total_width_over_finger_limit_rejected(tmp_path, pdk_root):
     with pytest.raises(GenError, match="finger limit|-finger limit"):
         _esd_gen(tmp_path, pdk_root, {"total_width_um": 20.0 * 33})
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4203: res_array length_um mfg-grid / short-length warnings
+# --------------------------------------------------------------------------- #
+
+
+def _gen_res(tmp_path, root, tag, variant="gf180mcuD", **params):
+    return generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": variant, "root": str(root)},
+            "params": {"width_um": 1.0, "spacing_um": 1.0, "num": 1, **params},
+            "options": {"output": str(tmp_path / f"res_{tag}.gds")},
+        }
+    )
+
+
+def test_res_array_off_mfg_grid_length_warns(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "off", length_um=3.343)
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "params.length_um=3.343um" in warning
+    assert "0.005um" in warning
+    assert "3.34um (below)" in warning
+    assert "3.345um (above)" in warning
+
+
+def test_res_array_on_grid_length_no_warning(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "on", length_um=3.345)
+    assert _mfg_grid_warnings_of(report) == []
+
+
+def test_res_array_no_ongrid_rule_no_warning(tmp_path, both_pdk_root, monkeypatch):
+    from klayout_tools import gen_describe
+
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    report = _gen_res(tmp_path, both_pdk_root, "nogrid", length_um=3.343)
+    assert _mfg_grid_warnings_of(report) == []
+
+
+def test_res_array_off_grid_warning_leaves_geometry_unchanged(
+    tmp_path, both_pdk_root, monkeypatch
+):
+    from klayout_tools import gen_describe
+
+    warned = _gen_res(tmp_path, both_pdk_root, "warned", length_um=3.343)
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    silent = _gen_res(tmp_path, both_pdk_root, "silent", length_um=3.343)
+    assert _mfg_grid_warnings_of(warned) and not _mfg_grid_warnings_of(silent)
+    assert (tmp_path / "res_warned.gds").read_bytes() == (
+        tmp_path / "res_silent.gds"
+    ).read_bytes()
+
+
+def test_res_array_short_length_warns_on_gf180mcu(tmp_path, both_pdk_root):
+    short = _gen_res(tmp_path, both_pdk_root, "short", length_um=0.3)
+    assert any("minimum mask width" in w for w in short["warnings"])
+    long = _gen_res(tmp_path, both_pdk_root, "long", length_um=3.0)
+    assert not any("minimum mask width" in w for w in long["warnings"])
+
+
+def test_res_array_sky130_has_no_short_length_warning(tmp_path, pdk_root):
+    report = _gen_res(tmp_path, pdk_root, "sky", variant="sky130A", length_um=0.5)
+    assert not any("minimum mask width" in w for w in report["warnings"])

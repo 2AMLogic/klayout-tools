@@ -619,7 +619,7 @@ When a device name is not one of the curated devices, supply it explicitly:
 The converter recognises four device families through that same curated
 table, never a second, independent device-name mapping — MOS, resistor,
 capacitor, and bipolar (issue #1130 extended the original, MOS-only #280
-converter). See `netlist_normalize.py`'s module docstring for the full
+converter), plus sky130's junction diodes (issue #4319, below). See `netlist_normalize.py`'s module docstring for the full
 per-family rationale. It is deliberately narrow and loud (a wrong
 parameter/unit mapping into a sign-off tool must never pass silently):
 
@@ -719,13 +719,15 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   base/collector geometry the fixed-geometry cell name does not encode, and
   they are *secondary* parameters — once the primary `AE`/`NE` agree the
   devices pair and the comparer never reports them.
-- `nf`/`m`/`mult` > 1 on a resistor/capacitor call (a multiplied device the
+- `nf`/`m`/`mult`/`mf` > 1 on a resistor call, or `nf`/`mult`/`mf` > 1 on a capacitor call (a multiplied device the
   curated plain-element form cannot represent) is **rejected** with a specific error naming the device —
   never silently dropped or misinterpreted. Flatten it (one device per
   drawn gate) in the schematic netlist first. Two exceptions: bipolar's
   `mult` is carried onto `NE`, not rejected, since
   `DeviceClassBJT3Transistor` can represent multiple parallel emitters that
-  way; and MOS's own `nf` and `m` are *expanded*, not rejected (see above).
+  way; MOS's own `nf` and `m` are *expanded*, not rejected (see above); and a
+  capacitor's `m=N` (positive integer) becomes `N` parallel plain `C` cards named
+  `<instance>_m0` ..., each with the per-copy `A`/`P` (issue #4318).
   MOS `m=N` (positive integer) becomes `N` parallel plain `M` cards named
   `<instance>_m0` ... (`nf*m` cards named `<instance>_m0_f0` ... when
   combined with `nf`), total width `m*W`; pair with `options.combine_devices`
@@ -755,6 +757,19 @@ model-reference `R` card rather than a subcircuit) is not fabricated.
 Bipolar is never derived at all: it carries no geometry parameter to
 cross-check a name against, so an assumed identity could silently rewrite a
 genuine hierarchical instance into a `Q` card.
+
+**sky130 junction diodes** (issue #4319). Each of the deck's `diodes` classes
+(`diode_pw2nd_05v5{,_lvt,_nvt}`, `diode_pw2nd_11v0`,
+`diode_pd2nw_05v5{,_lvt,_hvt}`, `diode_pd2nw_11v0`) resolves from its PDK
+subcircuit name `sky130_fd_pr__<class>`: `X<n> anode cathode
+sky130_fd_pr__diode_pd2nw_05v5 area=<A> perim=<P>` becomes `D<n> anode cathode
+diode_pd2nw_05v5 A=.. P=..`, the `DeviceClassDiode` the layout-side extractor
+emits. `area` is um² and `perim` (alias `pj`) um under sky130's ambient
+`.option scale` for bare numbers (`area=1 perim=4`); suffixed/exponent literals
+are SI (`area=1p perim=4u`). Either may be omitted (class default). Anode is the
+first node, cathode the second, and polarity is compared. `mult`/`m` > 1 is
+rejected like resistors/capacitors. Other decks' diodes are not mapped, and
+`device_map`'s `kind` enum has no `diode`.
 
 Anything outside that union — including a subcircuit whose real upstream
 name differs from the deck's device-class label and has no curated entry yet
@@ -1225,6 +1240,14 @@ removed as a `severity: "warning"`, `category: "topology.power_only_pruned"`
 entry — see "`topology.power_only_pruned`" below — rather than reporting a
 false `topology` mismatch. You do not need to exclude these cells from
 `--abstract-cells` yourself.
+
+**Troubleshooting: a direct `lvs` on a standard-cell GDS mismatches
+wholesale.** Running `klt lvs` straight on a routed standard-cell GDS against
+a gate-level Verilog reference compares the library cells' *transistors*
+against device-less cell stubs, so nearly everything reports as unmatched.
+Extract with `klt extract --abstract-cells` first and compare that netlist, as
+shown above. This note is documentation only: the command does not detect
+that shape and print a hint.
 
 **Not every `write_verilog` consumer honors the "never instantiates a
 power-only cell" assumption above.** A gate-level netlist produced by
@@ -3164,6 +3187,15 @@ synthetic-net behaviour) is involved there:
   demonstrably names every PMOS body (e.g. `VPB`), not because the deck
   declares a mechanism.
 
+A body counts as "resolved" only when it lands on a **named** net. The check
+sees the extracted netlist, not tap geometry, so it cannot tell a layout with
+no tap drawn from one whose drawn, contacted tap ties to a supply conductor
+that carries no name label — both leave the body on the synthesized /
+anonymous net. The warning text therefore names both causes; if taps are
+already drawn, labeling the tap-connected conductor (e.g. `VSS`/`VDD` text on
+the label layer of the metal the taps connect to) resolves it and flips
+`body_verification` to `verified`.
+
 Both entries reflect real device-level extraction outcomes (per-device for
 NMOS since #490, for PMOS since #2048 — a property of what the layout
 actually drew, not of which deck ran extraction, nor of any individual
@@ -3535,6 +3567,18 @@ neither `fixed_offset_ohm` nor `end_term_ohm_um`, or N is 1. Covers `options.com
 `options.combine_devices_per_circuit`. The effect of `width_offset_um` is not
 disclosed.
 
+#### `net.merged` caused by case-colliding net names (issue #4200)
+
+On an inline-extraction layout (`layout.file`), a flat extraction can contain
+nets whose names differ only by case (`pb` / `PB`). The SPICE read-back is
+case-insensitive, so they merge and surface as `net.merged` / `device.unmatched`.
+When the extracted nets contain such a collision, each `net.merged` entry's
+`description` gains a note naming the cause; `status`, `severity` and counts
+are unchanged. Fix: extract the composed layout hierarchically with
+`klt extract --hierarchical-cells <block id>__<cell name>,...` (the placed-cell
+name `klt gen-compose` gives each cell) and compare that netlist with
+`options.flatten_layout: true`, so each cell keeps its own namespace.
+
 #### `topology.flattened`: `options.flatten_reference`/`options.flatten_layout` collapsed a side's hierarchy before comparing
 
 Only possible when `options.flatten_reference: true` and/or
@@ -3563,6 +3607,30 @@ never silently indistinguishable from one reached against the netlist's
 original hierarchy — the same transparency precedent
 `device.parameter_tolerated`/`device.bulk_reconciled` establish for their own
 opt-in normalisations.
+
+#### `topology.dangling_output_ambiguous`: interchangeable instances on unconnected outputs (issue #4296)
+
+Identical cell instances whose outputs connect to nothing (CTS dummy loads,
+unused flop outputs) have no distinguishing topology: the reference side names
+each such pin `__NC_<instance>_<pin>__` (a one-terminal net), the layout side
+has an anonymous one-terminal net, and `NetlistComparer` cannot pair the
+instances. Rather than `topology` ("subcircuit instance could not be matched")
+and `net.split`/`net.merged` errors, `klt lvs` reports one `severity:
+"warning"` entry per `(circuit, cell type)` group, with `details`
+`{cell_type, instance_count, layout_instances, reference_instances}` and
+`circuit`/`subcircuit` naming the group, plus one aggregate entry
+(`details.net_event_count`) for the dangling nets themselves.
+
+It applies only when every unmatched instance has a dangling pin, each cell
+type has as many unmatched layout as reference instances, and every net
+mismatch is dangling-only on each side it appears on. A one-sided dangling net
+(connected on the other side), differing cell types, an unbalanced count, or
+any real mismatch beside them leaves the ordinary `error` findings in place.
+
+`status` is still `NetlistComparer.compare()`'s own verdict, so such a run
+reports `status: "mismatch"` with no `error`-severity entries; gate on
+`error_count` to distinguish it from a real defect. This is a report-side
+reclassification: the comparer is unchanged.
 
 #### `topology.power_only_pruned`: a power-only circuit was removed before comparing
 

@@ -211,6 +211,71 @@
       ]
     }
   },
+  "diff.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        },
+        {
+          "box": [
+            2360,
+            0,
+            4360,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "The real sky130A.lydrc (the native deck this cross-check drives) defines no difftap.3/poly.2 spacing rule at all -- the gap issue #4282 reports (klt drc --engine klayout --pdk sky130A is coverage_unknown on these). The foundry spacing rule lives only in sky130A_mr.drc's FEOL block, which this engine's invocation cannot enable. A violate fixture correctly trips the curated engine but is always reported \"clean\" by sky130.lydrc.",
+    "layer": [
+      65,
+      20
+    ],
+    "threshold_dbu": 270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        },
+        {
+          "box": [
+            2180,
+            0,
+            4180,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        }
+      ]
+    }
+  },
   "diff.width.1": {
     "check": "width",
     "clean": {
@@ -1158,6 +1223,71 @@
       ]
     }
   },
+  "poly.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            66,
+            20
+          ]
+        },
+        {
+          "box": [
+            2280,
+            0,
+            4280,
+            4000
+          ],
+          "layer": [
+            66,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "The real sky130A.lydrc (the native deck this cross-check drives) defines no difftap.3/poly.2 spacing rule at all -- the gap issue #4282 reports (klt drc --engine klayout --pdk sky130A is coverage_unknown on these). The foundry spacing rule lives only in sky130A_mr.drc's FEOL block, which this engine's invocation cannot enable. A violate fixture correctly trips the curated engine but is always reported \"clean\" by sky130.lydrc.",
+    "layer": [
+      66,
+      20
+    ],
+    "threshold_dbu": 210,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            66,
+            20
+          ]
+        },
+        {
+          "box": [
+            2140,
+            0,
+            4140,
+            4000
+          ],
+          "layer": [
+            66,
+            20
+          ]
+        }
+      ]
+    }
+  },
   "poly.width.1": {
     "check": "width",
     "clean": {
@@ -1248,7 +1378,7 @@
           "box": [
             0,
             0,
-            1300,
+            1370,
             4000
           ],
           "layer": [
@@ -1270,12 +1400,77 @@
           "box": [
             0,
             0,
-            1000,
+            1170,
             4000
           ],
           "layer": [
             86,
             20
+          ]
+        }
+      ]
+    }
+  },
+  "tap.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        },
+        {
+          "box": [
+            2360,
+            0,
+            4360,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "The real sky130A.lydrc (the native deck this cross-check drives) defines no difftap.3/poly.2 spacing rule at all -- the gap issue #4282 reports (klt drc --engine klayout --pdk sky130A is coverage_unknown on these). The foundry spacing rule lives only in sky130A_mr.drc's FEOL block, which this engine's invocation cannot enable. A violate fixture correctly trips the curated engine but is always reported \"clean\" by sky130.lydrc.",
+    "layer": [
+      65,
+      44
+    ],
+    "threshold_dbu": 270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        },
+        {
+          "box": [
+            2180,
+            0,
+            4180,
+            4000
+          ],
+          "layer": [
+            65,
+            44
           ]
         }
       ]
@@ -1330,7 +1525,7 @@
           "box": [
             0,
             0,
-            1300,
+            1370,
             4000
           ],
           "layer": [
@@ -1352,7 +1547,7 @@
           "box": [
             0,
             0,
-            1000,
+            1170,
             4000
           ],
           "layer": [

@@ -285,6 +285,71 @@ def test_liberty_header_name_and_comment_differences_merge(
     assert all(f"cell ({c})" in merged for c in "ABC")
 
 
+_TPL = (
+    '  lu_table_template ("{n}") {{\n    variable_1 : input_net_transition;\n'
+    '    index_1 ("{i}");\n  }}\n'
+    "  power_lut_template (p_{n}) {{ variable_1 : input_transition_time; }}\n"
+)
+
+
+def _tpl_header(*names, extra='  time_unit : "1ps";\n', body="7"):
+    return "library (x) {\n" + extra + "".join(_TPL.format(n=n, i=body) for n in names)
+
+
+def _merge_g2(tmp_path, monkeypatch, h1, h2):
+    root = _views_tree(tmp_path, monkeypatch)
+    info = pdk.find_pdk(root=str(root))
+    (root / "d" / "g1.lib").write_text(_lib("A", header=h1), encoding="utf-8")
+    (root / "d" / "g2.lib").write_text(_lib("C", header=h2), encoding="utf-8")
+    result = pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+    path = result[0] if isinstance(result, tuple) else result
+    return open(path, encoding="utf-8").read()
+
+
+def test_liberty_disjoint_templates_are_unioned(tmp_path, monkeypatch):
+    merged = _merge_g2(
+        tmp_path, monkeypatch, _tpl_header("d_7x7"), _tpl_header("d_7x7_x1")
+    )
+    assert merged.count('lu_table_template ("d_7x7")') == 1
+    assert merged.count('lu_table_template ("d_7x7_x1")') == 1
+    assert merged.count("power_lut_template (p_d_7x7_x1)") == 1
+    assert all(f"cell ({c})" in merged for c in "AC")
+
+
+def test_liberty_identical_templates_dedupe(tmp_path, monkeypatch):
+    h2 = _tpl_header("d", body="7").replace("  ", " /* c */ ")
+    merged = _merge_g2(tmp_path, monkeypatch, _tpl_header("d"), h2)
+    assert merged.count("lu_table_template") == 1
+    assert merged.count("power_lut_template") == 1
+
+
+def test_liberty_matching_headers_output_unchanged(tmp_path, monkeypatch):
+    h = _tpl_header("d")
+    merged = _merge_g2(tmp_path, monkeypatch, h, h)
+    expected = h.rstrip() + "\n\ncell (A) { area : 1; }\ncell (C) { area : 1; }\n}\n"
+    assert merged == expected
+
+
+def test_liberty_conflicting_template_refused(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="template 'd' differs"):
+        _merge_g2(
+            tmp_path,
+            monkeypatch,
+            _tpl_header("d", body="7"),
+            _tpl_header("d", body="9"),
+        )
+
+
+def test_liberty_non_template_difference_with_templates_refused(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="headers differ"):
+        _merge_g2(
+            tmp_path,
+            monkeypatch,
+            _tpl_header("a"),
+            _tpl_header("b", extra='  time_unit : "1ns";\n'),
+        )
+
+
 def test_liberty_header_mismatch_and_duplicate(tmp_path, monkeypatch):
     root = _views_tree(tmp_path, monkeypatch)
     info = pdk.find_pdk(root=str(root))
