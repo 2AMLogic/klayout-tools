@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt drc` gains `-o/--output PATH`** (issue #4393, documented in
+  [`docs/cli/drc.md`](docs/cli/drc.md)): an additive file copy of the report
+  envelope, byte-identical to `--format json` stdout and written for clean and
+  violating (exit `3`) runs alike; `.gz` paths are gzip-compressed. Stdout and
+  exit codes are unchanged; reachable from a request document as `output`.
+
 - **`klt place-and-route` gains `instance_groups` (request) and `instance_groups[]`
   (response)** (issue #4344, documented in
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)): name sets of

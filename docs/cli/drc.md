@@ -9,6 +9,7 @@ klt drc --deck sky130|gf180mcu|sg13g2|sg13cmos5l --list-rules [--format text|jso
 klt drc <file> --engine both --deck <name> [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--format text|json]
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
 klt drc <file> --deck <name> --waivers <waivers.json> [--format text|json]
+klt drc <file> --deck <name> -o <report.json[.gz]> [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
 ```
@@ -20,6 +21,14 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   file, `-` to read the document from stdin, or an inline JSON object string.
   Mutually exclusive with the flags it replaces — see "Request document"
   below.
+- `-o`, `--output PATH` — also write the report envelope to `PATH`,
+  byte-identical to `--format json` stdout (gzip-compressed when `PATH` ends
+  `.gz`; `--format text` still writes JSON to the file). The file is written
+  for clean and violating runs alike (exit `3` included) and for
+  `--engine both`; stdout and exit codes are unchanged. An unwritable `PATH`
+  is the standard error envelope (exit `1`). Rejected with `--check` and
+  `--list-rules`, which emit no run report. Mirrors `klt sim --report-out`
+  (issue #4393).
 - `--deck` — the DRC deck to run for `--engine curated` (the default);
   required in that case, ignored for `--engine klayout`. Currently: `sky130`,
   `gf180mcu`, `sg13g2`, `sg13cmos5l`. Adding a new family's curated deck (registry wiring,
@@ -154,6 +163,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `pdk_root` | string | `--pdk-root` |
 | `rules` | string \| array\<string\> | `--rules` — one comma-separated string (the argv spelling) or a list of selector strings, each comma-split the same way. Any other type (a number, an object, a list holding a non-string) is rejected; empty and unmatched tokens are rejected exactly as for the flag. Curated engine only. |
 | `waivers_file` | string | `--waivers` (issue #3483; a path, resolved relative to the request document's own directory like `deck_file`. The waivers are not inlined — point at the reviewed file.) Curated engine only — see "Waivers". |
+| `output` | string | `-o/--output` (issue #4393; a path, resolved relative to the request document's own directory like `deck_file`.) |
 
 An unknown top-level field is an application error (exit `1`), not a silently
 ignored one — a typo'd field would otherwise drop an input the caller

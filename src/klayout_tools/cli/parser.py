@@ -6582,6 +6582,20 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "See docs/cli/drc.md, 'Waivers'"
         ),
     )
+    drc_parser.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        default=None,
+        metavar="PATH",
+        help=(
+            "also write the report envelope to PATH, byte-identical to "
+            "`--format json` stdout, whether the run is clean or exits 3 on "
+            "violations; gzip-compressed (deterministic) when PATH ends "
+            "`.gz`. Stdout and exit codes are unchanged (issue #4393). Not "
+            "supported with --check or --list-rules. See docs/cli/drc.md"
+        ),
+    )
     _add_format_arg(drc_parser)
     _record_request_argv_flags(
         drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")

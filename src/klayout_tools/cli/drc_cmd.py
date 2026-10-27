@@ -72,7 +72,13 @@ from ..drc import (
 from ..drc_crosscheck import crosscheck_exit_code, run_drc_crosscheck
 from ..env_provenance import render_path_field
 from . import _request_document as reqdoc
-from .output import emit_error, emit_success, render_check_text, render_rerun_drift
+from .output import (
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+    write_json_file,
+)
 
 EXIT_CLEAN = 0
 EXIT_VIOLATIONS = 3
@@ -110,6 +116,10 @@ def run(args: argparse.Namespace) -> int:
     except pdk_module.PdkNotFoundError as exc:
         return emit_error("drc", str(exc), args.format)
 
+    write_failure = _write_output(report, args)
+    if write_failure is not None:
+        return write_failure
+
     if report.get("mode") == "crosscheck":
         emit_success(report, args.format, _print_crosscheck_text)
         return crosscheck_exit_code(report)
@@ -122,6 +132,26 @@ def run(args: argparse.Namespace) -> int:
     # `status == "clean"` test is exactly the per-verb divergence
     # `docs/coverage-contract.md` exists to prevent.
     return drc_exit_code(report)
+
+
+def _write_output(report: dict, args: argparse.Namespace) -> int | None:
+    """Write the ``-o/--output`` file copy; return an exit code only on failure.
+
+    Issue #4393: an additive copy of the envelope, written before emitting so
+    it lands regardless of the verdict's exit code and an unwritable path
+    fails with the error envelope. Stdout is unchanged.
+    """
+    if not args.output:
+        return None
+    try:
+        write_json_file(report, args.output)
+    except OSError as exc:
+        return emit_error(
+            "drc",
+            f"could not write report to '{args.output}': {exc}",
+            args.format,
+        )
+    return None
 
 
 def _run_list_rules(args: argparse.Namespace) -> int:
@@ -169,6 +199,14 @@ def _non_default_flags(
 
 
 def _run_check(args: argparse.Namespace) -> int:
+    if args.output is not None:
+        # Issue #4393: --check emits a verification result, not a run report.
+        return emit_error(
+            "drc",
+            "-o/--output cannot be combined with --check: --check emits no "
+            "run report to write",
+            args.format,
+        )
     if args.waivers is not None:
         # Issue #3483: like --rules, the waivers a report was run with are
         # recorded in its provenance and replayed by `--check --rerun`.
@@ -230,6 +268,7 @@ _REQUEST_FIELD_DESTS = {
     "pdk_root": "pdk_root",
     "rules": "rules",
     "waivers_file": "waivers",
+    "output": "output",
 }
 
 
@@ -304,6 +343,8 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "rules": _request_rules(request),
             # Issue #3483: resolved against the request document's directory.
             "waivers": _path("waivers_file"),
+            # Issue #4393: resolved against the request document's directory.
+            "output": _path("output"),
         }
     )
 
