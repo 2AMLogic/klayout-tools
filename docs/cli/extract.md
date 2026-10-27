@@ -470,6 +470,11 @@ each field's exact layer numbers and provenance are documented in the deck
 module's own docstring, verified against this repo's real corpus fixtures
 (`tests/corpus/sky130/`, `tests/corpus/gf180mcu/`).
 
+A body is "resolved" only to a **named** net: a drawn, contacted tap whose
+supply conductor carries no name label still leaves the body on the
+synthesized/anonymous net, indistinguishable in the netlist from a missing
+tap. Label the tap-connected conductor (e.g. `VSS`/`VDD`) to resolve it.
+
 **NMOS/PMOS body resolution**, both documented in the deck modules:
 
 - **NMOS body.** Neither curated deck draws a separate substrate/pwell
@@ -4321,6 +4326,17 @@ R$2 MID_A OUT_A 289.2 res_generic_po L=6U W=1U
   the same net partition; otherwise one shared definition would be wrong for
   some placement and the run fails naming the cell. (Typical cause: an
   outside wire shorting two of a placement's nets.)
+
+- **Placed-cell naming for composed layouts (issue #4200).** A cell placed
+  by `klt gen-compose` is named `<block id>__<cell name>`, and that full name
+  is what `--hierarchical-cells` must be given (e.g.
+  `--hierarchical-cells ota__diff_pair,ota__mirror`). Splitting the hierarchy
+  this way keeps same-case-folded net names (`pb` / `PB`) in different
+  circuits; a flat extraction that contains such names emits a `warnings[]`
+  entry ("differ only by case"), because `klt lvs` reads the netlist back
+  case-insensitively and would report a false `net.merged`. Pair it with
+  `options.flatten_layout` in `klt lvs` — see
+  [`klt lvs`](lvs.md) (`options.flatten_layout`).
 
 ### Flat vs hierarchical
 

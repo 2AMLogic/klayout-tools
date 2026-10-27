@@ -541,6 +541,7 @@
         "klayout_tools.sim_decks",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_errors",
+        "klayout_tools.sim_eye",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
@@ -613,6 +614,7 @@
       "kind": "verb",
       "description": "`klt synthesize` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools._sv2v",
         "klayout_tools.cli.synthesize_cmd",
         "klayout_tools.restructure",
         "klayout_tools.sta",

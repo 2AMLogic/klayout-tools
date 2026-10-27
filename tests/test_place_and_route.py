@@ -549,6 +549,26 @@ def test_run_floorplan_utilization_requires_site(tmp_path):
         run_place_and_route(request_path)
 
 
+def test_run_floorplan_utilization_requires_core_margin(tmp_path):
+    """Issue #4191: OpenROAD needs `-core_space` (IFP-0034) for `-utilization`,
+    so reject before any engine run, naming the field."""
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            floorplan={
+                "method": "utilization",
+                "utilization_pct": 38,
+                "site": "unithd",
+            }
+        ),
+    )
+    with pytest.raises(
+        PlaceAndRouteError, match="floorplan.core_margin_um is required"
+    ):
+        run_place_and_route(request_path)
+
+
 def test_run_floorplan_explicit_requires_die_and_core_area(tmp_path):
     _write(tmp_path / "gcd_synth.v", "// netlist\n")
     request_path = _write_request(
@@ -1745,13 +1765,15 @@ _EXPECTED_PRESET_STRAPS: dict[str, list[dict[str, object]]] = {
     ],
 }
 
-#: The via-stack tuning each preset must resolve to. Both gf180mcu configs
-#: carry `add_pdn_connect -grid {block} -layers {Metal1 Metal4}
+#: The via-stack tuning each preset must resolve to. The 9t gf180mcu config
+#: carries `add_pdn_connect -grid {block} -layers {Metal1 Metal4}
 #: -max_columns {5} -ongrid {Metal2 Metal3 Metal4} -split_cuts {Metal3
-#: 0.128}` plus a bare `{Metal4 Metal5}` pair; sky130hd's `pdn.tcl` carries
-#: two bare pairs and therefore no tuning at all, and IHP's LibreLane
-#: config names no via-stack tuning for `sg13g2` either.
-_GF180MCU_PRESET_CONNECTS = [
+#: 0.128}` plus a bare `{Metal4 Metal5}` pair; the 7t preset drops the
+#: `-split_cuts` (issue #4301: DRC-dirty vias under `klt drc --deck
+#: gf180mcu`). sky130hd's `pdn.tcl` carries two bare pairs and therefore no
+#: tuning at all, and IHP's LibreLane config names no via-stack tuning for
+#: `sg13g2` either.
+_GF180MCU_9T_PRESET_CONNECTS = [
     {
         "layers": ["Metal1", "Metal4"],
         "max_columns": 5,
@@ -1759,9 +1781,10 @@ _GF180MCU_PRESET_CONNECTS = [
         "split_cuts": {"layer": "Metal3", "width_um": 0.128},
     }
 ]
+_GF180MCU_7T_PRESET_CONNECTS = [{**_GF180MCU_9T_PRESET_CONNECTS[0], "split_cuts": None}]
 _EXPECTED_PRESET_CONNECTS: dict[str, list[dict[str, object]]] = {
-    "gf180mcu_7t_6M": _GF180MCU_PRESET_CONNECTS,
-    "gf180mcu_9t_6M": _GF180MCU_PRESET_CONNECTS,
+    "gf180mcu_7t_6M": _GF180MCU_7T_PRESET_CONNECTS,
+    "gf180mcu_9t_6M": _GF180MCU_9T_PRESET_CONNECTS,
     "sg13g2": [],
     "sky130hd": [],
 }
@@ -2851,6 +2874,7 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
         "power_net": None,
         "ground_net": None,
         "tapcell_master": None,
+        "tapless": False,
         "endcap_master": None,
         "tapcell_distance_um": None,
         "filler_masters": [],
@@ -3075,6 +3099,7 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
         "power_net": "VDD",
         "ground_net": "VSS",
         "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
+        "tapless": False,
         "endcap_master": None,
         "tapcell_distance_um": 14,
         "filler_masters": [
@@ -6331,6 +6356,35 @@ def test_engine_error_message_flags_readable_file_openroad_cannot_read(tmp_path)
     assert "docs/cli/place-and-route.md" in message
 
 
+def test_engine_error_message_names_mount_rule_for_path_outside_cwd(
+    tmp_path, monkeypatch
+):
+    """Issue #4191: a readable path outside the invocation directory gets the
+    `$PWD`/`$PDK_ROOT`/`$TMPDIR` mount rule and the common-ancestor advice."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    outside = tmp_path / "elsewhere" / "macro.lef"
+    outside.parent.mkdir()
+    outside.write_text("# lef\n", encoding="utf-8")
+    monkeypatch.chdir(cwd)
+    completed = fake_completed(
+        returncode=1,
+        stderr=f"Error: pnr_top_floorplan.tcl, 1\ncannot read file {outside}.\n",
+    )
+
+    message = place_and_route._engine_error_message("floorplan", completed)
+
+    assert f"'{outside}' is outside the invocation directory" in message
+    assert "$PWD, $PDK_ROOT and $TMPDIR" in message
+    assert "common ancestor" in message
+
+    inside = cwd / "macro.lef"
+    inside.write_text("# lef\n", encoding="utf-8")
+    completed = fake_completed(returncode=1, stderr=f"cannot read file {inside}.\n")
+    message = place_and_route._engine_error_message("floorplan", completed)
+    assert "outside the invocation directory" not in message
+
+
 def test_engine_error_message_omits_pdk_note_when_path_outside_pdk_root(tmp_path):
     """The mount-namespace hint still fires for any readable, out-of-mount
     absolute path (issue #1868's own closing note: the same hazard applies
@@ -7011,6 +7065,7 @@ def test_sg13g2_stdcell_power_run_skips_tapcell_instead_of_raising(
     assert power["pdn"] is True
     assert power["global_connect"] is True
     assert power["tapcell_master"] is None
+    assert power["tapless"] is True
     assert power["endcap_master"] is None
     assert power["filler_masters"] == ["sg13g2_fill_1", "sg13g2_fill_2"]
     assert [strap["layer"] for strap in power["straps"]] == [
@@ -10287,6 +10342,7 @@ def test_integration_real_openroad_power_pdn_sg13g2(tmp_path, monkeypatch):
     assert power["global_connect"] is True
     # No master is named for cells this library does not have.
     assert power["tapcell_master"] is None
+    assert power["tapless"] is True
     assert power["endcap_master"] is None
     assert power["filler_masters"] == ["sg13g2_fill_1", "sg13g2_fill_2"]
 
@@ -11808,6 +11864,7 @@ _TRACKS_FLOORPLAN = {
     "method": "utilization",
     "utilization_pct": 40,
     "site": "asap7sc7p5t",
+    "core_margin_um": 2.0,
 }
 _GOOD_TRACK = {
     "layer": "M2",

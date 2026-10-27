@@ -47,6 +47,11 @@ Scope (phase 2, this module's current state):
   uniformly to every tile (no *per-tile* override), and leaves per-tile
   ``connectivity[]``/``pins[]`` routing as a follow-on question this module
   does not answer -- see :func:`_parse_array_placement`'s docstring.
+  Each ``blocks[]`` entry may also carry an optional non-empty
+  ``placed_cell_name`` (#4246) that sets the name of the sub-cell the block
+  is instantiated under in place of the default ``"<id>__<cell_name>"``; a
+  real name collision gets KLayout's ``$n`` suffix plus a ``warnings[]``
+  entry, and the response ``blocks[]`` entry echoes the name actually used.
 * **Routing** (new this phase): for every 2-pin ``connectivity[]`` net, draw
   a Manhattan metal path (backbone -> corner bends -> straight fill; see
   :func:`manhattan_backbone`) between the two named ports on the resolved
@@ -1469,6 +1474,19 @@ def _parse_blocks(
                 _orient_bbox_um(region, orientation) for region in navigable_regions
             ]
 
+        # blocks[].placed_cell_name (#4246) -- the name of the sub-cell this
+        # block is instantiated under in the composed GDS. Like orientation,
+        # a placement decision that lives on the request-level blocks[]
+        # entry. Absent -> the "<id>__<cell>" convention, unchanged.
+        placed_cell_name = raw_block.get("placed_cell_name")
+        if placed_cell_name is not None and (
+            not isinstance(placed_cell_name, str) or not placed_cell_name
+        ):
+            raise GenComposeError(
+                f"blocks[{index}] (id '{block_id}').placed_cell_name "
+                f"{placed_cell_name!r} must be a non-empty string"
+            )
+
         matched_group_id, min_spacing_um, foreign_clearance_um = _parse_drc_hints(
             report.get("drc_hints")
         )
@@ -1487,6 +1505,7 @@ def _parse_blocks(
             "min_spacing_um": min_spacing_um,
             "foreign_clearance_um": foreign_clearance_um,
             "orientation": orientation,
+            "placed_cell_name": placed_cell_name,
             "navigable_regions": navigable_regions,
             # blocks[].abuts (#2638) -- parsed below, once every id is known.
             "abuts": _parse_abuts(raw_block, index, block_id),
@@ -4494,6 +4513,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             "offset_um": offsets_um[block_id],
             "bbox_um": placed_bboxes_um[block_id],
             "orientation": blocks[block_id].get("orientation", "none"),
+            # #4246: the sub-cell name actually written to the composed GDS
+            # (after any "$n" collision suffix).
+            "placed_cell_name": blocks[block_id]["placed_cell_name_actual"],
             # #2638: echo of the request's own blocks[].abuts (sorted for a
             # stable report; empty when omitted) -- an accepted clearance
             # advisory must stay visible in the response, not only in the
@@ -4659,6 +4681,32 @@ def _insert_via_cuts(
         for dx in axis(array["cols"]):
             x, y = cx + dx, cy + dy
             shapes.insert(kdb.Box(x - half, y - half, x + half, y + half))
+
+
+def _create_placed_sub_cell(
+    layout: Any,
+    block: dict[str, Any],
+    block_id: str,
+    src_cell_name: str,
+    warnings: list[str],
+) -> Any:
+    """Create the composed sub-cell for ``block`` and record its actual name.
+
+    blocks[].placed_cell_name (#4246) overrides the "<id>__<cell>" convention.
+    create_cell() applies KLayout's native "$n" suffix on a real collision
+    (another block, or the top cell); the name actually used is recorded on the
+    block for the response echo, and a collision adds a warning.
+    """
+    requested_name = block.get("placed_cell_name")
+    sub_cell = layout.create_cell(requested_name or f"{block_id}__{src_cell_name}")
+    block["placed_cell_name_actual"] = sub_cell.name
+    if requested_name and sub_cell.name != requested_name:
+        warnings.append(
+            f"block '{block_id}' requested placed_cell_name "
+            f"'{requested_name}' but it collides with an existing cell; "
+            f"placed as '{sub_cell.name}'"
+        )
+    return sub_cell
 
 
 def _write_composed_gds(
@@ -4857,7 +4905,9 @@ def _write_composed_gds(
                 f"'{src_cell_name}' (from its {_block_cell_name_source(block)})"
             )
 
-        sub_cell = layout.create_cell(f"{block_id}__{src_cell_name}")
+        sub_cell = _create_placed_sub_cell(
+            layout, block, block_id, src_cell_name, dbu_rescale_warnings
+        )
         sub_cell.copy_tree(src_cell)
 
         offset = offsets_um[block_id]

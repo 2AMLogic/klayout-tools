@@ -226,7 +226,8 @@ written to every block.
    `met` verdict from `klt signoff` is still not evidence that the gaps were
    disclosed. A reviewer must read the reported `coverage` against the claim
    themselves.
-4. **LVS clean** — latest LVS report `status: match`, fresh, engine named,
+4. **LVS clean** — latest LVS report (or, per cell, a list of reports — all must
+   pass) `status: match`, fresh, engine named,
    checked against the netlist from item 1 (schematic netlist for analog,
    synthesized/routed gate-level netlist for digital), **and that same
    report's `power_connectivity.status` not `"mismatch"`**. Those are two
@@ -298,7 +299,10 @@ written to every block.
      plus an explicit per-corner timing-margin metric measured directly in
      that same sweep — a SPICE-measured analog of STA setup/hold margin,
      e.g. a derived arrival-time-vs-required-time delta recorded per PVT
-     point — as the full-custom substitute for the STA requirement above.
+     point — as the full-custom substitute for the STA requirement above (`klt
+     signoff` grades it via a `timing_margin` spec row, see
+     [`docs/cli/signoff.md`](cli/signoff.md), "Full-custom digital needs a
+     measured timing margin").
      The machine-checkable evidence for the RTL-flow artifacts is a `klt
      sta` JSON report run across the declared corner set (`pdk.corners`,
      `docs/cli/sta.md`) and a `klt functional-verification` JSON report
@@ -494,7 +498,10 @@ written to every block.
       4's power/ground verdict having actually run. Concretely: the `klt
       place-and-route` response's `power.pdn` is `true` with a
       `power.tapcell_master` named (`docs/cli/place-and-route.md` → "Power
-      delivery"), every `power.straps[].layer` is covered by the cited
+      delivery") — or, for a library documented tapless (`sg13g2_stdcell`),
+      `power.tapless: true` with the master `null`, which the citation
+      records (a null master without `tapless` is `no_tapcell_master`, not
+      `no_pdn`) — every `power.straps[].layer` is covered by the cited
       `klt erc` spec's own stackup, and that same LVS report's
       `power_connectivity.status` is `"match"` — `"unchecked"` does **not**
       satisfy this item, unlike item 4 itself, where it means "the question

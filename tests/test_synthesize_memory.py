@@ -87,6 +87,23 @@ def test_evidence_script_without_macros_is_unchanged():
     assert "-lib" not in text
 
 
+def test_evidence_script_loads_liberty_first_and_lists_library_cells():
+    lines = sm.memory_evidence_script_text(
+        sources=["/a/x.v"],
+        hdl_toplevel="top",
+        blackbox_list_path="/o/bb.txt",
+        elaborated_stats_path="/o/e.json",
+        pre_lowering_stats_path="/o/p.json",
+        liberty_path="/l/x.lib",
+        library_cells_path="/o/lib.txt",
+    ).splitlines()
+    assert lines[:3] == [
+        "read_liberty -lib /l/x.lib",
+        "tee -q -o /o/lib.txt select -list =A:blackbox",
+        "read_verilog /a/x.v",
+    ]
+
+
 def test_evidence_script_carries_arithmetic_techmap_before_synth():
     lines = sm.memory_evidence_script_text(
         sources=["/a/x.v"],
