@@ -4,6 +4,25 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-27
 
+- **PR #4415**: feat: add place-and-route --resume to reuse committed stage artifacts
+- **PR #4413**: feat: record klt git commit and reinstall spec in report provenance
+- **PR #4407**: fix: reject device params that depend on a call-overridden subckt header parameter
+- **PR #4398**: feat: pin gf180mcu LVS runset in PINNED_RUNSETS
+- **PR #4387**: feat(pex): add --tie-declared-pins and record PDK root in pex response
+- **PR #4386**: feat(erc): disclose substrate continuity not modelled for multi-supply specs
+- **PR #4360**: feat: add klt formal verb for SymbiYosys property checking
+- **PR #4327**: feat: add --allow-unevaluated-expr flag to klt netlist
+- **PR #4253**: feat: add --tile abutment context to klt drc
+- **Issue #4412** (closed): Friction: development-version klt builds cannot be pinned with uvx --from ==
+- **Issue #4411** (closed): Friction: no resume after the place-and-route route stage; a late crash loses the whole run
+- **Issue #4406** (closed): klt lvs: subckt-call converter does not evaluate a subcircuit-parameter multiplier (m={SCALE}), silently compares it as 1
+- **Issue #4405** (closed): Record first post-merge cache hit/miss timings for ASAP7 klayout .deb cache (#4392)
+- **Issue #4395** (closed): Follow-on from PR #4322: pin the gf180mcu LVS runset digest (and live-verify klayout-runset on npn13G2)
+- **Issue #4384** (closed): klt erc: supply nets joined only through the substrate are reported as separate clean islands
+- **Issue #4383** (closed): pex: cannot bind an extracted DUT whose declared pins merge into one net; model_mismatch misparses parameter expressions
+- **Issue #4358** (closed): No formal-verification verb: SymbiYosys flow and mapped-netlist loading are hand-assembled
+- **Issue #4305** (closed): klt netlist: no opt-in to keep a netlist with unevaluated expr() for callers that resolve it downstream
+- **Issue #4226** (closed): klt drc: no way to check a tileable cell in abutment context (boundary-cut conductor flagged by width rules)
 - **PR #4378**: feat: select ERC well classes by cell name
 - **PR #4366**: fix: exclude and disclose well-layer LEF pins in lvs power_connectivity
 - **PR #4303**: feat(gen): esd_device voltage_flavor marker and total_width_um finger split
