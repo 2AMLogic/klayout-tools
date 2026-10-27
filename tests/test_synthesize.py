@@ -2581,6 +2581,23 @@ def test_sv2v_frontend_converts_once_and_records_provenance(tmp_path, monkeypatc
     }
 
 
+def test_sv2v_frontend_passes_defines_to_sv2v(tmp_path, monkeypatch):
+    """Review fix: sv2v preprocesses, so request defines must reach it."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _sv2v_request(tmp_path, request_path)
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["defines"] = {"B": "2", "A": None}
+    _write_request(Path(request_path), request)
+    log = _install_stub_sv2v(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    _route_sv2v_to_real_subprocess(monkeypatch)
+
+    run_synthesize(request_path)
+
+    args = log.read_text(encoding="utf-8").split()
+    assert args.index("--define=A") < args.index("--define=B=2")
+
+
 def test_default_frontend_has_no_sv_frontend_provenance(tmp_path, monkeypatch):
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_yosys_success(monkeypatch)

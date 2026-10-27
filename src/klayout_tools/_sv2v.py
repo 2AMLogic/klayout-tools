@@ -67,12 +67,17 @@ def convert_sources(
     sources: list[str],
     output_path: str,
     error: Callable[[str], Exception],
+    defines: dict[str, str | None] | None = None,
 ) -> tuple[str, str]:
     """Convert ``sources`` (``.v``/``.sv``/``.svh`` mix) with one ``sv2v`` call
     into ``output_path``. Returns ``(output_path, sv2v_version_text)``.
 
     Each source's directory is passed as an include directory so ``.svh``
     includes resolve as they would for the native front end.
+
+    ``defines`` are passed as ``--define=NAME[=VALUE]`` in sorted-name order:
+    sv2v runs the preprocessor itself, so the later ``read_verilog -D`` sees
+    already-preprocessed text and could not apply them.
     """
     exe = _find_sv2v(error)
     version = sv2v_version(exe, error)
@@ -86,6 +91,9 @@ def convert_sources(
     cmd = [exe]
     for directory in include_dirs:
         cmd.append(f"--incdir={directory}")
+    for name in sorted(defines or {}):
+        value = (defines or {})[name]
+        cmd.append(f"--define={name}" if value is None else f"--define={name}={value}")
     cmd += ["-w", output_path, *inputs]
     try:
         proc = subprocess.run(

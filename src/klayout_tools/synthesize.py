@@ -1179,6 +1179,7 @@ def run_synthesize(
             resolved_sources,
             os.path.join(output_dir, f"{hdl_toplevel}_sv2v.v"),
             SynthesizeError,
+            defines,
         )
         elab_sources = [converted_path]
         provenance["sv_frontend"] = {
