@@ -132,6 +132,21 @@ ARG DEBIAN_FRONTEND=noninteractive
 # libraries are xschem's link-time dependencies; it still netlists headlessly
 # (`xschem -q -n -x`), no display and no Xvfb required. zstd is what ciel
 # unpacks its `.tar.zst` PDK release assets with.
+ARG IVERILOG_APT_PACKAGE
+ARG IVERILOG_MIN_MAJOR
+RUN set -euo pipefail; \
+    : "${IVERILOG_APT_PACKAGE:?build with docker/eda-sim/build.sh -- pins come from pdk-versions.json}"; \
+    : "${IVERILOG_MIN_MAJOR:?build with docker/eda-sim/build.sh -- pins come from pdk-versions.json}"; \
+    apt-get update -qq \
+    && apt-get install -y --no-install-recommends "${IVERILOG_APT_PACKAGE}" \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*; \
+    major="$(iverilog -V 2>&1 | sed -n 's/.*version \([0-9][0-9]*\)\..*/\1/p' | head -n 1)"; \
+    if [[ -z "${major}" || "${major}" -lt "${IVERILOG_MIN_MAJOR}" ]]; then \
+        echo "FAIL: iverilog >= ${IVERILOG_MIN_MAJOR} required, found: ${major:-unparseable}" >&2; exit 1; \
+    fi; \
+    command -v vvp >/dev/null
+
 RUN apt-get update -qq \
     && apt-get install -y --no-install-recommends \
         libcairo2 \

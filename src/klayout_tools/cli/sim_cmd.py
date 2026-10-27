@@ -132,6 +132,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             submit_only=getattr(args, "submit_only", False),
             attach_job_id=getattr(args, "attach_job_id", None),
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
+            command_approvals=getattr(args, "command_approvals", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -152,8 +153,13 @@ def _run_sweep(args: argparse.Namespace) -> int:
         emit_success(report, args.format, _print_dry_run_text)
         return EXIT_PASS
 
-    deck_mode = report.get("mode") == "decks"
-    emit_success(report, args.format, _print_deck_text if deck_mode else _print_text)
+    deck_mode = report.get("mode") in ("decks", "commands")
+    printer = _print_text
+    if report.get("mode") == "decks":
+        printer = _print_deck_text
+    elif report.get("mode") == "commands":
+        printer = _print_commands_text
+    emit_success(report, args.format, printer)
     return _exit_code_for(report, deck_mode)
 
 
@@ -445,6 +451,33 @@ def _print_worker_pdk(report: dict) -> None:
     pdk = worker.get("pdk")
     if isinstance(pdk, dict):
         print(f"models_staged: {str(pdk.get('models_staged') is True).lower()}")
+
+
+def _print_commands_text(report: dict) -> None:
+    """Text courtesy rendering for a command-list report (issue #4443)."""
+    print(f"mode: {report['mode']}")
+    print(f"status: {report['status']}")
+    print(
+        f"units: {report['unit_count']}  passed: {report['passed']}  "
+        f"errored: {report['errored']}  timed_out: {report['timed_out']}"
+    )
+    print(f"outdir: {report['outdir']}")
+    remote = report["environment"].get("remote")
+    if remote:
+        print(
+            f"remote: {remote.get('provider', 'remote')} "
+            f"job {remote.get('job_id', '-')}"
+        )
+    for unit in report["units"]:
+        exit_desc = "-" if unit["exit_code"] is None else str(unit["exit_code"])
+        print(f"  {unit['id']} [{unit['status']}] exit={exit_desc}  {unit['stdout']}")
+        for diagnostic in unit["diagnostics"]:
+            print(
+                f"    diagnostic: {diagnostic['severity']} "
+                f"{diagnostic['code']} - {diagnostic['message']}"
+            )
+        if unit["missing_outputs"]:
+            print(f"    missing outputs: {', '.join(unit['missing_outputs'])}")
 
 
 def _print_deck_text(report: dict) -> None:

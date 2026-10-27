@@ -102,7 +102,18 @@
         "to `ng-spice-rework/old-releases/<version>/` -- adjust `url_template`."
       ]
     },
-    "xschem": {
+    "iverilog": {
+    "apt_package": "iverilog",
+    "min_major": 11,
+    "_comment": [
+      "Icarus Verilog (iverilog + vvp) for `klt sim` command-list requests",
+      "(issue #4443): a digital RTL testbench is carried to the batch fleet as",
+      "an operator-approved `iverilog`/`vvp` step. Installed from apt -- the",
+      "distro package is current enough -- and `min_major` is the floor the",
+      "image asserts at build time and smoke.sh re-asserts at run time."
+    ]
+  },
+  "xschem": {
       "tag": "3.4.7",
       "commit": "92dd8fe5f4d5c1057489710d8a22f18fdc9d7ed0",
       "repo": "https://github.com/StefanSchippers/xschem",
