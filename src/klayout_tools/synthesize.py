@@ -205,6 +205,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import uuid
 from typing import Any
 
@@ -3075,6 +3076,35 @@ def _read_sta_timing(
     in ``place_and_route_power_audit.py``, not a fixed vocabulary a consumer
     would have to exhaustively match.
     """
+    if _netlist_is_hierarchical(netlist_path):
+        # Issue #4224: the native engine reads only the ``top`` module's
+        # text and treats every instance as a liberty cell, so a user
+        # sub-module instance is a "not found in liberty" failure. Analyze a
+        # throwaway flattened copy; the committed netlist stays hierarchical.
+        with tempfile.TemporaryDirectory(prefix="klt_sta_flat_") as scratch:
+            try:
+                flat_path = _flatten_netlist_for_sta(
+                    netlist_path, liberty_path, hdl_toplevel, scratch
+                )
+            except SynthesizeError as exc:
+                if not _statime_native_is_importable():
+                    return None, STA_UNAVAILABLE_EXTENSION_NOT_INSTALLED
+                return None, (
+                    "the netlist is hierarchical (more than one module) and "
+                    f"could not be flattened for the klt_statime_native engine: "
+                    f"{exc} -- `klt sta` with a `verilog` request links and "
+                    "flattens the hierarchy itself"
+                )
+            return _read_sta_timing_flat(flat_path, liberty_path, hdl_toplevel)
+    return _read_sta_timing_flat(netlist_path, liberty_path, hdl_toplevel)
+
+
+def _read_sta_timing_flat(
+    netlist_path: str, liberty_path: str, hdl_toplevel: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The un-flattening half of :func:`_read_sta_timing`: one
+    ``compute_critical_path`` call with ``StaError`` shaped into the
+    ``sta_unavailable_reason`` text."""
     try:
         return compute_critical_path(netlist_path, liberty_path, hdl_toplevel), None
     except StaError as exc:
@@ -3084,6 +3114,46 @@ def _read_sta_timing(
             "the klt_statime_native engine could not analyze this "
             f"netlist/liberty pair: {exc}"
         )
+
+
+_NETLIST_MODULE_RE = re.compile(r"^\s*module\s+(\\\S+|[A-Za-z_][\w$]*)", re.MULTILINE)
+
+
+def _netlist_is_hierarchical(netlist_path: str) -> bool:
+    """Whether the netlist file defines more than one distinct module
+    (issue #4224). A cheap text check; an unreadable file is not
+    hierarchical, leaving the error to the engine call as before."""
+    try:
+        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return False
+    return len(set(_NETLIST_MODULE_RE.findall(text))) > 1
+
+
+def _flatten_netlist_for_sta(
+    netlist_path: str, liberty_path: str, hdl_toplevel: str, scratch_dir: str
+) -> str:
+    """Write a flattened copy of ``netlist_path`` into ``scratch_dir`` with
+    Yosys and return its path (issue #4224). ``read_liberty -lib`` runs
+    first so mapped-cell instances resolve (see
+    :func:`_baseline_metrics_from_netlist`). Raises :class:`SynthesizeError`
+    on any Yosys failure or a missing output."""
+    script_path = os.path.join(scratch_dir, f"{hdl_toplevel}_sta_flatten.ys")
+    flat_path = os.path.join(scratch_dir, f"{hdl_toplevel}_sta_flat.v")
+    script_lines = [
+        f"read_liberty -lib {liberty_path}",
+        f"read_verilog {netlist_path}",
+        f"hierarchy -check -top {hdl_toplevel}",
+        "flatten",
+        f"write_verilog -noattr {flat_path}",
+    ]
+    with open(script_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(script_lines) + "\n")
+    _run_yosys(script_path)
+    if not os.path.isfile(flat_path):
+        raise SynthesizeError("yosys did not write the flattened netlist")
+    return flat_path
 
 
 def _leakage_unit_scale_to_nw(unit_text: str | None) -> float:
