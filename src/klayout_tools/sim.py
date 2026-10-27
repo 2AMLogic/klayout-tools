@@ -9797,6 +9797,9 @@ def _run_corner(
         )
     else:
         output_tail = _engine_abort_tail(stderr_text, stdout_text, log_text)
+        log_error = _engine_log_error(log_text)
+        if log_error and log_error not in output_tail:
+            output_tail = f"{log_error}\n{output_tail}" if output_tail else log_error
         tail_suffix = f"; last output:\n{output_tail}" if output_tail else ""
         if engine_killed_by_signal is not None:
             diagnostics.append(
@@ -10159,6 +10162,24 @@ def _engine_abort_tail(*sources: str) -> str:
         lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
         if lines:
             return "\n".join(lines[-_ENGINE_TAIL_LINES:])
+    return ""
+
+
+def _engine_log_error(log_text: str) -> str:
+    """The first ``ERROR:``/``Error:`` line of the engine log plus its indented
+    continuation lines, or ``""`` when the log has none (issue #4218). Keeps an
+    unclassified abort's message from showing only the stdout banner."""
+    lines = log_text.splitlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(("ERROR:", "Error:")):
+            out = [line.rstrip()]
+            if (
+                i + 1 < len(lines)
+                and lines[i + 1][:1].isspace()
+                and lines[i + 1].strip()
+            ):
+                out.append(lines[i + 1].rstrip())
+            return "\n".join(out)
     return ""
 
 
