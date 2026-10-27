@@ -298,4 +298,4 @@ def test_failing_cli_attest_writes_nothing(tmp_path):
 def test_inventory_items_unchanged_still_reject_item2():
     with pytest.raises(AttestationError):
         build_attestation(2, "nonexistent.json")
-    assert attest_module.ATTESTABLE_ITEMS == (1, 9, 10)
+    assert attest_module.ATTESTABLE_ITEMS == (1, 8, 9, 10)

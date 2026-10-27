@@ -313,7 +313,7 @@ def test_job_cmd_redirects_report_to_output_dir(tmp_path):
     assert '> "$EDA_OUTPUT_DIR/report.json"' in spec.cmd
     assert '"$EDA_INPUT_DIR/request.json"' in spec.cmd
     assert "--backend local-parallel --format json" in spec.cmd
-    assert "--outdir" not in spec.cmd
+    assert "--outdir" in spec.cmd  # engine logs always collected (#4369)
 
 
 def test_job_cmd_tees_stderr_into_outputs(tmp_path):
@@ -559,7 +559,7 @@ def test_job_cmd_physical_core_workers_expand_as_intended_in_a_shell(tmp_path):
         timeout_s=30.0,
         keep_artifacts=False,
     )
-    flag = spec.cmd.split("--format json", 1)[1].split(">", 1)[0].strip()
+    flag = spec.cmd.split("--format json", 1)[1].split("--outdir", 1)[0].strip()
     probe = f'printf "%s|" {flag}'
     with_cores = subprocess.run(
         ["sh", "-c", probe],
@@ -598,6 +598,18 @@ def test_job_cmd_points_outdir_into_output_dir_when_keeping_artifacts(tmp_path):
     assert spec.cmd.index("--outdir") < spec.cmd.index(
         '> "$EDA_OUTPUT_DIR/report.json"'
     )
+
+
+def test_job_cmd_collects_engine_logs_without_keep_artifacts(tmp_path):
+    """Issue #4369: the log must be collected so a deck abort is diagnosable."""
+    spec = sb._build_batch_job_spec(
+        {"models": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    assert '--outdir "$EDA_OUTPUT_DIR/artifacts"' in spec.cmd
 
 
 def test_job_json_omits_unset_optional_fields(tmp_path):
@@ -5902,6 +5914,46 @@ def test_exit_4_batch_job_surfaces_generic_fatal_from_retrieved_log(
     assert "wall-clock" in diagnostics[1]["message"]
 
 
+def test_batch_job_surfaces_model_bin_range_without_keep_artifacts(
+    tmp_path, monkeypatch
+):
+    """Issue #4369: `could not find a valid modelname` reaches the errored
+    corner without `keep_artifacts`, and nothing is installed for the caller."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    remote_log = "/var/tmp/eda-job-1/outputs/artifacts/tt_1.800_27/ngspice.log"
+    runner.outputs = {
+        "report.json": _errored_report_without_include_code(remote_log),
+        "artifacts/tt_1.800_27/ngspice.log": (
+            "Circuit: * deck\n"
+            "Error on line 570 : m.x1.m0 d g s b nfet_03v3 w=1.28e-4 l=2.8e-7\n"
+            "Error: could not find a valid modelname\n"
+        ),
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    artifacts_dir = tmp_path / "caller-artifacts"
+
+    corners, _, _ = sb._run_batch_job(
+        config=_config(tmp_path),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(artifacts_dir),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+
+    diagnostics = corners[0]["diagnostics"]
+    assert [d["code"] for d in diagnostics] == ["measurement", "model_bin_range"]
+    assert "valid modelname" in diagnostics[1]["message"]
+    assert not list(artifacts_dir.rglob("*.log"))
+
+
 def test_report_already_carrying_missing_include_is_not_duplicated(
     tmp_path, monkeypatch
 ):
@@ -6224,6 +6276,21 @@ def test_request_features_detect_the_released_fields():
     ]
     plain = {"corners": {"process": [{"name": "b", "sections": ["a"]}]}}
     assert sb._request_features(plain) == []
+
+
+def test_request_features_detect_the_v080_fields():
+    """#4212: both first shipped in v0.8.0; an empty value is not a use."""
+    request = {
+        "options": {"ngspice_options": {"reltol": 1e-4}},
+        "corners": {"params": {"names": ["w"], "rows": [[1]]}},
+    }
+    assert sorted(sb._request_features(request)) == [
+        "corners.params",
+        "options.ngspice_options",
+    ]
+    assert sb._request_features({"options": {"ngspice_options": {}}}) == []
+    for key in ("corners.params", "options.ngspice_options"):
+        assert sb.REQUEST_FEATURE_MIN_RUNNER_VERSION[key] == "0.8.0"
 
 
 def test_prelaunch_warn_returns_one_diagnostic_naming_every_field(
@@ -7956,6 +8023,62 @@ def test_capacity_watch_throttles_to_the_heartbeat_interval():
     assert "(last refusal: batch_no_capacity)" in lines[0]
 
 
+def test_capacity_watch_progress_line_counts_rate_and_eta():
+    now = [0.0]
+    lines: list[str] = []
+    watch = sb._CapacityWatch(4, monotonic=lambda: now[0], emit=lines.append)
+
+    watch.phase(0, "submitted")  # still pending: counts unchanged, no line
+    watch.phase(0, "launching")
+    assert lines == [
+        "klt sim: shards 0/4 launched, 1 launching, 3 pending, "
+        "0 collected; launch rate unknown, ETA unknown"
+    ]
+    now[0] += sb.BATCH_HEARTBEAT_INTERVAL_S
+    watch.phase(0, "launched")  # first launch: no rate yet
+    assert "1/4 launched" in lines[-1] and "ETA unknown" in lines[-1]
+    watch.phase(1, "launching")  # inside the interval: suppressed
+    assert len(lines) == 2
+    now[0] += 60.0
+    watch.phase(1, "launched")  # suppressed again (interval not elapsed)
+    now[0] += sb.BATCH_HEARTBEAT_INTERVAL_S
+    watch.phase(2, "launching")
+    assert "2/4 launched" in lines[-1]
+    assert "launch rate 0.2/min" in lines[-1]
+    assert "ETA 12m" in lines[-1]
+
+
+def test_capacity_watch_progress_final_line_and_refusal_rollback():
+    now = [0.0]
+    lines: list[str] = []
+    watch = sb._CapacityWatch(2, monotonic=lambda: now[0], emit=lines.append)
+    watch.phase(0, "launching")
+    now[0] += sb.BATCH_HEARTBEAT_INTERVAL_S
+    watch.phase(0, "launch_refused")  # back to pending
+    assert "0 launching, 2 pending" in lines[-1]
+    for i in (0, 1):
+        watch.phase(i, "launching")
+        watch.phase(i, "launched")
+    assert "2/2 launched, 0 launching, 0 pending" in lines[-1]
+    count = len(lines)
+    watch.finished(0)  # throttled, final already printed
+    assert len(lines) == count
+
+
+def test_capacity_watch_progress_seeded_and_single_shard_silent():
+    lines: list[str] = []
+    watch = sb._CapacityWatch(3, emit=lines.append)
+    watch.seed(0, "collected")
+    watch.seed(1, "launched")
+    watch.phase(2, "launching")
+    assert "1 launching, 0 pending, 1 collected" in lines[-1]
+    quiet: list[str] = []
+    one = sb._CapacityWatch(1, emit=quiet.append)
+    one.phase(0, "launching")
+    one.phase(0, "launched")
+    assert quiet == []
+
+
 def test_models_pdk_root_local_directory_is_refused(tmp_path):
     request = _lib_request(
         tmp_path, models={"pdk": "gf180mcuD", "pdk_root": str(tmp_path)}
@@ -8026,6 +8149,18 @@ def test_request_without_corners_params_runs_on_a_0_7_0_runner(tmp_path):
     proc, _, marker = _run_job_cmd_with_fake_klt(tmp_path, spec, _fake_klt("klt 0.7.0"))
     assert proc.returncode == 0, proc.stderr
     assert marker.exists()
+
+
+def test_corner_axis_fields_are_registry_features():
+    request = {"corners": {"units": {"vdd": "V"}, "temperature_param": "temp_c"}}
+    assert sorted(sb._request_features(request)) == [
+        "corners.temperature_param",
+        "corners.units",
+    ]
+    for name in ("corners.units", "corners.temperature_param"):
+        assert sb._missing_runner_features([name], "0.7.0") == [name]
+        assert sb._missing_runner_features([name], "0.8.0") == []
+        assert sb._missing_runner_features([name], None) is None
 
 
 def test_expr_no_value_offhost_carries_runner_hint():

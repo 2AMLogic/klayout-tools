@@ -425,6 +425,21 @@ draws that the spec never declared" below.
     `roles` on the same entry (there is otherwise no remainder for it to
     narrow, and the declaration would read as honoured while doing
     nothing); `null` or `[]` is the undeclared form.
+  - `unlabelled_allow_device_connected` (boolean, optional, default `false`,
+    issue #4374) — when `true`, unlabelled clusters on the owned `roles`
+    that drive a gate (`kind: "device_connected"`, e.g. an internal signal
+    net named by no pin) do not gate `erc.unlabelled_conductor`;
+    `floating` clusters (stray supply fragments, dead metal) still do. The
+    excused clusters count in `nets[].unlabelled_allowed_islands` and are
+    echoed in `provenance.net_exclusions` (`allow_device_connected: true`,
+    `excluded_device_connected_islands`); the raw `unlabelled_*` values stay
+    raw. "Drives a gate" means the cluster has geometry on the gate role
+    (`stackup[0]`): the ERC connectivity graph registers no extracted
+    devices (`devices[]` only cuts device bodies out of conductors), so it
+    needs no `devices[]` and works identically with it omitted. Requires a
+    non-empty `roles` on the same entry; a non-boolean is a spec error.
+    Composes with `unlabelled_allowed_boxes` (a cluster excused by either
+    is excused).
   - Omitted entirely -> `erc.unconnected_net`/`erc.multiply_driven_net`/
     `erc.supply_short`/`erc.expected_short_missing`/
     `erc.unlabelled_conductor` are never computed.
@@ -1810,7 +1825,12 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   this finding. Legitimate unlabelled conductor on an owned role is
   declared away with `nets[].unlabelled_allowed_boxes` — see "Measuring the
   unlabelled remainder" below for the escape hatch and the decision behind
-  gating it at all.
+  gating it at all. Since issue #4374 the finding carries `islands[]`: one
+  entry per surviving (post-carve-out) unlabelled cluster, in the
+  `erc.unconnected_net` entry shape (`bbox`, `layer`, `shape_count`) plus
+  `kind` — `"device_connected"` (the cluster drives a gate) or `"floating"`
+  — so the reporter can locate each island without rebuilding connectivity.
+  `nets[].unlabelled_allow_device_connected` excuses the former.
 - **`erc.missing_tie`** — for every physically distinct well/tub shape
   (one per merged polygon of a `ties[]` entry's `well_layer` — narrowed to
   the shapes its class selection keeps —

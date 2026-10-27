@@ -4,6 +4,69 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-27
 
+- **PR #4379**: fix: always collect batch engine logs so deck aborts surface without keep_artifacts
+- **PR #4307**: fix: drop split_cuts from gf180mcu_7t_6M PDN preset
+- **PR #4258**: feat: flag corners.units and corners.temperature_param against older batch runners
+- **PR #4195**: feat: export resolved PDK to xschem env and report it in unresolved_symbol errors
+- **PR #4317**: feat: add measurements[].eye eye/phase-fold measurement to klt sim
+- **PR #4266**: feat: union Liberty table templates when merging cell-group files
+- **PR #4365**: fix(lvs): word body_unverified warning by cause
+- **PR #4265**: feat: add blocks[].placed_cell_name to set composed sub-cell names
+- **PR #4326**: feat(signoff): require measured timing margin for sim-only digital item 5
+- **PR #4332**: feat(gf180mcu): transcribe eFuse EF.14/EF.17/EF.20 DRC rules, disclose the rest
+- **PR #4248**: fix: select a PDK variant that ships the requested cell library by default
+- **PR #4260**: feat: read_liberty -lib the cell library so RTL can instantiate library cells without a stub
+- **PR #4328**: refactor: collapse three identical count validators into _count_from
+- **PR #4343**: feat(lvs): expand capacitor instance multiplier m into parallel C cards
+- **PR #4297**: feat(drc): enforce sky130 difftap.3 and poly.2 spacing, disclose omitted spacing rules
+- **PR #4239**: feat: warn on case-colliding net names in extract and explain lvs net.merged
+- **PR #4350**: feat(place-and-route): report placed bbox of named instance groups
+- **PR #4364**: feat(signoff): accept per-cell klt lvs report lists for T1 item 4
+- **PR #4222**: feat: require core_margin_um for utilization floorplans and name the container mount rule in hints
+- **PR #4228**: feat: add opt-in sv2v front end for klt synthesize
+- **PR #4264**: feat: report per-check klt build drift in signoff; document non-supply ERC ties
+- **PR #4357**: feat: add --skip-deck PDK-less cheap mode to klt synthesize --check
+- **PR #2645**: feat(synthesize,sta,place-and-route): shared request.macros hard-macro declaration
+- **PR #4306**: feat(sim): surface batch job progress in --job-status and flag never-started --attach jobs
+- **PR #4336**: fix(sim): quote the engine log's ERROR line in engine_aborted messages
+- **PR #4333**: docs: add SymbiYosys property-checking guide, out of scope for klt
+- **PR #4304**: feat(place-and-route): accept library.antenna_diode null to skip antenna repair
+- **PR #4325**: feat: add --equiv-engine to klt synthesize for sequential equivalence gating
+- **PR #4281**: feat(synthesize): add ASAP7 RVT tie cells to _TIE_CELLS
+- **PR #4261**: feat: name unrecovered non-87 batch job failures in diagnostics
+- **PR #4270**: fix: name klt gen PCell child cell <cell_name>__core
+- **PR #4243**: fix: flatten hierarchical netlists for the native STA stage
+- **Issue #4389** (closed): test_synthesize: two macro/liberty tests fail on main (read_liberty -lib emitted)
+- **Issue #4369** (closed): klt sim batch: gf180mcuD binned nfet_03v3 passes locally but fails 'could not find a valid modelname' on the fleet; no model-closure parity signal
+- **Issue #4215** (closed): klt sim batch: corners.units is silently ignored by an older runner and a default corner runs
+- **Issue #4186** (closed): klt netlist: --pdk/--pdk-root are not exported to xschem, so a project xschemrc cannot find PDK symbols from them
+- **Issue #4292** (closed): klt sim: built-in eye / phase-fold measurement (height, width, best phase)
+- **Issue #4242** (closed): pdk: Liberty cell-group list-merge refuses headers that differ in table templates (ASAP7 RVT groups)
+- **Issue #4361** (closed): Friction: lvs body_unverified blames missing tap geometry when the tap-connected net is merely unlabeled
+- **Issue #4246** (closed): gen-compose: composed sub-block cells are always renamed <id>__<cell>; no way to keep source cell names
+- **Issue #4314** (closed): signoff: full-custom digital item 5 accepts a sim sweep without checking the per-corner timing-margin metric
+- **Issue #4316** (closed): gf180mcu deck: transcribe DRM eFuse EF.* DRC rules (split from #4312)
+- **Issue #4204** (closed): klt synthesize: PDK auto-resolution ignores the request's cell_library
+- **Issue #4205** (closed): synthesize: RTL that instantiates a library standard cell by name fails unless the user hand-writes a blackbox stub
+- **Issue #4216** (closed): Dedupe three identical count validators in yield_analysis.py
+- **Issue #4318** (closed): lvs: reference.form subckt-call refuses a sky130 MIM capacitor card with m>1
+- **Issue #4282** (closed): Friction: curated sky130 DRC deck has no diff/tap or poly spacing rule, reports clean, and 'klt deck info' does not list them as not enforced
+- **Issue #4200** (closed): extract/lvs: flat extraction of composed sibling cells collapses same-named internal nets on read-back, reported as net.merged with no pointer to the cause
+- **Issue #4344** (closed): place-and-route: no placement grouping/region control, and no response check that a named instance set stayed together
+- **Issue #4354** (closed): signoff: item 4 accepts one lvs report per partition; a list is invalid_evidence
+- **Issue #4198** (closed): synthesize: no supported route for SystemVerilog that Yosys' native -sv front end cannot parse (follow-up to #4181)
+- **Issue #4223** (closed): Committed DRC/LVS verdicts are not checked against the klt build that produced them; erc tie class cannot express a well tied to a non-supply net
+- **Issue #4315** (closed): synthesize --check: PDK-less cheap mode that skips liberty resolution
+- **Issue #2635** (closed): synthesize / sta / place-and-route: no way to declare a hard macro (LEF + liberty + GDS) in any request schema
+- **Issue #4291** (closed): klt sim batch: job-status simulated-time progress and never-launched --attach diagnostic
+- **Issue #4218** (closed): klt sim: ngspice's 99-call par() limit surfaces as a bare engine_aborted
+- **Issue #4321** (closed): No provisioned flow for SymbiYosys property checks: sby helper names and SMT solver missing in the YoWASP install
+- **Issue #4274** (closed): place-and-route: a library with no antenna cell and no antenna data in its LEF cannot reach route
+- **Issue #4310** (closed): synthesize: --verify-equivalence is combinational-only and cannot select klt equiv's yosys-sequential engine
+- **Issue #4273** (closed): synthesize: no tie-cell entry for ASAP7, so constants stay bare literals that place-and-route cannot route
+- **Issue #4217** (closed): klt sim batch: expr-only measurements with process bundles exit 2 with no diagnostic on the 0.7.0 runner
+- **Issue #4251** (closed): gen mos_array: child cell is always named mos_array, so separate outputs collide when merged
+- **Issue #4224** (closed): synthesize: integrated sta cannot analyse a hierarchical netlist (sub-module reported as missing liberty cell)
 - **Issue #4276** (closed): klt sta (verilog mode): netlist path in generated Tcl is repo-root-relative, so run fails unless cwd is repo root
 - **PR #4278**: test(sta): pin verilog-mode Tcl as cwd-independent
 - **Issue #4313** (closed): synthesize: report records no hash of the derived netlist, so --check cannot tie a committed gate-level netlist to its run
