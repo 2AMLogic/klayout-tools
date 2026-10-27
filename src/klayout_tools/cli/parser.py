@@ -2794,6 +2794,22 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--tie-declared-pins",
+        dest="tie_declared_pins",
+        action="store_true",
+        default=False,
+        help=(
+            "alias a net matching 2+ declared --pins/--def-pins names back to every "
+            "declared pin (issue #4383): the net is renamed to its first declared "
+            "name and the other declared names are added to the .SUBCKT header as "
+            "ports tied to it by a 1 micro-ohm resistor, so the extracted pin list "
+            "matches the schematic's. Each tie is reported in the additive pin_ties "
+            "response field and a declared_pin_short warning stays. Implies "
+            "--rename-declared-pins; requires --pins or --def-pins. Off by default "
+            "-- byte-identical to today's behavior."
+        ),
+    )
+    extract_parser.add_argument(
         "--pin-source-cells",
         dest="pin_source_cells",
         default=None,
@@ -3369,6 +3385,20 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "--measure-command replaces the testbench set with a "
             "caller-supplied command run once per side (issue #2478). "
             "See docs/cli/pex.md for the request/response contract."
+        ),
+    )
+    pex_parser.add_argument(
+        "--tie-declared-pins",
+        dest="tie_declared_pins",
+        action="store_true",
+        default=False,
+        help=(
+            "passed through to `klt extract --tie-declared-pins` (issue #4383): "
+            "declared pins that extraction joins into one net (e.g. ground and "
+            "body) are tied back to every declared name so the extracted .SUBCKT "
+            "keeps the schematic's pin count. Requires --pins. Off by default -- "
+            "byte-identical to today's behavior. Echoed as "
+            "`extraction.tie_declared_pins`."
         ),
     )
     pex_parser.add_argument("layout", help="path to a GDSII or OASIS layout file")
