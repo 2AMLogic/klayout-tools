@@ -296,6 +296,12 @@ _SUBCKT_RE = re.compile(r"^\s*\.subckt\s+(?P<body>\S.*?)\s*$", re.IGNORECASE)
 #: ``delta[]`` row met its tolerance). See :func:`_body_bias_report`.
 BODY_BIAS_BIASED = "biased"
 BODY_BIAS_UNBIASED = "unbiased"
+#: Issue #4245: every reported-unbiased net was merged into a schematic net by
+#: a caller's ``--tie-net`` declaration. Deliberately not ``"biased"``: that
+#: means the *layout* drew the bias path.
+BODY_BIAS_TIED = "tied"
+#: ``body_bias.tied[].source`` for a ``--tie-net`` tie.
+TIE_SOURCE_DECLARED = "declared"
 
 #: Issue #2478: ``measurement.mode`` values -- how this run's two legs were
 #: measured.
@@ -351,7 +357,10 @@ class PexError(Exception):
         self.code = code
 
 
-def _body_bias_report(extract_report: Mapping[str, Any]) -> dict[str, Any]:
+def _body_bias_report(
+    extract_report: Mapping[str, Any],
+    ties: Sequence[tuple[str, str]] | None = None,
+) -> dict[str, Any]:
     """The ``body_bias`` block (issue #1983): whether the extracted netlist
     this run re-simulated actually has a DC bias path for every device body.
 
@@ -390,12 +399,92 @@ def _body_bias_report(extract_report: Mapping[str, Any]) -> dict[str, Any]:
     re-spelled, so a reader who knows one artifact already knows the other.
     """
     entries = list(extract_report.get("unbiased_pmos_body_nets") or [])
-    return {
+    unbiased_nets = sorted({entry["net"] for entry in entries})
+    report: dict[str, Any] = {
         "status": BODY_BIAS_UNBIASED if entries else BODY_BIAS_BIASED,
         "unbiased_device_count": len(entries),
-        "unbiased_nets": sorted({entry["net"] for entry in entries}),
+        "unbiased_nets": unbiased_nets,
         "unbiased_pmos_body_nets": entries,
     }
+    if ties:
+        # Issue #4245: additive. `unbiased_*` above keep reporting what the
+        # layout drew; the caller's declared ties are stated beside them, so
+        # "tied by declaration" never reads as a drawn tap.
+        report["tied"] = [
+            {
+                "extracted_net": extracted,
+                "schematic_net": schematic,
+                "source": TIE_SOURCE_DECLARED,
+            }
+            for extracted, schematic in ties
+        ]
+        if {extracted for extracted, _ in ties} >= set(unbiased_nets):
+            report["status"] = BODY_BIAS_TIED
+    return report
+
+
+def _validate_tie_nets(
+    ties: Sequence[tuple[str, str]], extract_report: Mapping[str, Any]
+) -> None:
+    """Reject a ``--tie-net`` whose extracted half is not one of the
+    extraction's own unbiased nets (issue #4245), naming the valid ones.
+
+    Confining the flag to reported floating bodies stops it rewriting
+    arbitrary nets of the extracted netlist.
+    """
+    valid = sorted(
+        {e["net"] for e in extract_report.get("unbiased_pmos_body_nets") or []}
+    )
+    for extracted, _schematic in ties:
+        if extracted not in valid:
+            listing = (
+                ", ".join(repr(net) for net in valid)
+                if valid
+                else "none -- this extraction reported no unbiased net"
+            )
+            raise PexError(
+                f"--tie-net: {extracted!r} is not an unbiased well/body net of "
+                f"this extraction (valid: {listing}). Anonymous net names are "
+                "synthesized per extraction; read them from "
+                "`body_bias.unbiased_nets` of an untied run.",
+                code="invalid_tie_net",
+            )
+
+
+def _apply_tie_nets(netlist_path: str, ties: Sequence[tuple[str, str]]) -> None:
+    """Merge each tied extracted net into its schematic net, in place, in
+    ``netlist_path`` (issue #4245).
+
+    Only whole whitespace-delimited tokens on device/instance cards are
+    rewritten (never comments, directives or ``name=value`` parameters), and
+    all ties are applied in one pass so a chain such as ``a=b`` / ``b=c``
+    cannot cascade.
+    """
+    mapping = dict(ties)
+    pattern = re.compile(
+        r"(?<!\S)(" + "|".join(re.escape(n) for n in mapping) + r")(?!\S)"
+    )
+    with open(netlist_path, encoding="utf-8", newline="") as handle:
+        lines = handle.read().splitlines(keepends=True)
+    seen: set[str] = set()
+
+    def swap(match: re.Match[str]) -> str:
+        seen.add(match.group(1))
+        return mapping[match.group(1)]
+
+    out = [
+        line if line.lstrip().startswith(("*", ".")) else pattern.sub(swap, line)
+        for line in lines
+    ]
+    missing = [net for net in mapping if net not in seen]
+    if missing:
+        raise PexError(
+            f"--tie-net: {missing[0]!r} does not appear on any device card of "
+            f"the extracted netlist {netlist_path}",
+            code="invalid_tie_net",
+        )
+    with open(netlist_path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("".join(out))
 
 
 def _parasitic_integrity_report(
@@ -2674,6 +2763,7 @@ def run_pex(
     declared_pins: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
+    tie_nets: Sequence[tuple[str, str]] | None = None,
     critical_nets: Sequence[str] | None = None,
     critical_net_patterns: Sequence[str] | None = None,
     critical_net_all: bool = False,
@@ -3036,6 +3126,16 @@ def run_pex(
         rename_declared_pins=rename_declared_pins,
         label_layers=label_layers,
     )
+
+    # Issue #4245: `--tie-net` merges reported-unbiased body nets into
+    # schematic nets in the netlist every simulated leg below reads. Checked
+    # against the extraction first, applied before any simulation; `None`
+    # leaves the netlist (and the whole report) untouched.
+    if tie_nets:
+        _validate_tie_nets(tie_nets, extract_report)
+        _apply_tie_nets(extracted_netlist_path, tie_nets)
+        if device_only_netlist_path is not None:
+            _apply_tie_nets(device_only_netlist_path, tie_nets)
 
     work_dir = (
         os.path.abspath(artifacts_dir)
@@ -3545,7 +3645,7 @@ def run_pex(
         # Reported beside `status`, never folded into it -- see
         # `_body_bias_report` for why an item-7 citation needs this in the
         # artifact it cites, and why this command does not grade on it.
-        "body_bias": _body_bias_report(extract_report),
+        "body_bias": _body_bias_report(extract_report, tie_nets),
         # Additive field (issue #2478): how this run's two legs were
         # measured, always present so a reader of a committed record never
         # has to infer it from the presence/absence of `testbenches[]`.

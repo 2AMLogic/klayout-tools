@@ -3610,6 +3610,26 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--tie-net",
+        dest="tie_nets",
+        action="append",
+        default=None,
+        metavar="EXTRACTED_NET=SCHEMATIC_NET",
+        help=(
+            "merge one reported-unbiased well/body net of the extracted "
+            "netlist into a schematic net (issue #4245), as "
+            "EXTRACTED_NET=SCHEMATIC_NET, before the extracted leg is "
+            "simulated; repeatable. EXTRACTED_NET must be one of the "
+            "report's `body_bias.unbiased_nets` (anonymous names such as "
+            "`\\$5`, valid for one extraction only); any other name is an "
+            "error that lists the valid ones. Each tie is stated in "
+            '`body_bias.tied[]` with `source: "declared"`, and a run whose '
+            "every unbiased net is tied reports `body_bias.status: "
+            '"tied"` (never `biased`). Omitted by default -- '
+            "byte-identical to today's behavior. See docs/cli/pex.md."
+        ),
+    )
+    pex_parser.add_argument(
         "--critical-net",
         dest="critical_nets",
         action="append",

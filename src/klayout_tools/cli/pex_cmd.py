@@ -33,7 +33,12 @@ import sys
 from ..env_provenance import render_path_field
 from ..output_lock import OutputLockError
 from ..pex import PexError, run_pex
-from ._parsing import parse_deck_options, parse_declared_pins, parse_label_layers
+from ._parsing import (
+    parse_deck_options,
+    parse_declared_pins,
+    parse_label_layers,
+    parse_tie_nets,
+)
 
 # Issue #2686: the same one-line `label_layers:` text rendering `klt extract`
 # prints for its own echo, reused rather than copied.
@@ -57,6 +62,9 @@ def run(args: argparse.Namespace) -> int:
         # --label-layer` uses (issue #2656), bound to `PexError`. Role names
         # are validated by the deck during extraction, not here.
         label_layers = parse_label_layers(args.label_layers, PexError)
+        # `--tie-net` (issue #4245): `EXTRACTED=SCHEMATIC` pairs; whether the
+        # extracted half is a reported unbiased net is checked by `run_pex`.
+        tie_nets = parse_tie_nets(args.tie_nets, PexError)
         # `--measure-command` (issue #2478): one shell-quoted string on the
         # command line, an argv *list* everywhere below -- `shlex.split`
         # here is the only place the string form exists. The command is
@@ -96,6 +104,10 @@ def run(args: argparse.Namespace) -> int:
             # was never given, unchanged from every call site that predates
             # it.
             label_layers=label_layers,
+            # `--tie-net` (issue #4245): merges reported-unbiased body nets
+            # into schematic nets in the simulated extracted netlist. `None`
+            # when the flag was never given, unchanged from before it.
+            tie_nets=tie_nets,
             # `--critical-net` (issue #976, Epic #709 Phase 2a): scopes the
             # lateral coupling pass onto these net names. `None` when the
             # flag was never given, unchanged from every call site that
