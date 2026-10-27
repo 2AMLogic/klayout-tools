@@ -5564,7 +5564,7 @@ def test_check_synthesize_report_clean_pass(tmp_path, monkeypatch):
     assert result["mode"] == "check"
     assert result["report"] == report_path
     assert result["status"] == "match"
-    assert len(result["checks"]) == 4
+    assert len(result["checks"]) == 5
     assert all(check["match"] for check in result["checks"])
     defines = [c for c in result["checks"] if c["field"] == "defines"]
     assert len(defines) == 1 and defines[0]["match"] is True
@@ -5621,6 +5621,94 @@ def test_check_synthesize_report_missing_hash_is_never_a_false_pass(
     by_field = {check["field"]: check for check in result["checks"]}
     assert by_field["provenance.input.content_hash"]["expected"] is None
     assert by_field["provenance.input.content_hash"]["match"] is False
+
+
+def _committed_netlist_report(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report = run_synthesize(request_path)
+    report_path = _write_report(tmp_path / "gcd.synth.json", report)
+    return request_path, report, report_path
+
+
+def test_check_synthesize_report_detects_edited_netlist(tmp_path, monkeypatch):
+    """Issue #4313: one gate flipped in a copy of the committed netlist is
+    `drifted` on `netlist_sha256`; the unmodified copy matches."""
+    request_path, report, report_path = _committed_netlist_report(tmp_path, monkeypatch)
+    good = tmp_path / "good.v"
+    good.write_bytes(Path(_abs_path(report["netlist_path"], tmp_path)).read_bytes())
+    bad = tmp_path / "bad.v"
+    bad.write_text(good.read_text(encoding="utf-8") + "// one gate flipped\n")
+
+    ok = synthesize.check_synthesize_report(
+        report_path, request_path, netlist_override=str(good)
+    )
+    assert ok["status"] == "match"
+
+    drifted = synthesize.check_synthesize_report(
+        report_path, request_path, netlist_override=str(bad)
+    )
+    assert drifted["status"] == "drifted"
+    by_field = {c["field"]: c for c in drifted["checks"]}
+    assert by_field["netlist_sha256"]["match"] is False
+    assert by_field["provenance.input.content_hash"]["match"] is True
+
+
+def test_check_synthesize_report_netlist_sha256_missing_baseline(tmp_path, monkeypatch):
+    request_path, report, _ = _committed_netlist_report(tmp_path, monkeypatch)
+    del report["netlist_sha256"]
+    report_path = _write_report(tmp_path / "old.synth.json", report)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["netlist_sha256"]["expected"] is None
+    assert by_field["netlist_sha256"]["match"] is False
+    assert result["status"] == "drifted"
+
+
+def test_check_synthesize_report_netlist_unlocatable_is_not_skipped(
+    tmp_path, monkeypatch
+):
+    request_path, report, _ = _committed_netlist_report(tmp_path, monkeypatch)
+    report["netlist_path"] = {"path": None, "scope": "external"}
+    report_path = _write_report(tmp_path / "ext.synth.json", report)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["netlist_sha256"]["actual"] is None
+    assert by_field["netlist_sha256"]["match"] is False
+
+    missing = synthesize.check_synthesize_report(
+        report_path, request_path, netlist_override=str(tmp_path / "nope.v")
+    )
+    by_field = {c["field"]: c for c in missing["checks"]}
+    assert by_field["netlist_sha256"]["actual"] is None
+    assert by_field["netlist_sha256"]["match"] is False
+
+
+def test_cli_synthesize_check_netlist_flag_exits_three_on_edit(
+    tmp_path, monkeypatch, capsys
+):
+    request_path, _, report_path = _committed_netlist_report(tmp_path, monkeypatch)
+    bad = tmp_path / "bad.v"
+    bad.write_text("module gcd(); endmodule\n", encoding="utf-8")
+
+    code = main(
+        [
+            "synthesize",
+            request_path,
+            "--check",
+            report_path,
+            "--netlist",
+            str(bad),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert code == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "drifted"
 
 
 def test_check_synthesize_report_missing_file_raises(tmp_path, monkeypatch):

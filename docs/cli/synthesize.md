@@ -1647,6 +1647,19 @@ as `{}`), so the same sources elaborated with different overrides report
 request's `defines` (issue #4196): a changed, added or removed define reports
 `drifted`.
 
+A fifth check, `netlist_sha256` (issue #4313), re-hashes the committed
+gate-level netlist (SHA-256 of its bytes, bare lowercase hex) and compares it
+with the report's recorded top-level `netlist_sha256`, so a hand-edited or
+stale-after-resynthesis netlist reports `drifted` with no Yosys and no extra
+tooling. The file is `--netlist FILE` when given (it always wins); otherwise
+the report's own `netlist_path`, resolved from this checkout when it is
+`scope: "repo"`. A netlist that cannot be located (`external`/`absent` path,
+missing file) or a report with no recorded `netlist_sha256` renders
+`match: false` (`actual: null` for the former) — never silently skipped. This
+proves the committed bytes are the ones the report recorded; it does **not**
+prove those bytes are what Yosys would produce from the sources today — that
+is `--rerun`.
+
 `status` is `"match"` only when every `checks[]` entry matches. A recorded
 hash that is itself `null` (a report predating the field) always renders
 `match: false` — a missing baseline is never a pass.

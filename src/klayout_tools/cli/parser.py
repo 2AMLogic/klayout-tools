@@ -4452,6 +4452,17 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
         engine="Yosys",
         docs="docs/cli/synthesize.md",
     )
+    synthesize_parser.add_argument(
+        "--netlist",
+        metavar="FILE",
+        default=None,
+        help=(
+            "with --check (cheap mode): the committed gate-level netlist to "
+            "re-hash against the report's recorded `netlist_sha256`. Always "
+            "wins over the report's own `netlist_path`; without it that path "
+            "is used when it is repo-scoped. See docs/cli/synthesize.md."
+        ),
+    )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
 
