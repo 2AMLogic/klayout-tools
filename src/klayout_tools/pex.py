@@ -2579,6 +2579,7 @@ def _extract_device_only_leg(
     declared_pins: Any,
     rename_declared_pins: bool,
     label_layers: Any,
+    device_models: Any = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """The parasitic-free leg's netlist path and its parity against the
     parasitic extraction (issue #3298), or ``(None, None)`` without
@@ -2602,6 +2603,7 @@ def _extract_device_only_leg(
             declared_pins=declared_pins,
             rename_declared_pins=rename_declared_pins,
             label_layers=label_layers,
+            device_models=device_models,
         )
     except ExtractError as exc:
         raise PexError(f"device-only extraction failed: {exc}") from exc
@@ -2674,6 +2676,7 @@ def run_pex(
     declared_pins: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
+    device_models: Mapping[str, str] | None = None,
     critical_nets: Sequence[str] | None = None,
     critical_net_patterns: Sequence[str] | None = None,
     critical_net_all: bool = False,
@@ -2981,6 +2984,7 @@ def run_pex(
             # Issue #2686: `--label-layer` passthrough. `None` when the flag
             # was never given -- the exact `run_extract` call made before it.
             label_layers=label_layers,
+            device_models=device_models,
             critical_nets=critical_nets,
             critical_net_patterns=critical_net_patterns,
             critical_net_all=critical_net_all,
@@ -3035,6 +3039,7 @@ def run_pex(
         declared_pins=declared_pins,
         rename_declared_pins=rename_declared_pins,
         label_layers=label_layers,
+        device_models=device_models,
     )
 
     work_dir = (
@@ -3506,6 +3511,9 @@ def run_pex(
             # `--label-layer` mapping as `{role: [layer, datatype] | null}`,
             # or `None` when the flag was never given.
             "label_layers": extract_report.get("label_layers"),
+            # Additive field (issue #4234): `klt extract`'s `device_models`
+            # echo -- the applied `--device-model` mapping, or `None`.
+            "device_models": extract_report.get("device_models"),
             # Additive field (issue #2854): echoes the effective
             # `--rename-declared-pins` value back -- `False` when the flag
             # was never given, byte-identical to before this feature

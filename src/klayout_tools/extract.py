@@ -1438,6 +1438,7 @@ def run_extract(
     apply_resistor_fixed_offset: bool = True,
     deck_options: Mapping[str, str] | None = None,
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
+    device_models: Mapping[str, str] | None = None,
     abstract_cell_patterns: tuple[str, ...] = (),
     abstract_cell_lef_paths: tuple[str, ...] = (),
     mom_net: str | None = None,
@@ -2779,6 +2780,8 @@ def run_extract(
     # see `klayout_tools.pdk_models`). Drives the `X`-card model-binding writer
     # below -- see the module docstring's "--pdk-triggered model binding" note.
     model_bindings: dict[str, DeviceBinding] | None = None
+    if device_models and pdk_variant is None and pdk_root is None:
+        raise ExtractError("--device-model requires --pdk or --pdk-root")
     if pdk_variant is not None or pdk_root is not None:
         try:
             pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
@@ -2795,7 +2798,10 @@ def run_extract(
             raise ExtractError(str(exc)) from exc
         try:
             model_bindings = resolve_device_bindings(
-                deck_name, pdk_info["variant"], deck_for_models
+                deck_name,
+                pdk_info["variant"],
+                deck_for_models,
+                device_models=device_models,
             )
         except ModelBindingError as exc:
             raise ExtractError(str(exc)) from exc
@@ -3999,6 +4005,12 @@ def run_extract(
         # report replays the same purposes instead of drifting on every net
         # name at once. See run_extract's `label_layers` docstring paragraph.
         "label_layers": _describe_label_layers(label_layers),
+        # Additive field (issue #4234): `null` unless `device_models`
+        # (--device-model) was given, otherwise the caller's own
+        # `{class: subckt}` binding for a device class with no curated PDK
+        # model (e.g. gf180mcu's `bjt`), echoed so a committed report records
+        # which model the bipolar card was written against.
+        "device_models": dict(sorted(device_models.items())) if device_models else None,
         # Additive field (issue #2986): one entry per `--probe`, in request
         # order; always present, `[]` when none was given. `net`/`cluster_id`
         # are the final `nets[].name`/`nets[].net_id` of the net under the
