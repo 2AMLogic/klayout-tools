@@ -19,6 +19,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   envelope, byte-identical to `--format json` stdout and written for clean and
   violating (exit `3`) runs alike; `.gz` paths are gzip-compressed. Stdout and
   exit codes are unchanged; reachable from a request document as `output`.
+- **ASAP7 deck no longer aborts on LIG near unconnected LISD/SDT** (issue
+  #4340). The LIG.LISD.S.6 / LIG.SDT.S.8 / LIG.LISD.S.7 net separation
+  tripped a KLayout 0.28 assertion on tie and tap cells whose LIG sat within
+  the search distance of a LISD/SDT with no pair closer than the rule, leaving
+  a partial report. An empty plain separation now short-circuits the
+  net-aware call; the rules are still declared, so coverage is unchanged.
+  `provenance.deck` (sha256) changes.
 - **`klt place-and-route` rejects unknown top-level request keys** (issue
   #4230, documented in [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)):
   a misspelt or foreign key now exits 1 naming the key instead of being
