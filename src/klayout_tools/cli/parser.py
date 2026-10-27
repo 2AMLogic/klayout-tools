@@ -9,6 +9,7 @@ import argparse
 import sys
 
 from .. import arith_gen, artifact_store, netlist, netlist_batch, pdk_stackup, pex
+from ..equiv import SUPPORTED_ENGINES as SUPPORTED_EQUIV_ENGINES
 from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
@@ -4498,6 +4499,19 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
             "equivalence` proof (default: klt equiv's own 60s default); "
             "has no effect unless `--verify-equivalence` is given. Also "
             "bounds the `klt equiv` check `--restructure-timing` runs."
+        ),
+    )
+    synthesize_parser.add_argument(
+        "--equiv-engine",
+        dest="equiv_engine",
+        choices=list(SUPPORTED_EQUIV_ENGINES),
+        default=None,
+        help=(
+            "`klt equiv` proof engine for the `--verify-equivalence` gate "
+            "(default: klt equiv's own default, `yosys`, combinational "
+            "only); pass `yosys-sequential` for designs with flip-flops. "
+            "Has no effect unless `--verify-equivalence` is given. Must be "
+            "re-passed with `--check --rerun`, like `--equiv-timeout-s`."
         ),
     )
     synthesize_parser.add_argument(

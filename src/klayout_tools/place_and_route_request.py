@@ -1676,8 +1676,13 @@ def _validate_library_route_layers(raw: Any) -> str:
     return f"{low}-{high}"
 
 
-def _validate_library_antenna_diode(raw: Any) -> tuple[str, str]:
+def _validate_library_antenna_diode(raw: Any) -> tuple[str, str] | None:
+    """``None`` (JSON ``null``) states the library has no antenna diode:
+    the ``route`` stage skips ``repair_antennas`` (issue #4274); an object
+    names the diode cell and pin."""
     where = "request.library.antenna_diode"
+    if raw is None:
+        return None
     obj = _library_object(raw, where, ("cell", "pin"))
     for key in ("cell", "pin"):
         if key not in obj:
@@ -1745,7 +1750,8 @@ def _validate_library(library: Any) -> dict[str, Any] | None:
     generated script byte-identical. Returns only the keys that were given:
     ``cts_buffer`` (str), ``power_pins`` (list of ``(net_role, pattern,
     primary)``), ``wire_rc`` (``(resistance, capacitance)``),
-    ``route_layers`` (``"low-high"``), ``antenna_diode`` (``(cell, pin)``),
+    ``route_layers`` (``"low-high"``), ``antenna_diode`` (``(cell, pin)``, or ``None`` =
+    the library has no antenna diode, so no antenna repair; issue #4274),
     ``tapcell`` (``(tap, endcap, distance_um)``, all ``None`` = the library
     has no tap cells) and ``filler`` (tuple of masters; issue #4127).
     """

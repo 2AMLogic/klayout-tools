@@ -581,6 +581,19 @@ _DONT_USE_PATTERN_RE = re.compile(r"^[A-Za-z0-9_.*?!\[\]-]+$")
 #:   (``function : "0"``, ``driver_type : open_source``). Same
 #:   two-distinct-cells shape as gf180mcu, not sky130's single dual-output
 #:   cell -- this library has no ``conb``-equivalent either.
+#: - ``asap7sc7p5t_rvt`` and ``asap7sc7p5t_28_R`` (issue #4273) -> two
+#:   distinct cells, ``TIEHIx1_ASAP7_75t_R`` port ``H`` and
+#:   ``TIELOx1_ASAP7_75t_R`` port ``L``. Both keys name the same RVT
+#:   library: the first is its directory under a structurally discovered
+#:   lambdapdk tree (``libs/asap7sc7p5t_rvt``, which
+#:   :func:`~klayout_tools.pdk_cells.resolve_liberty_for_cell_library`
+#:   joins onto ``libs_ref``), the second is the key ``klt-pdk.json``
+#:   descriptors use for its liberty mapping (``docs/cli/pdk.md``).
+#:   Checked 2026-10-27 against lambdapdk 0.2.17: in
+#:   ``asap7sc7p5t_RVT_TT_merged.lib`` ``TIEHIx1_ASAP7_75t_R``'s only
+#:   output is ``H`` (``function "1"``) and ``TIELOx1_ASAP7_75t_R``'s is
+#:   ``L`` (``function "0"``); both are ``CLASS CORE`` in
+#:   ``asap7sc7p5t_28_R.lef``. Same two-distinct-cells shape as gf180mcu.
 #:
 #: **Deviation from ORFS: no ``-singleton``.** ORFS collapses every constant
 #: in the design onto one tie-hi and one tie-lo instance, then splits that
@@ -614,6 +627,14 @@ _TIE_CELLS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     "sg13g2_stdcell": (
         ("sg13g2_tiehi", "L_HI"),
         ("sg13g2_tielo", "L_LO"),
+    ),
+    "asap7sc7p5t_rvt": (
+        ("TIEHIx1_ASAP7_75t_R", "H"),
+        ("TIELOx1_ASAP7_75t_R", "L"),
+    ),
+    "asap7sc7p5t_28_R": (
+        ("TIEHIx1_ASAP7_75t_R", "H"),
+        ("TIELOx1_ASAP7_75t_R", "L"),
     ),
 }
 
@@ -990,6 +1011,7 @@ def run_synthesize(
     pdk_root: str | None = None,
     verify_equivalence: bool = False,
     equiv_timeout_s: float | None = None,
+    equiv_engine: str | None = None,
     restructure_timing: bool = False,
     restructure_max_iterations: int | None = None,
     _scratch_run_dir: bool = False,
@@ -1016,15 +1038,19 @@ def run_synthesize(
     equivalent to the RTL that was fed into Yosys. A non-``"equivalent"``
     verdict (``"counterexample"`` or ``"inconclusive"``) -- or an
     :class:`~klayout_tools.equiv.EquivError`, e.g. a **sequential** design
-    (this MVP's ``klt equiv`` is combinational-only -- see
+    (the default ``yosys`` engine is combinational-only -- see
     ``docs/cli/equiv.md``'s "Scope" section; a design containing flip-flops/
-    latches/memories cannot use this flag today) -- is a hard
+    latches/memories needs ``equiv_engine="yosys-sequential"``) -- is a hard
     :class:`SynthesizeError`, never a silent warning: a synthesized netlist
     this gate cannot prove faithful to its own source RTL is not "done".
     ``equiv_timeout_s`` (the CLI's ``--equiv-timeout-s``) overrides ``klt
     equiv``'s own default proof timeout; ``None`` leaves
     :data:`klayout_tools.equiv.DEFAULT_TIMEOUT_S` in effect. It also bounds
     the ``klt equiv`` check ``restructure_timing`` runs, below.
+    ``equiv_engine`` (the CLI's ``--equiv-engine``) selects the ``klt equiv``
+    proof engine for the ``verify_equivalence`` gate only (``None`` keeps the
+    combinational ``yosys`` default; ``"yosys-sequential"`` handles
+    flip-flops); the ``restructure_timing`` check stays combinational.
 
     ``restructure_timing`` (the CLI's ``--restructure-timing`` flag; issue
     #926, Epic #704 Phase 3) runs a bounded cell-resizing loop
@@ -1322,6 +1348,7 @@ def run_synthesize(
             netlist_path=netlist_path,
             liberty_path=liberty_path,
             timeout_s=equiv_timeout_s,
+            engine=equiv_engine,
             parameters=parameters,
             defines=defines,
         )
@@ -1568,6 +1595,7 @@ def _verify_synthesis_equivalence(
     netlist_path: str,
     liberty_path: str,
     timeout_s: float | None,
+    engine: str | None = None,
     request_filename: str | None = None,
     parameters: dict[str, int | str] | None = None,
     defines: dict[str, str | None] | None = None,
@@ -1615,6 +1643,8 @@ def _verify_synthesis_equivalence(
             "liberty": liberty_path,
         },
     }
+    if engine is not None:
+        equiv_request["engine"] = engine
     if parameters:
         # Issue #3466: the gold RTL must be elaborated like the synthesis was.
         equiv_request["gold"]["parameters"] = dict(parameters)
@@ -3929,6 +3959,7 @@ def rerun_synthesize_report(
     pdk_root: str | None = None,
     verify_equivalence: bool = False,
     equiv_timeout_s: float | None = None,
+    equiv_engine: str | None = None,
     restructure_timing: bool = False,
     restructure_max_iterations: int | None = None,
 ) -> dict[str, Any]:
@@ -3950,7 +3981,8 @@ def rerun_synthesize_report(
     ``--rerun``: the optional flags (``--verify-equivalence``,
     ``--restructure-timing``, their tuning knobs) are not echoed anywhere in
     the response, so they cannot be recovered from ``report_path`` -- pass
-    the same ones again here (the CLI does) or the corresponding blocks
+    the same ones again here (the CLI does; that includes ``equiv_engine``,
+    whose choice shows up as ``equivalence.engine``) or the corresponding blocks
     legitimately drift. A request pinning an explicit ``run_id`` cannot be
     re-run at all: :func:`_create_run_directory` refuses to reuse a retained
     run directory, and that refusal (a :class:`SynthesizeError` naming the
@@ -3971,6 +4003,7 @@ def rerun_synthesize_report(
         pdk_root=pdk_root,
         verify_equivalence=verify_equivalence,
         equiv_timeout_s=equiv_timeout_s,
+        equiv_engine=equiv_engine,
         restructure_timing=restructure_timing,
         restructure_max_iterations=restructure_max_iterations,
         _scratch_run_dir=True,
