@@ -257,13 +257,13 @@ from typing import Any
 from . import env_provenance
 from . import macros as macro_spec
 from ._openroad_engine import (
-    _container_runtime_hint,
     _count_violations,
     _openroad_version,
     _OpenRoadResult,
     _run_openroad,
     _timing_status,
     _timing_violation_report_lines,
+    container_runtime_hint,
     write_sdf_line,
 )
 from ._paths import (
@@ -4109,7 +4109,7 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
     function's route-stage-only ``DRT-0305`` diagnosis, which cannot occur
     here -- this verb never runs TritonRoute).
 
-    :func:`~klayout_tools._openroad_engine._container_runtime_hint` is
+    :func:`~klayout_tools._openroad_engine.container_runtime_hint` is
     appended as a further ``--`` clause when the captured output shows the
     engine never really ran at all because its container runtime was
     unreachable (issue #2632) -- the same append-a-recognized-hint structure
@@ -4135,14 +4135,14 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
         snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
         message = f"openroad sta run exited with code {completed.returncode}: {snippet}"
 
-    hint = _container_runtime_hint(completed)
+    hint = container_runtime_hint(completed)
     if hint is not None:
         message = f"{message} -- {hint}"
     # Issue #2635: `ORD-2013` names the instance and the LEF master but
     # nothing about which request field would have supplied it -- the one
     # failure mode a caller with a hard macro and no `request.macros` entry
     # hits first. Appended as a further `--` clause, the same
-    # recognized-hint structure `_container_runtime_hint` above uses.
+    # recognized-hint structure `container_runtime_hint` above uses.
     macro_hint = macro_spec.missing_lef_master_hint(
         (completed.stdout or "") + "\n" + (completed.stderr or "")
     )

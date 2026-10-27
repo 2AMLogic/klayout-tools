@@ -34,7 +34,7 @@ import pytest
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import pdk as pdk_module
 from klayout_tools import post_route_sta
-from klayout_tools._openroad_engine import _container_runtime_hint
+from klayout_tools._openroad_engine import container_runtime_hint
 from klayout_tools.cli import main
 from klayout_tools.post_route_sta import PostRouteStaError, load_request, run_sta
 
@@ -2666,7 +2666,7 @@ def test_container_runtime_hint_recognizes_both_daemon_wordings(stderr):
     says the request was never analyzed -- the whole point of the
     distinction, since retrying the same request after starting the runtime
     is the correct response."""
-    hint = _container_runtime_hint(fake_completed(returncode=1, stderr=stderr))
+    hint = container_runtime_hint(fake_completed(returncode=1, stderr=stderr))
 
     assert hint is not None
     assert "container runtime" in hint
@@ -2678,7 +2678,7 @@ def test_container_runtime_hint_recognizes_both_daemon_wordings(stderr):
 def test_container_runtime_hint_recognizes_permission_denied():
     """The socket-permission case gets its own remedy -- starting the daemon
     would not help; the invoking user needs access to it."""
-    hint = _container_runtime_hint(
+    hint = container_runtime_hint(
         fake_completed(returncode=1, stderr=_DOCKER_PERMISSION_DENIED)
     )
 
@@ -2692,7 +2692,7 @@ def test_container_runtime_hint_reads_stdout_too():
     """Detection is stream-agnostic: a wrapper that merges docker's message
     onto stdout is diagnosed the same way."""
     assert (
-        _container_runtime_hint(
+        container_runtime_hint(
             fake_completed(returncode=1, stdout=_DOCKER_CLASSIC_UNREACHABLE)
         )
         is not None
@@ -2704,7 +2704,7 @@ def test_container_runtime_hint_none_for_genuine_analysis_failure():
     be actively misleading -- it would tell a caller to go restart Docker
     when the actual problem is their design."""
     assert (
-        _container_runtime_hint(
+        container_runtime_hint(
             fake_completed(
                 returncode=1,
                 stdout=_GENUINE_STA_FAILURE_STDOUT,
@@ -2716,7 +2716,7 @@ def test_container_runtime_hint_none_for_genuine_analysis_failure():
 
 
 def test_container_runtime_hint_none_for_empty_output():
-    assert _container_runtime_hint(fake_completed(returncode=1)) is None
+    assert container_runtime_hint(fake_completed(returncode=1)) is None
 
 
 def test_engine_error_message_appends_container_runtime_hint():

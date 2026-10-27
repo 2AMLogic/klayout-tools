@@ -1382,6 +1382,59 @@ def _probe_engine_version(engine: str, binary: str) -> str | None:
     return match.group(1) if match else None
 
 
+#: Issue #4438: first ngspice major that loads an OSDI ABI newer than v0.3
+#: (OpenVAF-Reloaded modules); ngspice <= 43 hard-rejects anything but 0.3.
+OSDI_V04_MIN_NGSPICE_MAJOR = 44
+
+
+def _read_osdi_abi(path: str) -> tuple[int, int] | None:
+    """The ``(major, minor)`` OSDI ABI a compiled ``.osdi`` declares through
+    its exported ``OSDI_VERSION_MAJOR``/``OSDI_VERSION_MINOR`` symbols, or
+    ``None`` when it cannot be read (not loadable on this platform, symbols
+    absent) -- the caller then fails open."""
+    import ctypes
+
+    try:
+        lib = ctypes.CDLL(path)
+        major = ctypes.c_uint32.in_dll(lib, "OSDI_VERSION_MAJOR").value
+        minor = ctypes.c_uint32.in_dll(lib, "OSDI_VERSION_MINOR").value
+    except (OSError, ValueError, AttributeError):
+        return None
+    return major, minor
+
+
+def _check_local_osdi_abi(
+    osdi_preload: tuple[str, ...], backend: str, engine: str, binary: str
+) -> None:
+    """Refuse before any corner runs when a declared ``.osdi`` needs an ABI
+    newer than v0.3 and the local ngspice is older than 44 (issue #4438).
+    Fails open on every unknown (unreadable module, unparseable version); the
+    per-corner ``osdi_abi_mismatch`` log classifier stays as the backstop."""
+    if not osdi_preload or engine != "ngspice" or backend in _OFFHOST_BACKENDS:
+        return
+    found: str | None = None
+    probed = False
+    for path in osdi_preload:
+        abi = _read_osdi_abi(path)
+        if abi is None or abi <= (0, 3):
+            continue
+        if not probed:
+            found = _probe_engine_version(engine, binary)
+            probed = True
+        parsed = _version_components(found) if found else None
+        if parsed is None or parsed[0] >= OSDI_V04_MIN_NGSPICE_MAJOR:
+            return
+        raise SimError(
+            f"prerequisite missing: {os.path.basename(path)} targets OSDI "
+            f"v{abi[0]}.{abi[1]}, which needs ngspice >= "
+            f"{OSDI_V04_MIN_NGSPICE_MAJOR}, but the local ngspice is {found}; "
+            "run the corner with --backend batch (the fleet image carries a "
+            "new enough ngspice) or build/use an ngspice >= "
+            f"{OSDI_V04_MIN_NGSPICE_MAJOR}",
+            code="osdi_abi_mismatch",
+        )
+
+
 def _worker_ngspice_binary(remote: Any) -> str | None:
     """The worker-observed ngspice path out of ``environment.remote`` (issue
     #3110): ``worker_environment.simulator.selected_path`` when its capture is
@@ -3149,6 +3202,9 @@ def _prepare_sim_request(
     _check_local_engine_version_pin(
         engine_version_pin, backend, engine, ngspice_binary or XYCE_BINARY
     )
+    # Issue #4438: an OSDI ABI the local ngspice cannot load is refused up
+    # front rather than discovered inside ngspice, once per corner.
+    _check_local_osdi_abi(osdi_preload, backend, engine, ngspice_binary or XYCE_BINARY)
     # Issue #4046: a `models.pdk_version` pin is checked the same way, before
     # any corner runs; off-host backends reject it rather than pass silently.
     _check_pdk_version_pin(_validate_pdk_version_pin(models), models, backend)

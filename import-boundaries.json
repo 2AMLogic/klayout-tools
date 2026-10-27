@@ -2338,12 +2338,6 @@
       {
         "consumer": "klayout_tools.post_route_sta",
         "exporter": "klayout_tools._openroad_engine",
-        "symbol": "_container_runtime_hint",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.post_route_sta",
-        "exporter": "klayout_tools._openroad_engine",
         "symbol": "_count_violations",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
