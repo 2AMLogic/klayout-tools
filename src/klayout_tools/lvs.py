@@ -1551,14 +1551,18 @@ def run_lvs(
     # validated inside the resolver (both are specific to this one form, and
     # "neither was given" is its own error there), so this branch stays a
     # single call.
+    # Issue #4353: the resolved files are also echoed (`reference_conversion`)
+    # so `--rerun` is independent of the original request directory.
+    reference_pin_order_files: list[str] = []
     if reference_form == "gate-level-verilog":
+        reference_pin_order_files = _resolve_reference_pin_order_files(
+            reference_spec, request_dir
+        )
         resolved_pin_orders = _resolve_gate_level_pin_orders(
             reference_spec.get("library"),
             reference_spec.get("pdk"),
             reference_spec.get("pdk_root"),
-            pin_order_files=_resolve_reference_pin_order_files(
-                reference_spec, request_dir
-            ),
+            pin_order_files=reference_pin_order_files,
         )
         reference_pin_orders = resolved_pin_orders.pin_orders
         reference_pdk_info = resolved_pin_orders.pdk_info
@@ -2824,7 +2828,9 @@ def run_lvs(
         # replay a `reference.form: "subckt-call"` reference -- see
         # `_reference_conversion_echo`. Absent for every other form, so those
         # reports stay byte-identical to before.
-        **_reference_conversion_echo(reference_form, reference_spec),
+        **_reference_conversion_echo(
+            reference_form, reference_spec, reference_pin_order_files
+        ),
         # Issue #589: the effective `options.parameter_tolerance`, echoed so a
         # consumer reading only the response can tell whether a `"match"` was
         # reached under a caller-supplied design tolerance at all. `null` when
@@ -3314,8 +3320,8 @@ def _reconstruct_lvs_request(
     since ``committed["layout"]`` is actually a SPICE netlist, not a
     layout stream, in that case. A ``"subckt-call"`` reference is replayed
     from the report's ``reference_conversion`` echo (issue #2673; a report
-    committed before it existed stays best-effort), but a
-    ``"gate-level-verilog"`` ``reference.form``,
+    committed before it existed stays best-effort), as is a
+    ``"gate-level-verilog"`` reference (issue #4353), but
     ``reference.device_bulk``
     and ``layout.top_cell_pins``/``declared_pins``/``pin_source_cells``/
     ``rename_declared_pins`` are
@@ -3468,37 +3474,61 @@ def _combine_devices_max_attempts_replay_options(
 
 
 def _reference_conversion_echo(
-    reference_form: str, reference_spec: dict[str, Any]
+    reference_form: str,
+    reference_spec: dict[str, Any],
+    pin_order_files: list[str] | None = None,
 ) -> dict[str, Any]:
-    """``{"reference_conversion": {"form", "deck", "device_map"}}`` for a
-    ``subckt-call`` reference, else ``{}`` (issue #2673).
+    """``{"reference_conversion": {...}}`` for a ``subckt-call`` or
+    ``gate-level-verilog`` reference, else ``{}`` (issues #2673, #4353).
 
     The conversion is a function of the reference file *and* this context, so
     a report that records only the file cannot be replayed: ``--rerun`` would
-    re-read the simulation-form SPICE as plain-element and never rebuild the
-    proven placeholder exclusions. ``deck``/``device_map`` are echoed as the
-    caller gave them (``null`` when omitted).
+    re-read the simulation-form SPICE / structural Verilog as plain-element
+    SPICE. ``subckt-call`` echoes ``deck``/``device_map``; ``gate-level-
+    verilog`` echoes ``library``/``pdk``/``pdk_root`` and the *resolved*
+    ``pin_order_files`` (``null`` when omitted). Values are echoed as the
+    caller gave them.
     """
-    if reference_form != "subckt-call":
-        return {}
-    return {
-        "reference_conversion": {
-            "form": reference_form,
-            "deck": reference_spec.get("deck"),
-            "device_map": reference_spec.get("device_map"),
+    if reference_form == "subckt-call":
+        return {
+            "reference_conversion": {
+                "form": reference_form,
+                "deck": reference_spec.get("deck"),
+                "device_map": reference_spec.get("device_map"),
+            }
         }
-    }
+    if reference_form == "gate-level-verilog":
+        return {
+            "reference_conversion": {
+                "form": reference_form,
+                "library": reference_spec.get("library"),
+                "pdk": reference_spec.get("pdk"),
+                "pdk_root": reference_spec.get("pdk_root"),
+                "pin_order_files": list(pin_order_files) if pin_order_files else None,
+            }
+        }
+    return {}
 
 
 def _reference_conversion_replay(committed: dict[str, Any]) -> dict[str, Any]:
     """The ``request.reference`` keys that rebuild a committed report's
-    ``reference_conversion`` echo (issue #2673); ``{}`` for a report without
-    one (every non-``subckt-call`` report, and any committed before the echo
-    existed -- those stay best-effort, as documented)."""
+    ``reference_conversion`` echo (issues #2673, #4353); ``{}`` for a report
+    without one (every other form, and any committed before the echo existed
+    -- those stay best-effort, as documented)."""
     echoed = committed.get("reference_conversion")
-    if not isinstance(echoed, dict) or echoed.get("form") != "subckt-call":
+    if not isinstance(echoed, dict):
         return {}
-    spec: dict[str, Any] = {"form": "subckt-call"}
+    if echoed.get("form") == "gate-level-verilog":
+        spec: dict[str, Any] = {"form": "gate-level-verilog"}
+        for key in ("library", "pdk", "pdk_root"):
+            if echoed.get(key) is not None:
+                spec[key] = echoed[key]
+        if isinstance(echoed.get("pin_order_files"), list):
+            spec["pin_order_files"] = list(echoed["pin_order_files"])
+        return spec
+    if echoed.get("form") != "subckt-call":
+        return {}
+    spec = {"form": "subckt-call"}
     if echoed.get("deck") is not None:
         spec["deck"] = echoed["deck"]
     if isinstance(echoed.get("device_map"), dict):
@@ -3586,9 +3616,10 @@ def _run_reconstructed_lvs(request: dict[str, Any]) -> dict[str, Any]:
     """:func:`run_lvs` on a :func:`_reconstruct_lvs_request` result, adding
     ``--rerun`` context to a reference-netlist parse failure (issue #2250).
 
-    The reconstruction always omits ``reference.form`` (it is never echoed in
-    a report), so the reference is re-read as the default ``"plain-element"``
-    SPICE. When the original request used a non-default form (e.g. a
+    A report without a ``reference_conversion`` echo (committed before issues
+    #2673/#4353) reconstructs without ``reference.form``, so the reference is
+    re-read as the default ``"plain-element"`` SPICE. When the original
+    request used a non-default form (e.g. a
     ``"gate-level-verilog"`` ``.v`` reference), that read fails with the
     generic "could not parse reference netlist" error, which on its own does
     not point at the cause. The original form is unknowable from the report
