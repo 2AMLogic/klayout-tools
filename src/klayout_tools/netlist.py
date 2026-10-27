@@ -613,26 +613,37 @@ def _probe_xschem_version(xschem_binary: str) -> str | None:
     return match.group(0) if match else None
 
 
-def _check_no_unevaluated_expr(data: bytes, version: str | None) -> None:
-    """Fail when the netlist still holds a literal ``expr(...)`` (issue #3482).
+def _find_unevaluated_expr(data: bytes) -> tuple[int, str] | None:
+    """First ``(line, snippet)`` holding a literal ``expr(...)``, else ``None``.
 
-    xschem releases that do not evaluate a symbol's ``expr()`` attributes
-    still write a "fresh" ``.spice`` file, which ngspice then cannot load.
     Comment lines (``*``) are ignored, and ``\b`` keeps longer identifiers such
     as ``myexpr(`` from matching.
     """
     for number, line in enumerate(data.split(b"\n"), start=1):
         if line.lstrip().startswith(b"*") or not _UNEVALUATED_EXPR_RE.search(line):
             continue
-        snippet = line.decode("utf-8", errors="replace").strip()
-        raise NetlistError(
-            f"the netlist has an unevaluated expr(...) at line {number}: "
-            f"{snippet!r}. xschem version: {version or 'unknown'}; releases "
-            f"older than {MIN_EXPR_XSCHEM_VERSION} are reported not to "
-            "evaluate expr() (unverified). ngspice cannot load this netlist, "
-            "so none was written; use a newer xschem.",
-            code=UNEVALUATED_EXPR_CODE,
-        )
+        return number, line.decode("utf-8", errors="replace").strip()
+    return None
+
+
+def _check_no_unevaluated_expr(data: bytes, version: str | None) -> None:
+    """Fail when the netlist still holds a literal ``expr(...)`` (issue #3482).
+
+    xschem releases that do not evaluate a symbol's ``expr()`` attributes
+    still write a "fresh" ``.spice`` file, which ngspice then cannot load.
+    """
+    hit = _find_unevaluated_expr(data)
+    if hit is None:
+        return
+    number, snippet = hit
+    raise NetlistError(
+        f"the netlist has an unevaluated expr(...) at line {number}: "
+        f"{snippet!r}. xschem version: {version or 'unknown'}; releases "
+        f"older than {MIN_EXPR_XSCHEM_VERSION} are reported not to "
+        "evaluate expr() (unverified). ngspice cannot load this netlist, "
+        "so none was written; use a newer xschem.",
+        code=UNEVALUATED_EXPR_CODE,
+    )
 
 
 def _check_no_unresolved_symbol(data: bytes) -> None:
@@ -879,6 +890,7 @@ def run_netlist(
     pdk: str | None = None,
     pdk_root: str | None = None,
     block: bool = False,
+    allow_unevaluated_expr: bool = False,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -891,6 +903,10 @@ def run_netlist(
     #2680, edge 1): see :func:`_apply_block_mode`. The transform runs before
     ``check``'s comparison/diff and before the normal write, so both modes
     operate on the block-shaped netlist, not xschem's raw testbench export.
+
+    ``allow_unevaluated_expr=True`` downgrades the unevaluated-``expr()`` gate
+    (issue #4305) to a ``warnings`` entry in the payload, for callers that
+    evaluate ``expr()`` downstream; ``unresolved_symbol`` stays a failure.
 
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
@@ -934,7 +950,20 @@ def run_netlist(
             fresh_data, block_info = _apply_block_mode(fresh_data)
 
         version = _probe_xschem_version(xschem_binary)
-        _check_no_unevaluated_expr(fresh_data, version)
+        warnings: list[dict[str, Any]] = []
+        if allow_unevaluated_expr:
+            hit = _find_unevaluated_expr(fresh_data)
+            if hit is not None:
+                warnings.append(
+                    {
+                        "code": UNEVALUATED_EXPR_CODE,
+                        "line": hit[0],
+                        "snippet": hit[1],
+                        "xschem_version": version,
+                    }
+                )
+        else:
+            _check_no_unevaluated_expr(fresh_data, version)
         _check_no_unresolved_symbol(fresh_data)
 
         payload: dict[str, Any] = {
@@ -962,6 +991,8 @@ def run_netlist(
             payload["pdk"] = pdk_block
         if block_info is not None:
             payload["block"] = block_info
+        if warnings:
+            payload["warnings"] = warnings
 
         if check:
             status, drift = _check_result(output, fresh_data)
