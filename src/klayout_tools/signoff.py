@@ -5693,14 +5693,9 @@ def _bind_anchored_citation(
         _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE
     ):
         return None
-    input_verified = resolution.get("input_verified")
-    if input_verified is False:
-        return _REASON_STALE_EVIDENCE
-    if input_verified is not True:
-        return _REASON_UNVERIFIABLE_PROVENANCE
-    drift_refusal = _attested_checks_refusal(resolution, repo_root, execution_detail)
-    if drift_refusal is not None:
-        return drift_refusal
+    input_refusal = _anchored_input_refusal(resolution, repo_root, execution_detail)
+    if input_refusal is not None:
+        return input_refusal
     binding = _generic_artifact_binding(resolution["envelope"], resolution)
     if item_id in _ITEMS_ACCEPTING_REGENERATION_CLAIMS:
         regeneration, refusal = _regeneration_claim(
@@ -5728,6 +5723,22 @@ def _bind_anchored_citation(
             binding["regeneration"] = regeneration
     citation["artifact_binding"] = binding
     return None
+
+
+def _anchored_input_refusal(
+    resolution: Mapping[str, Any],
+    repo_root: str | Path | None,
+    detail: dict[str, Any] | None,
+) -> str | None:
+    """The refusing reason when an anchored citation's input did not re-hash
+    (stale or unverifiable) or an attested ``present`` file drifted (issue
+    #4197), else ``None``."""
+    input_verified = resolution.get("input_verified")
+    if input_verified is False:
+        return _REASON_STALE_EVIDENCE
+    if input_verified is not True:
+        return _REASON_UNVERIFIABLE_PROVENANCE
+    return _attested_checks_refusal(resolution, repo_root, detail)
 
 
 def _attested_check_members(
