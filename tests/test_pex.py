@@ -4997,6 +4997,51 @@ def test_cli_pex_label_layer_reaches_run_pex(tmp_path, resistor_layout, monkeypa
     assert captured["label_layers"] == {"metal0": (67, 10), "poly": None}
 
 
+def test_cli_pex_device_model_reaches_run_pex(tmp_path, resistor_layout, monkeypatch):
+    """`--device-model` is repeatable and a later CLASS wins (issue #4234);
+    omitting it passes `None`."""
+    captured = _fake_run_pex_capturing(monkeypatch)
+    argv = [
+        "pex",
+        resistor_layout,
+        str(tmp_path / "request.json"),
+        "--deck",
+        "gf180mcu",
+        "--format",
+        "json",
+    ]
+    assert main(argv) == 0
+    assert captured["device_models"] is None
+
+    assert (
+        main(
+            argv + ["--device-model", "bjt=a", "--device-model", "bjt=pnp_05p00x05p00"]
+        )
+        == 0
+    )
+    assert captured["device_models"] == {"bjt": "pnp_05p00x05p00"}
+
+
+def test_cli_pex_malformed_device_model_is_a_clean_error(
+    tmp_path, resistor_layout, monkeypatch
+):
+    _fake_run_pex_capturing(monkeypatch)
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(tmp_path / "request.json"),
+            "--deck",
+            "gf180mcu",
+            "--device-model",
+            "bjt",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+
+
 def test_cli_pex_omitting_label_layer_passes_none(
     tmp_path, resistor_layout, monkeypatch
 ):

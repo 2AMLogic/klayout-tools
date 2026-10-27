@@ -2874,6 +2874,26 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--device-model",
+        dest="device_models",
+        action="append",
+        default=None,
+        metavar="CLASS=SUBCKT",
+        help=(
+            "with --pdk/--pdk-root, write the bipolar device CLASS as an `X` "
+            "call to the named PDK subcircuit SUBCKT (issue #4234), "
+            "repeatable. For a bipolar class the deck recognises but has no "
+            "curated PDK binding for -- today gf180mcu's `bjt`, whose cell "
+            "name and polarity the tool cannot guess but the schematic "
+            "states. A CLASS the deck does not declare, or one that already "
+            "has a curated binding (sky130's `pnp`), is an error; curated "
+            "data is never overridden. Omitted by default -- output is "
+            "byte-identical to before this flag existed. The mapping is "
+            "echoed in the JSON response's `device_models` field. See "
+            "docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
         "--probe",
         dest="probes",
         action="append",
@@ -3609,6 +3629,25 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "error. Omitted by default -- byte-identical to today's "
             "behavior. The applied mapping is echoed in the JSON response's "
             "`extraction.label_layers`. See docs/cli/pex.md."
+        ),
+    )
+    pex_parser.add_argument(
+        "--device-model",
+        dest="device_models",
+        action="append",
+        default=None,
+        metavar="CLASS=SUBCKT",
+        help=(
+            "write the bipolar device CLASS as an `X` call to the named PDK "
+            "subcircuit SUBCKT (issue #4234), repeatable, passed through to "
+            "`klt extract --device-model`. Needed under --pdk for a deck "
+            "whose recognised bipolar has no curated PDK binding (gf180mcu's "
+            "`bjt`), which otherwise stays a bare `Q` card ngspice cannot "
+            "load. A CLASS the deck does not declare, or that already has a "
+            "curated binding, is an error. Omitted by default -- "
+            "byte-identical to today's behavior. The applied mapping is "
+            "echoed in the JSON response's `extraction.device_models`. See "
+            "docs/cli/pex.md."
         ),
     )
     pex_parser.add_argument(
