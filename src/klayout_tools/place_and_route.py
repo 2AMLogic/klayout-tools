@@ -44,6 +44,7 @@ from . import macros as macro_spec
 from . import output_lock
 from . import place_and_route_resume as _resume
 from ._openroad_engine import (
+    _container_runtime_hint,
     _count_violations,
     _openroad_version,
     _OpenRoadResult,
@@ -2729,6 +2730,7 @@ def _engine_error_message(
     streams = f"{completed.stdout or ''}\n{completed.stderr or ''}"
     hints = (
         _mount_namespace_hint(completed, pdk_info),
+        _container_runtime_hint(completed),
         macro_spec.missing_lef_master_hint(streams),
         slot_shortage_hint(streams, pin_constraints, top_ports),
     )

@@ -21,6 +21,7 @@ for the identical problem.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import uuid
@@ -171,28 +172,112 @@ def _container_runtime_hint(completed: _OpenRoadResult) -> str | None:
     that diagnosis means and what to do next. A caller that does not recognize
     either signature gets today's message byte-for-byte.
 
-    Deliberately **not** classified here: a ``docker`` binary missing from
-    ``$PATH`` after install, which surfaces as the wrapper's own bash
-    ``command not found`` (exit ``127``) -- a separable signature, left to a
-    follow-up rather than folded into an under-tested third branch.
+    Two further signatures are classified (issue #4440), the *environment*
+    failures a fleet worker hits when it cannot run OpenROAD at all:
+
+    - **Wrapper cannot find ``docker``** -- exit ``127`` plus a ``not found``
+      line naming ``docker`` (bash's ``command not found`` or sh's ``not
+      found``): the wrapper is installed but the container CLI is not.
+    - **Image missing** -- Docker's ``Unable to find image`` / ``pull access
+      denied`` / ``manifest unknown`` / ``No such image`` lines: the wrapper's
+      image was never pulled and cannot be.
+
+    When ``$KLT_SIM_BACKEND`` is ``batch`` (a dispatch host that is meant to
+    run OpenROAD on the fleet) the remedy names the fleet path instead of
+    local-install advice that cannot work on such a host.
     """
+    batch_host = os.environ.get(_BATCH_BACKEND_ENV) == "batch"
     for stream in (completed.stdout or "", completed.stderr or ""):
         for line in stream.splitlines():
             lowered = line.lower()
             if "permission denied" in lowered and "docker" in lowered:
+                remedy = (
+                    "this host runs OpenROAD on the batch fleet, not locally; "
+                    + _BATCH_REMEDY
+                    if batch_host
+                    else "grant it access (e.g. add the user to the 'docker' "
+                    "group, or use a rootless runtime), then retry"
+                )
                 return (
                     f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- this user is not "
-                    "permitted to reach the container runtime's socket; grant "
-                    "it access (e.g. add the user to the 'docker' group, or "
-                    "use a rootless runtime), then retry"
+                    f"permitted to reach the container runtime's socket; {remedy}"
                 )
             if _CONTAINER_RUNTIME_UNREACHABLE_RE.search(line):
+                remedy = (
+                    "this host runs OpenROAD on the batch fleet, not locally; "
+                    + _BATCH_REMEDY
+                    if batch_host
+                    else "verify the runtime is installed and its daemon is "
+                    "running ('docker info'), then retry; the request itself "
+                    "was never analyzed"
+                )
+                return f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- {remedy}"
+    if completed.returncode == 127:
+        for stream in (completed.stdout or "", completed.stderr or ""):
+            for line in stream.splitlines():
+                lowered = line.lower()
+                if "docker" in lowered and "not found" in lowered:
+                    return (
+                        f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- the wrapper ran "
+                        "but the 'docker' command is not installed or not on "
+                        f"PATH (exit 127); {_install_or_batch_remedy(batch_host)}"
+                    )
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in stream.splitlines():
+            lowered = line.lower()
+            if any(marker in lowered for marker in _IMAGE_MISSING_MARKERS):
                 return (
-                    f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- verify the runtime "
-                    "is installed and its daemon is running ('docker info'), "
-                    "then retry; the request itself was never analyzed"
+                    f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- the OpenROAD "
+                    "container image is not present and could not be pulled; "
+                    f"{_install_or_batch_remedy(batch_host, pull=True)}"
                 )
     return None
+
+
+#: Lowercased Docker lines meaning the wrapper's image is missing locally and
+#: cannot be fetched (issue #4440).
+#: ``klayout_tools.sim.BACKEND_ENV``, duplicated to avoid importing ``sim``.
+_BATCH_BACKEND_ENV = "KLT_SIM_BACKEND"
+
+_IMAGE_MISSING_MARKERS = (
+    "unable to find image",
+    "pull access denied",
+    "manifest unknown",
+    "no such image",
+)
+
+_BATCH_REMEDY = (
+    "submit with '--backend batch' (one pdk.rebuild_corners unit per job, "
+    "see place_and_route_batch) instead of fixing local Docker"
+)
+
+
+def _install_or_batch_remedy(batch_host: bool, *, pull: bool = False) -> str:
+    if batch_host:
+        return (
+            "this host runs OpenROAD on the batch fleet, not locally; " + _BATCH_REMEDY
+        )
+    if pull:
+        return (
+            "pull the image or rebuild it with "
+            "scripts/install-openroad-docker.sh, then retry"
+        )
+    return (
+        "install the container runtime (scripts/install-openroad-docker.sh), then retry"
+    )
+
+
+def _launch_failure_hint(exc: OSError) -> str:
+    """A named cause for ``openroad`` failing to launch at all (issue #4440):
+    binary absent from ``PATH`` versus another launch error."""
+    batch_host = os.environ.get(_BATCH_BACKEND_ENV) == "batch"
+    if isinstance(exc, FileNotFoundError):
+        cause = "the 'openroad' binary is not on PATH"
+    elif isinstance(exc, PermissionError):
+        cause = "the 'openroad' binary is not executable by this user"
+    else:
+        return ""
+    return f" -- {cause}; {_install_or_batch_remedy(batch_host)}"
 
 
 def _log_error_context(message: str, record: dict[str, Any]) -> str:
@@ -321,7 +406,10 @@ def _run_openroad(
     except OSError as exc:
         record = retain("launch_failed", None, None, None)
         raise error_cls(
-            _log_error_context(f"could not launch openroad: {exc}", record)
+            _log_error_context(
+                f"could not launch openroad: {exc}{_launch_failure_hint(exc)}",
+                record,
+            )
         ) from exc
     except subprocess.TimeoutExpired as exc:
         record = retain("timed_out", None, exc.stdout, exc.stderr)
