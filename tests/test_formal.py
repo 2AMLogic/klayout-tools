@@ -69,7 +69,7 @@ sys.exit(16)
 """
 
 _COVER_PASS_BODY = """\
-print("SBY [formal] engine_0: smtbmc: Reached cover statement at x.v:3 in step 4.")
+print("SBY [formal] engine_0: ##  0:00:00  Reached cover statement in step 4 at x.v:3")
 open(os.path.join(work, "engine_0", "trace0.vcd"), "w").write("$end\\n")
 print("SBY [formal] DONE (PASS, rc=0)")
 sys.exit(0)
@@ -317,3 +317,71 @@ def test_real_sby_pass_and_seeded_failure(tmp_path):
         assert report["status"] == expected
         if expected == "fail":
             assert os.path.isfile(report["trace_path"])
+
+
+_COVER_DESIGN = textwrap.dedent(
+    """\
+    module top(input clk, input rst, output reg [3:0] q);
+      always @(posedge clk) q <= rst ? 4'd0 : q + 4'd1;
+      always @(posedge clk) cover ({cond});
+    endmodule
+    """
+)
+
+_UNINDUCTIVE = textwrap.dedent(
+    """\
+    module top(input clk, output reg [3:0] q);
+      initial q = 0;
+      always @(posedge clk) q <= q + 4'd1;
+      always @(posedge clk) assert (q != 4'd15);
+    endmodule
+    """
+)
+
+
+def _real_request(tmp_path, name, text, **fields):
+    (tmp_path / f"{name}.v").write_text(text)
+    req = tmp_path / f"{name}.json"
+    req.write_text(json.dumps({"top": "top", "sources": [f"{name}.v"], **fields}))
+    return str(req)
+
+
+@pytest.mark.skipif(not _have_sby, reason="sby/yosys/bitwuzla not on PATH")
+def test_real_sby_cover_reachable_has_trace_and_step(tmp_path):
+    req = _real_request(
+        tmp_path,
+        "reach",
+        _COVER_DESIGN.format(cond="q == 4'd3"),
+        depth=8,
+        mode="cover",
+    )
+    report = run_formal(req)
+    assert report["status"] == "pass"
+    # q is unconstrained at step 0, so sby reaches q == 3 at step 1; a
+    # depth_reached of 8 would mean the "Reached ... in step N" line was
+    # not parsed.
+    assert report["depth_reached"] == 1
+    assert os.path.isfile(report["trace_path"])
+
+
+@pytest.mark.skipif(not _have_sby, reason="sby/yosys/bitwuzla not on PATH")
+def test_real_sby_cover_unreachable_is_fail(tmp_path):
+    req = _real_request(
+        tmp_path,
+        "unreach",
+        _COVER_DESIGN.format(cond="q == 4'd3 && q == 4'd4"),
+        depth=8,
+        mode="cover",
+    )
+    report = run_formal(req)
+    assert report["status"] == "fail"
+    assert report["trace_path"] is None
+    assert [d["code"] for d in report["diagnostics"]] == ["cover_unreached"]
+
+
+@pytest.mark.skipif(not _have_sby, reason="sby/yosys/bitwuzla not on PATH")
+def test_real_sby_prove_failing_induction_is_unknown(tmp_path):
+    req = _real_request(tmp_path, "ind", _UNINDUCTIVE, depth=8, mode="prove")
+    report = run_formal(req)
+    assert report["status"] == "unknown"
+    assert [d["code"] for d in report["diagnostics"]] == ["unproven"]
