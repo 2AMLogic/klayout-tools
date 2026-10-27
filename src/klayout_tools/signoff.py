@@ -5402,6 +5402,17 @@ def _verify_pex_schematic_inputs(
     return results
 
 
+def _unresolved_evidence_detail(
+    spec: dict[str, Any], reason: str | None
+) -> dict[str, Any]:
+    """The ``failure_detail`` for evidence :func:`_resolve_evidence` could not
+    resolve: an unreadable evidence file names both the resolved path and the
+    process cwd it resolved against (evidence paths are cwd-relative)."""
+    if reason == _REASON_UNREADABLE_EVIDENCE and spec.get("file") is not None:
+        return {"path": os.path.abspath(spec["file"]), "cwd": os.getcwd()}
+    return {}
+
+
 def _grade_evidence(
     spec: dict[str, Any],
     *,
@@ -5520,15 +5531,7 @@ def _grade_evidence(
     """
     resolution, reason = _resolve_evidence(spec, repo_root)
     if resolution is None:
-        detail: dict[str, Any] = {}
-        if reason == _REASON_UNREADABLE_EVIDENCE and spec.get("file") is not None:
-            # Evidence paths resolve against the process cwd, so name both
-            # the resolved path and the cwd that produced it.
-            detail = {
-                "path": os.path.abspath(spec["file"]),
-                "cwd": os.getcwd(),
-            }
-        return "unmet", reason, None, detail
+        return "unmet", reason, None, _unresolved_evidence_detail(spec, reason)
 
     check_kind = resolution["kind"]
     envelope = resolution["envelope"]
