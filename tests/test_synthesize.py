@@ -2512,6 +2512,117 @@ def test_generated_script_reads_sv_sources_with_sv_front_end(tmp_path, monkeypat
     assert "read_verilog -sv c.sv" in script_text
 
 
+def _install_stub_sv2v(tmp_path, monkeypatch, *, exit_code=0):
+    """A stub `sv2v` on PATH that logs each invocation and writes `-w` output."""
+    bindir = tmp_path / "stubbin"
+    bindir.mkdir()
+    log = tmp_path / "sv2v.log"
+    stub = bindir / "sv2v"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "sv2v v9.9.9-stub"; exit 0; fi\n'
+        f'echo "$@" >> "{log}"\n'
+        f"[ {exit_code} -ne 0 ] && {{ echo 'stub failure' >&2; exit {exit_code}; }}\n"
+        'while [ $# -gt 0 ]; do [ "$1" = "-w" ] && { out="$2"; break; }; shift; done\n'
+        'echo "module converted(); endmodule" > "$out"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return log
+
+
+_REAL_SUBPROCESS_RUN = subprocess.run
+
+
+def _route_sv2v_to_real_subprocess(monkeypatch):
+    """Let the stub `sv2v` really execute while Yosys stays stubbed: call after
+    `_stub_yosys_success`, which replaces the shared `subprocess.run`."""
+    yosys_stub = synthesize.subprocess.run
+    real_run = _REAL_SUBPROCESS_RUN
+
+    def run(cmd, *args, **kwargs):
+        if os.path.basename(str(cmd[0])) == "sv2v":
+            return real_run(cmd, *args, **kwargs)
+        return yosys_stub(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(synthesize.subprocess, "run", run)
+
+
+def _sv2v_request(tmp_path, request_path):
+    _write(tmp_path / "c.sv", "module c(input logic clk); endmodule\n")
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["sources"] = ["gcd.v", "c.sv"]
+    request["sv_frontend"] = "sv2v"
+    _write_request(Path(request_path), request)
+
+
+def test_sv2v_frontend_converts_once_and_records_provenance(tmp_path, monkeypatch):
+    """Issue #4198: one sv2v call; the script reads the converted file; the
+    record names the route and sv2v version."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _sv2v_request(tmp_path, request_path)
+    log = _install_stub_sv2v(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    _route_sv2v_to_real_subprocess(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    script_text = Path(_abs_path(report["script_path"], tmp_path)).read_text(
+        encoding="utf-8"
+    )
+    assert "_sv2v.v" in script_text
+    assert "read_verilog -sv" not in script_text
+    assert "c.sv" not in script_text
+    assert report["provenance"]["sv_frontend"] == {
+        "route": "sv2v",
+        "sv2v_version": "sv2v v9.9.9-stub",
+    }
+
+
+def test_default_frontend_has_no_sv_frontend_provenance(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert "sv_frontend" not in report["provenance"]
+
+
+def test_sv2v_frontend_missing_tool_is_structured_error(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _sv2v_request(tmp_path, request_path)
+    empty = tmp_path / "emptybin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    _stub_yosys_success(monkeypatch)
+
+    with pytest.raises(SynthesizeError, match="sv2v.*not found on PATH"):
+        run_synthesize(request_path)
+
+
+def test_sv2v_frontend_conversion_failure_is_error(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _sv2v_request(tmp_path, request_path)
+    _install_stub_sv2v(tmp_path, monkeypatch, exit_code=3)
+    _stub_yosys_success(monkeypatch)
+    _route_sv2v_to_real_subprocess(monkeypatch)
+
+    with pytest.raises(SynthesizeError, match="sv2v conversion failed.*stub failure"):
+        run_synthesize(request_path)
+
+
+def test_sv_frontend_rejects_unknown_value(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["sv_frontend"] = "slang"
+    _write_request(Path(request_path), request)
+
+    with pytest.raises(SynthesizeError, match="sv_frontend"):
+        run_synthesize(request_path)
+
+
 def test_generated_script_passes_constr_and_dont_use(tmp_path, monkeypatch):
     """The default (no `clock_period_ns`) run passes `-constr` -- which is
     what unlocks ABC's `buffer`/`upsize`/`dnsize` sizing steps and its
