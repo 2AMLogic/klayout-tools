@@ -142,12 +142,13 @@ from .signoff_power_delivery import (
     _strap_layers,
 )
 from .signoff_runset import (
-    REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
-)
-from .signoff_runset import (
+    PINNED_RUNSETS,
     runset_disclosure,
     runset_refusal,
     unrecognised_device_gaps,
+)
+from .signoff_runset import (
+    REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
 )
 
 __all__ = [
@@ -872,6 +873,10 @@ def describe_grader() -> dict[str, Any]:
         # `not_applicable` outcome, and on which partitions.
         "not_applicable_items": {
             str(_STATISTICAL_CLAIMS_ITEM_ID): [_NOT_APPLICABLE_PARTITION]
+        },
+        # Additive (issue #4309): the runset digests items 4/11 accept.
+        "pinned_runsets": {
+            digest: dict(pin) for digest, pin in sorted(PINNED_RUNSETS.items())
         },
     }
 

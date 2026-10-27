@@ -281,8 +281,16 @@ written to every block.
    `runset_hash_mismatch`. **This does not change** the default: curated decks
    stay the route wherever they recognise every device in the block, and a
    block may not choose the runset to avoid a curated-deck finding. The
-   allowlist is empty as of this change (2026-10-17) until a published runset's
-   digest is reviewed into it, so no runset report grades `met` before then.
+   allowlist (`signoff_runset.PINNED_RUNSETS`, listed by
+   `klt signoff --describe-grader` under `pinned_runsets`) holds the SG13G2 and
+   SG13CMOS5L `*.lvs` runsets as of 2026-10-27; gf180mcu is not yet pinned.
+   **Adding an entry** is a reviewed trust decision, never a copy of a hash
+   from a report: fetch the PDK's runset file from its upstream repo at a
+   named commit, `sha256` it (the same digest `_provenance.sha256_file`
+   records), and add one entry recording `pdk`, `revision`, `repo`, `commit`,
+   `path` and `reviewed_by`. The digest covers the top-level runset file only,
+   so the `commit` is what fixes the `rule_decks/` it includes. A PDK whose
+   runset cannot be fetched or run at a verifiable commit is left unpinned.
 5. **Full corner verification vs a ratified spec**
    - *Analog* — PVT corner-matrix simulation results covering every spec
      row at its bound corners, with per-row pass/fail and the binding
