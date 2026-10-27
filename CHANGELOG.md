@@ -14,6 +14,11 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt erc` `ties[]` gains `tap_excludes`** (issue #4194, documented in
+  [`docs/cli/erc.md`](docs/cli/erc.md)): an optional `"<layer>/<datatype>"`
+  array subtracted from the tap, so a tap defined by the absence of an
+  implant (`active - pplus`) is expressible by layer rather than via
+  `tap_boxes`. Additive; no `schema_version` bump.
 - **`klt lvs` gains `options.compare_timeout_s` and a stderr heartbeat for large
   flat compares** (issue #4165, documented in
   [`docs/cli/lvs.md`](docs/cli/lvs.md) "Large flat designs"). When the

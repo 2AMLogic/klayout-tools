@@ -109,6 +109,7 @@ _TIE_KEYS = (
     "connect_to",
     "net",
     "tap_requires",
+    "tap_excludes",
     "tap_is_dedicated",
     "tap_boxes",
     "well_boxes",
@@ -645,6 +646,17 @@ def _parse_tap_requires(
     return _parse_tie_layer_list(entry, "tap_requires", spec_path, index)
 
 
+def _parse_tap_excludes(
+    entry: dict[str, Any], spec_path: str, index: int
+) -> list[tuple[int, int]]:
+    """``ties[].tap_excludes`` (optional, issue #4194): layers *subtracted*
+    from this tie's ``tap_layer`` -- the mirror of :func:`_parse_tap_requires`
+    for a tap defined by the **absence** of a marker, e.g. an n-well tap that
+    is ``active - pplus`` on a process drawing no n+ implant. Omitted/``null``
+    -> ``[]``."""
+    return _parse_tie_layer_list(entry, "tap_excludes", spec_path, index)
+
+
 def _parse_tap_is_dedicated(entry: dict[str, Any], spec_path: str, index: int) -> bool:
     """``ties[].tap_is_dedicated`` (optional, issue #2199): the spec's
     affirmation that ``tap_layer`` names a layer drawn **only** for taps --
@@ -1082,6 +1094,7 @@ def _validate_ties(
         )
 
         tap_requires = _parse_tap_requires(entry, spec_path, i)
+        tap_excludes = _parse_tap_excludes(entry, spec_path, i)
         tap_is_dedicated = _parse_tap_is_dedicated(entry, spec_path, i)
         tap_boxes = _parse_tap_boxes(entry, spec_path, i)
 
@@ -1102,6 +1115,7 @@ def _validate_ties(
                 **well,
                 "tap_layer": tap_layer,
                 "tap_requires": tap_requires,
+                "tap_excludes": tap_excludes,
                 "tap_is_dedicated": tap_is_dedicated,
                 "tap_boxes": tap_boxes,
                 "connect_to": connect_to,
