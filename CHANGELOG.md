@@ -22,6 +22,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   `detail.power_delivery.{missing_parts,cited_parts}` and, when the ERC spec
   resolved, `supply_nets`. Value change on an existing field for that case
   only; never `met`.
+- **`klt lvs` `subckt-call` converts sky130 junction diodes** (issue #4319,
+  documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)): `X… sky130_fd_pr__diode_*
+  area=… perim=…` now converts to a `D` card in the deck's diode class instead
+  of raising `reference.unresolved_subckt_call`, for all 8 classes in the sky130
+  deck's `diodes`. Additive; other decks unchanged.
+
 - **`klt place-and-route` gains `instance_groups` (request) and `instance_groups[]`
   (response)** (issue #4344, documented in
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)): name sets of

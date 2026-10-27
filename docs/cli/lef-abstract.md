@@ -11,7 +11,8 @@ Capability A of [Epic #393](https://github.com/2AMLogic/klayout-tools/issues/393
 klt lef-abstract <file> --socket <descriptor.json> --macro-name <name>
                   --cell-library <library> [--top <cell>] [--class <CLASS>]
                   [--symmetry "<axes>"] [--pdk <variant>] [--pdk-root <root>]
-                  [-o/--output <path.lef>] [--require-power-pins]
+                  [-o/--output <path.lef>] [--obs-mode {detailed,coarse}]
+                  [--require-power-pins]
                   [--format text|json]
 ```
 
@@ -36,6 +37,12 @@ klt lef-abstract <file> --socket <descriptor.json> --macro-name <name>
 - `--pdk` / `--pdk-root` — PDK variant/root overrides, same semantics as
   every other `klt` verb's PDK flags.
 - `-o` / `--output` — output LEF path (default: `<macro-name>.lef`).
+- `--obs-mode {detailed,coarse}` — obstruction granularity (issue #4283).
+  `detailed` (default) emits every merged routing-layer region, unchanged.
+  `coarse` emits, per routing LEF layer, the merged region's bounding
+  rectangle minus the declared pin ports (ports stay unblocked), so the OBS
+  size is O(pins) instead of O(shapes). The mode used is reported as the
+  `obs_mode` JSON field.
 - `--require-power-pins` — exit `3` when the supply-pin verdict
   (`power_pins`, issue #2839) fails. Without it the verdict is reported only.
 - `--format` — `text` (default, a human-readable summary) or `json`.
@@ -102,8 +109,10 @@ Each declared pin becomes a `PIN <name>` block:
   LEF's own `USE` value for exactly this pin class, and this command's
   macros are analog blocks per Epic #393's own scope. There is no
   mechanical way to derive true signal direction from geometry alone.
-- **`PORT` geometry** — real drawn shapes whose bounding box contains the
-  declared `(x, y)` position (every such shape becomes its own `RECT`,
+- **`PORT` geometry** — real drawn shapes that contain the declared
+  `(x, y)` position (the polygon itself, edges inclusive — not merely its
+  bounding box, so a notched polygon whose bbox covers the pin is not
+  absorbed into the PORT, issue #4283; every such shape becomes its own `RECT`,
   mirroring how a real standard-cell LEF's multi-`RECT` pins look). The
   search covers **every** GDS `(layer, datatype)` pair that the resolved
   layer map maps to the same LEF layer *name* as the pin's declared
@@ -115,7 +124,13 @@ Each declared pin becomes a `PIN <name>` block:
   layer, e.g. `Metal1`) — searching every sibling datatype (mirroring how
   `OBS` geometry below is already unioned across every datatype sharing a
   LEF layer name) finds real geometry a single-datatype search would
-  silently miss (issue #1614). Otherwise a **synthesized** placeholder
+  silently miss (issue #1614). If the declared `(layer, datatype)` is itself
+  absent from the layer map (e.g. a label purpose such as sky130 `met3.label`
+  70/5), the LEF layer is resolved through the other datatypes of the same GDS
+  layer number that map to a routing layer (drawing datatype 20 preferred,
+  else the lowest). When the pin declares `width_um`/`height_um` and a
+  matched drawn rect exceeds them, a warning names the pin and rect (geometry
+  is kept). Otherwise a **synthesized** placeholder
   box, centered at `(x, y)`, sized from the descriptor's own
   `width_um`/`height_um` when given, else the resolved tech-LEF routing
   layer's own `WIDTH`. Each pin's response entry reports which
@@ -208,6 +223,7 @@ view rather than a hole-aware multi-`RECT` decomposition).
 | `pins` | array\<object\> | One entry per descriptor pin, in name-sorted order: `{name, direction, use, layer, gds_layer, geometry_source, rects_um}`. `layer` is the resolved LEF layer name, or `null` when unresolvable. `gds_layer` (issue #2839, additive) is the descriptor's declared `[layer, datatype]` for the pin, so a consumer can match the PIN to the same pin's `klt socket-check` port facts. `rects_um` is `[]` for `geometry_source: "none"`. |
 | `pin_count` | integer | `len(pins)`. |
 | `unroutable_pins` | array\<object\> | `{name, layer: [gds_layer, gds_datatype]}` for every pin with `geometry_source: "none"` — a programmatically-checkable echo of the same condition (issue #464), so a caller composing this command's output into `klt place-and-route`'s `request.macros` can check it directly instead of grepping `warnings[]`. `[]` on a run with no such pins. |
+| `obs_mode` | string | `"detailed"` or `"coarse"` — echo of `--obs-mode` (issue #4283, additive). |
 | `obs` | array\<object\> | `{layer, shape_count}` per LEF layer with obstruction geometry, layer-name sorted. |
 | `obs_shape_count` | integer | Sum of every `obs[].shape_count`. |
 | `warnings` | array\<string\> | Non-fatal notes: a pin fell back to synthesized geometry, or a pin's layer did not resolve to a known routing LEF layer. `[]` on a run with no such notes. |

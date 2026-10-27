@@ -67,6 +67,7 @@ from .gen_layer_params import (
     _cap_geometry_min_um,
     _contact_gate_extra_offset_um,
     _cut_fixed_size_um,
+    _deck_min_width_um,
     _gate_bottom_endcap_um,
     _gate_pad_clearance_um,
     _gate_top_endcap_um,
@@ -76,6 +77,7 @@ from .gen_layer_params import (
     _pdk_family,
     _reject_deferred_family,
     _res_end_contact_um,
+    _res_flavor_layers,
     _res_flavor_min_width_um_floor,
     _res_sab_geometry_um,
     _ring_implant_margin_um,
@@ -505,6 +507,7 @@ def _mfg_grid_warnings(
     params: dict[str, Any],
     multiple: int = 1,
     multiple_label: str = "",
+    checks: tuple[tuple[str, str], ...] = (("w_um", "active"), ("l_um", "poly")),
 ) -> list[str]:
     """Top-level ``warnings[]`` entries for a MOS generator's ``w_um``/
     ``l_um`` that is not an exact multiple of the resolved family's
@@ -519,12 +522,15 @@ def _mfg_grid_warnings(
     whose total width is ``multiple`` unit widths of ``w_um`` each (e.g.
     ``diff_pair``'s ``splits``): every unit must be on-grid, so the total is
     representable only as a multiple of ``multiple x grid`` -- the nearest
-    such totals are reported alongside the unit-width neighbours."""
+    such totals are reported alongside the unit-width neighbours.
+
+    ``checks`` are the ``(param, role)`` pairs to check (issue #4203:
+    ``res_array`` passes ``(("length_um", "poly"),)``)."""
     from .gen import _mfg_grid_neighbours
 
     roles = _PDK_ROLE_LAYERS[family]
     warnings: list[str] = []
-    for param, role in (("w_um", "active"), ("l_um", "poly")):
+    for param, role in checks:
         grid_um = mfg_grid_um(family, roles.get(role))
         value_um = params[param]
         neighbours = _mfg_grid_neighbours(grid_um, value_um)
@@ -1033,6 +1039,33 @@ def _res_array_series_note(joints: list[dict[str, Any]], num: int) -> str:
     )
 
 
+def _res_short_length_warnings(family: str, params: dict[str, Any]) -> list[str]:
+    """Advisory ``warnings[]`` entry when a poly ``res_array``'s ``length_um``
+    is below the deck's minimum width of a body-sized mask (issue #4203).
+
+    Only where a salicide block is drawn (:func:`_res_sab_geometry_um`; today
+    gf180mcu): the SAB and the implant masks of the flavour span the resistor
+    body segment, whose length is exactly ``length_um``, so a shorter length
+    draws a mask narrower than the deck's ``*.width.*`` minimum. The minimum is
+    read from the deck rule, never restated."""
+    flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
+    if _res_sab_geometry_um(family, flavor) == (0.0, 0.0):
+        return []
+    worst: tuple[str, float] | None = None
+    for pair in _res_flavor_layers(family, flavor):
+        rule = _deck_min_width_um(family, pair)
+        if rule is not None and (worst is None or rule[1] > worst[1]):
+            worst = rule
+    if worst is None or params["length_um"] >= worst[1]:
+        return []
+    return [
+        f"generator 'res_array': params.length_um={_fmt_um(params['length_um'])} "
+        f"is below the '{family}' deck's {worst[0]} minimum mask width "
+        f"({_fmt_um(worst[1])}) -- the body-length SAB/implant mask will be "
+        "drawn narrower than that rule and expect a width DRC finding"
+    ]
+
+
 def _res_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1160,6 +1193,14 @@ def _res_array_describe(
             ["one or more dimensions were rounded to the technology grid"]
             if snapped
             else []
+        )
+        + (
+            []
+            if metal_level
+            else _mfg_grid_warnings(
+                "res_array", family, params, checks=(("length_um", "poly"),)
+            )
+            + _res_short_length_warnings(family, params)
         ),
     }
 
@@ -2827,6 +2868,82 @@ def _esd_device_describe(
 
     snapped = _grid_snapped(dbu, params["finger_width_um"], params["l_um"])
 
+    return {
+        "device_count": 1,
+        "ports": ports,
+        "drc_hints": {
+            "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
+            "matched_group_id": None,
+            "snapped_to_grid": snapped,
+            "notes": notes,
+        },
+        "warnings": (
+            ["one or more dimensions were rounded to the technology grid"]
+            if snapped
+            else []
+        ),
+    }
+
+
+def _diode_validate(params: dict[str, Any]) -> None:
+    from .gen import GenError
+    from .gen_diode import DIODE_KINDS, DIODE_MIN_EDGE_UM, DIODE_VOLTAGE_CLASSES
+
+    if params["kind"] not in DIODE_KINDS:
+        raise GenError(
+            f"generator 'diode': params.kind must be one of {list(DIODE_KINDS)}"
+        )
+    if params["voltage_class"] not in DIODE_VOLTAGE_CLASSES:
+        raise GenError(
+            "generator 'diode': params.voltage_class must be one of "
+            f"{list(DIODE_VOLTAGE_CLASSES)}"
+        )
+    for name in ("width_um", "length_um"):
+        if params[name] < DIODE_MIN_EDGE_UM:
+            raise GenError(
+                f"generator 'diode': params.{name} must be >= {DIODE_MIN_EDGE_UM} "
+                "(the smallest diffusion that fits an enclosed contact)"
+            )
+
+
+def _diode_describe(
+    params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
+) -> dict[str, Any]:
+    from .gen import MIN_SAME_LAYER_SPACING_UM, _grid_snapped
+    from .gen_diode import _diode_layout
+
+    info = _diode_layout(
+        params["kind"], params["voltage_class"], params["width_um"], params["length_um"]
+    )
+    metal_pair = _PDK_ROLE_LAYERS[_pdk_family(pdk_info["variant"])]["metal"]
+    assert metal_pair is not None
+    metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
+    ports = []
+    for name, box, direction in (
+        ("ANODE", info["anode_li"], 90),
+        ("CATHODE", info["cathode_li"], 90),
+    ):
+        ports.append(
+            {
+                "name": name,
+                "net": None,
+                "layer": metal_layer,
+                "x_um": (box[0] + box[2]) / 2,
+                "y_um": (box[1] + box[3]) / 2,
+                "width_um": box[2] - box[0],
+                "direction_deg": direction,
+            }
+        )
+    snapped = _grid_snapped(dbu, params["width_um"], params["length_um"])
+    notes = [
+        "areaid.ed (81/19) is never drawn -- the extraction deck treats it as "
+        "an exclusion, so an ESD-flagged diode would not extract as diode_*"
+    ]
+    if params["kind"] == "n_psub":
+        notes.append(
+            "ANODE is a p+ substrate tap; the p-substrate itself is the anode "
+            "terminal in the extracted netlist"
+        )
     return {
         "device_count": 1,
         "ports": ports,
