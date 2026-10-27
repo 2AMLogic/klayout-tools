@@ -136,6 +136,7 @@ dimension is now independently checkable — see the note itself.)
 | `esd_device` | yes | yes | no | no |
 | `bond_pad` | yes | yes | no | no |
 | `bjt_array` | yes | yes | no | no |
+| `diode` | yes | no | no | no |
 
 **gf180mcu — `mos_array`'s unit-device geometry was margined against the
 six-rule signoff gap (issue #1577), but this remains an *unverified*
@@ -1954,6 +1955,42 @@ current-sharing an ESD pulse depends on avoiding.
 | `ring_padding_um`    | double | `0.5`   | Padding between the finger array and the tap ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. |
 | `gate_contact`       | bool   | `false` | Draw a contact + local-metal pad on the gate landing pad and report `M1_G` on the `metal` role instead of `poly` — see `mos_array`'s equivalent note above. |
 | `salicide_block`     | bool   | `false` | Draw the PDK's salicide-block layer over the finger array on families that curate one (gf180mcu only — see above). |
+
+### `diode` (junction diode / pad ESD clamp primitive, issue #4300)
+
+A single sky130 junction diode that extracts as the deck's own diode class.
+**sky130 only** — other families raise a clear `GenError` ("not yet supported
+by this generator"); gf180mcu and sg13g2 declare diode classes too and are a
+follow-up.
+
+- `kind="n_psub"` — n+ diffusion (`nsdm`) in the p-substrate. The substrate
+  is the anode; `ANODE` is a contacted p+ substrate tap beside the diode and
+  `CATHODE` is the diffusion's local metal. Extracts as `diode_pw2nd_*`.
+- `kind="p_nwell"` — p+ diffusion (`psdm`) in an nwell. `ANODE` is the
+  diffusion's local metal; `CATHODE` is a contacted n+ well tap in the same
+  well. Extracts as `diode_pd2nw_*`.
+- `voltage_class="05v5"` (default) or `"11v0"`, which adds the `hvi`
+  implant (covering the whole nwell for `p_nwell`, per `nwell.9`) so the
+  device extracts as `*_11v0`.
+
+Both draw the `areaid.diode` (81/23) recognition mark over the junction.
+**`areaid.ed` (81/19) is never drawn**: the extraction deck treats it as an
+exclusion, so an ESD-flagged diode would not extract as `diode_*`. Ports are
+`ANODE`/`CATHODE` on `li1`; `device_count` is `1` and
+`drc_hints.matched_group_id` is `null`. `lvt`/`nvt`/`hvt` flavours, guard
+rings, arrays and matching are not drawn.
+
+| `params` field  | Type   | Default    | Description |
+| --------------- | ------ | ---------- | ----------- |
+| `kind`          | string | `"n_psub"` | `"n_psub"` or `"p_nwell"`. |
+| `voltage_class` | string | `"05v5"`   | `"05v5"` or `"11v0"`. |
+| `width_um`      | double | `2.0`      | Junction diffusion width (µm). Must be `>= 0.4`. |
+| `length_um`     | double | `2.0`      | Junction diffusion length (µm). Must be `>= 0.4`. |
+
+The contact count is derived from the diffusion area. To verify against a
+schematic, label the two ports' `li1` (positions are in `ports[]`), run
+`klt extract`, and compare with a `D` element of the matching class under
+`klt lvs`.
 
 ## Output database unit (dbu)
 

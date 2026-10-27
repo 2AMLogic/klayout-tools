@@ -82,6 +82,8 @@ from .gen_describe import (
     _cap_array_validate,
     _diff_pair_describe,
     _diff_pair_validate,
+    _diode_describe,
+    _diode_validate,
     _esd_device_describe,
     _esd_device_validate,
     _guard_ring_describe,
@@ -131,6 +133,7 @@ from .gen_layer_params import (
     _bond_pad_layer_params,
     _cap_array_layer_params,
     _diff_pair_layer_params,
+    _diode_layer_params,
     _esd_device_layer_params,
     _mos_array_layer_params,
     _resistor_layer_params,
@@ -314,6 +317,7 @@ from .gen_pcells import (
     _build_cap_array_pcell,
     _build_cap_vpp_array_pcell,
     _build_diff_pair_pcell,
+    _build_diode_pcell,
     _build_esd_device_pcell,
     _build_guard_ring_pcell,
     _build_mos_array_pcell,
@@ -464,6 +468,10 @@ _HIDDEN_PARAMS = {
     # sg13g2 PDK-PCell poly-resistor convention (issue #2679): poly drawn as
     # the two abutting heads only; resolved per family, never request-facing.
     "res_poly_heads_only",
+    "nplus_layer",
+    "pplus_layer",
+    "hvi_layer",
+    "diode_mark_layer",
 }
 
 #: ``res_array``'s flavour mask slots are generated from
@@ -4000,6 +4008,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     pcell_classes.update(_build_bjt_array_pcell())
     pcell_classes.update(_build_bond_pad_pcell())
     pcell_classes.update(_build_esd_device_pcell())
+    pcell_classes.update(_build_diode_pcell())
     return pcell_classes
 
 
@@ -4212,5 +4221,19 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         validate=_esd_device_validate,
         describe=_esd_device_describe,
         layer_params=_esd_device_layer_params,
+    ),
+    "diode": _GeneratorSpec(
+        name="diode",
+        summary=(
+            "Junction diode (pad ESD clamp primitive): n+ diffusion in the "
+            "p-substrate or p+ diffusion in an nwell, with a contacted "
+            "substrate/well tap for the other terminal and the "
+            "areaid.diode recognition mark, so it extracts as sky130's "
+            "diode_pw2nd_*/diode_pd2nw_* -- sky130 only (issue #4300)."
+        ),
+        dbu=0.001,
+        validate=_diode_validate,
+        describe=_diode_describe,
+        layer_params=_diode_layer_params,
     ),
 }
