@@ -20,7 +20,7 @@
    content hash identifying the grading code itself -- purely informational,
    reads no manifest and runs no check. See :func:`..signoff.describe_grader`.
 
-5. **Attest T1 items 1, 9, 10** (``--attest ITEM --inventory FILE``, issue
+5. **Attest T1 items 1, 8, 9, 10** (``--attest ITEM --inventory FILE``, issue
    #2844): run the item-specific checks a versioned inventory declares and
    emit the artifact-anchored generic envelope ``--manifest`` binds (see
    :mod:`..signoff_attest`). With ``--check COMMITTED`` it re-attests and
@@ -291,7 +291,7 @@ def _attest_flag_problem(
     args: argparse.Namespace, inventory: str | None, stream: str | None
 ) -> str | None:
     """The refusal message for an invalid ``--attest`` flag combination (item 2
-    takes ``--input``; items 1, 9 and 10 take ``--inventory``), else ``None``."""
+    takes ``--input``; items 1, 8, 9 and 10 take ``--inventory``), else ``None``."""
     if args.attest == STREAM_ATTESTABLE_ITEM:
         if inventory:
             return (
@@ -310,7 +310,7 @@ def _attest_flag_problem(
     ):
         return (
             "--input/--generator/--regenerated-hash/--hash-kind only apply "
-            f"to --attest {STREAM_ATTESTABLE_ITEM} (items 1, 9 and 10 take "
+            f"to --attest {STREAM_ATTESTABLE_ITEM} (items 1, 8, 9 and 10 take "
             "--inventory)"
         )
     if not inventory:
@@ -636,6 +636,11 @@ def _print_describe_grader_text(result: dict) -> None:
             ", ".join(str(i) for i in items) if items else "none (satisfies nothing)"
         )
         print(f"  {kind}: {scope}")
+    print("pinned PDK runsets (digest -> pdk @ commit):")
+    for digest, pin in result["pinned_runsets"].items():
+        print(
+            f"  {digest}: {pin.get('pdk')} @ {pin.get('commit') or pin.get('revision')}"
+        )
 
 
 def _print_text(result: dict) -> None:

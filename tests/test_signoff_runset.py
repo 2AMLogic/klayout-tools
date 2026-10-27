@@ -181,3 +181,43 @@ def test_item_11_runset_report_with_empty_net_correspondence_is_unproven(
     )
 
     assert _item_11(result)["reason"] == "lvs_supply_unproven"
+
+
+SG13G2_RUNSET_HASH = (
+    "sha256:e01bcb1ec5858e8069bade8f7fd7ec28c1026fc2fd0590e8f611d3398a5bbbd7"
+)
+
+
+def _npn_envelope(deck_file) -> dict:
+    stand_in = deck_file.parent / "stand-in.lvs"
+    stand_in.write_text("# stand-in\n")
+    envelope = _runset_envelope(
+        LVS_MATCH_ENVELOPE,
+        stand_in,
+        device_census={"layout": {"npn13G2": 1}, "reference": {"npn13G2": 1}},
+    )
+    envelope["deck_file"] = str(deck_file)
+    envelope["provenance"]["runset"] = {"content_hash": SG13G2_RUNSET_HASH}
+    return envelope
+
+
+def test_shipped_sg13g2_pin_grades_an_npn13g2_report_met(tmp_path):
+    """Uses the real shipped pin (no monkeypatch). The envelope is
+    hand-built; the runset itself was not run (needs klayout + the PDK)."""
+    pin = signoff_runset.PINNED_RUNSETS[SG13G2_RUNSET_HASH]
+    assert pin["commit"] == "5cccb161f7492697cfa52eb14dc03beb00bdca9e"
+
+    item = _item_4(tmp_path, _npn_envelope(tmp_path / "absent.lvs"))
+
+    assert item["status"] == "met", item
+    assert item["citation"]["pdk_pin"]["pdk"] == "ihp-sg13g2"
+
+
+def test_shipped_sg13g2_pin_rejects_a_modified_runset_file(tmp_path):
+    edited = tmp_path / "sg13g2.lvs"
+    edited.write_text("# modified runset\n")
+
+    item = _item_4(tmp_path, _npn_envelope(edited))
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "runset_hash_mismatch"
