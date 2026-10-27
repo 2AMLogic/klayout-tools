@@ -8,9 +8,9 @@ from klayout_tools.place_and_route import _stage_script_lines
 from klayout_tools.place_and_route_pins import (
     check_pin_constraints,
     netlist_top_ports,
+    pin_abutment,
     pin_constraint_lines,
     read_def_instance_groups,
-    pin_abutment,
     read_def_pins,
 )
 from klayout_tools.place_and_route_request import (
