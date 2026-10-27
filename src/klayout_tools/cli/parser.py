@@ -6681,6 +6681,20 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "See docs/cli/drc.md, 'Waivers'"
         ),
     )
+    drc_parser.add_argument(
+        "--tile",
+        dest="tile",
+        metavar="COLSxROWS",
+        default=None,
+        help=(
+            "abutment context (issue #4226, --engine curated only): check "
+            "each top cell as the centre of a COLSxROWS array of itself at "
+            "its prBoundary (else bbox) pitch, e.g. 3x1; counts must be odd. "
+            "Only markers in the centre instance are reported, so a "
+            "boundary-cut tileable cell is judged among its neighbours. "
+            "See docs/cli/drc.md, 'Abutment context'"
+        ),
+    )
     _add_format_arg(drc_parser)
     _record_request_argv_flags(
         drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")
