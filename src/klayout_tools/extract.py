@@ -6430,7 +6430,8 @@ def _pin_source_cell_net_names(
     A caller names the cell(s) a `gen-compose`d assembly's own hand-drawn
     interconnect script draws its top-level pin labels into (e.g. the
     ``f"{block_id}__{src_cell_name}"`` sub-cell `klt gen-compose` itself
-    creates for a composed-in block, or a hand-authored interconnect
+    creates for a composed-in block (or its ``blocks[].placed_cell_name``,
+    #4246, when set), or a hand-authored interconnect
     block's own top cell) -- unlike ``--top-cell-pins``, this deliberately
     *does not* require that cell to be ``top_cell`` itself, since a
     composed assembly's own interconnect labels necessarily live in an
