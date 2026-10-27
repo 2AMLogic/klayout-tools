@@ -112,6 +112,7 @@ klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene che
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
 klt seam-check row.gds --tiling TILE --layer 68/20 --band 0,0,30,2  # abutting cells tile and the rail is continuous across seams
 klt keepout-check design.gds --forbidden '[[67,20]]' --margin 10 --cells SPIRAL  # nothing on the forbidden layers within a margin of a cell
+klt array-check column.gds --cell BIT --pitch 2.72 --count 8  # unit-cell placements abut at the pitch; add --mirror-axis x --at 10 --layers '[[68,20]]' for layer-wise symmetry
 klt tap-distance design.gds --subject '65/20' --taps '65/44' --max-distance-um 15  # every diffusion point within a Euclidean distance of a tap
 klt components design.gds --conductors '[{"name":"m1","layer":[68,20]}]'  # connected components, no deck
 klt clip design.gds --cell SUBCELL -o subcell.gds  # write a bbox region or named cell's subtree out as its own stream

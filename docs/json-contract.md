@@ -662,7 +662,12 @@ three now renders `unmet`/`wrong_kind`, an existing `reason` value; this is a
 no `schema_version` bump (the `build.grading_ruleset_id` hash moves, which
 is what it is for). `citation.artifact_binding` gains an optional
 `attestation` object when the cited envelope came from `--attest`. Item 2 is
-unchanged. The inventory `--attest` reads is its own versioned contract —
+unchanged in grading; issue #4188 adds a producer for it,
+`klt signoff --attest 2 --input STREAM [--generator CMD --regenerated-hash H
+[--hash-kind {bytes,geometry}]]`, emitting the same `generic` envelope with
+`attestation.checks[]` entries `stream_readable`, `top_cell_non_empty` and
+`dbu_on_grid`, `provenance.klayout_version` populated, and an optional
+`provenance.regeneration` (additive; no `schema_version` bump). The inventory `--attest` reads is its own versioned contract —
 see "A versioned *input* contract" below.
 
 Issue #3044 adds an optional `provenance.input.paths` set form to that

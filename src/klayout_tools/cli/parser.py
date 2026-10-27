@@ -14,6 +14,7 @@ from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     arith_gen_cmd,
+    array_check_cmd,
     artifact_cmd,
     cells_cmd,
     characterize_cmd,
@@ -309,6 +310,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_seam_check_parser(subparsers)
     _add_corner_matrix_parser(subparsers)
     _add_keepout_check_parser(subparsers)
+    _add_array_check_parser(subparsers)
     _add_tap_distance_parser(subparsers)
 
     _add_layout_metrics_parser(subparsers)
@@ -3932,14 +3934,17 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         "--attest",
         metavar="ITEM",
         type=int,
-        choices=[1, 9, 10],
+        choices=[1, 2, 9, 10],
         help=(
             "produce the artifact-anchored generic envelope for T1 item 1 "
             "(Design sources), 9 (Testbenches shipped) or 10 (Repo hygiene) "
             "from --inventory, by running the item-specific checks the "
-            "inventory declares (issue #2844). Status is derived from those "
-            "checks: exit 0 pass, 3 fail (nothing written), 1 malformed "
-            "inventory. Mutually exclusive with <file>/--manifest/--fleet/"
+            "inventory declares (issue #2844); or for item 2 (Layout) from "
+            "--input STREAM, by checking the committed layout stream "
+            "(readable, non-empty top cell, dbu on grid; issue #4188). "
+            "Status is derived from those checks: exit 0 pass, 3 fail "
+            "(nothing written), 1 malformed inventory. Mutually exclusive "
+            "with <file>/--manifest/--fleet/"
             "--describe-grader/--tiers-doc. See docs/cli/signoff.md's "
             "'Attesting items 1, 9 and 10' section."
         ),
@@ -3951,6 +3956,45 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "with --attest: path to the versioned attestation inventory "
             "(schema_version 1, kind 't1-attestation-inventory') inside a "
             "git repository; the envelope pins this file's raw-byte sha256."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--input",
+        dest="attest_input",
+        metavar="STREAM",
+        help=(
+            "with --attest 2: path to the committed GDS/OASIS layout stream "
+            "inside a git repository; the envelope pins its raw-byte sha256 "
+            "and the producing KLayout version (issue #4188). Refused with "
+            "items 1, 9 and 10, which take --inventory."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--generator",
+        metavar="CMD",
+        help=(
+            "with --attest 2: the command that regenerates the stream, "
+            "recorded as provenance.regeneration.generator. Echoed, never "
+            "run; requires --regenerated-hash."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--regenerated-hash",
+        metavar="sha256:HEX",
+        help=(
+            "with --attest 2: the hash your own CI got after re-running the "
+            "generator, recorded as provenance.regeneration.regenerated_hash; "
+            "the grader flags the item stale_artifact if it differs from the "
+            "committed stream. Requires --generator."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--hash-kind",
+        choices=["bytes", "geometry"],
+        help=(
+            "with --attest 2 --regenerated-hash: what the regenerated hash "
+            "digests -- raw bytes (default) or the decoded geometry, which "
+            "ignores GDS/OASIS write timestamps."
         ),
     )
     signoff_parser.add_argument(
@@ -6908,6 +6952,71 @@ def _add_seam_check_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(seam_parser)
     seam_parser.set_defaults(func=seam_check_cmd.run)
+
+
+def _add_array_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``array-check`` verb: symmetry and abutment of a cell array."""
+    p = subparsers.add_parser(
+        "array-check",
+        help="assert mirror/translation symmetry and pitch abutment of a cell array",
+        description=(
+            "Assert structural regularity of a cell array: layer-by-layer "
+            "mirror or translation symmetry (XOR residual per layer) and/or "
+            "abutment of the unit-cell placements at a declared pitch and "
+            "count (no gap, no overlap, length == count x pitch). Purely "
+            "geometric; fully headless via KLayout's batch database API. "
+            "See docs/cli/array-check.md."
+        ),
+    )
+    p.add_argument("file", help="path to a GDSII or OASIS layout file")
+    p.add_argument(
+        "--cell",
+        default=None,
+        help=(
+            "symmetry: root cell to flatten (default: every top cell); "
+            "abutment: the unit cell whose placements are checked"
+        ),
+    )
+    p.add_argument(
+        "--layers",
+        default=None,
+        help=(
+            "symmetry layer set: a path to a JSON file or an inline JSON array "
+            "of [layer, datatype] pairs. Required with --mirror-axis/--translate."
+        ),
+    )
+    p.add_argument(
+        "--mirror-axis",
+        choices=("x", "y"),
+        default=None,
+        help="mirror about the line x = AT ('x') or y = AT ('y'); needs --at",
+    )
+    p.add_argument("--at", default=None, help="mirror line coordinate in um")
+    p.add_argument(
+        "--translate",
+        default=None,
+        help="translation symmetry vector 'dx,dy' in um (exclusive with --mirror-axis)",
+    )
+    p.add_argument(
+        "--tolerance",
+        default=None,
+        help="ignore deviations below this many um (default 0)",
+    )
+    p.add_argument("--pitch", default=None, help="abutment pitch in um (> 0)")
+    p.add_argument("--count", default=None, help="expected number of placements")
+    p.add_argument(
+        "--direction",
+        choices=("x", "y"),
+        default="x",
+        help="array direction for the abutment check (default x)",
+    )
+    p.add_argument(
+        "--top",
+        default=None,
+        help="top cell to check when the stream has more than one; omit for all",
+    )
+    _add_format_arg(p)
+    p.set_defaults(func=array_check_cmd.run)
 
 
 def _add_keepout_check_parser(subparsers: argparse._SubParsersAction) -> None:
