@@ -226,9 +226,15 @@ from ._report_verify import (
     get_path,
     hash_check,
     load_committed_report,
+    resolve_committed_path,
     strip_keys,
 )
-from ._verilog_params import chparam_lines, read_verilog_line, validate_parameters
+from ._verilog_params import (
+    chparam_lines,
+    read_verilog_line,
+    validate_defines,
+    validate_parameters,
+)
 from .equiv import EquivError, run_equiv
 from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
@@ -921,6 +927,7 @@ _ALLOWED_REQUEST_KEYS = frozenset(
         "run_id",
         "outputs",
         "parameters",
+        "defines",
     }
 )
 
@@ -1091,6 +1098,9 @@ def run_synthesize(
     parameters = validate_parameters(
         request.get("parameters"), SynthesizeError, "request.parameters"
     )
+    defines = validate_defines(
+        request.get("defines"), SynthesizeError, "request.defines"
+    )
 
     pdk_spec = request["pdk"]
     if not isinstance(pdk_spec, dict):
@@ -1149,6 +1159,9 @@ def run_synthesize(
     # Issue #3466: record which elaboration this is, so two parameterisations
     # of the same sources are distinguishable in provenance.
     provenance["parameters"] = dict(parameters)
+    # Issue #4196: likewise for preprocessor defines (a separate field, so the
+    # input content hash of existing committed reports is unchanged).
+    provenance["defines"] = dict(defines)
     output_dir = _create_run_directory(
         request_dir, request, ignore_outputs_dir=_scratch_run_dir
     )
@@ -1195,6 +1208,7 @@ def run_synthesize(
             equiv_timeout_s=equiv_timeout_s,
             repo_root=repo_root,
             parameters=parameters,
+            defines=defines,
         )
 
     # Issue #1844: `repo_root` is threaded into this run's own script so
@@ -1237,6 +1251,7 @@ def run_synthesize(
         repo_root=repo_root,
         pdk_root=pdk_info["root"],
         parameters=parameters,
+        defines=defines,
     )
 
     # `cwd=repo_root` is what makes the relative paths `_write_script` just
@@ -1294,6 +1309,7 @@ def run_synthesize(
         adder_techmap_path=adder_techmap_path,
         repo_root=repo_root,
         parameters=parameters,
+        defines=defines,
     )
 
     equivalence = None
@@ -1306,6 +1322,7 @@ def run_synthesize(
             liberty_path=liberty_path,
             timeout_s=equiv_timeout_s,
             parameters=parameters,
+            defines=defines,
         )
 
     sta, sta_unavailable_reason = _read_sta_timing(
@@ -1326,6 +1343,7 @@ def run_synthesize(
             equiv_timeout_s=equiv_timeout_s,
             repo_root=repo_root,
             parameters=parameters,
+            defines=defines,
         )
 
     response: dict[str, Any] = {
@@ -1337,6 +1355,8 @@ def run_synthesize(
         # with (`{}` when none). Additive field, no `schema_version` bump
         # (docs/json-contract.md).
         "parameters": dict(parameters),
+        # Issue #4196: preprocessor defines (`read_verilog -D`), `{}` when none.
+        "defines": dict(defines),
         "run_id": os.path.basename(output_dir),
         "status": "ok",
         "instance_count": module_stats["num_cells"],
@@ -1549,6 +1569,7 @@ def _verify_synthesis_equivalence(
     timeout_s: float | None,
     request_filename: str | None = None,
     parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """The ``verify_equivalence`` gate :func:`run_synthesize` calls after a
     successful synthesis: reuses :func:`klayout_tools.equiv.run_equiv`'s
@@ -1596,6 +1617,9 @@ def _verify_synthesis_equivalence(
     if parameters:
         # Issue #3466: the gold RTL must be elaborated like the synthesis was.
         equiv_request["gold"]["parameters"] = dict(parameters)
+    if defines:
+        # Issue #4196: ... and preprocessed with the same defines.
+        equiv_request["gold"]["defines"] = dict(defines)
     try:
         with open(equiv_request_path, "w", encoding="utf-8") as handle:
             json.dump(equiv_request, handle, indent=2)
@@ -1670,6 +1694,7 @@ def _run_timing_restructuring(
     equiv_timeout_s: float | None,
     repo_root: str | None = None,
     parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """The ``restructure_timing`` gate :func:`run_synthesize` calls after the
     ``sta`` stage: runs
@@ -1752,6 +1777,7 @@ def _run_timing_restructuring(
             timeout_s=equiv_timeout_s,
             request_filename=f"equiv_request_{hdl_toplevel}_restructured.json",
             parameters=parameters,
+            defines=defines,
         )
 
     # Issue #1844: `restructured_netlist_path` is `restructure_for_timing`'s
@@ -2307,6 +2333,7 @@ def _write_script(
     repo_root: str | None = None,
     pdk_root: str | None = None,
     parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> str:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
@@ -2462,7 +2489,7 @@ def _write_script(
         abc_command = f"tee -q -o {abc_log_text} {abc_command}"
 
     lines = [
-        read_verilog_line(_script_path_text(path, repo_root=repo_root))
+        read_verilog_line(_script_path_text(path, repo_root=repo_root), defines)
         for path in sources
     ]
     # Issue #3466: top-level parameter overrides apply between the reads and
@@ -3695,6 +3722,29 @@ def _synthesize_request_parameters(request_path: str) -> dict[str, int | str]:
     )
 
 
+def _synthesize_request_defines(request_path: str) -> dict[str, str | None]:
+    """The validated ``defines`` of the request at ``request_path`` (``{}``
+    when absent) -- what ``--check`` compares against the committed report's
+    recorded ``defines`` (issue #4196)."""
+    return validate_defines(
+        load_request(request_path).get("defines"),
+        SynthesizeError,
+        "request.defines",
+    )
+
+
+def _defines_check(recorded: Any, current: dict[str, str | None]) -> dict[str, Any]:
+    """Cheap-mode comparison entry for ``defines`` (issue #4196); an absent
+    recorded ``defines`` counts as ``{}``."""
+    expected = {} if recorded is None else recorded
+    return {
+        "field": "defines",
+        "expected": expected,
+        "actual": current,
+        "match": expected == current,
+    }
+
+
 def _parameters_check(recorded: Any, current: dict[str, int | str]) -> dict[str, Any]:
     """Cheap-mode comparison entry for the ``parameters`` override (issue
     #3466). A report that predates the field recorded no override, so an
@@ -3708,12 +3758,38 @@ def _parameters_check(recorded: Any, current: dict[str, int | str]) -> dict[str,
     }
 
 
+def _netlist_sha256_check(
+    committed: dict[str, Any], report_path: str, netlist_override: str | None
+) -> dict[str, Any]:
+    """Cheap-mode ``netlist_sha256`` entry (issue #4313): does the committed
+    gate-level netlist re-hash to the ``netlist_sha256`` the report recorded?
+
+    The file is ``netlist_override`` when given (it always wins), otherwise
+    the report's own ``netlist_path`` resolved from this checkout
+    (``scope: "repo"`` only). A netlist that cannot be located here, or a file
+    that does not exist, yields ``actual: null`` -- ``match: false``, never a
+    silent skip. The hash is :func:`sha256_file` of the file as it sits on
+    disk; the report hashed it after signed-qualifier stripping, which is what
+    was written, so no re-stripping is applied.
+    """
+    path = resolve_committed_path(
+        get_path(committed, ("netlist_path",)),
+        report_path=report_path,
+        override=netlist_override,
+    )
+    actual = sha256_file(path) if path and os.path.isfile(path) else None
+    return hash_check(
+        "netlist_sha256", get_path(committed, ("netlist_sha256",)), actual
+    )
+
+
 def check_synthesize_report(
     report_path: str,
     request_path: str,
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    netlist_override: str | None = None,
 ) -> dict[str, Any]:
     """``klt synthesize <request> --check <report>`` (cheap mode, issue
     #2224): verify a previously committed ``klt synthesize --format json``
@@ -3738,6 +3814,12 @@ def check_synthesize_report(
     that leaves the synthesis result untouched is not evidence drift, and
     reporting it as drift would train a consumer to ignore the verdict.
 
+    A fifth check, ``netlist_sha256`` (issue #4313), re-hashes the committed
+    gate-level netlist against the report's recorded ``netlist_sha256`` (see
+    :func:`_netlist_sha256_check`); ``netlist_override`` is the ``--netlist``
+    path. It proves the committed bytes are the ones the report recorded, not
+    that Yosys would still produce them -- that is ``--rerun``.
+
     Raises :class:`SynthesizeError` for a missing/unparseable committed
     report or an unresolvable request -- never a traceback.
     """
@@ -3760,6 +3842,11 @@ def check_synthesize_report(
             get_path(committed, ("parameters",)),
             _synthesize_request_parameters(request_path),
         ),
+        _defines_check(
+            get_path(committed, ("defines",)),
+            _synthesize_request_defines(request_path),
+        ),
+        _netlist_sha256_check(committed, report_path, netlist_override),
     ]
     return build_check_result(report_path=report_path, checks=checks)
 

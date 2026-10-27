@@ -437,6 +437,8 @@ def _run(args: argparse.Namespace) -> dict:
         pdk_root=args.pdk_root,
         rules=selectors,
         waivers_file=args.waivers,
+        negative_control=args.negative_control,
+        negative_control_categories=_negative_control_categories(args),
     )
 
 

@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--substrate-tie-ohms <ohms>] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--substrate-tie-ohms <ohms>] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--device-model <class>=<subckt> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--format text|json]
 klt extract <request.json>|-|'{...}' [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
@@ -147,6 +147,23 @@ two disagree, this document (and the code) win.
   silently-kept default. Omitting the flag resolves every deck exactly as
   before it existed. See "Selecting a shared-geometry resistor flavour"
   below.
+- `--device-model` — optional, unset by default, repeatable, requires
+  `--pdk`/`--pdk-root`. `<class>=<subckt>` writes the bipolar device class
+  `<class>` as an `X` call to the named PDK subcircuit instead of a bare `Q`
+  card (issue #4234), e.g. `--device-model bjt=pnp_05p00x05p00`. It exists for
+  a recognised bipolar with **no curated binding** — today gf180mcu's `bjt`
+  (see "gf180mcu bipolar is deliberately left unbound" below) — whose bare
+  `Q … bjt` card ngspice rejects (`could not find a valid modelname`). The
+  caller supplies the cell name and polarity the tool cannot guess. The card
+  is `X<name> C B E <subckt>`, the same form sky130's curated `pnp` binding
+  writes; the subcircuit must take `c b e` in that order (checked by loading
+  gf180mcu's `pnp_05p00x05p00` in ngspice; a four-terminal VNPN cell does not
+  fit). The extractor's measured AE/PE/AB/PB/AC/PC/NE are not carried, and
+  `warnings[]` names them. A class the deck does not declare as bipolar, or one
+  with a curated binding (sky130's `pnp`), is a clean error (exit 1); curated
+  data is never overridden. A class absent from the layout is accepted and
+  echoed. Omitted by default — output is byte-identical to before this flag
+  existed. The mapping is echoed as `device_models` (`null` when not given).
 - `--label-layer` — optional, unset by default, repeatable.
   `<role>=<layer>/<datatype>` reads net/pin name text for one label *role* off
   the given GDS layer/datatype instead of the one this `--deck`'s curated
@@ -297,6 +314,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `hierarchical_cells` | array\<string\> \| string | `--hierarchical-cells` (same comma-joining rule as `pins`) |
 | `deck_options` | object\<string, string\|number\|bool\> | repeatable `--deck-option KEY=VALUE`. A key containing `=` is rejected. |
 | `label_layers` | object\<string, [int, int] \| null\> | repeatable `--label-layer ROLE=LAYER/DATATYPE` (issue #2656), e.g. `{"metal0": [8, 25], "poly": null}`. `null` is the flag's `none` spelling. A role name containing `=`, or a value that is neither `null` nor a `[layer, datatype]` pair of non-negative integers, is rejected. |
+| `device_models` | object\<string, string\> | repeatable `--device-model CLASS=SUBCKT` (issue #4234), e.g. `{"bjt": "pnp_05p00x05p00"}`. |
 | `probes` | array\<object\|string\> | repeatable `--probe` (issue #2986): each entry is `{"name", "layer", "x", "y"}` or the flag's own `name=…,layer=…,x=…,y=…` string. Validated exactly like the flag. |
 | `defer_resistor_fixed_offset` | bool | `--defer-resistor-fixed-offset` |
 | `abstract_cells` | array\<string\> \| string | repeatable `--abstract-cells` |
@@ -4772,7 +4790,9 @@ future epic):
   bipolar still extracts under `--pdk` (its MOS/resistor/capacitor devices
   bind; only the `bjt` stays a bare card). Any other recognised device class
   with no curated binding entry is likewise written as its bare primitive card
-  rather than a guessed subcircuit call.
+  rather than a guessed subcircuit call. To simulate such a netlist, name the
+  cell yourself with `--device-model bjt=<subckt>` (issue #4234), which writes
+  the `X` card; the carve-out itself is unchanged when the flag is absent.
 - **An unbound *capacitor* class writes a bare, value-only `C` card**
   (issue #1558) — `C$1 net1 net2 1.119e-13`, with **no** trailing
   device-class token. This is the one place `klt extract` does not simply

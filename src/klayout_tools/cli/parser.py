@@ -2878,6 +2878,26 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--device-model",
+        dest="device_models",
+        action="append",
+        default=None,
+        metavar="CLASS=SUBCKT",
+        help=(
+            "with --pdk/--pdk-root, write the bipolar device CLASS as an `X` "
+            "call to the named PDK subcircuit SUBCKT (issue #4234), "
+            "repeatable. For a bipolar class the deck recognises but has no "
+            "curated PDK binding for -- today gf180mcu's `bjt`, whose cell "
+            "name and polarity the tool cannot guess but the schematic "
+            "states. A CLASS the deck does not declare, or one that already "
+            "has a curated binding (sky130's `pnp`), is an error; curated "
+            "data is never overridden. Omitted by default -- output is "
+            "byte-identical to before this flag existed. The mapping is "
+            "echoed in the JSON response's `device_models` field. See "
+            "docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
         "--probe",
         dest="probes",
         action="append",
@@ -3459,9 +3479,10 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "testbench re-run against it. Each delta[] row then also carries "
             "device_only_value, representation_delta_pct (device-only vs "
             "schematic) and parasitic_delta_pct (extracted vs device-only), "
-            "splitting device-representation effects from parasitics. Not "
-            "supported with --measure-command. Off by default -- "
-            "byte-identical to today's behavior."
+            "splitting device-representation effects from parasitics. With "
+            "--measure-command the command is run a third time on the "
+            "parasitic-free netlist ($KLT_PEX_SIDE=device-only). Off by "
+            "default -- byte-identical to today's behavior."
         ),
     )
     pex_parser.add_argument(
@@ -3613,6 +3634,25 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "error. Omitted by default -- byte-identical to today's "
             "behavior. The applied mapping is echoed in the JSON response's "
             "`extraction.label_layers`. See docs/cli/pex.md."
+        ),
+    )
+    pex_parser.add_argument(
+        "--device-model",
+        dest="device_models",
+        action="append",
+        default=None,
+        metavar="CLASS=SUBCKT",
+        help=(
+            "write the bipolar device CLASS as an `X` call to the named PDK "
+            "subcircuit SUBCKT (issue #4234), repeatable, passed through to "
+            "`klt extract --device-model`. Needed under --pdk for a deck "
+            "whose recognised bipolar has no curated PDK binding (gf180mcu's "
+            "`bjt`), which otherwise stays a bare `Q` card ngspice cannot "
+            "load. A CLASS the deck does not declare, or that already has a "
+            "curated binding, is an error. Omitted by default -- "
+            "byte-identical to today's behavior. The applied mapping is "
+            "echoed in the JSON response's `extraction.device_models`. See "
+            "docs/cli/pex.md."
         ),
     )
     pex_parser.add_argument(
@@ -4455,6 +4495,17 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
         inputs="RTL sources and standard-cell liberty",
         engine="Yosys",
         docs="docs/cli/synthesize.md",
+    )
+    synthesize_parser.add_argument(
+        "--netlist",
+        metavar="FILE",
+        default=None,
+        help=(
+            "with --check (cheap mode): the committed gate-level netlist to "
+            "re-hash against the report's recorded `netlist_sha256`. Always "
+            "wins over the report's own `netlist_path`; without it that path "
+            "is used when it is repo-scoped. See docs/cli/synthesize.md."
+        ),
     )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
@@ -6345,11 +6396,11 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         metavar="LAYOUT",
         default=None,
         help=(
-            "known-bad fixture layout the same native deck must flag "
-            "(--engine klayout only): run first with identical options; "
-            "zero violations fails the run (error.code "
-            "negative_control_failed), proving the deck executed. "
-            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+            "known-bad fixture layout the same deck must flag (curated "
+            "and klayout engines): run first with identical options "
+            "(waivers not applied); zero violations fails the run "
+            "(error.code negative_control_failed), proving the deck "
+            "executed. See docs/cli/drc.md, 'Negative control'."
         ),
     )
     drc_parser.add_argument(

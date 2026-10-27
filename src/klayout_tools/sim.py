@@ -11098,9 +11098,32 @@ def _no_value_message(
             "complex result prints as a table instead; reduce it with e.g. "
             "vecmax()/mean()/db()/<expr>[0])"
         )
+        message += _unsupported_function_hint(spec["expr"])
     if save_mode == "netlist":
         message += SAVE_MODE_NETLIST_NO_VALUE_HINT
     return message
+
+
+#: ngspice control-language functions that do not exist, with the working
+#: replacement (issue #4290; docs/cli/sim.md "Functions `expr` does not have").
+_UNSUPPORTED_EXPR_FUNCTIONS = {
+    "sum": "mean(x)*length(x)",
+    "sgn": "(x gt 0) - (x lt 0)",
+    "max": "vecmax(x) (max() takes two arguments)",
+    "min": "vecmin(x) (min() takes two arguments)",
+}
+
+
+def _unsupported_function_hint(expr: str) -> str:
+    """Name the replacement for any unsupported ngspice function in ``expr``."""
+    found = [
+        f"{name}() -> {fix}"
+        for name, fix in _UNSUPPORTED_EXPR_FUNCTIONS.items()
+        if re.search(rf"(?<![\w.]){name}\(", expr)
+    ]
+    if not found:
+        return ""
+    return " -- ngspice has no such function; use: " + "; ".join(found)
 
 
 #: The trailing hint :func:`_no_value_message` (and the step-sequence
