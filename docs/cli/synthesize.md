@@ -1753,6 +1753,32 @@ is `--rerun`.
 hash that is itself `null` (a report predating the field) always renders
 `match: false` — a missing baseline is never a pass.
 
+#### `--skip-deck`: PDK-less cheap mode (issue #4315)
+
+`--check REPORT --skip-deck` never resolves the standard-cell liberty, so it
+runs on a host with no PDK install (e.g. a signoff CI job with `PDK_ROOT`
+unset). The `provenance.deck.content_hash` entry is omitted from `checks[]`
+and the response gains an additive `skipped` list naming it:
+
+```json
+"skipped": [{"field": "provenance.deck.content_hash",
+             "reason": "--skip-deck: liberty not resolved"}]
+```
+
+`status` is computed over the checks that ran (RTL sources, `parameters`,
+`defines`, `netlist_sha256`). Without the flag the payload is unchanged and has
+no `skipped` key. In `--format text` each skipped check prints as
+`[SKIPPED] <field>: <reason>`.
+
+A `--skip-deck` `match` proves the committed report still corresponds to these
+RTL bytes, parameters and defines, and that the committed netlist is the one the
+report recorded. It does **not** prove the standard-cell library is the one the
+report was mapped against: a changed liberty is `drifted` on a normal `--check`
+and invisible under `--skip-deck`. Run a normal `--check` (or `--rerun`) on a
+PDK host for that. `--skip-deck` is a usage error without `--check` and with
+`--rerun` (a rerun runs Yosys and needs the liberty). A CI that holds a liberty
+copy can instead point the unchanged `--check` at it with `--pdk-root`/`--pdk`.
+
 Tool identity is deliberately **not** among the checks: a Yosys upgrade that
 leaves the synthesis result untouched is tool churn, not evidence drift, and
 reporting it as drift would train a consumer to ignore the verdict. Full mode

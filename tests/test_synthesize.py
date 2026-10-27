@@ -5691,6 +5691,132 @@ def test_check_synthesize_report_detects_edited_netlist(tmp_path, monkeypatch):
     assert by_field["provenance.input.content_hash"]["match"] is True
 
 
+def _no_pdk(monkeypatch):
+    """Make any liberty resolution fail loudly -- the PDK-less host."""
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.setattr(
+        synthesize,
+        "_resolve_liberty",
+        lambda *a, **k: pytest.fail("--skip-deck must not resolve the liberty"),
+    )
+
+
+def test_check_synthesize_report_skip_deck_matches_without_a_pdk(tmp_path, monkeypatch):
+    """Issue #4315: `skip_deck` runs with no resolvable PDK; the deck entry is
+    absent from `checks[]` and named in `skipped[]`."""
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    _no_pdk(monkeypatch)
+
+    result = synthesize.check_synthesize_report(
+        report_path, request_path, skip_deck=True
+    )
+
+    assert result["status"] == "match"
+    fields = [c["field"] for c in result["checks"]]
+    assert "provenance.deck.content_hash" not in fields
+    assert len(fields) == 4 and all(c["match"] for c in result["checks"])
+    assert result["skipped"] == [
+        {
+            "field": "provenance.deck.content_hash",
+            "reason": "--skip-deck: liberty not resolved",
+        }
+    ]
+
+
+def test_check_synthesize_report_without_skip_deck_has_no_skipped_key(
+    tmp_path, monkeypatch
+):
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    result = synthesize.check_synthesize_report(report_path, request_path)
+    assert "skipped" not in result
+    assert len(result["checks"]) == 5
+
+
+def test_check_synthesize_report_skip_deck_detects_rtl_edit(tmp_path, monkeypatch):
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    _no_pdk(monkeypatch)
+    _write(tmp_path / "gcd.v", _GCD_RTL + "\n// an edit after the fact\n")
+
+    result = synthesize.check_synthesize_report(
+        report_path, request_path, skip_deck=True
+    )
+
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["match"] is False
+
+
+def test_check_synthesize_report_skip_deck_does_not_see_a_changed_deck(
+    tmp_path, monkeypatch
+):
+    """A changed liberty is `drifted` without the flag and invisible with it
+    -- exactly why the response must say what was skipped."""
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    for lib in (tmp_path / "install").rglob("*.lib"):
+        lib.write_text(lib.read_text(encoding="utf-8") + "\n/* changed */\n")
+
+    full = synthesize.check_synthesize_report(report_path, request_path)
+    assert full["status"] == "drifted"
+    assert {c["field"] for c in full["checks"] if not c["match"]} == {
+        "provenance.deck.content_hash"
+    }
+
+    cheap = synthesize.check_synthesize_report(
+        report_path, request_path, skip_deck=True
+    )
+    assert cheap["status"] == "match"
+    assert cheap["skipped"][0]["field"] == "provenance.deck.content_hash"
+
+
+def test_cli_synthesize_skip_deck_exit_codes_and_text(tmp_path, monkeypatch, capsys):
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    _no_pdk(monkeypatch)
+    argv = ["synthesize", request_path, "--check", report_path, "--skip-deck"]
+
+    assert main([*argv, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["skipped"]
+
+    assert main([*argv, "--format", "text"]) == 0
+    assert "[SKIPPED] provenance.deck.content_hash" in capsys.readouterr().out
+
+    _write(tmp_path / "gcd.v", _GCD_RTL + "\n// edit\n")
+    assert main([*argv, "--format", "json"]) == 3
+
+
+def test_cli_synthesize_skip_deck_usage_errors(tmp_path, monkeypatch, capsys):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    assert main(["synthesize", request_path, "--skip-deck", "--format", "json"]) == 1
+    assert "requires --check" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+    assert (
+        main(
+            [
+                "synthesize",
+                request_path,
+                "--check",
+                str(tmp_path / "r.json"),
+                "--rerun",
+                "--skip-deck",
+                "--format",
+                "json",
+            ]
+        )
+        == 1
+    )
+    assert "cheap-mode only" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
 def test_check_synthesize_report_netlist_sha256_missing_baseline(tmp_path, monkeypatch):
     request_path, report, _ = _committed_netlist_report(tmp_path, monkeypatch)
     del report["netlist_sha256"]

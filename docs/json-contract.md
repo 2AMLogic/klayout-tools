@@ -1162,6 +1162,12 @@ device-recognition-affecting — changes `content_hash`, and `--check`/
 `--rerun` are what turn that into a caller-visible signal instead of a
 silent mismatch.
 
+`klt synthesize --check <report.json> --skip-deck` (issue #4315) adds an
+optional top-level `skipped[]` (`{field, reason}` entries) to the cheap-mode
+payload, naming checks deliberately not run; the key is absent otherwise. It is
+an additive field — no `schema_version` bump. A consumer must treat a `match`
+with a non-empty `skipped` as a partial verification.
+
 `klt extract --check <report.json> --rerun` additionally normalizes every
 **bookkeeping** field (issue #1559 — see `docs/cli/extract.md`'s "Field
 classes: content, bookkeeping, tool metadata") before diffing, so a
