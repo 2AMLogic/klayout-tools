@@ -167,6 +167,8 @@ def run_formal(request: str, *, timeout_s: float | None = None) -> dict[str, Any
         error_cls=FormalError,
         install_hint=_INSTALL_HINT,
     )
+    if sby_binary is None:
+        raise FormalError(f"could not launch sby: not found. {_INSTALL_HINT}")
     solver_binary = _SOLVER_BINARIES[cfg["solver"]]
     if shutil.which(solver_binary) is None:
         raise FormalError(
