@@ -916,6 +916,7 @@ the exit code describes the read, `state` describes the job:
 | `state` | `pending` (no `status.json` yet — the instance has not booted; not an error), `running`, `interrupted`, `done`, `failed` or `timeout` |
 | `terminal` | `true` for `done`/`failed`/`timeout` |
 | `detail`, `started_at`, `updated_at`, `elapsed_seconds`, `exit_code`, `tool` | As written by the fleet harness; absent ones are omitted |
+| `progress` | Optional object the runner publishes into `status.json` while a job runs, e.g. `{"sim_time_s": 1.5e-6, "stop_time_s": 1e-5}` (simulated time reached, and the target stop time when known). Passed through verbatim and additive: omitted when the runner publishes none, so callers must treat it as optional ([#4291](https://github.com/2AMLogic/klayout-tools/issues/4291)) |
 | `instance` | `instance_id`, `instance_type`, `availability_zone`, `lifecycle`, `spot`, ... when published |
 
 An unknown job id (no `job.json` under the prefix) is an error envelope with
@@ -923,12 +924,18 @@ An unknown job id (no `job.json` under the prefix) is an error envelope with
 `"batch_job_id_invalid"`. Reading an `interrupted` job re-launches nothing —
 2am's own `reconcile` does that.
 
-**No unit counts.** The fleet's `status.json` is written at state transitions
-only (`fetching inputs`, `executing`, the terminal state) and carries no
-completed/total unit count; `outputs/` is uploaded only after the job ends. A
-status read therefore cannot say how far through the grid a running job is, and
-`klt` does not estimate one from elapsed time. That needs the fleet to publish
-progress first (tracked against 2AMLogic/2am).
+**Progress and unit counts.** The fleet's `status.json` is written at state
+transitions only and carries no completed/total unit count; `outputs/` is
+uploaded only after the job ends, and `klt` does not estimate progress from
+elapsed time. A simulated-time `progress` object appears in the status payload
+only if the runner publishes one; the client side is a passthrough, so a runner
+that does not write it leaves the field absent (runner dependency tracked on
+[#4291](https://github.com/2AMLogic/klayout-tools/issues/4291)).
+
+`--attach` on a job that has a `job.json` but no `status.json` after 120 s
+(the launch was refused, e.g. `batch_concurrency_cap`, or never issued) prints
+one stderr line naming the job as never started. It only reports: polling
+continues to its normal timeout.
 
 `--submit-only` also writes the [submit receipt](#submit-receipt-and-client-termination-3065)
 (`batch-receipt.json`, `state: null`) into the artifacts directory, so the job
