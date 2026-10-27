@@ -796,61 +796,15 @@ def _group_min_spacing_um(generator_report: dict[str, Any]) -> float:
     return max(0.0, float(spacing))
 
 
-def _resolve_placement(
+def _place_rows(
     rows: list[dict[str, Any]],
-    abutment: list[dict[str, Any]],
     bboxes_um: dict[str, dict[str, float]],
-    group_ids: set[str],
     min_spacing_um_by_group: dict[str, float],
-    grid_um: float = 0.0,
-) -> tuple[dict[str, dict[str, float]], list[str]]:
-    """Row-of-rows placement (the ``gen_compose.compute_row_offsets``
-    recurrence per row, then stacked vertically by each preceding row's tallest group),
-    followed by ``abutment[]`` applied as a final constraint pass -- see the
-    module docstring's "core idea" and scope decision 4.
-
-    **Inter-row margin (issue #1170).** Before stacking a row on top of the
-    previous one, an inter-row margin is added to ``cumulative_y``: a row's
-    own explicit ``rows[].margin_um`` (parsed by
-    :func:`klayout_tools.layout_plan._parse_rows`) wins when set (``0.0`` is
-    a legitimate, explicit "stack flush" choice, distinct from "unset");
-    otherwise it defaults to the tallest ``min_spacing_um_by_group`` value
-    declared by any group in either the previous row or this row, so a
-    default (no explicit ``margin_um``) multi-row plan no longer stacks
-    vertically-adjacent groups at exactly ``0.00um`` and trips
-    ``gen_compose``'s own "closer than declared drc_hints.min_spacing_um"
-    clearance warning. The first row has no predecessor, so no margin is
-    added before it.
-
-    **Manufacturing-grid snap (issues #4202, #4267).** When ``grid_um > 0``
-    every origin is snapped onto the grid *as it is resolved*, before any
-    successor is derived from it, so ``spacing_um`` / ``gap_um`` /
-    ``margin_um`` stay lower bounds by construction: offsets round *up*,
-    except along the gap axis of a ``left``/``bottom`` abutment (which grows
-    toward negative coordinates) where they round *down*. One ``warnings[]``
-    entry names each group whose origin moved. ``grid_um <= 0.0`` disables
-    snapping.
-
-    Raises :class:`LayoutPlanExecuteError` if any ``group_ids`` entry is
-    unreachable from ``rows[]``/``abutment[]`` (scope decision 2).
-    """
-    warnings: list[str] = []
+    snap: Callable[..., float],
+) -> dict[str, dict[str, float]]:
+    """The ``rows[]`` half of :func:`_resolve_placement`: stack rows, each
+    group snapped via ``snap`` as it is resolved."""
     offsets_um: dict[str, dict[str, float]] = {}
-    shifts: dict[str, dict[str, float]] = {}
-
-    def snap(group_id: str, axis: str, value: float, *, up: bool = True) -> float:
-        if grid_um <= 0.0:
-            return value
-        steps = value / grid_um
-        snapped = round(
-            (math.ceil(steps - 1e-6) if up else math.floor(steps + 1e-6)) * grid_um, 6
-        )
-        if abs(snapped - value) > 1e-9:
-            shifts.setdefault(group_id, {})[axis] = snapped - value
-            return snapped
-        shifts.get(group_id, {}).pop(axis, None)
-        return value
-
     cumulative_y = 0.0
     previous_row_order: list[str] | None = None
     for row in rows:
@@ -893,7 +847,18 @@ def _resolve_placement(
             offsets_um[group_id] = {"x": x, "y": y}
         cumulative_y = row_top
         previous_row_order = order
+    return offsets_um
 
+
+def _apply_abutments(
+    abutment: list[dict[str, Any]],
+    bboxes_um: dict[str, dict[str, float]],
+    offsets_um: dict[str, dict[str, float]],
+    snap: Callable[..., float],
+) -> list[str]:
+    """The ``abutment[]`` half of :func:`_resolve_placement`: mutates
+    ``offsets_um`` in place and returns the override warnings."""
+    warnings: list[str] = []
     pending = list(abutment)
     made_progress = True
     while pending and made_progress:
@@ -940,6 +905,64 @@ def _resolve_placement(
             else:
                 still_pending.append(entry)
         pending = still_pending
+    return warnings
+
+
+def _resolve_placement(
+    rows: list[dict[str, Any]],
+    abutment: list[dict[str, Any]],
+    bboxes_um: dict[str, dict[str, float]],
+    group_ids: set[str],
+    min_spacing_um_by_group: dict[str, float],
+    grid_um: float = 0.0,
+) -> tuple[dict[str, dict[str, float]], list[str]]:
+    """Row-of-rows placement (the ``gen_compose.compute_row_offsets``
+    recurrence per row, then stacked vertically by each preceding row's tallest group),
+    followed by ``abutment[]`` applied as a final constraint pass -- see the
+    module docstring's "core idea" and scope decision 4.
+
+    **Inter-row margin (issue #1170).** Before stacking a row on top of the
+    previous one, an inter-row margin is added to ``cumulative_y``: a row's
+    own explicit ``rows[].margin_um`` (parsed by
+    :func:`klayout_tools.layout_plan._parse_rows`) wins when set (``0.0`` is
+    a legitimate, explicit "stack flush" choice, distinct from "unset");
+    otherwise it defaults to the tallest ``min_spacing_um_by_group`` value
+    declared by any group in either the previous row or this row, so a
+    default (no explicit ``margin_um``) multi-row plan no longer stacks
+    vertically-adjacent groups at exactly ``0.00um`` and trips
+    ``gen_compose``'s own "closer than declared drc_hints.min_spacing_um"
+    clearance warning. The first row has no predecessor, so no margin is
+    added before it.
+
+    **Manufacturing-grid snap (issues #4202, #4267).** When ``grid_um > 0``
+    every origin is snapped onto the grid *as it is resolved*, before any
+    successor is derived from it, so ``spacing_um`` / ``gap_um`` /
+    ``margin_um`` stay lower bounds by construction: offsets round *up*,
+    except along the gap axis of a ``left``/``bottom`` abutment (which grows
+    toward negative coordinates) where they round *down*. One ``warnings[]``
+    entry names each group whose origin moved. ``grid_um <= 0.0`` disables
+    snapping.
+
+    Raises :class:`LayoutPlanExecuteError` if any ``group_ids`` entry is
+    unreachable from ``rows[]``/``abutment[]`` (scope decision 2).
+    """
+    shifts: dict[str, dict[str, float]] = {}
+
+    def snap(group_id: str, axis: str, value: float, *, up: bool = True) -> float:
+        if grid_um <= 0.0:
+            return value
+        steps = value / grid_um
+        snapped = round(
+            (math.ceil(steps - 1e-6) if up else math.floor(steps + 1e-6)) * grid_um, 6
+        )
+        if abs(snapped - value) > 1e-9:
+            shifts.setdefault(group_id, {})[axis] = snapped - value
+            return snapped
+        shifts.get(group_id, {}).pop(axis, None)
+        return value
+
+    offsets_um = _place_rows(rows, bboxes_um, min_spacing_um_by_group, snap)
+    warnings = _apply_abutments(abutment, bboxes_um, offsets_um, snap)
 
     unresolved = sorted(group_ids - set(offsets_um))
     if unresolved:
