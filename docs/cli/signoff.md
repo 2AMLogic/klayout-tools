@@ -2344,6 +2344,12 @@ Two mechanisms close that gap, both driven by the same content hash:
    the running build and have changed across releases; read them at runtime
    rather than hardcoding.
 
+   An additive field (issue #4309), `"pinned_runsets"`, maps each accepted
+   PDK-runset `sha256:` digest to its `pdk`, `revision`, `repo`, `commit`,
+   `path` and `reviewed_by` (`signoff_runset.PINNED_RUNSETS`), so a block can
+   check its runset is pinned before running `klt lvs --engine
+   klayout-runset`.
+
    A further additive field (issue #2865), `"not_applicable_items": {"6":
    ["digital"]}`, maps each item that accepts a recorded `not_applicable`
    outcome to the partitions that may use it (see "Item 6 `not_applicable`").

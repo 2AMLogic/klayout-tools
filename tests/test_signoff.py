@@ -8510,8 +8510,13 @@ def test_describe_grader_shape():
         "opt_in_evidence_kinds",
         "opt_in_kinds_by_item",
         "not_applicable_items",
+        "pinned_runsets",
     }
     assert result["not_applicable_items"] == {"6": ["digital"]}
+    assert {p["pdk"] for p in result["pinned_runsets"].values()} == {
+        "ihp-sg13g2",
+        "ihp-sg13cmos5l",
+    }
     assert result["schema_version"] == signoff_module.DESCRIBE_GRADER_SCHEMA_VERSION
     assert result["grading_ruleset_id"].startswith("sha256:")
     assert result["source_doc"] == "docs/design-evidence-tiers.md"
