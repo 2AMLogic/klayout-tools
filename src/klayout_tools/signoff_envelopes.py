@@ -278,6 +278,26 @@ class _SocketCheckEnvelope(_SocketCheckRequired, total=False):
     provenance: dict[str, Any] | None
 
 
+class _SeamCheckRequired(_EnvelopeCommon):
+    # Issue #4189: `klt seam-check` (docs/cli/seam-check.md). `tiling` and
+    # `bands_um` (null when that assertion was not requested) plus the
+    # `violations` list are what `_classify` recognises this shape by;
+    # `status` is what `_check_passed` grades.
+    status: str
+    violations: list[Any]
+    tiling: Any
+    bands_um: Any
+
+
+class _SeamCheckEnvelope(_SeamCheckRequired, total=False):
+    file: Any
+    layer: Any
+    dbu_um: Any
+    violation_count: Any
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
 class _LefAbstractRequired(_EnvelopeCommon):
     # Issue #2839: `klt lef-abstract` (docs/cli/lef-abstract.md).
     # `macro_name` plus the `pins` list and the `self_check` block are the
@@ -360,6 +380,7 @@ _EvidenceEnvelope = (
     | _ErcEnvelope
     | _PlaceAndRouteEnvelope
     | _SocketCheckEnvelope
+    | _SeamCheckEnvelope
     | _LefAbstractEnvelope
     | _SynthesizeEnvelope
     | _GenericEnvelope
@@ -385,6 +406,7 @@ _ENVELOPE_SHAPES: dict[str, Any] = {
     "erc": _ErcEnvelope,
     "place-and-route": _PlaceAndRouteEnvelope,
     "socket-check": _SocketCheckEnvelope,
+    "seam-check": _SeamCheckEnvelope,
     "lef-abstract": _LefAbstractEnvelope,
     "synthesize": _SynthesizeEnvelope,
     "generic": _GenericEnvelope,

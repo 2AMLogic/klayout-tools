@@ -55,6 +55,7 @@ from . import (
     report_cmd,
     reset_coverage_cmd,
     ring_check_cmd,
+    seam_check_cmd,
     signoff_cmd,
     sim_cmd,
     sim_merge_cmd,
@@ -305,6 +306,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_lef_abstract_parser(subparsers)
 
     _add_ring_check_parser(subparsers)
+    _add_seam_check_parser(subparsers)
     _add_corner_matrix_parser(subparsers)
     _add_keepout_check_parser(subparsers)
     _add_tap_distance_parser(subparsers)
@@ -3930,14 +3932,17 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         "--attest",
         metavar="ITEM",
         type=int,
-        choices=[1, 9, 10],
+        choices=[1, 2, 9, 10],
         help=(
             "produce the artifact-anchored generic envelope for T1 item 1 "
             "(Design sources), 9 (Testbenches shipped) or 10 (Repo hygiene) "
             "from --inventory, by running the item-specific checks the "
-            "inventory declares (issue #2844). Status is derived from those "
-            "checks: exit 0 pass, 3 fail (nothing written), 1 malformed "
-            "inventory. Mutually exclusive with <file>/--manifest/--fleet/"
+            "inventory declares (issue #2844); or for item 2 (Layout) from "
+            "--input STREAM, by checking the committed layout stream "
+            "(readable, non-empty top cell, dbu on grid; issue #4188). "
+            "Status is derived from those checks: exit 0 pass, 3 fail "
+            "(nothing written), 1 malformed inventory. Mutually exclusive "
+            "with <file>/--manifest/--fleet/"
             "--describe-grader/--tiers-doc. See docs/cli/signoff.md's "
             "'Attesting items 1, 9 and 10' section."
         ),
@@ -3949,6 +3954,45 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "with --attest: path to the versioned attestation inventory "
             "(schema_version 1, kind 't1-attestation-inventory') inside a "
             "git repository; the envelope pins this file's raw-byte sha256."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--input",
+        dest="attest_input",
+        metavar="STREAM",
+        help=(
+            "with --attest 2: path to the committed GDS/OASIS layout stream "
+            "inside a git repository; the envelope pins its raw-byte sha256 "
+            "and the producing KLayout version (issue #4188). Refused with "
+            "items 1, 9 and 10, which take --inventory."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--generator",
+        metavar="CMD",
+        help=(
+            "with --attest 2: the command that regenerates the stream, "
+            "recorded as provenance.regeneration.generator. Echoed, never "
+            "run; requires --regenerated-hash."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--regenerated-hash",
+        metavar="sha256:HEX",
+        help=(
+            "with --attest 2: the hash your own CI got after re-running the "
+            "generator, recorded as provenance.regeneration.regenerated_hash; "
+            "the grader flags the item stale_artifact if it differs from the "
+            "committed stream. Requires --generator."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--hash-kind",
+        choices=["bytes", "geometry"],
+        help=(
+            "with --attest 2 --regenerated-hash: what the regenerated hash "
+            "digests -- raw bytes (default) or the decoded geometry, which "
+            "ignores GDS/OASIS write timestamps."
         ),
     )
     signoff_parser.add_argument(
@@ -6855,6 +6899,57 @@ def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(ring_check_parser)
     ring_check_parser.set_defaults(func=ring_check_cmd.run)
+
+
+def _add_seam_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``seam-check`` verb: tiling / rail continuity across seams."""
+    seam_parser = subparsers.add_parser(
+        "seam-check",
+        help="check abutting-cell tiling and conductor continuity across seams",
+        description=(
+            "Check the seams of a layout assembled from abutting cells. "
+            "--tiling asserts the named cells' placements tile with no gap "
+            "or overlap; --layer with --band asserts the layer's merged "
+            "shapes cover each band fully and form one connected piece. At "
+            "least one assertion is required. Empty geometry is a violation, "
+            "never a vacuous pass. Loop closure is `klt ring-check`'s job. "
+            "Headless, purely geometric. See docs/cli/seam-check.md."
+        ),
+    )
+    seam_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    seam_parser.add_argument(
+        "--tiling",
+        action="append",
+        default=None,
+        metavar="CELL",
+        help=(
+            "repeatable exact child-cell name whose placements must tile "
+            "with no gap or overlap"
+        ),
+    )
+    seam_parser.add_argument(
+        "--layer",
+        default=None,
+        metavar="L/D",
+        help="conductor layer/datatype to check inside each --band (e.g. 68/20)",
+    )
+    seam_parser.add_argument(
+        "--band",
+        action="append",
+        default=None,
+        metavar="x0,y0,x1,y1",
+        help=(
+            "repeatable band in micrometres that --layer must cover "
+            "completely as one connected piece; requires --layer"
+        ),
+    )
+    seam_parser.add_argument(
+        "--top",
+        default=None,
+        help="top cell to check when the stream has more than one; omit for all",
+    )
+    _add_format_arg(seam_parser)
+    seam_parser.set_defaults(func=seam_check_cmd.run)
 
 
 def _add_keepout_check_parser(subparsers: argparse._SubParsersAction) -> None:

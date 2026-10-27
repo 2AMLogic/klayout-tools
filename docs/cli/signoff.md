@@ -1565,6 +1565,9 @@ these four included — is `"met"`.
 
 ### Attesting items 1, 9 and 10 (`--attest`, issue #2844)
 
+Item 2 is attested from a layout stream rather than an inventory — see
+"Item 2: attest a committed layout stream" below.
+
 > **Availability:** `--attest` and `--inventory` first ship in `klt` **0.8.0**
 > (PyPI). Release-pinned installs of 0.7.0 and earlier fail with
 > `unrecognized arguments`.
@@ -1577,6 +1580,48 @@ every check passed. The envelope pins the inventory itself
 (`provenance.input.path` = `{"path": "<repo-relative>", "scope": "repo"}`,
 `provenance.input.content_hash` = its raw-byte SHA-256), so `--manifest`
 grades it through the existing binding rules with no special path.
+
+#### Item 2: attest a committed layout stream (`--input`, issue #4188)
+
+Item 2 (Layout) has no inventory — the committed stream is the artifact:
+
+```bash
+klt signoff --attest 2 --input layout/top.gds -o evidence/item2.json \
+    [--generator "python gen.py -o layout/top.gds" \
+     --regenerated-hash sha256:<64 hex> [--hash-kind {bytes,geometry}]]
+```
+
+The stream must be a regular file (not a symlink) inside a git repository.
+The envelope pins it as `provenance.input` (`{"path": ..., "scope": "repo"}`
+plus the raw-byte SHA-256) and records the producing KLayout version in
+`provenance.klayout_version`. `attestation.checks[]` lists, in order:
+
+| Check | Passes when |
+| ----- | ----------- |
+| `stream_readable` | the stream loads in `pya` |
+| `top_cell_non_empty` | there is at least one top cell and every top cell has a non-empty bounding box |
+| `dbu_on_grid` | the database unit is positive and divides one micron into a whole number of units (e.g. `0.001`) |
+
+`status` is `pass` iff all three pass; otherwise the command exits `3` and
+writes no `--output`. `--generator` and `--regenerated-hash` must be given
+together and populate `provenance.regeneration` (`--hash-kind geometry`
+compares the timestamp-independent geometry digest instead of raw bytes).
+The generator is echoed, never run; the grader reports a hash that differs
+from the committed stream as `stale_artifact`. `--check COMMITTED` re-attests
+and diffs as for items 1/9/10. `--input` is refused with items 1/9/10 and
+`--inventory` with item 2. A cited item-2 envelope carries the same
+`artifact_binding.attestation` disclosure (`inventory_schema_version` is
+`null`, as there is no inventory).
+
+#### How manifest `file` paths resolve
+
+A relative `evidence.<n>.file` in a `--manifest` is resolved against the
+**working directory `klt` runs in**, not the manifest's own directory (the
+same convention as `klt drc --check`). Run `klt signoff --manifest` from the
+directory the paths were written relative to — normally the repository root —
+or the entry grades `unmet`/`unreadable_evidence`. (The `{path, scope:
+"repo"}` input an envelope names is separate: it resolves against the repo
+root of the evidence file.)
 
 #### Inventory schema (`schema_version: 1`)
 

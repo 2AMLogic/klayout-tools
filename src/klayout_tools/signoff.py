@@ -469,6 +469,12 @@ _ITEMS_ACCEPTING_LEF_ABSTRACT_EVIDENCE: frozenset[int] = frozenset({11})
 #: (:data:`_DIGITAL_EXTRA_KINDS_BY_ITEM`).
 _ITEMS_ACCEPTING_SYNTHESIZE_EVIDENCE: frozenset[int] = frozenset({1})
 
+#: T1 item ids a ``"seam-check"``-kind citation (issue #4189) may satisfy:
+#: item 2 alone (Layout), as supporting evidence that an assembled layout
+#: tiles and its rails are continuous across cell seams. Its pass proves
+#: nothing about DRC, LVS, simulation or any other item.
+_ITEMS_ACCEPTING_SEAM_CHECK_EVIDENCE: frozenset[int] = frozenset({2})
+
 #: Every **opt-in** kind, mapped to the T1 item ids that accept it -- the
 #: single table :func:`_build_tier_item` consults, so a new opt-in kind is
 #: one entry here rather than a fourth near-identical branch there. A kind
@@ -486,6 +492,7 @@ _OPT_IN_KIND_ITEMS: dict[str, frozenset[int]] = {
     "place-and-route": _ITEMS_ACCEPTING_PLACE_AND_ROUTE_EVIDENCE,
     "socket-check": _ITEMS_ACCEPTING_SOCKET_CHECK_EVIDENCE,
     "lef-abstract": _ITEMS_ACCEPTING_LEF_ABSTRACT_EVIDENCE,
+    "seam-check": _ITEMS_ACCEPTING_SEAM_CHECK_EVIDENCE,
     "synthesize": _ITEMS_ACCEPTING_SYNTHESIZE_EVIDENCE,
 }
 
@@ -1623,7 +1630,7 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                     "kind": "drc" | "lvs" | "extract" | "sim" | "yield" | "pex"
                             | "power" | "sta" | "functional-verification"
                             | "erc" | "place-and-route" | "socket-check"
-                            | "lef-abstract" | "synthesize" | "generic"
+                            | "seam-check" | "lef-abstract" | "synthesize" | "generic"
                             | "error",
                     "status": <str> | None,
                     "passed": <bool>,
@@ -1921,9 +1928,9 @@ def _raise_unclassified(envelope: Mapping[str, Any], source: str) -> NoReturn:
         f"envelope '{source}' has an unrecognized shape (schema_version="
         f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
         "yield/pex/power/sta/functional-verification/erc/place-and-route/"
-        "socket-check/lef-abstract/synthesize success or error envelope, and not a "
-        'generic evidence envelope ("kind": "generic") either -- klt '
-        "signoff aggregates those fourteen "
+        "socket-check/seam-check/lef-abstract/synthesize success or error "
+        'envelope, and not a generic evidence envelope ("kind": "generic") '
+        "either -- klt signoff aggregates those fifteen "
         "verbs' output plus opt-in generic evidence today (see "
         "docs/cli/signoff.md)"
     )
@@ -1976,6 +1983,18 @@ def _is_socket_check_shape(envelope: Mapping[str, Any]) -> bool:
         "socket" in envelope
         and isinstance(envelope.get("checks"), list)
         and isinstance(envelope.get("budgets"), list)
+    )
+
+
+def _is_seam_check_shape(envelope: Mapping[str, Any]) -> bool:
+    # `klt seam-check` (issue #4189; docs/cli/seam-check.md): `tiling` and
+    # `bands_um` are always emitted (null when that assertion was not
+    # requested) beside the `violations` list, by no other verb. Opt-in
+    # evidence -- see `_ITEMS_ACCEPTING_SEAM_CHECK_EVIDENCE`.
+    return (
+        "tiling" in envelope
+        and "bands_um" in envelope
+        and isinstance(envelope.get("violations"), list)
     )
 
 
@@ -2078,6 +2097,13 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     # full contract and which --manifest items may cite it.
     elif envelope.get("kind") == "generic":
         kind = "generic"
+
+    # `klt seam-check` (issue #4189; docs/cli/seam-check.md): carries a
+    # `violations` list like `klt drc`, so it must be recognised *before* the
+    # drc branch below -- the `tiling` + `bands_um` keys (always present,
+    # possibly null) are unique to it.
+    elif _is_seam_check_shape(envelope):
+        kind = "seam-check"
 
     elif isinstance(envelope.get("violations"), list):
         kind = "drc"
@@ -2691,6 +2717,7 @@ _PASSING_STATUS_BY_KIND: dict[str, str] = {
     "pex": "pass",
     "place-and-route": "ok",
     "socket-check": "pass",
+    "seam-check": "pass",
     "generic": "pass",
 }
 
@@ -2850,6 +2877,8 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
       ``structural.unexpected_latches``/``comb_loops``/``multi_driven``;
       ``status`` alone cannot fail, so the counts are the verdict. Opt-in,
       scoped to T1 item 1.
+    - ``seam-check`` (issue #4189) passes on ``status == "pass"``; opt-in,
+      scoped to T1 item 2 (Layout).
     - ``generic`` (issue #1152) passes on ``status == "pass"`` -- the
       envelope's own, caller-asserted verdict; unlike every native kind
       above, nothing here re-derives that verdict from any other field,
@@ -3671,6 +3700,17 @@ def _socket_check_detail(envelope: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _seam_check_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``"seam-check"`` excerpt (issue #4189)."""
+    violations = [v for v in envelope.get("violations") or [] if isinstance(v, dict)]
+    return {
+        "tiling": envelope.get("tiling"),
+        "layer": envelope.get("layer"),
+        "violation_count": len(violations),
+        "violation_kinds": sorted({str(v.get("kind")) for v in violations}),
+    }
+
+
 def _synthesize_detail(envelope: dict[str, Any]) -> dict[str, Any]:
     """:func:`_detail`'s ``"synthesize"`` excerpt (issue #4015)."""
     structural = envelope.get("structural") or {}
@@ -3705,6 +3745,7 @@ _DETAIL_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "erc": _erc_detail,
     "place-and-route": _place_and_route_detail,
     "socket-check": _socket_check_detail,
+    "seam-check": _seam_check_detail,
     "lef-abstract": _lef_abstract_detail,
     "synthesize": _synthesize_detail,
 }
@@ -5169,6 +5210,7 @@ _INPUT_ARTIFACT_FIELDS: dict[str, tuple[str, ...]] = {
     "pex": ("layout",),
     "sta": ("def_path", "verilog_path"),
     "lef-abstract": ("file",),
+    "seam-check": ("file",),
 }
 
 
