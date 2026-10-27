@@ -231,6 +231,7 @@ from .lvs_power import (
     _parse_power_connectivity,
     _power_connectivity_report,
     _power_connectivity_unchecked,
+    _well_layer_lef_pins,
     _with_stub_power_connectivity_reason,
 )
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
@@ -1646,6 +1647,13 @@ def run_lvs(
                 reference_netlist,
                 reference_pin_orders,
                 expected_nets=power_connectivity_expected_nets,
+                # Issue #4363: LEF pins drawn on a pwell/nwell layer are
+                # disclosed in `excluded_pins`, not cross-checked.
+                well_layer_pins=_well_layer_lef_pins(
+                    layout_abstraction.lef_paths
+                    if layout_abstraction is not None
+                    else ()
+                ),
             )
         else:
             power_connectivity = _power_connectivity_unchecked(

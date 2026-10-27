@@ -289,6 +289,21 @@
           "additionalProperties": {"type": "string"}
         },
         "unchecked_expected_pins": {"type": "array", "items": {"type": "string"}},
+        "excluded_pins": {
+          "type": "array",
+          "description": "Well/substrate-layer LEF pins disclosed instead of checked (issue #4363). Additive.",
+          "items": {
+            "type": "object",
+            "required": ["pin", "cells", "instance_count", "reason"],
+            "properties": {
+              "pin": {"type": "string"},
+              "cells": {"type": "array", "items": {"type": "string"}},
+              "instance_count": {"type": "integer", "minimum": 0},
+              "reason": {"type": "string"}
+            },
+            "additionalProperties": true
+          }
+        },
         "findings": {
           "type": "array",
           "items": {"$ref": "#/$defs/power_finding"}

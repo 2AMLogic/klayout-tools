@@ -188,6 +188,11 @@ def _print_text(report: dict) -> None:
                 "options.power_connectivity.expected_nets but never "
                 "observed on any layout-side instance)"
             )
+        for excluded in power.get("excluded_pins") or []:
+            print(
+                f"  excluded_pin: {excluded['pin']} "
+                f"({excluded['instance_count']} instance(s)) -- {excluded['reason']}"
+            )
         for finding in power["findings"]:
             print(
                 f"  [{finding['severity']}] {finding['rule']}  {finding['description']}"
