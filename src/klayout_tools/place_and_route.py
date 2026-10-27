@@ -59,6 +59,7 @@ from ._openroad_engine import (
 from ._paths import _count_spef_nets_annotated as _count_spef_nets_annotated
 from ._paths import (
     _load_request_json,
+    _reject_unknown_keys,
     validate_request_shape,
 )
 from ._paths import _tcl_net_list as _tcl_net_list
@@ -1135,12 +1136,45 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``load_request``.
     """
     request = _load_request_json(request_path, PlaceAndRouteError)
-    return validate_request_shape(
+    request = validate_request_shape(
         request,
         "request file",
         error_cls=PlaceAndRouteError,
         required_fields=("netlist", "hdl_toplevel", "pdk", "floorplan", "seed"),
     )
+    _validate_outputs(request, request_path)
+    return request
+
+
+#: Keys allowed inside the optional request ``outputs`` object (issue #4231,
+#: mirroring ``klt synthesize``'s ``outputs.dir``, issue #3795).
+_ALLOWED_OUTPUTS_KEYS = frozenset({"dir"})
+
+
+def _validate_outputs(request: dict[str, Any], request_path: str) -> None:
+    """Reject a malformed ``outputs`` object before any engine work (#4231)."""
+    if "outputs" not in request:
+        return
+    outputs = request["outputs"]
+    if not isinstance(outputs, dict):
+        raise PlaceAndRouteError("request.outputs must be an object")
+    _reject_unknown_keys(
+        outputs, _ALLOWED_OUTPUTS_KEYS, request_path, "outputs", PlaceAndRouteError
+    )
+    if "dir" in outputs:
+        out_dir = outputs["dir"]
+        if not isinstance(out_dir, str) or not out_dir.strip():
+            raise PlaceAndRouteError("request.outputs.dir must be a non-empty string")
+
+
+def _stage_root(request_dir: str, request: dict[str, Any]) -> str:
+    """The directory every artifact of this request is written under: the
+    request's ``outputs.dir`` (relative to the request file's directory
+    unless absolute) or, by default, ``.klt/place-and-route/`` (#4231)."""
+    out_dir = request.get("outputs", {}).get("dir")
+    if out_dir is None:
+        return os.path.join(request_dir, ".klt", "place-and-route")
+    return os.path.normpath(os.path.join(request_dir, out_dir))
 
 
 def _validate_pdn_core_fit(
@@ -1235,17 +1269,32 @@ def _response_warnings(
     return warnings
 
 
-def _own_stage_root(ownership: contextlib.ExitStack, request_path: str) -> None:
-    """Own the fixed ``.klt/place-and-route/`` stage root (#2770)."""
-    ownership.enter_context(
-        output_lock.hold_output_dir(
-            os.path.join(
-                os.path.dirname(os.path.abspath(request_path)),
-                ".klt",
-                "place-and-route",
-            )
+def _own_stage_root(
+    ownership: contextlib.ExitStack,
+    request_path: str,
+    request: dict[str, Any],
+    *,
+    reuse_outputs_dir: bool = False,
+) -> None:
+    """Own the stage root (#2770): ``.klt/place-and-route/`` or the request's
+    ``outputs.dir`` (#4231).
+
+    A fresh run must not write into a populated ``outputs.dir`` (prior
+    evidence is retained); ``reuse_outputs_dir`` (``--rerun``) lifts that,
+    since a re-run deliberately overwrites the artifacts of its own report.
+    """
+    stage_root = _stage_root(os.path.dirname(os.path.abspath(request_path)), request)
+    if (
+        "dir" in request.get("outputs", {})
+        and not reuse_outputs_dir
+        and os.path.lexists(stage_root)
+        and (not os.path.isdir(stage_root) or os.listdir(stage_root))
+    ):
+        raise PlaceAndRouteError(
+            f"could not claim outputs.dir '{stage_root}': it must not exist or "
+            "be an empty directory (prior evidence is retained)"
         )
-    )
+    ownership.enter_context(output_lock.hold_output_dir(stage_root))
 
 
 @output_lock.owns_run
@@ -1255,6 +1304,7 @@ def run_place_and_route(
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     backend: str | None = None,
+    reuse_outputs_dir: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the OpenROAD place-and-route flow declared by the request at
@@ -1303,8 +1353,10 @@ def run_place_and_route(
     never falls back to running a unit on this host. A single-unit request
     stays local under a host-default ``batch``.
     """
-    _own_stage_root(_ownership, request_path)
     request = load_request(request_path)
+    _own_stage_root(
+        _ownership, request_path, request, reuse_outputs_dir=reuse_outputs_dir
+    )
     rebuild_corners = _validate_rebuild_corners(request)
 
     from . import place_and_route_batch
@@ -1313,6 +1365,11 @@ def run_place_and_route(
         backend, request, units=len(rebuild_corners) if rebuild_corners else 1
     )
     if selected == "batch":
+        if "dir" in request.get("outputs", {}):
+            raise PlaceAndRouteError(
+                "request.outputs.dir is not supported with the batch backend "
+                "(the fleet copies artifacts back into .klt/place-and-route/)"
+            )
         assert rebuild_corners is not None and _ownership is not None
         return place_and_route_batch.run_rebuild_corners_batch(
             request_path,
@@ -1713,7 +1770,7 @@ def _run_single_corner(
         tech_lef=tech_lef,
     )
 
-    output_dir = os.path.join(request_dir, ".klt", "place-and-route")
+    output_dir = _stage_root(request_dir, request)
     if output_subdir is not None:
         output_dir = os.path.join(output_dir, output_subdir)
     try:
@@ -2082,6 +2139,7 @@ def _run_single_corner(
             "power_net": None,
             "ground_net": None,
             "tapcell_master": None,
+            "tapless": False,
             "endcap_master": None,
             "tapcell_distance_um": None,
             "filler_masters": [],
@@ -2102,6 +2160,7 @@ def _run_single_corner(
             "power_net": power["power_net"],
             "ground_net": power["ground_net"],
             "tapcell_master": tap_master,
+            "tapless": cell_library in _NO_TAPCELL_LIBRARIES,
             "endcap_master": endcap_master,
             "tapcell_distance_um": tapcell_distance_um,
             "filler_masters": (
@@ -2423,7 +2482,7 @@ def _run_rebuild_corners(
         )
         deck_hashes[name] = _content_hash(liberty_path)
 
-    stage_root = os.path.join(request_dir, ".klt", "place-and-route")
+    stage_root = _stage_root(request_dir, request)
     corner_runs: list[dict[str, Any]] = []
     for name in corners:
         unit_dir = os.path.join(stage_root, name)
@@ -3107,8 +3166,10 @@ def rerun_place_and_route_report(
 
     **Re-running overwrites this request's own artifacts.** Unlike ``klt
     synthesize``'s retained per-``run_id`` directories, this verb writes to a
-    fixed ``.klt/place-and-route/`` next to the request, so a ``--rerun``
-    rewrites the DEF/GDS/Verilog the committed report names. That is the same
+    fixed ``.klt/place-and-route/`` next to the request (or the request's
+    ``outputs.dir``, issue #4231, which a re-run reuses in place rather than
+    refusing it as populated), so a ``--rerun`` rewrites the DEF/GDS/Verilog
+    the committed report names. That is the same
     thing invoking the verb again would do, and is why ``--check`` (cheap
     mode, which touches nothing) is the default.
 
@@ -3117,7 +3178,11 @@ def rerun_place_and_route_report(
     """
     committed = load_committed_report(report_path, PlaceAndRouteError)
     fresh = run_place_and_route(
-        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root, backend=backend
+        request_path,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        backend=backend,
+        reuse_outputs_dir=True,
     )
     return build_rerun_result(
         report_path=report_path,

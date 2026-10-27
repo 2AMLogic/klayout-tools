@@ -101,6 +101,7 @@ from . import (
     sim_cycle_mean,
     sim_decks,
     sim_energy,
+    sim_eye,
     sim_injected,
     sim_mismatch_gate,
     sim_noise,
@@ -1604,6 +1605,8 @@ def _resolve_analysis_and_measurements(
     sim_tian.validate_tian_context(measurements_spec, analysis)
     # Issue #3895: and an snm margin is a DC-sweep quantity.
     sim_snm_meas.validate_snm_context(measurements_spec, analysis)
+    # Issue #4292: an eye fold is a transient-time quantity too.
+    sim_eye.validate_eye_context(measurements_spec, analysis)
     # Issue #4121: a search entry needs the scalar single-analysis deck.
     sim_search.validate_search_context(measurements_spec, analysis)
     # Issue #2938: a `noise` entry is lowered to an `expr` (plus helper
@@ -3325,6 +3328,7 @@ def _prepare_sim_request(
         ),
         snm_declared=bool(sim_snm_meas.snm_measurements(measurements_spec)),
         search_declared=bool(sim_search.search_measurements(measurements_spec)),
+        eye_declared=bool(sim_eye.eye_measurements(measurements_spec)),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -7735,6 +7739,7 @@ def _refuse_xyce_control_block_measurements(
     transfer_declared: bool = False,
     snm_declared: bool = False,
     search_declared: bool = False,
+    eye_declared: bool = False,
 ) -> None:
     """The ``engine: "xyce"`` refusals for measurement forms that exist only
     as commands in klt's generated ngspice ``.control`` block (``expr``,
@@ -7806,6 +7811,14 @@ def _refuse_xyce_control_block_measurements(
             "measurements[].search is not supported for engine 'xyce': the "
             "bisection runs as an ngspice `.control` `while` loop, and the "
             "Xyce deck has no control block; use engine 'ngspice'"
+        )
+    if eye_declared:
+        # Issue #4292: same `.control` let/write boundary as `crossings`.
+        raise SimError(
+            "measurements[].eye is not supported for engine 'xyce': the "
+            "signal is dumped by ngspice `let`/`write` commands inside a "
+            "`.control` block, and the Xyce deck has none; use engine "
+            "'ngspice'"
         )
 
 
@@ -7903,6 +7916,7 @@ def _enforce_xyce_support_boundary(
     transfer_declared: bool = False,
     snm_declared: bool = False,
     search_declared: bool = False,
+    eye_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -7972,6 +7986,7 @@ def _enforce_xyce_support_boundary(
         transfer_declared=transfer_declared,
         snm_declared=snm_declared,
         search_declared=search_declared,
+        eye_declared=eye_declared,
     )
     for declared, message in (
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
@@ -9871,6 +9886,7 @@ def _run_corner(
         measurements_spec, corner_dir
     )
     snms = sim_snm_meas.extract_corner_snms(measurements_spec, corner_dir)
+    eyes = sim_eye.extract_corner_eyes(measurements_spec, corner_dir)
     searches = sim_search.extract_corner_searches(measurements_spec, log_text)
     # Issue #3160: each pass's rawfile is decoded once, shared by the tian
     # reduction below and the corner's `passes` field.
@@ -9893,6 +9909,7 @@ def _run_corner(
             cycle_means=cycle_means,
             transfers=transfers,
             snms=snms,
+            eyes=eyes,
             searches=searches,
             tians=tians,
             engine_diagnostics=diagnostics,
@@ -10239,6 +10256,7 @@ def _corner_measurement_results(
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
     snms: dict[int, sim_snm_meas.SnmOutcome] | None = None,
+    eyes: dict[int, sim_eye.EyeOutcome] | None = None,
     searches: dict[int, sim_search.SearchOutcome] | None = None,
     tians: dict[int, sim_tian.TianOutcome] | None = None,
     engine_diagnostics: list[dict[str, Any]] | None = None,
@@ -10300,6 +10318,7 @@ def _corner_measurement_results(
         (sim_transfer_meas.is_transfer, _transfer_measurement_result, transfers),
         (sim_tian.is_tian, _tian_measurement_result, tians),
         (sim_snm_meas.is_snm, _snm_measurement_result, snms),
+        (sim_eye.is_eye, _eye_measurement_result, eyes),
         (sim_search.is_search, _search_measurement_result, searches),
     )
     for position, spec in enumerate(measurements_spec):
@@ -10707,6 +10726,63 @@ def _snm_measurement_result(
         "status": m_status,
         "margin": margin,
         "snm": outcome.report(spec),
+    }
+    return result, grading_diagnostics
+
+
+def _eye_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_eye.EyeOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``eye`` measurement's response entry (issue #4292).
+
+    ``value`` is the metric the entry selects (eye height by default), graded
+    through :func:`_grade_measurement_value` like any scalar; height, width and
+    best phase ride the additive ``eye`` sibling. A failure is
+    ``status: "error"``, ``value: null`` with a ``code: "measurement"``
+    diagnostic whose message starts with a ``[<reason>]`` token from
+    :data:`klayout_tools.sim_eye.ERROR_CODES`."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.value is None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no eye value"
+        )
+        reason = (
+            outcome.code
+            if outcome is not None and outcome.code is not None
+            else "eye_vector_missing"
+        )
+        if save_mode == "netlist" and reason == "eye_vector_missing":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {
+                "severity": "error",
+                "code": "measurement",
+                "message": f"[{reason}] {message}",
+            }
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(
+        spec, outcome.value
+    )
+    result = {
+        "name": name,
+        "value": outcome.value,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "eye": outcome.report(),
     }
     return result, grading_diagnostics
 
@@ -11550,6 +11626,7 @@ def _corner_deck_control_lines(
     cycle_mean_lines = sim_cycle_mean.control_lines(measurements_spec, corner_dir)
     transfer_lines = sim_transfer_meas.control_lines(measurements_spec, corner_dir)
     snm_lines = sim_snm_meas.control_lines(measurements_spec, corner_dir)
+    eye_lines = sim_eye.control_lines(measurements_spec, corner_dir)
     search_lines = sim_search.control_lines(measurements_spec)
     complex_vector_lines = sim_complex_vectors.control_lines(
         complex_vectors, corner_dir
@@ -11561,6 +11638,7 @@ def _corner_deck_control_lines(
         or cycle_mean_lines
         or transfer_lines
         or snm_lines
+        or eye_lines
         or complex_vector_lines
     ):
         lines.append("set filetype=ascii")
@@ -11589,6 +11667,7 @@ def _corner_deck_control_lines(
     lines.extend(cycle_mean_lines)
     lines.extend(transfer_lines)
     lines.extend(snm_lines)
+    lines.extend(eye_lines)
     lines.extend(complex_vector_lines)
     # Issue #4121: last, so no later line reads the main analysis' plot after
     # the search has moved ngspice's current plot.

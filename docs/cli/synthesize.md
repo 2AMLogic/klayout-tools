@@ -543,7 +543,10 @@ default search order finds (`$PDK_ROOT`/`$PDK` environment variables, then
 the ciel/volare stores, then the conventional install prefixes) — exactly as
 `klt pdk find` with no flags would resolve — unless the CLI's own `--pdk`/
 `--pdk-root` flags (mirroring `klt extract`'s identical pair) pin a specific
-installed variant/root instead.
+installed variant/root instead. When neither `--pdk` nor `$PDK` is set and
+the default pick does not ship `pdk.cell_library`, the first installed
+variant that does (search order) is used instead, and the result's PDK
+provenance names it.
 
 - `pdk.cell_library` — a standard-cell library name. Not restricted to a
   single PDK family: any standard-cell library the resolved install ships a
@@ -1484,9 +1487,11 @@ core shipped as LEF + liberty + GDS.
 command emits one line per declared macro, in precedence order:
 
 1. A `lib` entry matching this run's resolved corner (falling back to
-   `"default"`) → `read_liberty -lib <macro liberty>`. Preferred: it carries
-   the macro's real timing *and* area, so a later `klt sta`/
-   `klt place-and-route` run on the same declaration sees the same numbers.
+   `"default"`) → `read_liberty -lib <macro liberty>`. Preferred: the macro
+   liberty itself carries the macro's real timing and area, so a later
+   `klt sta`/`klt place-and-route` run on the same declaration sees the same
+   numbers. (Loading it here only makes the macro visible to Yosys as a
+   blackbox; it does not feed `area_um2` — see "Area accounting" below.)
 2. `verilog_blackbox`, when given → `read_verilog -lib <blackbox>`.
 3. Neither → a `(* blackbox *)` module is **generated** from the macro's own
    LEF `PIN DIRECTION`s and written into the run directory as
@@ -1511,12 +1516,15 @@ is a request error**, naming the macro, the corner, and the keys that are
 available — never a silent fallback to another corner's timing.
 
 **Area accounting.** `stat -liberty`'s `area_um2` sums only the one
-standard-cell liberty this run loaded — a blackboxed macro contributes a
-silent `0` unless its own `lib` was also given (in which case its area is
-included, like any other liberty-backed cell). `cells_without_area` above
-names every instantiated type (macro or otherwise) `area_um2` does not
-account for, and a non-empty result also surfaces as a `macro_area_excluded`
-/ `cells_without_liberty_area` entry in `warnings` — see "`warnings`" below.
+standard-cell liberty this run loaded. A macro's own `lib` is read with
+`read_liberty -lib` for blackboxing only; it is never passed to
+`stat -liberty`, so a blackboxed macro contributes a silent `0` whether it
+was declared with a `lib`, a `verilog_blackbox`, or LEF only. To get a
+macro's area, read it from its own liberty (`response.macros[].lib`) and add
+it to `area_um2` yourself. `cells_without_area` above names every
+instantiated type (macro or otherwise) `area_um2` does not account for, and
+a non-empty result also surfaces as a `macro_area_excluded` /
+`cells_without_liberty_area` entry in `warnings` — see "`warnings`" below.
 
 See `docs/cli/sta.md`'s and `docs/cli/place-and-route.md`'s own "Hard
 macros"/"Hard-macro placement" sections for how the other two verbs consume

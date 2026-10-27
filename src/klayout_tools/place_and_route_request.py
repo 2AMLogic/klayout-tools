@@ -173,6 +173,11 @@ _ROUTING_LAYER_STACK: dict[str, tuple[str, ...]] = {
 #:   (line-wrapped here only to fit this file's 88-column limit; the config
 #:   itself writes each call on one line)
 #:
+#:   The preset deviates from that config in one place: it omits the
+#:   ``-split_cuts {Metal3 0.128}`` (issue #4301, reporter-observed DRC-dirty
+#:   vias under ``klt drc --deck gf180mcu``). ``"gf180mcu_9t_6M"`` keeps it,
+#:   unverified either way.
+#:
 #: - ``"gf180mcu_9t_6M"`` -> the sibling ``pdn_grid_strategy_9t_6M.cfg``
 #:   (``gf180mcu_fd_sc_mcu9t5v0``, the platform's own ``TRACK_OPTION ?= 9t``
 #:   default). Byte-for-byte identical to the ``7t`` config above except its
@@ -281,7 +286,11 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
                 "layers": ["Metal1", "Metal4"],
                 "max_columns": 5,
                 "ongrid": ["Metal2", "Metal3", "Metal4"],
-                "split_cuts": {"layer": "Metal3", "width_um": 0.128},
+                # Deliberate deviation from the ORFS cfg (issue #4301): its
+                # `-split_cuts {Metal3 0.128}` produced negative CUTSPACING
+                # via cells and metal2/3/4.ongrid.1, via2/via3.ongrid.1 and
+                # via2/via3.width.1 hits under `klt drc --deck gf180mcu`.
+                "split_cuts": None,
             },
         ),
     },
