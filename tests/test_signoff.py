@@ -6161,6 +6161,9 @@ def test_generic_evidence_satisfies_item_8(tmp_path):
         # nothing to verify against an artifact either.
         "input_verified": None,
         "exit_status": 0,
+        # Issue #4311: a bare (hand-written) item-8 envelope discloses that
+        # no tool produced it.
+        "attestation": {"tool_produced": False},
     }
 
 
@@ -16301,7 +16304,7 @@ def test_attest_refuses_an_inventory_outside_any_repository(tmp_path):
 
 def test_attest_refuses_unsupported_item_and_unreadable_inventory(tmp_path):
     repo = _attest_repo(tmp_path)
-    with pytest.raises(AttestationError, match="supports T1 items 1, 9, 10"):
+    with pytest.raises(AttestationError, match="supports T1 items 1, 8, 9, 10"):
         build_attestation(2, _write_inventory(repo, 1))
     with pytest.raises(AttestationError, match="not found"):
         build_attestation(1, str(repo / "missing.json"))
@@ -17975,6 +17978,64 @@ def test_synthesize_citation_for_analog_item_1_is_wrong_kind(tmp_path):
     item = next(row for row in result["items"] if row["id"] == 1)
     assert item["status"] == "unmet"
     assert item["reason"] == "wrong_kind"
+
+
+def test_unreadable_file_evidence_detail_names_path_and_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = build_tier_report(_manifest(evidence={"3": "missing/drc.json"}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["reason"] == "unreadable_evidence"
+    assert item_3["detail"]["path"] == os.path.abspath("missing/drc.json")
+    assert item_3["detail"]["cwd"] == os.getcwd()
+
+
+def test_unreadable_file_evidence_absolute_path_is_unchanged(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    gone = str(tmp_path / "gone.json")
+    result = build_tier_report(_manifest(evidence={"3": gone}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["detail"]["path"] == gone
+
+
+def _capture_attest_env(monkeypatch):
+    from klayout_tools import signoff_attest
+
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(argv, 0, stdout=b"")
+
+    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
+    signoff_attest._run_command(".", {"argv": ["python3"], "cwd": "."})
+    return seen["env"]
+
+
+def test_attest_command_env_drops_venv_bin_from_path(monkeypatch):
+    venv_bin = os.path.dirname(sys.executable)
+    monkeypatch.setattr(sys, "prefix", "/venv")
+    monkeypatch.setattr(sys, "base_prefix", "/base")
+    monkeypatch.setenv("PATH", os.pathsep.join([venv_bin, "/usr/bin"]))
+    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
+
+
+def test_attest_command_env_unchanged_outside_venv(monkeypatch):
+    monkeypatch.setattr(sys, "prefix", "/base")
+    monkeypatch.setattr(sys, "base_prefix", "/base")
+    path = os.pathsep.join([os.path.dirname(sys.executable), "/usr/bin"])
+    monkeypatch.setenv("PATH", path)
+    assert _capture_attest_env(monkeypatch)["PATH"] == path
+
+
+def test_attest_command_env_tolerates_unset_path_and_absent_venv_bin(monkeypatch):
+    monkeypatch.setattr(sys, "prefix", "/venv")
+    monkeypatch.setattr(sys, "base_prefix", "/base")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
+    monkeypatch.delenv("PATH")
+    assert "PATH" not in _capture_attest_env(monkeypatch)
 
 
 # --------------------------------------------------------------------------- #

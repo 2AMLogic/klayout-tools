@@ -1381,6 +1381,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 
 **Plain-string fields** — intentionally unchanged:
 
@@ -1397,7 +1398,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `layout-plan-execute` | `gds_path` | 1 |
 | `lef-abstract` | `output`, `socket` | 2 |
 | `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
-| `functional-verification` | `info_path`, `log_path`, `options.trace.path` | 1 |
+| `functional-verification` | `info_path`, `options.trace.path` | 2 (`log_path` moved to the envelope table) |
 | `yield-campaign` | `campaign.sim_report_path`, `campaign.request_path` | 1 (`yield_analysis.py`) |
 | `characterize` | `liberty.path`, `liberty.roundtrip.probe_netlist`, `simulation.{testbench,request,report}`, `cells[].simulation.{testbench,request,report}`, `comparison.{ours,reference}` | 1 |
 
@@ -1843,6 +1844,20 @@ depends on its meaning staying fixed:
 
 Field-level schema, path rules, examples and exit codes:
 [`cli/signoff.md`](cli/signoff.md#attesting-items-1-9-and-10---attest-issue-2844).
+
+Two behaviours worth knowing when running `--attest` or grading a manifest:
+
+- **Declared commands see the caller's `PATH`.** Inventory commands run with
+  the invoking environment, except that when `klt` itself runs inside a venv
+  (`sys.prefix != sys.base_prefix`, as under `uvx`/pipx) that venv's `bin`
+  directory is removed from `PATH`, so a bare `python3` resolves to the
+  repo's interpreter, not the tool's. Outside a venv the environment is
+  unchanged.
+- **Manifest evidence paths are cwd-relative.** A relative `file` evidence
+  path resolves against the process cwd, not the manifest's directory. When a
+  file-backed entry grades `unreadable_evidence`, the item's `detail` carries
+  `path` (the resolved absolute path) and `cwd` (the process cwd) — additive
+  fields; no existing field changes.
 
 ## Error shape
 

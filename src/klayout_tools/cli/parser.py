@@ -3638,6 +3638,26 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--tie-net",
+        dest="tie_nets",
+        action="append",
+        default=None,
+        metavar="EXTRACTED_NET=SCHEMATIC_NET",
+        help=(
+            "merge one reported-unbiased well/body net of the extracted "
+            "netlist into a schematic net (issue #4245), as "
+            "EXTRACTED_NET=SCHEMATIC_NET, before the extracted leg is "
+            "simulated; repeatable. EXTRACTED_NET must be one of the "
+            "report's `body_bias.unbiased_nets` (anonymous names such as "
+            "`\\$5`, valid for one extraction only); any other name is an "
+            "error that lists the valid ones. Each tie is stated in "
+            '`body_bias.tied[]` with `source: "declared"`, and a run whose '
+            "every unbiased net is tied reports `body_bias.status: "
+            '"tied"` (never `biased`). Omitted by default -- '
+            "byte-identical to today's behavior. See docs/cli/pex.md."
+        ),
+    )
+    pex_parser.add_argument(
         "--device-model",
         dest="device_models",
         action="append",
@@ -3979,10 +3999,11 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         "--attest",
         metavar="ITEM",
         type=int,
-        choices=[1, 2, 9, 10],
+        choices=[1, 2, 8, 9, 10],
         help=(
             "produce the artifact-anchored generic envelope for T1 item 1 "
-            "(Design sources), 9 (Testbenches shipped) or 10 (Repo hygiene) "
+            "(Design sources), 8 (Characterization report), 9 (Testbenches "
+            "shipped) or 10 (Repo hygiene) "
             "from --inventory, by running the item-specific checks the "
             "inventory declares (issue #2844); or for item 2 (Layout) from "
             "--input STREAM, by checking the committed layout stream "
@@ -3991,7 +4012,7 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "(nothing written), 1 malformed inventory. Mutually exclusive "
             "with <file>/--manifest/--fleet/"
             "--describe-grader/--tiers-doc. See docs/cli/signoff.md's "
-            "'Attesting items 1, 9 and 10' section."
+            "'Attesting items 1, 8, 9 and 10' section."
         ),
     )
     signoff_parser.add_argument(
@@ -4011,7 +4032,7 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "with --attest 2: path to the committed GDS/OASIS layout stream "
             "inside a git repository; the envelope pins its raw-byte sha256 "
             "and the producing KLayout version (issue #4188). Refused with "
-            "items 1, 9 and 10, which take --inventory."
+            "items 1, 8, 9 and 10, which take --inventory."
         ),
     )
     signoff_parser.add_argument(
