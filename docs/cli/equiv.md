@@ -800,6 +800,9 @@ real OpenROAD/sky130 pipeline — distinct from the fixture-based
 
 ## Out of scope
 
+- **Property checking (`assert`/`cover` via SymbiYosys).** Not a `klt`
+  verb; see [`docs/guides/property-checking.md`](../guides/property-checking.md)
+  for the supported downstream recipe.
 - **General sequential equivalence.** The `"yosys-sequential"` engine
   proves *register-correspondence* equivalence only (§"Scope" above) —
   retiming, register cloning, and FSM re-encoding (cases with no 1:1
