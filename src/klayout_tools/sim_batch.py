@@ -231,9 +231,13 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     "corners.process[].sections[] (object form)": "0.7.0",
     # 1b51954f options.ngspice_init (#2530); first in v0.7.0.
     "options.ngspice_init": "0.7.0",
-    # 7849a377c corners.params parameter axis (#3035); first in v0.7.0
-    # (`git tag --contains 7849a377c`).
-    "corners.params": "0.7.0",
+    # 7849a377c corners.params parameter axis (#3035); first in v0.8.0
+    # (`git tag --contains 7849a377c` -> v0.8.0 only; not an ancestor of
+    # v0.7.0, so a 0.7.0 runner silently drops the field, #4212).
+    "corners.params": "0.8.0",
+    # 75f738422 options.ngspice_options (#3111); first in v0.8.0
+    # (`git tag --contains 75f738422` -> v0.8.0 only, #4212).
+    "options.ngspice_options": "0.8.0",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
@@ -791,6 +795,7 @@ _RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
         (request.get("corners") or {}).get("params")
     ),
     "options.ngspice_init": _uses_option("ngspice_init"),
+    "options.ngspice_options": _uses_option("ngspice_options"),
     "options.osdi_preload": _uses_option("osdi_preload"),
     "options.stage_model_inputs": _uses_option("stage_model_inputs"),
 }
