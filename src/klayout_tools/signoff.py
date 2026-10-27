@@ -6797,6 +6797,16 @@ def _build_tier_item(
             met_envelopes=met_envelopes,
             required_kind_pair=required_kind_pair,
         )
+    elif item_id == _LVS_ITEM_ID and isinstance(raw_entry, list):
+        # Issue #4354: item 4 may cite one ``klt lvs`` report per cell.
+        # ``spec_rows`` has no meaning for LVS, so it is ignored here.
+        status, reason, citation, failure_detail, extra = _grade_multi_citation(
+            raw_entry,
+            grade_spec,
+            spec_rows=None,
+            spec_rows_invalid=False,
+            met_envelopes=met_envelopes,
+        )
     elif raw_entry is not None:
         spec = _normalize_evidence_entry(raw_entry)
         if spec is None:
@@ -6830,6 +6840,11 @@ def _build_tier_item(
 #: ``spec_rows`` coverage (issue #2959). Item 5, and item 6 (issue #2908: a
 #: block whose spec has several statistical rows, only some evidenced).
 _ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5, 6})
+
+#: T1 item 4 (LVS): accepts a list of ``klt lvs`` reports -- one per cell of
+#: an analog partition (issue #4354) -- but never ``spec_rows``, so it is
+#: kept out of :data:`_ITEMS_ACCEPTING_MULTI_CITATION`.
+_LVS_ITEM_ID = 4
 
 #: Issue #3741: the RTL-flow evidence kinds of T1 item 5, digital -- the tier
 #: doc's "multi-corner STA **plus** a bit-exact functional test suite". A
