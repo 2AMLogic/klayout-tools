@@ -3930,16 +3930,17 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         "--attest",
         metavar="ITEM",
         type=int,
-        choices=[1, 9, 10],
+        choices=[1, 2, 9, 10],
         help=(
             "produce the artifact-anchored generic envelope for T1 item 1 "
-            "(Design sources), 9 (Testbenches shipped) or 10 (Repo hygiene) "
+            "(Design sources), 2 (Layout), 9 (Testbenches shipped) or 10 "
+            "(Repo hygiene) "
             "from --inventory, by running the item-specific checks the "
             "inventory declares (issue #2844). Status is derived from those "
             "checks: exit 0 pass, 3 fail (nothing written), 1 malformed "
             "inventory. Mutually exclusive with <file>/--manifest/--fleet/"
             "--describe-grader/--tiers-doc. See docs/cli/signoff.md's "
-            "'Attesting items 1, 9 and 10' section."
+            "'Attesting items 1, 2, 9 and 10' section."
         ),
     )
     signoff_parser.add_argument(

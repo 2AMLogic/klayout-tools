@@ -91,7 +91,7 @@ envelope (a clean DRC report, say) **no longer satisfies items 1, 9 or
 10**. Item 2 still accepts one, for compatibility; its citation carries no
 `artifact_binding`, which marks it as a cited pass the tool could not judge
 for relevance. See [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2,
-9, and 10" and "Attesting items 1, 9 and 10".
+9, and 10" and "Attesting items 1, 2, 9 and 10".
 
 Where the claim is about a set of files (item 1's sources plus the derived
 netlist; item 9's or 10's several files), the envelope may bind the set with

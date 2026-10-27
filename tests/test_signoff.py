@@ -16094,8 +16094,8 @@ def test_attest_refuses_an_inventory_outside_any_repository(tmp_path):
 
 def test_attest_refuses_unsupported_item_and_unreadable_inventory(tmp_path):
     repo = _attest_repo(tmp_path)
-    with pytest.raises(AttestationError, match="supports T1 items 1, 9, 10"):
-        build_attestation(2, _write_inventory(repo, 1))
+    with pytest.raises(AttestationError, match="supports T1 items 1, 2, 9, 10"):
+        build_attestation(3, _write_inventory(repo, 1))
     with pytest.raises(AttestationError, match="not found"):
         build_attestation(1, str(repo / "missing.json"))
     bad = repo / "attest" / "bad.json"
@@ -16363,9 +16363,8 @@ def test_attest_argument_conflicts_are_refused(argv, capsys):
 
 
 def test_attest_rejects_an_item_it_does_not_attest_as_a_usage_error():
-    """Item 2 is out of scope (its binding is the layout stream itself)."""
     with pytest.raises(SystemExit) as excinfo:
-        main(["signoff", "--attest", "2", "--inventory", "x.json"])
+        main(["signoff", "--attest", "3", "--inventory", "x.json"])
     assert excinfo.value.code == 2
 
 
@@ -16402,6 +16401,372 @@ def test_command_backed_attestation_is_graded_like_a_file(tmp_path):
     assert item["citation"]["artifact_binding"]["attestation"]["producer"] == (
         "klt signoff --attest"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4221: `--attest 2` binds the committed layout stream, optionally with a
+# generator-backed regeneration claim.
+# --------------------------------------------------------------------------- #
+
+
+def _attest_gds(path: Path, *, extra_box: bool = False, year: int = 2020) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_gds(path, extra_box=extra_box, year=year)
+
+
+def _copy_script(repo: Path, source: Path) -> list[str]:
+    """A generator argv that writes ``source``'s bytes to ``gen/out.gds``."""
+    return [
+        sys.executable,
+        "-c",
+        "import shutil,sys; shutil.copyfile(sys.argv[1], 'gen/out.gds')",
+        str(source),
+    ]
+
+
+def _layout_repo(tmp_path: Path, **inventory) -> tuple[Path, str]:
+    repo = _attest_repo(tmp_path)
+    _attest_gds(repo / "layout" / "ota.gds")
+    (repo / "gen").mkdir()
+    base = {
+        "schema_version": 1,
+        "kind": "t1-attestation-inventory",
+        "t1_item": 2,
+        "streams": ["layout/ota.gds"],
+    }
+    for key, value in inventory.items():
+        if value is _DROP:
+            base.pop(key, None)
+        else:
+            base[key] = value
+    return repo, _write_inventory(repo, 2, base)
+
+
+def _manifest_layout_item(repo: Path, envelope: dict, *, name="item2.json"):
+    output = repo / "evidence" / name
+    output.write_text(json.dumps(envelope, indent=2))
+    pin = envelope["provenance"]["input"]["content_hash"]
+    result = build_tier_report(
+        _manifest(evidence={"2": {"file": str(output), "content_hash": pin}})
+    )
+    return _item(result, 2)
+
+
+def test_attest_item_2_single_stream_binds_the_stream_not_the_inventory(tmp_path):
+    repo, inventory = _layout_repo(tmp_path)
+
+    envelope = build_attestation(2, inventory)
+
+    assert envelope["status"] == "pass"
+    assert envelope["source"] == "attest/item2.json"
+    assert envelope["provenance"]["input"] == {
+        "path": {"path": "layout/ota.gds", "scope": "repo"},
+        "content_hash": _hash_of(str(repo / "layout" / "ota.gds")),
+    }
+    assert "regeneration" not in envelope["provenance"]
+    assert [(c["role"], c["path"]) for c in envelope["attestation"]["checks"]] == [
+        ("layout", "layout/ota.gds")
+    ]
+    item = _manifest_layout_item(repo, envelope)
+    assert item["status"] == "met"
+    assert item["citation"]["artifact_binding"]["input_verified"] is True
+
+
+def test_attest_item_2_multiple_streams_use_a_set_binding(tmp_path):
+    repo, _ = _layout_repo(tmp_path)
+    _attest_gds(repo / "layout" / "bias.gds", extra_box=True)
+    inventory = _write_inventory(
+        repo,
+        2,
+        {
+            "schema_version": 1,
+            "kind": "t1-attestation-inventory",
+            "t1_item": 2,
+            "streams": ["layout/ota.gds", "layout/bias.gds"],
+        },
+    )
+
+    envelope = build_attestation(2, inventory)
+
+    bound = envelope["provenance"]["input"]
+    members = {m["path"]["path"]: m["content_hash"] for m in bound["paths"]}
+    assert members == {
+        "layout/bias.gds": _hash_of(str(repo / "layout" / "bias.gds")),
+        "layout/ota.gds": _hash_of(str(repo / "layout" / "ota.gds")),
+    }
+    assert bound["content_hash"] == signoff_module.input_set_digest(members.items())
+    assert _manifest_layout_item(repo, envelope)["status"] == "met"
+
+
+def test_attest_item_2_edited_stream_after_attesting_is_stale(tmp_path):
+    repo, inventory = _layout_repo(tmp_path)
+    envelope = build_attestation(2, inventory)
+    _attest_gds(repo / "layout" / "ota.gds", extra_box=True)
+
+    item = _manifest_layout_item(repo, envelope)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+
+
+def test_attest_item_2_regeneration_bytes_match_and_mismatch(tmp_path):
+    repo, _ = _layout_repo(tmp_path)
+    same = repo / "layout" / "ota.gds"
+    regeneration = {
+        "generator": {"argv": _copy_script(repo, same)},
+        "output": "gen/out.gds",
+    }
+    inventory = _write_inventory(
+        repo,
+        2,
+        {
+            "schema_version": 1,
+            "kind": "t1-attestation-inventory",
+            "t1_item": 2,
+            "streams": ["layout/ota.gds"],
+            "regeneration": regeneration,
+        },
+    )
+
+    envelope = build_attestation(2, inventory)
+
+    assert envelope["status"] == "pass"
+    claim = envelope["provenance"]["regeneration"]
+    assert claim["regenerated_hash"] == _hash_of(str(same))
+    assert "hash_kind" not in claim
+    assert claim["generator"] == " ".join(regeneration["generator"]["argv"])
+    # The regenerated copy is not left in the tree.
+    assert not (repo / "gen" / "out.gds").exists()
+    item = _manifest_layout_item(repo, envelope)
+    assert item["status"] == "met"
+    assert (
+        item["citation"]["artifact_binding"]["regeneration"]["regenerated_hash"]
+        == (claim["regenerated_hash"])
+    )
+
+    other = tmp_path / "other.gds"
+    _attest_gds(other, extra_box=True)
+    regeneration["generator"]["argv"] = _copy_script(repo, other)
+    _write_inventory(
+        repo,
+        2,
+        {
+            "schema_version": 1,
+            "kind": "t1-attestation-inventory",
+            "t1_item": 2,
+            "streams": ["layout/ota.gds"],
+            "regeneration": regeneration,
+        },
+    )
+    mismatch = build_attestation(2, inventory)
+    item = _manifest_layout_item(repo, mismatch, name="mismatch.json")
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_artifact"
+
+
+def test_attest_item_2_geometry_hash_ignores_rewrite_timestamps(tmp_path):
+    repo, _ = _layout_repo(tmp_path)
+    rewritten = tmp_path / "rewritten.gds"
+    _attest_gds(rewritten, year=2031)  # same geometry, different BGNLIB year
+    inventory = _write_inventory(
+        repo,
+        2,
+        {
+            "schema_version": 1,
+            "kind": "t1-attestation-inventory",
+            "t1_item": 2,
+            "streams": ["layout/ota.gds"],
+            "regeneration": {
+                "generator": {"argv": _copy_script(repo, rewritten)},
+                "output": "gen/out.gds",
+                "hash_kind": "geometry",
+            },
+        },
+    )
+
+    assert _hash_of(rewritten) != _hash_of(repo / "layout" / "ota.gds")
+    envelope = build_attestation(2, inventory)
+
+    claim = envelope["provenance"]["regeneration"]
+    assert claim["hash_kind"] == "geometry"
+    assert claim["regenerated_hash"] == layout_geometry_digest(
+        str(repo / "layout" / "ota.gds")
+    )
+    assert _manifest_layout_item(repo, envelope)["status"] == "met"
+
+
+def test_attest_item_2_failed_generator_or_missing_output_fails(tmp_path):
+    repo, _ = _layout_repo(tmp_path)
+    for argv in (
+        [sys.executable, "-c", "import sys; sys.exit(3)"],
+        _OK,  # exits 0 but writes nothing
+    ):
+        inventory = _write_inventory(
+            repo,
+            2,
+            {
+                "schema_version": 1,
+                "kind": "t1-attestation-inventory",
+                "t1_item": 2,
+                "streams": ["layout/ota.gds"],
+                "regeneration": {"generator": {"argv": argv}, "output": "gen/out.gds"},
+            },
+        )
+        envelope = build_attestation(2, inventory)
+        assert envelope["status"] == "fail"
+        assert "regeneration" not in envelope["provenance"]
+        (failed,) = _failed(envelope)
+        assert failed["role"] == "regeneration"
+        assert failed["regenerated_hash"] is None
+
+
+def test_attest_item_2_restores_a_preexisting_output_file(tmp_path):
+    repo, _ = _layout_repo(tmp_path)
+    (repo / "gen" / "out.gds").write_bytes(b"precious")
+    inventory = _write_inventory(
+        repo,
+        2,
+        {
+            "schema_version": 1,
+            "kind": "t1-attestation-inventory",
+            "t1_item": 2,
+            "streams": ["layout/ota.gds"],
+            "regeneration": {
+                "generator": {"argv": _copy_script(repo, repo / "layout" / "ota.gds")},
+                "output": "gen/out.gds",
+            },
+        },
+    )
+
+    assert build_attestation(2, inventory)["status"] == "pass"
+    assert (repo / "gen" / "out.gds").read_bytes() == b"precious"
+
+
+def test_attest_item_2_missing_stream_fails_without_internal_error(tmp_path):
+    repo, inventory = _layout_repo(tmp_path, streams=["layout/missing.gds"])
+
+    envelope = build_attestation(2, inventory)
+
+    assert envelope["status"] == "fail"
+    assert _failed(envelope)[0]["path"] == "layout/missing.gds"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"streams": []}, "empty"),
+        ({"streams": ["/abs.gds"]}, "absolute"),
+        ({"streams": ["../x.gds"]}, "outside the repository"),
+        ({"streams": ["layout/ota.gds", "layout/ota.gds"]}, "more than once"),
+        ({"bogus": 1}, "unknown field"),
+        (
+            {
+                "regeneration": {
+                    "generator": {"argv": ["x"]},
+                    "output": "layout/ota.gds",
+                }
+            },
+            "attested streams",
+        ),
+        (
+            {
+                "regeneration": {
+                    "generator": {"argv": ["x"]},
+                    "output": "g.gds",
+                    "hash_kind": "md5",
+                }
+            },
+            "hash_kind",
+        ),
+        (
+            {
+                "regeneration": {
+                    "generator": {"argv": ["x"]},
+                    "output": "g.gds",
+                    "extra": 1,
+                }
+            },
+            "unknown field",
+        ),
+        ({"regeneration": {"output": "g.gds"}}, "generator"),
+        (
+            {
+                "streams": ["layout/ota.gds", "layout/b.gds"],
+                "regeneration": {
+                    "generator": {"argv": ["x"]},
+                    "output": "g.gds",
+                    "hash_kind": "geometry",
+                },
+            },
+            "exactly one stream",
+        ),
+    ],
+)
+def test_attest_item_2_refuses_malformed_inventories(tmp_path, overrides, message):
+    _, inventory = _layout_repo(tmp_path, **overrides)
+
+    with pytest.raises(AttestationError, match=message):
+        build_attestation(2, inventory)
+
+
+def test_attest_item_2_refuses_a_symlinked_stream(tmp_path):
+    repo, _ = _layout_repo(tmp_path)
+    (repo / "layout" / "link.gds").symlink_to(repo / "layout" / "ota.gds")
+    inventory = _write_inventory(
+        repo,
+        2,
+        {
+            "schema_version": 1,
+            "kind": "t1-attestation-inventory",
+            "t1_item": 2,
+            "streams": ["layout/link.gds"],
+        },
+    )
+
+    with pytest.raises(AttestationError, match="symlink"):
+        build_attestation(2, inventory)
+
+
+def test_attest_item_2_check_detects_stream_drift_and_skips_local_only(
+    tmp_path, capsys
+):
+    repo, _ = _layout_repo(tmp_path)
+    gen = {
+        "argv": _copy_script(repo, repo / "layout" / "ota.gds"),
+        "local_only": True,
+    }
+    inventory = _write_inventory(
+        repo,
+        2,
+        {
+            "schema_version": 1,
+            "kind": "t1-attestation-inventory",
+            "t1_item": 2,
+            "streams": ["layout/ota.gds"],
+            "regeneration": {"generator": gen, "output": "gen/out.gds"},
+        },
+    )
+    committed = repo / "evidence" / "item2.json"
+    assert _attest_cli(2, inventory, "-o", str(committed)) == 0
+    capsys.readouterr()
+
+    assert _attest_cli(2, inventory, "--check", str(committed)) == 0
+    capsys.readouterr()
+    # The local_only generator was not re-run: no output file, committed hash kept.
+    assert not (repo / "gen" / "out.gds").exists()
+
+    _attest_gds(repo / "layout" / "ota.gds", extra_box=True)
+    assert _attest_cli(2, inventory, "--check", str(committed)) == 3
+
+
+def test_attest_item_2_text_output_names_the_bound_stream(tmp_path, capsys):
+    repo, inventory = _layout_repo(tmp_path)
+
+    assert _attest_cli(2, inventory) == 0
+
+    out = capsys.readouterr().out
+    assert "inventory: attest/item2.json" in out
+    assert "bound: layout/ota.gds" in out
 
 
 # --------------------------------------------------------------------------- #

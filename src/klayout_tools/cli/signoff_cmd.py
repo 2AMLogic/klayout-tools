@@ -20,12 +20,13 @@
    content hash identifying the grading code itself -- purely informational,
    reads no manifest and runs no check. See :func:`..signoff.describe_grader`.
 
-5. **Attest T1 items 1, 9, 10** (``--attest ITEM --inventory FILE``, issue
-   #2844): run the item-specific checks a versioned inventory declares and
-   emit the artifact-anchored generic envelope ``--manifest`` binds (see
-   :mod:`..signoff_attest`). With ``--check COMMITTED`` it re-attests and
-   diffs instead, writing nothing; exit ``0`` only when the committed
-   envelope still reproduces and still passes, ``3`` otherwise.
+5. **Attest T1 items 1, 2, 9, 10** (``--attest ITEM --inventory FILE``, issue
+   #2844; item 2 issue #4221): run the item-specific checks a versioned
+   inventory declares and emit the artifact-anchored generic envelope
+   ``--manifest`` binds (see :mod:`..signoff_attest`). With ``--check
+   COMMITTED`` it re-attests and diffs instead, writing nothing; exit ``0``
+   only when the committed envelope still reproduces and still passes, ``3``
+   otherwise.
 
 The modes are mutually exclusive: ``--manifest``/``--fleet``/
 ``--describe-grader``/``--attest`` each replace the positional ``<file>...``
@@ -367,7 +368,16 @@ def _print_attestation_text(result: dict) -> None:
     attestation = result["attestation"]
     print(f"checks: {attestation['passed_count']}/{attestation['check_count']} passed")
     binding = result["provenance"]["input"]
-    print(f"inventory: {binding['path']['path']} ({binding['content_hash']})")
+    if result["t1_item"] != 2:
+        print(f"inventory: {binding['path']['path']} ({binding['content_hash']})")
+    else:
+        what = (
+            binding["path"]["path"]
+            if "path" in binding
+            else f"{len(binding['paths'])} streams"
+        )
+        print(f"inventory: {result['source']}")
+        print(f"bound: {what} ({binding['content_hash']})")
     print()
     for check in attestation["checks"]:
         print(_attestation_check_line(check))

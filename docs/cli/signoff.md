@@ -41,13 +41,13 @@ Four modes, one verb:
    which T1 item ids this build has grading rules for, plus the content hash
    identifying the grading code itself, without reading a manifest or
    running any check. See "Identifying the grading build" below.
-5. **Attest T1 items 1, 9 and 10** (`--attest {1,9,10} --inventory FILE`,
-   issue #2844) — run the item-specific mechanical checks a versioned
+5. **Attest T1 items 1, 2, 9 and 10** (`--attest {1,2,9,10} --inventory FILE`,
+   issue #2844; item 2 issue #4221) — run the item-specific mechanical checks a versioned
    inventory declares and emit the artifact-anchored `generic` envelope
    `--manifest` binds for that item. Its `status` is derived from the
    checks, not asserted. Since this producer exists, items 1, 9 and 10
-   **no longer accept native envelopes** (item 2 still does). See
-   "Attesting items 1, 9 and 10" below.
+   **no longer accept native envelopes** (item 2 still does, and can also be
+   attested). See "Attesting items 1, 2, 9 and 10" below.
 
 Plus one modifier on modes 2 and 3: **`--check <committed-report>`** (issue
 #2249) re-grades the manifest and reports whether a previously committed
@@ -66,8 +66,8 @@ klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|js
 klt signoff --manifest <manifest-file> --check <committed-report> [--tiers-doc <path>] [--format text|json]
 klt signoff --fleet <fleet-manifest-file> --check <committed-report> [--tiers-doc <path>] [--format text|json]
 klt signoff --describe-grader [--format text|json]
-klt signoff --attest {1,9,10} --inventory <file> [-o <envelope>] [--format text|json]
-klt signoff --attest {1,9,10} --inventory <file> --check <committed-envelope> [--format text|json]
+klt signoff --attest {1,2,9,10} --inventory <file> [-o <envelope>] [--format text|json]
+klt signoff --attest {1,2,9,10} --inventory <file> --check <committed-envelope> [--format text|json]
 ```
 
 - `<file>...` — one or more paths to `klt drc`/`klt lvs`/`klt extract`/`klt
@@ -109,12 +109,12 @@ klt signoff --attest {1,9,10} --inventory <file> --check <committed-envelope> [-
   for, plus its grading-code content hash. Mutually exclusive with
   `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`. See
   "Identifying the grading build" below.
-- `--attest` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** `1`, `9` or `10`: produce the attestation envelope for that
+- `--attest` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** `1`, `2`, `9` or `10` (`2` first ships in the `klt` release after 0.8.0): produce the attestation envelope for that
   T1 item from `--inventory` (issue #2844). Any other value is a usage error
   (exit `2`). Mutually exclusive with
   `<file>...`/`--manifest`/`--fleet`/`--describe-grader`/`--tiers-doc`.
   With `--check <committed-envelope>`, re-attests and diffs instead of
-  writing. See "Attesting items 1, 9 and 10" below.
+  writing. See "Attesting items 1, 2, 9 and 10" below.
 - `--inventory` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** With `--attest`: path to the attestation inventory (a
   file inside a git repository, not `-`). Refused without `--attest`.
 - `-o`/`--output` — with `--attest`: also write the envelope to this path,
@@ -1221,7 +1221,7 @@ What each item binds:
 | **10** Repo hygiene | The hygiene files as a [set](#binding-a-set-of-artifacts-provenanceinputpaths) (CI workflow, README, spec table, license) — or, for a single file, the CI workflow or a committed checklist covering them. |
 
 For items 1, 9 and 10, produce this envelope with `klt signoff --attest`
-(issue #2844, see "Attesting items 1, 9 and 10" below): its `status` is
+(issue #2844, see "Attesting items 1, 2, 9 and 10" below): its `status` is
 derived from item-specific checks it ran and lists in
 `attestation.checks[]`, and the met citation's `artifact_binding` carries an
 `attestation` block naming the producer and the check counts. A
@@ -1563,13 +1563,13 @@ Nothing about how the four are *graded* changes: they are still `unmet` when
 uncited, and a block still reaches `tier: "T1"` only once every T1 item —
 these four included — is `"met"`.
 
-### Attesting items 1, 9 and 10 (`--attest`, issue #2844)
+### Attesting items 1, 2, 9 and 10 (`--attest`, issue #2844)
 
 > **Availability:** `--attest` and `--inventory` first ship in `klt` **0.8.0**
 > (PyPI). Release-pinned installs of 0.7.0 and earlier fail with
 > `unrecognized arguments`.
 
-`klt signoff --attest {1,9,10} --inventory FILE` is the producer for the
+`klt signoff --attest {1,2,9,10} --inventory FILE` is the producer for the
 artifact-anchored envelope above. It reads a versioned **attestation
 inventory**, runs the mechanical checks that inventory declares for the
 item, and emits a `generic` envelope whose `status` is `"pass"` only when
@@ -1597,6 +1597,8 @@ an inventory the author did not write.
 | ---- | ----- | -------- | ---------- |
 | **1** Design sources | `sources`: list of paths | yes, non-empty | each file exists (`present`, role `source`) |
 | | `derived`: list of `{path, generator, check}` | yes, non-empty | each file exists (`present`, role `derived`), **and** its `check` command exits `0` (`command`, role `freshness`). `generator` names what produced it (e.g. `"klt netlist"`). |
+| **2** Layout | `streams`: list of GDS/OASIS paths | yes, non-empty | each file exists (`present`, role `layout`) |
+| | `regeneration`: `{generator, output, hash_kind?}` | no | `generator` (a command) exits `0` **and** the file it wrote at `output` is readable (`command`, role `regeneration`); see "Item 2" below. `output` must not be one of `streams`, and a regeneration needs exactly one stream. `hash_kind` is `"bytes"` (default) or `"geometry"`. |
 | **9** Testbenches shipped | `testbenches`: list of paths | yes, non-empty | each file exists (`present`, role `testbench`) |
 | | `cold_start`: command | yes | exits `0` (`command`, role `cold_start`) |
 | | `pins`: `{"pdk": {"name", "revision"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty (`pin`, role `pdk`); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
@@ -1621,6 +1623,47 @@ absolute, escape the repository (`..`), traverse a symlink anywhere along
 their length, or appear more than once across the inventory's path lists.
 The inventory file itself must not be a symlink, and must be a file (`-` is
 refused: there is no path to pin).
+
+#### Item 2 (Layout): the stream is the binding (issue #4221)
+
+> **Availability:** `--attest 2` first ships in the `klt` release after 0.8.0.
+
+Items 1, 9 and 10 pin the *inventory*. Item 2 pins the committed **stream**
+instead, because the grader compares a `provenance.regeneration` claim with
+the bound artifact's hash: pinning the inventory would make that claim
+meaningless. One stream binds as `provenance.input.path`
+(`{"path", "scope": "repo"}`) with that stream's raw-byte hash; several bind
+as a `provenance.input.paths` set whose `content_hash` is the combined
+`input_set_digest`. The inventory is named in `source`. Editing a stream
+after attesting turns the row `stale_evidence`.
+
+With a `regeneration` block, `klt signoff --attest 2` **runs** the generator
+(same runner and timeout as other command checks; the attester's own CI is
+trusted exactly as for the `command` checks above), hashes the file at
+`output` (`bytes`: raw SHA-256; `geometry`: the decoded-geometry digest,
+which ignores GDS/OASIS write timestamps) and writes
+`provenance.regeneration` as `{generator, regenerated_hash, hash_kind?}`
+(`hash_kind` absent for `bytes`). A generator that fails, or an `output`
+that is missing or unreadable, fails the attestation and writes no hash.
+The generated `output` is removed afterwards (a pre-existing file there is
+restored), so the working tree is left as found. A mismatch with the
+committed stream grades `stale_artifact` (see "Items 1 and 2: attesting that
+the artifact was regenerated"). With `--check`, a `local_only` generator is
+skipped and its committed outcome carried through.
+
+```json
+{
+  "schema_version": 1,
+  "kind": "t1-attestation-inventory",
+  "t1_item": 2,
+  "streams": ["layout/ota.gds"],
+  "regeneration": {
+    "generator": {"argv": ["klt", "gen-compose", "spec.json", "-o", "build/ota.gds"]},
+    "output": "build/ota.gds",
+    "hash_kind": "geometry"
+  }
+}
+```
 
 #### Hashing rules
 
@@ -2324,7 +2367,7 @@ themselves landed (issues #2176, #2202) — see
 T1 item 2 accepts *any* recognised, *native* envelope kind — a `klt drc`
 report can satisfy it just as well as a `klt lvs` one (items 1, 9 and 10
 did too until issue #2844 restricted them to attested `generic` evidence;
-see "Attesting items 1, 9 and 10" above), since Phase
+see "Attesting items 1, 2, 9 and 10" above), since Phase
 0/1 (issues #722/#825) graded each item purely on whether *some* passing
 check was cited, not on whether that check was the *right kind* of check.
 (This is unchanged by issue #1152's `generic` kind below — that issue adds a

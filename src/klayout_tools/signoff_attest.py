@@ -1,6 +1,6 @@
-"""Built-in attestation producer for T1 items 1, 9 and 10 (issue #2844).
+"""Built-in attestation producer for T1 items 1, 2, 9 and 10 (issue #2844).
 
-``klt signoff --attest {1,9,10} --inventory FILE`` reads a versioned
+``klt signoff --attest {1,2,9,10} --inventory FILE`` reads a versioned
 **attestation inventory**, runs the item-specific mechanical checks it
 declares, and emits the artifact-anchored ``"generic"`` envelope that
 ``klt signoff --manifest`` already knows how to bind (issue #2718 --
@@ -17,12 +17,17 @@ drift check, and the envelope wrapper -- and the envelope's ``status:
 ``"pass"`` only when every check this module ran passed, and the envelope's
 ``attestation.checks[]`` names each one.
 
-What each item checks (see ``docs/cli/signoff.md``, "Attesting items 1, 9
+What each item checks (see ``docs/cli/signoff.md``, "Attesting items 1, 2, 9
 and 10"):
 
 - **Item 1 (Design sources)** -- every listed source exists; every declared
   derived artifact exists *and* its declared freshness command (e.g. ``klt
   netlist ... --check``) exits ``0``. A present-but-stale netlist fails.
+- **Item 2 (Layout, issue #4221)** -- every listed stream exists. Unlike the
+  other items the envelope binds the *stream* (one stream: ``input.path``;
+  several: an ``input.paths`` set), not the inventory. An optional
+  ``regeneration`` block runs the generator and records the hash of its
+  output as ``provenance.regeneration`` for the grader to compare.
 - **Item 9 (Testbenches shipped)** -- every listed testbench exists; the
   declared cold-start invocation exits ``0``; the PDK name + revision and at
   least one tool version are pinned.
@@ -54,7 +59,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ._provenance import sha256_file
+from ._provenance import layout_geometry_digest, sha256_file
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
     build_rerun_result,
@@ -72,6 +77,7 @@ from .signoff import (
     _finite_json_float,
     _generic_item_binding_refusal,
     _reject_json_constant,
+    input_set_digest,
 )
 
 #: The attestation-inventory schema versions this build reads. An inventory
@@ -98,13 +104,24 @@ PRODUCER = "klt signoff --attest"
 #: part of the evidence, not an implicit convention.
 HASH_ALGORITHM = "sha256-raw-bytes"
 
-#: The T1 items this producer attests -- exactly the items whose evidence
+#: The T1 items this producer attests: the items whose evidence
 #: :data:`~klayout_tools.signoff._ITEMS_REQUIRING_ATTESTED_EVIDENCE` restricts
-#: to a generic envelope. Item 2 (Layout) stays out of scope: its binding is
-#: the committed stream itself (issue #2718), unchanged by issue #2844.
-ATTESTABLE_ITEMS: tuple[int, ...] = tuple(sorted(_ITEMS_REQUIRING_ATTESTED_EVIDENCE))
+#: to a generic envelope (issue #2844), plus item 2 (Layout, issue #4221).
+#: Item 2 accepts other evidence kinds too, so the grader's constant is left
+#: alone and the producer adds it locally.
+ATTESTABLE_ITEMS: tuple[int, ...] = tuple(
+    sorted(_ITEMS_REQUIRING_ATTESTED_EVIDENCE | {2})
+)
 
-_ITEM_TITLES = {1: "Design sources", 9: "Testbenches shipped", 10: "Repo hygiene"}
+_ITEM_TITLES = {
+    1: "Design sources",
+    2: "Layout",
+    9: "Testbenches shipped",
+    10: "Repo hygiene",
+}
+
+#: ``regeneration.hash_kind`` values (the grader's ``_HASH_KIND_*``).
+_HASH_KINDS = ("bytes", "geometry")
 
 #: Top-level inventory keys each item accepts. Anything else is refused --
 #: an unknown key is far more likely a typo (``testbench`` for
@@ -113,6 +130,7 @@ _ITEM_TITLES = {1: "Design sources", 9: "Testbenches shipped", 10: "Repo hygiene
 _COMMON_KEYS = frozenset({"schema_version", "kind", "t1_item", "description"})
 _ITEM_KEYS: dict[int, frozenset[str]] = {
     1: frozenset({"sources", "derived"}),
+    2: frozenset({"streams", "regeneration"}),
     9: frozenset({"testbenches", "cold_start", "pins"}),
     10: frozenset({"hygiene", "checks"}),
 }
@@ -121,6 +139,7 @@ _ITEM_KEYS: dict[int, frozenset[str]] = {
 #: records.
 _PATH_LISTS: dict[int, tuple[tuple[str, str], ...]] = {
     1: (("sources", "source"),),
+    2: (("streams", "layout"),),
     9: (("testbenches", "testbench"),),
     10: (("hygiene", "hygiene"),),
 }
@@ -324,6 +343,10 @@ def _validated_inventory(
         normalized[field] = _path_list(inventory, field, root, seen)
     if item == 1:
         normalized["derived"] = _validated_derived(inventory, root, seen)
+    elif item == 2:
+        normalized["regeneration"] = _validated_regeneration(
+            inventory, normalized["streams"], root
+        )
     elif item == 9:
         if "cold_start" not in inventory:
             raise AttestationError(
@@ -358,6 +381,51 @@ def _validated_inventory(
             specs.append({"name": name, **spec})
         normalized["checks"] = specs
     return normalized
+
+
+def _validated_regeneration(
+    inventory: Mapping[str, Any], streams: Sequence[str], root: str
+) -> dict[str, Any] | None:
+    """Validate item 2's optional ``regeneration`` block, or return ``None``
+    when it is absent.
+
+    The generator's ``output`` must not be one of ``streams`` (running the
+    generator would clobber the attested bytes). A regeneration claim is
+    graded against the single bound stream, so it needs exactly one stream."""
+    raw = inventory.get("regeneration")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise AttestationError("'regeneration' must be an object")
+    unknown = sorted(set(raw) - {"generator", "output", "hash_kind"})
+    if unknown:
+        raise AttestationError(
+            f"'regeneration' has unknown field(s): {', '.join(unknown)}"
+        )
+    if "generator" not in raw:
+        raise AttestationError(
+            "'regeneration.generator' must be a command object with an 'argv' list"
+        )
+    generator = _command_spec(raw["generator"], "regeneration.generator", root)
+    output = _normalize_repo_path(raw.get("output"), "regeneration.output", root)
+    hash_kind = raw.get("hash_kind", "bytes")
+    if hash_kind not in _HASH_KINDS:
+        raise AttestationError(
+            f"'regeneration.hash_kind' must be one of {', '.join(_HASH_KINDS)}"
+        )
+    if output in streams:
+        raise AttestationError(
+            f"'regeneration.output' '{output}' is one of the attested streams -- "
+            "the generator would overwrite the bytes being attested; write the "
+            "regenerated copy to a different path"
+        )
+    if len(streams) != 1:
+        raise AttestationError(
+            "'regeneration' needs exactly one stream: the claim is graded "
+            "against the single bound stream (a multi-stream binding has no "
+            "single artifact to compare the regenerated output with)"
+        )
+    return {"generator": generator, "output": output, "hash_kind": hash_kind}
 
 
 def _validated_derived(
@@ -531,6 +599,50 @@ def _skipped_check(
     }
 
 
+def _regeneration_check(
+    root: str,
+    regeneration: Mapping[str, Any],
+    committed_checks: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """Item 2's regeneration check: run the generator, then hash the file it
+    wrote at ``output`` (raw bytes, or decoded geometry for ``hash_kind:
+    "geometry"``). The check fails -- and records no hash -- when the
+    generator fails or ``output`` is missing/unreadable. Any pre-existing
+    file at ``output`` is restored (or the new one removed) afterwards, so the
+    working tree is left as found. A ``local_only`` generator is skipped under
+    ``--check`` and its committed outcome (hash included) carried through."""
+    output = regeneration["output"]
+    hash_kind = regeneration["hash_kind"]
+    spec = regeneration["generator"]
+    identity = {"output": output, "hash_kind": hash_kind}
+    if committed_checks is not None and spec.get("local_only"):
+        return _skipped_check(spec, "regeneration", committed_checks, **identity)
+    target = os.path.join(root, output)
+    previous: bytes | None = None
+    if os.path.isfile(target):
+        with open(target, "rb") as handle:
+            previous = handle.read()
+    try:
+        check = _command_check(root, spec, "regeneration", **identity)
+        regenerated: str | None = None
+        if check["passed"]:
+            if hash_kind == "geometry":
+                regenerated = layout_geometry_digest(target)
+            else:
+                digest = sha256_file(target)
+                regenerated = f"sha256:{digest}" if digest is not None else None
+    finally:
+        if previous is not None:
+            with open(target, "wb") as handle:
+                handle.write(previous)
+        elif os.path.isfile(target):
+            os.remove(target)
+    check["regenerated_hash"] = regenerated
+    if regenerated is None:
+        check["passed"] = False
+    return check
+
+
 def _pin_checks(pins: Any) -> list[dict[str, Any]]:
     """Item 9's reproducibility pins: the PDK name + revision, and at least
     one tool version. A missing or empty pin is a failed check, not a
@@ -591,7 +703,12 @@ def _run_checks(
         checks.extend(
             _file_check(root, path, role) for path in sorted(normalized[field])
         )
-    if item == 1:
+    if item == 2:
+        if normalized["regeneration"] is not None:
+            checks.append(
+                _regeneration_check(root, normalized["regeneration"], committed_checks)
+            )
+    elif item == 1:
         for entry in normalized["derived"]:
             checks.append(_file_check(root, entry["path"], "derived"))
         for entry in normalized["derived"]:
@@ -641,7 +758,7 @@ def build_attestation(
     ``committed_checks`` is passed only by :func:`check_attestation`: it makes
     ``local_only`` commands skip (carrying the committed outcome, marked
     ``skipped``) instead of run."""
-    if item not in _ITEMS_REQUIRING_ATTESTED_EVIDENCE:
+    if item not in ATTESTABLE_ITEMS:
         raise AttestationError(
             f"--attest supports T1 items {', '.join(map(str, ATTESTABLE_ITEMS))}; "
             f"got {item}"
@@ -657,6 +774,14 @@ def build_attestation(
     inventory_rel = os.path.relpath(absolute, root).replace(os.sep, "/")
     normalized = _validated_inventory(inventory, item, root, inventory_path)
     checks = _run_checks(item, root, normalized, committed_checks)
+    if item == 2:
+        input_block, binding_hash = _layout_binding(normalized["streams"], checks)
+    else:
+        input_block = {
+            "path": {"path": inventory_rel, "scope": "repo"},
+            "content_hash": inventory_hash,
+        }
+        binding_hash = inventory_hash
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
     envelope: dict[str, Any] = {
@@ -682,14 +807,68 @@ def build_attestation(
             "klayout_version": None,
             "pdk": None,
             "deck": None,
-            "input": {
-                "path": {"path": inventory_rel, "scope": "repo"},
-                "content_hash": inventory_hash,
-            },
+            "input": input_block,
         },
     }
-    _self_check(envelope, item, inventory_hash)
+    regeneration = _regeneration_claim(checks) if item == 2 else None
+    if regeneration is not None:
+        envelope["provenance"]["regeneration"] = regeneration
+    # An unreadable stream has no hash to bind; the envelope is already a
+    # ``fail`` and the CLI never writes it, so there is nothing to self-check.
+    if binding_hash is not None:
+        _self_check(envelope, item, binding_hash)
     return envelope
+
+
+def _layout_binding(
+    streams: Sequence[str], checks: Sequence[Mapping[str, Any]]
+) -> tuple[dict[str, Any], str | None]:
+    """Item 2's ``provenance.input`` and the hash it binds.
+
+    Unlike items 1/9/10 the envelope binds the committed stream itself, not
+    the inventory: the grader compares ``regenerated_hash`` with the *bound
+    artifact's* hash, so pinning the inventory would make a regeneration
+    claim meaningless. One stream is bound by ``path`` + its raw-byte hash;
+    several by a ``paths`` set whose ``content_hash`` is the combined
+    :func:`~klayout_tools.signoff.input_set_digest`. The bound hash is
+    ``None`` when a stream is unreadable (nothing to bind)."""
+    hashes = {
+        check["path"]: check["content_hash"]
+        for check in checks
+        if check["check"] == "present" and check["role"] == "layout"
+    }
+    members = [
+        {"path": {"path": path, "scope": "repo"}, "content_hash": hashes.get(path)}
+        for path in sorted(streams)
+    ]
+    readable = all(member["content_hash"] is not None for member in members)
+    if len(members) == 1:
+        member = members[0]
+        return {"path": member["path"], "content_hash": member["content_hash"]}, (
+            member["content_hash"]
+        )
+    combined = (
+        input_set_digest((path, hashes[path]) for path in streams) if readable else None
+    )
+    return {"paths": members, "content_hash": combined}, combined
+
+
+def _regeneration_claim(checks: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """``provenance.regeneration`` from the passed regeneration check, in the
+    shape the grader reads (``hash_kind`` absent for ``bytes``), or ``None``
+    when no hash was recorded (no claim, or the generator/output failed)."""
+    for check in checks:
+        if check["check"] == "command" and check["role"] == "regeneration":
+            if not check["passed"] or not check.get("regenerated_hash"):
+                return None
+            claim: dict[str, Any] = {
+                "generator": " ".join(check["argv"]),
+                "regenerated_hash": check["regenerated_hash"],
+            }
+            if check["hash_kind"] != "bytes":
+                claim["hash_kind"] = check["hash_kind"]
+            return claim
+    return None
 
 
 def _self_check(envelope: Mapping[str, Any], item: int, content_hash: str) -> None:
