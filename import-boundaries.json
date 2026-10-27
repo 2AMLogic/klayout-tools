@@ -931,6 +931,11 @@
     },
     {
       "consumer": "functional_verification",
+      "exporter": "env_provenance",
+      "reason": "`klt functional-verification` emits its artifact paths as env_provenance's committable repo-relative {path, scope} envelope (issue #4279)."
+    },
+    {
+      "consumer": "functional_verification",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
