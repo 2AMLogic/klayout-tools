@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`place-and-route` accepts `library.antenna_diode: null`** (issue #4274).
+  A library with no antenna cell and no antenna rules (ASAP7) can now reach
+  `route`: JSON `null` (like `library.tapcell: null`) skips `repair_antennas`
+  and the reroute pass, keeps the initial `detailed_route` and `check_antennas`,
+  and adds a response `warnings` entry saying antenna repair did not run.
+  Omitting the key is unchanged (still "unverified"); scripts for libraries
+  with a diode are byte-identical.
 - **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
   Landing candidates are now enumerated per merged net polygon rather than over
   the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too
@@ -32,6 +39,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   `compare.timeout` category entry (`details.code: "compare_timeout"`). The
   option is echoed under `options.compare_timeout_s` only when set; output
   without it is unchanged.
+- **Added** (#2635, `klt synthesize` + `klt sta` + `klt place-and-route`;
+  additive — `schema_version` unchanged on all three): a shared
+  `request.macros` hard-macro declaration (`cell`, `lef`, `lib`/`liberty`
+  per-corner map, `gds`, `verilog_blackbox`), documented once in
+  `klayout_tools.macros` and accepted identically by all three verbs, so a
+  pre-characterized block (a compiled SRAM, a third-party IP core) no
+  longer fails at a different stage in each one. `klt synthesize` loads
+  each macro's liberty (or a LEF-derived blackbox) before `hierarchy`, so
+  the macro survives as an opaque instance, and reports it separately in
+  the new `macros`/`macro_instance_counts_by_type`/`macro_instance_count`
+  response fields; the new `cells_without_area` field (plus a
+  `warnings` entry) names every instantiated cell type `area_um2` does not
+  account for, so a blackboxed macro's area is never silently `0`. `klt
+  sta` reads each macro's LEF and corner-matching liberty alongside the
+  standard-cell library, fixing the `ORD-2013 LEF master not found` a
+  macro-bearing DEF/netlist used to hit. `klt place-and-route`'s existing
+  `request.macros` (issue #438/#464) gains `halo` (a keep-out margin,
+  honored as a placement blockage and — with `request.power` — a
+  `define_pdn_grid -macro` grid, closing that command's own v1 macro-PDN
+  exclusion) and `lib`/`liberty`. Both engine errors (Yosys's "not part of
+  the design", OpenROAD's `ORD-2013`) now append a hint naming the
+  `request.macros` entry that would fix them.
 
 ## 0.8.0 (2026-10-24)
 
