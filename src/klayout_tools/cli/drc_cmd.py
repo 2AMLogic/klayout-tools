@@ -456,6 +456,8 @@ def _run(args: argparse.Namespace) -> dict:
         rules=selectors,
         waivers_file=args.waivers,
         tile=args.tile,
+        negative_control=args.negative_control,
+        negative_control_categories=_negative_control_categories(args),
     )
 
 

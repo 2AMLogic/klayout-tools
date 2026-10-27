@@ -2197,6 +2197,8 @@ def run_drc(
     rules: list[str] | None = None,
     waivers_file: str | None = None,
     tile: str | tuple[int, int] | None = None,
+    negative_control: str | None = None,
+    negative_control_categories: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run ``deck_name``'s rules against the layout at ``path``.
 
@@ -2447,11 +2449,20 @@ def run_drc(
     carries the container's ``source_cell`` (see
     :func:`_attribute_to_instance`), so waive it under that cell.
 
+    ``negative_control`` (issue #4320, ``--negative-control``) names a
+    known-bad layout the same deck is run over *first*, with the same
+    ``top``/``rules``/pdk options but no waivers (a waiver must not hide the
+    control's violations). A fixture with no violation, or one missing a
+    ``negative_control_categories`` rule id, raises :class:`DrcError` (code
+    ``negative_control_failed``) and no verdict is reached for ``path``. On
+    success the report gains the native engine's ``negative_control`` block;
+    it is absent without the flag, so a default report is unchanged.
+
     Raises :class:`DrcError` if the file is missing/unreadable, the deck
     name is unknown, ``top`` names a cell absent from the stream, a rule is
     malformed (e.g. a two-layer check missing ``other_layer``),
     ``pdk_variant``/``pdk_root`` is given but no matching PDK can be found,
-    or a ``rules`` selector matches no rule.
+    a ``rules`` selector matches no rule, or the negative control fails.
     """
     # Issue #4226 (``--tile``): ``tile`` is ``"<cols>x<rows>"`` (odd counts)
     # or an already-parsed pair. Each checked top cell is placed as that
@@ -2460,6 +2471,17 @@ def run_drc(
     # cell cut at its boundary is judged as placed among identical
     # neighbours. The report gains ``tile``; absent otherwise.
     tile_pair = parse_tile(tile) if isinstance(tile, str) else tile
+    control_result = None
+    if negative_control is not None:
+        control_result = _run_curated_negative_control(
+            negative_control,
+            negative_control_categories,
+            deck_name=deck_name,
+            top=top,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+            rules=rules,
+        )
     setup = _prepare_drc(
         path, deck_name, top, pdk_variant, pdk_root, rules, waivers_file, tile_pair
     )
@@ -2472,7 +2494,44 @@ def run_drc(
     for rule in _dispatched_rules(setup.deck, setup.omitted_ids):
         _evaluate_rule(rule, setup, state)
 
-    return _assemble_report(path, setup, state, waivers_file)
+    report = _assemble_report(path, setup, state, waivers_file)
+    if control_result is not None:
+        report["negative_control"] = control_result
+    return report
+
+
+def _run_curated_negative_control(
+    control_path: str,
+    categories: list[str] | None,
+    **run_kwargs: Any,
+) -> dict[str, Any]:
+    """Run the same curated deck over a known-bad fixture and require
+    findings (issue #4320), mirroring the native engine's control: proof the
+    deck can fail on this stream's own layers, so a clean verdict on the real
+    layout is not vacuous. Raises :class:`DrcError` (code
+    ``negative_control_failed``) on no violations or a missing category."""
+    control = run_drc(control_path, **run_kwargs)
+    found = sorted({v["rule"] for v in control["violations"]})
+    missing = sorted(set(categories or []) - set(found))
+    if control["violation_count"] < 1 or missing:
+        detail = (
+            f"missing expected categories {missing}"
+            if control["violation_count"] and missing
+            else "no violations reported"
+        )
+        raise DrcError(
+            f"negative control {control_path!r} failed on the same deck: "
+            f"{detail} -- the deck may not have executed its rules, so a "
+            "clean verdict on the real layout cannot be trusted",
+            code=CODE_NEGATIVE_CONTROL_FAILED,
+        )
+    return {
+        "file": control_path,
+        "status": "passed",
+        "violation_count": control["violation_count"],
+        "rules_found": found,
+        "expected_categories": sorted(categories or []),
+    }
 
 
 def drc_exit_code(report: dict[str, Any]) -> int:

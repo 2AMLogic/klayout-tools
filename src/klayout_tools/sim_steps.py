@@ -197,6 +197,17 @@ def _refuse_cycle_mean(spec: dict[str, Any]) -> None:
         )
 
 
+def _refuse_eye(spec: dict[str, Any]) -> None:
+    """Issue #4292: an ``eye`` folds one transient plot's rawfile and has no
+    per-step equivalent -- refused by name."""
+    if spec.get("eye") is not None:
+        raise SimError(
+            f"measurement {spec.get('name')!r}: 'eye' is not supported "
+            "with analysis_steps -- use the scalar analysis "
+            '(kind "tran") for an eye measurement'
+        )
+
+
 def _refuse_noise(spec: dict[str, Any]) -> None:
     """Issue #2938: a ``noise`` measurement reads one noise analysis'
     spectrum plot; no per-step equivalent is implemented."""
@@ -456,6 +467,7 @@ def _resolve_step_measurements(
         _refuse_search(spec)
         _refuse_optional(spec)
         _refuse_cycle_mean(spec)
+        _refuse_eye(spec)
         _refuse_noise(spec)
         local = spec["name"]
         if not isinstance(local, str) or not _NAME_RE.match(local):
@@ -649,6 +661,7 @@ def _resolve_derived_measurements(
         _refuse_search(spec)
         _refuse_optional(spec)
         _refuse_cycle_mean(spec)
+        _refuse_eye(spec)
         _refuse_noise(spec)
         if spec.get("spice") is not None:
             raise SimError(

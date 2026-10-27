@@ -9,9 +9,14 @@ from klayout_tools.place_and_route_pins import (
     check_pin_constraints,
     netlist_top_ports,
     pin_constraint_lines,
+    read_def_instance_groups,
     read_def_pins,
 )
-from klayout_tools.place_and_route_request import PlaceAndRouteError, _validate_io
+from klayout_tools.place_and_route_request import (
+    PlaceAndRouteError,
+    _validate_instance_groups,
+    _validate_io,
+)
 from test_place_and_route import (
     _GCD_RTL,
     _REAL_SKY130_PNR_VARIANT,
@@ -180,6 +185,102 @@ def test_read_def_pins(tmp_path):
         {"name": "y", "edge": "north", "x_um": 40.0, "y_um": 50.0, "layer": "met2"},
     ]
     assert read_def_pins(str(tmp_path / "missing.def")) is None
+
+
+_COMPONENTS_DEF = (
+    "UNITS DISTANCE MICRONS 1000 ;\n"
+    "DIEAREA ( 0 0 ) ( 100000 50000 ) ;\n"
+    "COMPONENTS 4 ;\n"
+    "  - dly0 sky130_fd_sc_hd__dlygate4sd3_1 + PLACED ( 10000 20000 ) N ;\n"
+    "  - dly1 sky130_fd_sc_hd__dlygate4sd3_1\n"
+    "    + SOURCE NETLIST\n"
+    "    + PLACED ( 13000 22000 ) FS ;\n"
+    "  - \\dly[2] sky130_fd_sc_hd__dlygate4sd3_1 + FIXED ( 16000 21000 ) N ;\n"
+    "  - far0 sky130_fd_sc_hd__buf_1 + PLACED ( 90000 40000 ) N ;\n"
+    "END COMPONENTS\n"
+)
+
+
+def _groups(*entries):
+    return _validate_instance_groups(list(entries))
+
+
+def test_read_def_instance_groups_bbox_and_extent(tmp_path):
+    path = tmp_path / "d.def"
+    path.write_text(_COMPONENTS_DEF)
+    groups = _groups(
+        {"name": "chain", "instances": ["dly*"], "max_extent_um": 7},
+        {"name": "tight", "instances": ["dly0", "dly1"], "max_extent_um": 2.5},
+        {"name": "none", "instances": ["nope*"], "max_extent_um": 5},
+        {"name": "solo", "instances": ["far0"]},
+    )
+    result = {g["name"]: g for g in read_def_instance_groups(str(path), groups)}
+    assert result["chain"]["matched"] == 3
+    assert result["chain"]["bbox"] == {
+        "x_min_um": 10.0,
+        "x_max_um": 16.0,
+        "y_min_um": 20.0,
+        "y_max_um": 22.0,
+    }
+    # span = max(6, 2) = 6 <= 7
+    assert result["chain"]["within_extent"] is True
+    # span = max(3, 2) = 3 > 2.5
+    assert result["tight"]["within_extent"] is False
+    assert result["none"] == {
+        "name": "none",
+        "matched": 0,
+        "bbox": None,
+        "max_extent_um": 5,
+        "within_extent": None,
+    }
+    assert result["solo"]["matched"] == 1
+    assert result["solo"]["within_extent"] is None
+    assert read_def_instance_groups(str(path), []) == []
+    assert read_def_instance_groups(str(tmp_path / "missing.def"), groups) is None
+
+
+def test_extent_bound_is_inclusive(tmp_path):
+    path = tmp_path / "d.def"
+    path.write_text(_COMPONENTS_DEF)
+    (group,) = read_def_instance_groups(
+        str(path),
+        _groups({"name": "g", "instances": ["dly0", "dly1"], "max_extent_um": 3}),
+    )
+    assert group["within_extent"] is True
+
+
+@pytest.mark.parametrize(
+    "raw, fragment",
+    [
+        ("x", "instance_groups must be an array"),
+        (["x"], "instance_groups[0] must be a JSON object"),
+        ([{"name": "", "instances": ["a"]}], "instance_groups[0].name"),
+        ([{"name": "g", "instances": []}], "instance_groups[0].instances"),
+        ([{"name": "g", "instances": [""]}], "instance_groups[0].instances"),
+        (
+            [{"name": "g", "instances": ["a"], "max_extent_um": 0}],
+            "instance_groups[0].max_extent_um",
+        ),
+        (
+            [{"name": "g", "instances": ["a"], "max_extent_um": True}],
+            "instance_groups[0].max_extent_um",
+        ),
+        (
+            [{"name": "g", "instances": ["a"]}, {"name": "g", "instances": ["b"]}],
+            "instance_groups[1].name 'g' is not unique",
+        ),
+        ([{"name": "g", "instances": ["a"], "bogus": 1}], "unknown key"),
+    ],
+)
+def test_validate_instance_groups_rejects(raw, fragment):
+    with pytest.raises(PlaceAndRouteError) as err:
+        _validate_instance_groups(raw)
+    assert fragment in str(err.value)
+
+
+def test_validate_instance_groups_omitted_is_empty():
+    assert _validate_instance_groups(None) == []
+    assert _validate_instance_groups([]) == []
 
 
 @pytest.mark.skipif(
