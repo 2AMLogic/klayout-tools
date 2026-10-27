@@ -7216,6 +7216,161 @@ def test_run_sta_power_basis_engine_default_and_global(tmp_path, monkeypatch):
     assert "set_power_activity -global -activity 0.2" in scripts[0]
 
 
+# -- constraints.clock_uncertainty_ns (issue #4240) ---------------------------#
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (None, None),
+        (0.1, {"setup_ns": 0.1, "hold_ns": 0.1}),
+        (0, {"setup_ns": 0.0, "hold_ns": 0.0}),
+        ({"setup_ns": 0.2}, {"setup_ns": 0.2, "hold_ns": None}),
+        ({"hold_ns": 0.05}, {"setup_ns": None, "hold_ns": 0.05}),
+        ({"setup_ns": 0, "hold_ns": 0.3}, {"setup_ns": 0.0, "hold_ns": 0.3}),
+    ],
+)
+def test_validate_clock_uncertainty_accepts(value, expected):
+    constraints = {} if value is None else {"clock_uncertainty_ns": value}
+    assert post_route_sta._validate_clock_uncertainty(constraints) == expected
+
+
+@pytest.mark.parametrize(
+    "value, match",
+    [
+        ({}, "at least one"),
+        ([], "must be a finite number"),
+        ("0.1", "must be a finite number"),
+        (True, "must be a finite number"),
+        (-0.1, "must be >= 0"),
+        (float("nan"), "must be a finite number"),
+        (float("inf"), "must be a finite number"),
+        ({"setup_ns": True}, "setup_ns must be a finite number"),
+        ({"hold_ns": -1}, "hold_ns must be >= 0"),
+        ({"setup_ns": "0.1"}, "setup_ns must be a finite number"),
+        ({"setup_ns": 0.1, "skew_ns": 1}, "unknown key"),
+    ],
+)
+def test_validate_clock_uncertainty_rejects(value, match):
+    with pytest.raises(PostRouteStaError, match=match):
+        post_route_sta._validate_clock_uncertainty({"clock_uncertainty_ns": value})
+
+
+def test_run_sta_clock_uncertainty_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(clock_uncertainty_ns=-1),
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        post_route_sta.subprocess, "run", lambda *a, **k: calls.append(a)
+    )
+    with pytest.raises(PostRouteStaError, match="clock_uncertainty_ns"):
+        run_sta(request_path)
+    assert calls == []
+
+
+def test_clock_uncertainty_lines_and_block():
+    assert post_route_sta._clock_uncertainty_lines("clk", None) == []
+    assert post_route_sta._clock_uncertainty_block(None) == {"applied": False}
+    both = {"setup_ns": 0.125, "hold_ns": 0.05}
+    assert post_route_sta._clock_uncertainty_lines("clk", both) == [
+        "set_clock_uncertainty -setup 0.125 [get_clocks clk]",
+        "set_clock_uncertainty -hold 0.05 [get_clocks clk]",
+    ]
+    hold_only = {"setup_ns": None, "hold_ns": 0.0}
+    assert post_route_sta._clock_uncertainty_lines("clk", hold_only) == [
+        "set_clock_uncertainty -hold 0.0 [get_clocks clk]"
+    ]
+    assert post_route_sta._clock_uncertainty_block(hold_only) == {
+        "applied": True,
+        "setup_ns": None,
+        "hold_ns": 0.0,
+    }
+
+
+def test_sta_script_lines_clock_uncertainty_after_clock_both_modes():
+    kwargs = dict(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk",
+        clock_period_ns=2.5,
+    )
+    cu = {"setup_ns": 0.1, "hold_ns": 0.02}
+    marker = "set_clock_uncertainty"
+
+    baseline = post_route_sta._sta_script_lines(def_path="/d/top.def", **kwargs)
+    assert not any(marker in line for line in baseline)
+    lines = post_route_sta._sta_script_lines(
+        def_path="/d/top.def", clock_uncertainty=cu, **kwargs
+    )
+    create = next(i for i, x in enumerate(lines) if x.startswith("create_clock"))
+    assert lines[create + 1] == "set_clock_uncertainty -setup 0.1 [get_clocks clk]"
+    assert lines[create + 2] == "set_clock_uncertainty -hold 0.02 [get_clocks clk]"
+    assert [x for x in lines if marker not in x] == baseline
+
+    # Orthogonal to propagation: both may be set, uncertainty after the clock.
+    both = post_route_sta._sta_script_lines(
+        def_path="/d/top.def", clock_uncertainty=cu, propagated_clock=True, **kwargs
+    )
+    assert "set_propagated_clock [get_clocks clk]" in both
+    assert sum(marker in x for x in both) == 2
+
+    net_kwargs = dict(verilog_path="/d/top.v", hdl_toplevel="top", **kwargs)
+    net_base = post_route_sta._sta_netlist_script_lines(**net_kwargs)
+    net = post_route_sta._sta_netlist_script_lines(clock_uncertainty=cu, **net_kwargs)
+    create = next(i for i, x in enumerate(net) if x.startswith("create_clock"))
+    assert net[create + 1].startswith("set_clock_uncertainty -setup")
+    assert [x for x in net if marker not in x] == net_base
+
+
+def test_run_sta_clock_uncertainty_response_and_script(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, constraints=_propagated_constraints()
+    )
+    scripts = _stub_openroad_clock_capture(monkeypatch, {None: "propagated_buffered"})
+    report = run_sta(request_path)
+    assert report["clock_uncertainty"] == {"applied": False}
+    assert "set_clock_uncertainty" not in scripts[0]
+
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(clock_uncertainty_ns={"setup_ns": 0.2}),
+    )
+    scripts = _stub_openroad_clock_capture(monkeypatch, {None: "propagated_buffered"})
+    report = run_sta(request_path)
+    assert report["clock_uncertainty"] == {
+        "applied": True,
+        "setup_ns": 0.2,
+        "hold_ns": None,
+    }
+    assert "set_clock_uncertainty -setup 0.2 [get_clocks" in scripts[0]
+    assert "-hold" not in "".join(
+        x for x in scripts[0].splitlines() if "set_clock_uncertainty" in x
+    )
+
+
+def test_run_sta_clock_uncertainty_every_corner(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(clock_uncertainty_ns=0.1),
+    )
+    scripts = _stub_openroad_clock_capture(
+        monkeypatch,
+        {None: "propagated_buffered", "ss_100C_1v60": "propagated_buffered"},
+    )
+    report = run_sta(request_path)
+    assert len(scripts) == 2
+    for s in scripts:
+        assert "set_clock_uncertainty -setup 0.1 [get_clocks" in s
+        assert "set_clock_uncertainty -hold 0.1 [get_clocks" in s
+    assert report["clock_uncertainty"]["applied"] is True
+
+
 def test_run_sta_power_basis_per_corner_entry(tmp_path, monkeypatch):
     request_path = _setup_multi_corner_env(
         tmp_path,
