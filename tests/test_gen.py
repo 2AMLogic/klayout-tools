@@ -9656,6 +9656,8 @@ def test_esd_device_params_schema_has_no_hidden_layer_fields():
         "ring_padding_um",
         "gate_contact",
         "salicide_block",
+        "voltage_flavor",
+        "total_width_um",
     }
     assert not param_names & {
         "active_layer",
@@ -11921,6 +11923,104 @@ def test_sky130_no_ring_draws_no_opposite_implant(tmp_path, pdk_root):
     assert (93, 44) in present
     assert (94, 20) not in present
     assert (95, 20) not in present
+
+
+# --- esd_device: voltage_flavor + total_width_um (issue #4299) -------------- #
+
+
+def _esd_gen(tmp_path, pdk_root, params, name="esd", variant="sky130A"):
+    output = tmp_path / f"{name}.gds"
+    report = generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": variant, "root": str(pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    return output, report
+
+
+def _gds_layers(gds_path):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    return {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+
+
+def test_esd_device_default_voltage_flavor_output_unchanged(tmp_path, pdk_root):
+    """No `voltage_flavor` draws no marker: geometry identical to an explicit `''`."""
+    implicit, _ = _esd_gen(tmp_path, pdk_root, {}, "implicit")
+    explicit, report = _esd_gen(tmp_path, pdk_root, {"voltage_flavor": ""}, "explicit")
+    _assert_gds_geometry_equal(implicit, explicit)
+    assert report["drc_hints"]["voltage_flavor"] is None
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER not in _gds_layers(implicit)
+
+
+def test_esd_device_voltage_flavor_hvi_draws_marker_and_extracts_g5v0d10v5(
+    tmp_path, pdk_root
+):
+    output, report = _esd_gen(tmp_path, pdk_root, {"voltage_flavor": "hvi"})
+    assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER in _gds_layers(output)
+    assert report["drc_hints"]["voltage_flavor"] == "hvi"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+
+    extract = run_extract(
+        str(output), "sky130", pdk_variant="sky130A", pdk_root=str(pdk_root)
+    )
+    cards = Path(extract["netlist_path"]).read_text().splitlines()
+    assert any(" sky130_fd_pr__nfet_g5v0d10v5 " in c for c in cards)
+    assert not any(" sky130_fd_pr__nfet_01v8 " in c for c in cards)
+
+
+def test_esd_device_unknown_voltage_flavor_notes_not_drawn(tmp_path, pdk_root):
+    output, report = _esd_gen(tmp_path, pdk_root, {"voltage_flavor": "bogus"})
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    flavor_notes = [n for n in report["drc_hints"]["notes"] if "voltage_flavor" in n]
+    assert len(flavor_notes) == 1
+    assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER not in _gds_layers(output)
+
+
+def test_esd_device_voltage_flavor_medium_voltage_gf180mcu(tmp_path, both_pdk_root):
+    """gf180mcu keeps its unconditional `esd_mark`; the flavor still resolves."""
+    _, report = _esd_gen(
+        tmp_path,
+        both_pdk_root,
+        {"voltage_flavor": "medium_voltage"},
+        variant="gf180mcuD",
+    )
+    assert report["drc_hints"]["voltage_flavor"] == "medium_voltage"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+
+
+@pytest.mark.parametrize(
+    ("total", "fingers", "finger_w"),
+    [(21.5, 2, 10.75), (20.0, 1, 20.0), (20.01, 2, 10.005), (40.0, 2, 20.0)],
+)
+def test_esd_device_total_width_splits_fingers(
+    tmp_path, pdk_root, total, fingers, finger_w
+):
+    _, report = _esd_gen(tmp_path, pdk_root, {"total_width_um": total})
+    assert report["drc_hints"]["fingers"] == fingers
+    assert report["drc_hints"]["finger_width_um"] == pytest.approx(finger_w)
+
+
+@pytest.mark.parametrize("extra", [{"fingers": 2}, {"finger_width_um": 5.0}])
+def test_esd_device_total_width_conflicts_with_explicit_split(
+    tmp_path, pdk_root, extra
+):
+    with pytest.raises(GenError, match="cannot be combined"):
+        _esd_gen(tmp_path, pdk_root, {"total_width_um": 21.5, **extra})
+
+
+def test_esd_device_total_width_over_finger_limit_rejected(tmp_path, pdk_root):
+    with pytest.raises(GenError, match="finger limit|-finger limit"):
+        _esd_gen(tmp_path, pdk_root, {"total_width_um": 20.0 * 33})
 
 
 # --------------------------------------------------------------------------- #

@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--substrate-tie-ohms <ohms>] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--device-model <class>=<subckt> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--substrate-tie-ohms <ohms>] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--tie-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--device-model <class>=<subckt> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--format text|json]
 klt extract <request.json>|-|'{...}' [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
@@ -138,6 +138,20 @@ two disagree, this document (and the code) win.
   name is skipped and reported. Off (or without a declared set: a clean
   error) the output is byte-for-byte unchanged. See "Renaming promoted pins
   to their declared name" below.
+- `--tie-declared-pins` — optional, off by default, requires `--pins` or
+  `--def-pins`; implies `--rename-declared-pins` (issue #4383). For a net
+  matching 2+ declared names (e.g. a ground and a body pin joined through the
+  substrate, extracted as `A|B`), the net is renamed to its first declared name
+  (sorted) and every other declared name is appended to the `.SUBCKT` header as
+  a port tied to it by a `Rtie_<pin> <pin> <canonical> 1u` resistor (1 µΩ
+  rather than a literal `0`, which ngspice warns about and clamps). The
+  extracted pin list then matches a schematic that declares both pins. Each tie
+  is reported in the additive `pin_ties` array
+  (`[{"net", "pin", "tied_pins"}]`, present only under this flag) and
+  `pin_renames.ties`; the `declared_pin_short` finding stays visible at
+  `warning` severity instead of `error`. A canonical name already carried by
+  another net is not tied (the short is reported as an error as before). Off,
+  output is byte-for-byte unchanged.
 - `--deck-option` — optional, unset by default, repeatable. `<key>=<value>`
   selects which caller-visible flavour of a deck's shared-geometry device
   family this run wires (issue #595) — the recognised keys are gf180mcu's

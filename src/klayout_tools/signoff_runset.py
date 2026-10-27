@@ -45,15 +45,20 @@ REASON_RUNSET_HASH_MISMATCH = "runset_hash_mismatch"
 REASON_RUNSET_UNRECOGNISED_DEVICE = "runset_unrecognised_device"
 
 _IHP_REPO = "IHP-GmbH/IHP-Open-PDK"
+_GF_PV_REPO = "fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pv"
 _REVIEW = (
     "klayout-tools#4309: fetched at the commit and hashed; digest reviewed in that PR"
+)
+_REVIEW_GF180 = (
+    "klayout-tools#4395: fetched at the commit and hashed; digest reviewed in that PR"
 )
 
 #: ``sha256:<hex>`` of a PDK-published LVS runset file -> ``{"pdk", "revision",
 #: "repo", "commit", "path", "reviewed_by"}``. Signoff-side on purpose; see the
 #: module docstring. Not pinned (runset not fetchable/runnable at a verifiable
-#: commit): gf180mcu, whose only local copy is an open_pdks/ciel build with no
-#: upstream path to hash against.
+#: commit): none at present. The gf180mcu entry is the ``fd_pv`` repo's
+#: ``klayout/lvs/gf180mcu.lvs``; open_pdks installs that file byte-identically
+#: into each of the gf180mcuA-D variant trees.
 PINNED_RUNSETS: dict[str, dict[str, str]] = {
     "sha256:e01bcb1ec5858e8069bade8f7fd7ec28c1026fc2fd0590e8f611d3398a5bbbd7": {
         "pdk": "ihp-sg13g2",
@@ -70,6 +75,14 @@ PINNED_RUNSETS: dict[str, dict[str, str]] = {
         "commit": "f7bca32694fe3d58be0cc7d9df4b9f5db7161a14",
         "path": "ihp-sg13cmos5l/libs.tech/klayout/tech/lvs/sg13cmos5l.lvs",
         "reviewed_by": _REVIEW,
+    },
+    "sha256:09a4f1f1a6fe1fc1e4e193ae5ae1c2b1c49ba190f9e135ffd72d45c14637fde9": {
+        "pdk": "gf180mcu",
+        "revision": "fd_pv@1a4e4b5",
+        "repo": _GF_PV_REPO,
+        "commit": "1a4e4b59f5d1ea4dfd7b108a02bc085151609ccb",
+        "path": "klayout/lvs/gf180mcu.lvs",
+        "reviewed_by": _REVIEW_GF180,
     },
 }
 
