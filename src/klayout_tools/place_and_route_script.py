@@ -912,11 +912,22 @@ def _stage_script_lines(
             if library is not None and "route_layers" in library
             else _ROUTING_LAYER_RANGE[cell_library]
         )
-        diode_cell = (
-            library["antenna_diode"][0]
-            if library is not None and "antenna_diode" in library
-            else _ANTENNA_DIODE_CELLS[cell_library][0]
+        # `library.antenna_diode: null` (issue #4274) states the library has
+        # no antenna diode: no `repair_antennas` call and no reroute pass,
+        # exactly the `max_antenna_repair_iterations: 0` path (initial
+        # `detailed_route`, `check_antennas` and everything after still run).
+        antenna_diode_absent = (
+            library is not None and library.get("antenna_diode", ()) is None
         )
+        if antenna_diode_absent:
+            max_antenna_repair_iterations = 0
+            diode_cell = None
+        else:
+            diode_cell = (
+                library["antenna_diode"][0]
+                if library is not None and "antenna_diode" in library
+                else _ANTENNA_DIODE_CELLS[cell_library][0]
+            )
         # `-critical_nets_percentage` (issue #939, native-routing survey
         # section 4.1): a real, documented `global_route` flag -- see this
         # module's own docstring, "Timing-driven global routing + bounded

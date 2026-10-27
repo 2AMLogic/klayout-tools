@@ -2122,6 +2122,16 @@ def _run_single_corner(
         row_rail_emitted=row_rail_info["emitted"],
         row_rail_layer=row_rail_info["layer"],
     )
+    if (
+        target_stage == "route"
+        and library is not None
+        and library.get("antenna_diode", ()) is None
+    ):
+        warnings.append(
+            "antenna repair did not run: request.library.antenna_diode is "
+            "null (the library has no antenna diode), so repair_antennas "
+            "was not called; the antenna check still ran"
+        )
 
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
