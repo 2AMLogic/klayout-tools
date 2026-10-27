@@ -43,6 +43,7 @@
     "instance_count": 0,
     "expected_nets": null,
     "unchecked_expected_pins": [],
+    "excluded_pins": [],
     "findings": [],
     "finding_count": 0
   },
@@ -87,6 +88,8 @@
   },
   "provenance": {
     "klt_version": null,
+    "klt_git_commit": null,
+    "klt_reinstall_spec": null,
     "klayout_version": "0.30.12",
     "pdk": null,
     "deck": null,

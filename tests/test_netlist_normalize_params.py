@@ -120,3 +120,49 @@ def test_sky130_diode_subckt_call_area_only_pj_and_mult():
             "X1 an ca sky130_fd_pr__diode_pd2nw_05v5 area=2 perim=4 mult=2\n",
             deck="sky130",
         )
+
+
+_OVERRIDE_REF = (
+    ".subckt cell a b SCALE=1\n"
+    "XM1 a b b b sky130_fd_pr__nfet_01v8 L=1 W=2 nf=1 m={SCALE}\n"
+    ".ends\n"
+    ".subckt top a b\n"
+    "x1 a b cell SCALE=%s\n"
+    ".ends\n"
+)
+
+
+def test_call_site_override_of_header_param_is_rejected():
+    with pytest.raises(NormalizeError, match=r"M=\{SCALE\}.*SCALE.*x1.*4"):
+        normalize_reference_netlist(_OVERRIDE_REF % "4", deck="sky130")
+
+
+def test_call_site_override_is_case_insensitive():
+    text = _OVERRIDE_REF.replace("SCALE=%s", "scale=4")
+    with pytest.raises(NormalizeError, match="overrides"):
+        normalize_reference_netlist(text, deck="sky130")
+
+
+def test_call_site_override_through_param_chain_is_rejected():
+    text = _OVERRIDE_REF.replace("m={SCALE}", "m={SCALE*2}") % "4"
+    with pytest.raises(NormalizeError, match="SCALE"):
+        normalize_reference_netlist(text, deck="sky130")
+
+
+def test_call_passing_default_value_converts():
+    normalize_reference_netlist(_OVERRIDE_REF % "1", deck="sky130")
+
+
+def test_call_omitting_param_converts():
+    text = _OVERRIDE_REF.replace(" SCALE=%s", "")
+    normalize_reference_netlist(text, deck="sky130")
+
+
+def test_override_of_unused_param_converts():
+    text = (
+        ".subckt cell a b SCALE=1 other=2\n"
+        "XM1 a b b b sky130_fd_pr__nfet_01v8 L=1 W=2 nf=1 m={SCALE}\n"
+        ".ends\n"
+        ".subckt top a b\nx1 a b cell other=3\n.ends\n"
+    )
+    normalize_reference_netlist(text, deck="sky130")

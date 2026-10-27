@@ -1428,6 +1428,7 @@ exactly.
 | `options.timescale` | `[string, string]` | `[unit, precision]`, defaulting to `["1ns", "1ps"]`. Passed to **both** the build and test steps — Icarus elaboration otherwise fails the moment a testbench's `Clock(..., unit="ns")` meets an unset (default 1 s) simulator precision. |
 | `options.random_seed` | integer \| null | Optional. Pinned to `Runner.test()`'s own `seed` parameter (`COCOTB_RANDOM_SEED`) when given; omitted/`null` lets cocotb generate its own. Either way the seed actually used is echoed in `environment.random_seed` (see "Reproducibility: `random_seed`"). |
 | `options.defines` | object | Optional. String key -> string \| null value, forwarded unchanged to `Runner.build(defines=...)`. A `null` value defines the macro with no value (e.g. `` `define USE_POWER_PINS ``); it is passed to the simulator as a `-DNAME` build arg, because cocotb 2.x cannot serialise a `null` define value itself (issue #2884). Defaults to `{}` (see "Compile-time defines, build args, and includes"). |
+| `env` | object | Optional (issue #4338). String key -> string value, forwarded to `Runner.test(extra_env=...)` so each entry is visible in `os.environ` inside the cocotb test process (the test step only, not the build). Keys must be non-empty and contain no `=`; any non-string value is exit 1 naming `request.env`. Echoed verbatim as `environment.env` (`{}` when absent), so **never put credentials in it**. Applied to `--mutations` runs and `options.initial_state` runs too. Non-empty together with `testbench.verilog_top` is exit 1 (no cocotb process to apply it to). A key that collides with a `COCOTB_*` variable is not special-cased; cocotb's own `Runner` decides which wins. The ambient host environment is not filtered or allow-listed. |
 | `options.source_defines` | object | Optional (issue #3290). Key = an entry of `request.sources` (matched after the same path resolution; an unknown key is exit 1), value = a defines object with the same `string -> string \| null` rules as `options.defines`. For each named source a wrapper is generated under the output directory (`` `define K [V] `` / `` `include "<abs path>" `` / `` `undef K ``) and substituted for that source in the same list position, so the defines reach that one file and cannot leak into later sources; the source's own directory is added to the include path for nested relative `` `include ``s. If a name is also in `options.defines`, the scoped value wins inside that source. Echoed as `environment.source_defines` (keyed by absolute source path; `{}` when absent). Works with `--mutations`. Defaults to `{}`. |
 | `options.build_args` | array\<string\> | Optional. Extra Icarus/Verilator build args, appended **after** the fixed `--coverage --trace` args a coverage run already adds and after any SDF back-annotation args (composed, not replaced — see "Coverage" and "SDF back-annotation"). Defaults to `[]`. |
 | `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
@@ -1633,6 +1634,25 @@ The companion testbench (`test_modexp_parameters.py`) asserts
 reached elaboration itself, not just the request/response envelope — then
 re-runs `test_modexp.py`'s own width-adaptive randomized cross-check against
 Python's `pow`.
+
+### `env`: per-run environment for the testbench
+
+A bench swept over several parameter sets can read its expected values from
+`os.environ`, with the values carried in the request instead of the shell
+around `klt`:
+
+```json
+{
+  "sources": ["adder.v"],
+  "hdl_toplevel": "adder",
+  "testbench": { "module": "test_adder_env" },
+  "env": { "EXPECTED_SUM": "5" }
+}
+```
+
+The bench reads `os.environ["EXPECTED_SUM"]`; the report's
+`environment.env` records `{"EXPECTED_SUM": "5"}`. Values are echoed
+verbatim, so keep credentials out of `env`.
 
 ### `testbench.search_path`: one testbench, several views of the same design
 

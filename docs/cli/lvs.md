@@ -891,6 +891,15 @@ resolved still fails with an error naming the parameter and the unresolved
 symbol — never a silent fallback. Already-literal values are untouched, and
 `ad`/`as`/`pd`/`ps` (never carried) can use any expression.
 
+Call-site parameters are **not** propagated into the definition: a device
+card is converted once, against the `.subckt` header defaults. If a
+geometry or multiplicity expression (`m={SCALE}`, `W`, `L`, `nf`, ...) depends
+on a header parameter that some `X` call overrides to a different value,
+`klt lvs` fails with a `NormalizeError` naming the card, the expression, the
+parameter and the calling card (issue #4406) rather than silently using the
+default. A call that passes the default value, or omits the parameter, is
+unaffected.
+
 **`form: "subckt-call"` resolves a bare literal per `reference.deck`
 (issue #1492).** A real xschem/ngspice schematic-flow netlist for a deck
 whose model library sets an ambient `.option scale=1.0u` (confirmed for
@@ -1587,6 +1596,7 @@ would silently exempt them.
   "instance_count": 462,
   "expected_nets": null,
   "unchecked_expected_pins": [],
+  "excluded_pins": [],
   "findings": [
     {
       "rule": "power.inconsistent_pin_net",
@@ -1624,6 +1634,7 @@ would silently exempt them.
 | `instance_count` | integer | How many distinct layout-side instances carried at least one of those pins. `0` when `status` is `"unchecked"`. |
 | `expected_nets` | object\<string, string\> \| `null` | The resolved `options.power_connectivity.expected_nets` mapping (upper-cased, key-sorted), or `null` when none was declared. |
 | `unchecked_expected_pins` | array\<string\> | Issue #1978. `expected_nets` keys that named a power/ground pin no layout-side instance was actually observed to carry — a typo, or a PDK standard cell whose tie pin has no in-cell label/LEF port at all. Such a pin matches zero rows in `_power_pin_connections` and so produces zero findings, which reads identically to "checked and found correct" unless this field is consulted; a non-empty list means at least one declared expectation was never exercised by this run. `[]` on a clean check, and always `[]` when `status` is `"unchecked"`. |
+| `excluded_pins` | array\<object\> | Issue #4363. Power/ground pins set aside rather than checked, because the LEF given as `layout.abstract_cell_lef` draws them only on a well/substrate layer (`pwell`/`nwell`/`psub`/`nsub`/`subs` in the LEF `LAYER` name) — e.g. sky130's `VNB`/`VPB`. Decided from the pin's LEF layer, never its name. An abstract-cell probe of such a pin lands on whatever conductor crosses the well, so its per-instance net is arbitrary, and substrate continuity through the cells' taps is not modelled; checking it produced a spurious `power.inconsistent_pin_net`. Each entry is `{pin, cells, instance_count, reason}`. Excluded pins appear in neither `power_pins` nor `findings`; the metal power pins are still checked in full. If *every* declared power pin is excluded the status is `"unchecked"`. `[]` when nothing was excluded (always, without `abstract_cell_lef`). |
 | `findings` | array\<object\> | One entry per offending **pin name** (never per instance) — see the rule table above. `[]` on a clean check. |
 | `finding_count` | integer | `len(findings)`. |
 | `findings[].nets[]` | array\<object\> | Per finding, the nets that pin reached, each with the exact untruncated `instance_count` and a bounded `instances` sample (at most 10 `{circuit, instance, cell}` entries, with `instances_truncated` saying whether anything was left out). A real routed block puts hundreds of instances on one rail; a finding that dumped all of them would bury the few that differ. A `net` of `null` is an unconnected pin. |

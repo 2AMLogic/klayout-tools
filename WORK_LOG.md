@@ -4,6 +4,72 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-27
 
+- **PR #4378**: feat: select ERC well classes by cell name
+- **PR #4366**: fix: exclude and disclose well-layer LEF pins in lvs power_connectivity
+- **PR #4303**: feat(gen): esd_device voltage_flavor marker and total_width_um finger split
+- **PR #4394**: ci: cache klayout .deb closure in ASAP7 deck job
+- **PR #4401**: feat(signoff): optional per-command timeout_s for attest commands
+- **PR #4342**: feat(functional-verification): forward request.env to the cocotb test process
+- **PR #4380**: fix(erc): keep text-bearing undeclared layers under --deck coverage filter
+- **PR #4219**: feat: report missing erc/lvs parts for signoff item 11
+- **Issue #4193** (closed): signoff: T1 item 11 cannot be partially cited; no reason names the missing parts
+- **Issue #4376** (closed): klt erc: undeclared label purposes with text are hidden from layers_in_stream_without_declaration under --deck
+- **Issue #4338** (closed): functional-verification: no way to pass per-run environment to the cocotb testbench
+- **Issue #4400** (closed): signoff --attest: allow a per-command timeout above 1800 s for long-running cold-start commands
+- **Issue #4408** (closed): test flake: apt-get install klayout exhausts ci-apt-install budget on ASAP7 DRC deck fixtures job
+- **Issue #4392** (closed): CI: klayout apt install in ASAP7 deck job repeatedly slow/failing (recurs: #4059, #4075, #4372)
+- **Issue #4299** (closed): gen esd_device: no thick-oxide / ESD marker on sky130, and 20 um finger cap blocks a single 21.5 um finger
+- **Issue #4363** (closed): lvs power_connectivity: pwell-layer substrate pin (VNB) of abstracted std cells gets arbitrary signal nets
+- **Issue #4373** (closed): klt erc: well class selection for repeated, rotated cells needs top-coordinate boxes per placement
+- **PR #4382**: test: select macro liberty line past the std-cell read_liberty -lib
+- **PR #4377**: feat(erc): locate and classify unlabelled-conductor islands
+- **PR #4375**: docs(synthesize): correct macro lib area accounting in area_um2
+- **PR #4367**: feat: add klt signoff --attest 8 producer for characterization reports
+- **PR #4356**: feat(lvs): replay gate-level-verilog references in --check --rerun
+- **PR #4355**: feat: shard launch progress and ETA line for batch runs
+- **PR #4341**: feat(pdk): expose corner_points in klt pdk cells and document gf180mcu shipped corners
+- **PR #4337**: fix(synthesize): write repo-relative paths in retained memory-evidence script
+- **PR #4335**: feat(gen): add sky130 junction diode generator
+- **PR #4331**: feat(lvs): convert sky130 junction-diode subckt calls to D cards
+- **PR #4323**: feat(lvs): report dangling-output ambiguity as warning category
+- **PR #4322**: feat(signoff): pin SG13G2/SG13CMOS5L LVS runset digests and list in --describe-grader
+- **PR #4302**: feat(lef-abstract): polygon-accurate pin match, sibling label layers, coarse OBS mode
+- **PR #4294**: fix: cap skipped records quoted in signoff coverage_qualification
+- **PR #4288**: fix: snap layout-plan group origins as placement resolves to keep spacing lower bounds
+- **PR #4284**: feat(functional-verification): emit artifact paths as repo-relative {path, scope}
+- **PR #4271**: feat: add outputs.dir request field to place-and-route
+- **PR #4269**: feat: add multi-clock constraints.clocks and clock_groups to klt sta
+- **PR #4268**: feat: warn on off-grid and too-short res_array length_um
+- **PR #4263**: feat: add klt pex --tie-net to tie reported-unbiased body nets
+- **PR #4259**: feat: probe tech/pymacros for PDK PCell libraries and report searched_dirs
+- **PR #4256**: fix: register corners.params and options.ngspice_options as v0.8.0 request features
+- **PR #4250**: feat: grade tapless-library PDN as met, split no_tapcell_master from no_pdn
+- **PR #4238**: fix: sanitise venv PATH for attest commands and name path/cwd on unreadable evidence
+- **Issue #4399** (closed): tests: two test_synthesize macro/liberty tests fail on main
+- **Issue #4381** (closed): main CI red: two test_synthesize macro read_liberty tests fail on b0cf4f201
+- **Issue #4374** (closed): klt erc: unlabelled_conductor cannot tell internal signal nets from stray supply fragments; no island locations
+- **Issue #4353** (closed): lvs: --check --rerun cannot replay a gate-level-verilog report
+- **Issue #4349** (closed): klt sim --backend batch: no way to cancel submitted jobs; sharded submissions can sit in 'launching' indefinitely
+- **Issue #4339** (closed): sta/place-and-route: gf180mcu 7t5v0 liberty set has no fs/sf corners and sparse 3.3 V-family coverage
+- **Issue #4329** (closed): synthesize: retained run/memory-evidence .ys scripts embed absolute host paths
+- **Issue #4319** (closed): lvs: sky130 junction-diode cards in a subckt-call reference are left unresolved although the deck lists the diode classes
+- **Issue #4311** (closed): signoff: no tool-produced envelope for T1 item 8 (characterization report); every block hand-rolls a generic envelope
+- **Issue #4309** (closed): signoff: PINNED_RUNSETS is empty, so no klayout-runset LVS report can grade T1 item 4 or item 11 met
+- **Issue #4300** (closed): gen: add a diode generator (pad ESD diode, sky130 first)
+- **Issue #4296** (closed): Friction: gate-level-verilog LVS cannot pair instances on dangling (no-connect) output nets; abstract-cell flow undocumented in lvs docs
+- **Issue #4286** (closed): signoff: item-11 citation inlines full erc_coverage twice, bloating the committed tier report
+- **Issue #4283** (closed): Friction: lef-abstract OBS grows with the layout (19 MB for an 8k-cell macro) and an OBS polygon's bounding box is absorbed into a pin's PORT
+- **Issue #4279** (closed): functional-verification: environment block embeds absolute scratch paths, unfit for committed evidence
+- **Issue #4267** (closed): layout-plan grid snap: verify composed-GDS ongrid and cumulative spacing lower bound
+- **Issue #4247** (closed): gen --list-pdk-pcells finds no PCell libraries for an installed gf180mcu tree
+- **Issue #4245** (closed): pex: let the caller tie reported unbiased well/body nets so the extracted leg is simulatable
+- **Issue #4241** (closed): klt sta: only one clock port; second-clock registers go unchecked while timing_status reads constrained
+- **Issue #4231** (closed): place-and-route: no way to export routed artifacts to a committable location; response paths name the scratch dir
+- **Issue #4212** (closed): klt sim batch: runner silently lacks newer request fields (ngspice_options, corners.params); job runs fully, then client discards results
+- **Issue #4203** (closed): res_array: sub-grid length_um is drawn off-grid, and short lengths violate SAB/PPLUS width, with no snap or warning
+- **Issue #4199** (closed): signoff: item 11 grades a built PDN as no_pdn when the library is tapless (tapcell_master null)
+- **Issue #4192** (closed): signoff --attest: declared commands see the tool venv PATH; manifest evidence paths are cwd-relative
+- **Issue #2747** (closed): docs(synthesize): reconcile hard-macro liberty area accounting description
 - **PR #4379**: fix: always collect batch engine logs so deck aborts surface without keep_artifacts
 - **PR #4307**: fix: drop split_cuts from gf180mcu_7t_6M PDN preset
 - **PR #4258**: feat: flag corners.units and corners.temperature_param against older batch runners

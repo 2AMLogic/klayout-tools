@@ -397,6 +397,7 @@ _REQUEST_FIELD_DESTS = {
         "pins",
         "def_pins",
         "rename_declared_pins",
+        "tie_declared_pins",
         "pin_source_cells",
         "deck_options",
         "label_layers",
@@ -515,6 +516,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "pins": _comma_joined("pins"),
             "def_pins": _path("def_pins"),
             "rename_declared_pins": _bool("rename_declared_pins"),
+            "tie_declared_pins": _bool("tie_declared_pins"),
             "pin_source_cells": _comma_joined("pin_source_cells"),
             "deck_options": reqdoc.get_str_map_as_pairs(
                 request,
@@ -745,6 +747,8 @@ def run(args: argparse.Namespace) -> int:
             # `False` when the flag was never given, unchanged from every
             # call site that predates it.
             rename_declared_pins=args.rename_declared_pins,
+            # `--tie-declared-pins` (issue #4383).
+            tie_declared_pins=args.tie_declared_pins,
             # `--pin-source-cells` (issue #1513): the positional, probe-based
             # declared-pin mechanism for a `klt gen-compose`d assembly with
             # no governing top-level DEF -- derives the declared top-level

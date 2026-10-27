@@ -676,6 +676,7 @@ def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
         "instance_count": len({(row["circuit"], row["instance"]) for row in rows}),
         "expected_nets": None,
         "unchecked_expected_pins": [],
+        "excluded_pins": [],
         "findings": findings,
         "finding_count": len(findings),
     }
