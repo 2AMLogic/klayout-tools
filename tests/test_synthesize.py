@@ -6172,3 +6172,35 @@ def test_equivalence_gate_forwards_parameters_to_gold_side(tmp_path, monkeypatch
 
     synthesize._verify_synthesis_equivalence(**kwargs)
     assert "parameters" not in captured["gold"]
+
+
+_SV_PORT_ERROR = (
+    "t.sv:1: ERROR: syntax error, unexpected '[', expecting ')' or ',' or '='"
+)
+
+
+def test_synthesis_error_sv_unpacked_array_port_gets_hint():
+    msg = synthesize._synthesis_error_message(
+        fake_completed(stdout=_SV_PORT_ERROR, returncode=1)
+    )
+    assert _SV_PORT_ERROR in msg
+    assert "unpacked-array port" in msg
+    assert "-sv` front end does not support" in msg
+
+
+def test_synthesis_error_plain_v_gets_no_sv_hint():
+    line = _SV_PORT_ERROR.replace("t.sv", "t.v")
+    msg = synthesize._synthesis_error_message(fake_completed(stdout=line, returncode=1))
+    assert msg == f"yosys synthesis failed: {line}"
+
+
+def test_synthesis_error_unrelated_sv_error_unchanged():
+    line = "t.sv:3: ERROR: Module `foo' referenced but not defined"
+    msg = synthesize._synthesis_error_message(fake_completed(stderr=line, returncode=1))
+    assert msg == f"yosys synthesis failed: {line}"
+
+
+def test_synthesis_error_svh_mixed_sources_path_gets_hint():
+    line = "/tmp/a b/inc.svh:7: ERROR: syntax error, unexpected '[', expecting ')'"
+    msg = synthesize._synthesis_error_message(fake_completed(stderr=line, returncode=1))
+    assert "unpacked-array port" in msg
