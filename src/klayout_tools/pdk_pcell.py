@@ -73,6 +73,7 @@ from .pdk import (
     PdkNotFoundError,
     _pcell_lib_dir_for_assets,
     _pcell_packages_in,
+    _pcell_search_dirs,
     find_pdk,
     resolve_pdk_dbu,
 )
@@ -201,6 +202,7 @@ def list_pdk_pcells(
             "schema_version": 1,
             "pdk": {"name": str, "variant": str, "version": str | None},
             "pcell_lib_dir": str | None,
+            "searched_dirs": [str],  # candidate dirs probed, in order
             "libraries": [
                 {
                     "library": str,      # registered pya.Library name
@@ -236,7 +238,7 @@ def list_pdk_pcells(
             ],
         }
 
-    A PDK that ships no ``libs.tech/klayout/python/`` at all (a real
+    A PDK that ships no PyCell directory at all (a real
     gf180mcuD install) resolves ``pcell_lib_dir`` to ``None`` with both lists
     empty -- a **successful** result, not an error.
 
@@ -269,6 +271,7 @@ def list_pdk_pcells(
             "version": pdk_info["version"],
         },
         "pcell_lib_dir": lib_dir,
+        "searched_dirs": _pcell_search_dirs(pdk_info["assets"]),
         "libraries": libraries,
         "unavailable": unavailable,
     }
@@ -414,7 +417,8 @@ def _resolve_library(pdk_info: dict[str, Any], library_name: str) -> dict[str, A
     if lib_dir is None:
         raise PdkPCellError(
             f"PDK '{pdk_info['variant']}' ships no KLayout PCell library "
-            "(no libs.tech/klayout/python/ directory)"
+            "(no libs.tech/klayout/python/ or "
+            "libs.tech/klayout/tech/pymacros/ directory)"
         )
 
     loaded, unavailable = _load_libraries(lib_dir)
