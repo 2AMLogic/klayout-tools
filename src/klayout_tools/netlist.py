@@ -255,8 +255,15 @@ def _build_argv(
     return argv
 
 
-def _launch_xschem(argv: list[str], timeout_s: float) -> tuple[int, str, str, float]:
+def _launch_xschem(
+    argv: list[str],
+    timeout_s: float,
+    env: dict[str, str] | None = None,
+) -> tuple[int, str, str, float]:
     """Run ``argv`` under a ``timeout_s`` wall-clock bound.
+
+    ``env`` replaces the child's environment when given; ``None`` inherits
+    klt's own.
 
     Returns ``(exit_status, stdout, stderr, duration_s)``. The exit status is
     returned for the record, **not** as a verdict -- see the module docstring's
@@ -272,6 +279,7 @@ def _launch_xschem(argv: list[str], timeout_s: float) -> tuple[int, str, str, fl
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=env,
             # The child gets its own session (and therefore its own process
             # group) so `_signal_group` has a group handle to kill -- see its
             # docstring.
@@ -635,7 +643,23 @@ def _check_no_unevaluated_expr(data: bytes, version: str | None) -> None:
         )
 
 
-def _check_no_unresolved_symbol(data: bytes) -> None:
+def _pdk_env_note(rcfile: str | None, env: dict[str, str] | None) -> str:
+    """Name what klt can observe about xschem's PDK setup, for error text."""
+    if env is not None:
+        seen = f"PDK_ROOT={env['PDK_ROOT']} PDK={env['PDK']} (exported by klt)"
+    else:
+        root = os.environ.get("PDK_ROOT")
+        variant = os.environ.get("PDK")
+        seen = (
+            f"PDK_ROOT={root or 'not set'} PDK={variant or 'not set'} "
+            "(inherited, not set by klt)"
+        )
+    return f"xschem ran with --rcfile {rcfile or 'none'} and {seen}. "
+
+
+def _check_no_unresolved_symbol(
+    data: bytes, rcfile: str | None = None, env: dict[str, str] | None = None
+) -> None:
     """Fail when xschem could not resolve a symbol (issue #3964).
 
     xschem still writes a "fresh" ``.spice`` for an instance whose symbol does
@@ -651,7 +675,8 @@ def _check_no_unresolved_symbol(data: bytes) -> None:
             f"the netlist has an unresolved symbol at line {number}: "
             f"{snippet!r}. xschem could not find a symbol an instance refers "
             "to, so the device is missing from the netlist and none was "
-            "written; fix the symbol path or library.",
+            f"written. {_pdk_env_note(rcfile, env)}"
+            "Fix the symbol path or library.",
             code=UNRESOLVED_SYMBOL_CODE,
         )
 
@@ -917,7 +942,18 @@ def run_netlist(
         # satisfied by a file that already existed (see
         # `_resolve_produced_netlist`).
         started_at = time.time()
-        exit_status, stdout, stderr, duration_s = _launch_xschem(argv, timeout_s)
+        # Export the resolved PDK so an xschemrc reading $env(PDK_ROOT)/
+        # $env(PDK) agrees with --pdk/--pdk-root (issue #4186).
+        xschem_env: dict[str, str] | None = None
+        if pdk_block is not None:
+            xschem_env = {
+                **os.environ,
+                "PDK_ROOT": pdk_block["root"],
+                "PDK": pdk_block["variant"],
+            }
+        exit_status, stdout, stderr, duration_s = _launch_xschem(
+            argv, timeout_s, xschem_env
+        )
         produced = _resolve_produced_netlist(
             work_dir,
             stem,
@@ -935,7 +971,7 @@ def run_netlist(
 
         version = _probe_xschem_version(xschem_binary)
         _check_no_unevaluated_expr(fresh_data, version)
-        _check_no_unresolved_symbol(fresh_data)
+        _check_no_unresolved_symbol(fresh_data, rcfile, xschem_env)
 
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,

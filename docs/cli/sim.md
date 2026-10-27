@@ -1604,6 +1604,8 @@ but no tagged release contains it yet.
 | `measurements[].expr` | 0.7.0 |
 | `corners.process[].sections[]` (object form) | 0.7.0 |
 | `corners.params` | 0.8.0 |
+| `corners.units` | 0.8.0 |
+| `corners.temperature_param` | 0.8.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
@@ -2145,6 +2147,12 @@ aid, not a diagnosis. Equal PDK commits, equal library hashes and an equal
 ngspice major version do not by themselves show the two executions are
 equivalent.
 
+0. Read `environment.pdk_stamp_comparison` first (the worker's PDK
+   `SOURCES` stamp, or under `options.stage_model_inputs` the per-file sha256
+   of the shipped model files, against the submitter's). A `match` does not
+   prove the model closures are equal. The fatal ngspice line and its code
+   (`model_bin_range`, `ngspice_fatal`, ...) are on the errored unit's
+   `diagnostics` even without `options.keep_artifacts`.
 1. Run with `options.keep_artifacts` locally and on `batch`; diff the
    generated per-corner decks (`artifacts.deck`) and logs.
 2. Compare how every `.include`/`.lib` resolved: the expanded paths and

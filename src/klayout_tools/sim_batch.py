@@ -238,6 +238,13 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # compares below 0.8.0, so a 0.7.1.dev7xx+ runner that has the feature is
     # refused; that fails safe.
     "corners.params": "0.8.0",
+    # b24141ef9 corners.units (#2993), after v0.7.0; first in v0.8.0
+    # (`git tag --contains b24141ef9`). An older runner ignores the axis and
+    # runs one default corner.
+    "corners.units": "0.8.0",
+    # 0380f2a05 corners.temperature_param, after v0.7.0; first in v0.8.0
+    # (`git tag --contains 0380f2a05`).
+    "corners.temperature_param": "0.8.0",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
@@ -261,8 +268,9 @@ _BATCH_STDERR_TAIL_BYTES = 64 * 1024
 _BATCH_JOB_FAILURE_TAIL_BYTES = 1500
 
 #: ``$EDA_OUTPUT_DIR``-relative directory the job command points `klt sim`'s
-#: ``--outdir`` at when ``options.keep_artifacts`` is set, so per-corner
-#: logs/rawfiles land inside the one tree the harness collects.
+#: ``--outdir`` at, so per-corner logs/rawfiles land inside the one tree the
+#: harness collects (issue #4369: always, so a deck-abort log is readable;
+#: ``options.keep_artifacts`` only gates installing them for the caller).
 BATCH_ARTIFACTS_DIRNAME = "artifacts"
 
 #: ``job.json``'s ``tool`` field -- informational only (the harness echoes it
@@ -810,6 +818,10 @@ _RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
     "corners.process[].sections[]": _uses_process_section_objects,
     "corners.params": lambda request: bool(
         (request.get("corners") or {}).get("params")
+    ),
+    "corners.units": lambda request: "units" in (request.get("corners") or {}),
+    "corners.temperature_param": lambda request: (
+        "temperature_param" in (request.get("corners") or {})
     ),
     "options.ngspice_init": _uses_option("ngspice_init"),
     "options.osdi_preload": _uses_option("osdi_preload"),
@@ -1592,8 +1604,10 @@ def _build_batch_job_spec(
     # An explicit `options.max_workers` in the request still wins.
     if not (remote_request.get("options") or {}).get("max_workers"):
         command += ' ${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}'
-    if keep_artifacts:
-        command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
+    # Always collect the per-corner engine logs: without them a deck abort
+    # (`could not find a valid modelname`) never reaches the report (#4369).
+    # Only `keep_artifacts` installs them into the caller's artifact dir.
+    command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
     # stdout -> report.json (the success channel); stderr was teed into
     # stderr.log from the job command's first line (see
     # _job_stderr_capture_prefix), so it also covers the preflight.
