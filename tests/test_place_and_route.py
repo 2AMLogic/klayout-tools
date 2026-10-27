@@ -1924,7 +1924,7 @@ def test_power_preset_accepts_connects_override_issue_4348():
     lib = "gf180mcu_fd_sc_mcu7t5v0"
     plain = place_and_route._validate_power({"preset": "gf180mcu_7t_6M"}, lib)
     assert plain["connects_overridden"] is False
-    assert any(c["split_cuts"] for c in plain["connects"])
+    assert any(c["max_columns"] for c in plain["connects"])
     over = place_and_route._validate_power(
         {"preset": "gf180mcu_7t_6M", "connects": []}, lib
     )
