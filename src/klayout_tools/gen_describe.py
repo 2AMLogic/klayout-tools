@@ -46,6 +46,7 @@ imported here directly from their defining module rather than through
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .gen_layer_params import (
@@ -2707,6 +2708,45 @@ def _bond_pad_describe(
     }
 
 
+def _esd_device_resolve_total_width(
+    raw_params: dict[str, Any], resolved: dict[str, Any]
+) -> None:
+    """Pre-resolve ``esd_device``'s optional ``total_width_um`` (issue #4299),
+    in place on ``resolved``, before :func:`_esd_device_validate` runs so the
+    per-finger cap and finger-count limit are checked on the derived values.
+
+    Picks the smallest finger count whose equal split stays within
+    ``ESD_FINGER_WIDTH_MAX_UM`` (21.5 -> 2 x 10.75). ``0.0`` (the default)
+    means unset. Combining it with an explicit ``fingers``/``finger_width_um``
+    is ambiguous and rejected."""
+    from .gen import GenError
+
+    if "total_width_um" not in raw_params:
+        return
+    total = resolved["total_width_um"]
+    if total <= 0:
+        raise GenError("generator 'esd_device': params.total_width_um must be > 0")
+    explicit = [k for k in ("fingers", "finger_width_um") if k in raw_params]
+    if explicit:
+        raise GenError(
+            "generator 'esd_device': params.total_width_um cannot be combined "
+            f"with an explicit params.{explicit[0]} (it derives both "
+            "fingers and finger_width_um)"
+        )
+    # The epsilon keeps a total that is exactly N x the cap at N fingers
+    # despite float division noise.
+    fingers = max(1, math.ceil(total / ESD_FINGER_WIDTH_MAX_UM - 1e-9))
+    if fingers > ESD_MAX_FINGERS_PER_RING:
+        raise GenError(
+            f"generator 'esd_device': params.total_width_um {total} needs "
+            f"{fingers} fingers at <= {ESD_FINGER_WIDTH_MAX_UM} um each, above "
+            f"the {ESD_MAX_FINGERS_PER_RING}-finger limit per automatically-"
+            "sized tap ring"
+        )
+    resolved["fingers"] = fingers
+    resolved["finger_width_um"] = total / fingers
+
+
 def _esd_device_validate(params: dict[str, Any]) -> None:
     from .gen import (
         GenError,
@@ -2844,6 +2884,7 @@ def _esd_device_describe(
     notes = _ring_gap_notes(
         info["ring"] if ring_drawn else None, params["ring_gap_side"]
     )
+    voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
     if not params["add_guard_ring"]:
         notes.append(
             "no tap ring drawn (params.add_guard_ring is false) -- substrate "
@@ -2876,6 +2917,10 @@ def _esd_device_describe(
             "matched_group_id": None,
             "snapped_to_grid": snapped,
             "notes": notes,
+            # Echo the (possibly `total_width_um`-derived) split, issue #4299.
+            "fingers": params["fingers"],
+            "finger_width_um": params["finger_width_um"],
+            **voltage_flavor_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]

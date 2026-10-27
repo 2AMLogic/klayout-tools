@@ -1955,6 +1955,13 @@ current-sharing an ESD pulse depends on avoiding.
 | `ring_padding_um`    | double | `0.5`   | Padding between the finger array and the tap ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. |
 | `gate_contact`       | bool   | `false` | Draw a contact + local-metal pad on the gate landing pad and report `M1_G` on the `metal` role instead of `poly` — see `mos_array`'s equivalent note above. |
 | `salicide_block`     | bool   | `false` | Draw the PDK's salicide-block layer over the finger array on families that curate one (gf180mcu only — see above). |
+| `voltage_flavor`     | string | `""`    | Thick-oxide / medium-voltage device-class marker, same values and semantics as `mos_array`'s. `"hvi"` on `sky130` draws `hvi.drawing` over the finger array so `klt extract` classifies the clamp as `sky130_fd_pr__nfet_g5v0d10v5`; `"medium_voltage"` on `gf180mcu` draws its `Dualgate` marker. An unrecognised value draws nothing and is reported in `drc_hints.notes`. Echoed as `drc_hints.voltage_flavor`/`voltage_flavor_mark_present`. |
+| `total_width_um`     | double | `0.0`   | Total device width (µm); `0.0` means unset. When given, the generator picks the smallest finger count whose equal split is `<= 20.0` µm per finger (`21.5` → 2 × `10.75`) and sets `fingers`/`finger_width_um` itself. Cannot be combined with an explicit `fingers` or `finger_width_um`; must fit within the 32-finger limit. The derived `fingers`/`finger_width_um` are reported in `drc_hints`. The 20 µm per-finger cap is unchanged. |
+
+The drain net has no param of its own: to name it (e.g. the pad net), run the
+block through [`klt gen-compose`](gen-compose.md) and promote `M1_D` with a
+`pins[]` entry (`{"net": "PAD", "block": "esd", "port": "M1_D"}`), which
+writes the net label on the composed cell.
 
 ### `diode` (junction diode / pad ESD clamp primitive, issue #4300)
 
