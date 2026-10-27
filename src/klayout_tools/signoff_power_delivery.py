@@ -148,6 +148,10 @@ _REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION = "supply_spec_disclosed_tool_limi
 _REASON_SUPPLY_NOT_CONTINUOUS = "supply_not_continuous"
 _REASON_LVS_SUPPLY_UNPROVEN = "lvs_supply_unproven"
 _REASON_LVS_DID_NOT_PASS = "lvs_did_not_pass"
+#: Issue #4193: the cited set resolved cleanly but lacks the ``erc`` and/or
+#: the ``lvs`` part. Distinct from ``wrong_kind`` ("cite a different
+#: artifact"): the parts that are cited are right, the set is incomplete.
+_REASON_POWER_DELIVERY_PARTS_MISSING = "power_delivery_parts_missing"
 
 #: Issue #2839: T1 item 11's **port-accessibility** sub-checks -- the
 #: provisional amendment (2AMLogic/product#134, drafted in product PR #168)
@@ -1653,6 +1657,35 @@ def _port_accessibility_verdict(
     )
 
 
+def _missing_parts_verdict(
+    by_kind: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any]]:
+    """The ``"unmet"`` verdict for a cited set lacking the ``erc`` and/or
+    ``lvs`` part (issue #4193). An ERC part whose spec does not resolve
+    reports its own, more actionable reason first; otherwise
+    :data:`_REASON_POWER_DELIVERY_PARTS_MISSING` names the absent parts and
+    credits the supplies a resolved ERC spec proved. Never ``"met"``.
+    """
+    erc = by_kind.get("erc")
+    supply_spec = None
+    if erc is not None:
+        supply_spec, reason, detail = _resolve_erc_supply_spec(erc)
+        if supply_spec is None:
+            return "unmet", reason, None, detail
+    block: dict[str, Any] = {
+        "missing_parts": [k for k in ("erc", "lvs") if k not in by_kind],
+        "cited_parts": [k for k in _POWER_DELIVERY_PART_ORDER if k in by_kind],
+    }
+    if supply_spec is not None:
+        block["supply_nets"] = list(supply_spec["supply_nets"])
+    return (
+        "unmet",
+        _REASON_POWER_DELIVERY_PARTS_MISSING,
+        None,
+        {"power_delivery": block},
+    )
+
+
 def _par_tapless_field(par: dict[str, Any] | None) -> dict[str, Any]:
     """``{"tapless": True}`` when the cited ``place-and-route`` part states
     ``power.tapless`` is ``true`` (issue #4199), else ``{}``; split out of
@@ -1761,7 +1794,8 @@ def _grade_power_delivery(
     :data:`_REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION`,
     :data:`_REASON_SUPPLY_NOT_CONTINUOUS`,
     :data:`_REASON_LVS_SUPPLY_UNPROVEN`,
-    :data:`_REASON_LVS_DID_NOT_PASS`) are reserved for a cited set that
+    :data:`_REASON_LVS_DID_NOT_PASS`,
+    :data:`_REASON_POWER_DELIVERY_PARTS_MISSING`) are reserved for a cited set that
     resolved cleanly and still does not prove power delivery.
     Issue #2496: ``stale_evidence``/``unverifiable_provenance`` can also
     arise a second way for the ``erc`` part specifically -- not from the
@@ -1787,7 +1821,7 @@ def _grade_power_delivery(
     those unrelated findings
     newly fatal.
     """
-    from .signoff import _REASON_WRONG_KIND, _citation
+    from .signoff import _citation
 
     by_kind, reason = _resolve_power_delivery_parts(specs, repo_root)
     if by_kind is None:
@@ -1796,10 +1830,7 @@ def _grade_power_delivery(
     erc = by_kind.get("erc")
     lvs = by_kind.get("lvs")
     if erc is None or lvs is None:
-        # The cited set does not contain the artifacts this item names at
-        # all -- "cite a different artifact", which is exactly what
-        # `wrong_kind` means everywhere else in this module.
-        return "unmet", _REASON_WRONG_KIND, None, {}
+        return _missing_parts_verdict(by_kind)
 
     # Issue #2495: the ERC half is resolved *before* the LVS pass gate, not
     # after it, so a failing LVS citation can say which of the two halves is

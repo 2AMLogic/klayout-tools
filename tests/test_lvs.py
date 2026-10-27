@@ -17821,8 +17821,8 @@ def test_run_lvs_gate_level_verilog_reference_converts_and_matches(tmp_path):
 
 def _committed_gate_level_verilog_report(tmp_path: Path) -> Path:
     """Commit a clean `reference.form: "gate-level-verilog"` report (issue
-    #2250) -- a form `--rerun` cannot reconstruct, since no report echoes
-    `reference.form`."""
+    #2250) in the legacy shape -- `reference_conversion` stripped (issue
+    #4353 added it), so `--rerun` cannot reconstruct `reference.form`."""
     root = _make_fake_pdk_library(
         tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
     )
@@ -17841,6 +17841,7 @@ def _committed_gate_level_verilog_report(tmp_path: Path) -> Path:
     }
     report = run_lvs(json.dumps(request))
     assert report["status"] == "match"
+    report.pop("reference_conversion")
     report_path = tmp_path / "lvs.json"
     _write_report(report_path, report)
     return report_path
@@ -23529,6 +23530,43 @@ def test_rerun_report_without_reference_conversion_is_not_drift(tmp_path):
     old = {k: v for k, v in report.items() if k != "reference_conversion"}
     with pytest.raises(LvsError):
         # Replayed as plain-element SPICE, exactly as before this change.
+        rerun_lvs_report(_commit_report(tmp_path, old))
+
+
+# Issue #4353: `reference.form: "gate-level-verilog"` is replayed too.
+def _gate_level_replay_request(tmp_path, *, with_library):
+    if with_library:
+        macro = _write(tmp_path / "macro.spice", _SRAM_MACRO_SPICE)
+        extra = {
+            "library": "sky130_fd_sc_hd",
+            "pdk": "sky130A",
+            "pdk_root": _make_fake_macro_pdk(tmp_path),
+            "pin_order_files": [macro],
+        }
+    else:
+        cells = _SKY130_HD_LIBRARY_SPICE + _SRAM_MACRO_SPICE
+        extra = {"pin_order_files": [_write(tmp_path / "all_cells.spice", cells)]}
+    return _macro_request(tmp_path, extra)
+
+
+@pytest.mark.parametrize("with_library", [True, False])
+def test_rerun_replays_gate_level_verilog_reference(tmp_path, with_library):
+    report = run_lvs(_gate_level_replay_request(tmp_path, with_library=with_library))
+    assert report["status"] == "match"
+    _assert_lvs_report_conforms(report)
+    echo = report["reference_conversion"]
+    assert echo["form"] == "gate-level-verilog"
+    assert echo["library"] == ("sky130_fd_sc_hd" if with_library else None)
+    assert echo["pdk"] == ("sky130A" if with_library else None)
+    assert all(os.path.isabs(path) for path in echo["pin_order_files"])
+    result = rerun_lvs_report(_commit_report(tmp_path, report))
+    assert result["status"] == "match", result
+
+
+def test_rerun_gate_level_report_without_echo_stays_best_effort(tmp_path):
+    report = run_lvs(_gate_level_replay_request(tmp_path, with_library=False))
+    old = {k: v for k, v in report.items() if k != "reference_conversion"}
+    with pytest.raises(LvsError):
         rerun_lvs_report(_commit_report(tmp_path, old))
 
 
