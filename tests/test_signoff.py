@@ -18223,3 +18223,44 @@ def test_item4_partition_qualified_lists_grade_each_partition(tmp_path):
     }
     assert by_partition["analog"] == "met"
     assert by_partition["digital"] == "unmet"
+
+
+def _capture_attest_timeout(monkeypatch, spec):
+    from klayout_tools import signoff_attest
+
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        return subprocess.CompletedProcess(argv, 0, stdout=b"")
+
+    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
+    signoff_attest._run_command(".", spec)
+    return seen["timeout"]
+
+
+def test_attest_command_timeout_s_plumbed_and_defaults(monkeypatch):
+    from klayout_tools import signoff_attest
+
+    spec = signoff_attest._command_spec(
+        {"argv": ["x"], "timeout_s": 5400, "local_only": True}, "f", "."
+    )
+    assert spec["timeout_s"] == 5400 and spec["local_only"] is True
+    assert _capture_attest_timeout(monkeypatch, spec) == 5400
+    plain = signoff_attest._command_spec({"argv": ["x"]}, "f", ".")
+    assert "timeout_s" not in plain
+    assert _capture_attest_timeout(monkeypatch, plain) == 1800
+    top = signoff_attest._command_spec(
+        {"argv": ["x"], "timeout_s": signoff_attest.COMMAND_TIMEOUT_CEILING_S},
+        "f",
+        ".",
+    )
+    assert top["timeout_s"] == 21600
+
+
+@pytest.mark.parametrize("bad", ["60", True, 0, -1, float("nan"), float("inf"), 21601])
+def test_attest_command_timeout_s_refused(bad):
+    from klayout_tools import signoff_attest
+
+    with pytest.raises(signoff_attest.AttestationError, match=r"f\.timeout_s"):
+        signoff_attest._command_spec({"argv": ["x"], "timeout_s": bad}, "f", ".")
