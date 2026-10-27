@@ -2863,6 +2863,7 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # deliberate.
     assert _power_without_placed(report) == {
         "preset": None,
+        "connects_overridden": False,
         "pdn": False,
         "global_connect": False,
         "power_net": None,
