@@ -9,6 +9,7 @@ import argparse
 import sys
 
 from .. import arith_gen, artifact_store, netlist, netlist_batch, pdk_stackup, pex
+from ..equiv import SUPPORTED_ENGINES as SUPPORTED_EQUIV_ENGINES
 from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
@@ -442,7 +443,11 @@ def _add_sta_parser(subparsers: argparse._SubParsersAction) -> None:
             "trip instead of N external invocations. "
             "`constraints.clock_port`/"
             "`clock_period_ns` are required (a standalone STA run has no "
-            "meaning without a clock). An optional `spef` path feeds a "
+            "meaning without a clock) -- or, for a multi-clock design, "
+            "`constraints.clocks` (a list of {port, period_ns}; the first is "
+            "primary) instead, with optional `constraints.clock_groups` "
+            "declaring asynchronous clock groups (issue #4241). An optional "
+            "`spef` path feeds a "
             "caller-supplied SPEF (e.g. from `klt extract --parasitics`) in "
             "via `read_spef`, with the same net-name-correlation sanity "
             "check `klt place-and-route`'s own `post_route_spef` pass runs. "
@@ -2874,6 +2879,26 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--device-model",
+        dest="device_models",
+        action="append",
+        default=None,
+        metavar="CLASS=SUBCKT",
+        help=(
+            "with --pdk/--pdk-root, write the bipolar device CLASS as an `X` "
+            "call to the named PDK subcircuit SUBCKT (issue #4234), "
+            "repeatable. For a bipolar class the deck recognises but has no "
+            "curated PDK binding for -- today gf180mcu's `bjt`, whose cell "
+            "name and polarity the tool cannot guess but the schematic "
+            "states. A CLASS the deck does not declare, or one that already "
+            "has a curated binding (sky130's `pnp`), is an error; curated "
+            "data is never overridden. Omitted by default -- output is "
+            "byte-identical to before this flag existed. The mapping is "
+            "echoed in the JSON response's `device_models` field. See "
+            "docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
         "--probe",
         dest="probes",
         action="append",
@@ -3455,9 +3480,10 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "testbench re-run against it. Each delta[] row then also carries "
             "device_only_value, representation_delta_pct (device-only vs "
             "schematic) and parasitic_delta_pct (extracted vs device-only), "
-            "splitting device-representation effects from parasitics. Not "
-            "supported with --measure-command. Off by default -- "
-            "byte-identical to today's behavior."
+            "splitting device-representation effects from parasitics. With "
+            "--measure-command the command is run a third time on the "
+            "parasitic-free netlist ($KLT_PEX_SIDE=device-only). Off by "
+            "default -- byte-identical to today's behavior."
         ),
     )
     pex_parser.add_argument(
@@ -3609,6 +3635,25 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "error. Omitted by default -- byte-identical to today's "
             "behavior. The applied mapping is echoed in the JSON response's "
             "`extraction.label_layers`. See docs/cli/pex.md."
+        ),
+    )
+    pex_parser.add_argument(
+        "--device-model",
+        dest="device_models",
+        action="append",
+        default=None,
+        metavar="CLASS=SUBCKT",
+        help=(
+            "write the bipolar device CLASS as an `X` call to the named PDK "
+            "subcircuit SUBCKT (issue #4234), repeatable, passed through to "
+            "`klt extract --device-model`. Needed under --pdk for a deck "
+            "whose recognised bipolar has no curated PDK binding (gf180mcu's "
+            "`bjt`), which otherwise stays a bare `Q` card ngspice cannot "
+            "load. A CLASS the deck does not declare, or that already has a "
+            "curated binding, is an error. Omitted by default -- "
+            "byte-identical to today's behavior. The applied mapping is "
+            "echoed in the JSON response's `extraction.device_models`. See "
+            "docs/cli/pex.md."
         ),
     )
     pex_parser.add_argument(
@@ -3934,10 +3979,11 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         "--attest",
         metavar="ITEM",
         type=int,
-        choices=[1, 2, 9, 10],
+        choices=[1, 2, 8, 9, 10],
         help=(
             "produce the artifact-anchored generic envelope for T1 item 1 "
-            "(Design sources), 9 (Testbenches shipped) or 10 (Repo hygiene) "
+            "(Design sources), 8 (Characterization report), 9 (Testbenches "
+            "shipped) or 10 (Repo hygiene) "
             "from --inventory, by running the item-specific checks the "
             "inventory declares (issue #2844); or for item 2 (Layout) from "
             "--input STREAM, by checking the committed layout stream "
@@ -3946,7 +3992,7 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "(nothing written), 1 malformed inventory. Mutually exclusive "
             "with <file>/--manifest/--fleet/"
             "--describe-grader/--tiers-doc. See docs/cli/signoff.md's "
-            "'Attesting items 1, 9 and 10' section."
+            "'Attesting items 1, 8, 9 and 10' section."
         ),
     )
     signoff_parser.add_argument(
@@ -3966,7 +4012,7 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "with --attest 2: path to the committed GDS/OASIS layout stream "
             "inside a git repository; the envelope pins its raw-byte sha256 "
             "and the producing KLayout version (issue #4188). Refused with "
-            "items 1, 9 and 10, which take --inventory."
+            "items 1, 8, 9 and 10, which take --inventory."
         ),
     )
     signoff_parser.add_argument(
@@ -4266,6 +4312,18 @@ def _add_lef_abstract_parser(subparsers: argparse._SubParsersAction) -> None:
         help="output LEF path (default: <macro-name>.lef)",
     )
     lef_abstract_parser.add_argument(
+        "--obs-mode",
+        dest="obs_mode",
+        choices=["detailed", "coarse"],
+        default="detailed",
+        help=(
+            "obstruction granularity (issue #4283): 'detailed' (default) "
+            "emits every merged routing-layer region; 'coarse' emits one "
+            "bounding rectangle per routing layer minus the declared pin "
+            "ports, bounding the LEF size to O(pins)"
+        ),
+    )
+    lef_abstract_parser.add_argument(
         "--require-power-pins",
         action="store_true",
         help=(
@@ -4417,6 +4475,19 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     synthesize_parser.add_argument(
+        "--equiv-engine",
+        dest="equiv_engine",
+        choices=list(SUPPORTED_EQUIV_ENGINES),
+        default=None,
+        help=(
+            "`klt equiv` proof engine for the `--verify-equivalence` gate "
+            "(default: klt equiv's own default, `yosys`, combinational "
+            "only); pass `yosys-sequential` for designs with flip-flops. "
+            "Has no effect unless `--verify-equivalence` is given. Must be "
+            "re-passed with `--check --rerun`, like `--equiv-timeout-s`."
+        ),
+    )
+    synthesize_parser.add_argument(
         "--restructure-timing",
         dest="restructure_timing",
         action="store_true",
@@ -4451,6 +4522,30 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
         inputs="RTL sources and standard-cell liberty",
         engine="Yosys",
         docs="docs/cli/synthesize.md",
+    )
+    synthesize_parser.add_argument(
+        "--netlist",
+        metavar="FILE",
+        default=None,
+        help=(
+            "with --check (cheap mode): the committed gate-level netlist to "
+            "re-hash against the report's recorded `netlist_sha256`. Always "
+            "wins over the report's own `netlist_path`; without it that path "
+            "is used when it is repo-scoped. See docs/cli/synthesize.md."
+        ),
+    )
+    synthesize_parser.add_argument(
+        "--skip-deck",
+        dest="skip_deck",
+        action="store_true",
+        help=(
+            "with --check (cheap mode only): do not resolve the standard-cell "
+            "liberty, so the check runs on a host with no PDK install. The "
+            "`provenance.deck.content_hash` check is omitted and listed in "
+            "the response's `skipped[]`; a `match` then proves RTL, "
+            "parameters, defines and netlist bytes, NOT the deck. Not valid "
+            "with --rerun. See docs/cli/synthesize.md."
+        ),
     )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
@@ -6341,11 +6436,11 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         metavar="LAYOUT",
         default=None,
         help=(
-            "known-bad fixture layout the same native deck must flag "
-            "(--engine klayout only): run first with identical options; "
-            "zero violations fails the run (error.code "
-            "negative_control_failed), proving the deck executed. "
-            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+            "known-bad fixture layout the same deck must flag (curated "
+            "and klayout engines): run first with identical options "
+            "(waivers not applied); zero violations fails the run "
+            "(error.code negative_control_failed), proving the deck "
+            "executed. See docs/cli/drc.md, 'Negative control'."
         ),
     )
     drc_parser.add_argument(

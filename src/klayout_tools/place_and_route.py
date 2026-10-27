@@ -40,6 +40,7 @@ import re
 import subprocess  # noqa: F401 -- tests patch place_and_route.subprocess.run
 from typing import Any
 
+from . import macros as macro_spec
 from . import output_lock
 from ._openroad_engine import (
     _count_violations,
@@ -106,6 +107,7 @@ from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
 from .place_and_route_pins import (
     check_io_pin_constraints,
     netlist_top_ports,
+    read_def_instance_groups,
     read_def_pins,
     slot_shortage_hint,
 )
@@ -226,6 +228,9 @@ from .place_and_route_request import (
     _validate_floorplan as _validate_floorplan,
 )
 from .place_and_route_request import (
+    _validate_instance_groups as _validate_instance_groups,
+)
+from .place_and_route_request import (
     _validate_io as _validate_io,
 )
 from .place_and_route_request import (
@@ -281,6 +286,9 @@ from .place_and_route_script import (
     _antenna_check_lines as _antenna_check_lines,
 )
 from .place_and_route_script import (
+    _antenna_diode_absent as _antenna_diode_absent,
+)
+from .place_and_route_script import (
     _clock_lines as _clock_lines,
 )
 from .place_and_route_script import (
@@ -300,6 +308,12 @@ from .place_and_route_script import (
 )
 from .place_and_route_script import (
     _io_delay_lines as _io_delay_lines,
+)
+from .place_and_route_script import (
+    _macro_blockage_lines as _macro_blockage_lines,
+)
+from .place_and_route_script import (
+    _macro_pdn_grid_lines as _macro_pdn_grid_lines,
 )
 from .place_and_route_script import (
     _metrics_report_lines as _metrics_report_lines,
@@ -1134,6 +1148,8 @@ _ALLOWED_REQUEST_KEYS = (
     "portable_paths",
     "backend",
     "batch",
+    "outputs",
+    "instance_groups",
 )
 
 
@@ -1160,7 +1176,39 @@ def load_request(request_path: str) -> dict[str, Any]:
     _reject_unknown_keys(
         request, _ALLOWED_REQUEST_KEYS, request_path, "", PlaceAndRouteError
     )
+    _validate_outputs(request, request_path)
     return request
+
+
+#: Keys allowed inside the optional request ``outputs`` object (issue #4231,
+#: mirroring ``klt synthesize``'s ``outputs.dir``, issue #3795).
+_ALLOWED_OUTPUTS_KEYS = frozenset({"dir"})
+
+
+def _validate_outputs(request: dict[str, Any], request_path: str) -> None:
+    """Reject a malformed ``outputs`` object before any engine work (#4231)."""
+    if "outputs" not in request:
+        return
+    outputs = request["outputs"]
+    if not isinstance(outputs, dict):
+        raise PlaceAndRouteError("request.outputs must be an object")
+    _reject_unknown_keys(
+        outputs, _ALLOWED_OUTPUTS_KEYS, request_path, "outputs", PlaceAndRouteError
+    )
+    if "dir" in outputs:
+        out_dir = outputs["dir"]
+        if not isinstance(out_dir, str) or not out_dir.strip():
+            raise PlaceAndRouteError("request.outputs.dir must be a non-empty string")
+
+
+def _stage_root(request_dir: str, request: dict[str, Any]) -> str:
+    """The directory every artifact of this request is written under: the
+    request's ``outputs.dir`` (relative to the request file's directory
+    unless absolute) or, by default, ``.klt/place-and-route/`` (#4231)."""
+    out_dir = request.get("outputs", {}).get("dir")
+    if out_dir is None:
+        return os.path.join(request_dir, ".klt", "place-and-route")
+    return os.path.normpath(os.path.join(request_dir, out_dir))
 
 
 def _validate_pdn_core_fit(
@@ -1204,6 +1252,19 @@ def _validate_pdn_core_fit(
         raise PlaceAndRouteError(message)
 
 
+def _antenna_repair_warnings(
+    target_stage: str, library: dict[str, Any] | None
+) -> list[str]:
+    """Warn when a ``route`` run skips antenna repair (``antenna_diode: null``)."""
+    if target_stage != "route" or not _antenna_diode_absent(library):
+        return []
+    return [
+        "antenna repair did not run: request.library.antenna_diode is "
+        "null (the library has no antenna diode), so repair_antennas "
+        "was not called; the antenna check still ran"
+    ]
+
+
 def _response_warnings(
     placed: dict[str, Any],
     *,
@@ -1242,17 +1303,32 @@ def _response_warnings(
     return warnings
 
 
-def _own_stage_root(ownership: contextlib.ExitStack, request_path: str) -> None:
-    """Own the fixed ``.klt/place-and-route/`` stage root (#2770)."""
-    ownership.enter_context(
-        output_lock.hold_output_dir(
-            os.path.join(
-                os.path.dirname(os.path.abspath(request_path)),
-                ".klt",
-                "place-and-route",
-            )
+def _own_stage_root(
+    ownership: contextlib.ExitStack,
+    request_path: str,
+    request: dict[str, Any],
+    *,
+    reuse_outputs_dir: bool = False,
+) -> None:
+    """Own the stage root (#2770): ``.klt/place-and-route/`` or the request's
+    ``outputs.dir`` (#4231).
+
+    A fresh run must not write into a populated ``outputs.dir`` (prior
+    evidence is retained); ``reuse_outputs_dir`` (``--rerun``) lifts that,
+    since a re-run deliberately overwrites the artifacts of its own report.
+    """
+    stage_root = _stage_root(os.path.dirname(os.path.abspath(request_path)), request)
+    if (
+        "dir" in request.get("outputs", {})
+        and not reuse_outputs_dir
+        and os.path.lexists(stage_root)
+        and (not os.path.isdir(stage_root) or os.listdir(stage_root))
+    ):
+        raise PlaceAndRouteError(
+            f"could not claim outputs.dir '{stage_root}': it must not exist or "
+            "be an empty directory (prior evidence is retained)"
         )
-    )
+    ownership.enter_context(output_lock.hold_output_dir(stage_root))
 
 
 @output_lock.owns_run
@@ -1262,6 +1338,7 @@ def run_place_and_route(
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     backend: str | None = None,
+    reuse_outputs_dir: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the OpenROAD place-and-route flow declared by the request at
@@ -1310,8 +1387,10 @@ def run_place_and_route(
     never falls back to running a unit on this host. A single-unit request
     stays local under a host-default ``batch``.
     """
-    _own_stage_root(_ownership, request_path)
     request = load_request(request_path)
+    _own_stage_root(
+        _ownership, request_path, request, reuse_outputs_dir=reuse_outputs_dir
+    )
     rebuild_corners = _validate_rebuild_corners(request)
 
     from . import place_and_route_batch
@@ -1320,6 +1399,11 @@ def run_place_and_route(
         backend, request, units=len(rebuild_corners) if rebuild_corners else 1
     )
     if selected == "batch":
+        if "dir" in request.get("outputs", {}):
+            raise PlaceAndRouteError(
+                "request.outputs.dir is not supported with the batch backend "
+                "(the fleet copies artifacts back into .klt/place-and-route/)"
+            )
         assert rebuild_corners is not None and _ownership is not None
         return place_and_route_batch.run_rebuild_corners_batch(
             request_path,
@@ -1644,6 +1728,7 @@ def _run_single_corner(
     # no-op.
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
+    instance_groups = _validate_instance_groups(request.get("instance_groups"))
     library = _validate_library(request.get("library"))
     power = _validate_power(request.get("power"), cell_library, library)
     (
@@ -1673,6 +1758,24 @@ def _run_single_corner(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
+    # Issue #2635: which of each macro's per-corner liberties applies to
+    # *this* run, resolvable only now that `_resolve_liberty` has named the
+    # corner. A macro that declared a `lib` map with no entry for this
+    # corner (and no `"default"`) is rejected here with a named error rather
+    # than silently timed at some other corner -- see
+    # `klayout_tools.macros.macro_lib_for_corner`.
+    macro_liberty_paths = [
+        path
+        for path in (
+            macro_spec.macro_lib_for_corner(
+                {**macro, "cell": macro["cell_name"]},
+                corner,
+                error_cls=PlaceAndRouteError,
+            )
+            for macro in macros
+        )
+        if path is not None
+    ]
     validate_tech_lef_track_offsets(floorplan, tech_lef)
 
     # Issue #2170: the joint floorplan/PDN pre-flight -- see
@@ -1701,7 +1804,7 @@ def _run_single_corner(
         tech_lef=tech_lef,
     )
 
-    output_dir = os.path.join(request_dir, ".klt", "place-and-route")
+    output_dir = _stage_root(request_dir, request)
     if output_subdir is not None:
         output_dir = os.path.join(output_dir, output_subdir)
     try:
@@ -1746,6 +1849,7 @@ def _run_single_corner(
             output_dir=output_dir,
             route_critical_nets_percentage=route_critical_nets_percentage,
             max_antenna_repair_iterations=max_antenna_repair_iterations,
+            macro_liberty_paths=macro_liberty_paths,
             library=library,
         )
         _write_script(script_path, lines)
@@ -2068,6 +2172,7 @@ def _run_single_corner(
             "power_net": None,
             "ground_net": None,
             "tapcell_master": None,
+            "tapless": False,
             "endcap_master": None,
             "tapcell_distance_um": None,
             "filler_masters": [],
@@ -2087,6 +2192,7 @@ def _run_single_corner(
             "power_net": power["power_net"],
             "ground_net": power["ground_net"],
             "tapcell_master": tap_master,
+            "tapless": cell_library in _NO_TAPCELL_LIBRARIES,
             "endcap_master": endcap_master,
             "tapcell_distance_um": tapcell_distance_um,
             "filler_masters": (
@@ -2156,6 +2262,7 @@ def _run_single_corner(
         row_rail_emitted=row_rail_info["emitted"],
         row_rail_layer=row_rail_info["layer"],
     )
+    warnings.extend(_antenna_repair_warnings(target_stage, library))
 
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
@@ -2223,6 +2330,14 @@ def _run_single_corner(
                 "x_um": macro["x_um"],
                 "y_um": macro["y_um"],
                 "orientation": macro["orientation"],
+                # Additive per-entry fields (issue #2635): the macro's
+                # master name (shared with `klt synthesize`/`klt sta`'s own
+                # `macros[].cell`), the per-corner liberty map as resolved,
+                # and the halo actually honored -- `null` when the request
+                # declared no `halo`/`lib`.
+                "cell": macro["cell_name"],
+                "lib": macro["lib"],
+                "halo": macro["halo"],
             }
             for macro in macros
         ],
@@ -2230,6 +2345,14 @@ def _run_single_corner(
         # Additive field (issue #3885): final edge/coordinates of every
         # top-level pin, read from the DEF above (`null` at "floorplan").
         "pins": read_def_pins(audited_def_path) if audited_def_path else None,
+        # Additive field (issue #4344): placed-origin bbox of each requested
+        # `instance_groups` entry, read from the same DEF (`null` at
+        # "floorplan"; `[]` when none were requested).
+        "instance_groups": (
+            read_def_instance_groups(audited_def_path, instance_groups)
+            if audited_def_path
+            else None
+        ),
         # Additive field (issue #1826): see this function's own comment
         # above (right before `unrouted_def_path` is computed) for the
         # "when is this populated" contract.
@@ -2391,7 +2514,7 @@ def _run_rebuild_corners(
         )
         deck_hashes[name] = _content_hash(liberty_path)
 
-    stage_root = os.path.join(request_dir, ".klt", "place-and-route")
+    stage_root = _stage_root(request_dir, request)
     corner_runs: list[dict[str, Any]] = []
     for name in corners:
         unit_dir = os.path.join(stage_root, name)
@@ -2519,17 +2642,33 @@ def _engine_error_message(
             f"{completed.returncode}: {snippet}"
         )
 
-    hint = _mount_namespace_hint(completed, pdk_info)
-    if hint is not None:
-        message = f"{message} -- {hint}"
-    slot_hint = slot_shortage_hint(
-        f"{completed.stdout or ''}\n{completed.stderr or ''}",
-        pin_constraints,
-        top_ports,
+    # Each recognized-hint helper appends a further `--` clause. Issue
+    # #2635: `ORD-2013` is what a hard macro with no `request.macros` entry
+    # looks like, and the raw diagnostic says nothing about which request
+    # field would have supplied its physical view.
+    streams = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+    hints = (
+        _mount_namespace_hint(completed, pdk_info),
+        macro_spec.missing_lef_master_hint(streams),
+        slot_shortage_hint(streams, pin_constraints, top_ports),
     )
-    if slot_hint is not None:
-        message = f"{message} -- {slot_hint}"
+    message += "".join(f" -- {hint}" for hint in hints if hint is not None)
     return message
+
+
+def _outside_cwd_note(path: str) -> str:
+    """Issue #4191: the docker wrapper mounts only `$PWD`, `$PDK_ROOT` and
+    `$TMPDIR`, so a readable path outside the invocation directory is the
+    commonest trigger -- say the rule and the fix, not just the symptom."""
+    cwd = os.path.realpath(os.getcwd())
+    real = os.path.realpath(path)
+    if real == cwd or real.startswith(cwd.rstrip(os.sep) + os.sep):
+        return ""
+    return (
+        f"; '{path}' is outside the invocation directory '{cwd}', and the "
+        "container wrapper mounts only $PWD, $PDK_ROOT and $TMPDIR -- run "
+        "from a common ancestor of the request and its inputs"
+    )
 
 
 def _mount_namespace_hint(
@@ -2596,11 +2735,13 @@ def _mount_namespace_hint(
             f"{os.environ.get('PDK_ROOT') or '(unset)'})"
         )
 
+    mount_note = _outside_cwd_note(path)
+
     return (
         f"'openroad' could not read '{path}', but this process can read it"
         f"{pdk_note} -- if 'openroad' is a container/wrapper invocation, its "
         "mounts likely do not cover that path (see docs/cli/place-and-route.md's "
-        "'Installing OpenROAD' section)"
+        f"'Installing OpenROAD' section){mount_note}"
     )
 
 
@@ -3057,8 +3198,10 @@ def rerun_place_and_route_report(
 
     **Re-running overwrites this request's own artifacts.** Unlike ``klt
     synthesize``'s retained per-``run_id`` directories, this verb writes to a
-    fixed ``.klt/place-and-route/`` next to the request, so a ``--rerun``
-    rewrites the DEF/GDS/Verilog the committed report names. That is the same
+    fixed ``.klt/place-and-route/`` next to the request (or the request's
+    ``outputs.dir``, issue #4231, which a re-run reuses in place rather than
+    refusing it as populated), so a ``--rerun`` rewrites the DEF/GDS/Verilog
+    the committed report names. That is the same
     thing invoking the verb again would do, and is why ``--check`` (cheap
     mode, which touches nothing) is the default.
 
@@ -3067,7 +3210,11 @@ def rerun_place_and_route_report(
     """
     committed = load_committed_report(report_path, PlaceAndRouteError)
     fresh = run_place_and_route(
-        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root, backend=backend
+        request_path,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        backend=backend,
+        reuse_outputs_dir=True,
     )
     return build_rerun_result(
         report_path=report_path,

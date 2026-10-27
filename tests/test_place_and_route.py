@@ -578,6 +578,26 @@ def test_run_floorplan_utilization_requires_site(tmp_path):
         run_place_and_route(request_path)
 
 
+def test_run_floorplan_utilization_requires_core_margin(tmp_path):
+    """Issue #4191: OpenROAD needs `-core_space` (IFP-0034) for `-utilization`,
+    so reject before any engine run, naming the field."""
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            floorplan={
+                "method": "utilization",
+                "utilization_pct": 38,
+                "site": "unithd",
+            }
+        ),
+    )
+    with pytest.raises(
+        PlaceAndRouteError, match="floorplan.core_margin_um is required"
+    ):
+        run_place_and_route(request_path)
+
+
 def test_run_floorplan_explicit_requires_die_and_core_area(tmp_path):
     _write(tmp_path / "gcd_synth.v", "// netlist\n")
     request_path = _write_request(
@@ -1774,13 +1794,15 @@ _EXPECTED_PRESET_STRAPS: dict[str, list[dict[str, object]]] = {
     ],
 }
 
-#: The via-stack tuning each preset must resolve to. Both gf180mcu configs
-#: carry `add_pdn_connect -grid {block} -layers {Metal1 Metal4}
+#: The via-stack tuning each preset must resolve to. The 9t gf180mcu config
+#: carries `add_pdn_connect -grid {block} -layers {Metal1 Metal4}
 #: -max_columns {5} -ongrid {Metal2 Metal3 Metal4} -split_cuts {Metal3
-#: 0.128}` plus a bare `{Metal4 Metal5}` pair; sky130hd's `pdn.tcl` carries
-#: two bare pairs and therefore no tuning at all, and IHP's LibreLane
-#: config names no via-stack tuning for `sg13g2` either.
-_GF180MCU_PRESET_CONNECTS = [
+#: 0.128}` plus a bare `{Metal4 Metal5}` pair; the 7t preset drops the
+#: `-split_cuts` (issue #4301: DRC-dirty vias under `klt drc --deck
+#: gf180mcu`). sky130hd's `pdn.tcl` carries two bare pairs and therefore no
+#: tuning at all, and IHP's LibreLane config names no via-stack tuning for
+#: `sg13g2` either.
+_GF180MCU_9T_PRESET_CONNECTS = [
     {
         "layers": ["Metal1", "Metal4"],
         "max_columns": 5,
@@ -1788,9 +1810,10 @@ _GF180MCU_PRESET_CONNECTS = [
         "split_cuts": {"layer": "Metal3", "width_um": 0.128},
     }
 ]
+_GF180MCU_7T_PRESET_CONNECTS = [{**_GF180MCU_9T_PRESET_CONNECTS[0], "split_cuts": None}]
 _EXPECTED_PRESET_CONNECTS: dict[str, list[dict[str, object]]] = {
-    "gf180mcu_7t_6M": _GF180MCU_PRESET_CONNECTS,
-    "gf180mcu_9t_6M": _GF180MCU_PRESET_CONNECTS,
+    "gf180mcu_7t_6M": _GF180MCU_7T_PRESET_CONNECTS,
+    "gf180mcu_9t_6M": _GF180MCU_9T_PRESET_CONNECTS,
     "sg13g2": [],
     "sky130hd": [],
 }
@@ -2880,6 +2903,7 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
         "power_net": None,
         "ground_net": None,
         "tapcell_master": None,
+        "tapless": False,
         "endcap_master": None,
         "tapcell_distance_um": None,
         "filler_masters": [],
@@ -3104,6 +3128,7 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
         "power_net": "VDD",
         "ground_net": "VSS",
         "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
+        "tapless": False,
         "endcap_master": None,
         "tapcell_distance_um": 14,
         "filler_masters": [
@@ -4485,6 +4510,10 @@ def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(
 
     report = run_place_and_route(request_path)
 
+    # `cell`/`lib`/`halo` are issue #2635's additive per-entry fields: the
+    # macro's master name (shared with `klt synthesize`/`klt sta`) plus the
+    # two newly-accepted request fields, `null` here because this request
+    # declares neither.
     assert report["macros"] == [
         {
             "instance": "u_analog",
@@ -4492,6 +4521,9 @@ def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(
             "x_um": 12.5,
             "y_um": 3.0,
             "orientation": "MX",
+            "cell": "analog_block",
+            "lib": None,
+            "halo": None,
         }
     ]
 
@@ -6353,6 +6385,35 @@ def test_engine_error_message_flags_readable_file_openroad_cannot_read(tmp_path)
     assert "docs/cli/place-and-route.md" in message
 
 
+def test_engine_error_message_names_mount_rule_for_path_outside_cwd(
+    tmp_path, monkeypatch
+):
+    """Issue #4191: a readable path outside the invocation directory gets the
+    `$PWD`/`$PDK_ROOT`/`$TMPDIR` mount rule and the common-ancestor advice."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    outside = tmp_path / "elsewhere" / "macro.lef"
+    outside.parent.mkdir()
+    outside.write_text("# lef\n", encoding="utf-8")
+    monkeypatch.chdir(cwd)
+    completed = fake_completed(
+        returncode=1,
+        stderr=f"Error: pnr_top_floorplan.tcl, 1\ncannot read file {outside}.\n",
+    )
+
+    message = place_and_route._engine_error_message("floorplan", completed)
+
+    assert f"'{outside}' is outside the invocation directory" in message
+    assert "$PWD, $PDK_ROOT and $TMPDIR" in message
+    assert "common ancestor" in message
+
+    inside = cwd / "macro.lef"
+    inside.write_text("# lef\n", encoding="utf-8")
+    completed = fake_completed(returncode=1, stderr=f"cannot read file {inside}.\n")
+    message = place_and_route._engine_error_message("floorplan", completed)
+    assert "outside the invocation directory" not in message
+
+
 def test_engine_error_message_omits_pdk_note_when_path_outside_pdk_root(tmp_path):
     """The mount-namespace hint still fires for any readable, out-of-mount
     absolute path (issue #1868's own closing note: the same hazard applies
@@ -7033,6 +7094,7 @@ def test_sg13g2_stdcell_power_run_skips_tapcell_instead_of_raising(
     assert power["pdn"] is True
     assert power["global_connect"] is True
     assert power["tapcell_master"] is None
+    assert power["tapless"] is True
     assert power["endcap_master"] is None
     assert power["filler_masters"] == ["sg13g2_fill_1", "sg13g2_fill_2"]
     assert [strap["layer"] for strap in power["straps"]] == [
@@ -10309,6 +10371,7 @@ def test_integration_real_openroad_power_pdn_sg13g2(tmp_path, monkeypatch):
     assert power["global_connect"] is True
     # No master is named for cells this library does not have.
     assert power["tapcell_master"] is None
+    assert power["tapless"] is True
     assert power["endcap_master"] is None
     assert power["filler_masters"] == ["sg13g2_fill_1", "sg13g2_fill_2"]
 
@@ -11088,6 +11151,642 @@ def test_dont_use_absent_for_library_without_entry():
 
 
 # --------------------------------------------------------------------------- #
+# `request.macros[].halo` / `.lib` -- issue #2635
+# --------------------------------------------------------------------------- #
+
+
+def _write_macro_lef_with_power_pins(
+    path: Path, macro_name: str = "sram_8x8", *, pg_layer: str = "met1"
+) -> None:
+    """A macro LEF with real `USE POWER`/`USE GROUND` pins that carry
+    `PORT` geometry -- what `define_pdn_grid -macro`/`add_pdn_connect`
+    needs, since pdngen rejects a macro grid that produces no shapes or
+    vias at all (`PDN-0232`/`PDN-0233`, live-verified)."""
+    path.write_text(
+        "VERSION 5.7 ;\n"
+        f"MACRO {macro_name}\n"
+        "  CLASS BLOCK ;\n"
+        "  SIZE 20.0 BY 10.0 ;\n"
+        "  PIN VPWR\n"
+        "    DIRECTION INOUT ;\n"
+        "    USE POWER ;\n"
+        "    PORT\n"
+        f"      LAYER {pg_layer} ;\n"
+        "        RECT 1.0 1.0 2.0 9.0 ;\n"
+        "    END\n"
+        "  END VPWR\n"
+        "  PIN VGND\n"
+        "    DIRECTION INOUT ;\n"
+        "    USE GROUND ;\n"
+        "    PORT\n"
+        f"      LAYER {pg_layer} ;\n"
+        "        RECT 3.0 1.0 4.0 9.0 ;\n"
+        "    END\n"
+        "  END VGND\n"
+        f"END {macro_name}\n"
+        "END LIBRARY\n",
+        encoding="utf-8",
+    )
+
+
+def _write_macro_lib(path: Path, cell: str = "analog_block") -> None:
+    path.write_text(
+        f"library ({cell}) {{\n  cell ({cell}) {{\n    area : 25.0 ;\n  }}\n}}\n",
+        encoding="utf-8",
+    )
+
+
+# -- `halo` validation ------------------------------------------------------ #
+
+
+def test_macro_halo_absent_validates_to_none(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    macros = place_and_route._validate_macros(
+        [{"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 2}], str(tmp_path)
+    )
+    assert macros[0]["halo"] is None
+
+
+def test_macro_halo_scalar_applies_to_all_four_sides(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    macros = place_and_route._validate_macros(
+        [{"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 2, "halo": 2.5}],
+        str(tmp_path),
+    )
+    assert macros[0]["halo"] == {
+        "left": 2.5,
+        "bottom": 2.5,
+        "right": 2.5,
+        "top": 2.5,
+    }
+
+
+def test_macro_halo_object_defaults_unnamed_sides_to_zero(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    macros = place_and_route._validate_macros(
+        [
+            {
+                "instance": "u1",
+                "lef": "m.lef",
+                "x_um": 1,
+                "y_um": 2,
+                "halo": {"left": 3, "top": 1.5},
+            }
+        ],
+        str(tmp_path),
+    )
+    assert macros[0]["halo"] == {
+        "left": 3.0,
+        "bottom": 0.0,
+        "right": 0.0,
+        "top": 1.5,
+    }
+
+
+def test_macro_halo_rejects_a_negative_scalar(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    with pytest.raises(PlaceAndRouteError, match="halo must not be negative"):
+        place_and_route._validate_macros(
+            [{"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 2, "halo": -1}],
+            str(tmp_path),
+        )
+
+
+def test_macro_halo_rejects_a_negative_side(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    with pytest.raises(PlaceAndRouteError, match=r"halo\.right must not be negative"):
+        place_and_route._validate_macros(
+            [
+                {
+                    "instance": "u1",
+                    "lef": "m.lef",
+                    "x_um": 1,
+                    "y_um": 2,
+                    "halo": {"right": -0.5},
+                }
+            ],
+            str(tmp_path),
+        )
+
+
+def test_macro_halo_rejects_an_unknown_side(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    with pytest.raises(PlaceAndRouteError, match="unknown side\\(s\\) sideways"):
+        place_and_route._validate_macros(
+            [
+                {
+                    "instance": "u1",
+                    "lef": "m.lef",
+                    "x_um": 1,
+                    "y_um": 2,
+                    "halo": {"sideways": 1},
+                }
+            ],
+            str(tmp_path),
+        )
+
+
+def test_macro_halo_rejects_an_empty_object(tmp_path):
+    """A caller who wrote `"halo": {}` meant something; guessing which is
+    worse than asking."""
+    _write_macro_lef(tmp_path / "m.lef")
+    with pytest.raises(PlaceAndRouteError, match="halo must name at least one of"):
+        place_and_route._validate_macros(
+            [{"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 2, "halo": {}}],
+            str(tmp_path),
+        )
+
+
+def test_macro_halo_rejects_a_string(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    with pytest.raises(PlaceAndRouteError, match="halo must be a number"):
+        place_and_route._validate_macros(
+            [{"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 2, "halo": "2um"}],
+            str(tmp_path),
+        )
+
+
+# -- `lib` validation ------------------------------------------------------- #
+
+
+def test_macro_lib_is_accepted_as_a_per_corner_map(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    _write_macro_lib(tmp_path / "m_tt.lib")
+    macros = place_and_route._validate_macros(
+        [
+            {
+                "instance": "u1",
+                "lef": "m.lef",
+                "x_um": 1,
+                "y_um": 2,
+                "lib": {"tt_025C_1v80": "m_tt.lib"},
+            }
+        ],
+        str(tmp_path),
+    )
+    assert macros[0]["lib"] == {"tt_025C_1v80": str(tmp_path / "m_tt.lib")}
+
+
+def test_macro_liberty_alias_is_accepted(tmp_path):
+    """Issue #2635 AC4 names this field `liberty`; AC1 names the identical
+    field `lib` for the other two verbs. Both spellings are accepted
+    everywhere, so one declaration round-trips through all three."""
+    _write_macro_lef(tmp_path / "m.lef")
+    _write_macro_lib(tmp_path / "m_tt.lib")
+    macros = place_and_route._validate_macros(
+        [
+            {
+                "instance": "u1",
+                "lef": "m.lef",
+                "x_um": 1,
+                "y_um": 2,
+                "liberty": {"tt_025C_1v80": "m_tt.lib"},
+            }
+        ],
+        str(tmp_path),
+    )
+    assert macros[0]["lib"] == {"tt_025C_1v80": str(tmp_path / "m_tt.lib")}
+
+
+def test_macro_lib_file_must_exist(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    with pytest.raises(PlaceAndRouteError, match=r"lib\['tt_025C_1v80'\] not found"):
+        place_and_route._validate_macros(
+            [
+                {
+                    "instance": "u1",
+                    "lef": "m.lef",
+                    "x_um": 1,
+                    "y_um": 2,
+                    "lib": {"tt_025C_1v80": "nope.lib"},
+                }
+            ],
+            str(tmp_path),
+        )
+
+
+def test_macro_cell_disagreeing_with_its_lef_is_rejected(tmp_path):
+    """`cell` is accepted here for shape-compatibility with the other two
+    verbs, and cross-checked against the LEF rather than merely echoed."""
+    _write_macro_lef(tmp_path / "m.lef")
+    with pytest.raises(PlaceAndRouteError, match="does not match the MACRO name"):
+        place_and_route._validate_macros(
+            [
+                {
+                    "instance": "u1",
+                    "cell": "something_else",
+                    "lef": "m.lef",
+                    "x_um": 1,
+                    "y_um": 2,
+                }
+            ],
+            str(tmp_path),
+        )
+
+
+# -- emission --------------------------------------------------------------- #
+
+
+def test_stubbed_macro_halo_emits_create_blockage_after_place_macro(
+    tmp_path, monkeypatch
+):
+    """Issue #2635 AC4: the halo is honored during floorplan as a hard
+    placement blockage over the macro's footprint plus its margin --
+    `create_blockage -region {x1 y1 x2 y2}`, live-verified against
+    OpenROAD 26Q3. `x_um`/`y_um` is the macro's lower-left corner."""
+    _write_macro_lef(tmp_path / "analog_block.lef")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        macros=[
+            {
+                "instance": "u_analog",
+                "lef": "analog_block.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "halo": 2.0,
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    report = run_place_and_route(request_path)
+
+    assert report["macros"][0]["halo"] == {
+        "left": 2.0,
+        "bottom": 2.0,
+        "right": 2.0,
+        "top": 2.0,
+    }
+    lines = _script_lines(
+        os.path.join(
+            os.path.dirname(request_path),
+            ".klt",
+            "place-and-route",
+            "pnr_gcd_floorplan.tcl",
+        )
+    )
+    # `_write_macro_lef` declares `SIZE 5.0 BY 5.0`, so the footprint is
+    # (10, 20)-(15, 25) and the halo'd blockage is (8, 18)-(17, 27).
+    blockage = "create_blockage -region {8.0 18.0 17.0 27.0}"
+    assert blockage in lines
+    place_macro_index = next(
+        i for i, line in enumerate(lines) if line.startswith("place_macro ")
+    )
+    assert place_macro_index < lines.index(blockage) < lines.index("make_tracks")
+
+
+def test_stubbed_macro_halo_rotated_orientation_swaps_the_footprint(
+    tmp_path, monkeypatch
+):
+    _write_macro_lef(tmp_path / "analog_block.lef")
+    (tmp_path / "wide.lef").write_text(
+        "VERSION 5.7 ;\n"
+        "MACRO wide_block\n"
+        "  CLASS BLOCK ;\n"
+        "  SIZE 20.0 BY 5.0 ;\n"
+        "  PIN A\n    DIRECTION INPUT ;\n    USE SIGNAL ;\n"
+        "    PORT\n      LAYER li1 ;\n        RECT 1 1 2 2 ;\n    END\n  END A\n"
+        "END wide_block\n"
+        "END LIBRARY\n",
+        encoding="utf-8",
+    )
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        macros=[
+            {
+                "instance": "u_wide",
+                "lef": "wide.lef",
+                "x_um": 0.0,
+                "y_um": 0.0,
+                "orientation": "R90",
+                "halo": 1.0,
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    run_place_and_route(request_path)
+
+    lines = _script_lines(
+        os.path.join(
+            os.path.dirname(request_path),
+            ".klt",
+            "place-and-route",
+            "pnr_gcd_floorplan.tcl",
+        )
+    )
+    # 20x5 rotated by 90 degrees is 5x20, so the halo'd blockage is
+    # (-1, -1)-(6, 21) rather than (-1, -1)-(21, 6).
+    assert "create_blockage -region {-1.0 -1.0 6.0 21.0}" in lines
+
+
+def test_stubbed_no_halo_emits_no_create_blockage(tmp_path, monkeypatch):
+    _write_macro_lef(tmp_path / "analog_block.lef")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        macros=[
+            {
+                "instance": "u_analog",
+                "lef": "analog_block.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    run_place_and_route(request_path)
+
+    lines = _script_lines(
+        os.path.join(
+            os.path.dirname(request_path),
+            ".klt",
+            "place-and-route",
+            "pnr_gcd_floorplan.tcl",
+        )
+    )
+    assert not any("create_blockage" in line for line in lines)
+
+
+def test_stubbed_macro_halo_with_power_emits_a_macro_pdn_grid(tmp_path, monkeypatch):
+    """The PDN half of AC4: `define_pdn_grid -macro ... -halo` plus the
+    `add_pdn_connect` pdngen requires to produce any shapes at all -- both
+    live-verified against OpenROAD 26Q3, emitted after the flat
+    standard-cell grid and before `pdngen`."""
+    _write_macro_lef_with_power_pins(tmp_path / "sram.lef", pg_layer="met1")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={"preset": "sky130hd", "power_net": "VPWR", "ground_net": "VGND"},
+        macros=[
+            {
+                "instance": "u_sram",
+                "lef": "sram.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "halo": {"left": 2, "bottom": 1.84, "right": 2, "top": 2},
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    run_place_and_route(request_path)
+
+    lines = _script_lines(
+        os.path.join(
+            os.path.dirname(request_path),
+            ".klt",
+            "place-and-route",
+            "pnr_gcd_floorplan.tcl",
+        )
+    )
+    grid_line = (
+        "define_pdn_grid -macro -name {macro_u_sram} -voltage_domains {CORE} "
+        "-instances {u_sram} -halo {2.0 1.84 2.0 2.0} -grid_over_boundary"
+    )
+    connect_line = "add_pdn_connect -grid {macro_u_sram} -layers {met1 met4}"
+    assert grid_line in lines
+    assert connect_line in lines
+    assert (
+        lines.index("add_pdn_connect -grid {grid} -layers {met4 met5}")
+        < lines.index(grid_line)
+        < lines.index(connect_line)
+        < lines.index("pdngen")
+    )
+
+
+def test_stubbed_macro_halo_without_power_emits_no_macro_pdn_grid(
+    tmp_path, monkeypatch
+):
+    _write_macro_lef_with_power_pins(tmp_path / "sram.lef")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        macros=[
+            {
+                "instance": "u_sram",
+                "lef": "sram.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "halo": 2.0,
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    run_place_and_route(request_path)
+
+    lines = _script_lines(
+        os.path.join(
+            os.path.dirname(request_path),
+            ".klt",
+            "place-and-route",
+            "pnr_gcd_floorplan.tcl",
+        )
+    )
+    assert not any("define_pdn_grid -macro" in line for line in lines)
+    # ...but the placement half of the halo is still honored.
+    assert any("create_blockage" in line for line in lines)
+
+
+def test_macro_halo_with_power_but_no_pg_pins_is_rejected(tmp_path, monkeypatch):
+    """A halo a caller asked for and this module quietly skipped would be a
+    wrong answer reported as a right one -- so it is a named error."""
+    _write_macro_lef(tmp_path / "analog_block.lef")  # signal pins only
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={"preset": "sky130hd", "power_net": "VPWR", "ground_net": "VGND"},
+        macros=[
+            {
+                "instance": "u_analog",
+                "lef": "analog_block.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "halo": 2.0,
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    with pytest.raises(PlaceAndRouteError, match="no POWER/GROUND pin with PORT"):
+        run_place_and_route(request_path)
+
+
+def test_macro_halo_with_power_on_an_unstrapped_layer_is_rejected(
+    tmp_path, monkeypatch
+):
+    _write_macro_lef_with_power_pins(tmp_path / "sram.lef", pg_layer="met3")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={"preset": "sky130hd", "power_net": "VPWR", "ground_net": "VGND"},
+        macros=[
+            {
+                "instance": "u_sram",
+                "lef": "sram.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "halo": 2.0,
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    with pytest.raises(PlaceAndRouteError, match="strap on the macro's own P/G layer"):
+        run_place_and_route(request_path)
+
+
+def test_stubbed_macro_lib_is_read_in_every_stage(tmp_path, monkeypatch):
+    """`request.macros[].lib` is read right after the standard-cell liberty
+    in *every* stage -- a macro whose timing were only loaded in some
+    stages would make this verb's own `-metrics`/repair steps see a
+    different design than the floorplan did."""
+    _write_macro_lef(tmp_path / "analog_block.lef")
+    _write_macro_lib(tmp_path / "analog_tt.lib")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[
+            {
+                "instance": "u_analog",
+                "lef": "analog_block.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "lib": {"tt_025C_1v80": "analog_tt.lib"},
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["macros"][0]["lib"]["tt_025C_1v80"].endswith("analog_tt.lib")
+    for stage in ("floorplan", "place", "cts", "route"):
+        lines = _script_lines(
+            os.path.join(
+                os.path.dirname(request_path),
+                ".klt",
+                "place-and-route",
+                f"pnr_gcd_{stage}.tcl",
+            )
+        )
+        liberty_lines = [
+            i for i, line in enumerate(lines) if line.startswith("read_liberty ")
+        ]
+        assert len(liberty_lines) == 2
+        assert lines[liberty_lines[1]].endswith("analog_tt.lib")
+        assert liberty_lines[1] == liberty_lines[0] + 1
+
+
+def test_macro_lib_with_no_entry_for_the_resolved_corner_is_rejected(
+    tmp_path, monkeypatch
+):
+    _write_macro_lef(tmp_path / "analog_block.lef")
+    _write_macro_lib(tmp_path / "analog_ss.lib")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        macros=[
+            {
+                "instance": "u_analog",
+                "lef": "analog_block.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "lib": {"ss_100C_1v60": "analog_ss.lib"},
+            }
+        ],
+    )
+    with pytest.raises(PlaceAndRouteError) as excinfo:
+        run_place_and_route(request_path)
+    message = str(excinfo.value)
+    assert "analog_block" in message
+    assert "tt_025C_1v80" in message
+
+
+def test_ord_2013_failure_names_request_macros(tmp_path, monkeypatch):
+    """A macro in the netlist with no `request.macros` entry at all -- the
+    case that still reproduces today -- must produce a clear, named error
+    rather than a bare `ORD-2013`."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, target_stage="floorplan")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="26Q3-771-gdeadbeef \n")
+        return fake_completed(
+            returncode=1,
+            stdout=(
+                "[ERROR ORD-2013] instance u_sram LEF master sram_8x8 not found.\n"
+            ),
+        )
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+
+    with pytest.raises(PlaceAndRouteError) as excinfo:
+        run_place_and_route(request_path)
+    message = str(excinfo.value)
+    assert "ORD-2013" in message
+    assert "request.macros" in message
+    assert "sram_8x8" in message
+
+
+# -- `_macro_pdn_grid_lines` with supplies on several layers ----------------- #
+
+
+def _pdn_macro(layers):
+    return {
+        "instance": "u_sram",
+        "halo": {"left": 2, "bottom": 2, "right": 2, "top": 2},
+        "power_ground_layers": layers,
+    }
+
+
+_PDN_POWER = {
+    "straps": [
+        {"layer": "met1"},
+        {"layer": "met3"},
+        {"layer": "met4"},
+        {"layer": "met5"},
+    ]
+}
+
+
+def test_macro_pdn_connects_every_supply_pin_layer():
+    """POWER on met1, GROUND on met3: each layer gets its own
+    `add_pdn_connect`, not just the first-declared one."""
+    lines = place_and_route._macro_pdn_grid_lines(
+        [_pdn_macro(["met1", "met3"])], _PDN_POWER
+    )
+
+    connects = [line for line in lines if line.startswith("add_pdn_connect")]
+    assert connects == [
+        "add_pdn_connect -grid {macro_u_sram} -layers {met1 met3}",
+        "add_pdn_connect -grid {macro_u_sram} -layers {met3 met4}",
+    ]
+
+
+def test_macro_pdn_rejects_supply_layer_missing_from_straps():
+    """A second supply layer with no matching strap is rejected up front
+    rather than silently left unconnected."""
+    power = {"straps": [{"layer": "met1"}, {"layer": "met4"}, {"layer": "met5"}]}
+    with pytest.raises(place_and_route.PlaceAndRouteError) as excinfo:
+        place_and_route._macro_pdn_grid_lines([_pdn_macro(["met1", "met3"])], power)
+    assert "met3" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
 # `request.portable_paths` (issue #3820): opt-in committable response paths
 # --------------------------------------------------------------------------- #
 
@@ -11194,6 +11893,7 @@ _TRACKS_FLOORPLAN = {
     "method": "utilization",
     "utilization_pct": 40,
     "site": "asap7sc7p5t",
+    "core_margin_um": 2.0,
 }
 _GOOD_TRACK = {
     "layer": "M2",

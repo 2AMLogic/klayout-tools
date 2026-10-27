@@ -2,6 +2,59 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-27
+
+- **Issue #4276** (closed): klt sta (verilog mode): netlist path in generated Tcl is repo-root-relative, so run fails unless cwd is repo root
+- **PR #4278**: test(sta): pin verilog-mode Tcl as cwd-independent
+- **Issue #4313** (closed): synthesize: report records no hash of the derived netlist, so --check cannot tie a committed gate-level netlist to its run
+- **PR #4324**: feat: verify committed netlist hash in synthesize --check
+- **Issue #4293** (closed): pex: --device-only-leg is rejected with --measure-command, so command-measured blocks get no representation/parasitic split
+- **PR #4298**: feat(pex): run --measure-command a third time for --device-only-leg
+- **Issue #4234** (closed): pex: extracted netlist needs out-of-band device-model and well-tie patching before it can be re-simulated
+- **PR #4255**: feat: add --device-model to bind an unbound bipolar class to a PDK subcircuit
+- **Issue #4345** (closed): signoff --attest: no producer for T1 item 2 (Layout); the anchored envelope is hand-written and unchecked
+- **Issue #4320** (closed): klt drc: --negative-control unavailable for the curated engine
+- **PR #4330**: feat(drc): support --negative-control on the curated engine
+- **Issue #4275** (closed): place-and-route: library.wire_rc capacitance is read in pF, contradicting the documented "first Liberty file's units"
+- **PR #4280**: docs: correct wire_rc unit wording in place-and-route CLI doc
+- **Issue #4290** (closed): klt sim expr: document unsupported ngspice functions and an edge-count recipe
+- **PR #4295**: docs(sim): document unsupported expr functions and a tested edge-count recipe
+- **Issue #4201** (closed): gen-compose ports_from_labels: default grid fails on long thin nets (too many points) and a coarser grid finds 0 candidates
+- **PR #4232**: fix: enumerate port landing candidates per net polygon
+- **Issue #4190** (closed): signoff: declared spec_rows are ignored for T1 item 5 when no citation exists
+- **PR #4225**: fix: grade declared spec_rows with no evidence entry as partial_coverage
+- **Issue #4240** (closed): klt sta: no way to apply clock uncertainty (setup/hold)
+- **PR #4262**: feat: add clock_uncertainty_ns constraint to klt sta
+- **Issue #4197** (closed): signoff --manifest: item 1 grade does not re-run the declared freshness check
+- **PR #4227**: feat: re-hash attested sources and derived files when grading manifest citations
+- **Issue #4196** (closed): synthesize: request cannot set preprocessor defines
+- **PR #4229**: feat: add defines request key to klt synthesize
+- **Issue #4285** (closed): erc: no falsifiable way to check the substrate tie on a bulk-substrate standard-cell layout
+- **Issue #4235** (closed): sim: a request axis the runner does not support is silently dropped instead of refused
+- **PR #4254**: fix: make corners.params a mandatory runner feature at 0.8.0
+- **Issue #4237** (closed): No command checks a regular structure for mirror/translation symmetry or abutment (cell array, column, clock tree)
+- **PR #4257**: feat: add klt array-check for array symmetry and pitch abutment
+- **Issue #4236** (closed): klt gen --pdk-pcell: IHP-Open-PDK release tarball has an empty pycell4klayout-api, so no PDK PCell can be instantiated
+- **PR #4252**: feat: report PCell shim presence in pdk find and name its source when missing
+- **Issue #4272** (closed): ci flake: apt install of klayout exhausts retry budget in ASAP7 DRC deck fixtures job
+- **Issue #4188** (closed): signoff --attest: no producer for item 2 (layout stream); envelope must be hand-written
+- **PR #4220**: feat: attest T1 item 2 from a committed layout stream
+- **Issue #4202** (closed): layout-plan: row placement leaves group origins off the manufacturing grid (whole downstream groups fail *.ongrid.1)
+- **PR #4244**: fix: snap layout-plan group origins onto the PDK manufacturing grid
+- **Issue #4189** (closed): No verb to check cell-to-cell seam / rail continuity of an assembled ring or array
+- **PR #4207**: feat: add klt seam-check for abutting-cell tiling and rail continuity
+- **Issue #4194** (closed): erc: tap defined by absence of an implant, and derived substrate region, are inexpressible in ties[]
+- **PR #4213**: feat: add ties[].tap_excludes to subtract layers from the erc tap
+- **Issue #4206** (closed): batch backend: no installable client matches the fleet runner for OSDI-model sims
+- **Issue #4210** (closed): klt netlist --check cannot verify a committed netlist whose sch_path/line wrapping was normalised
+- **Issue #4214** (closed): klt netlist --check compares provenance comment lines that embed absolute checkout paths
+- **Issue #4208** (closed): klt netlist --check drifts on absolute sch_path/sym_path header lines
+- **Issue #4209** (closed): klt netlist: absolute sch_path/sym_path stamps make --check fail across checkouts
+- **Issue #4184** (closed): synthesize/pdk: descriptor Liberty list-merge rejects split libraries whose headers differ only by library name
+- **PR #4187**: feat: tolerate library-name and comment differences in Liberty merge
+- **Issue #4181** (closed): synthesize: no front-end route for SystemVerilog that Yosys' native -sv parser rejects (unpacked-array ports)
+- **PR #4182**: feat: hint when Yosys -sv front end rejects unpacked-array SV ports
+
 ### 2026-10-26
 
 - **PR #4180**: refactor: share one SPICE number parser across six modules
