@@ -7,7 +7,9 @@ lets a ``liberty`` corner list those files; :func:`merge_liberty` produces the
 single file every ``liberty_path`` consumer (Yosys, OpenROAD, OpenSTA) expects.
 
 Merge rule: the header (text before the first ``cell (``) comes from the first
-file and must be whitespace-normalised identical in the rest; each file's cell
+file and must match the rest after normalisation -- whitespace, comments and
+the ``library (<name>)`` name are ignored, every other difference (units,
+templates, operating conditions, ...) is an error; each file's cell
 groups are appended in listed order; a duplicate cell name is an error. The
 result is written content-addressed under a klt cache directory -- never into
 the PDK tree -- so repeated runs reuse it and its path (and hash) is stable.
@@ -25,6 +27,7 @@ import tempfile
 CACHE_ENV = "KLT_CACHE_DIR"
 
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.$]*")
+_LIBRARY_NAME_RE = re.compile(r"\blibrary\s*\([^)]*\)")
 _CELL_NAME_RE = re.compile(r"\(\s*\"?([^\")\s]+)\"?\s*\)")
 
 
@@ -79,7 +82,7 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str]]:
     bodies: list[str] = []
     for path, text in zip(paths, texts, strict=True):
         file_header, body, cells = _split(path, text)
-        norm = " ".join(file_header.split())
+        norm = _normalize_header(file_header)
         if path is first_path:
             header, header_norm = file_header, norm
         elif norm != header_norm:
@@ -96,6 +99,31 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str]]:
             seen[cell] = path
         bodies.append(body)
     return header, bodies
+
+
+def _normalize_header(header: str) -> str:
+    """Header text with comments, whitespace and the library name ignored."""
+    parts: list[str] = []
+    i, n = 0, len(header)
+    while i < n:
+        if header[i] == '"':
+            j = i + 1
+            while j < n and header[j] != '"':
+                j += 2 if header[j] == "\\" else 1
+            parts.append(header[i : j + 1])
+            i = j + 1
+        elif header.startswith("/*", i):
+            stop = header.find("*/", i + 2)
+            i = n if stop < 0 else stop + 2
+            parts.append(" ")
+        elif header.startswith("//", i):
+            stop = header.find("\n", i)
+            i = n if stop < 0 else stop
+        else:
+            parts.append(header[i])
+            i += 1
+    text = _LIBRARY_NAME_RE.sub("library ()", "".join(parts), count=1)
+    return " ".join(text.split())
 
 
 def _write_atomic(out_path: str, merged: str) -> None:
