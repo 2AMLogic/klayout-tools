@@ -654,6 +654,31 @@ def _check_no_unevaluated_expr(data: bytes, version: str | None) -> None:
     )
 
 
+def _unevaluated_expr_warnings(
+    data: bytes, version: str | None, allow: bool
+) -> list[dict[str, Any]]:
+    """Gate on, or downgrade to a warning, an unevaluated ``expr(...)``.
+
+    Without ``allow`` this raises exactly like
+    :func:`_check_no_unevaluated_expr`; with it (issue #4305) the hit becomes
+    a ``warnings`` entry for the payload instead.
+    """
+    if not allow:
+        _check_no_unevaluated_expr(data, version)
+        return []
+    hit = _find_unevaluated_expr(data)
+    if hit is None:
+        return []
+    return [
+        {
+            "code": UNEVALUATED_EXPR_CODE,
+            "line": hit[0],
+            "snippet": hit[1],
+            "xschem_version": version,
+        }
+    ]
+
+
 def _pdk_env_note(rcfile: str | None, env: dict[str, str] | None) -> str:
     """Name what klt can observe about xschem's PDK setup, for error text."""
     if env is not None:
@@ -986,20 +1011,9 @@ def run_netlist(
             fresh_data, block_info = _apply_block_mode(fresh_data)
 
         version = _probe_xschem_version(xschem_binary)
-        warnings: list[dict[str, Any]] = []
-        if allow_unevaluated_expr:
-            hit = _find_unevaluated_expr(fresh_data)
-            if hit is not None:
-                warnings.append(
-                    {
-                        "code": UNEVALUATED_EXPR_CODE,
-                        "line": hit[0],
-                        "snippet": hit[1],
-                        "xschem_version": version,
-                    }
-                )
-        else:
-            _check_no_unevaluated_expr(fresh_data, version)
+        warnings = _unevaluated_expr_warnings(
+            fresh_data, version, allow_unevaluated_expr
+        )
         _check_no_unresolved_symbol(fresh_data, rcfile, xschem_env)
 
         payload: dict[str, Any] = {
