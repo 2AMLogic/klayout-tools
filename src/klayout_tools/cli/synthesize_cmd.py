@@ -86,6 +86,7 @@ def run(args: argparse.Namespace) -> int:
             pdk_root=args.pdk_root,
             verify_equivalence=args.verify_equivalence,
             equiv_timeout_s=args.equiv_timeout_s,
+            equiv_engine=args.equiv_engine,
             restructure_timing=args.restructure_timing,
             restructure_max_iterations=args.restructure_max_iterations,
         )
@@ -117,6 +118,7 @@ def _run_check(args: argparse.Namespace) -> int:
                 pdk_root=args.pdk_root,
                 verify_equivalence=args.verify_equivalence,
                 equiv_timeout_s=args.equiv_timeout_s,
+                equiv_engine=args.equiv_engine,
                 restructure_timing=args.restructure_timing,
                 restructure_max_iterations=args.restructure_max_iterations,
             )

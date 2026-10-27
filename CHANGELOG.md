@@ -21,6 +21,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   and, with `max_extent_um`, a `within_extent` flag, from the run's DEF
   `COMPONENTS`. Measurement only, not a placement constraint. Additive; no
   `schema_version` bump.
+- **`place-and-route` accepts `library.antenna_diode: null`** (issue #4274).
+  A library with no antenna cell and no antenna rules (ASAP7) can now reach
+  `route`: JSON `null` (like `library.tapcell: null`) skips `repair_antennas`
+  and the reroute pass, keeps the initial `detailed_route` and `check_antennas`,
+  and adds a response `warnings` entry saying antenna repair did not run.
+  Omitting the key is unchanged (still "unverified"); scripts for libraries
+  with a diode are byte-identical.
 - **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
   Landing candidates are now enumerated per merged net polygon rather than over
   the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too
