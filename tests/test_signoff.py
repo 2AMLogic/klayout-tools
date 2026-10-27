@@ -10997,7 +10997,57 @@ def test_item_11_digital_unmet_when_no_tapcell_master_was_placed(tmp_path):
         )
     )
 
+    assert _item_11(result)["reason"] == "no_tapcell_master"
+
+
+def test_item_11_digital_unmet_no_pdn_wins_over_tapless(tmp_path):
+    par = {
+        **PLACE_AND_ROUTE_ENVELOPE,
+        "power": {
+            **PLACE_AND_ROUTE_ENVELOPE["power"],
+            "pdn": False,
+            "tapcell_master": None,
+            "tapless": True,
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", par_envelope=par
+                )
+            },
+        )
+    )
+
     assert _item_11(result)["reason"] == "no_pdn"
+
+
+def test_item_11_digital_met_for_tapless_library(tmp_path):
+    par = {
+        **PLACE_AND_ROUTE_ENVELOPE,
+        "power": {
+            **PLACE_AND_ROUTE_ENVELOPE["power"],
+            "tapcell_master": None,
+            "tapless": True,
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", par_envelope=par
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["tapless"] is True
+    assert item["citation"]["power_delivery"]["tapcell_master"] is None
 
 
 @pytest.mark.parametrize(
