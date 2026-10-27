@@ -3166,6 +3166,15 @@ synthetic-net behaviour) is involved there:
   demonstrably names every PMOS body (e.g. `VPB`), not because the deck
   declares a mechanism.
 
+A body counts as "resolved" only when it lands on a **named** net. The check
+sees the extracted netlist, not tap geometry, so it cannot tell a layout with
+no tap drawn from one whose drawn, contacted tap ties to a supply conductor
+that carries no name label — both leave the body on the synthesized /
+anonymous net. The warning text therefore names both causes; if taps are
+already drawn, labeling the tap-connected conductor (e.g. `VSS`/`VDD` text on
+the label layer of the metal the taps connect to) resolves it and flips
+`body_verification` to `verified`.
+
 Both entries reflect real device-level extraction outcomes (per-device for
 NMOS since #490, for PMOS since #2048 — a property of what the layout
 actually drew, not of which deck ran extraction, nor of any individual
