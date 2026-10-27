@@ -600,7 +600,7 @@ def test_klayout_version_expected_falls_back_to_live_probe(monkeypatch):
 
 
 def test_version_report_includes_klayout_fields(monkeypatch):
-    monkeypatch.setattr(build_identity, "_klayout_version", lambda: "0.30.12")
+    monkeypatch.setattr(build_identity, "klayout_version", lambda: "0.30.12")
     monkeypatch.setattr(build_identity, "klayout_version_expected", lambda: "0.30.10")
 
     report = build_identity.version_report()
