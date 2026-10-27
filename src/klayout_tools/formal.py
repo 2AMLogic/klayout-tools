@@ -92,7 +92,8 @@ _REQUIRED_REQUEST_FIELDS = ("top",)
 
 _DONE_RE = re.compile(r"DONE \((PASS|FAIL|UNKNOWN|TIMEOUT|ERROR|PREUNSAT)\b")
 _STEP_RE = re.compile(r"Checking (?:assertions|cover reachability) in step (\d+)")
-_COVER_REACHED_RE = re.compile(r"Reached cover statement .* in step (\d+)")
+# Real sby: "Reached cover statement in step 1 at top: f.v:3.25-3.42 (...)".
+_COVER_REACHED_RE = re.compile(r"Reached cover statement in step (\d+)")
 
 
 class FormalError(Exception):
