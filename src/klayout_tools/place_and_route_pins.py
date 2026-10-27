@@ -299,7 +299,7 @@ def pin_abutment(
                     "ports; cannot pair them"
                 )
                 continue
-            for a, b in zip(members[i], members[j]):
+            for a, b in zip(members[i], members[j], strict=True):
                 if a not in placed or b not in placed:
                     record["reason"] = f"pin '{a if a not in placed else b}' not placed"
                     record["pairs"] = []
