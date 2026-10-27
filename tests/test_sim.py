@@ -4924,6 +4924,8 @@ def test_run_sim_stubbed_provenance_pins_model_library(tmp_path, monkeypatch):
     prov = report["provenance"]
     assert set(prov.keys()) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",
@@ -9569,6 +9571,8 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
     prov = data["provenance"]
     assert set(prov.keys()) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",

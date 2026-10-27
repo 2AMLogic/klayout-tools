@@ -519,6 +519,8 @@ def test_json_contract(tmp_path, capsys):
     prov = data["provenance"]
     assert set(prov.keys()) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",

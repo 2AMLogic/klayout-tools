@@ -723,6 +723,8 @@ def test_clean_self_compare_reports_match(tmp_path):
     prov = report["provenance"]
     assert set(prov.keys()) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",

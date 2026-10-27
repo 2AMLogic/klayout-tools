@@ -656,6 +656,8 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
     prov = report["provenance"]
     assert set(prov.keys()) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",

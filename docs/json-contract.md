@@ -824,6 +824,8 @@ stability statement, concrete precedents, and drift-detection guidance, and
 ```json
 "provenance": {
   "klt_version": "0.4.2",
+  "klt_git_commit": "<full sha> | null",
+  "klt_reinstall_spec": "klayout-tools==0.4.2 | null",
   "klayout_version": "0.29.8",
   "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
   "deck": {"name": "sky130", "content_hash": "sha256:<hex>", "released": true},
@@ -849,6 +851,14 @@ stability statement, concrete precedents, and drift-detection guidance, and
   version on non-release builds — it carries the same dev form as `version`.
   Field names, types, and the definition (`klayout_tools.__version__`) are
   unchanged, so no `schema_version` bump; see `docs/cli/version.md`.
+- `klt_git_commit`, `klt_reinstall_spec` (issue #4412, additive, no `schema_version` bump) — the
+  full commit behind this build and the `uvx --from`/`pip install` spec that
+  re-obtains it, with the same values as `klt version --format json`'s
+  `git_commit` and `reinstall_spec`. `null` when unrecoverable (dirty tree,
+  tarball install, `X.Y.Z.dev0+unknown`), never fabricated. A `.devN+g<sha>`
+  `klt_version` is not published to an index, so `uvx --from
+  "klayout-tools==<version>"` fails by design; use `klt_reinstall_spec`. Both are
+  excluded from `--rerun`/`--check` drift like `klt_version`.
 - `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
   or `null` if unresolvable.
 - `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see
