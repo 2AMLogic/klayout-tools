@@ -445,6 +445,7 @@ table:
 | `gf180mcu_fd_sc_mcu9t5v0` | `gf180mcu_fd_sc_mcu9t5v0__tieh` `Z` | `gf180mcu_fd_sc_mcu9t5v0__tiel` `ZN` |
 | `gf180mcu_fd_sc_mcu7t5v0` | `gf180mcu_fd_sc_mcu7t5v0__tieh` `Z` | `gf180mcu_fd_sc_mcu7t5v0__tiel` `ZN` |
 | `sg13g2_stdcell` | `sg13g2_tiehi` `L_HI` | `sg13g2_tielo` `L_LO` |
+| `asap7sc7p5t_rvt`, `asap7sc7p5t_28_R` | `TIEHIx1_ASAP7_75t_R` `H` | `TIELOx1_ASAP7_75t_R` `L` |
 
 The first three rows are ORFS's own `TIEHI_CELL_AND_PORT`/`TIELO_CELL_AND_PORT`
 for that platform, cross-checked against the installed liberty (the sky130
