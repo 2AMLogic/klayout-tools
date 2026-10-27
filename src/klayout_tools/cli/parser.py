@@ -4266,6 +4266,18 @@ def _add_lef_abstract_parser(subparsers: argparse._SubParsersAction) -> None:
         help="output LEF path (default: <macro-name>.lef)",
     )
     lef_abstract_parser.add_argument(
+        "--obs-mode",
+        dest="obs_mode",
+        choices=["detailed", "coarse"],
+        default="detailed",
+        help=(
+            "obstruction granularity (issue #4283): 'detailed' (default) "
+            "emits every merged routing-layer region; 'coarse' emits one "
+            "bounding rectangle per routing layer minus the declared pin "
+            "ports, bounding the LEF size to O(pins)"
+        ),
+    )
+    lef_abstract_parser.add_argument(
         "--require-power-pins",
         action="store_true",
         help=(
