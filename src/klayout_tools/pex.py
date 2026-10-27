@@ -2575,6 +2575,7 @@ def _extract_device_only_leg(
     deck_options: Any,
     declared_pins: Any,
     rename_declared_pins: bool,
+    tie_declared_pins: bool,
     label_layers: Any,
     device_models: Any = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
@@ -2599,6 +2600,7 @@ def _extract_device_only_leg(
             deck_options=deck_options,
             declared_pins=declared_pins,
             rename_declared_pins=rename_declared_pins,
+            tie_declared_pins=tie_declared_pins,
             label_layers=label_layers,
             device_models=device_models,
         )
@@ -2672,6 +2674,7 @@ def run_pex(
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
+    tie_declared_pins: bool = False,
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     device_models: Mapping[str, str] | None = None,
     critical_nets: Sequence[str] | None = None,
@@ -2977,6 +2980,7 @@ def run_pex(
             # whenever the flag was never given, which is the exact
             # `run_extract` call this module made before it existed.
             rename_declared_pins=rename_declared_pins,
+            tie_declared_pins=tie_declared_pins,
             # Issue #2686: `--label-layer` passthrough. `None` when the flag
             # was never given -- the exact `run_extract` call made before it.
             label_layers=label_layers,
@@ -3034,6 +3038,7 @@ def run_pex(
         deck_options=deck_options,
         declared_pins=declared_pins,
         rename_declared_pins=rename_declared_pins,
+        tie_declared_pins=tie_declared_pins,
         label_layers=label_layers,
         device_models=device_models,
     )
@@ -3518,6 +3523,11 @@ def run_pex(
             # `pin_renames` report, visible here through the extraction's
             # written netlist (`.SUBCKT` header) rather than re-embedded.
             "rename_declared_pins": bool(extract_report.get("rename_declared_pins")),
+            "tie_declared_pins": "pin_ties" in extract_report,
+            # Additive field (issue #4383): the PDK install this extraction
+            # actually read -- `klt extract`'s own `pdk` block (`variant`,
+            # `root` as `{path, scope}`, `version`), `None` without `--pdk`.
+            "pdk": extract_report.get("pdk"),
             # Additive field (issue #2764): the extraction's own
             # per-net parasitic RC network integrity diagnostics --
             # threshold/tolerances, aggregate counts, and one entry per net
