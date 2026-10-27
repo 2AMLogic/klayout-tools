@@ -564,6 +564,18 @@ draws that the spec never declared" below.
     matters). Same "second plain layer field, intersected at use time"
     shape as `stackup[0].active_layer`, generalised to a list; omitted ->
     `tap_layer` alone, unchanged.
+  - `tap_excludes` (optional array of `"<layer>/<datatype>"`, default
+    `[]`, issue #4194) — layers *subtracted* from the tap, the mirror of
+    `tap_requires`, for a tap defined by the **absence** of a marker. On a
+    process whose standard cells draw no n+ implant (n+ is the default
+    doping), an n-well tap is "active inside NWell with no p+ implant over
+    it": `{"tap_layer": "<active>", "tap_requires": ["<nwell-ish>"],
+    "tap_excludes": ["<pplus>"]}`. Composes with `tap_requires` and
+    `tap_boxes`; the result is layer-derived, so a non-degenerate tie is
+    graded `checked`, not `checked_by_assertion`. An exclusion that removes
+    nothing from the drawn `tap_layer` inside the well (including an
+    excluded layer absent from the stream) is `degenerate_tap_declaration`,
+    exactly as an ineffective `tap_requires` is. Omitted -> unchanged.
   - `tap_is_dedicated` (optional boolean, default `false`, issue #2199) —
     assert that `tap_layer` already names a **tap-only** layer (sky130's
     own `tap`, a PDK tub-contact marker), so there is nothing for
