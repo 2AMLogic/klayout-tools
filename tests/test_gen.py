@@ -179,7 +179,12 @@ def test_generate_child_cell_named_after_cell_name_no_collision(tmp_path, pdk_ro
         layout.read(str(output))
 
     assert names == [["a", "a__core"], ["b", "b__core"]]
-    assert sorted(c.name for c in layout.each_cell()) == ["a", "a__core", "b", "b__core"]
+    assert sorted(c.name for c in layout.each_cell()) == [
+        "a",
+        "a__core",
+        "b",
+        "b__core",
+    ]
 
 
 def test_generate_defaults_cell_name_and_output(tmp_path, pdk_root, monkeypatch):
