@@ -873,6 +873,8 @@
   },
   "provenance": {
     "klt_version": null,
+    "klt_git_commit": null,
+    "klt_reinstall_spec": null,
     "klayout_version": "0.30.12",
     "pdk": null,
     "deck": {
