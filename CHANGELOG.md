@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
+  Landing candidates are now enumerated per merged net polygon rather than over
+  the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too
+  many grid points", and a coarse `access.grid_um` can no longer miss a thin
+  wire (a polygon with no on-grid point gets one manufacturing-grid fallback
+  point). Candidate ordering is unchanged for compact nets.
 - **`klt erc` `ties[]` gains `tap_excludes`** (issue #4194, documented in
   [`docs/cli/erc.md`](docs/cli/erc.md)): an optional `"<layer>/<datatype>"`
   array subtracted from the tap, so a tap defined by the absence of an
