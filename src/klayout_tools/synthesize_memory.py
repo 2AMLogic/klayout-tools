@@ -122,7 +122,9 @@ def memory_evidence_script_text(
     if liberty_path is not None:
         lines.append(f"read_liberty -lib {rel(liberty_path)}")
         if library_cells_path is not None:
-            lines.append(f"tee -q -o {rel(library_cells_path)} select -list =A:blackbox")
+            lines.append(
+                f"tee -q -o {rel(library_cells_path)} select -list =A:blackbox"
+            )
     lines += [read_verilog_line(rel(path), defines) for path in sources]
     lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
