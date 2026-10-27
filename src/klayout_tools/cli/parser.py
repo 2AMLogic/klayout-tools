@@ -55,6 +55,7 @@ from . import (
     report_cmd,
     reset_coverage_cmd,
     ring_check_cmd,
+    seam_check_cmd,
     signoff_cmd,
     sim_cmd,
     sim_merge_cmd,
@@ -305,6 +306,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_lef_abstract_parser(subparsers)
 
     _add_ring_check_parser(subparsers)
+    _add_seam_check_parser(subparsers)
     _add_corner_matrix_parser(subparsers)
     _add_keepout_check_parser(subparsers)
     _add_tap_distance_parser(subparsers)
@@ -6855,6 +6857,57 @@ def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(ring_check_parser)
     ring_check_parser.set_defaults(func=ring_check_cmd.run)
+
+
+def _add_seam_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``seam-check`` verb: tiling / rail continuity across seams."""
+    seam_parser = subparsers.add_parser(
+        "seam-check",
+        help="check abutting-cell tiling and conductor continuity across seams",
+        description=(
+            "Check the seams of a layout assembled from abutting cells. "
+            "--tiling asserts the named cells' placements tile with no gap "
+            "or overlap; --layer with --band asserts the layer's merged "
+            "shapes cover each band fully and form one connected piece. At "
+            "least one assertion is required. Empty geometry is a violation, "
+            "never a vacuous pass. Loop closure is `klt ring-check`'s job. "
+            "Headless, purely geometric. See docs/cli/seam-check.md."
+        ),
+    )
+    seam_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    seam_parser.add_argument(
+        "--tiling",
+        action="append",
+        default=None,
+        metavar="CELL",
+        help=(
+            "repeatable exact child-cell name whose placements must tile "
+            "with no gap or overlap"
+        ),
+    )
+    seam_parser.add_argument(
+        "--layer",
+        default=None,
+        metavar="L/D",
+        help="conductor layer/datatype to check inside each --band (e.g. 68/20)",
+    )
+    seam_parser.add_argument(
+        "--band",
+        action="append",
+        default=None,
+        metavar="x0,y0,x1,y1",
+        help=(
+            "repeatable band in micrometres that --layer must cover "
+            "completely as one connected piece; requires --layer"
+        ),
+    )
+    seam_parser.add_argument(
+        "--top",
+        default=None,
+        help="top cell to check when the stream has more than one; omit for all",
+    )
+    _add_format_arg(seam_parser)
+    seam_parser.set_defaults(func=seam_check_cmd.run)
 
 
 def _add_keepout_check_parser(subparsers: argparse._SubParsersAction) -> None:

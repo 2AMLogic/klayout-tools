@@ -137,14 +137,18 @@ def test_long_thin_wire_coarse_grid_derives_port(tmp_path):
     assert 0.0 <= port["x_um"] <= 0.4
 
 
-def test_no_candidate_error_names_cause(tmp_path):
-    import klayout.db as kdb
+def test_no_candidate_error_names_cause(tmp_path, monkeypatch):
+    import klayout_tools.gen_compose_port_access as access_mod
 
-    from klayout_tools.gen_compose_port_access import _grid_candidates
-
-    # An empty region yields no candidates at all.
-    points, truncated = _grid_candidates(kdb.Region(), (0, 0), 100, 10)
-    assert points == [] and truncated is False
+    # Force the enumerator to yield nothing so _search_landing reaches the
+    # empty-candidate error instead of the per-category rejection summary.
+    monkeypatch.setattr(access_mod, "_grid_candidates", lambda *a, **k: ([], False))
+    gds = _two_strip_macro(tmp_path)
+    with pytest.raises(
+        GenComposeError,
+        match=r"no candidate landing point for port 'A'.*lower access\.grid_um",
+    ):
+        _blocks(gds, _spec(["A"], ACCESS))
 
 
 def test_keepout_layer_rejects_and_steers(tmp_path):
