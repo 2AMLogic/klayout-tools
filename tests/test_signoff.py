@@ -4083,6 +4083,8 @@ def test_every_recognized_kind_declares_a_typed_shape():
         "place-and-route",
         # Issue #2839: T1 item 11's port-accessibility evidence.
         "socket-check",
+        # Issue #4189: T1 item 2's seam/tiling evidence.
+        "seam-check",
         "lef-abstract",
         # Issue #4015: T1 item 1's netlist-evidence half.
         "synthesize",
@@ -15617,6 +15619,58 @@ def test_build_signoff_classifies_port_evidence(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Issue #4189: `klt seam-check` evidence (item 2)
+# --------------------------------------------------------------------------- #
+
+
+def _seam_check_envelope(**overrides) -> dict:
+    return {
+        "schema_version": 1,
+        "file": "row.gds",
+        "tiling": ["TILE"],
+        "layer": None,
+        "bands_um": None,
+        "dbu_um": 0.001,
+        "status": "pass",
+        "violation_count": 0,
+        "violations": [],
+        **overrides,
+    }
+
+
+def test_seam_check_is_not_classified_as_drc(tmp_path):
+    path = _write(tmp_path, "seam.json", _seam_check_envelope())
+    failing = _write(
+        tmp_path,
+        "seam_fail.json",
+        _seam_check_envelope(
+            status="fail",
+            violation_count=1,
+            violations=[{"kind": "gap", "rule": "seam.tiling"}],
+        ),
+    )
+
+    result = build_signoff([path, failing])
+
+    assert [(c["kind"], c["passed"]) for c in result["checks"]] == [
+        ("seam-check", True),
+        ("seam-check", False),
+    ]
+    assert result["checks"][1]["detail"]["violation_kinds"] == ["gap"]
+
+
+def test_seam_check_satisfies_only_item_2(tmp_path):
+    path = _write(tmp_path, "seam.json", _seam_check_envelope())
+    result = build_tier_report(_manifest(evidence={"2": path, "1": path}))
+
+    item2 = next(i for i in result["items"] if i["id"] == 2)
+    item1 = next(i for i in result["items"] if i["id"] == 1)
+    assert item2["status"] == "met"
+    assert item1["status"] == "unmet"
+    assert item1["reason"] == "wrong_kind"
+
+
+# --------------------------------------------------------------------------- #
 # Issue #2875: `klt pex` schematic-side input verification (item 7)
 # --------------------------------------------------------------------------- #
 
@@ -16395,9 +16449,9 @@ def test_attest_argument_conflicts_are_refused(argv, capsys):
 
 
 def test_attest_rejects_an_item_it_does_not_attest_as_a_usage_error():
-    """Item 2 is out of scope (its binding is the layout stream itself)."""
+    """Only items 1, 2, 9 and 10 are attestable (item 2 via `--input`)."""
     with pytest.raises(SystemExit) as excinfo:
-        main(["signoff", "--attest", "2", "--inventory", "x.json"])
+        main(["signoff", "--attest", "3", "--inventory", "x.json"])
     assert excinfo.value.code == 2
 
 
