@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`place-and-route` `power.preset` accepts `power.connects`; `drc` tap_distance note**
+  (issue #4348). An explicit `connects` replaces the preset's connect entries
+  (`[]` = no via tuning); `power.straps` stays mutually exclusive. The response
+  gains an additive `power.connects_overridden` boolean. `klt drc` violations
+  from `tap_distance` rules carry an additive `note` that the rule is
+  tap-placement dependent.
 - **ASAP7 deck no longer aborts on LIG near unconnected LISD/SDT** (issue
   #4340). The LIG.LISD.S.6 / LIG.SDT.S.8 / LIG.LISD.S.7 net separation
   tripped a KLayout 0.28 assertion on tie and tap cells whose LIG sat within
