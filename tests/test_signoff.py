@@ -11562,6 +11562,40 @@ def test_item_11_is_not_blocked_by_a_non_supply_erc_finding(tmp_path, envelope):
     assert item["citation"]["check_status"] == "violations"
 
 
+def test_item_11_grade_is_unchanged_by_the_substrate_continuity_disclosure(tmp_path):
+    """Issue #4384: `klt erc` now discloses `erc.supply_short` as
+    inapplicable (`substrate_continuity_not_modelled`) for a spec with two or
+    more supply nets. Item 11 only reads `erc.missing_tie:` reasons, so the
+    grade stays `met` -- downgrading on it is a separate decision."""
+    erc = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": {
+            "scope": "connectivity",
+            "checked": [],
+            "skipped": [],
+            "inapplicable": [
+                {
+                    "id": "erc.supply_short",
+                    "reason": "substrate_continuity_not_modelled",
+                }
+            ],
+        },
+    }
+
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=erc
+                )
+            },
+        )
+    )
+
+    assert _item_11(result)["status"] == "met"
+
+
 def test_item_11_unmet_when_the_erc_spec_declared_no_supply_net(tmp_path):
     """The "it never asked" case: `klt erc` computes the supply rules only
     for declared nets, so a spec with none reports zero findings. That must
