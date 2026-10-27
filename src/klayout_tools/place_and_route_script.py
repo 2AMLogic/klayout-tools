@@ -489,6 +489,7 @@ def _power_delivery_lines(
     power: dict[str, Any],
     cell_library: str,
     library: dict[str, Any] | None = None,
+    macros: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Tcl for the optional ``request.power`` PDN stage (issue #1091):
     ``tapcell`` well/substrate ties, ``add_global_connection``/
@@ -500,6 +501,12 @@ def _power_delivery_lines(
     (immediately after ``place_macro``/``make_tracks``, before that stage's
     own ``write_db``) -- see :func:`_stage_script_lines`'s own ``"floorplan"``
     branch.
+
+    ``macros`` (issue #2635, the validated ``request.macros`` array) adds a
+    ``define_pdn_grid -macro``/``add_pdn_connect`` pair for every macro that
+    declared a ``halo`` -- see :func:`_macro_pdn_grid_lines`. ``None``/``[]``
+    (every pre-#2635 caller, and any request whose macros declare no halo)
+    emits nothing extra and leaves this function's output byte-identical.
 
     The ``tapcell`` line is the one conditional piece: a ``cell_library``
     listed in :data:`_NO_TAPCELL_LIBRARIES` (issue #2441) ships no
@@ -594,7 +601,170 @@ def _power_delivery_lines(
                 f" -split_cuts {{{split_cuts['layer']} {split_cuts['width_um']}}}"
             )
         lines.append(connect_call)
+    # Issue #2635: one macro PDN grid per halo'd macro, after the flat
+    # standard-cell grid is fully declared and before `pdngen` runs -- the
+    # same ordering every real ORFS `pdn.tcl` uses for its own "macro grids"
+    # section. Closes the "macro-specific PDN grids (`define_pdn_grid
+    # -macro`, with their own halo/orientation config)" exclusion this
+    # module's docstring has carried since issue #1091.
+    lines += _macro_pdn_grid_lines(macros or [], power)
     lines.append("pdngen")
+    return lines
+
+
+#: ``request.macros[].orientation`` values that rotate the macro's own LEF
+#: ``SIZE`` by 90 degrees, so its placed footprint is ``height x width``
+#: rather than ``width x height`` -- what :func:`_macro_footprint` needs to
+#: get a halo blockage's rectangle right for a sideways-placed macro.
+_ROTATED_MACRO_ORIENTATIONS = frozenset({"R90", "R270", "MXR90", "MYR90"})
+
+
+def _macro_footprint(macro: dict[str, Any]) -> tuple[float, float, float, float]:
+    """The macro's placed footprint as ``(x1, y1, x2, y2)`` in microns.
+
+    ``x_um``/``y_um`` is the placed macro's **lower-left** corner -- live-
+    verified against OpenROAD 26Q3: ``place_macro -macro_name u_sram
+    -location {10 10} -orientation R0`` on a ``SIZE 20.0 BY 20.0`` macro
+    reports ``[INFO MPL-0035] Macro u_sram placed. Bounding box (10.000um,
+    10.000um), (30.000um, 30.000um)``. The width/height come from the
+    macro's own LEF ``SIZE``, swapped for the rotated orientations
+    (:data:`_ROTATED_MACRO_ORIENTATIONS`).
+    """
+    width = macro["width_um"]
+    height = macro["height_um"]
+    if macro["orientation"] in _ROTATED_MACRO_ORIENTATIONS:
+        width, height = height, width
+    return (
+        macro["x_um"],
+        macro["y_um"],
+        macro["x_um"] + width,
+        macro["y_um"] + height,
+    )
+
+
+def _macro_blockage_lines(macros: list[dict[str, Any]]) -> list[str]:
+    """``create_blockage`` Tcl for every macro that declared a ``halo``
+    (issue #2635) -- one hard placement blockage per macro, covering its own
+    footprint expanded by the halo.
+
+    This is the *placement* half of a macro halo, and the half that means
+    what a caller means by the word: standard cells (and therefore the
+    detailed placer's legalization) are kept out of the ring around the
+    macro, so the macro's own pins stay reachable and its edges do not end
+    up abutted by logic. ``create_blockage -region {x1 y1 x2 y2}`` takes
+    microns and was live-verified against OpenROAD 26Q3 on a real sky130A
+    floorplan with a placed macro.
+
+    Covering the macro's own footprint as well as the ring (rather than
+    emitting four thin ring rectangles) is deliberate: a blockage only
+    constrains *movable* instance placement, so overlapping the already-
+    fixed macro costs nothing and one rectangle is far easier to read in the
+    generated Tcl than four.
+
+    Raises :class:`PlaceAndRouteError` when the macro's LEF declared no
+    ``SIZE`` -- there is no footprint to expand, and silently skipping the
+    blockage would honor the halo in the response and not in the run.
+    """
+    lines: list[str] = []
+    for macro in macros:
+        halo = macro["halo"]
+        if halo is None:
+            continue
+        if macro["width_um"] is None or macro["height_um"] is None:
+            raise PlaceAndRouteError(
+                f"request.macros[].halo for instance '{macro['instance']}' "
+                f"needs the macro's footprint, but its lef ({macro['lef']}) "
+                f"declares no SIZE for MACRO '{macro['cell_name']}'"
+            )
+        x1, y1, x2, y2 = _macro_footprint(macro)
+        lines.append(
+            "create_blockage -region "
+            f"{{{x1 - halo['left']} {y1 - halo['bottom']} "
+            f"{x2 + halo['right']} {y2 + halo['top']}}}"
+        )
+    return lines
+
+
+def _macro_pdn_grid_lines(
+    macros: list[dict[str, Any]], power: dict[str, Any]
+) -> list[str]:
+    """``define_pdn_grid -macro``/``add_pdn_connect`` Tcl for every macro
+    that declared a ``halo`` (issue #2635) -- the *power-delivery* half of a
+    macro halo.
+
+    What the halo does here is tell ``pdngen`` to keep the flat
+    standard-cell grid off the macro and its margin, and to connect the
+    macro's own P/G pins into that grid instead. Live-verified against
+    OpenROAD 26Q3 on a real sky130A floorplan (macro ``SIZE 20x20``, met1
+    P/G pins, met1-followpins/met4/met5 core straps): the pair below is
+    exactly what makes ``pdngen`` report ``Inserting grid: macro_... -
+    u_sram`` and succeed. Both halves are required -- a macro grid with no
+    ``add_pdn_connect`` at all fails ``[WARNING PDN-0232] ... does not
+    contain any shapes or vias`` / ``[ERROR PDN-0233] Failed to generate
+    full power grid``.
+
+    The connection's **lower** layer is the macro's own P/G ``PORT`` layer
+    (one connection per distinct layer when supplies sit on several), read
+    from its LEF (:func:`_macro_power_ground_layers`) rather than asked
+    for in the request -- the LEF is the authority on it. The **upper**
+    layer is the next strap layer above it in ``power.straps`` (which every
+    real platform config lists bottom-to-top, the same assumption the core
+    grid's own consecutive-pair ``add_pdn_connect`` loop above already
+    makes). When neither can be established the request is **rejected with a
+    named error**, never silently degraded: a halo a caller asked for and
+    this function quietly skipped would be a wrong answer reported as a
+    right one.
+
+    ``-grid_over_boundary`` lets the core grid's straps continue over the
+    macro's boundary (stopping only at the halo), matching ORFS's own macro
+    grids. Emits nothing at all when no macro declares a halo, leaving every
+    pre-#2635 ``request.power`` script byte-identical.
+    """
+    strap_layers = [strap["layer"] for strap in power["straps"]]
+    lines: list[str] = []
+    for macro in macros:
+        halo = macro["halo"]
+        if halo is None:
+            continue
+        pg_layers = macro["power_ground_layers"]
+        if not pg_layers:
+            raise PlaceAndRouteError(
+                f"request.macros[].halo for instance '{macro['instance']}' "
+                "cannot be honored by pdngen: its lef declares no POWER/GROUND "
+                "pin with PORT geometry, so there is no layer to connect the "
+                "macro's supplies to the grid on -- drop the halo, or drop "
+                "request.power"
+            )
+        connects: list[str] = []
+        for lower in pg_layers:
+            if lower not in strap_layers:
+                raise PlaceAndRouteError(
+                    f"request.macros[].halo for instance '{macro['instance']}' "
+                    "needs a request.power strap on the macro's own P/G layer "
+                    f"'{lower}' to connect to; request.power.straps declares "
+                    + ", ".join(strap_layers)
+                )
+            index = strap_layers.index(lower)
+            if index + 1 >= len(strap_layers):
+                raise PlaceAndRouteError(
+                    f"request.macros[].halo for instance '{macro['instance']}' "
+                    "needs a request.power strap *above* the macro's own P/G "
+                    f"layer '{lower}' to connect up to, but '{lower}' is the "
+                    "topmost strap declared"
+                )
+            connects.append(f"{lower} {strap_layers[index + 1]}")
+        name = f"macro_{macro['instance']}"
+        lines.append(
+            f"define_pdn_grid -macro -name {{{name}}} -voltage_domains {{CORE}} "
+            f"-instances {{{macro['instance']}}} -halo "
+            f"{{{halo['left']} {halo['bottom']} {halo['right']} {halo['top']}}} "
+            "-grid_over_boundary"
+        )
+        # One connection per distinct supply-pin layer: a macro exposing
+        # POWER on one layer and GROUND on another is only fully tied in
+        # when each layer reaches the grid.
+        for layers in dict.fromkeys(connects):
+            lines.append(f"add_pdn_connect -grid {{{name}}} -layers {{{layers}}}")
     return lines
 
 
@@ -744,6 +914,7 @@ def _stage_script_lines(
     route_critical_nets_percentage: int,
     max_antenna_repair_iterations: int,
     library: dict[str, Any] | None = None,
+    macro_liberty_paths: list[str] | None = None,
 ) -> list[str]:
     from .place_and_route import (
         _CTS_BUFFER_CELLS,
@@ -752,6 +923,14 @@ def _stage_script_lines(
         _ROW_RAIL_STRAP,
     )
 
+    # Issue #2635: `request.macros[].lib`, resolved to this run's own
+    # corner. Read immediately after the standard-cell `read_liberty` in
+    # *every* stage (the floorplan stage's own load, and every later stage's
+    # post-`read_db` reload) -- a macro whose timing is only loaded in some
+    # stages would make this verb's own `-metrics`/repair steps see a
+    # different design than the floorplan did. Empty for every pre-#2635
+    # request, leaving each stage script byte-identical.
+    macro_liberty_lines = [f"read_liberty {path}" for path in macro_liberty_paths or []]
     if stage == "floorplan":
         # `create_clock` (`_clock_lines`) must come after `link_design` --
         # see that helper's own docstring; `read_liberty` itself is read
@@ -760,8 +939,9 @@ def _stage_script_lines(
         # LEFs (issue #438) are read alongside the tech/cell LEF, before
         # `read_verilog` -- `link_design` needs every macro's physical view
         # already loaded to resolve the netlist's own macro instances.
-        lines = [
-            f"read_liberty {liberty_path}",
+        lines = [f"read_liberty {liberty_path}"]
+        lines += macro_liberty_lines
+        lines += [
             f"read_lef {tech_lef}",
             f"read_lef {cell_lef}",
         ]
@@ -789,6 +969,12 @@ def _stage_script_lines(
             f"-orientation {macro['orientation']} -exact"
             for macro in macros
         ]
+        # Issue #2635: `request.macros[].halo` -- a hard placement blockage
+        # over each halo'd macro's footprint plus its margin. After
+        # `place_macro` (the footprint is only meaningful once the macro has
+        # a location) and before `make_tracks`/the PDN, so every later
+        # placement step sees it.
+        lines += _macro_blockage_lines(macros)
         lines += _make_tracks_lines(floorplan)
         # `request.power` (issue #1091): tapcell + PDN Tcl, right after
         # `place_macro`/`make_tracks` and before this stage's own
@@ -796,7 +982,7 @@ def _stage_script_lines(
         # itself uses (see this module's own docstring "Power delivery"
         # section for the live-verified citation).
         if power is not None:
-            lines += _power_delivery_lines(power, cell_library, library)
+            lines += _power_delivery_lines(power, cell_library, library, macros)
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
         lines += [f"write_db {checkpoint_out}"]
         return lines
@@ -806,6 +992,7 @@ def _stage_script_lines(
     # stage's own `link_design`), so `create_clock` may safely follow
     # `read_liberty` directly here -- unlike the floorplan stage above.
     lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
+    lines += macro_liberty_lines
     # Issue #2378: `set_dont_use` must come after liberty is loaded and before
     # the first resizer-driven step (`global_placement -timing_driven`,
     # `repair_*`, CTS, hold repair), and is re-emitted in every fresh OpenROAD

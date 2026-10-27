@@ -422,6 +422,21 @@ draws that the spec never declared" below.
     `roles` on the same entry (there is otherwise no remainder for it to
     narrow, and the declaration would read as honoured while doing
     nothing); `null` or `[]` is the undeclared form.
+  - `unlabelled_allow_device_connected` (boolean, optional, default `false`,
+    issue #4374) — when `true`, unlabelled clusters on the owned `roles`
+    that drive a gate (`kind: "device_connected"`, e.g. an internal signal
+    net named by no pin) do not gate `erc.unlabelled_conductor`;
+    `floating` clusters (stray supply fragments, dead metal) still do. The
+    excused clusters count in `nets[].unlabelled_allowed_islands` and are
+    echoed in `provenance.net_exclusions` (`allow_device_connected: true`,
+    `excluded_device_connected_islands`); the raw `unlabelled_*` values stay
+    raw. "Drives a gate" means the cluster has geometry on the gate role
+    (`stackup[0]`): the ERC connectivity graph registers no extracted
+    devices (`devices[]` only cuts device bodies out of conductors), so it
+    needs no `devices[]` and works identically with it omitted. Requires a
+    non-empty `roles` on the same entry; a non-boolean is a spec error.
+    Composes with `unlabelled_allowed_boxes` (a cluster excused by either
+    is excused).
   - Omitted entirely -> `erc.unconnected_net`/`erc.multiply_driven_net`/
     `erc.supply_short`/`erc.expected_short_missing`/
     `erc.unlabelled_conductor` are never computed.
@@ -862,6 +877,23 @@ empty and the exit status stays `0` by design. Gate on `erc_status`, not
 the exit code. To make the declaration non-degenerate, affirm
 `tap_is_dedicated`, narrow with `tap_requires`, or assert `tap_boxes`
 (details below).
+
+**A well tied to a non-supply net (issue #4223).** `ties[].net` is not
+restricted to supply nets: it is the net the tap must be connected to, matched
+against the layout's net labels. A PMOS whose well is deliberately tied to its
+source/signal net is declared per well, by naming that net:
+
+```json
+"ties": [
+  {"name": "pmos_in_well", "well_layer": "64/20", "tap_layer": "65/44",
+   "connect_to": "li1", "net": "SRC"}
+]
+```
+
+Declared as `"net": "VDD"` instead, the same layout reports
+`erc.missing_tie` ("not connected to declared net 'VDD'"); declaring `SRC`
+clears it with no finding left recorded. One entry per well class; use
+`tap_boxes` to scope an entry to particular wells.
 
 A `ties[]` entry is evaluated in its own second extraction: the same
 `stackup`/`vias` graph, plus one extra conductor per tie — that tie's
@@ -1790,7 +1822,12 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   this finding. Legitimate unlabelled conductor on an owned role is
   declared away with `nets[].unlabelled_allowed_boxes` — see "Measuring the
   unlabelled remainder" below for the escape hatch and the decision behind
-  gating it at all.
+  gating it at all. Since issue #4374 the finding carries `islands[]`: one
+  entry per surviving (post-carve-out) unlabelled cluster, in the
+  `erc.unconnected_net` entry shape (`bbox`, `layer`, `shape_count`) plus
+  `kind` — `"device_connected"` (the cluster drives a gate) or `"floating"`
+  — so the reporter can locate each island without rebuilding connectivity.
+  `nets[].unlabelled_allow_device_connected` excuses the former.
 - **`erc.missing_tie`** — for every physically distinct well/tub shape
   (one per merged polygon of a `ties[]` entry's `well_layer` — narrowed to
   the shapes its class selection keeps —
@@ -2921,7 +2958,9 @@ any other checked, non-degenerate tie:
   declared. Pure disclosure, mirroring `klt drc`'s
   `coverage.layers_in_stream_without_rules`: it is not an input to
   `erc_status` (nor `status`), emits no finding, and is narrowed to the
-  curated deck's conducting layers when `--deck` is given. See "Layers this
+  curated deck's conducting layers when `--deck` is given, except that an
+  undeclared layer carrying text shapes is always named (an undeclared label
+  purpose otherwise reads as absent labels). See "Layers this
   stream draws that the spec never declared" above.
 - `well_assertion_coverage` (array\<object\>, issue #2427) — one entry per
   non-degenerate tie that asserted its substrate region (`well_layer: null` +

@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff` item 11: a partial `erc`/`lvs` set renders
+  `power_delivery_parts_missing`** (issue #4193, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)). A cited set lacking the `erc`
+  and/or `lvs` part used to render `unmet`/`wrong_kind` with an empty detail;
+  it now renders `unmet`/`power_delivery_parts_missing` with
+  `detail.power_delivery.{missing_parts,cited_parts}` and, when the ERC spec
+  resolved, `supply_nets`. Value change on an existing field for that case
+  only; never `met`.
+- **`klt lvs` `subckt-call` converts sky130 junction diodes** (issue #4319,
+  documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)): `X… sky130_fd_pr__diode_*
+  area=… perim=…` now converts to a `D` card in the deck's diode class instead
+  of raising `reference.unresolved_subckt_call`, for all 8 classes in the sky130
+  deck's `diodes`. Additive; other decks unchanged.
+
+- **`klt place-and-route` gains `instance_groups` (request) and `instance_groups[]`
+  (response)** (issue #4344, documented in
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)): name sets of
+  instances (globs allowed) and read back each set's placed-origin bounding box
+  and, with `max_extent_um`, a `within_extent` flag, from the run's DEF
+  `COMPONENTS`. Measurement only, not a placement constraint. Additive; no
+  `schema_version` bump.
 - **`place-and-route` accepts `library.antenna_diode: null`** (issue #4274).
   A library with no antenna cell and no antenna rules (ASAP7) can now reach
   `route`: JSON `null` (like `library.tapcell: null`) skips `repair_antennas`
@@ -21,6 +42,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   and adds a response `warnings` entry saying antenna repair did not run.
   Omitting the key is unchanged (still "unverified"); scripts for libraries
   with a diode are byte-identical.
+- **`klt signoff` item 5 (digital, `sim`-only) now requires a measured timing
+  margin** (issue #4314, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)). A full-custom digital entry
+  citing only `klt sim` grades `unmet` / `timing_margin_missing` unless a
+  `spec_rows` row has `"timing_margin": true` and its `spec_row`-tagged,
+  limited, passing measurement is present at every corner. **Behaviour
+  change:** existing `sim`-only digital manifests must add the row and the
+  tag. Additive reason and `detail.missing_timing_margin`; no `schema_version`
+  bump.
 - **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
   Landing candidates are now enumerated per merged net polygon rather than over
   the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too
@@ -39,6 +69,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   `compare.timeout` category entry (`details.code: "compare_timeout"`). The
   option is echoed under `options.compare_timeout_s` only when set; output
   without it is unchanged.
+- **Added** (#2635, `klt synthesize` + `klt sta` + `klt place-and-route`;
+  additive — `schema_version` unchanged on all three): a shared
+  `request.macros` hard-macro declaration (`cell`, `lef`, `lib`/`liberty`
+  per-corner map, `gds`, `verilog_blackbox`), documented once in
+  `klayout_tools.macros` and accepted identically by all three verbs, so a
+  pre-characterized block (a compiled SRAM, a third-party IP core) no
+  longer fails at a different stage in each one. `klt synthesize` loads
+  each macro's liberty (or a LEF-derived blackbox) before `hierarchy`, so
+  the macro survives as an opaque instance, and reports it separately in
+  the new `macros`/`macro_instance_counts_by_type`/`macro_instance_count`
+  response fields; the new `cells_without_area` field (plus a
+  `warnings` entry) names every instantiated cell type `area_um2` does not
+  account for, so a blackboxed macro's area is never silently `0`. `klt
+  sta` reads each macro's LEF and corner-matching liberty alongside the
+  standard-cell library, fixing the `ORD-2013 LEF master not found` a
+  macro-bearing DEF/netlist used to hit. `klt place-and-route`'s existing
+  `request.macros` (issue #438/#464) gains `halo` (a keep-out margin,
+  honored as a placement blockage and — with `request.power` — a
+  `define_pdn_grid -macro` grid, closing that command's own v1 macro-PDN
+  exclusion) and `lib`/`liberty`. Both engine errors (Yosys's "not part of
+  the design", OpenROAD's `ORD-2013`) now append a hint naming the
+  `request.macros` entry that would fix them.
 
 ## 0.8.0 (2026-10-24)
 

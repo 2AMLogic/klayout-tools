@@ -602,18 +602,28 @@ def _undeclared_stream_layers(
     ``deck``, when given, narrows the result to that curated deck's own
     conducting layers (:func:`_deck_conductor_layers`) -- without it there is
     no PDK-agnostic way to tell a conductor from an implant or marker, so the
-    unfiltered list is reported.
+    unfiltered list is reported. A layer carrying at least one text shape in
+    that scope survives the narrowing regardless (issue #4376): an undeclared
+    label purpose reads as absent labels, and the deck has no label purposes
+    of its own to keep it.
     """
     scope_cells = cells_in_hierarchy(layout, top_cell)
     drawn: set[tuple[int, int]] = set()
+    texted: set[tuple[int, int]] = set()
     for layer_index in layout.layer_indexes():
         if any(cell.shapes(layer_index).size() for cell in scope_cells):
             info = layout.get_info(layer_index)
             drawn.add((info.layer, info.datatype))
+            if any(
+                shape.is_text()
+                for cell in scope_cells
+                for shape in cell.shapes(layer_index).each()
+            ):
+                texted.add((info.layer, info.datatype))
 
     undeclared = drawn - declared
     if deck is not None:
-        undeclared &= _deck_conductor_layers(deck)
+        undeclared = (undeclared & _deck_conductor_layers(deck)) | (undeclared & texted)
     return [f"{layer}/{datatype}" for layer, datatype in sorted(undeclared)]
 
 
@@ -1633,7 +1643,7 @@ def _declared_net_entry(
 
 def _unlabelled_by_role(
     l2n: Any, circuit: Any, layer_index: dict[str, int], roles: set[str]
-) -> dict[str, dict[int, Any]]:
+) -> tuple[dict[str, dict[int, Any]], set[int]]:
     """Per ``stackup`` role in ``roles``: the merged conductor region of every
     extracted net that carries **no label at all**, keyed by that net's
     ``cluster_id`` (issue #2510; per-cluster since issue #2524).
@@ -1654,23 +1664,39 @@ def _unlabelled_by_role(
     whole *islands*, not area: deciding whether an island survived needs that
     island's own geometry, which a single merged region has already thrown
     away. Distinct clusters are disjoint by construction, so the pre-#2524
-    per-role totals are recovered by summing them."""
+    per-role totals are recovered by summing them.
+
+    The second return value is the ``cluster_id`` set of the unlabelled nets
+    that are **device-connected** (issue #4374): they carry geometry on the
+    gate role (``stackup[0]``, the first ``layer_index`` entry), i.e. they
+    drive a gate. The ERC graph registers no extracted devices --
+    ``devices[]`` only cuts device bodies out of the conductor regions -- so
+    ``Net.each_terminal()`` would be empty for every net; the gate role is the
+    only device terminal this model has, and it needs no ``devices[]``."""
     by_role: dict[str, dict[int, Any]] = {role: {} for role in roles}
+    device_connected: set[int] = set()
+    gate_index = next(iter(layer_index.values()), None)
     for net in circuit.each_net():
         if net.cluster_id == 0 or net.name:
             continue
+        if (
+            gate_index is not None
+            and not l2n.polygons_of_net(net, gate_index).is_empty()
+        ):
+            device_connected.add(net.cluster_id)
         for role, per_cluster in by_role.items():
             piece = l2n.polygons_of_net(net, layer_index[role])
             if piece.is_empty():
                 continue
             per_cluster[net.cluster_id] = piece.merged()
-    return by_role
+    return by_role, device_connected
 
 
 def _unlabelled_state(
     l2n: Any,
     decl: dict[str, Any],
     by_role: dict[str, dict[int, Any]],
+    device_connected: set[int],
 ) -> dict[str, Any]:
     """One declared net's unlabelled remainder (issue #2510) and the verdict
     it now carries (issue #2524): the conductor geometry on the roles it owns
@@ -1748,7 +1774,18 @@ def _unlabelled_state(
     island survives unless **all** of its geometry on the owned roles falls
     inside the declared boxes, and the three raw values above never change
     because of a declaration -- so ``unlabelled_islands: 0`` goes on meaning
-    what #2510 documented, and a partially-covered orphan still fires."""
+    what #2510 documented, and a partially-covered orphan still fires.
+
+    **Island kinds** (issue #4374). Each surviving cluster is classified
+    ``"device_connected"`` (it drives a gate -- see
+    :func:`_unlabelled_by_role`) or ``"floating"`` (it touches none), and the
+    gating payload carries one ``islands[]`` entry per surviving cluster in
+    :func:`_island_entry`'s shape plus that ``kind``, so the reporter can
+    locate them without rebuilding connectivity. A declared
+    ``unlabelled_allow_device_connected`` excuses the ``device_connected``
+    clusters exactly like a carve-out box does (they count in
+    ``unlabelled_allowed_islands`` and are echoed in
+    ``provenance.net_exclusions``); ``floating`` clusters always gate."""
     roles = decl["roles"]
     if not roles:
         return {
@@ -1773,8 +1810,11 @@ def _unlabelled_state(
         allowed += kdb.Region(_clip_box(kdb, box_um, dbu))
     allowed = allowed.merged()
 
+    allow_device = decl["unlabelled_allow_device_connected"]
     raw_clusters: set[int] = set()
     kept_clusters: set[int] = set()
+    excused_device_clusters: set[int] = set()
+    kept_by_cluster: dict[int, list[tuple[str, Any]]] = {}
     raw_area = 0
     kept_area = 0
     raw_bbox: Any = None
@@ -1790,7 +1830,11 @@ def _unlabelled_state(
             kept = (region - allowed).merged() if not allowed.is_empty() else region
             if kept.is_empty():
                 continue
+            if allow_device and cluster_id in device_connected:
+                excused_device_clusters.add(cluster_id)
+                continue
             kept_clusters.add(cluster_id)
+            kept_by_cluster.setdefault(cluster_id, []).append((role, kept))
             kept_role_region += kept
         role_region = role_region.merged()
         if not role_region.is_empty():
@@ -1819,9 +1863,17 @@ def _unlabelled_state(
         "unlabelled_bbox": _bbox_dict(raw_bbox) if raw_bbox is not None else None,
         "unlabelled_allowed_islands": len(raw_clusters) - len(kept_clusters),
     }
+    islands = [
+        _unlabelled_island_entry(
+            kept_parts,
+            "device_connected" if cluster_id in device_connected else "floating",
+        )
+        for cluster_id, kept_parts in sorted(kept_by_cluster.items())
+    ]
     gating = (
         {
             "islands": len(kept_clusters),
+            "island_entries": islands,
             "area_um2": round(kept_area * dbu2, 9),
             "bbox": _bbox_dict(kept_bbox) if kept_bbox is not None else None,
             # The owned role carrying the most surviving remainder area, ties
@@ -1842,10 +1894,38 @@ def _unlabelled_state(
             "excluded_islands": report["unlabelled_allowed_islands"],
             "excluded_area_um2": round((raw_area - kept_area) * dbu2, 9),
         }
-        if boxes
+        if boxes or allow_device
         else None
     )
+    if exclusion is not None and allow_device:
+        # Only when declared, so a pre-#4374 echo is byte-identical.
+        exclusion["allow_device_connected"] = True
+        exclusion["excluded_device_connected_islands"] = len(excused_device_clusters)
     return {"report": report, "gating": gating, "exclusion": exclusion}
+
+
+def _unlabelled_island_entry(parts: list[tuple[str, Any]], kind: str) -> dict[str, Any]:
+    """One ``erc.unlabelled_conductor`` ``islands[]`` entry (issue #4374):
+    :func:`_island_entry`'s ``bbox``/``layer``/``shape_count`` shape, measured
+    over the cluster's *surviving* (post-carve-out) geometry on the owned
+    roles, plus ``kind`` (``"device_connected"`` | ``"floating"``). ``layer``
+    is the role carrying the most area, ties broken by declared role order."""
+    bbox: Any = None
+    layer: str | None = None
+    best_area = 0
+    shape_count = 0
+    for role, region in parts:
+        shape_count += region.count()
+        bbox = region.bbox() if bbox is None else bbox + region.bbox()
+        if region.area() > best_area:
+            best_area = region.area()
+            layer = role
+    return {
+        "bbox": _bbox_dict(bbox) if bbox is not None else None,
+        "layer": layer,
+        "shape_count": shape_count,
+        "kind": kind,
+    }
 
 
 def _island_entry(l2n: Any, layer_index: dict[str, int], net: Any) -> dict[str, Any]:
@@ -2115,7 +2195,7 @@ def _net_connectivity_findings(
     clusters_by_name: dict[str, set[int]] = {}
     # Issue #2510: the unlabelled conductor on every role some declared net
     # owns (`nets[].roles`), computed once for all of them.
-    unlabelled = _unlabelled_by_role(
+    unlabelled, device_connected = _unlabelled_by_role(
         l2n,
         circuit,
         layer_index,
@@ -2131,7 +2211,7 @@ def _net_connectivity_findings(
         matched = _match_net_clusters(circuit, decl["name"])
         matches[decl["name"]] = matched
         clusters_by_name[decl["name"]] = {net.cluster_id for net in matched}
-        state = _unlabelled_state(l2n, decl, unlabelled)
+        state = _unlabelled_state(l2n, decl, unlabelled, device_connected)
         declared_nets.append(_declared_net_entry(decl, len(matched), state["report"]))
         if state["exclusion"] is not None:
             net_exclusions.append(state["exclusion"])
@@ -2161,6 +2241,7 @@ def _net_connectivity_findings(
                     net=decl["name"],
                     layer=gating["layer"],
                     bbox=gating["bbox"],
+                    islands=gating["island_entries"],
                 )
             )
         # The expected island count is the declared one (issue #2400;

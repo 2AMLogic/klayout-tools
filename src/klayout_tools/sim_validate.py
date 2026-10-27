@@ -18,6 +18,7 @@ from . import (
     sim_crossings,
     sim_cycle_mean,
     sim_energy,
+    sim_eye,
     sim_noise,
     sim_search,
     sim_snm_meas,
@@ -298,6 +299,7 @@ def _require_measurement_form(name: Any, has_form: bool) -> None:
 
 
 _EXCLUSIVE_FORM_VALIDATORS = (
+    sim_eye.validate_form_exclusive,
     sim_search.validate_form_exclusive,
     sim_snm_meas.validate_form_exclusive,
     sim_tian.validate_form_exclusive,
@@ -310,7 +312,7 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
     the round trip through the deck and back out of the log. See
     :func:`_validate_measurement_forms` for why each rule exists."""
-    # Newest-first: #4121 search, #3895 snm, #3160 tian, #2923 transfer.
+    # Newest-first: #4292 eye, #4121 search, #3895 snm, #3160 tian, #2923 transfer.
     for validator in _EXCLUSIVE_FORM_VALIDATORS:
         if validator(spec):
             return

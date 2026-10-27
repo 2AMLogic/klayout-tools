@@ -226,7 +226,8 @@ written to every block.
    `met` verdict from `klt signoff` is still not evidence that the gaps were
    disclosed. A reviewer must read the reported `coverage` against the claim
    themselves.
-4. **LVS clean** — latest LVS report `status: match`, fresh, engine named,
+4. **LVS clean** — latest LVS report (or, per cell, a list of reports — all must
+   pass) `status: match`, fresh, engine named,
    checked against the netlist from item 1 (schematic netlist for analog,
    synthesized/routed gate-level netlist for digital), **and that same
    report's `power_connectivity.status` not `"mismatch"`**. Those are two
@@ -280,8 +281,16 @@ written to every block.
    `runset_hash_mismatch`. **This does not change** the default: curated decks
    stay the route wherever they recognise every device in the block, and a
    block may not choose the runset to avoid a curated-deck finding. The
-   allowlist is empty as of this change (2026-10-17) until a published runset's
-   digest is reviewed into it, so no runset report grades `met` before then.
+   allowlist (`signoff_runset.PINNED_RUNSETS`, listed by
+   `klt signoff --describe-grader` under `pinned_runsets`) holds the SG13G2 and
+   SG13CMOS5L `*.lvs` runsets as of 2026-10-27; gf180mcu is not yet pinned.
+   **Adding an entry** is a reviewed trust decision, never a copy of a hash
+   from a report: fetch the PDK's runset file from its upstream repo at a
+   named commit, `sha256` it (the same digest `_provenance.sha256_file`
+   records), and add one entry recording `pdk`, `revision`, `repo`, `commit`,
+   `path` and `reviewed_by`. The digest covers the top-level runset file only,
+   so the `commit` is what fixes the `rule_decks/` it includes. A PDK whose
+   runset cannot be fetched or run at a verifiable commit is left unpinned.
 5. **Full corner verification vs a ratified spec**
    - *Analog* — PVT corner-matrix simulation results covering every spec
      row at its bound corners, with per-row pass/fail and the binding
@@ -298,7 +307,10 @@ written to every block.
      plus an explicit per-corner timing-margin metric measured directly in
      that same sweep — a SPICE-measured analog of STA setup/hold margin,
      e.g. a derived arrival-time-vs-required-time delta recorded per PVT
-     point — as the full-custom substitute for the STA requirement above.
+     point — as the full-custom substitute for the STA requirement above (`klt
+     signoff` grades it via a `timing_margin` spec row, see
+     [`docs/cli/signoff.md`](cli/signoff.md), "Full-custom digital needs a
+     measured timing margin").
      The machine-checkable evidence for the RTL-flow artifacts is a `klt
      sta` JSON report run across the declared corner set (`pdk.corners`,
      `docs/cli/sta.md`) and a `klt functional-verification` JSON report
@@ -435,9 +447,14 @@ written to every block.
    tool). For a digital or mixed-signal digital partition this includes
    Fmax, area, and power across the corner set, not just functional
    pass/fail. Unlike every other T1 item, this one names no specific `klt`
-   verb — there is no dedicated aggregation command, and its evidence may be
-   a hand-assembled record (e.g. a committed Markdown characterization
-   report) rather than one `klt` verb's own JSON output. `klt signoff
+   verb for its evidence, which may be a hand-assembled record (e.g. a
+   committed Markdown characterization report) rather than one `klt` verb's
+   own JSON output. `klt signoff --attest 8 --inventory FILE` (issue #4311)
+   produces the generic envelope mechanically — report present, each spec row
+   cited, each cited envelope present and passing its own `--check`, and for a
+   digital partition Fmax/area/power bound per corner — and a met citation
+   discloses whether the tool produced it; a bare hand-written envelope still
+   grades. `klt signoff
    --manifest` grades it via an opt-in **generic evidence envelope**
    (`"kind": "generic"`, issue #1152) — a minimal, hand-rolled JSON wrapper
    asserting `status: "pass"|"fail"` for whatever record backs it. Item 8
@@ -479,7 +496,10 @@ written to every block.
       `klt signoff` renders `lvs_did_not_pass` (not the plain
       `check_failed`) when the ERC supply evidence is complete and
       continuous and only the LVS half is unavailable, naming in
-      `detail.power_delivery` the supplies the ERC run did prove. Produce
+      `detail.power_delivery` the supplies the ERC run did prove. A set
+      citing only the `erc` or only the `lvs` part renders
+      `power_delivery_parts_missing` (not `wrong_kind`), naming the absent
+      part and crediting the supplies a resolved ERC spec proved. Produce
       the ERC supply spec anyway — it is the half that survives an unrelated
       LVS defect, and it is what makes the distinction visible.
       A `klayout-runset` report (item 4's PDK-runset path) can be this LVS
@@ -494,7 +514,10 @@ written to every block.
       4's power/ground verdict having actually run. Concretely: the `klt
       place-and-route` response's `power.pdn` is `true` with a
       `power.tapcell_master` named (`docs/cli/place-and-route.md` → "Power
-      delivery"), every `power.straps[].layer` is covered by the cited
+      delivery") — or, for a library documented tapless (`sg13g2_stdcell`),
+      `power.tapless: true` with the master `null`, which the citation
+      records (a null master without `tapless` is `no_tapcell_master`, not
+      `no_pdn`) — every `power.straps[].layer` is covered by the cited
       `klt erc` spec's own stackup, and that same LVS report's
       `power_connectivity.status` is `"match"` — `"unchecked"` does **not**
       satisfy this item, unlike item 4 itself, where it means "the question

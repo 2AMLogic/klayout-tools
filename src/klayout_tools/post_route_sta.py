@@ -221,6 +221,26 @@ way. A deeper optimization (checkpointing the loaded LEF/DEF once via
 stage's own already-loaded design, so only the liberty deck differs per
 invocation) is tracked as follow-up work, not required for this field's
 initial scope.
+
+Hard macros (issue #2635)
+-------------------------
+
+``request.macros`` is the shared hard-macro declaration -- one shape,
+documented once in :mod:`klayout_tools.macros`, accepted identically by
+``klt synthesize`` and (plus its own placement fields) by ``klt
+place-and-route``. Each entry's ``lef`` is ``read_lef``'d alongside the
+tech/cell LEF before the ``def``/``verilog`` load, which is what makes a
+macro-bearing design analysable here at all: without it OpenROAD refuses
+the load outright with ``[ERROR ORD-2013] instance <inst> LEF master
+<cell> not found`` (live-reproduced, and live-confirmed fixed by the one
+extra ``read_lef``, against OpenROAD 26Q3 on sky130A). Each entry's
+optional ``lib`` -- a **per-corner** map -- is ``read_liberty``'d alongside
+the standard-cell library for whichever corner is being analysed, so the
+macro's real arcs participate in this verb's slack/``fmax``/power numbers
+rather than being blackboxed; a ``lib`` map with no entry for the corner
+being run is a named error, never a silent fallback to another corner's
+timing, which matters most in a ``request.pdk.corners`` sweep. See
+:func:`_macro_liberty_paths`.
 """
 
 from __future__ import annotations
@@ -235,6 +255,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from . import env_provenance
+from . import macros as macro_spec
 from ._openroad_engine import (
     _container_runtime_hint,
     _count_violations,
@@ -650,12 +671,19 @@ def run_sta(
             "multi-corner characterization (see docs/cli/sta.md)"
         )
 
+    # Issue #2635: the shared hard-macro declaration. Shape-validated here,
+    # before any PDK resolution or engine invocation; the corner-dependent
+    # half (which of a macro's per-corner liberties applies) is resolved
+    # per corner inside `_run_corner_session`.
+    macros = _validate_macros(request.get("macros"), request_dir)
+
     (
         clock_port,
         clock_period_ns,
         input_delay_ns,
         output_delay_ns,
     ) = _validate_constraints(request["constraints"])
+    clock_extras = _validate_clock_extras(request["constraints"])
     input_delays, output_delays = _validate_port_delay_maps(
         request["constraints"], clock_port
     )
@@ -759,7 +787,9 @@ def run_sta(
             spef_map=spef_map,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
+            macros=macros,
             propagated_clock=propagated_clock,
+            clock_extras=clock_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             write_sdf=write_sdf,
@@ -923,7 +953,9 @@ def _dispatch_sta(
     spef_map: dict[str, str] | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
+    macros: list[dict[str, Any]],
     propagated_clock: bool,
+    clock_extras: dict[str, Any] | None,
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
     output_dir: str,
@@ -967,7 +999,9 @@ def _dispatch_sta(
             spef_map=spef_map,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
+            macros=macros,
             propagated_clock=propagated_clock,
+            clock_extras=clock_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             write_sdf=write_sdf,
@@ -1000,7 +1034,9 @@ def _dispatch_sta(
         spef_path=spef_path,
         wire_load_model=wire_load_model,
         wire_load_mode=wire_load_mode,
+        macros=macros,
         propagated_clock=propagated_clock,
+        clock_extras=clock_extras,
         power_activity=power_activity,
         clock_uncertainty=clock_uncertainty,
         output_dir=output_dir,
@@ -1054,12 +1090,19 @@ def _dispatch_sta(
         # model.
         "wire_load_model": wire_load_model,
         "wire_load_mode": wire_load_mode,
+        # Additive field (issue #2635): echo of `request.macros`, resolved
+        # to absolute paths -- the identical shape `klt synthesize`'s own
+        # response carries (`klayout_tools.macros.macros_response`), so one
+        # declaration round-trips through both verbs' reports unchanged.
+        # `[]` when the request declared none.
+        "macros": macro_spec.macros_response(macros),
         # Additive field (issue #2739): which clock mode every analyzed
         # corner was timed with -- "ideal" (the default, this command's
         # pre-#2739 behaviour) or "propagated". Present on both response
         # shapes; never infer it from clock_skew_ns, which is a measured
         # metric that is non-zero under ideal timing too.
         "clock_mode": "propagated" if propagated_clock else "ideal",
+        "clock_targets": _clock_targets(clock_port, clock_period_ns, clock_extras),
         "clock_uncertainty": _clock_uncertainty_block(clock_uncertainty),
         "spef_path": report_paths.spef_path,
         "worst_slack_ns": corner_fields["worst_slack_ns"],
@@ -1138,7 +1181,9 @@ def _run_corner_session(
     spef_path: str | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
+    macros: list[dict[str, Any]],
     propagated_clock: bool,
+    clock_extras: dict[str, Any] | None,
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
     output_dir: str,
@@ -1180,6 +1225,13 @@ def _run_corner_session(
       response once (shared across every corner) while nesting only
       ``deck`` per corner (see :func:`_run_multi_corner`).
 
+    ``macros`` (issue #2635) adds one ``read_lef`` per declared hard macro
+    -- which is what makes a macro-bearing ``def``/``verilog`` load at all
+    instead of failing ``[ERROR ORD-2013] instance <inst> LEF master <cell>
+    not found`` -- plus one ``read_liberty`` per macro that declared a
+    liberty for *this* corner (:func:`_macro_liberty_paths`). ``[]`` (the
+    default for every pre-#2635 request) emits neither and leaves the
+    generated script byte-identical.
     ``sdf_stem`` (issue #2886) -- when given (only ever for a ``def``-mode
     request with a ``spef``; :func:`_validate_sdf` enforces both) -- makes
     this session write ``<output_dir>/<sdf_stem>.<corner>.sdf`` right after
@@ -1191,13 +1243,16 @@ def _run_corner_session(
     byte-identical to the pre-#2886 session, with ``sdf: None``.
 
     Raises :class:`PostRouteStaError` for an unresolvable
-    ``cell_library``/``corner_name``/LEF, or an OpenROAD engine failure --
-    identical to this command's pre-#1871 single-corner behaviour.
+    ``cell_library``/``corner_name``/LEF, a macro liberty with no entry for
+    this corner, or an OpenROAD engine failure -- otherwise identical to
+    this command's pre-#1871 single-corner behaviour.
     """
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, corner_name, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info)
+    macro_lefs = [macro["lef"] for macro in macros]
+    macro_liberty_paths = _macro_liberty_paths(macros, corner)
 
     script_path = os.path.join(output_dir, f"sta_{script_tag}.tcl")
     metrics_path = os.path.join(output_dir, f"{script_tag}_metrics.json")
@@ -1227,6 +1282,8 @@ def _run_corner_session(
             spef_net_names=spef_net_names,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            macro_lefs=macro_lefs,
+            macro_liberty_paths=macro_liberty_paths,
             input_delays=input_delays,
             output_delays=output_delays,
             input_transition_ns=input_transition_ns,
@@ -1235,6 +1292,7 @@ def _run_corner_session(
             report_ports=report_ports,
             false_path_from=false_path_from,
             propagated_clock=propagated_clock,
+            clock_extras=clock_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             sdf_path=sdf_path,
@@ -1254,6 +1312,8 @@ def _run_corner_session(
             wire_load_mode=wire_load_mode,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            macro_lefs=macro_lefs,
+            macro_liberty_paths=macro_liberty_paths,
             input_delays=input_delays,
             output_delays=output_delays,
             input_transition_ns=input_transition_ns,
@@ -1262,6 +1322,7 @@ def _run_corner_session(
             report_ports=report_ports,
             false_path_from=false_path_from,
             power_activity=power_activity,
+            clock_extras=clock_extras,
             clock_uncertainty=clock_uncertainty,
         )
     _write_script(script_path, lines)
@@ -1397,7 +1458,9 @@ def _run_multi_corner(
     spef_map: dict[str, str] | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
+    macros: list[dict[str, Any]],
     propagated_clock: bool,
+    clock_extras: dict[str, Any] | None,
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
     output_dir: str,
@@ -1480,7 +1543,9 @@ def _run_multi_corner(
             spef_path=pair_spef,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
+            macros=macros,
             propagated_clock=propagated_clock,
+            clock_extras=clock_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             output_dir=output_dir,
@@ -1549,6 +1614,12 @@ def _run_multi_corner(
         "geometry_source": geometry_source,
         "wire_load_model": wire_load_model,
         "wire_load_mode": wire_load_mode,
+        # Additive field (issue #2635): hoisted to the top level like every
+        # other request-level field that cannot vary across corners -- the
+        # *declaration* is shared, only which of each macro's per-corner
+        # liberties was loaded varies, and that is already determined by
+        # each corner's own name plus this one `macros` block.
+        "macros": macro_spec.macros_response(macros),
         # Additive field (issue #2739): one clock mode for the whole
         # characterization -- every per-corner session runs the same
         # request-level `constraints.propagated_clock`, so this is hoisted
@@ -1556,6 +1627,7 @@ def _run_multi_corner(
         # entry carries that session's own `clock_propagation` evidence
         # block (the network latencies it reports *do* vary per corner).
         "clock_mode": "propagated" if propagated_clock else "ideal",
+        "clock_targets": _clock_targets(clock_port, clock_period_ns, clock_extras),
         "clock_uncertainty": _clock_uncertainty_block(clock_uncertainty),
         "spef_path": report_paths.spef_path,
         "provenance": provenance,
@@ -1835,8 +1907,13 @@ def _validate_constraints(
     validated and emitted here too, never inherited."""
     if not isinstance(constraints, dict):
         raise PostRouteStaError("request.constraints must be a JSON object")
-    clock_port = constraints.get("clock_port")
-    clock_period_ns = constraints.get("clock_period_ns")
+    clocks = _validate_clocks_list(constraints)
+    if clocks:
+        clock_port = clocks[0]["port"]
+        clock_period_ns = clocks[0]["period_ns"]
+    else:
+        clock_port = constraints.get("clock_port")
+        clock_period_ns = constraints.get("clock_period_ns")
     if not (isinstance(clock_port, str) and clock_port):
         raise PostRouteStaError("request.constraints.clock_port is required")
     if (
@@ -1850,6 +1927,130 @@ def _validate_constraints(
     input_delay_ns = _validate_io_delay(constraints.get("input_delay_ns"), "input")
     output_delay_ns = _validate_io_delay(constraints.get("output_delay_ns"), "output")
     return clock_port, float(clock_period_ns), input_delay_ns, output_delay_ns
+
+
+def _validate_clocks_list(constraints: dict[str, Any]) -> list[dict[str, Any]]:
+    """``constraints.clocks`` (issue #4241) as ``[{port, period_ns}]``, empty
+    when omitted/``null``. The multi-clock alternative to the
+    ``clock_port``/``clock_period_ns`` shorthand -- the two are mutually
+    exclusive, and the first entry is the primary clock (it keeps every role
+    ``clock_port`` has: the I/O-delay ``-clock``, ``report_ports`` /
+    ``false_path_from`` anchors and the input-delay exclusion). Mirrors
+    ``synthesize.py``'s ``constraints.clocks`` (issue #2883) rules."""
+    raw = constraints.get("clocks")
+    if raw is None:
+        return []
+    if constraints.get("clock_port") is not None or (
+        constraints.get("clock_period_ns") is not None
+    ):
+        raise PostRouteStaError(
+            "request.constraints.clocks cannot be combined with "
+            "clock_port/clock_period_ns -- give either the single-clock "
+            "shorthand or the clocks list"
+        )
+    if not isinstance(raw, list) or not raw:
+        raise PostRouteStaError(
+            "request.constraints.clocks must be a non-empty array of "
+            "{port, period_ns} objects"
+        )
+    clocks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        clock = _validate_clock_entry(entry, f"request.constraints.clocks[{index}]")
+        if clock["port"] in seen:
+            raise PostRouteStaError(
+                f"request.constraints.clocks[{index}].port "
+                f"'{clock['port']}' is listed more than once"
+            )
+        seen.add(clock["port"])
+        clocks.append(clock)
+    return clocks
+
+
+def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
+    """One ``constraints.clocks`` entry as ``{port, period_ns}`` (issue #4241)."""
+    if not isinstance(entry, dict):
+        raise PostRouteStaError(f"{where} must be a {{port, period_ns}} object")
+    unknown = sorted(set(entry) - {"port", "period_ns"})
+    if unknown:
+        raise PostRouteStaError(
+            f"{where} has unknown key(s): {', '.join(map(str, unknown))} "
+            "(allowed: port, period_ns)"
+        )
+    port = entry.get("port")
+    if not isinstance(port, str) or not port.strip():
+        raise PostRouteStaError(f"{where}.port must be a non-empty string")
+    period = entry.get("period_ns")
+    if isinstance(period, bool) or not isinstance(period, (int, float)):
+        raise PostRouteStaError(f"{where}.period_ns must be a positive number")
+    if period <= 0:
+        raise PostRouteStaError(f"{where}.period_ns must be greater than zero")
+    return {"port": port, "period_ns": float(period)}
+
+
+def _validate_clock_extras(constraints: dict[str, Any]) -> dict[str, Any] | None:
+    """The multi-clock additions beyond the primary clock (issue #4241):
+    ``{"clocks": [{port, period_ns}, ...secondary], "groups": [[port, ...]]}``,
+    or ``None`` when the request is the plain single-clock shorthand with no
+    ``clock_groups`` -- which keeps the generated Tcl byte-identical to the
+    pre-#4241 output. ``constraints.clock_groups`` names declared clocks only
+    and is emitted as ``set_clock_groups -asynchronous``."""
+    clocks = _validate_clocks_list(constraints)
+    groups_raw = constraints.get("clock_groups")
+    groups: list[list[str]] = []
+    if groups_raw is not None:
+        declared = (
+            {c["port"] for c in clocks} if clocks else {constraints.get("clock_port")}
+        )
+        groups = _validate_clock_groups(groups_raw, declared)
+    if len(clocks) <= 1 and not groups:
+        return None
+    return {"clocks": clocks[1:], "groups": groups}
+
+
+def _validate_clock_groups(groups_raw: Any, declared: set[Any]) -> list[list[str]]:
+    """``constraints.clock_groups`` (issue #4241) as de-duplicated port lists,
+    each naming only ``declared`` clocks; at least two groups are required."""
+    if not isinstance(groups_raw, list) or not groups_raw:
+        raise PostRouteStaError(
+            "request.constraints.clock_groups must be a non-empty array "
+            "of non-empty port-name arrays"
+        )
+    groups: list[list[str]] = []
+    for index, group in enumerate(groups_raw):
+        where = f"request.constraints.clock_groups[{index}]"
+        if not isinstance(group, list) or not group:
+            raise PostRouteStaError(f"{where} must be a non-empty array")
+        ports: list[str] = []
+        for port in group:
+            if not isinstance(port, str) or not port:
+                raise PostRouteStaError(f"{where} entries must be port names")
+            if port not in declared:
+                raise PostRouteStaError(
+                    f"{where} names '{port}', which is not a declared clock"
+                )
+            if port not in ports:
+                ports.append(port)
+        groups.append(ports)
+    if len(groups) < 2:
+        raise PostRouteStaError(
+            "request.constraints.clock_groups needs at least two groups "
+            "for an asynchronous relationship"
+        )
+    return groups
+
+
+def _clock_targets(
+    clock_port: str, clock_period_ns: float, clock_extras: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The response's additive ``clock_targets`` echo (issue #4241): every
+    clock applied (primary first), and the asynchronous groups."""
+    clocks = [{"port": clock_port, "period_ns": clock_period_ns}]
+    groups: list[list[str]] = []
+    if clock_extras:
+        clocks += clock_extras["clocks"]
+        groups = clock_extras["groups"]
+    return {"clocks": clocks, "clock_groups": groups}
 
 
 def _validate_io_delay(value: Any, which: str) -> float | None:
@@ -2687,6 +2888,45 @@ def _validate_wire_load_estimate(
     return wire_load_model, wire_load_mode
 
 
+def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
+    """Validate the optional ``request.macros`` array (issue #2635) -- the
+    same shared hard-macro declaration ``klt synthesize`` accepts, field for
+    field, documented once in :mod:`klayout_tools.macros`.
+
+    Returns ``[]`` when the field is omitted, so every request written
+    before this field existed analyses exactly as it did. A thin wrapper
+    rather than a second validator: only the exception class differs per
+    verb.
+    """
+    return macro_spec.validate_macros(macros, request_dir, error_cls=PostRouteStaError)
+
+
+def _macro_liberty_paths(macros: list[dict[str, Any]], corner: str) -> list[str]:
+    """The macro liberties to ``read_liberty`` alongside the standard-cell
+    library for the corner actually being analysed (issue #2635).
+
+    A macro that declared no ``lib`` at all contributes nothing: its LEF is
+    what fixes ``ORD-2013``, and OpenSTA then times the instance as an
+    untimed blackbox (``[WARNING STA-0198] module <cell> not found.
+    Creating black box for <inst>``) -- a legitimate, explicit choice for a
+    caller doing a geometry-only run. A macro that *did* declare a ``lib``
+    map with no entry for this corner is a hard error naming the corner and
+    the keys that are available
+    (:func:`~klayout_tools.macros.macro_lib_for_corner`), never a silent
+    fallback to some other corner's timing -- which matters most in a
+    ``request.pdk.corners`` multi-corner run, where the right answer for
+    one corner is the wrong answer for the next.
+    """
+    paths: list[str] = []
+    for macro in macros:
+        lib_path = macro_spec.macro_lib_for_corner(
+            macro, corner, error_cls=PostRouteStaError
+        )
+        if lib_path is not None:
+            paths.append(lib_path)
+    return paths
+
+
 def _resolve_liberty(
     cell_library: str,
     requested_corner: str | None,
@@ -2778,6 +3018,25 @@ def _propagated_clock_lines(clock_port: str) -> list[str]:
     analysis. The clock-port spelling matches :func:`_clock_lines`'s own
     (plain interpolation -- the same string ``create_clock -name`` used)."""
     return [f"set_propagated_clock [get_clocks {clock_port}]"]
+
+
+def _extra_clock_lines(clock_extras: dict[str, Any] | None) -> list[str]:
+    """Issue #4241: one ``create_clock`` per secondary clock, then any
+    ``set_clock_groups -asynchronous``. Empty for a single-clock request."""
+    if not clock_extras:
+        return []
+    lines = [
+        f"create_clock -name {c['port']} -period {c['period_ns']} "
+        f"[get_ports {c['port']}]"
+        for c in clock_extras["clocks"]
+    ]
+    groups = clock_extras["groups"]
+    if groups:
+        lines.append(
+            "set_clock_groups -asynchronous "
+            + " ".join(f"-group [get_clocks {{{' '.join(g)}}}]" for g in groups)
+        )
+    return lines
 
 
 def _clock_latency_lines() -> list[str]:
@@ -3523,6 +3782,8 @@ def _sta_script_lines(
     spef_net_names: list[str] | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    macro_lefs: list[str] | None = None,
+    macro_liberty_paths: list[str] | None = None,
     input_delays: dict[str, dict[str, float]] | None = None,
     output_delays: dict[str, dict[str, float]] | None = None,
     input_transition_ns: float | None = None,
@@ -3531,6 +3792,7 @@ def _sta_script_lines(
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
     propagated_clock: bool = False,
+    clock_extras: dict[str, Any] | None = None,
     sdf_path: str | None = None,
     power_activity: dict[str, float] | None = None,
     clock_uncertainty: dict[str, float | None] | None = None,
@@ -3544,6 +3806,16 @@ def _sta_script_lines(
     design as the analysis target itself, the one and only geometry this
     session ever times), then ``read_liberty``/``create_clock`` and,
     optionally, a caller-supplied ``spef``.
+
+    ``macro_lefs``/``macro_liberty_paths`` (issue #2635,
+    ``request.macros``) are emitted **before** ``read_def`` and immediately
+    after the standard-cell ``read_liberty`` respectively. The LEF ordering
+    is load-bearing: ``read_def``'s own ``COMPONENTS`` records are resolved
+    against the already-loaded masters, so a macro LEF read afterwards is
+    too late -- that is precisely the ``[ERROR ORD-2013] instance <inst>
+    LEF master <cell> not found`` this field closes (live-reproduced against
+    OpenROAD 26Q3 on sky130A, and live-confirmed fixed by this one extra
+    ``read_lef``).
 
     When a ``spef`` is given, ``read_spef`` is wrapped in the annotation
     *evidence* scaffolding issue #1624 added: the pre-existing name-
@@ -3574,12 +3846,20 @@ def _sta_script_lines(
     lines = [
         f"read_lef {tech_lef}",
         f"read_lef {cell_lef}",
+    ]
+    lines += [f"read_lef {lef}" for lef in macro_lefs or []]
+    lines += [
         f"read_def {def_path}",
         f"read_liberty {liberty_path}",
     ]
+    lines += [f"read_liberty {lib}" for lib in macro_liberty_paths or []]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _extra_clock_lines(clock_extras)
     if propagated_clock:
         lines += _propagated_clock_lines(clock_port)
+        if clock_extras:
+            for extra in clock_extras["clocks"]:
+                lines += _propagated_clock_lines(extra["port"])
     lines += _clock_uncertainty_lines(clock_port, clock_uncertainty)
     lines += _request_io_delay_lines(
         clock_port,
@@ -3640,6 +3920,8 @@ def _sta_netlist_script_lines(
     wire_load_mode: str | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    macro_lefs: list[str] | None = None,
+    macro_liberty_paths: list[str] | None = None,
     input_delays: dict[str, dict[str, float]] | None = None,
     output_delays: dict[str, dict[str, float]] | None = None,
     input_transition_ns: float | None = None,
@@ -3648,6 +3930,7 @@ def _sta_netlist_script_lines(
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
     power_activity: dict[str, float] | None = None,
+    clock_extras: dict[str, Any] | None = None,
     clock_uncertainty: dict[str, float | None] | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
@@ -3684,14 +3967,23 @@ def _sta_netlist_script_lines(
     shapes throughout, differing only in ``geometry_source``/the estimate
     provenance fields.
     """
-    lines = [
-        f"read_liberty {liberty_path}",
+    lines = [f"read_liberty {liberty_path}"]
+    # Issue #2635 (`request.macros`): each macro's corner-matching liberty
+    # right after the standard-cell one, each macro's LEF right after the
+    # cell LEF -- both necessarily before `read_verilog`/`link_design`,
+    # which is where an undeclared macro surfaces as `ORD-2013`.
+    lines += [f"read_liberty {lib}" for lib in macro_liberty_paths or []]
+    lines += [
         f"read_lef {tech_lef}",
         f"read_lef {cell_lef}",
+    ]
+    lines += [f"read_lef {lef}" for lef in macro_lefs or []]
+    lines += [
         f"read_verilog {verilog_path}",
         f"link_design {hdl_toplevel}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _extra_clock_lines(clock_extras)
     lines += _clock_uncertainty_lines(clock_port, clock_uncertainty)
     lines += _request_io_delay_lines(
         clock_port,
@@ -3846,6 +4138,16 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
     hint = _container_runtime_hint(completed)
     if hint is not None:
         message = f"{message} -- {hint}"
+    # Issue #2635: `ORD-2013` names the instance and the LEF master but
+    # nothing about which request field would have supplied it -- the one
+    # failure mode a caller with a hard macro and no `request.macros` entry
+    # hits first. Appended as a further `--` clause, the same
+    # recognized-hint structure `_container_runtime_hint` above uses.
+    macro_hint = macro_spec.missing_lef_master_hint(
+        (completed.stdout or "") + "\n" + (completed.stderr or "")
+    )
+    if macro_hint is not None:
+        message = f"{message} -- {macro_hint}"
     return message
 
 

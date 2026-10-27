@@ -201,6 +201,9 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `klayout_tools.decks.sky130.EXTRACTION_DECK.nwell`; no curated DRC
         # rule checks this layer, but it is real and extraction already
         # trusts it to split nfet/pfet active regions (see `extract.py`).
+        "diode_mark": (81, 23),  # areaid.diode -- decks/sky130.py _DIODE_MARK; the
+        # recognition mark `EXTRACTION_DECK.diodes` keys off (issue #4300).
+        "hvi": (75, 20),  # hvi.drawing -- selects the *_11v0 diode flavours.
         "bjt_mark": (82, 44),  # pnp.drawing -- no curated *DRC* rule checks
         # this layer (see decks/sky130.py's "Negative finding" docstring
         # note), but `klayout_tools.decks.sky130.EXTRACTION_DECK.bipolars`

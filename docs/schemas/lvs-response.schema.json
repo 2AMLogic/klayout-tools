@@ -31,13 +31,27 @@
     "reference_top": {"type": "string", "description": "Reference side's resolved top circuit name."},
     "reference_conversion": {
       "type": "object",
-      "description": "Present only for reference.form 'subckt-call'.",
-      "required": ["form", "deck", "device_map"],
-      "properties": {
-        "form": {"const": "subckt-call"},
-        "deck": {"type": ["string", "null"]},
-        "device_map": {"type": ["object", "null"]}
-      },
+      "description": "Present only for reference.form 'subckt-call' or 'gate-level-verilog'.",
+      "oneOf": [
+        {
+          "required": ["form", "deck", "device_map"],
+          "properties": {
+            "form": {"const": "subckt-call"},
+            "deck": {"type": ["string", "null"]},
+            "device_map": {"type": ["object", "null"]}
+          }
+        },
+        {
+          "required": ["form", "library", "pdk", "pdk_root", "pin_order_files"],
+          "properties": {
+            "form": {"const": "gate-level-verilog"},
+            "library": {"type": ["string", "array", "null"], "items": {"type": "string"}},
+            "pdk": {"type": ["string", "null"]},
+            "pdk_root": {"type": ["string", "null"]},
+            "pin_order_files": {"type": ["array", "null"], "items": {"type": "string"}}
+          }
+        }
+      ],
       "additionalProperties": true
     },
     "parameter_tolerance": {"type": ["number", "null"]},
@@ -233,7 +247,7 @@
             "type": "object",
             "required": ["library", "path", "cells"],
             "properties": {
-              "library": {"type": ["string", "null"]},
+              "library": {"type": ["string", "array", "null"], "items": {"type": "string"}},
               "path": {"$ref": "#/$defs/path_value"},
               "cells": {"type": "integer", "minimum": 0}
             },
@@ -271,7 +285,7 @@
                 "type": "object",
                 "required": ["library", "masters", "master_count", "corroborated", "power_pins"],
                 "properties": {
-                  "library": {"type": ["string", "null"]},
+                  "library": {"type": ["string", "array", "null"], "items": {"type": "string"}},
                   "masters": {"type": "array", "items": {"type": "string"}},
                   "master_count": {"type": "integer", "minimum": 0},
                   "corroborated": {"type": "boolean"},
@@ -411,7 +425,7 @@
       "properties": {
         "category": {
           "type": "string",
-          "description": "Stable category id. Documented values: net.unmatched, net.merged, net.split, net.supply_fragmented, device.unmatched, device.class, device.class_arity, device.class_family_unsatisfiable, device.bulk_reconciled, device.finfet_bulk_tied, device.placeholder_value, device.property, device.parameter_tolerated, device.parameter_excluded, device.geometry_not_compared, device.body_unverified, device.combine_incomplete, device.combine_parameter_corrected, pin.unmatched, pin.count, pin.declared_short, topology, topology.flattened, topology.power_only_pruned, topology.reference_port_alias_joined, topology.top_level_pins_anchored, hints.rejected, hints.short_nets_applied, combine_devices_per_circuit.unmatched, compare.timeout. Not an enum: new categories are additive."
+          "description": "Stable category id. Documented values: net.unmatched, net.merged, net.split, net.supply_fragmented, device.unmatched, device.class, device.class_arity, device.class_family_unsatisfiable, device.bulk_reconciled, device.finfet_bulk_tied, device.placeholder_value, device.property, device.parameter_tolerated, device.parameter_excluded, device.geometry_not_compared, device.body_unverified, device.combine_incomplete, device.combine_parameter_corrected, pin.unmatched, pin.count, pin.declared_short, topology, topology.flattened, topology.power_only_pruned, topology.dangling_output_ambiguous, topology.reference_port_alias_joined, topology.top_level_pins_anchored, hints.rejected, hints.short_nets_applied, combine_devices_per_circuit.unmatched, compare.timeout. Not an enum: new categories are additive."
         },
         "severity": {"enum": ["error", "warning"]},
         "description": {"type": "string"},
@@ -440,7 +454,7 @@
         },
         "details": {
           "type": ["object", "null"],
-          "description": "Category-specific data (e.g. device.class_arity terminals, device.bulk_reconciled, netgen {raw}, net.supply_fragmented {supply, fragment_count}, topology.top_level_pins_anchored {pins, pin_count, pins_truncated}). Shape varies by category and is additive.",
+          "description": "Category-specific data (e.g. device.class_arity terminals, device.bulk_reconciled, netgen {raw}, net.supply_fragmented {supply, fragment_count}, topology.top_level_pins_anchored {pins, pin_count, pins_truncated}, topology.dangling_output_ambiguous {cell_type, instance_count, layout_instances, reference_instances} or {net_event_count}). Shape varies by category and is additive.",
           "additionalProperties": true
         },
         "circuit": {"$ref": "#/$defs/name_pair"},
