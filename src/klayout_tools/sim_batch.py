@@ -4037,8 +4037,13 @@ def _annotate_unrecovered_preflight_reject(
     87``. Say what the exit means and, when the post-run runner identity
     shows a major.minor mismatch, classify the failure as a version mismatch
     (``runner_code`` :data:`BATCH_RUNNER_MISMATCH_CODE` plus both klt
-    identities). A no-op for any other exit code."""
-    if _status_exit_code(status) != _BATCH_PREFLIGHT_REJECT_EXIT:
+    identities). Any other non-zero exit code gets the generic
+    :func:`_annotate_unrecovered_failure` wording (issue #4217)."""
+    exit_code = _status_exit_code(status)
+    if exit_code is None or exit_code == 0:
+        return
+    if exit_code != _BATCH_PREFLIGHT_REJECT_EXIT:
+        _annotate_unrecovered_failure(corners, exit_code)
         return
     note = (
         f"exit {_BATCH_PREFLIGHT_REJECT_EXIT} is the runner preflight reject "
@@ -4061,6 +4066,27 @@ def _annotate_unrecovered_preflight_reject(
                 diagnostic["runner_code"] = BATCH_RUNNER_MISMATCH_CODE
                 diagnostic["runner_klt_version"] = identity["runner_klt_version"]
                 diagnostic["client_klt_version"] = identity["client_klt_version"]
+
+
+def _annotate_unrecovered_failure(
+    corners: list[dict[str, Any]], exit_code: int
+) -> None:
+    """Issue #4217: a job that exited non-zero (other than the preflight
+    reject) with nothing recovered -- no ``report.json``, no klt envelope in
+    ``stderr.log`` -- would otherwise read as the bare ``job command exited
+    N``. Name the exit code, say what did not come back, and point at the
+    places the cause can still be found. Additive: only the
+    ``batch_job_failed`` message is extended."""
+    note = (
+        f"the runner exited {exit_code} and no report.json, stderr.log "
+        "envelope or engine log came back; read harness.log under the job's "
+        "S3 prefix, or bisect the request (fewer corners/measurements, one "
+        "feature at a time) to find the cause"
+    )
+    for corner in corners:
+        for diagnostic in corner.get("diagnostics") or []:
+            if diagnostic.get("code") == "batch_job_failed":
+                diagnostic["message"] = f"{diagnostic['message']} [{note}]"
 
 
 def _poll_timeout_corners(

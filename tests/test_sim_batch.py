@@ -8028,14 +8028,36 @@ def test_unrecovered_exit_87_with_unknown_runner_is_named_not_classified(
     assert "runner_code" not in diagnostic
 
 
-def test_unrecovered_non_preflight_exit_is_left_unannotated(tmp_path, monkeypatch):
+def test_unrecovered_non_preflight_exit_is_named(tmp_path, monkeypatch):
+    # Issue #4217: exit 2 with nothing collected used to read as a bare
+    # "job command exited 2".
     runner = _FakeRunner()
     runner.default = fake_completed(
-        _status("failed", exit_code="1", detail="job command exited 1")
+        _status("failed", exit_code="2", detail="job command exited 2")
     )
     runner.outputs = {"runner_identity.json": _identity("0.7.0")}
     corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner)
 
     diagnostic = corners[0]["diagnostics"][0]
+    assert diagnostic["code"] == "batch_job_failed"
+    assert "the runner exited 2" in diagnostic["message"]
+    assert "harness.log" in diagnostic["message"]
+    assert "bisect the request" in diagnostic["message"]
     assert "preflight reject" not in diagnostic["message"]
     assert "runner_code" not in diagnostic
+
+
+def test_recovered_envelope_is_not_given_the_unrecovered_note(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="2", detail="job command exited 2")
+    )
+    runner.outputs = {
+        "runner_identity.json": _identity("0.7.0"),
+        "report.json": _envelope("bad request", code="bad_request"),
+    }
+    corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner)
+
+    messages = [d["message"] for d in corners[0]["diagnostics"]]
+    assert messages
+    assert all("no report.json" not in m for m in messages)
