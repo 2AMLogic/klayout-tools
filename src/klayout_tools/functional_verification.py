@@ -1450,6 +1450,34 @@ def _resolve_parameters(parameters: Any) -> dict[str, Any]:
     return parameters
 
 
+def _resolve_env(env: Any) -> dict[str, str]:
+    """Validate the optional ``request.env`` object and return it unchanged
+    (or ``{}`` when omitted).
+
+    Forwarded to ``Runner.test(extra_env=...)`` so the cocotb test process
+    sees each entry in ``os.environ`` (issue #4338). Echoed verbatim as
+    ``environment.env``, so it must never carry credentials.
+    """
+    if env is None:
+        return {}
+    if not isinstance(env, dict):
+        raise FunctionalVerificationError(
+            "request.env must be a JSON object (string key -> string value)"
+        )
+
+    for key, value in env.items():
+        if not isinstance(key, str) or not key or "=" in key:
+            raise FunctionalVerificationError(
+                "request.env keys must be non-empty strings without '='"
+            )
+        if not isinstance(value, str):
+            raise FunctionalVerificationError(
+                f"request.env[{key!r}] must be a string -- got a {type(value).__name__}"
+            )
+
+    return env
+
+
 # ---------------------------------------------------------------------------
 # `--mutations`: the `<proposals>` document (spike section 3b)
 # ---------------------------------------------------------------------------
@@ -1737,6 +1765,7 @@ def _build_and_test_variant(
     includes: list[str],
     timescale: tuple[str, str],
     parameters: dict[str, Any],
+    env: dict[str, str],
     build_log: str,
     module: str,
     module_dir: str,
@@ -1789,6 +1818,7 @@ def _build_and_test_variant(
         results_xml=results_xml,
         timescale=timescale,
         parameters=parameters,
+        extra_env=env,
         log_path=test_log,
     )
 
@@ -2314,6 +2344,7 @@ def _run_test(
     log_path: str,
     waves: bool = False,
     plusargs: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> None:
     """``Runner.test()``, with the simulator's own exit code deliberately
     discarded (spike section 4): a :class:`SystemExit` here means only "the
@@ -2343,6 +2374,9 @@ def _run_test(
     passed to both the build and test steps, matching cocotb's own
     ``Runner`` contract).
 
+    ``extra_env`` (``request.env``, issue #4338), when non-empty, is forwarded
+    to ``Runner.test(extra_env=...)`` -- the test step only, never the build.
+
     ``waves`` (``options.trace``, issue #1845) is forwarded to cocotb's own
     ``Runner.test(waves=...)``, which is what actually triggers the
     simulator to dump a waveform this run -- see :func:`_find_trace_artifact`
@@ -2366,6 +2400,7 @@ def _run_test(
             log_file=log_path,
             waves=waves,
             plusargs=plusargs or [],
+            extra_env=extra_env or {},
         )
     except (SystemExit, subprocess.CalledProcessError):
         # Expected on a failing regression -- the results file is the truth.
@@ -3237,6 +3272,12 @@ def run_functional_verification(
             "generated wrapper as the root and scans a single transcript)"
         )
     parameters = _resolve_parameters(request_doc.get("parameters"))
+    env = _resolve_env(request_doc.get("env"))
+    if verilog_tb is not None and env:
+        raise FunctionalVerificationError(
+            "request.env cannot be combined with testbench.verilog_top -- "
+            "the Verilog-bench path has no cocotb test process to apply it to"
+        )
     source_defines = _resolve_source_defines(
         request_doc.get("options"), sources, request_dir
     )
@@ -3570,6 +3611,7 @@ def run_functional_verification(
             test_dir=output_dir,
             timescale=timescale,
             parameters=parameters,
+            extra_env=env,
             waves=trace_requested,
         )
     results_xml = run_specs[0]["results_xml"]
@@ -3655,6 +3697,8 @@ def run_functional_verification(
             # request.sources entry as resolved to an absolute path; `{}`
             # when absent.
             "source_defines": source_defines,
+            # Additive (issue #4338): `request.env` as given; `{}` when absent.
+            "env": env,
             # Additive (issue #2998): `null` unless the request set
             # `options.initial_state`. `seeds` echoes the effective seeds
             # (empty for mode "x"); `runs` has one entry per seed.
@@ -3878,6 +3922,7 @@ def run_functional_verification_with_mutations(
         request_doc["testbench"], request_dir
     )
     parameters = _resolve_parameters(request_doc.get("parameters"))
+    env = _resolve_env(request_doc.get("env"))
     build_args = list(user_build_args)
     source_defines = _resolve_source_defines(
         request_doc.get("options"), sources, request_dir
@@ -3976,6 +4021,7 @@ def run_functional_verification_with_mutations(
                 includes=[*includes, *scoped_include_dirs],
                 timescale=timescale,
                 parameters=parameters,
+                env=env,
                 build_log=build_log,
                 module=module,
                 module_dir=module_dir,
