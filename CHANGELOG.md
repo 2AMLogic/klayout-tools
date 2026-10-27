@@ -20,6 +20,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   gains an additive `power.connects_overridden` boolean. `klt drc` violations
   from `tap_distance` rules carry an additive `note` that the rule is
   tap-placement dependent.
+
+- **`klt signoff` item 11: a partial `erc`/`lvs` set renders
+  `power_delivery_parts_missing`** (issue #4193, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)). A cited set lacking the `erc`
+  and/or `lvs` part used to render `unmet`/`wrong_kind` with an empty detail;
+  it now renders `unmet`/`power_delivery_parts_missing` with
+  `detail.power_delivery.{missing_parts,cited_parts}` and, when the ERC spec
+  resolved, `supply_nets`. Value change on an existing field for that case
+  only; never `met`.
 - **`klt lvs` `subckt-call` converts sky130 junction diodes** (issue #4319,
   documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)): `X… sky130_fd_pr__diode_*
   area=… perim=…` now converts to a `D` card in the deck's diode class instead
