@@ -470,6 +470,11 @@ each field's exact layer numbers and provenance are documented in the deck
 module's own docstring, verified against this repo's real corpus fixtures
 (`tests/corpus/sky130/`, `tests/corpus/gf180mcu/`).
 
+A body is "resolved" only to a **named** net: a drawn, contacted tap whose
+supply conductor carries no name label still leaves the body on the
+synthesized/anonymous net, indistinguishable in the netlist from a missing
+tap. Label the tap-connected conductor (e.g. `VSS`/`VDD`) to resolve it.
+
 **NMOS/PMOS body resolution**, both documented in the deck modules:
 
 - **NMOS body.** Neither curated deck draws a separate substrate/pwell

@@ -3684,6 +3684,40 @@ def test_body_unverified_counts_flags_pmos_body_reaching_no_net_at_all():
     }
 
 
+def test_body_unverified_message_names_unlabeled_tap_cause():
+    """Issue #4361: the warning must not claim tap geometry is missing when
+    the tap-connected net is merely unnamed (the netlist cannot tell the two
+    apart), and must say labeling the conductor resolves it."""
+    from klayout_tools import lvs_mismatch
+
+    deck = _gf180mcu_like_deck()
+    _netlist, circuit = _one_device_circuit(body_net_name=None)
+
+    (entry,) = lvs_mismatch._body_net_warnings(circuit, deck)
+    message = entry["description"]
+    assert "no drawn or derived well-tap geometry exists" in message
+    assert "carries no name label" in message
+    assert "label the tap-connected conductor" in message
+    assert entry["severity"] == "warning"
+
+
+def test_body_unverified_message_nmos_names_both_causes():
+    from klayout_tools import lvs_mismatch
+
+    deck = _gf180mcu_like_deck()
+    _netlist, circuit = _one_device_circuit(body_net_name="vsubs")
+    device = next(iter(circuit.each_device()))
+    # reuse the pfet-shaped stub as the deck's nfet class
+    deck.nfet_class = device.device_class().name
+    deck.pfet_class = "unused"
+
+    (entry,) = lvs_mismatch._body_net_warnings(circuit, deck)
+    message = entry["description"]
+    assert "no substrate-tap geometry is drawn" in message
+    assert "carries no name label" in message
+    assert "label the tap-connected conductor" in message
+
+
 def _write_hier_inverter_gds(path: Path) -> str:
     """A minimal sky130 inverter whose gate ``A`` label lives inside an
     instanced sub-cell (issue #291), so flat extraction names the gate net
