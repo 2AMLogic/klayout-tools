@@ -4,21 +4,21 @@ from __future__ import annotations
 
 from klayout_tools.extract_report import (
     _case_collision_warnings,
-    _detect_case_colliding_net_names,
+    detect_case_colliding_net_names,
 )
 from klayout_tools.lvs_mismatch import _annotate_case_collision_merges
 
 
 def test_detects_case_only_difference():
-    assert _detect_case_colliding_net_names(["pb", "PB", "nz", "x"]) == [["PB", "pb"]]
+    assert detect_case_colliding_net_names(["pb", "PB", "nz", "x"]) == [["PB", "pb"]]
 
 
 def test_three_way_collision_is_one_group():
-    assert _detect_case_colliding_net_names(["nz", "NZ", "Nz"]) == [["NZ", "Nz", "nz"]]
+    assert detect_case_colliding_net_names(["nz", "NZ", "Nz"]) == [["NZ", "Nz", "nz"]]
 
 
 def test_exact_duplicates_and_clean_names_not_flagged():
-    assert _detect_case_colliding_net_names(["pb", "pb", "a", "b"]) == []
+    assert detect_case_colliding_net_names(["pb", "pb", "a", "b"]) == []
 
 
 def test_warning_names_labels_and_hierarchical_cells():

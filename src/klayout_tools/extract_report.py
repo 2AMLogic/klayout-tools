@@ -542,7 +542,7 @@ def _detect_merged_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]
     return merged
 
 
-def _detect_case_colliding_net_names(names: Iterable[str]) -> list[list[str]]:
+def detect_case_colliding_net_names(names: Iterable[str]) -> list[list[str]]:
     """Group net names that are equal after case-folding but differ as written.
 
     ``klt lvs`` reads the written SPICE back case-insensitively, so two
@@ -567,7 +567,7 @@ def _case_collision_warnings(nets: list[dict[str, Any]]) -> list[str]:
         "--hierarchical-cells with the placed-cell names "
         "(`<block id>__<cell name>`) to split the hierarchy -- see "
         "docs/cli/extract.md's 'Hierarchical output' section."
-        for group in _detect_case_colliding_net_names(n["name"] for n in nets)
+        for group in detect_case_colliding_net_names(n["name"] for n in nets)
     ]
 
 

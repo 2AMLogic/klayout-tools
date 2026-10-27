@@ -2385,10 +2385,10 @@ def _annotate_case_collision_merges(
     no hint of the cause. Appends a note to each such entry's ``description``;
     ``status``, ``severity`` and counts are untouched.
     """
-    from .extract_report import _detect_case_colliding_net_names
+    from .extract_report import detect_case_colliding_net_names
 
     groups = (
-        _detect_case_colliding_net_names(
+        detect_case_colliding_net_names(
             n.expanded_name() for n in layout_circuit.each_net()
         )
         if inline
