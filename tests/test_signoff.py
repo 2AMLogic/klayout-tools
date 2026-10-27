@@ -16417,9 +16417,9 @@ def test_attest_argument_conflicts_are_refused(argv, capsys):
 
 
 def test_attest_rejects_an_item_it_does_not_attest_as_a_usage_error():
-    """Item 2 is out of scope (its binding is the layout stream itself)."""
+    """Only items 1, 2, 9 and 10 are attestable (item 2 via `--input`)."""
     with pytest.raises(SystemExit) as excinfo:
-        main(["signoff", "--attest", "2", "--inventory", "x.json"])
+        main(["signoff", "--attest", "3", "--inventory", "x.json"])
     assert excinfo.value.code == 2
 
 
@@ -16895,6 +16895,60 @@ def test_item5_declared_gap_row_is_reported_apart_and_never_met(tmp_path):
     assert item["detail"]["declared_gaps"] == [
         {"id": "zin", "gap": "multi-solve reduction"}
     ]
+
+
+def test_item5_all_gap_rows_without_evidence_is_partial_coverage_never_met():
+    rows = [
+        {"id": "A", "gap": "no sim yet"},
+        {"id": "B", "gap": "no sim yet"},
+    ]
+
+    item = _item5({}, rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["citation"] is None
+    assert item["detail"]["failed_rows"] == []
+    assert item["detail"]["uncovered_rows"] == []
+    assert [g["id"] for g in item["detail"]["declared_gaps"]] == ["A", "B"]
+
+
+def test_item5_mixed_rows_without_evidence_lists_uncovered_rows():
+    item = _item5({}, [{"id": "tdec"}, {"id": "zin", "gap": "later"}])
+
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == ["tdec"]
+    assert item["detail"]["declared_gaps"] == [{"id": "zin", "gap": "later"}]
+
+
+def test_item5_unratified_row_without_evidence_is_reported():
+    item = _item5({}, [{"id": "tdec", "ratified": False}])
+
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["unratified_rows"] == ["tdec"]
+
+
+def test_item6_rows_without_evidence_is_partial_coverage():
+    manifest = _manifest(evidence={})
+    manifest["spec_rows"] = {"6": [{"id": "mc", "gap": "pending"}]}
+
+    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 6)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+
+
+def test_item5_no_spec_rows_and_no_evidence_stays_no_evidence():
+    item = _item5({})
+
+    assert item["reason"] == "no_evidence"
+    assert "detail" not in item
+
+
+def test_item5_malformed_spec_rows_without_evidence_is_invalid_evidence():
+    item = _item5({}, [{"id": "a"}, {"id": "a"}])
+
+    assert item["reason"] == "invalid_evidence"
 
 
 def test_item5_all_declared_rows_covered_is_met_with_row_coverage(tmp_path):
@@ -17768,3 +17822,84 @@ def test_synthesize_citation_for_analog_item_1_is_wrong_kind(tmp_path):
     item = next(row for row in result["items"] if row["id"] == 1)
     assert item["status"] == "unmet"
     assert item["reason"] == "wrong_kind"
+
+
+# --------------------------------------------------------------------------- #
+# Manifest grading re-hashes an attestation's listed sources/derived (#4197)
+# --------------------------------------------------------------------------- #
+
+
+def _graded_attestation(repo: Path, item: int = 1, **grade_kwargs) -> dict:
+    inventory = _write_inventory(repo, item)
+    envelope = build_attestation(item, inventory)
+    envelope_path = repo / "evidence" / f"item{item}.json"
+    envelope_path.write_text(json.dumps(envelope, indent=2))
+    manifest = _manifest(
+        evidence={
+            str(item): {
+                "file": str(envelope_path),
+                "content_hash": _hash_of(inventory),
+            }
+        }
+    )
+    return _item(build_tier_report(manifest, repo_root=str(repo), **grade_kwargs), item)
+
+
+@pytest.mark.parametrize("item", [1, 9, 10])
+def test_untouched_attested_tree_stays_met_without_extra_fields(tmp_path, item):
+    graded = _graded_attestation(_attest_repo(tmp_path), item)
+
+    assert graded["status"] == "met"
+    assert "detail" not in graded or not graded["detail"]
+    assert "members" not in graded["citation"]["artifact_binding"]
+
+
+@pytest.mark.parametrize("path", ["design/ota.sch", "netlist/ota.spice"])
+def test_editing_an_attested_source_or_derived_file_is_stale(tmp_path, path):
+    repo = _attest_repo(tmp_path)
+    inventory = _write_inventory(repo, 1)
+    envelope = build_attestation(1, inventory)
+    (repo / "evidence" / "item1.json").write_text(json.dumps(envelope))
+    manifest = _manifest(
+        evidence={
+            "1": {
+                "file": str(repo / "evidence" / "item1.json"),
+                "content_hash": _hash_of(inventory),
+            }
+        }
+    )
+    assert _item(build_tier_report(manifest, repo_root=str(repo)), 1)["status"] == "met"
+
+    (repo / path).write_text("edited after attestation\n")
+    graded = _item(build_tier_report(manifest, repo_root=str(repo)), 1)
+
+    assert graded["status"] == "unmet"
+    assert graded["reason"] == "stale_evidence"
+    members = graded["detail"]["artifact_binding"]["members"]
+    assert [(m["path"], m["status"]) for m in members] == [(path, "stale")]
+
+
+def test_deleting_an_attested_file_is_unverifiable_provenance(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _write_inventory(repo, 1)
+    (repo / "evidence" / "item1.json").write_text(
+        json.dumps(build_attestation(1, inventory))
+    )
+    manifest = _manifest(
+        evidence={
+            "1": {
+                "file": str(repo / "evidence" / "item1.json"),
+                "content_hash": _hash_of(inventory),
+            }
+        }
+    )
+    (repo / "design" / "bias.sch").unlink()
+
+    graded = _item(build_tier_report(manifest, repo_root=str(repo)), 1)
+
+    assert graded["status"] == "unmet"
+    assert graded["reason"] == "unverifiable_provenance"
+    members = graded["detail"]["artifact_binding"]["members"]
+    assert [(m["path"], m["status"]) for m in members] == [
+        ("design/bias.sch", "unverifiable")
+    ]

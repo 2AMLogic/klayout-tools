@@ -1596,7 +1596,7 @@ but no tagged release contains it yet.
 | --- | --- |
 | `measurements[].expr` | 0.7.0 |
 | `corners.process[].sections[]` (object form) | 0.7.0 |
-| `corners.params` | 0.7.0 |
+| `corners.params` | 0.8.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
@@ -1710,7 +1710,7 @@ release segment:
 | `twoport` ([#3338](https://github.com/2AMLogic/klayout-tools/issues/3338)) | `analysis.kind` is `"twoport"` | `0.7.1` (**mandatory**, see below) |
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
-| `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (warn-and-run like the other non-mandatory entries; the post-run `params_unsupported_worker` check stays) | `0.7.0` |
+| `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
@@ -1890,8 +1890,11 @@ the packaged `data/` copy. See
   existed passes it and ignores that field. For `corners.params` `klt sim`
   does not rely on the version: it requires every returned corner to echo
   the dispatched `corner_id` and `params`, and fails the request with
-  `params_unsupported_worker` otherwise (see "Corner axes"). Other newer
-  fields still depend on the version check above.
+  `params_unsupported_worker` otherwise (see "Corner axes"). `corners.params`
+  is also a **mandatory** runner feature (first in `0.8.0`, #4235): a runner
+  that predates it, or whose version is unreadable, is refused with
+  `batch_runner_feature_unsupported` even under `runner_version_check: warn`.
+  Other newer fields still depend on the version check above.
 
 **When the client is newer than the runner.** If the image is a different
 minor from your client, either:
@@ -3725,6 +3728,42 @@ relying on `print`:
 A `print`ed scalar uses ngspice's `numdgt` digit count; see "Measurement
 output precision" above for widening it via `options.ngspice_init`.
 
+### Functions `expr` does not have
+
+ngspice's control language is smaller than SPICE `.meas` or numpy. These
+are not available (verified on ngspice-42: `no function as sum with that
+arity`); use the replacement:
+
+| Not available | Use instead |
+| --- | --- |
+| `sum(x)` | `mean(x)*length(x)` |
+| `sgn(x)` | a comparison: `(x gt 0)` is `1`/`0`; `(x gt 0) - (x lt 0)` is the sign |
+| one-argument `max(x)` / `min(x)` | `vecmax(x)` / `vecmin(x)` (`max`/`min` take two arguments) |
+
+Spell comparisons `gt` / `lt` (see the runner-skew note on `<` / `>`).
+
+### Counting edges with `expr`
+
+There is no edge-count measurement in `expr`, but a signed first difference
+of a thresholded signal gives one with index slices. `x[a,b]` selects samples
+`a..b` inclusive, so `s[1,length(s)-1] - s[0,length(s)-2]` is `s[i+1]-s[i]`:
+`+1` on a rising edge, `-1` on a falling edge, `0` elsewhere. Counting uses
+`mean(...)*length(...)` in place of the missing `sum`. For `v(in)` thresholded
+at 0.5 V (`s = (v(in) gt 0.5)`, `n = length(time)-1` steps):
+
+```json
+{ "name": "rises", "expr": "mean(((v(in) gt 0.5)[1,length(time)-1] - (v(in) gt 0.5)[0,length(time)-2]) gt 0.5)*(length(time)-1)" },
+{ "name": "falls", "expr": "mean(((v(in) gt 0.5)[1,length(time)-1] - (v(in) gt 0.5)[0,length(time)-2]) lt -0.5)*(length(time)-1)" }
+```
+
+Wrap the step in `abs(...)` and drop the `gt`/`lt` for the total edge count.
+Worked example: a `PULSE(0 1 0 1n 1n 5u 10u)` source over a `100u` transient
+returns `rises = 10`, `falls = 10` and (with `abs`) `edges = 20`. The
+recipe is exercised by `tests/test_sim_expr_edge_count.py`. The count is over
+the saved time points, so the transient must resolve every edge (a `tstep`
+or `.options` maximum step finer than the shortest pulse); where the edge
+*times* are needed, use a `crossings` measurement instead.
+
 Worked `op` example — the case that had no expression at all before:
 
 ```json
@@ -3957,7 +3996,10 @@ mid-rail threshold follows the supply sweep. The resolved threshold is echoed as
 `level` (volts) inside that corner's `crossings` object; a literal-number
 `level` leaves the report unchanged. `frac_of` must be a `corners.supply_v`
 key of every corner and `fraction` a finite number `>= 0`; otherwise the
-request is refused before any corner runs. (This is the supply-relative path;
+request is refused before any corner runs. **Runner version:** `frac_of`
+first shipped in `klt` v0.8.0 (it is not in v0.7.x); a fleet runner older than
+that does not understand it, so on such a runner give `level` as a literal
+number per corner. (This is the supply-relative path;
 see the `.meas` note under *`WHEN` thresholds must be literal numbers*.)
 
 `crossings` is a third measurement form: an entry declares **exactly one** of

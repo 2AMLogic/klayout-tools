@@ -443,30 +443,57 @@ def _first_rejection(
 
 
 def _grid_candidates(
-    net_region: Any, label_xy: tuple[int, int], step: int, cap: int
+    net_region: Any,
+    label_xy: tuple[int, int],
+    step: int,
+    cap: int,
+    mfg_dbu: int = 1,
 ) -> tuple[list[tuple[int, int]], bool]:
     """Grid points whose centre lies inside ``net_region``, nearest to the
     label first (ties: x then y), at most ``cap`` of them; plus a truncated
-    flag. Candidate order is fully determined by geometry, never by dict/set
-    iteration."""
+    flag. Enumeration is per merged polygon (its own bbox), so cost follows the
+    net's shapes rather than its overall bbox; a polygon that no grid point
+    lands in contributes one manufacturing-grid point near its centre. Candidate
+    order is fully determined by geometry, never by dict/set iteration."""
     import klayout.db as kdb
 
-    box = net_region.bbox()
-    xs = range(-(-box.left // step) * step, box.right + 1, step)
-    ys = range(-(-box.bottom // step) * step, box.top + 1, step)
-    if len(xs) * len(ys) > _MAX_ENUMERATED_POINTS:
+    polygons = list(net_region.merged().each())
+    total = 0
+    for poly in polygons:
+        box = poly.bbox()
+        nx = len(range(-(-box.left // step) * step, box.right + 1, step))
+        ny = len(range(-(-box.bottom // step) * step, box.top + 1, step))
+        total += nx * ny
+    if total > _MAX_ENUMERATED_POINTS:
         raise _err(
             "ports_from_labels: the port net spans too many grid points "
-            f"({len(xs) * len(ys)}) -- raise access.grid_um to coarsen the search"
+            f"({total}) -- raise access.grid_um to coarsen the search"
         )
-    points = [
-        (x, y)
-        for x in xs
-        for y in ys
-        if not net_region.interacting(
-            kdb.Region(kdb.Box(x, y, x + 1, y + 1))
-        ).is_empty()
-    ]
+
+    found: set[tuple[int, int]] = set()
+    for poly in polygons:
+        box = poly.bbox()
+        region = kdb.Region(poly)
+        local = [
+            (x, y)
+            for x in range(-(-box.left // step) * step, box.right + 1, step)
+            for y in range(-(-box.bottom // step) * step, box.top + 1, step)
+            if not region.interacting(
+                kdb.Region(kdb.Box(x, y, x + 1, y + 1))
+            ).is_empty()
+        ]
+        if not local:
+            cx, cy = (box.left + box.right) // 2, (box.bottom + box.top) // 2
+            for px, py in (
+                (round(cx / mfg_dbu) * mfg_dbu, round(cy / mfg_dbu) * mfg_dbu),
+                (cx, cy),
+            ):
+                probe = kdb.Region(kdb.Box(px, py, px + 1, py + 1))
+                if not region.interacting(probe).is_empty():
+                    local = [(px, py)]
+                    break
+        found.update(local)
+    points = list(found)
     lx, ly = label_xy
     points.sort(key=lambda p: ((p[0] - lx) ** 2 + (p[1] - ly) ** 2, p[0], p[1]))
     return points[:cap], len(points) > cap
@@ -556,7 +583,7 @@ def _search_landing(
 
     net_region = nets.net_shapes(net, net_layer)
     candidates, truncated = _grid_candidates(
-        net_region, label_xy, step, access["max_candidates"]
+        net_region, label_xy, step, access["max_candidates"], mfg_dbu
     )
     counts: dict[str, int] = {"keep_out": 0, "via_spacing": 0, "clearance": 0}
     samples: dict[str, list[str]] = {key: [] for key in counts}
@@ -583,6 +610,14 @@ def _search_landing(
         counts[category] += 1
         if len(samples[category]) < _REJECTION_SAMPLES:
             samples[category].append(f"({x * dbu:g}, {y * dbu:g}) um: {detail}")
+    if not candidates:
+        raise _err(
+            f"ports_from_labels: no candidate landing point for port '{name}' on "
+            f"layer {net_layer[0]}/{net_layer[1]}: no grid point at "
+            f"grid_um={step * dbu:g} falls inside the net shapes and the net has "
+            "no shape to place a fallback point in -- lower access.grid_um or "
+            "check the net's geometry"
+        )
     summary = ", ".join(f"{k}: {v}" for k, v in counts.items())
     detail_lines = "; ".join(s for key in counts for s in samples[key])
     raise _err(

@@ -5675,8 +5675,10 @@ def test_check_synthesize_report_clean_pass(tmp_path, monkeypatch):
     assert result["mode"] == "check"
     assert result["report"] == report_path
     assert result["status"] == "match"
-    assert len(result["checks"]) == 3
+    assert len(result["checks"]) == 5
     assert all(check["match"] for check in result["checks"])
+    defines = [c for c in result["checks"] if c["field"] == "defines"]
+    assert len(defines) == 1 and defines[0]["match"] is True
 
 
 def test_check_synthesize_report_detects_moved_source_hash(tmp_path, monkeypatch):
@@ -5730,6 +5732,94 @@ def test_check_synthesize_report_missing_hash_is_never_a_false_pass(
     by_field = {check["field"]: check for check in result["checks"]}
     assert by_field["provenance.input.content_hash"]["expected"] is None
     assert by_field["provenance.input.content_hash"]["match"] is False
+
+
+def _committed_netlist_report(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report = run_synthesize(request_path)
+    report_path = _write_report(tmp_path / "gcd.synth.json", report)
+    return request_path, report, report_path
+
+
+def test_check_synthesize_report_detects_edited_netlist(tmp_path, monkeypatch):
+    """Issue #4313: one gate flipped in a copy of the committed netlist is
+    `drifted` on `netlist_sha256`; the unmodified copy matches."""
+    request_path, report, report_path = _committed_netlist_report(tmp_path, monkeypatch)
+    good = tmp_path / "good.v"
+    good.write_bytes(Path(_abs_path(report["netlist_path"], tmp_path)).read_bytes())
+    bad = tmp_path / "bad.v"
+    bad.write_text(good.read_text(encoding="utf-8") + "// one gate flipped\n")
+
+    ok = synthesize.check_synthesize_report(
+        report_path, request_path, netlist_override=str(good)
+    )
+    assert ok["status"] == "match"
+
+    drifted = synthesize.check_synthesize_report(
+        report_path, request_path, netlist_override=str(bad)
+    )
+    assert drifted["status"] == "drifted"
+    by_field = {c["field"]: c for c in drifted["checks"]}
+    assert by_field["netlist_sha256"]["match"] is False
+    assert by_field["provenance.input.content_hash"]["match"] is True
+
+
+def test_check_synthesize_report_netlist_sha256_missing_baseline(tmp_path, monkeypatch):
+    request_path, report, _ = _committed_netlist_report(tmp_path, monkeypatch)
+    del report["netlist_sha256"]
+    report_path = _write_report(tmp_path / "old.synth.json", report)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["netlist_sha256"]["expected"] is None
+    assert by_field["netlist_sha256"]["match"] is False
+    assert result["status"] == "drifted"
+
+
+def test_check_synthesize_report_netlist_unlocatable_is_not_skipped(
+    tmp_path, monkeypatch
+):
+    request_path, report, _ = _committed_netlist_report(tmp_path, monkeypatch)
+    report["netlist_path"] = {"path": None, "scope": "external"}
+    report_path = _write_report(tmp_path / "ext.synth.json", report)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["netlist_sha256"]["actual"] is None
+    assert by_field["netlist_sha256"]["match"] is False
+
+    missing = synthesize.check_synthesize_report(
+        report_path, request_path, netlist_override=str(tmp_path / "nope.v")
+    )
+    by_field = {c["field"]: c for c in missing["checks"]}
+    assert by_field["netlist_sha256"]["actual"] is None
+    assert by_field["netlist_sha256"]["match"] is False
+
+
+def test_cli_synthesize_check_netlist_flag_exits_three_on_edit(
+    tmp_path, monkeypatch, capsys
+):
+    request_path, _, report_path = _committed_netlist_report(tmp_path, monkeypatch)
+    bad = tmp_path / "bad.v"
+    bad.write_text("module gcd(); endmodule\n", encoding="utf-8")
+
+    code = main(
+        [
+            "synthesize",
+            request_path,
+            "--check",
+            report_path,
+            "--netlist",
+            str(bad),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert code == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "drifted"
 
 
 def test_check_synthesize_report_missing_file_raises(tmp_path, monkeypatch):
@@ -6283,6 +6373,138 @@ def test_equivalence_gate_forwards_parameters_to_gold_side(tmp_path, monkeypatch
 
     synthesize._verify_synthesis_equivalence(**kwargs)
     assert "parameters" not in captured["gold"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4196: `defines` (preprocessor -D) request key
+# --------------------------------------------------------------------------- #
+
+
+def test_read_verilog_line_defines_sorted_and_sv():
+    from klayout_tools._verilog_params import read_verilog_line
+
+    assert read_verilog_line("a.v") == "read_verilog a.v"
+    assert read_verilog_line("a.v", {}) == "read_verilog a.v"
+    assert (
+        read_verilog_line("a.v", {"B": "1", "A": None})
+        == "read_verilog -D A -D B=1 a.v"
+    )
+    assert read_verilog_line("a.sv", {"A": None}) == "read_verilog -sv -D A a.sv"
+
+
+@pytest.mark.parametrize(
+    "defines, match",
+    [
+        ([1], "must be a JSON object"),
+        ({"": None}, "Verilog identifiers"),
+        ({"1BAD": None}, "Verilog identifiers"),
+        ({"A": 1}, "string or null"),
+        ({"A": True}, "string or null"),
+        ({"A": 'x"y'}, "outside the supported set"),
+        ({"A": "x;y"}, "outside the supported set"),
+        ({"A": "x#y"}, "outside the supported set"),
+        ({"A": "x\\y"}, "outside the supported set"),
+        ({"A": "a\nb"}, "outside the supported set"),
+    ],
+)
+def test_run_synthesize_rejects_malformed_defines(tmp_path, defines, match):
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    path = _write_request(tmp_path / "request.json", _base_request(defines=defines))
+    with pytest.raises(SynthesizeError, match=match):
+        run_synthesize(path)
+
+
+def test_run_synthesize_applies_and_echoes_defines(tmp_path, monkeypatch):
+    _setup_success_env(tmp_path, monkeypatch)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(defines={"VARIANT_B": None, "WIDTH": "8"}),
+    )
+    _stub_yosys_success(monkeypatch)
+    scripts = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["defines"] == {"VARIANT_B": None, "WIDTH": "8"}
+    assert report["provenance"]["defines"] == {"VARIANT_B": None, "WIDTH": "8"}
+    text = Path(scripts[0]).read_text(encoding="utf-8")
+    assert "read_verilog -D VARIANT_B -D WIDTH=8 " in text
+
+
+def test_run_synthesize_without_defines_emits_no_flag(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    scripts = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["defines"] == {}
+    assert report["provenance"]["defines"] == {}
+    assert " -D " not in Path(scripts[0]).read_text(encoding="utf-8")
+
+
+def test_check_synthesize_report_defines_match_and_drift(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    committed = run_synthesize(request_path)
+    report_path = _write_report(tmp_path / "gcd.synth.json", committed)
+    assert synthesize.check_synthesize_report(report_path, request_path)["status"] == (
+        "match"
+    )
+
+    _write_request(
+        tmp_path / "request.json", _base_request(defines={"VARIANT_B": None})
+    )
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["defines"]["match"] is False
+    assert by_field["defines"]["expected"] == {}
+    assert by_field["defines"]["actual"] == {"VARIANT_B": None}
+
+
+def test_check_synthesize_report_treats_missing_defines_as_empty(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    committed = run_synthesize(request_path)
+    del committed["defines"]  # a report predating the field
+    report_path = _write_report(tmp_path / "gcd.synth.json", committed)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "match"
+
+
+def test_equivalence_gate_forwards_defines_to_gold_side(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    def fake_run_equiv(request_path, timeout_s=None):
+        captured.update(json.loads(Path(request_path).read_text(encoding="utf-8")))
+        return {
+            "status": "equivalent",
+            "engine": "yosys",
+            "engine_version": "0",
+            "timeout_s": 1,
+            "elapsed_s": 0.1,
+            "artifacts": {},
+        }
+
+    monkeypatch.setattr(synthesize, "run_equiv", fake_run_equiv)
+    kwargs = dict(
+        synthesize_output_dir=str(tmp_path),
+        resolved_sources=["a.v"],
+        hdl_toplevel="gcd",
+        netlist_path="n.v",
+        liberty_path="l.lib",
+        timeout_s=None,
+    )
+    synthesize._verify_synthesis_equivalence(**kwargs, defines={"V": None})
+    assert captured["gold"]["defines"] == {"V": None}
+    assert "defines" not in captured["gate"]
+
+    synthesize._verify_synthesis_equivalence(**kwargs)
+    assert "defines" not in captured["gold"]
 
 
 _SV_PORT_ERROR = (
