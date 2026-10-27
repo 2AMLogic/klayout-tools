@@ -100,6 +100,7 @@ _NET_KEYS = (
     "same_net_as",
     "roles",
     "unlabelled_allowed_boxes",
+    "unlabelled_allow_device_connected",
     "extractor_global",
 )
 _TIE_KEYS = (
@@ -433,6 +434,10 @@ def _validate_nets(
                 "unlabelled_allowed_boxes": _parse_unlabelled_allowed_boxes(
                     entry, spec_path, i, roles
                 ),
+                # Issue #4374: excuse unlabelled clusters that drive a gate.
+                "unlabelled_allow_device_connected": (
+                    _parse_unlabelled_allow_device_connected(entry, spec_path, i, roles)
+                ),
             }
         )
 
@@ -454,8 +459,14 @@ def _parse_extractor_global(entry: dict[str, Any], spec_path: str, index: int) -
             f"boolean (got {value!r})"
         )
     if value:
-        for key in ("islands", "same_net_as", "roles", "unlabelled_allowed_boxes"):
-            if entry.get(key) not in (None, [], {}):
+        for key in (
+            "islands",
+            "same_net_as",
+            "roles",
+            "unlabelled_allowed_boxes",
+            "unlabelled_allow_device_connected",
+        ):
+            if entry.get(key) not in (None, [], {}, False):
                 raise ErcError(
                     f"spec '{spec_path}': nets[{index}].extractor_global "
                     f"conflicts with nets[{index}].{key}: an extractor-global "
@@ -583,6 +594,30 @@ def _parse_unlabelled_allowed_boxes(
             "role there is no unlabelled remainder to exclude anything from"
         )
     return boxes
+
+
+def _parse_unlabelled_allow_device_connected(
+    entry: dict[str, Any], spec_path: str, index: int, roles: list[str]
+) -> bool:
+    """``nets[].unlabelled_allow_device_connected`` (optional, issue #4374,
+    default ``false``): when ``true``, unlabelled clusters that drive a gate
+    (internal signal nets, ``kind: "device_connected"``) do not gate
+    ``erc.unlabelled_conductor``; ``floating`` clusters still do. Like
+    ``unlabelled_allowed_boxes`` it narrows the unlabelled measurement, so
+    declaring it without ``roles`` is a spec error rather than a silent no-op."""
+    value = entry.get("unlabelled_allow_device_connected", False)
+    if not isinstance(value, bool):
+        raise ErcError(
+            f"spec '{spec_path}': nets[{index}].unlabelled_allow_device_connected "
+            f"must be a boolean (got {value!r})"
+        )
+    if value and not roles:
+        raise ErcError(
+            f"spec '{spec_path}': nets[{index}].unlabelled_allow_device_connected "
+            "needs a non-empty nets[].roles to narrow -- without a declared "
+            "owned role there is no unlabelled remainder to excuse"
+        )
+    return value
 
 
 def _validate_same_net_refs(

@@ -183,8 +183,11 @@ _DEVICE_LIKE_PARAMS = _CARRIED_PARAMS + ("r_length", "r_width", "c_length", "c_w
 #: instead of rejecting it (see :func:`_resolve_finger_count` and
 #: :func:`_expand_mos_fingers`); resistor/capacitor calls still route their
 #: own ``nf`` through this same rejection tuple (:func:`_convert_geometry_card`/
-#: :func:`_convert_capacitor_card` call :func:`_reject_multiplicity` with no
-#: ``exclude``), so a resistor/capacitor ``nf>1`` is still a hard error.
+#: :func:`_convert_capacitor_card` call :func:`_reject_multiplicity`), so a
+#: resistor/capacitor ``nf>1`` is still a hard error. A capacitor's instance
+#: multiplier ``m`` is the exception: it is excluded and expanded into ``m``
+#: parallel plain ``C`` cards (issue #4318), so only its ``nf``/``mult``/``mf``
+#: are still rejected.
 _MULTIPLICITY_PARAMS = ("nf", "m", "mult", "mf")
 
 #: The multiplicity parameters :func:`_reject_multiplicity` never rejects for
@@ -193,6 +196,10 @@ _MULTIPLICITY_PARAMS = ("nf", "m", "mult", "mf")
 #: :func:`_resolve_multiplier` (``m``, issue #3123) and
 #: :func:`_check_mos_mult` (``mult``, mismatch-only) handle them instead.
 _MOS_EXCLUDED_MULTIPLICITY_PARAMS = ("nf", "m", "mult")
+
+#: The multiplicity parameter :func:`_reject_multiplicity` never rejects for a
+#: capacitor call -- :func:`_convert_capacitor_card` expands ``m`` (issue #4318).
+_CAPACITOR_EXCLUDED_MULTIPLICITY_PARAMS = ("m",)
 
 #: Terminal count of the curated capacitor primitive, used the same way
 #: :data:`_MOS_TERMINALS` is for MOS -- a hard, named error on a mismatched
@@ -698,7 +705,7 @@ def _convert_x_card(
             placeholder_value_classes[lookup.device_class] = "capacitor"
         return card
     return _convert_passive_or_bipolar_card(
-        instance, nodes, subckt_name, lookup, params
+        instance, nodes, subckt_name, lookup, params, geometry_style=geometry_style
     )
 
 
@@ -708,9 +715,16 @@ def _convert_passive_or_bipolar_card(
     subckt_name: str,
     lookup: DeviceLookup,
     params: dict[str, str],
+    *,
+    geometry_style: str | None = None,
 ) -> str:
-    """The non-MOS/R/C tail of :func:`_convert_x_card`'s dispatch: an
-    ``inductor``/``varactor`` call (issue #3206) or, otherwise, a bipolar."""
+    """The non-MOS/R/C tail of :func:`_convert_x_card`'s dispatch: a junction
+    diode, an ``inductor``/``varactor`` call (issue #3206) or, otherwise, a
+    bipolar."""
+    if lookup.kind == "diode":
+        return _convert_diode_card(
+            instance, nodes, subckt_name, lookup, params, geometry_style=geometry_style
+        )
     if lookup.kind in _PASSIVE_X_TERMINALS:
         return _convert_passive_x_card(instance, nodes, subckt_name, lookup)
     return _convert_bipolar_card(instance, nodes, subckt_name, lookup, params)
@@ -1067,6 +1081,10 @@ def _convert_capacitor_card(
     Same ``0``-placeholder-value convention as :func:`_convert_geometry_card`
     (this module has no farad-per-area coefficient to compute a real
     capacitance from either -- that also lives in ``klayout_tools.decks``).
+
+    An instance multiplier ``m`` (issue #4318, mirroring #3123 for MOS)
+    expands into ``m`` parallel cards named ``<instance>_m0``, ...; ``A``/``P``
+    stay per copy. ``mf``/``nf``/``mult`` greater than 1 are still rejected.
     """
     if len(nodes) != _CAPACITOR_TERMINALS:
         raise NormalizeError(
@@ -1074,7 +1092,19 @@ def _convert_capacitor_card(
             f"{_CAPACITOR_TERMINALS} terminals (A B), found {len(nodes)} "
             f"({' '.join(nodes) or '<none>'})"
         )
-    _reject_multiplicity(instance, subckt_name, params)
+    multiplier = _resolve_positive_int(
+        instance,
+        subckt_name,
+        params,
+        "m",
+        "to expand into that many parallel plain-element devices",
+    )
+    _reject_multiplicity(
+        instance,
+        subckt_name,
+        params,
+        exclude=_CAPACITOR_EXCLUDED_MULTIPLICITY_PARAMS,
+    )
 
     has_length_param = lookup.length_param in params
     has_width_param = lookup.width_param in params
@@ -1103,7 +1133,88 @@ def _convert_capacitor_card(
         perimeter_um = 2.0 * (l_um + w_um)
         extra = f" A={_format_um2(area_um2)} P={_format_um(perimeter_um)}"
 
-    return f"{instance} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
+    if multiplier == 1:
+        return f"{instance} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
+    # Instance multiplier ``m`` (issue #4318): ``m`` parallel copies, each
+    # carrying the per-copy A/P, folded back by ``options.combine_devices``.
+    return "\n".join(
+        f"{instance}_m{j} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
+        for j in range(multiplier)
+    )
+
+
+def _parse_um2(
+    raw_value: str,
+    *,
+    device: str,
+    param: str,
+    geometry_style: str | None = None,
+) -> float:
+    """Parse a SPICE area literal to square micrometres, with the same
+    bare-literal convention as :func:`_parse_um` (a suffixed/exponent literal
+    is SI m^2; a bare one is already um^2 under a ``BARE_UM`` deck such as
+    sky130's ``.option scale=1.0u``)."""
+    match = spice_number.NUMBER_RE.match(raw_value.strip())
+    if match is None:
+        raise NormalizeError(
+            f"device '{device}': parameter '{param}' value '{raw_value}' is "
+            "not a plain numeric literal"
+        )
+    mantissa_text, raw_suffix = match.group(1), match.group(2)
+    mantissa = float(mantissa_text)
+    if not raw_suffix and "e" not in mantissa_text.lower():
+        if geometry_style is None:
+            raise NormalizeError(
+                f"device '{device}': parameter '{param}' value '{raw_value}' "
+                "has no unit suffix or exponent, so it is ambiguous whether it "
+                "is SI m^2 or already um^2 under an ambient '.option scale' -- "
+                'pass reference.deck (e.g. "sky130") or write an explicit '
+                "unit-suffixed literal (e.g. area=1p)"
+            )
+        if geometry_style == GEOMETRY_STYLE_BARE_UM:
+            return mantissa
+    return mantissa * spice_number.suffix_scale(raw_suffix) * 1e12
+
+
+def _convert_diode_card(
+    instance: str,
+    nodes: list[str],
+    subckt_name: str,
+    lookup: DeviceLookup,
+    params: dict[str, str],
+    *,
+    geometry_style: str | None = None,
+) -> str:
+    """Convert a PDK junction-diode call (``X<n> anode cathode <subckt>
+    area=.. perim=..``, issue #4319) to a plain ``D<n> anode cathode <class>
+    A=.. P=..`` card, which KLayout's reader reads as ``DeviceClassDiode``
+    (terminals ``A``, ``C``; parameters ``A`` um^2, ``P`` um) -- the class the
+    layout-side ``DeviceExtractorDiode`` emits. ``perim`` may be spelled
+    ``pj``. An omitted parameter is left off the card (class default).
+    ``mult``/``m`` > 1 is rejected, as for resistors/capacitors."""
+    if len(nodes) != 2:
+        raise NormalizeError(
+            f"device '{instance}' (subcircuit '{subckt_name}'): expected 2 "
+            f"terminals (anode cathode), found {len(nodes)} "
+            f"({' '.join(nodes) or '<none>'})"
+        )
+    _reject_multiplicity(instance, subckt_name, params)
+    extra = ""
+    if "area" in params:
+        area_um2 = _parse_um2(
+            params["area"],
+            device=instance,
+            param="area",
+            geometry_style=geometry_style,
+        )
+        extra += f" A={_format_um2(area_um2)}"
+    perim = params.get("perim", params.get("pj"))
+    if perim is not None:
+        perim_um = _parse_um(
+            perim, device=instance, param="perim", geometry_style=geometry_style
+        )
+        extra += f" P={_format_um(perim_um)}"
+    return f"{instance} {' '.join(nodes)} {lookup.device_class}{extra}"
 
 
 def _convert_bipolar_card(
@@ -1476,7 +1587,13 @@ def _instance_name(name_token: str, kind: str = "mos") -> str:
     """
     if kind in _PASSIVE_X_TERMINALS:
         return name_token  # stays a subcircuit-call card: no element letter
-    letter = {"mos": "M", "resistor": "R", "capacitor": "C", "bipolar": "Q"}[kind]
+    letter = {
+        "mos": "M",
+        "resistor": "R",
+        "capacitor": "C",
+        "bipolar": "Q",
+        "diode": "D",
+    }[kind]
     rest = name_token[1:]  # drop the leading X/x
     if not rest:
         return name_token  # malformed; leave as-is for the reader to reject

@@ -752,6 +752,15 @@ disagree about a finding with nothing in either payload to say why, and a
 box over empty space is indistinguishable from one that bit. See
 [`docs/cli/erc.md`](cli/erc.md)'s "The remainder gates".
 
+Issue #4374 is additive on the same surface: an `erc.unlabelled_conductor`
+finding now populates `islands[]` (previously `null` for that rule) with
+`{bbox, layer, shape_count, kind}` entries, `kind` being `"device_connected"`
+or `"floating"`; the optional spec key `nets[].unlabelled_allow_device_connected`
+(default `false`) excuses the former; and a `provenance.net_exclusions` entry
+gains `allow_device_connected` / `excluded_device_connected_islands` only when
+that key is declared. Nothing is renamed or removed and `schema_version` is
+unchanged.
+
 Issue #2415 adds a fourth, `provenance.label_layers`: one entry per
 `stackup` role that declares a `label_layer`, in stackup order (`{name,
 label_layer, label_text_count}`), `[]` when no role declares one. Always
@@ -1372,6 +1381,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 
 **Plain-string fields** — intentionally unchanged:
 
@@ -1388,7 +1398,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `layout-plan-execute` | `gds_path` | 1 |
 | `lef-abstract` | `output`, `socket` | 2 |
 | `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
-| `functional-verification` | `info_path`, `log_path`, `options.trace.path` | 1 |
+| `functional-verification` | `info_path`, `options.trace.path` | 2 (`log_path` moved to the envelope table) |
 | `yield-campaign` | `campaign.sim_report_path`, `campaign.request_path` | 1 (`yield_analysis.py`) |
 | `characterize` | `liberty.path`, `liberty.roundtrip.probe_netlist`, `simulation.{testbench,request,report}`, `cells[].simulation.{testbench,request,report}`, `comparison.{ours,reference}` | 1 |
 
