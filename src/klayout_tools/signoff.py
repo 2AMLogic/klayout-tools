@@ -5698,6 +5698,9 @@ def _bind_anchored_citation(
         return _REASON_STALE_EVIDENCE
     if input_verified is not True:
         return _REASON_UNVERIFIABLE_PROVENANCE
+    drift_refusal = _attested_checks_refusal(resolution, repo_root, execution_detail)
+    if drift_refusal is not None:
+        return drift_refusal
     binding = _generic_artifact_binding(resolution["envelope"], resolution)
     if item_id in _ITEMS_ACCEPTING_REGENERATION_CLAIMS:
         regeneration, refusal = _regeneration_claim(
@@ -5725,6 +5728,69 @@ def _bind_anchored_citation(
             binding["regeneration"] = regeneration
     citation["artifact_binding"] = binding
     return None
+
+
+def _attested_check_members(
+    envelope: Mapping[str, Any],
+) -> list[tuple[Any, str]]:
+    """``({path, scope}, recorded_hash)`` for every ``present`` check of a
+    ``klt signoff --attest`` envelope that recorded a ``sha256:`` content
+    hash (issue #4197) -- the inventory's listed ``sources`` and ``derived``
+    files. ``[]`` for an envelope with no ``attestation.checks[]``."""
+    attestation = envelope.get("attestation")
+    checks = attestation.get("checks") if isinstance(attestation, Mapping) else None
+    if not isinstance(checks, list):
+        return []
+    members: list[tuple[Any, str]] = []
+    for check in checks:
+        if not isinstance(check, Mapping) or check.get("check") != "present":
+            continue
+        path = check.get("path")
+        recorded = check.get("content_hash")
+        if (
+            isinstance(path, str)
+            and path
+            and isinstance(recorded, str)
+            and recorded.startswith("sha256:")
+        ):
+            members.append(({"path": path, "scope": "repo"}, recorded))
+    return members
+
+
+def _attested_checks_refusal(
+    resolution: Mapping[str, Any],
+    repo_root: str | Path | None,
+    detail: dict[str, Any] | None,
+) -> str | None:
+    """Re-hash the files an attestation's ``present`` checks recorded (issue
+    #4197). The envelope's ``provenance.input`` pins only the inventory, so
+    without this an edit to a listed source or derived file stays ``met``
+    until re-attested. A drifted file is :data:`_REASON_STALE_EVIDENCE`; one
+    that cannot be read from the grading context is
+    :data:`_REASON_UNVERIFIABLE_PROVENANCE`. ``None`` -- and nothing added to
+    the citation -- when every file re-hashes or the envelope carries none."""
+    members = _attested_check_members(resolution["envelope"])
+    if not members:
+        return None
+    results = _verify_generic_input_set(
+        members, resolution["spec"], resolution.get("file"), repo_root
+    )
+    bad = [
+        {
+            "path": member["path"]["path"],
+            "content_hash": member["content_hash"],
+            "status": member["status"],
+        }
+        for member in results
+        if member["status"] != "verified"
+    ]
+    if not bad:
+        return None
+    if detail is not None:
+        detail["artifact_binding"] = {"members": bad}
+    if any(member["status"] == "stale" for member in bad):
+        return _REASON_STALE_EVIDENCE
+    return _REASON_UNVERIFIABLE_PROVENANCE
 
 
 def _bound_artifact(

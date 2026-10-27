@@ -17714,3 +17714,84 @@ def test_synthesize_citation_for_analog_item_1_is_wrong_kind(tmp_path):
     item = next(row for row in result["items"] if row["id"] == 1)
     assert item["status"] == "unmet"
     assert item["reason"] == "wrong_kind"
+
+
+# --------------------------------------------------------------------------- #
+# Manifest grading re-hashes an attestation's listed sources/derived (#4197)
+# --------------------------------------------------------------------------- #
+
+
+def _graded_attestation(repo: Path, item: int = 1, **grade_kwargs) -> dict:
+    inventory = _write_inventory(repo, item)
+    envelope = build_attestation(item, inventory)
+    envelope_path = repo / "evidence" / f"item{item}.json"
+    envelope_path.write_text(json.dumps(envelope, indent=2))
+    manifest = _manifest(
+        evidence={
+            str(item): {
+                "file": str(envelope_path),
+                "content_hash": _hash_of(inventory),
+            }
+        }
+    )
+    return _item(build_tier_report(manifest, repo_root=str(repo), **grade_kwargs), item)
+
+
+@pytest.mark.parametrize("item", [1, 9, 10])
+def test_untouched_attested_tree_stays_met_without_extra_fields(tmp_path, item):
+    graded = _graded_attestation(_attest_repo(tmp_path), item)
+
+    assert graded["status"] == "met"
+    assert "detail" not in graded or not graded["detail"]
+    assert "members" not in graded["citation"]["artifact_binding"]
+
+
+@pytest.mark.parametrize("path", ["design/ota.sch", "netlist/ota.spice"])
+def test_editing_an_attested_source_or_derived_file_is_stale(tmp_path, path):
+    repo = _attest_repo(tmp_path)
+    inventory = _write_inventory(repo, 1)
+    envelope = build_attestation(1, inventory)
+    (repo / "evidence" / "item1.json").write_text(json.dumps(envelope))
+    manifest = _manifest(
+        evidence={
+            "1": {
+                "file": str(repo / "evidence" / "item1.json"),
+                "content_hash": _hash_of(inventory),
+            }
+        }
+    )
+    assert _item(build_tier_report(manifest, repo_root=str(repo)), 1)["status"] == "met"
+
+    (repo / path).write_text("edited after attestation\n")
+    graded = _item(build_tier_report(manifest, repo_root=str(repo)), 1)
+
+    assert graded["status"] == "unmet"
+    assert graded["reason"] == "stale_evidence"
+    members = graded["detail"]["artifact_binding"]["members"]
+    assert [(m["path"], m["status"]) for m in members] == [(path, "stale")]
+
+
+def test_deleting_an_attested_file_is_unverifiable_provenance(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _write_inventory(repo, 1)
+    (repo / "evidence" / "item1.json").write_text(
+        json.dumps(build_attestation(1, inventory))
+    )
+    manifest = _manifest(
+        evidence={
+            "1": {
+                "file": str(repo / "evidence" / "item1.json"),
+                "content_hash": _hash_of(inventory),
+            }
+        }
+    )
+    (repo / "design" / "bias.sch").unlink()
+
+    graded = _item(build_tier_report(manifest, repo_root=str(repo)), 1)
+
+    assert graded["status"] == "unmet"
+    assert graded["reason"] == "unverifiable_provenance"
+    members = graded["detail"]["artifact_binding"]["members"]
+    assert [(m["path"], m["status"]) for m in members] == [
+        ("design/bias.sch", "unverifiable")
+    ]

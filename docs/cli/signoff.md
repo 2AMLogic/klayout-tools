@@ -1231,8 +1231,15 @@ hand-written envelope is still graded by the same four conditions, but its
 the bound artifact is the committed stream itself. In every case the binding
 adds that the attestation names the exact bytes it was made about, that it
 cannot be cited for any other item, and that any edit to those bytes since
-the attestation turns the row `unmet`. A `--check` re-run also reports that
-as drift.
+the attestation turns the row `unmet`. For a `--attest` envelope that
+includes the inventory's listed `sources`, `derived` and other `present`
+files (issue #4197): each `attestation.checks[]` `present` entry's recorded
+`content_hash` is re-hashed against the file under the repo root (honouring
+`--repo-root`), so editing one without re-attesting is `stale_evidence`, and
+one that cannot be read from the grading context is `unverifiable_provenance`.
+The `detail.artifact_binding.members` list names each drifted path; an
+untouched tree grades `met` with an unchanged report. A `--check` re-run also
+reports that as drift.
 
 A valid item-9 citation (`tb-inventory.json` written beside
 `testbenches.txt`):
