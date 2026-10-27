@@ -2244,6 +2244,7 @@ def _run_single_corner(
     if power is None:
         power_info: dict[str, Any] = {
             "preset": None,
+            "connects_overridden": False,
             "pdn": False,
             "global_connect": False,
             "power_net": None,
@@ -2264,6 +2265,7 @@ def _run_single_corner(
         tapcell_distance_um = _effective_tapcell_distance(power, table_distance_um)
         power_info = {
             "preset": power["preset"],
+            "connects_overridden": power["connects_overridden"],
             "pdn": True,
             "global_connect": True,
             "power_net": power["power_net"],

@@ -820,8 +820,12 @@ def _resolve_pdn_preset(
     ``preset_name`` is ``None`` -- byte-for-byte the behaviour from before
     this field existed.
 
-    **``preset`` and explicit ``straps``/``connects`` are mutually
-    exclusive**, not merged per-field. That decision is deliberate and is
+    **``preset`` and explicit ``straps`` are mutually exclusive**, not
+    merged per-field. An explicit ``connects`` (issue #4348) is the one
+    allowed override: it replaces the preset's connect entries wholesale
+    (``[]`` = no tuning) and the response flags it as
+    ``power.connects_overridden``. The rationale below applies to ``straps``.
+    That decision is deliberate and is
     this issue's own open question resolved: a per-field override would
     reintroduce exactly the failure mode presets exist to remove -- a
     request that looks like it cites a platform config but silently carries
@@ -852,11 +856,10 @@ def _resolve_pdn_preset(
             f"unknown request.power.preset '{preset_name}' "
             f"(supported: {', '.join(sorted(_PDN_PRESETS))})"
         )
-    conflicting = sorted({"straps", "connects"} & set(power))
-    if conflicting:
+    if "straps" in power:
         raise PlaceAndRouteError(
             f"request.power.preset '{preset_name}' and explicit "
-            f"request.power.{'/'.join(conflicting)} are mutually exclusive "
+            "request.power.straps are mutually exclusive "
             "-- supply one or the other, not both"
         )
     preset = _PDN_PRESETS[preset_name]
@@ -867,6 +870,14 @@ def _resolve_pdn_preset(
             f"request.pdk.cell_library is '{cell_library}' -- a preset may "
             "only be used with the standard-cell library it was transcribed "
             "for"
+        )
+    if "connects" in power:
+        # Issue #4348: an explicit `connects` list replaces the preset's
+        # connect entries wholesale (no per-entry merge); `[]` = no tuning.
+        return (
+            preset_name,
+            [dict(strap) for strap in preset["straps"]],
+            power["connects"],
         )
     return (
         preset_name,
@@ -1128,6 +1139,7 @@ def _validate_power(
 
     return {
         "preset": preset_name,
+        "connects_overridden": preset_name is not None and "connects" in power,
         "power_net": power_net,
         "ground_net": ground_net,
         "tapcell_distance_um": tapcell_distance_um,

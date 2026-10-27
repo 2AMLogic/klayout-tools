@@ -286,3 +286,11 @@ def test_valid_spec_constructs():
 def test_malformed_descriptor_raises_value_error(overrides, match):
     with pytest.raises(ValueError, match=match):
         _spec(**overrides)
+
+
+def test_tap_distance_violation_carries_context_note(tmp_path):
+    """Issue #4348: triage note on tap_distance violations only."""
+    report = _run(tmp_path, _nwell_layout(0, tap=False))
+    found = _found(report, NWELL_RULE)
+    assert found
+    assert all("tap-cell placement" in v["note"] for v in found)

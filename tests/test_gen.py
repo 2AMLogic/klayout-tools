@@ -6707,6 +6707,49 @@ def test_sg13g2_generator_default_params_are_drc_clean(
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+@pytest.mark.parametrize("generator_name", ("mos_array", "diff_pair"))
+def test_sg13g2_pfet_guard_ring_nwell_encloses_ring_nplus_activ(
+    generator_name, tmp_path, sg13g2_pdk_root
+):
+    """Issue #4426: the n-tap guard ring of an sg13g2 pfet must be enclosed by
+    NWell by IHP `NW.e` (0.24um), not the generic 0.15um margin."""
+    output = tmp_path / f"{generator_name}_ring_sg13g2.gds"
+    params = {
+        "w_um": 0.52,
+        "l_um": 0.52,
+        "flavor": "pfet",
+        "add_guard_ring": True,
+    }
+    if generator_name == "mos_array":
+        params.update({"rows": 1, "cols": 4, "topology": "common_centroid"})
+    generate(
+        {
+            "generator": generator_name,
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    # The synthetic PDK install draws no nSD, so the deck's N+ Activ-derived
+    # `nwell.enclosing.nactiv.1` cannot fire here; assert the geometry directly:
+    # NWell must enclose the outermost Activ (the ring) by at least NW.e.
+    activ = _layer_bbox(output, 1, 0)
+    nwell = _layer_bbox(output, 31, 0)
+    for edge, sign in (("left", 1), ("bottom", 1), ("right", -1), ("top", -1)):
+        assert sign * (activ[edge] - nwell[edge]) >= 0.24 - 1e-9, edge
+
+
+def test_sg13g2_ring_well_margin_clears_nw_e_and_others_unchanged():
+    from klayout_tools.decks import get_deck
+    from klayout_tools.gen_layer_params import _ring_well_margin_um
+
+    for family in ("sg13g2", "sg13cmos5l"):
+        (rule,) = [r for r in get_deck(family) if r.id == "nwell.enclosing.nactiv.1"]
+        assert _ring_well_margin_um(family) > rule.threshold_dbu / 1000
+    assert _ring_well_margin_um("sky130") == 0.2
+    assert _ring_well_margin_um("gf180mcu") == gen.WELL_ENCLOSURE_MARGIN_UM
+
+
 def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk_root):
     """`res_array`'s default output round-trips through `klt extract --deck
     sg13g2` to the `"rsil"` device class (`res_mark`/`res_implant`/

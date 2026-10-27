@@ -675,7 +675,9 @@ def test_json_contract(tmp_path, capsys):
     assert data["metrics"] == {"drc__error__count": data["violation_count"]}
 
     for entry in data["violations"]:
-        assert set(entry.keys()) == {
+        assert set(entry.keys()) - (
+            {"note"} if entry["check"] == "tap_distance" else set()
+        ) == {
             "rule",
             "description",
             "check",
@@ -1639,7 +1641,9 @@ def test_gf180mcu_corpus_layout_produces_well_formed_report(layout_path: Path):
     assert len(report["violations"]) == report["violation_count"]
 
     for entry in report["violations"]:
-        assert set(entry.keys()) == {
+        assert set(entry.keys()) - (
+            {"note"} if entry["check"] == "tap_distance" else set()
+        ) == {
             "rule",
             "description",
             "check",
@@ -1695,7 +1699,9 @@ def test_openroad_gcd_fixture_produces_well_formed_report():
     assert report["violation_count"] == sum(report["rule_counts"].values())
     assert len(report["violations"]) == report["violation_count"]
     for entry in report["violations"]:
-        assert set(entry.keys()) == {
+        assert set(entry.keys()) - (
+            {"note"} if entry["check"] == "tap_distance" else set()
+        ) == {
             "rule",
             "description",
             "check",
