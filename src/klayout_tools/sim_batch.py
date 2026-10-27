@@ -107,6 +107,7 @@ from . import (
     _batch_common,
     _provenance,
     remote_transport,
+    sim_eye,
     sim_search,
     sim_snm_meas,
     sim_staging,
@@ -673,7 +674,8 @@ def _runner_gate_release(version: str) -> str | None:
 #: #3337), ``twoport`` (``analysis.kind: "twoport"``, #3338), and
 #: ``twoport_noise`` (``analysis.noise``, #3339), and ``snm``
 #: (``measurements[].snm``, #3895), and ``search`` (``measurements[].search``,
-#: #4121).
+#: #4121). ``eye`` (``measurements[].eye``, #4292) landed after ``v0.8.0``, so
+#: its first release segment is ``0.8.1``.
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
@@ -689,6 +691,12 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: bool(
             sim_snm_meas.snm_measurements(request.get("measurements") or [])
+        ),
+    ),
+    "eye": (
+        (0, 8, 1),
+        lambda request: bool(
+            sim_eye.eye_measurements(request.get("measurements") or [])
         ),
     ),
     "search": (
@@ -744,6 +752,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "transfer",
         "snm",
         "search",
+        "eye",
         "stimulus",
         "dual_injection",
         "complex_vectors",
