@@ -234,8 +234,8 @@ def run_lef_abstract(
 
     Raises :class:`LefAbstractError` for a missing/unreadable layout or
     socket descriptor, an invalid ``obs_mode``, an ambiguous/missing top cell,
-    an unresolvable PDK or tech LEF for ``cell_library``, a write failure, or a failure to read the
-    written file back for its self-check.
+    an unresolvable PDK or tech LEF for ``cell_library``, a write failure, or
+    a failure to read the written file back for its self-check.
     """
     layout = load_layout(layout_path, LefAbstractError)
     top_cell = resolve_top_cell(layout, top, LefAbstractError, path=layout_path)
