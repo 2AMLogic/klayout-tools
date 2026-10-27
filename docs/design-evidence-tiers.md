@@ -226,7 +226,8 @@ written to every block.
    `met` verdict from `klt signoff` is still not evidence that the gaps were
    disclosed. A reviewer must read the reported `coverage` against the claim
    themselves.
-4. **LVS clean** — latest LVS report `status: match`, fresh, engine named,
+4. **LVS clean** — latest LVS report (or, per cell, a list of reports — all must
+   pass) `status: match`, fresh, engine named,
    checked against the netlist from item 1 (schematic netlist for analog,
    synthesized/routed gate-level netlist for digital), **and that same
    report's `power_connectivity.status` not `"mismatch"`**. Those are two

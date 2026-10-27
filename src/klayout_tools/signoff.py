@@ -6796,6 +6796,7 @@ def _build_tier_item(
         if item_id == 5 and partition_kind == "digital"
         else None
     )
+    lvs_report_list = item_id == _LVS_ITEM_ID and isinstance(raw_entry, list)
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
     elif (
@@ -6812,26 +6813,32 @@ def _build_tier_item(
             status, reason, not_applicable, failure_detail = _grade_not_applicable(
                 raw_entry["not_applicable"], partition_kind
             )
-    elif item_id in _ITEMS_ACCEPTING_MULTI_CITATION and (
-        raw_entry is not None
+    elif (
+        lvs_report_list
+        or item_id in _ITEMS_ACCEPTING_MULTI_CITATION
         and (
-            isinstance(raw_entry, list)
-            or spec_rows is not None
-            or spec_rows_invalid
-            or required_kind_pair is not None
+            raw_entry is not None
+            and (
+                isinstance(raw_entry, list)
+                or spec_rows is not None
+                or spec_rows_invalid
+                or required_kind_pair is not None
+            )
+            # Issue #4190: declared ``spec_rows`` with no evidence entry at
+            # all grade as a zero-citation set (every row uncovered or a
+            # declared gap), not as ``no_evidence``.
+            or (raw_entry is None and (spec_rows is not None or spec_rows_invalid))
         )
-        # Issue #4190: declared ``spec_rows`` with no evidence entry at
-        # all grade as a zero-citation set (every row uncovered or a
-        # declared gap), not as ``no_evidence``.
-        or (raw_entry is None and (spec_rows is not None or spec_rows_invalid))
     ):
         # Issue #2959: item 5 may cite several envelopes (and declare the
         # spec rows they must cover) -- graded per citation, then aggregated.
+        # Issue #4354: item 4 may cite one ``klt lvs`` report per cell;
+        # ``spec_rows`` has no meaning for LVS, so it is ignored there.
         status, reason, citation, failure_detail, extra = _grade_multi_citation(
             raw_entry,
             grade_spec,
-            spec_rows=spec_rows,
-            spec_rows_invalid=spec_rows_invalid,
+            spec_rows=None if lvs_report_list else spec_rows,
+            spec_rows_invalid=False if lvs_report_list else spec_rows_invalid,
             met_envelopes=met_envelopes,
             required_kind_pair=required_kind_pair,
         )
@@ -6868,6 +6875,11 @@ def _build_tier_item(
 #: ``spec_rows`` coverage (issue #2959). Item 5, and item 6 (issue #2908: a
 #: block whose spec has several statistical rows, only some evidenced).
 _ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5, 6})
+
+#: T1 item 4 (LVS): accepts a list of ``klt lvs`` reports -- one per cell of
+#: an analog partition (issue #4354) -- but never ``spec_rows``, so it is
+#: kept out of :data:`_ITEMS_ACCEPTING_MULTI_CITATION`.
+_LVS_ITEM_ID = 4
 
 #: Issue #3741: the RTL-flow evidence kinds of T1 item 5, digital -- the tier
 #: doc's "multi-corner STA **plus** a bit-exact functional test suite". A

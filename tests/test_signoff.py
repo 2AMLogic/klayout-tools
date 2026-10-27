@@ -17955,3 +17955,77 @@ def test_deleting_an_attested_file_is_unverifiable_provenance(tmp_path):
     assert [(m["path"], m["status"]) for m in members] == [
         ("design/bias.sch", "unverifiable")
     ]
+
+
+# --- Issue #4354: item 4 accepts a list of per-cell `klt lvs` reports -------
+
+
+def _item_4(tmp_path, entry, **manifest_extra):
+    report = build_tier_report(_manifest(evidence={"4": entry}, **manifest_extra))
+    return next(i for i in report["items"] if i["id"] == 4)
+
+
+def test_item4_list_of_matching_lvs_reports_is_met(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    b = _write(tmp_path, "b.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    item = _item_4(tmp_path, [a, b])
+    assert item["status"] == "met"
+    assert len(item["citations_graded"]) == 2
+
+
+def test_item4_one_mismatch_member_is_unmet_and_named(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    b = _write(tmp_path, "b.json", LVS_MISMATCH_ENVELOPE)
+    item = _item_4(tmp_path, [a, b])
+    assert item["status"] == "unmet"
+    assert item["detail"]["failed_citations"] == [str(b)]
+
+
+def test_item4_power_connectivity_mismatch_member_is_unmet(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    b = _write(tmp_path, "b.json", LVS_MATCH_POWER_MISMATCH_ENVELOPE)
+    item = _item_4(tmp_path, [a, b])
+    assert item["status"] == "unmet"
+    assert item["detail"]["failed_citations"] == [str(b)]
+
+
+def test_item4_malformed_member_and_empty_list_are_invalid(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    assert _item_4(tmp_path, [a, 42])["reason"] == "invalid_evidence"
+    assert _item_4(tmp_path, [])["reason"] == "invalid_evidence"
+
+
+def test_item4_non_lvs_member_is_wrong_kind(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    item = _item_4(tmp_path, [a, sim])
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+
+
+def test_item4_single_entry_renders_as_before(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    item = _item_4(tmp_path, a)
+    assert item["status"] == "met"
+    assert "citations_graded" not in item
+
+
+def test_item4_spec_rows_are_ignored_for_lvs_list(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    item = _item_4(tmp_path, [a], spec_rows={"4": [{"id": "gain"}]})
+    assert item["status"] == "met"
+    assert "row_coverage" not in item
+
+
+def test_item4_partition_qualified_lists_grade_each_partition(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    b = _write(tmp_path, "b.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    bad = _write(tmp_path, "bad.json", LVS_MISMATCH_ENVELOPE)
+    report = build_tier_report(
+        _mixed_signal_manifest(evidence={"4.analog": [a, b], "4.digital": [a, bad]})
+    )
+    by_partition = {
+        i["partition"]: i["status"] for i in report["items"] if i["id"] == 4
+    }
+    assert by_partition["analog"] == "met"
+    assert by_partition["digital"] == "unmet"
