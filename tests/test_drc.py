@@ -1565,7 +1565,7 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "via.5a",
         "via2.5",
         "via3.5",
-]
+    ]
     assert get_unmodeled_rules("no-such-deck") == []
 
 
