@@ -293,6 +293,15 @@ REASON_NO_GATES = "no_gates"
 #: ``erc_status`` untouched like every other ``inapplicable`` entry.
 REASON_EXTRACTOR_GLOBAL_NET = "extractor_global_net"
 
+#: ``erc_coverage.inapplicable[].reason`` (issue #4384) on
+#: ``erc.supply_short`` when the spec declares two or more ``kind: "supply"``
+#: nets: ``klt erc`` joins conductors only through the declared
+#: ``stackup``/``vias``, so supply rails that are one conductor through a
+#: shared substrate read as separate clean islands. A coverage disclosure,
+#: not a merge (substrate/well merging was rejected in #2192); additive and
+#: leaves ``erc_status`` untouched. Cross-check with ``klt lvs``.
+REASON_SUBSTRATE_CONTINUITY_NOT_MODELLED = "substrate_continuity_not_modelled"
+
 #: The skip reason for a level that could have been graded had ``--pdk``
 #: named a PDK with an antenna-ratio table (or named one at all), or had the
 #: spec's ``antenna_limits`` carried an entry for its layer (issue #4090).
@@ -602,18 +611,28 @@ def _undeclared_stream_layers(
     ``deck``, when given, narrows the result to that curated deck's own
     conducting layers (:func:`_deck_conductor_layers`) -- without it there is
     no PDK-agnostic way to tell a conductor from an implant or marker, so the
-    unfiltered list is reported.
+    unfiltered list is reported. A layer carrying at least one text shape in
+    that scope survives the narrowing regardless (issue #4376): an undeclared
+    label purpose reads as absent labels, and the deck has no label purposes
+    of its own to keep it.
     """
     scope_cells = cells_in_hierarchy(layout, top_cell)
     drawn: set[tuple[int, int]] = set()
+    texted: set[tuple[int, int]] = set()
     for layer_index in layout.layer_indexes():
         if any(cell.shapes(layer_index).size() for cell in scope_cells):
             info = layout.get_info(layer_index)
             drawn.add((info.layer, info.datatype))
+            if any(
+                shape.is_text()
+                for cell in scope_cells
+                for shape in cell.shapes(layer_index).each()
+            ):
+                texted.add((info.layer, info.datatype))
 
     undeclared = drawn - declared
     if deck is not None:
-        undeclared &= _deck_conductor_layers(deck)
+        undeclared = (undeclared & _deck_conductor_layers(deck)) | (undeclared & texted)
     return [f"{layer}/{datatype}" for layer, datatype in sorted(undeclared)]
 
 
@@ -809,6 +828,13 @@ def _connectivity_coverage(
     if not nets_decl:
         inapplicable.append(
             {"id": work_id("erc.net_connectivity"), "reason": "no_nets_declared"}
+        )
+    if sum(1 for decl in nets_decl if decl.get("kind") == "supply") >= 2:
+        inapplicable.append(
+            {
+                "id": "erc.supply_short",
+                "reason": REASON_SUBSTRATE_CONTINUITY_NOT_MODELLED,
+            }
         )
 
     for tie in ties:
@@ -2498,6 +2524,8 @@ _WELL_SELECTION_KEYS = (
     "well_excludes",
     "well_requires_boxes",
     "well_excludes_boxes",
+    "well_requires_cells",
+    "well_excludes_cells",
 )
 
 
@@ -2535,6 +2563,43 @@ def _boxes_region(
     region = kdb.Region()
     for box_um in boxes:
         region += kdb.Region(_clip_box(kdb, box_um, layout.dbu))
+    return region.merged()
+
+
+def _cells_region(
+    kdb: Any, layout: Any, top_cell: Any, layer: tuple[int, int], names: list[str]
+) -> Any:
+    """The merged region of ``layer`` geometry drawn **directly** in instances
+    of the named cells, in top-cell coordinates (issue #4373).
+
+    Walks the hierarchy once and keeps each polygon whose owning cell is one of
+    ``names``, transformed by the instance's accumulated transformation -- so
+    rotation, mirroring and arrays need no per-placement input. Geometry in a
+    named cell's *children* belongs to the child cell and is not matched.
+
+    A name absent from the layout is an :class:`ErcError`, not an empty
+    selection: a misspelt cell would otherwise select nothing and read as a
+    quiet degenerate tie.
+    """
+    wanted = set(names)
+    known = {cell.name for cell in layout.each_cell()}
+    missing = sorted(wanted - known)
+    if missing:
+        raise ErcError(
+            f"ties[].well_requires_cells/well_excludes_cells names cell(s) "
+            f"{missing} that are not in the layout"
+        )
+    layer_index = layout.find_layer(layer[0], layer[1])
+    region = kdb.Region()
+    if layer_index is None:
+        return region
+    iterator = top_cell.begin_shapes_rec(layer_index)
+    while not iterator.at_end():
+        if iterator.cell().name in wanted:
+            polygon = iterator.shape().polygon
+            if polygon is not None:
+                region.insert(polygon.transformed(iterator.trans()))
+        iterator.next()
     return region.merged()
 
 
@@ -2729,6 +2794,16 @@ def _select_well_class(
     if tie["well_excludes_boxes"]:
         selected = selected.not_interacting(
             _boxes_region(kdb, layout, tie["well_excludes_boxes"])
+        )
+    # Issue #4373: cell-name selectors, evaluated in each instance's frame.
+    well_layer = tie["well_layer"]
+    if tie["well_requires_cells"]:
+        selected = selected.interacting(
+            _cells_region(kdb, layout, top_cell, well_layer, tie["well_requires_cells"])
+        )
+    if tie["well_excludes_cells"]:
+        selected = selected.not_interacting(
+            _cells_region(kdb, layout, top_cell, well_layer, tie["well_excludes_cells"])
         )
     selected = selected.merged()
     degenerate = selected.is_empty() or (well_region - selected).is_empty()

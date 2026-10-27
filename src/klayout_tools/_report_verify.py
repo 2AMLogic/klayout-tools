@@ -66,6 +66,9 @@ from . import env_provenance
 VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
     {
         ("provenance", "klt_version"),
+        # Issue #4412: the commit/reinstall handle behind `klt_version`.
+        ("provenance", "klt_git_commit"),
+        ("provenance", "klt_reinstall_spec"),
         ("provenance", "klayout_version"),
         ("provenance", "pdk", "version"),
         # Issue #3786: the upstream commit behind a fetched PDK -- a revision

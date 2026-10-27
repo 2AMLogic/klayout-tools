@@ -656,6 +656,8 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
     prov = report["provenance"]
     assert set(prov.keys()) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",
@@ -2571,6 +2573,75 @@ def test_rename_declared_pins_reports_a_short_between_two_declared_pins(tmp_path
         w.startswith("ERROR:") and "'A|Y'" in w and "--rename-declared-pins" in w
         for w in report["warnings"]
     )
+
+
+def test_tie_declared_pins_aliases_a_merged_net_to_every_declared_pin(tmp_path):
+    """Issue #4383: `--tie-declared-pins` on the two-declared-names-one-net
+    fixture lists both declared names as `.SUBCKT` ports, tied by a resistor,
+    reports the tie, and keeps a `warning`-severity `declared_pin_short`."""
+    path = _write_gds(_make_inverter_layout(extra_a_label="B"), tmp_path / "tie.gds")
+    out = tmp_path / "tie.spice"
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(out),
+        declared_pins=frozenset({"A", "B", "VGND", "VPWR", "VPB"}),
+        tie_declared_pins=True,
+    )
+
+    assert report["pin_ties"] == [{"net": "A|B", "pin": "A", "tied_pins": ["B"]}]
+    [finding] = report["pin_renames"]["findings"]
+    assert finding["severity"] == "warning"
+    assert finding["code"] == "declared_pin_short"
+    text = out.read_text()
+    header = next(line for line in text.splitlines() if line.startswith(".SUBCKT"))
+    assert {"A", "B"} <= set(header.split()[2:])
+    assert "Rtie_B B A 1u" in text
+    assert text.index("Rtie_B") < text.index(".ENDS")
+
+
+def test_tie_declared_pins_off_has_no_pin_ties_field(tmp_path):
+    path = _write_gds(_make_inverter_layout(extra_a_label="B"), tmp_path / "s.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "s.spice"),
+        declared_pins=frozenset({"A", "B", "VGND", "VPWR", "VPB"}),
+        rename_declared_pins=True,
+    )
+    assert "pin_ties" not in report
+    assert "ties" not in report["pin_renames"]
+
+
+def test_tie_declared_pins_on_a_device_free_layout_succeeds(tmp_path):
+    """Issue #4383: no extracted circuit means no `.SUBCKT` to tie into; the
+    tie rewrite is skipped rather than raising `AttributeError`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("EMPTY")
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(0, 0, 1000, 1000))
+    path = _write_gds(layout, tmp_path / "empty.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "empty.spice"),
+        declared_pins=frozenset({"A"}),
+        tie_declared_pins=True,
+    )
+
+    assert report["device_count"] == 0
+    assert report["pin_ties"] == []
+
+
+def test_tie_declared_pins_requires_a_declared_pin_set(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    with pytest.raises(ExtractError, match="--tie-declared-pins requires"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "inv.spice"),
+            tie_declared_pins=True,
+        )
 
 
 def test_rename_declared_pins_skips_and_reports_a_colliding_rename(tmp_path):

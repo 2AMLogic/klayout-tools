@@ -1233,6 +1233,109 @@ def test_whitespace_before_paren_still_triggers(tmp_path, argv_log, monkeypatch)
         run_netlist(schematic, str(tmp_path / "b.spice"), xschem_binary=binary)
 
 
+def test_allow_unevaluated_expr_writes_netlist_with_warning(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", _EXPR_BODY)
+    monkeypatch.setenv("STUB_VERSION", "3.4.4")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+
+    report = run_netlist(
+        schematic, str(output), xschem_binary=binary, allow_unevaluated_expr=True
+    )
+
+    assert report["status"] == "generated"
+    assert output.exists()
+    (entry,) = report["warnings"]
+    assert entry["code"] == "unevaluated_expr"
+    assert entry["line"] == 3
+    assert "expr(" in entry["snippet"]
+    assert entry["xschem_version"] == "3.4.4"
+
+
+def test_allow_unevaluated_expr_with_check_and_block(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", _EXPR_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text("* committed\n", encoding="utf-8")
+
+    report = run_netlist(
+        schematic,
+        str(output),
+        check=True,
+        block=True,
+        xschem_binary=binary,
+        allow_unevaluated_expr=True,
+    )
+
+    assert report["status"] == "drifted"
+    assert report["warnings"][0]["code"] == "unevaluated_expr"
+    assert output.read_text(encoding="utf-8") == "* committed\n"
+
+
+def test_allow_unevaluated_expr_without_expr_emits_no_warning(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", "* c\nR1 a b 1k\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    report = run_netlist(
+        schematic,
+        str(tmp_path / "b.spice"),
+        xschem_binary=binary,
+        allow_unevaluated_expr=True,
+    )
+
+    assert "warnings" not in report
+
+
+def test_allow_unevaluated_expr_does_not_relax_unresolved_symbol(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", _MISSING_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(
+            schematic,
+            str(tmp_path / "b.spice"),
+            xschem_binary=binary,
+            allow_unevaluated_expr=True,
+        )
+
+    assert excinfo.value.code == "unresolved_symbol"
+
+
+def test_cli_allow_unevaluated_expr_warns_and_rejects_batch(
+    tmp_path, argv_log, monkeypatch, capsys
+):
+    monkeypatch.setenv("NETLIST_BODY", _EXPR_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "b.spice"
+    base = ["netlist", schematic, "-o", str(output), "--xschem-binary", binary]
+
+    assert main(base) == 1
+    assert not output.exists()
+    capsys.readouterr()
+
+    code = main([*base, "--allow-unevaluated-expr", "--format", "json"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert output.exists()
+    assert "warning" in captured.err and "expr(" in captured.err
+    assert json.loads(captured.out)["warnings"][0]["code"] == "unevaluated_expr"
+
+    code = main([*base, "--allow-unevaluated-expr", "--backend", "batch"])
+    assert code == 1
+    assert "--allow-unevaluated-expr" in capsys.readouterr().err
+
+
 # --------------------------------------------------------------------------- #
 # Unresolved-symbol content gate (issue #3964)
 # --------------------------------------------------------------------------- #

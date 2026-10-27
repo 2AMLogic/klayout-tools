@@ -46,7 +46,14 @@ def run(args: argparse.Namespace) -> int:
         # `--backend` > $KLT_NETLIST_BACKEND > local. `batch` never falls
         # back to a local xschem run: every batch failure is exit 1.
         backend = resolve_backend(getattr(args, "backend", None))
+        allow_expr = bool(getattr(args, "allow_unevaluated_expr", False))
         if backend == "batch":
+            if allow_expr:
+                raise NetlistError(
+                    "--allow-unevaluated-expr is not supported with "
+                    "--backend batch (the runner applies the expr() gate "
+                    "itself); use --backend local"
+                )
             report = run_netlist_batch(
                 args.schematic,
                 args.output,
@@ -73,12 +80,19 @@ def run(args: argparse.Namespace) -> int:
                 pdk=args.pdk,
                 pdk_root=args.pdk_root,
                 block=args.block,
+                allow_unevaluated_expr=allow_expr,
             )
     except NetlistError as exc:
         return emit_error(
             "netlist", str(exc), args.format, code=exc.code, details=exc.details
         )
 
+    for entry in report.get("warnings") or ():
+        _warn(
+            f"unevaluated expr(...) at line {entry['line']}: {entry['snippet']!r} "
+            f"(xschem version: {entry['xschem_version'] or 'unknown'}); "
+            "written anyway because --allow-unevaluated-expr was given"
+        )
     emit_success(report, args.format, _print_text)
     return EXIT_DRIFTED if report["status"] == "drifted" else EXIT_OK
 

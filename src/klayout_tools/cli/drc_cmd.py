@@ -216,6 +216,15 @@ def _run_check(args: argparse.Namespace) -> int:
             "replays the committed report's own recorded waivers file",
             args.format,
         )
+    if args.tile is not None:
+        # Issue #4226: the abutment context a report was run with is
+        # recorded in its `tile` echo and replayed by `--check --rerun`.
+        return emit_error(
+            "drc",
+            "--tile cannot be combined with --check: --check --rerun replays "
+            "the committed report's own recorded tile",
+            args.format,
+        )
     if args.rules is not None:
         # Issue #2768: `--check` verifies a committed report as it was run;
         # `--rerun` replays that report's own recorded `rule_selection`, so a
@@ -269,6 +278,7 @@ _REQUEST_FIELD_DESTS = {
     "rules": "rules",
     "waivers_file": "waivers",
     "output": "output",
+    "tile": "tile",
 }
 
 
@@ -345,6 +355,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "waivers": _path("waivers_file"),
             # Issue #4393: resolved against the request document's directory.
             "output": _path("output"),
+            "tile": _str("tile"),
         }
     )
 
@@ -386,6 +397,7 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
     for flag, value in (
         ("--rules", args.rules),
         ("--waivers", args.waivers),
+        ("--tile", args.tile),
     ):
         if value is not None:
             raise DrcError(
@@ -423,6 +435,12 @@ def _run(args: argparse.Namespace) -> dict:
     if args.engine == "both":
         return _run_crosscheck(args)
     if args.engine == "klayout":
+        if args.tile is not None:
+            raise DrcError(
+                "--tile is not supported with --engine klayout: the abutment "
+                "context is built by the curated engine (see docs/cli/drc.md, "
+                "'Abutment context')"
+            )
         if args.waivers is not None:
             raise DrcError(
                 "--waivers is not supported with --engine klayout: waivers "
@@ -478,6 +496,7 @@ def _run(args: argparse.Namespace) -> dict:
         pdk_root=args.pdk_root,
         rules=selectors,
         waivers_file=args.waivers,
+        tile=args.tile,
         negative_control=args.negative_control,
         negative_control_categories=_negative_control_categories(args),
     )

@@ -282,8 +282,8 @@ written to every block.
    stay the route wherever they recognise every device in the block, and a
    block may not choose the runset to avoid a curated-deck finding. The
    allowlist (`signoff_runset.PINNED_RUNSETS`, listed by
-   `klt signoff --describe-grader` under `pinned_runsets`) holds the SG13G2 and
-   SG13CMOS5L `*.lvs` runsets as of 2026-10-27; gf180mcu is not yet pinned.
+   `klt signoff --describe-grader` under `pinned_runsets`) holds the SG13G2,
+   SG13CMOS5L and gf180mcu `*.lvs` runsets as of 2026-10-27.
    **Adding an entry** is a reviewed trust decision, never a copy of a hash
    from a report: fetch the PDK's runset file from its upstream repo at a
    named commit, `sha256` it (the same digest `_provenance.sha256_file`
@@ -496,7 +496,10 @@ written to every block.
       `klt signoff` renders `lvs_did_not_pass` (not the plain
       `check_failed`) when the ERC supply evidence is complete and
       continuous and only the LVS half is unavailable, naming in
-      `detail.power_delivery` the supplies the ERC run did prove. Produce
+      `detail.power_delivery` the supplies the ERC run did prove. A set
+      citing only the `erc` or only the `lvs` part renders
+      `power_delivery_parts_missing` (not `wrong_kind`), naming the absent
+      part and crediting the supplies a resolved ERC spec proved. Produce
       the ERC supply spec anyway — it is the half that survives an unrelated
       LVS defect, and it is what makes the distinction visible.
       A `klayout-runset` report (item 4's PDK-runset path) can be this LVS

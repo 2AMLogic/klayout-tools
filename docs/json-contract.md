@@ -825,6 +825,8 @@ stability statement, concrete precedents, and drift-detection guidance, and
 ```json
 "provenance": {
   "klt_version": "0.4.2",
+  "klt_git_commit": "<full sha> | null",
+  "klt_reinstall_spec": "klayout-tools==0.4.2 | null",
   "klayout_version": "0.29.8",
   "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
   "deck": {"name": "sky130", "content_hash": "sha256:<hex>", "released": true},
@@ -850,6 +852,14 @@ stability statement, concrete precedents, and drift-detection guidance, and
   version on non-release builds — it carries the same dev form as `version`.
   Field names, types, and the definition (`klayout_tools.__version__`) are
   unchanged, so no `schema_version` bump; see `docs/cli/version.md`.
+- `klt_git_commit`, `klt_reinstall_spec` (issue #4412, additive, no `schema_version` bump) — the
+  full commit behind this build and the `uvx --from`/`pip install` spec that
+  re-obtains it, with the same values as `klt version --format json`'s
+  `git_commit` and `reinstall_spec`. `null` when unrecoverable (dirty tree,
+  tarball install, `X.Y.Z.dev0+unknown`), never fabricated. A `.devN+g<sha>`
+  `klt_version` is not published to an index, so `uvx --from
+  "klayout-tools==<version>"` fails by design; use `klt_reinstall_spec`. Both are
+  excluded from `--rerun`/`--check` drift like `klt_version`.
 - `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
   or `null` if unresolvable.
 - `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see
@@ -1639,7 +1649,10 @@ bookkeeping is canonicalized out of the `--rerun` diff on both sides
 `place-and-route`'s `engine_logs[]`, keyed by a fresh `uuid4` per
 OpenROAD invocation; `equiv`'s `elapsed_s` and its `resume` block,
 issue #2280) — without that, `--rerun` would report `"drifted"`
-unconditionally. `klt signoff` is the same shape one level up: a
+unconditionally. `place-and-route --resume` (issue #4411) adds an optional
+`resume: {resumed_stages: [...]}` object, present only when the flag was
+given (see [`cli/place-and-route.md`](cli/place-and-route.md), "Resuming an
+interrupted run"). `klt signoff` is the same shape one level up: a
 tier/fleet report echoes graded verdicts, never the manifest, so
 `--check` sits beside the `--manifest`/`--fleet` argument it re-grades.
 Per-verb detail:
@@ -1845,6 +1858,20 @@ depends on its meaning staying fixed:
 
 Field-level schema, path rules, examples and exit codes:
 [`cli/signoff.md`](cli/signoff.md#attesting-items-1-9-and-10---attest-issue-2844).
+
+Two behaviours worth knowing when running `--attest` or grading a manifest:
+
+- **Declared commands see the caller's `PATH`.** Inventory commands run with
+  the invoking environment, except that when `klt` itself runs inside a venv
+  (`sys.prefix != sys.base_prefix`, as under `uvx`/pipx) that venv's `bin`
+  directory is removed from `PATH`, so a bare `python3` resolves to the
+  repo's interpreter, not the tool's. Outside a venv the environment is
+  unchanged.
+- **Manifest evidence paths are cwd-relative.** A relative `file` evidence
+  path resolves against the process cwd, not the manifest's directory. When a
+  file-backed entry grades `unreadable_evidence`, the item's `detail` carries
+  `path` (the resolved absolute path) and `cwd` (the process cwd) — additive
+  fields; no existing field changes.
 
 ## Error shape
 

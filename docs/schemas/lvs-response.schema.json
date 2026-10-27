@@ -31,13 +31,27 @@
     "reference_top": {"type": "string", "description": "Reference side's resolved top circuit name."},
     "reference_conversion": {
       "type": "object",
-      "description": "Present only for reference.form 'subckt-call'.",
-      "required": ["form", "deck", "device_map"],
-      "properties": {
-        "form": {"const": "subckt-call"},
-        "deck": {"type": ["string", "null"]},
-        "device_map": {"type": ["object", "null"]}
-      },
+      "description": "Present only for reference.form 'subckt-call' or 'gate-level-verilog'.",
+      "oneOf": [
+        {
+          "required": ["form", "deck", "device_map"],
+          "properties": {
+            "form": {"const": "subckt-call"},
+            "deck": {"type": ["string", "null"]},
+            "device_map": {"type": ["object", "null"]}
+          }
+        },
+        {
+          "required": ["form", "library", "pdk", "pdk_root", "pin_order_files"],
+          "properties": {
+            "form": {"const": "gate-level-verilog"},
+            "library": {"type": ["string", "array", "null"], "items": {"type": "string"}},
+            "pdk": {"type": ["string", "null"]},
+            "pdk_root": {"type": ["string", "null"]},
+            "pin_order_files": {"type": ["array", "null"], "items": {"type": "string"}}
+          }
+        }
+      ],
       "additionalProperties": true
     },
     "parameter_tolerance": {"type": ["number", "null"]},
@@ -233,7 +247,7 @@
             "type": "object",
             "required": ["library", "path", "cells"],
             "properties": {
-              "library": {"type": ["string", "null"]},
+              "library": {"type": ["string", "array", "null"], "items": {"type": "string"}},
               "path": {"$ref": "#/$defs/path_value"},
               "cells": {"type": "integer", "minimum": 0}
             },
@@ -271,7 +285,7 @@
                 "type": "object",
                 "required": ["library", "masters", "master_count", "corroborated", "power_pins"],
                 "properties": {
-                  "library": {"type": ["string", "null"]},
+                  "library": {"type": ["string", "array", "null"], "items": {"type": "string"}},
                   "masters": {"type": "array", "items": {"type": "string"}},
                   "master_count": {"type": "integer", "minimum": 0},
                   "corroborated": {"type": "boolean"},
@@ -289,6 +303,21 @@
           "additionalProperties": {"type": "string"}
         },
         "unchecked_expected_pins": {"type": "array", "items": {"type": "string"}},
+        "excluded_pins": {
+          "type": "array",
+          "description": "Well/substrate-layer LEF pins disclosed instead of checked (issue #4363). Additive.",
+          "items": {
+            "type": "object",
+            "required": ["pin", "cells", "instance_count", "reason"],
+            "properties": {
+              "pin": {"type": "string"},
+              "cells": {"type": "array", "items": {"type": "string"}},
+              "instance_count": {"type": "integer", "minimum": 0},
+              "reason": {"type": "string"}
+            },
+            "additionalProperties": true
+          }
+        },
         "findings": {
           "type": "array",
           "items": {"$ref": "#/$defs/power_finding"}

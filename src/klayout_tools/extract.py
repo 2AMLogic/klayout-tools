@@ -476,6 +476,62 @@ _SPICE_GLOBAL_GROUND_NODE = "0"
 SUBSTRATE_DC_TIE_RESISTANCE_OHM = 1e12
 
 
+#: Resistance of the ties ``--tie-declared-pins`` writes (issue #4383): a
+#: micro-ohm rather than a literal ``0``, which ngspice warns about and clamps.
+PIN_TIE_RESISTANCE = "1u"
+
+
+def _apply_pin_ties_if_circuit(
+    netlist_path: str, circuit: Any, ties: Sequence[Mapping[str, Any]]
+) -> None:
+    """Issue #4383: :func:`_apply_pin_ties_to_spice` on the extracted top
+    circuit; a device-free layout has none (and no ``.SUBCKT``), so skip."""
+    if circuit is not None:
+        _apply_pin_ties_to_spice(netlist_path, circuit.name, ties)
+
+
+def _apply_pin_ties_to_spice(
+    netlist_path: str, top_name: str, ties: Sequence[Mapping[str, Any]]
+) -> None:
+    """Issue #4383: rewrite the written deck so ``top_name``'s ``.SUBCKT``
+    header also lists every tied declared pin (appended after the existing
+    ports, in tie order) and the body gains one ``Rtie_<pin> <pin> <canonical>
+    1u`` per tied pin, just before the matching ``.ENDS``."""
+    if not ties:
+        return
+    with open(netlist_path, encoding="utf-8") as handle:
+        lines = handle.read().split("\n")
+    header_re = re.compile(rf"^\.subckt\s+{re.escape(top_name)}(\s|$)", re.IGNORECASE)
+    start = next((i for i, line in enumerate(lines) if header_re.match(line)), None)
+    if start is None:
+        raise ExtractError(
+            f"--tie-declared-pins: no `.SUBCKT {top_name}` header in '{netlist_path}'"
+        )
+    last_header = start
+    while last_header + 1 < len(lines) and lines[last_header + 1].startswith("+"):
+        last_header += 1
+    end = next(
+        (
+            i
+            for i in range(last_header + 1, len(lines))
+            if lines[i].lower().startswith(".ends")
+        ),
+        None,
+    )
+    if end is None:
+        raise ExtractError(f"--tie-declared-pins: no `.ENDS` in '{netlist_path}'")
+    extra = [pin for tie in ties for pin in tie["tied_pins"]]
+    cards = [
+        f"Rtie_{pin} {pin} {tie['pin']} {PIN_TIE_RESISTANCE}"
+        for tie in ties
+        for pin in tie["tied_pins"]
+    ]
+    lines[last_header] += " " + " ".join(extra)
+    lines[end:end] = cards
+    with open(netlist_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+
+
 def substrate_tie_written_ohms(requested_ohms: float) -> float:
     """Resistance (ohms) the substrate tie card is actually written with.
 
@@ -1488,6 +1544,7 @@ def run_extract(
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
+    tie_declared_pins: bool = False,
     subcircuit_cell: str | None = None,
     subcircuit_output: str | None = None,
     substrate_spreading_net: str | None = None,
@@ -3055,6 +3112,7 @@ def run_extract(
         # declared name. `False` (the default) is the exact call every
         # site that predates this flag makes.
         rename_declared_pins=rename_declared_pins,
+        tie_declared_pins=tie_declared_pins,
         subcircuit_cell=subcircuit_cell,
         subcircuit_info=subcircuit_info,
         hierarchical_cells=hierarchical_names,
@@ -3859,6 +3917,9 @@ def run_extract(
             shutil.rmtree(scratch_dir, ignore_errors=True)
         raise ExtractError(f"could not write netlist '{netlist_path}': {exc}") from exc
 
+    pin_ties = (pin_renames or {}).get("ties") or []
+    _apply_pin_ties_if_circuit(netlist_path, circuit, pin_ties)
+
     with stage("netlist_hash"):
         reported_netlist_path, netlist_sha256 = _finish_netlist_write(
             netlist_path, scratch_dir
@@ -4037,6 +4098,10 @@ def run_extract(
         # point, both `null` when `found` is false. See `_evaluate_probes`.
         "probes": probe_results,
     }
+    # Additive field (issue #4383): only present under `--tie-declared-pins`;
+    # each net's canonical port plus the declared names tied to it by a
+    # `Rtie_*` resistor in the written `.SUBCKT`.
+    result.update(_pin_ties_field(tie_declared_pins, pin_ties))
     if pdk_info is not None:
         result["pdk"] = {
             "variant": pdk_info["variant"],
@@ -4989,6 +5054,9 @@ def rerun_extract_report(
             declared_pins=rerun_declared_pins,
             def_pins=rerun_def_pins,
             rename_declared_pins=rename_declared_pins,
+            tie_declared_pins=isinstance(
+                (committed.get("pin_renames") or {}).get("ties"), list
+            ),
         )
     finally:
         if scratch_dir is not None:
@@ -5106,6 +5174,7 @@ def extract_netlist_from_layout(
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
+    tie_declared_pins: bool = False,
     subcircuit_cell: str | None = None,
     subcircuit_info: dict[str, Any] | None = None,
     hierarchical_cells: tuple[str, ...] = (),
@@ -5379,6 +5448,7 @@ def extract_netlist_from_layout(
             "--def-pins": bool(def_pins),
             "--pin-source-cells": bool(pin_source_cells),
             "--rename-declared-pins": rename_declared_pins,
+            "--tie-declared-pins": tie_declared_pins,
             "--subcircuit": subcircuit_cell is not None,
             "--hierarchical-cells": bool(hierarchical_cells),
             "--substrate-spreading": substrate_spreading_net is not None,
@@ -5398,6 +5468,9 @@ def extract_netlist_from_layout(
     # other request-shape check above uses (see the helper for why this is
     # an error rather than a silent no-op).
     _require_declared_set_for_rename(rename_declared_pins, declared_pins, def_pins)
+    _require_declared_set_for_rename(
+        tie_declared_pins, declared_pins, def_pins, flag="--tie-declared-pins"
+    )
 
     # `--subcircuit` (issue #2245): the one fact about the slice that needs the
     # live layout hierarchy, reported back through the out-parameter (see this
@@ -5557,6 +5630,7 @@ def extract_netlist_from_layout(
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         rename_declared_pins=rename_declared_pins,
+        tie_declared_pins=tie_declared_pins,
         substrate_spreading_net=substrate_spreading_net,
         probes=probes,
         probe_results=probe_results,
@@ -5645,6 +5719,7 @@ def _require_declared_set_for_rename(
     rename_declared_pins: bool,
     declared_pins: frozenset[str] | None,
     def_pins: frozenset[str] | None,
+    flag: str = "--rename-declared-pins",
 ) -> None:
     """Issue #2854: ``--rename-declared-pins`` with neither ``--pins`` nor
     ``--def-pins`` is a clean :class:`ExtractError`, not a silent no-op --
@@ -5653,7 +5728,7 @@ def _require_declared_set_for_rename(
     pin names for ``klt lvs``'s ``options.anchor_top_level_pins``)."""
     if rename_declared_pins and declared_pins is None and def_pins is None:
         raise ExtractError(
-            "--rename-declared-pins requires a declared pin set to rename "
+            f"{flag} requires a declared pin set to rename "
             "to -- pass --pins <A,B,...> (or --def-pins <def>), the same "
             "set whose reconciliation survives the pins it names"
         )
@@ -5823,10 +5898,28 @@ def _promoted_pin_nets_by_cluster(circuit: Any) -> dict[int, tuple[Any, list[int
     return pin_nets
 
 
-def _declared_pin_short_finding(before: str, hit: list[str]) -> dict[str, Any]:
+def _declared_pin_short_finding(
+    before: str, hit: list[str], *, tied: bool = False
+) -> dict[str, Any]:
     """The ``error``-severity ``declared_pin_short`` finding (issue #2854):
     one promoted pin net carrying 2+ declared pin names -- a short between
-    interface pins, reported and never repaired."""
+    interface pins, reported and never repaired (``tied``: issue #4383, the
+    caller opted into ``--tie-declared-pins`` -- aliased with a zero-ohm tie
+    and downgraded to a ``warning``)."""
+    if tied:
+        return {
+            "severity": "warning",
+            "code": "declared_pin_short",
+            "net": before,
+            "declared_pins": hit,
+            "message": (
+                f"promoted pin net '{before}' carries 2+ declared pin names "
+                f"({', '.join(hit)}) -- tied (--tie-declared-pins): the "
+                f"extracted `.SUBCKT` lists each as a port joined to "
+                f"'{hit[0]}' by a zero-ohm resistor; the layout still shorts "
+                "these interface pins -- issue #4383"
+            ),
+        }
     message = (
         f"promoted pin net '{before}' carries 2+ declared pin names "
         f"({', '.join(hit)}) -- not renamed (--rename-declared-pins reports "
@@ -5879,6 +5972,53 @@ def _rename_disclosure_prose(renamed: list[dict[str, str]]) -> list[str]:
     ]
 
 
+def _pin_ties_field(tie_declared_pins: bool, pin_ties: list[Any]) -> dict[str, Any]:
+    """The ``pin_ties`` key of the extract report (issue #4383), present only
+    under ``--tie-declared-pins``."""
+    return {"pin_ties": pin_ties} if tie_declared_pins else {}
+
+
+def _ties_block_field(tie: bool, ties: list[dict[str, Any]]) -> dict[str, Any]:
+    """The ``ties`` key of the ``--rename-declared-pins`` report block: only
+    present under ``--tie-declared-pins`` (issue #4383)."""
+    return {"ties": ties} if tie else {}
+
+
+def _handle_multi_hit_pin_net(
+    circuit: Any,
+    net: Any,
+    pin_ids: list[int],
+    hit: list[str],
+    before: str,
+    taken: set[str],
+    tie: bool,
+    findings: list[dict[str, Any]],
+    prose: list[str],
+    ties: list[dict[str, Any]],
+) -> None:
+    """A promoted pin net matching 2+ declared names: report the short as an
+    ``error`` and leave the net alone, or -- under ``--tie-declared-pins``
+    (issue #4383) with the first name free -- rename it to the first name and
+    record the tie. See :func:`_rename_declared_pin_nets`."""
+    if tie and hit[0] not in taken - {net.expanded_name()}:
+        short = _declared_pin_short_finding(before, hit, tied=True)
+        findings.append(short)
+        prose.append(short["message"])
+        taken.discard(net.expanded_name())
+        taken.add(hit[0])
+        net.name = hit[0]
+        for pin_id in pin_ids:
+            circuit.rename_pin(pin_id, hit[0])
+        ties.append({"net": before, "pin": hit[0], "tied_pins": hit[1:]})
+        return
+    short = _declared_pin_short_finding(before, hit)
+    findings.append(short)
+    # Mirrored with the `ERROR:` prefix, the same way
+    # `def_pin_promotion`'s error-severity findings are, so a caller
+    # checking only `warnings[]` (and `--format text`) still sees it.
+    prose.append("ERROR: " + short["message"])
+
+
 def _rename_declared_pin_nets(
     netlist: kdb.Netlist,
     top_name: str,
@@ -5886,6 +6026,7 @@ def _rename_declared_pin_nets(
     def_pins: frozenset[str] | None,
     *,
     enabled: bool,
+    tie: bool = False,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     """Rename each surviving promoted pin net to its declared name when
     exactly one component label matches (issue #2854), returning
@@ -5938,6 +6079,14 @@ def _rename_declared_pin_nets(
     restrict what ``declared_pins``'s kept, and it alone runs the
     ``def_pin_promotion`` report), so :func:`rerun_extract_report` replays
     both arguments from these echoes, not the union.
+
+    ``tie`` (``--tie-declared-pins``, issue #4383): a net matching 2+
+    declared names is not reported as an ``error`` short but renamed to its
+    first declared name (sorted) and recorded in the block's ``ties`` list as
+    ``{"net", "pin", "tied_pins"}``; the caller's SPICE post-pass
+    (:func:`_apply_pin_ties_to_spice`) then lists every tied name as a
+    ``.SUBCKT`` port joined to the canonical one by a zero-ohm resistor. The
+    finding stays visible as a ``warning``-severity ``declared_pin_short``.
     """
     if not enabled:
         return None, []
@@ -5968,6 +6117,7 @@ def _rename_declared_pin_nets(
     pin_nets = _promoted_pin_nets_by_cluster(circuit)
     taken = {net.expanded_name() for net in circuit.each_net()}
     renamed: list[dict[str, str]] = []
+    ties: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
     prose: list[str] = []
 
@@ -5977,12 +6127,9 @@ def _rename_declared_pin_nets(
         if not hit:
             continue
         if len(hit) > 1:
-            short = _declared_pin_short_finding(before, hit)
-            findings.append(short)
-            # Mirrored with the `ERROR:` prefix, the same way
-            # `def_pin_promotion`'s error-severity findings are, so a caller
-            # checking only `warnings[]` (and `--format text`) still sees it.
-            prose.append("ERROR: " + short["message"])
+            _handle_multi_hit_pin_net(
+                circuit, net, pin_ids, hit, before, taken, tie, findings, prose, ties
+            )
             continue
         target = hit[0]
         raw_name = net.expanded_name()
@@ -6005,13 +6152,15 @@ def _rename_declared_pin_nets(
             circuit.rename_pin(pin_id, target)
         renamed.append({"from": before, "to": target})
 
+    block: dict[str, Any] = {
+        "declared": sorted(declared),
+        **declared_pin_echoes,
+        "renamed": sorted(renamed, key=lambda entry: entry["from"]),
+        "findings": findings,
+        **_ties_block_field(tie, ties),
+    }
     return (
-        {
-            "declared": sorted(declared),
-            **declared_pin_echoes,
-            "renamed": sorted(renamed, key=lambda entry: entry["from"]),
-            "findings": findings,
-        },
+        block,
         prose + _rename_disclosure_prose(renamed),
     )
 
@@ -8682,6 +8831,7 @@ def _extract_netlist(
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
+    tie_declared_pins: bool = False,
     substrate_spreading_net: str | None = None,
     dotted_renames_out: list[tuple[str, str, str]] | None = None,
 ) -> tuple[
@@ -10759,7 +10909,8 @@ def _extract_netlist(
         top_cell.name,
         declared_pins,
         def_pins,
-        enabled=rename_declared_pins,
+        enabled=rename_declared_pins or tie_declared_pins,
+        tie=tie_declared_pins,
     )
     warnings.extend(declared_pin_rename_prose)
 

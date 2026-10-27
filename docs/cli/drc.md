@@ -164,6 +164,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `rules` | string \| array\<string\> | `--rules` — one comma-separated string (the argv spelling) or a list of selector strings, each comma-split the same way. Any other type (a number, an object, a list holding a non-string) is rejected; empty and unmatched tokens are rejected exactly as for the flag. Curated engine only. |
 | `waivers_file` | string | `--waivers` (issue #3483; a path, resolved relative to the request document's own directory like `deck_file`. The waivers are not inlined — point at the reviewed file.) Curated engine only — see "Waivers". |
 | `output` | string | `-o/--output` (issue #4393; a path, resolved relative to the request document's own directory like `deck_file`.) |
+| `tile` | string | `--tile` (issue #4226; `"<cols>x<rows>"`, odd counts, e.g. `"3x1"`). Curated engine only — see "Abutment context". |
 
 An unknown top-level field is an application error (exit `1`), not a silently
 ignored one — a typo'd field would otherwise drop an input the caller
@@ -3103,6 +3104,31 @@ These two fields are **purely additive** to the JSON contract — the existing
 `cell` field keeps its meaning (the top cell) and the sort key is unchanged
 — so this did not bump `drc`'s `schema_version` (see
 [`docs/json-contract.md`](../json-contract.md)).
+
+## Abutment context (`--tile`, issue #4226)
+
+`klt drc` judges each top cell on its own, so a tileable leaf (filler, rail
+segment) whose conductor is cut at the cell boundary reports e.g.
+`met5.width.1` against the segment's short dimension although the placed,
+flattened result is clean. `--tile <cols>x<rows>` (request field `tile`;
+curated engine only) checks each top cell as the **centre of a `cols x rows`
+array of itself** at its abutment pitch: the `prBoundary` (`235/4`) bbox when
+the cell draws one, else the cell bbox. Counts must be positive odd integers.
+
+- Only markers overlapping the centre instance are reported (a marker that
+  merely touches its edge, or lies wholly in a neighbour, is dropped), so the
+  array's edge instances raise no findings of their own. Reported markers keep
+  the original `cell` name and coordinates; `source_cell`/`source_path` are as
+  in an untiled run.
+- A genuinely narrow cell (narrower than the rule across the full pitch) still
+  fails; a boundary-cut one no longer does.
+- The report gains `tile: {"columns": C, "rows": R}`; it is absent without the
+  flag, and every other field is byte-identical to an untiled run.
+- `1x1` is the untiled check. An empty cell, or one with a zero-size pitch, is
+  checked untiled. Whole-region rules (density, area) see the array's
+  extent, not the cell's; only markers overlapping the centre instance count.
+- Refused (exit `1`) with `--engine klayout`, `--engine both` and `--check`
+  (`--check --rerun` replays the report's recorded `tile`).
 
 ## Waivers
 

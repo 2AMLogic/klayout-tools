@@ -350,6 +350,12 @@ draws that the spec never declared" below.
     with `islands`, `same_net_as`, `roles` or `unlabelled_allowed_boxes`
     — or naming it from another entry's `same_net_as` — is a spec error.
     Example: `{ "name": "SUB", "kind": "supply", "extractor_global": true }`.
+  - Two or more `kind: "supply"` entries (issue #4384) add one
+    `erc_coverage.inapplicable` entry `{"id": "erc.supply_short", "reason":
+    "substrate_continuity_not_modelled"}`: `erc.supply_short` sees joins only
+    through the declared `stackup`/`vias`, so rails that are one conductor
+    through a shared substrate are not observable. Cross-check with
+    `klt lvs` (`hints.short_nets`). `erc_status` is unchanged.
   - `same_net_as` (string, optional, default absent, issue #2463) — the
     `name` of another `nets[]` entry this one is *intentionally* the same
     electrical net as. Declare it when the layout deliberately ties two
@@ -566,6 +572,25 @@ draws that the spec never declared" below.
     graded. Same falsifiability test, same reason token: a selection keeping
     every drawn shape, or none of them (including boxes matching no shape at
     all), is recorded as skipped work (`degenerate_well_selection`).
+  - `well_requires_cells` / `well_excludes_cells` (optional arrays of cell
+    names, default `[]`, issue #4373) — the same well-side class selection,
+    named by the **cell** a well is drawn in instead of by coordinates, for a
+    hierarchical block that places one cell many times (rotated, mirrored or
+    arrayed) with only some placements on another supply. A merged shape of
+    `well_layer` is kept when it interacts with the union of `well_layer`
+    geometry drawn **directly** in instances of the `well_requires_cells`
+    cells and with none of the `well_excludes_cells` geometry, evaluated in
+    each instance's transformed frame, so no per-placement input goes stale.
+    Whole drawn shapes are selected, as for the box and marker forms; it
+    composes with the other four selectors and the degeneracy verdict
+    (`degenerate_well_selection`) is measured on the combined result. A cell
+    name absent from the layout is a spec error, not an empty selection.
+    Limits: well geometry in a named cell's *child* cells belongs to the child
+    and is not matched, and abutting wells of different classes merge into one
+    shape before selection, so the selector cannot split it. The cell name
+    comes from the stream hierarchy, not asserted coordinates, so (like the
+    marker form) a tie selected this way is **not** listed in
+    `erc_coverage.checked_by_well_assertion`.
   - `tap_layer` (string, `"<layer>/<datatype>"`, required) — the tap
     (substrate/well contact) layer expected inside each well shape.
   - `tap_requires` (optional array of `"<layer>/<datatype>"`, default
@@ -828,6 +853,15 @@ which is which. Once that triage has confirmed the islands are the
 *intended* partition (or a verified well-continuity artifact the spec
 cannot see), the entry can declare the count — `nets[].islands`, issue
 #2400 — so the name grades against it instead of an implicit 1.
+
+**Substrate continuity between supply nets is not modelled either (issue
+#4384).** Two `kind: "supply"` nets that are one conductor through a shared
+p-substrate are each reported as one clean island, with no
+`erc.supply_short`, while `klt lvs` sees a single merged net (it needs
+`hints.short_nets`). When a spec declares two or more supply nets, the report
+says so in `erc_coverage.inapplicable` (`erc.supply_short`, reason
+`substrate_continuity_not_modelled`), so "no short found" is distinguishable
+from "short not observable". Cross-check those rails with `klt lvs`.
 
 **That cross-check is not automatically an independent confirmation,
 either.** At least one widely used open-foundry LVS deck's connectivity
@@ -2958,7 +2992,9 @@ any other checked, non-degenerate tie:
   declared. Pure disclosure, mirroring `klt drc`'s
   `coverage.layers_in_stream_without_rules`: it is not an input to
   `erc_status` (nor `status`), emits no finding, and is narrowed to the
-  curated deck's conducting layers when `--deck` is given. See "Layers this
+  curated deck's conducting layers when `--deck` is given, except that an
+  undeclared layer carrying text shapes is always named (an undeclared label
+  purpose otherwise reads as absent labels). See "Layers this
   stream draws that the spec never declared" above.
 - `well_assertion_coverage` (array\<object\>, issue #2427) — one entry per
   non-degenerate tie that asserted its substrate region (`well_layer: null` +

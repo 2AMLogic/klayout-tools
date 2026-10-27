@@ -56,8 +56,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -318,6 +320,10 @@ def _path_list(
     return paths
 
 
+#: Upper bound (seconds) on a command's optional ``timeout_s``.
+COMMAND_TIMEOUT_CEILING_S = 21600
+
+
 def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
     """Validate one declared command: ``{"argv": [str, ...], "cwd"?: path}``.
 
@@ -347,6 +353,20 @@ def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
         raise AttestationError(f"'{field}.local_only' must be a boolean")
     if local_only:
         spec["local_only"] = True
+    if "timeout_s" in raw:
+        timeout_s = raw["timeout_s"]
+        if (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(timeout_s)
+            or timeout_s <= 0
+            or timeout_s > COMMAND_TIMEOUT_CEILING_S
+        ):
+            raise AttestationError(
+                f"'{field}.timeout_s' must be a positive number of seconds "
+                f"no greater than {COMMAND_TIMEOUT_CEILING_S}"
+            )
+        spec["timeout_s"] = timeout_s
     return spec
 
 
@@ -662,6 +682,23 @@ def failed_output_tail(check: Mapping[str, Any]) -> str:
     )
 
 
+def _command_env() -> dict[str, str]:
+    """Environment for a declared command: the caller's, minus the tool
+    venv's ``bin`` directory on ``PATH`` when running inside a venv (as under
+    ``uvx``/pipx), so a bare ``python3`` resolves to the repo's interpreter
+    rather than the tool's. Outside a venv the environment is unchanged."""
+    env = dict(os.environ)
+    if sys.prefix == sys.base_prefix or "PATH" not in env:
+        return env
+    venv_bin = os.path.normcase(os.path.dirname(sys.executable))
+    env["PATH"] = os.pathsep.join(
+        entry
+        for entry in env["PATH"].split(os.pathsep)
+        if os.path.normcase(entry) != venv_bin
+    )
+    return env
+
+
 def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
     """Run one declared command; return ``(exit_status, error)``. ``error``
     is ``"launch_failed"``/``"timeout"`` (stable tokens, not host-specific
@@ -677,8 +714,9 @@ def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | 
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=_COMMAND_EVIDENCE_TIMEOUT_S,
+            timeout=spec.get("timeout_s", _COMMAND_EVIDENCE_TIMEOUT_S),
             check=False,
+            env=_command_env(),
         )
     except subprocess.TimeoutExpired:
         return None, "timeout"

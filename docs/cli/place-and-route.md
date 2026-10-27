@@ -469,6 +469,49 @@ changes that net's own routing, so this mirrors ORFS's own
 then reports the post-repair violation count (`antenna_violation_count`)
 before `write_def`.
 
+## Resuming an interrupted run (`--resume`, issue #4411)
+
+A `route` stage on a large block can run for hours; if the `klt` process dies
+afterwards (host tool replaced, OOM, kill), the stage ODBs are on disk but a
+plain re-invocation starts again from `floorplan` — and, with `outputs.dir`
+set, is refused because the directory is populated. `--resume` picks the run
+up instead:
+
+```
+klt place-and-route request.json --resume
+```
+
+After each stage finishes, the flow writes `<top>_<stage>.commit.json` next to
+the checkpoint, holding the stage's `stages[]` entry, its `engine_logs`, the
+artifacts it produced (`<top>_<stage>.odb`, `<top>_<stage>_metrics.json`, plus
+`<top>.def` and `<top>.v` for `route`) and an **input hash**. On `--resume`,
+each stage in order is skipped iff its record exists, its input hash matches,
+and every listed artifact is still on disk. The first stage that fails the
+check — and every stage after it — runs normally. If every stage up to
+`target_stage` is reusable, only the DEF→GDS merge (and any `post_route_spef`
+pass) and response assembly run.
+
+The input hash covers the previous stage's hash (so a change invalidates all
+later stages), the request document except `target_stage`, the stage's
+generated Tcl script text, and the content hashes of the netlist, tech/cell
+LEF, liberty, and any macro LEF/liberty. A stage killed mid-run has no record
+(it is written last, and any stale one is deleted before the stage re-runs),
+so a partial `.odb` is never reused.
+
+* `--resume` lifts the populated-`outputs.dir` refusal (like `--rerun`). On an
+  empty or missing directory it behaves as a normal run.
+* Without `--resume`, behaviour is unchanged (the refusal stands) and the
+  response has no `resume` field.
+* The response gains an optional `resume` object, present only under
+  `--resume`: `{"resumed_stages": ["floorplan", "place", ...]}` (empty when
+  nothing was reusable). All other fields have the same shape and, for
+  reused stages, the same values as an uninterrupted run (`engine_logs`
+  entries of reused stages are the recorded ones).
+* Refused with a clear error (exit 1): `--resume` together with
+  `pdk.rebuild_corners` (each corner re-runs in full; resume is not applied
+  per corner), and `--resume` together with `--check`.
+* Out of scope: resuming inside a stage, and the `--backend batch` path.
+
 ## Floorplan methods
 
 Three of ORFS's four floorplan-initialization methods are supported (the
@@ -2013,6 +2056,19 @@ live re-measurement above.
 | `outputs` | object \| omitted | Additive field (issue #4231), mirroring `klt synthesize`'s `outputs.dir`. `{"dir": "<path>"}` replaces `.klt/place-and-route/` as the directory every artifact (DEF/GDS/Verilog/SPEF, Tcl, ODB, metrics) is written to; relative paths resolve against the request file's directory. Multi-corner requests write `<dir>/<corner>/` and `corner_runs[].output_dir` names it. Response paths are produced from this directory, so they name the committed location and `portable_paths` rewrites them as usual. Unknown keys and a non-string/empty `dir` are rejected, as is a `dir` that already exists and is non-empty (prior evidence is retained); an existing empty directory is accepted. The output-dir lock is held on this directory. `--check --rerun` reuses the directory in place (overwriting its own artifacts), so the non-empty refusal does not apply to a re-run. Not supported with `--backend batch` (rejected with an error). Omitting `outputs` leaves behaviour and JSON unchanged. |
 | `portable_paths` | boolean \| omitted | Additive field (issue #3820). Default `false`: the response is byte-identical to before this field existed (absolute paths, which `klt extract --def-pins` and `klt signoff` chain on). `true` rewrites every absolute host path in the response — `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path`, `stages[].def_path`, `power.placed.def_path`, `spef_sta.*_path`, `layer_map.path`, and paths embedded in messages — so it can be committed as evidence and passes `klt env-provenance lint-envelope`: inside the repo → `{"path": "<repo-relative>", "scope": "repo"}`; outside it (or no git root) → `{"path": null, "scope": "external"}`; under the PDK root → a `"$PDK_ROOT/<relative>"` string. Fields that are `null` stay `null`. An `external` path cannot be chained into `--def-pins`; keep `output_dir` inside the repo if you need both. No `schema_version` bump. |
 
+### Unknown request keys are errors (issue #4230)
+
+An unrecognised **top-level** request key is rejected with an error naming it
+and the request file (exit 1, nothing written), instead of being dropped in
+silence — a misspelt `post_route_spef` can no longer pass for a deliberate
+default. Recognised keys: `schema`, `engine`, `netlist`, `hdl_toplevel`, `pdk`,
+`floorplan`, `io`, `macros`, `power`, `constraints`, `seed`, `target_stage`,
+`route_critical_nets_percentage`, `max_antenna_repair_iterations`, `library`,
+`post_route_spef`, `post_route_sdf`, `portable_paths`, `backend`, `batch`; the
+`_comment` annotation is also accepted (its contents are never read). The same
+check applies to `--check` and `pdk.rebuild_corners`. Nested objects (`pdk`,
+`floorplan`, …) are not yet checked for unknown keys.
+
 ### IO pin layers must be inside the signal-routing range (#2473)
 
 `io.layer_h`/`io.layer_v` are rejected at **request time** — before any
@@ -2243,6 +2299,8 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
   "warnings": [],
   "provenance": {
     "klt_version": "0.1.0",
+    "klt_git_commit": null,
+    "klt_reinstall_spec": null,
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
     "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>", "path": { "path": null, "scope": "external" } },
@@ -3201,7 +3259,7 @@ committed one, reporting `status: "drifted"` with a `drift[]` list of
 `wirelength_um`, `setup_violation_count`, a `power.placed` count that stopped
 being reported, a changed `provenance.input.content_hash`.
 
-Excluded from the diff: `provenance.klt_version`/`klayout_version`/
+Excluded from the diff: `provenance.klt_version`/`klt_git_commit`/`klt_reinstall_spec`/`klayout_version`/
 `pdk.version` and `engine_version` (an OpenROAD upgrade that leaves the result
 untouched is tool churn, not evidence drift), plus the whole `engine_logs[]`
 block — every entry is keyed by a fresh `uuid4` `invocation_id` with its

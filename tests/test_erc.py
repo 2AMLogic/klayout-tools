@@ -2443,6 +2443,77 @@ def test_extractor_global_net_is_not_reported_unconnected_and_is_disclosed(tmp_p
     assert all(f["net"] != "SUB" for f in report["erc_findings"])
 
 
+def _supply_disclosure(report):
+    return [
+        e
+        for e in report["erc_coverage"]["inapplicable"]
+        if e["id"] == "erc.supply_short"
+    ]
+
+
+def test_two_supply_nets_disclose_substrate_continuity_not_modelled(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "two.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "two.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "VDD2", "kind": "supply"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+
+    assert _supply_disclosure(report) == [
+        {"id": "erc.supply_short", "reason": "substrate_continuity_not_modelled"}
+    ]
+
+
+def test_fewer_than_two_supply_nets_emit_no_substrate_disclosure(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "one.gds"
+    layout.write(str(gds))
+    for name, nets in (
+        ("zero", []),
+        ("one", [{"name": "VDD", "kind": "supply"}]),
+        (
+            "signals",
+            [{"name": "A", "kind": "signal"}, {"name": "B", "kind": "signal"}],
+        ),
+    ):
+        spec = tmp_path / f"{name}.erc.json"
+        _write_spec(spec, _nets_spec(nets=nets))
+        report = run_erc(str(gds), str(spec))
+        assert _supply_disclosure(report) == [], name
+
+
+def test_substrate_disclosure_leaves_erc_status_unchanged(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "status.gds"
+    layout.write(str(gds))
+    base = tmp_path / "base.erc.json"
+    two = tmp_path / "two.erc.json"
+    _write_spec(base, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+    _write_spec(
+        two,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "SUB", "kind": "supply", "extractor_global": True},
+            ]
+        ),
+    )
+
+    assert _supply_disclosure(run_erc(str(gds), str(two)))
+    assert (
+        run_erc(str(gds), str(two))["status"] == run_erc(str(gds), str(base))["status"]
+    )
+
+
 def test_same_net_without_extractor_global_is_still_reported(tmp_path):
     layout, top, poly, li1, label = _nets_fixture_layout()
     gds = tmp_path / "notglobal.gds"
@@ -8346,6 +8417,51 @@ def test_deck_still_names_an_undeclared_metal_level(tmp_path):
     assert report["erc_status"] == "clean"
 
 
+def _gf180mcu_with_extra_shapes(tmp_path, draw, **kwargs):
+    gds = tmp_path / "gf_extra.gds"
+    spec = tmp_path / "gf_extra.erc.json"
+    _gf180mcu_resistor_divider_fixture(gds)
+    layout = kdb.Layout()
+    layout.read(str(gds))
+    draw(layout, layout.top_cell())
+    layout.write(str(gds))
+    _write_spec(spec, _gf180mcu_resistor_divider_spec())
+    return run_erc(str(gds), str(spec), deck="gf180mcu", **kwargs)
+
+
+def test_deck_names_an_undeclared_label_purpose_carrying_text(tmp_path):
+    """A text on a purpose the spec declares as no `label_layer` reads as
+    absent; under `--deck` it must still be named (issue #4376), while a
+    shape-only marker layer stays suppressed and the field stays
+    reporting-only."""
+
+    def draw(layout, top):
+        top.shapes(layout.layer(36, 5)).insert(
+            kdb.Text("VDD", kdb.Trans(_um(1), _um(0.5)))
+        )
+        top.shapes(layout.layer(200, 0)).insert(
+            kdb.Box.new(_um(0), _um(0), _um(1), _um(1))
+        )
+
+    report = _gf180mcu_with_extra_shapes(tmp_path, draw)
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == ["36/5"]
+    assert report["erc_status"] == "clean"
+
+
+def test_deck_undeclared_text_counts_in_child_cells_not_sibling_tops(tmp_path):
+    def draw(layout, top):
+        child = layout.create_cell("CHILD")
+        child.shapes(layout.layer(36, 5)).insert(kdb.Text("A", kdb.Trans(0, 0)))
+        top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans()))
+        sibling = layout.create_cell("SIBLING")
+        sibling.shapes(layout.layer(37, 5)).insert(kdb.Text("B", kdb.Trans(0, 0)))
+
+    report = _gf180mcu_with_extra_shapes(tmp_path, draw, top="TOP")
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == ["36/5"]
+
+
 def test_cli_json_carries_undeclared_stream_layers(tmp_path, capsys):
     """The field reaches the JSON envelope (the contract), not just the
     in-process return value."""
@@ -9391,6 +9507,158 @@ def test_check_erc_report_external_file_is_unverifiable(tmp_path_factory):
     result = erc.check_erc_report(str(report_path))
 
     assert result["status"] != "match"
+
+
+# --- Issue #4373: well_requires_cells / well_excludes_cells ----------------
+# The cell-relative form of #2540's box selectors: the class of a drawn well
+# is named by the cell it is drawn in, evaluated in each instance's frame.
+
+
+def _hierarchical_two_class_layout():
+    """`_two_class_well_layout(marker=False)` with the base tub's well moved
+    out of the top cell into a `BASE_TUB` cell placed at the identity, so the
+    cell-name and box spellings grade identical geometry."""
+    layout, top = _two_class_well_layout(marker=False)
+    nwell = layout.layer(10, 0)
+    tub = kdb.Box.new(_um(3), _um(0.4), _um(6.5), _um(2.8))
+    for shape in list(top.shapes(nwell).each()):
+        if shape.bbox() == tub:
+            shape.delete()
+    sub = layout.create_cell("BASE_TUB")
+    sub.shapes(nwell).insert(tub)
+    top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans()))
+    return layout
+
+
+def _run_hierarchical(tmp_path, stem, ties):
+    layout = _hierarchical_two_class_layout()
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, _routed_tie_spec(ties=ties))
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+def test_cell_selectors_match_the_equivalent_box_spec(tmp_path):
+    by_cell = _run_hierarchical(
+        tmp_path,
+        "cells",
+        _two_class_ties(
+            body_overrides={"well_excludes_cells": ["BASE_TUB"]},
+            base_overrides={"well_requires_cells": ["BASE_TUB"]},
+        ),
+    )
+    by_box = _run_two_class_well(
+        tmp_path,
+        "boxes",
+        _two_class_ties(
+            body_overrides={"well_excludes_boxes": [_BASE_TUB_BOX]},
+            base_overrides={"well_requires_boxes": [_BASE_TUB_BOX]},
+        ),
+        marker=False,
+    )
+
+    assert by_cell["erc_findings"] == by_box["erc_findings"] == []
+    assert {_BODY_ID, _BASE_ID} <= set(by_cell["erc_coverage"]["checked"])
+    assert by_cell["erc_coverage"]["skipped"] == []
+    assert by_cell["erc_status"] == "clean"
+
+
+def test_cell_selected_ties_are_not_well_assertions(tmp_path):
+    report = _run_hierarchical(
+        tmp_path,
+        "cells_not_asserted",
+        _two_class_ties(
+            body_overrides={"well_excludes_cells": ["BASE_TUB"]},
+            base_overrides={"well_requires_cells": ["BASE_TUB"]},
+        ),
+    )
+
+    assert report["erc_coverage"]["checked_by_well_assertion"] == []
+
+
+def test_cell_selectors_compose_with_boxes_and_report_degenerate(tmp_path):
+    keeps_none = _run_hierarchical(
+        tmp_path,
+        "cells_keep_none",
+        [
+            _two_class_ties(
+                base_overrides={
+                    "well_requires_cells": ["BASE_TUB"],
+                    "well_excludes_boxes": [_BASE_TUB_BOX],
+                }
+            )[1]
+        ],
+    )
+    assert _tie_skips(keeps_none) == {_BASE_ID: "degenerate_well_selection"}
+
+    keeps_all = _run_hierarchical(
+        tmp_path,
+        "cells_keep_all",
+        [_two_class_ties(base_overrides={"well_excludes_cells": ["BASE_TUB"]})[0]],
+    )
+    # Excluding BASE_TUB leaves only the body well -> a real partition.
+    assert _tie_skips(keeps_all) == {}
+
+
+def test_unknown_cell_name_is_an_error(tmp_path):
+    with pytest.raises(ErcError, match="NOPE"):
+        _run_hierarchical(
+            tmp_path,
+            "cells_unknown",
+            _two_class_ties(base_overrides={"well_requires_cells": ["NOPE"]}),
+        )
+
+
+def test_cell_selector_keys_must_be_string_arrays(tmp_path):
+    with pytest.raises(ErcError, match="well_requires_cells"):
+        _run_hierarchical(
+            tmp_path,
+            "cells_bad_type",
+            _two_class_ties(base_overrides={"well_requires_cells": "BASE_TUB"}),
+        )
+
+
+def test_cells_region_follows_rotation_mirroring_arrays_and_ignores_children():
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    well = layout.layer(10, 0)
+    top = layout.create_cell("TOP")
+    cell = layout.create_cell("WELLCELL")
+    child = layout.create_cell("CHILD")
+    cell.shapes(well).insert(kdb.Box.new(0, 0, _um(2), _um(1)))
+    child.shapes(well).insert(kdb.Box.new(_um(10), _um(10), _um(11), _um(11)))
+    cell.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans()))
+    top.insert(kdb.CellInstArray(cell.cell_index(), kdb.Trans(1, False, _um(20), 0)))
+    top.insert(kdb.CellInstArray(cell.cell_index(), kdb.Trans(2, True, 0, _um(30))))
+    top.insert(
+        kdb.CellInstArray(
+            cell.cell_index(),
+            kdb.Trans(),
+            kdb.Vector(_um(5), 0),
+            kdb.Vector(0, _um(5)),
+            2,
+            2,
+        )
+    )
+
+    region = erc._cells_region(kdb, layout, top, (10, 0), ["WELLCELL"])
+
+    boxes = sorted(
+        (p.bbox().left, p.bbox().bottom, p.bbox().right, p.bbox().top)
+        for p in region.each()
+    )
+    expected = sorted(
+        [
+            (_um(19), 0, _um(20), _um(2)),  # R90 about (20, 0)
+            (_um(-2), _um(30), 0, _um(31)),  # M0 then R180: mirrored in x
+            (0, 0, _um(2), _um(1)),
+            (_um(5), 0, _um(7), _um(1)),
+            (0, _um(5), _um(2), _um(6)),
+            (_um(5), _um(5), _um(7), _um(6)),
+        ]
+    )
+    assert boxes == expected
 
 
 # Issue #4374: `erc.unlabelled_conductor` locates and classifies its islands,

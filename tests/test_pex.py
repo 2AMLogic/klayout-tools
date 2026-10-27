@@ -36,6 +36,7 @@ from klayout_tools.pex import (
     BODY_BIAS_BIASED,
     BODY_BIAS_UNBIASED,
     PexError,
+    _apply_tie_nets,
     _body_bias_report,
     _build_coverage,
     _build_delta_rows,
@@ -56,6 +57,7 @@ from klayout_tools.pex import (
     _status_from_coverage,
     _subckt_interfaces,
     _unextracted_delta_rows,
+    _validate_tie_nets,
     run_pex,
 )
 
@@ -280,6 +282,153 @@ def test_body_bias_report_unbiased_names_devices_and_nets():
     assert report["unbiased_device_count"] == 3
     assert report["unbiased_nets"] == ["\\$5", "\\$7"]
     assert report["unbiased_pmos_body_nets"] == entries
+
+
+# --------------------------------------------------------------------------- #
+# `--tie-net` (issue #4245): a caller-declared tie of a reported-unbiased net.
+# --------------------------------------------------------------------------- #
+
+_TIE_ENTRIES = [
+    {"device": "M1", "net": "\\$5"},
+    {"device": "M2", "net": "\\$7"},
+]
+
+
+def test_body_bias_report_without_ties_has_no_tied_key():
+    assert "tied" not in _body_bias_report({"unbiased_pmos_body_nets": _TIE_ENTRIES})
+
+
+def test_body_bias_report_partial_tie_stays_unbiased():
+    report = _body_bias_report(
+        {"unbiased_pmos_body_nets": _TIE_ENTRIES}, [("\\$5", "VDD")]
+    )
+    assert report["status"] == BODY_BIAS_UNBIASED
+    assert report["tied"] == [
+        {"extracted_net": "\\$5", "schematic_net": "VDD", "source": "declared"}
+    ]
+    # The layout's own finding is carried verbatim.
+    assert report["unbiased_pmos_body_nets"] == _TIE_ENTRIES
+
+
+def test_body_bias_report_fully_tied_is_tied_not_biased():
+    report = _body_bias_report(
+        {"unbiased_pmos_body_nets": _TIE_ENTRIES},
+        [("\\$5", "VDD"), ("\\$7", "VDD")],
+    )
+    assert report["status"] == "tied"
+    assert [t["schematic_net"] for t in report["tied"]] == ["VDD", "VDD"]
+
+
+def test_validate_tie_nets_lists_valid_names_for_unknown_net():
+    with pytest.raises(PexError) as exc:
+        _validate_tie_nets([("vout", "VDD")], {"unbiased_pmos_body_nets": _TIE_ENTRIES})
+    assert "vout" in str(exc.value)
+    assert "\\$5" in str(exc.value) and "\\$7" in str(exc.value)
+    assert exc.value.code == "invalid_tie_net"
+
+
+def test_validate_tie_nets_errors_when_nothing_is_unbiased():
+    with pytest.raises(PexError, match="no unbiased net"):
+        _validate_tie_nets([("\\$5", "VDD")], {"unbiased_pmos_body_nets": []})
+
+
+def test_apply_tie_nets_rewrites_whole_tokens_on_device_cards(tmp_path):
+    path = tmp_path / "x.spice"
+    path.write_text(
+        "* \\$5 comment\n.SUBCKT top a b\n"
+        "M1 a b c \\$5 pmos w=1\nM2 a b c \\$7 pmos w=1\n"
+        "M3 a b c \\$55 pmos w=1\n.ENDS\n"
+    )
+    _apply_tie_nets(str(path), [("\\$5", "VDD"), ("\\$7", "VDD")])
+    assert path.read_text() == (
+        "* \\$5 comment\n.SUBCKT top a b\n"
+        "M1 a b c VDD pmos w=1\nM2 a b c VDD pmos w=1\n"
+        "M3 a b c \\$55 pmos w=1\n.ENDS\n"
+    )
+
+
+def test_apply_tie_nets_does_not_chain(tmp_path):
+    path = tmp_path / "x.spice"
+    path.write_text("M1 a b c n1 pmos\nM2 a b c n2 pmos\n")
+    _apply_tie_nets(str(path), [("n1", "n2"), ("n2", "n3")])
+    assert path.read_text() == "M1 a b c n2 pmos\nM2 a b c n3 pmos\n"
+
+
+def test_apply_tie_nets_errors_when_net_absent(tmp_path):
+    path = tmp_path / "x.spice"
+    path.write_text("M1 a b c d pmos\n")
+    with pytest.raises(PexError, match="does not appear"):
+        _apply_tie_nets(str(path), [("\\$9", "VDD")])
+
+
+def test_parse_tie_nets():
+    from klayout_tools.cli._parsing import parse_tie_nets
+
+    assert parse_tie_nets(None, PexError) is None
+    assert parse_tie_nets(["\\$5=VDD", "\\$7=VDD", "\\$5=VDD"], PexError) == [
+        ("\\$5", "VDD"),
+        ("\\$7", "VDD"),
+    ]
+    for bad in ("nope", "=VDD", "a="):
+        with pytest.raises(PexError):
+            parse_tie_nets([bad], PexError)
+    with pytest.raises(PexError, match="twice"):
+        parse_tie_nets(["a=X", "a=Y"], PexError)
+
+
+def test_run_pex_tie_net_on_layout_with_no_unbiased_nets_errors(
+    tmp_path, resistor_layout, measure_reference
+):
+    with pytest.raises(PexError, match="not an unbiased"):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            measure_command=_write_harness(tmp_path),
+            reference_netlist=measure_reference,
+            tie_nets=[("\\$5", "VDD")],
+        )
+
+
+def test_run_pex_tie_net_reports_hash_of_rewritten_netlist(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    import klayout_tools.pex as pex_module
+    from klayout_tools._provenance import sha256_file
+
+    real = pex_module.run_extract
+
+    def _with_unbiased(*args, **kwargs):
+        rep = real(*args, **kwargs)
+        rep["unbiased_pmos_body_nets"] = [{"device": "M0", "net": "n_tie"}]
+        return rep
+
+    monkeypatch.setattr(pex_module, "run_extract", _with_unbiased)
+    monkeypatch.setattr(
+        pex_module,
+        "_validate_tie_nets",
+        lambda ties, rep: None,
+    )
+    out = tmp_path / "res.spice"
+
+    def _fake_apply(path, ties):
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("* tied\n")
+
+    monkeypatch.setattr(pex_module, "_apply_tie_nets", _fake_apply)
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(out),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=measure_reference,
+        tie_nets=[("n_tie", "VDD")],
+    )
+    assert report["extraction"]["netlist_sha256"] == sha256_file(str(out))
 
 
 # --------------------------------------------------------------------------- #

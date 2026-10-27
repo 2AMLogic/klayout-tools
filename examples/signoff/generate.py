@@ -127,7 +127,7 @@ _LVS_REQUEST = {
 #: `provenance` paths set to `null` in the committed envelopes (issue #2028).
 #:
 #: Every other field in these fixtures is a property of the *block* -- the
-#: deck and input content hashes, the coverage rollup, the verdicts. These two
+#: deck and input content hashes, the coverage rollup, the verdicts. These
 #: are properties of whichever checkout happened to run `generate.py`, so
 #: committing whatever the regenerating machine produced would bake a
 #: checkout-local artifact into a worked example and make a round-trip check
@@ -139,6 +139,10 @@ _LVS_REQUEST = {
 #:   *within one regeneration run* -- `drc.json` is captured first, and
 #:   rewriting it dirties the working tree, so `lvs.json` (captured second)
 #:   would record a `.dirty` suffix its sibling does not.
+#: - `provenance.klt_git_commit` and `provenance.klt_reinstall_spec` record
+#:   the running build's git SHA and the pip spec that reinstalls it. Both
+#:   name the regenerating checkout (a SHA that changes on every commit), so
+#:   committing them would break the round-trip on the next commit.
 #: - `provenance.deck.released` is a lookup of the deck's content hash in
 #:   this build's generated release-history table
 #:   (`klayout_tools.decks.history.is_deck_hash_released`). It answers
@@ -156,6 +160,8 @@ _LVS_REQUEST = {
 #: machine rather than about the block.
 _NORMALIZED_PROVENANCE_PATHS: tuple[tuple[str, ...], ...] = (
     ("provenance", "klt_version"),
+    ("provenance", "klt_git_commit"),
+    ("provenance", "klt_reinstall_spec"),
     ("provenance", "deck", "released"),
 )
 
