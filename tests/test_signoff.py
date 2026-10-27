@@ -16363,9 +16363,9 @@ def test_attest_argument_conflicts_are_refused(argv, capsys):
 
 
 def test_attest_rejects_an_item_it_does_not_attest_as_a_usage_error():
-    """Item 2 is out of scope (its binding is the layout stream itself)."""
+    """Only items 1, 2, 9 and 10 are attestable (item 2 via `--input`)."""
     with pytest.raises(SystemExit) as excinfo:
-        main(["signoff", "--attest", "2", "--inventory", "x.json"])
+        main(["signoff", "--attest", "3", "--inventory", "x.json"])
     assert excinfo.value.code == 2
 
 

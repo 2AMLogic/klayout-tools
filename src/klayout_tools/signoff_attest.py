@@ -60,12 +60,15 @@ from ._report_verify import (
     build_rerun_result,
     load_committed_report,
 )
-from .build_identity import build_version
+from .build_identity import _klayout_version, build_version
 from .env_provenance import find_repo_root
 from .signoff import (
     _COMMAND_EVIDENCE_TIMEOUT_S,
+    _HASH_KIND_BYTES,
+    _HASH_KIND_GEOMETRY,
     _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
     _ITEMS_REQUIRING_ATTESTED_EVIDENCE,
+    _REGENERATED_HASH_RE,
     SCHEMA_VERSION,
     SignoffError,
     _classify,
@@ -104,7 +107,20 @@ HASH_ALGORITHM = "sha256-raw-bytes"
 #: the committed stream itself (issue #2718), unchanged by issue #2844.
 ATTESTABLE_ITEMS: tuple[int, ...] = tuple(sorted(_ITEMS_REQUIRING_ATTESTED_EVIDENCE))
 
-_ITEM_TITLES = {1: "Design sources", 9: "Testbenches shipped", 10: "Repo hygiene"}
+#: The one T1 item attested from a committed layout stream rather than an
+#: inventory (issue #4188): ``--attest 2 --input STREAM``. Item 2's binding is
+#: the stream itself, so there is no inventory to hand-write.
+STREAM_ATTESTABLE_ITEM = 2
+
+#: ``--hash-kind`` values a stream attestation's regeneration claim accepts.
+REGENERATION_HASH_KINDS: tuple[str, ...] = (_HASH_KIND_BYTES, _HASH_KIND_GEOMETRY)
+
+_ITEM_TITLES = {
+    1: "Design sources",
+    2: "Layout",
+    9: "Testbenches shipped",
+    10: "Repo hygiene",
+}
 
 #: Top-level inventory keys each item accepts. Anything else is refused --
 #: an unknown key is far more likely a typo (``testbench`` for
@@ -754,6 +770,17 @@ def check_attestation(
     A ``local_only`` command is not run: it is listed in ``skipped_checks``
     (never counted as passed by this run) and its committed outcome is carried
     into ``fresh_status``, so a committed failure still fails the gate."""
+    committed = _load_committed_attestation(committed_path)
+    committed_checks = (committed.get("attestation") or {}).get("checks")
+    fresh = build_attestation(
+        item,
+        inventory_path,
+        committed_checks if isinstance(committed_checks, list) else [],
+    )
+    return _drift_result(committed_path, committed, fresh)
+
+
+def _load_committed_attestation(committed_path: str) -> dict[str, Any]:
     committed = load_committed_report(committed_path, AttestationError)
     if committed.get("kind") != "generic" or "attestation" not in committed:
         raise AttestationError(
@@ -761,12 +788,12 @@ def check_attestation(
             'envelope (no "kind": "generic" with an \'attestation\' block) -- '
             "check the path"
         )
-    committed_checks = (committed.get("attestation") or {}).get("checks")
-    fresh = build_attestation(
-        item,
-        inventory_path,
-        committed_checks if isinstance(committed_checks, list) else [],
-    )
+    return committed
+
+
+def _drift_result(
+    committed_path: str, committed: Mapping[str, Any], fresh: dict[str, Any]
+) -> dict[str, Any]:
     # ``skipped`` marks a local_only check this run did not execute; its
     # (carried-through) outcome is the committed one, so it is reported beside
     # the diff rather than as a difference from the committed envelope.
@@ -792,3 +819,181 @@ def check_attestation(
     result["skipped_checks"] = skipped
     result["fresh"] = fresh_payload
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Item 2: attest a committed layout stream (issue #4188)
+# --------------------------------------------------------------------------- #
+
+#: A database unit counts as "on grid" when it is a positive length that
+#: divides one micron into a whole number of database units (0.001 -> 1000),
+#: within this relative tolerance for float representation.
+_DBU_GRID_TOLERANCE = 1e-6
+
+
+def _stream_checks(stream: str, digest: str) -> list[dict[str, Any]]:
+    """The three item-2 checks, in fixed order: stream readable (loads in
+    ``pya``), non-empty top cell(s), database unit on grid. A stream that
+    cannot be read fails all three -- nothing else can be said about it."""
+    layout = None
+    try:
+        import klayout.db as kdb
+
+        layout = kdb.Layout()
+        layout.read(stream)
+    except Exception:
+        layout = None
+    checks: list[dict[str, Any]] = [
+        {
+            "check": "stream_readable",
+            "role": "layout",
+            "passed": layout is not None,
+            "content_hash": digest,
+        }
+    ]
+    top_names: list[str] = []
+    non_empty = False
+    dbu = None
+    if layout is not None:
+        tops = list(layout.top_cells())
+        top_names = sorted(cell.name for cell in tops)
+        non_empty = bool(tops) and all(not cell.bbox().empty() for cell in tops)
+        dbu = float(layout.dbu)
+    checks.append(
+        {
+            "check": "top_cell_non_empty",
+            "role": "layout",
+            "passed": non_empty,
+            "top_cells": top_names,
+        }
+    )
+    on_grid = False
+    if dbu is not None and dbu > 0:
+        per_micron = 1.0 / dbu
+        on_grid = abs(per_micron - round(per_micron)) <= _DBU_GRID_TOLERANCE * max(
+            per_micron, 1.0
+        )
+    checks.append(
+        {"check": "dbu_on_grid", "role": "layout", "passed": on_grid, "dbu": dbu}
+    )
+    return checks
+
+
+def build_stream_attestation(
+    stream_path: str,
+    *,
+    generator: str | None = None,
+    regenerated_hash: str | None = None,
+    hash_kind: str = _HASH_KIND_BYTES,
+) -> dict[str, Any]:
+    """``klt signoff --attest 2 --input STREAM``: run the item-2 checks on a
+    committed GDS/OASIS stream and return the artifact-anchored generic
+    envelope (``status`` ``"pass"`` iff every check passed).
+
+    ``generator`` and ``regenerated_hash`` must be given together; they
+    populate ``provenance.regeneration`` exactly as the grader reads it
+    (:func:`~.signoff._regeneration_claim`). The generator is echoed, never
+    run. Raises :class:`AttestationError` for a missing, symlinked or
+    non-repository stream or a malformed regeneration claim."""
+    if (generator is None) != (regenerated_hash is None):
+        raise AttestationError(
+            "--generator and --regenerated-hash must be given together: a "
+            "regeneration claim needs both the command and the hash it produced"
+        )
+    if hash_kind not in REGENERATION_HASH_KINDS:
+        raise AttestationError(
+            f"--hash-kind must be one of {', '.join(REGENERATION_HASH_KINDS)}; "
+            f"got '{hash_kind}'"
+        )
+    if generator is not None and not generator.strip():
+        raise AttestationError("--generator must be a non-empty command string")
+    if regenerated_hash is not None and not _REGENERATED_HASH_RE.match(
+        regenerated_hash
+    ):
+        raise AttestationError(
+            "--regenerated-hash must be 'sha256:' followed by 64 lowercase hex digits"
+        )
+    if not os.path.exists(stream_path):
+        raise AttestationError(f"stream not found: {stream_path}")
+    if os.path.islink(stream_path):
+        raise AttestationError(
+            f"stream '{stream_path}' is a symlink -- attest the real file so "
+            "the pinned path names the bytes that were hashed"
+        )
+    if not os.path.isfile(stream_path):
+        raise AttestationError(f"stream is not a file: {stream_path}")
+    absolute = os.path.realpath(os.path.abspath(stream_path))
+    root = find_repo_root(os.path.dirname(absolute))
+    if root is None:
+        raise AttestationError(
+            f"stream '{stream_path}' is not inside a git repository -- the "
+            "envelope pins it as a repository-relative path"
+        )
+    stream_rel = os.path.relpath(absolute, root).replace(os.sep, "/")
+    raw_digest = sha256_file(absolute)
+    if raw_digest is None:
+        raise AttestationError(f"could not read stream '{stream_path}'")
+    stream_hash = f"sha256:{raw_digest}"
+    checks = _stream_checks(absolute, stream_hash)
+    passed_count = sum(1 for check in checks if check["passed"])
+    status = "pass" if passed_count == len(checks) else "fail"
+    provenance: dict[str, Any] = {
+        "klt_version": build_version(),
+        "klayout_version": _klayout_version(),
+        "pdk": None,
+        "deck": None,
+        "input": {
+            "path": {"path": stream_rel, "scope": "repo"},
+            "content_hash": stream_hash,
+        },
+    }
+    if generator is not None:
+        regeneration: dict[str, Any] = {
+            "generator": generator,
+            "regenerated_hash": regenerated_hash,
+        }
+        if hash_kind != _HASH_KIND_BYTES:
+            regeneration["hash_kind"] = hash_kind
+        provenance["regeneration"] = regeneration
+    envelope: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "generic",
+        "status": status,
+        "t1_item": STREAM_ATTESTABLE_ITEM,
+        "summary": (
+            f"T1 item 2 ({_ITEM_TITLES[2]}): {passed_count}/{len(checks)} "
+            f"attestation checks passed ({PRODUCER})"
+        ),
+        "source": stream_rel,
+        "attestation": {
+            "producer": PRODUCER,
+            "hash_algorithm": HASH_ALGORITHM,
+            "check_count": len(checks),
+            "passed_count": passed_count,
+            "checks": checks,
+        },
+        "provenance": provenance,
+    }
+    _self_check(envelope, STREAM_ATTESTABLE_ITEM, stream_hash)
+    return envelope
+
+
+def check_stream_attestation(
+    stream_path: str,
+    committed_path: str,
+    *,
+    generator: str | None = None,
+    regenerated_hash: str | None = None,
+    hash_kind: str = _HASH_KIND_BYTES,
+) -> dict[str, Any]:
+    """``klt signoff --attest 2 --input STREAM --check COMMITTED``: re-attest
+    and diff against the committed envelope, writing nothing. Same result
+    shape as :func:`check_attestation`."""
+    committed = _load_committed_attestation(committed_path)
+    fresh = build_stream_attestation(
+        stream_path,
+        generator=generator,
+        regenerated_hash=regenerated_hash,
+        hash_kind=hash_kind,
+    )
+    return _drift_result(committed_path, committed, fresh)

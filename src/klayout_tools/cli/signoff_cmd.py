@@ -130,8 +130,11 @@ from ..signoff import (
     describe_grader,
 )
 from ..signoff_attest import (
+    STREAM_ATTESTABLE_ITEM,
     build_attestation,
+    build_stream_attestation,
     check_attestation,
+    check_stream_attestation,
     failed_output_tail,
     write_attestation,
 )
@@ -224,10 +227,22 @@ def _maybe_run_attest(
     """
     if getattr(args, "attest", None) is not None:
         return _run_attest(args, manifest_source, fleet_source)
-    if getattr(args, "inventory", None) or getattr(args, "output", None):
+    stray = [
+        flag
+        for flag, attr in (
+            ("--inventory", "inventory"),
+            ("--output", "output"),
+            ("--input", "attest_input"),
+            ("--generator", "generator"),
+            ("--regenerated-hash", "regenerated_hash"),
+        )
+        if getattr(args, attr, None)
+    ]
+    if stray or getattr(args, "hash_kind", None) is not None:
         return emit_error(
             "signoff",
-            "--inventory/--output only apply to --attest",
+            "--inventory/--output/--input/--generator/--regenerated-hash/"
+            "--hash-kind only apply to --attest",
             args.format,
         )
     return None
@@ -300,13 +315,46 @@ def _run_attest(
             args.format,
         )
     inventory = getattr(args, "inventory", None)
-    if not inventory:
-        return emit_error(
-            "signoff",
-            "--attest requires --inventory <file> (the versioned attestation "
-            "inventory; see docs/cli/signoff.md)",
-            args.format,
-        )
+    stream = getattr(args, "attest_input", None)
+    claim = {
+        "generator": getattr(args, "generator", None),
+        "regenerated_hash": getattr(args, "regenerated_hash", None),
+        "hash_kind": getattr(args, "hash_kind", None) or "bytes",
+    }
+    if args.attest == STREAM_ATTESTABLE_ITEM:
+        if inventory:
+            return emit_error(
+                "signoff",
+                "--inventory does not apply to --attest 2: the layout stream is "
+                "the artifact -- pass it with --input <stream>",
+                args.format,
+            )
+        if not stream:
+            return emit_error(
+                "signoff",
+                "--attest 2 requires --input <stream> (the committed GDS/OASIS "
+                "layout stream; see docs/cli/signoff.md)",
+                args.format,
+            )
+    else:
+        if stream or any(
+            getattr(args, attr, None) is not None
+            for attr in ("generator", "regenerated_hash", "hash_kind")
+        ):
+            return emit_error(
+                "signoff",
+                "--input/--generator/--regenerated-hash/--hash-kind only apply "
+                f"to --attest {STREAM_ATTESTABLE_ITEM} (items 1, 9 and 10 take "
+                "--inventory)",
+                args.format,
+            )
+        if not inventory:
+            return emit_error(
+                "signoff",
+                "--attest requires --inventory <file> (the versioned attestation "
+                "inventory; see docs/cli/signoff.md)",
+                args.format,
+            )
     committed = getattr(args, "check", None)
     output = getattr(args, "output", None)
     if committed is not None and output:
@@ -317,7 +365,12 @@ def _run_attest(
             args.format,
         )
     try:
-        if committed is not None:
+        if args.attest == STREAM_ATTESTABLE_ITEM:
+            if committed is not None:
+                result = check_stream_attestation(stream, committed, **claim)
+            else:
+                result = build_stream_attestation(stream, **claim)
+        elif committed is not None:
             result = check_attestation(args.attest, inventory, committed)
         else:
             result = build_attestation(args.attest, inventory)
@@ -346,6 +399,12 @@ def _attestation_check_line(check: dict) -> str:
         marker = "SKIP"
     if check["check"] == "present":
         what = f"{check['role']} {check['path']} present"
+    elif check["check"] == "stream_readable":
+        what = f"layout stream readable ({check['content_hash']})"
+    elif check["check"] == "top_cell_non_empty":
+        what = f"non-empty top cell(s): {', '.join(check['top_cells']) or 'none'}"
+    elif check["check"] == "dbu_on_grid":
+        what = f"dbu on grid ({check['dbu']})"
     elif check["check"] == "command":
         label = check.get("target") or check.get("name") or check["role"]
         status = check.get("error") or f"exit {check['exit_status']}"
@@ -367,7 +426,8 @@ def _print_attestation_text(result: dict) -> None:
     attestation = result["attestation"]
     print(f"checks: {attestation['passed_count']}/{attestation['check_count']} passed")
     binding = result["provenance"]["input"]
-    print(f"inventory: {binding['path']['path']} ({binding['content_hash']})")
+    label = "stream" if result["t1_item"] == STREAM_ATTESTABLE_ITEM else "inventory"
+    print(f"{label}: {binding['path']['path']} ({binding['content_hash']})")
     print()
     for check in attestation["checks"]:
         print(_attestation_check_line(check))
