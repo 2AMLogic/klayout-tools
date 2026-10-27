@@ -2550,6 +2550,21 @@ def _engine_error_message(
     return message
 
 
+def _outside_cwd_note(path: str) -> str:
+    """Issue #4191: the docker wrapper mounts only `$PWD`, `$PDK_ROOT` and
+    `$TMPDIR`, so a readable path outside the invocation directory is the
+    commonest trigger -- say the rule and the fix, not just the symptom."""
+    cwd = os.path.realpath(os.getcwd())
+    real = os.path.realpath(path)
+    if real == cwd or real.startswith(cwd.rstrip(os.sep) + os.sep):
+        return ""
+    return (
+        f"; '{path}' is outside the invocation directory '{cwd}', and the "
+        "container wrapper mounts only $PWD, $PDK_ROOT and $TMPDIR -- run "
+        "from a common ancestor of the request and its inputs"
+    )
+
+
 def _mount_namespace_hint(
     completed: _OpenRoadResult, pdk_info: dict[str, Any] | None
 ) -> str | None:
@@ -2614,11 +2629,13 @@ def _mount_namespace_hint(
             f"{os.environ.get('PDK_ROOT') or '(unset)'})"
         )
 
+    mount_note = _outside_cwd_note(path)
+
     return (
         f"'openroad' could not read '{path}', but this process can read it"
         f"{pdk_note} -- if 'openroad' is a container/wrapper invocation, its "
         "mounts likely do not cover that path (see docs/cli/place-and-route.md's "
-        "'Installing OpenROAD' section)"
+        f"'Installing OpenROAD' section){mount_note}"
     )
 
 
