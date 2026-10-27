@@ -42,6 +42,7 @@ from typing import Any
 
 from . import macros as macro_spec
 from . import output_lock
+from . import place_and_route_resume as _resume
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -1305,6 +1306,7 @@ def run_place_and_route(
     pdk_root: str | None = None,
     backend: str | None = None,
     reuse_outputs_dir: bool = False,
+    resume: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the OpenROAD place-and-route flow declared by the request at
@@ -1352,12 +1354,27 @@ def run_place_and_route(
     to the Spot batch fleet (:mod:`klayout_tools.place_and_route_batch`) and
     never falls back to running a unit on this host. A single-unit request
     stays local under a host-default ``batch``.
+
+    **Resume (issue #4411).** ``resume`` (``--resume``) skips each leading
+    stage whose commit record (:mod:`klayout_tools.place_and_route_resume`)
+    matches the stage's input hash and whose artifacts are on disk, and adds
+    ``resume: {"resumed_stages": [...]}`` to the response.
     """
     request = load_request(request_path)
+    # `resume` (issue #4411) reuses the stage artifacts of an interrupted run
+    # in the same directory, so it lifts the populated-`outputs.dir` refusal.
     _own_stage_root(
-        _ownership, request_path, request, reuse_outputs_dir=reuse_outputs_dir
+        _ownership,
+        request_path,
+        request,
+        reuse_outputs_dir=reuse_outputs_dir or resume,
     )
     rebuild_corners = _validate_rebuild_corners(request)
+    if resume and rebuild_corners is not None:
+        raise PlaceAndRouteError(
+            "--resume is not supported with pdk.rebuild_corners (each corner "
+            "re-runs in full)"
+        )
 
     from . import place_and_route_batch
 
@@ -1389,7 +1406,11 @@ def run_place_and_route(
             ownership=_ownership,
         )
     return _run_single_corner(
-        request_path, request, pdk_variant=pdk_variant, pdk_root=pdk_root
+        request_path,
+        request,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        resume=resume,
     )
 
 
@@ -1620,6 +1641,7 @@ def _run_single_corner(
     pdk_root: str | None,
     corner_override: str | None = None,
     output_subdir: str | None = None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """One full floorplan-through-``target_stage`` flow for an already-loaded
     ``request`` (issue #3507: the unit :func:`run_place_and_route` runs once,
@@ -1784,6 +1806,9 @@ def _run_single_corner(
     stages: list[dict[str, Any]] = []
     engine_logs: list[dict[str, Any]] = []
     checkpoint_path: str | None = None
+    previous_hash: str | None = None
+    resumed_stages: list[str] = []
+    can_resume = True
 
     for stage in stages_to_run:
         script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_{stage}.tcl")
@@ -1819,6 +1844,41 @@ def _run_single_corner(
             library=library,
         )
         _write_script(script_path, lines)
+
+        # Issue #4411: reuse a committed stage under `--resume`; always drop
+        # a stale record before (re)running so a crash mid-stage leaves none.
+        stage_hash = _resume.stage_input_hash(
+            previous_hash=previous_hash,
+            request=request,
+            script_lines=lines,
+            input_files=[
+                netlist_path,
+                tech_lef,
+                cell_lef,
+                liberty_path,
+                *macro_liberty_paths,
+                *(macro["lef"] for macro in macros),
+            ],
+        )
+        stage_artifacts = [
+            os.path.basename(next_checkpoint),
+            os.path.basename(metrics_path),
+        ]
+        if stage == "route":
+            stage_artifacts += [f"{hdl_toplevel}.def", f"{hdl_toplevel}.v"]
+        if resume and can_resume:
+            record = _resume.load_commit(output_dir, hdl_toplevel, stage, stage_hash)
+            if record is not None and set(stage_artifacts) <= set(record["artifacts"]):
+                stages.append(record["stage_entry"])
+                engine_logs.extend(record["engine_logs"])
+                placement_routability = record.get("placement_routability") or {}
+                resumed_stages.append(stage)
+                checkpoint_path = next_checkpoint
+                previous_hash = stage_hash
+                continue
+            can_resume = False
+        _resume.invalidate(output_dir, hdl_toplevel, stage)
+        logs_before = len(engine_logs)
 
         completed = _run_openroad(
             script_path,
@@ -1963,6 +2023,17 @@ def _run_single_corner(
             )
         )
         checkpoint_path = next_checkpoint
+        previous_hash = stage_hash
+        _resume.write_commit(
+            output_dir,
+            hdl_toplevel,
+            stage,
+            input_hash=stage_hash,
+            artifacts=stage_artifacts,
+            stage_entry=stages[-1],
+            engine_logs=engine_logs[logs_before:],
+            placement_routability=placement_routability,
+        )
 
     gds_path: str | None = None
     verilog_path: str | None = None
@@ -2388,6 +2459,9 @@ def _run_single_corner(
         "warnings": warnings,
         "provenance": provenance,
     }
+    if resume:
+        # Additive field (issue #4411): present only under `--resume`.
+        response["resume"] = {"resumed_stages": resumed_stages}
     return _finish_response(
         response,
         portable=portable_paths,
