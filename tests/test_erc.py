@@ -9438,6 +9438,158 @@ def test_check_erc_report_external_file_is_unverifiable(tmp_path_factory):
     assert result["status"] != "match"
 
 
+# --- Issue #4373: well_requires_cells / well_excludes_cells ----------------
+# The cell-relative form of #2540's box selectors: the class of a drawn well
+# is named by the cell it is drawn in, evaluated in each instance's frame.
+
+
+def _hierarchical_two_class_layout():
+    """`_two_class_well_layout(marker=False)` with the base tub's well moved
+    out of the top cell into a `BASE_TUB` cell placed at the identity, so the
+    cell-name and box spellings grade identical geometry."""
+    layout, top = _two_class_well_layout(marker=False)
+    nwell = layout.layer(10, 0)
+    tub = kdb.Box.new(_um(3), _um(0.4), _um(6.5), _um(2.8))
+    for shape in list(top.shapes(nwell).each()):
+        if shape.bbox() == tub:
+            shape.delete()
+    sub = layout.create_cell("BASE_TUB")
+    sub.shapes(nwell).insert(tub)
+    top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans()))
+    return layout
+
+
+def _run_hierarchical(tmp_path, stem, ties):
+    layout = _hierarchical_two_class_layout()
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, _routed_tie_spec(ties=ties))
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+def test_cell_selectors_match_the_equivalent_box_spec(tmp_path):
+    by_cell = _run_hierarchical(
+        tmp_path,
+        "cells",
+        _two_class_ties(
+            body_overrides={"well_excludes_cells": ["BASE_TUB"]},
+            base_overrides={"well_requires_cells": ["BASE_TUB"]},
+        ),
+    )
+    by_box = _run_two_class_well(
+        tmp_path,
+        "boxes",
+        _two_class_ties(
+            body_overrides={"well_excludes_boxes": [_BASE_TUB_BOX]},
+            base_overrides={"well_requires_boxes": [_BASE_TUB_BOX]},
+        ),
+        marker=False,
+    )
+
+    assert by_cell["erc_findings"] == by_box["erc_findings"] == []
+    assert {_BODY_ID, _BASE_ID} <= set(by_cell["erc_coverage"]["checked"])
+    assert by_cell["erc_coverage"]["skipped"] == []
+    assert by_cell["erc_status"] == "clean"
+
+
+def test_cell_selected_ties_are_not_well_assertions(tmp_path):
+    report = _run_hierarchical(
+        tmp_path,
+        "cells_not_asserted",
+        _two_class_ties(
+            body_overrides={"well_excludes_cells": ["BASE_TUB"]},
+            base_overrides={"well_requires_cells": ["BASE_TUB"]},
+        ),
+    )
+
+    assert report["erc_coverage"]["checked_by_well_assertion"] == []
+
+
+def test_cell_selectors_compose_with_boxes_and_report_degenerate(tmp_path):
+    keeps_none = _run_hierarchical(
+        tmp_path,
+        "cells_keep_none",
+        [
+            _two_class_ties(
+                base_overrides={
+                    "well_requires_cells": ["BASE_TUB"],
+                    "well_excludes_boxes": [_BASE_TUB_BOX],
+                }
+            )[1]
+        ],
+    )
+    assert _tie_skips(keeps_none) == {_BASE_ID: "degenerate_well_selection"}
+
+    keeps_all = _run_hierarchical(
+        tmp_path,
+        "cells_keep_all",
+        [_two_class_ties(base_overrides={"well_excludes_cells": ["BASE_TUB"]})[0]],
+    )
+    # Excluding BASE_TUB leaves only the body well -> a real partition.
+    assert _tie_skips(keeps_all) == {}
+
+
+def test_unknown_cell_name_is_an_error(tmp_path):
+    with pytest.raises(ErcError, match="NOPE"):
+        _run_hierarchical(
+            tmp_path,
+            "cells_unknown",
+            _two_class_ties(base_overrides={"well_requires_cells": ["NOPE"]}),
+        )
+
+
+def test_cell_selector_keys_must_be_string_arrays(tmp_path):
+    with pytest.raises(ErcError, match="well_requires_cells"):
+        _run_hierarchical(
+            tmp_path,
+            "cells_bad_type",
+            _two_class_ties(base_overrides={"well_requires_cells": "BASE_TUB"}),
+        )
+
+
+def test_cells_region_follows_rotation_mirroring_arrays_and_ignores_children():
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    well = layout.layer(10, 0)
+    top = layout.create_cell("TOP")
+    cell = layout.create_cell("WELLCELL")
+    child = layout.create_cell("CHILD")
+    cell.shapes(well).insert(kdb.Box.new(0, 0, _um(2), _um(1)))
+    child.shapes(well).insert(kdb.Box.new(_um(10), _um(10), _um(11), _um(11)))
+    cell.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans()))
+    top.insert(kdb.CellInstArray(cell.cell_index(), kdb.Trans(1, False, _um(20), 0)))
+    top.insert(kdb.CellInstArray(cell.cell_index(), kdb.Trans(2, True, 0, _um(30))))
+    top.insert(
+        kdb.CellInstArray(
+            cell.cell_index(),
+            kdb.Trans(),
+            kdb.Vector(_um(5), 0),
+            kdb.Vector(0, _um(5)),
+            2,
+            2,
+        )
+    )
+
+    region = erc._cells_region(kdb, layout, top, (10, 0), ["WELLCELL"])
+
+    boxes = sorted(
+        (p.bbox().left, p.bbox().bottom, p.bbox().right, p.bbox().top)
+        for p in region.each()
+    )
+    expected = sorted(
+        [
+            (_um(19), 0, _um(20), _um(2)),  # R90 about (20, 0)
+            (_um(-2), _um(30), 0, _um(31)),  # M0 then R180: mirrored in x
+            (0, 0, _um(2), _um(1)),
+            (_um(5), 0, _um(7), _um(1)),
+            (0, _um(5), _um(2), _um(6)),
+            (_um(5), _um(5), _um(7), _um(6)),
+        ]
+    )
+    assert boxes == expected
+
+
 # Issue #4374: `erc.unlabelled_conductor` locates and classifies its islands,
 # and `nets[].unlabelled_allow_device_connected` excuses the gate-driven ones.
 

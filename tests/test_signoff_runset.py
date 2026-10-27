@@ -221,3 +221,27 @@ def test_shipped_sg13g2_pin_rejects_a_modified_runset_file(tmp_path):
 
     assert item["status"] == "unmet"
     assert item["reason"] == "runset_hash_mismatch"
+
+
+GF180MCU_RUNSET_HASH = (
+    "sha256:09a4f1f1a6fe1fc1e4e193ae5ae1c2b1c49ba190f9e135ffd72d45c14637fde9"
+)
+
+
+def test_shipped_gf180mcu_pin_is_tied_to_an_upstream_commit():
+    pin = signoff_runset.PINNED_RUNSETS[GF180MCU_RUNSET_HASH]
+    assert pin["pdk"] == "gf180mcu"
+    assert pin["commit"] == "1a4e4b59f5d1ea4dfd7b108a02bc085151609ccb"
+    assert pin["path"] == "klayout/lvs/gf180mcu.lvs"
+
+
+def test_shipped_gf180mcu_pin_rejects_a_modified_runset_file(tmp_path):
+    edited = tmp_path / "gf180mcu.lvs"
+    edited.write_text("# modified runset\n")
+    envelope = _runset_envelope(LVS_MATCH_ENVELOPE, edited)
+    envelope["provenance"]["runset"] = {"content_hash": GF180MCU_RUNSET_HASH}
+
+    item = _item_4(tmp_path, envelope)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "runset_hash_mismatch"
