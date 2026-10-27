@@ -1610,6 +1610,13 @@ def _full_t1_evidence(tmp_path, *, kind: str = "analog") -> dict:
         evidence[str(item_id)] = _attested_entry(tmp_path, item_id, prefix=kind)
     evidence["4"] = _write(tmp_path, f"{kind}-lvs.json", LVS_MATCH_ENVELOPE)
     evidence["5"] = _write(tmp_path, f"{kind}-sim.json", SIM_PASS_ENVELOPE)
+    if kind == "digital":
+        # Issue #4314: a `sim`-only digital item 5 needs a `timing_margin`
+        # spec row (manifest side); the RTL-flow pair needs nothing extra.
+        evidence["5"] = [
+            _write(tmp_path, "digital-sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE),
+            _write(tmp_path, "digital-fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE),
+        ]
     evidence["6"] = _write(tmp_path, f"{kind}-yield.json", YIELD_PASS_ENVELOPE)
     evidence["7"] = _write(tmp_path, f"{kind}-pex.json", PEX_PASS_ENVELOPE)
     evidence["8"] = _write(
@@ -5908,16 +5915,17 @@ def test_genuine_evidence_for_items_5_6_and_8_still_renders_met(tmp_path):
 
 
 def test_digital_item_5_sim_alone_satisfies_the_full_custom_sub_case(tmp_path):
-    """`klt sim` alone keeps satisfying a digital partition's item 5: the
-    full-custom sub-case satisfies it "instead by PVT corner-matrix SPICE
-    simulation" (#3741 exempts it from the both-kinds rule)."""
+    """`klt sim` alone is exempt from the both-kinds rule (#3741) but, since
+    #4314, a margin-less envelope grades `timing_margin_missing`; the `met`
+    path is covered in `test_signoff_timing_margin.py`."""
     path = _write(tmp_path, "evidence.json", SIM_PASS_ENVELOPE)
 
     result = build_tier_report(_manifest(kind="digital", evidence={"5": path}))
 
     item_5 = next(i for i in result["items"] if i["id"] == 5)
-    assert item_5["status"] == "met"
-    assert item_5["citation"]["kind"] == "sim"
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "timing_margin_missing"
+    assert "missing_kinds" not in item_5["detail"]
 
 
 def _digital_item_5(tmp_path, entry):
@@ -10169,8 +10177,8 @@ def test_item_5_accepts_the_sim_corner_matrix_for_both_block_kinds(tmp_path):
         _manifest(kind="digital", evidence={"5": sim_path})
     )
     item_5 = next(i for i in full_custom_digital["items"] if i["id"] == 5)
-    assert item_5["status"] == "met"
-    assert item_5["citation"]["kind"] == "sim"
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "timing_margin_missing"
 
 
 def test_mixed_signal_partitions_apply_their_own_item_7_rule(tmp_path):

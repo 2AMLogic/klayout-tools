@@ -299,7 +299,10 @@ written to every block.
      plus an explicit per-corner timing-margin metric measured directly in
      that same sweep — a SPICE-measured analog of STA setup/hold margin,
      e.g. a derived arrival-time-vs-required-time delta recorded per PVT
-     point — as the full-custom substitute for the STA requirement above.
+     point — as the full-custom substitute for the STA requirement above (`klt
+     signoff` grades it via a `timing_margin` spec row, see
+     [`docs/cli/signoff.md`](cli/signoff.md), "Full-custom digital needs a
+     measured timing margin").
      The machine-checkable evidence for the RTL-flow artifacts is a `klt
      sta` JSON report run across the declared corner set (`pdk.corners`,
      `docs/cli/sta.md`) and a `klt functional-verification` JSON report

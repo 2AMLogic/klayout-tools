@@ -28,6 +28,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   and adds a response `warnings` entry saying antenna repair did not run.
   Omitting the key is unchanged (still "unverified"); scripts for libraries
   with a diode are byte-identical.
+- **`klt signoff` item 5 (digital, `sim`-only) now requires a measured timing
+  margin** (issue #4314, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)). A full-custom digital entry
+  citing only `klt sim` grades `unmet` / `timing_margin_missing` unless a
+  `spec_rows` row has `"timing_margin": true` and its `spec_row`-tagged,
+  limited, passing measurement is present at every corner. **Behaviour
+  change:** existing `sim`-only digital manifests must add the row and the
+  tag. Additive reason and `detail.missing_timing_margin`; no `schema_version`
+  bump.
 - **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
   Landing candidates are now enumerated per merged net polygon rather than over
   the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too

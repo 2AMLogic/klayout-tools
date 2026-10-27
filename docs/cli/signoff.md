@@ -2798,9 +2798,29 @@ digital partition a passing citation set that includes `sta` or
 `["functional-verification"]`). This applies to a single string/dict entry
 too, which is aggregated like a one-member list. A failing member still reports
 its own reason first. A `sim`-only entry (the full-custom digital sub-case) is
-exempt, and analog item 5 is unchanged. `detail.missing_kinds` is additive, so
+exempt from the pair (but see the timing-margin rule below), and analog item 5 is unchanged. `detail.missing_kinds` is additive, so
 there is no `schema_version` bump; note that a digital manifest citing only
 `sta` (or only `functional-verification`) for item 5 now grades `unmet`.
+
+**Full-custom digital needs a measured timing margin (issue #4314).** The
+`sim`-only sub-case must also carry "an explicit per-corner timing-margin
+metric measured in that same sweep". A digital item 5 whose passing citations
+are all `klt sim` grades `met` only when the manifest declares at least one
+`spec_rows` row with `"timing_margin": true` (boolean, default `false`) **and**
+each such row is evidenced by a cited `klt sim` envelope: a passing,
+`limits`-bearing `measurements[]` entry tagged `spec_row: "<row>"`, whose name
+has a passing measurement in **every** `corners[]` entry. A manifest-asserted
+`rows` list is not enough; the tag must be in the envelope. Otherwise the item is
+`unmet` / `timing_margin_missing`, with
+`detail.missing_timing_margin: [{"row": "<id>", "corners": [...]}]` (`row` is
+`null` when no `timing_margin` row is declared; `corners` lists the corner ids
+lacking the measurement, `["*"]` when no tagged measurement exists). A margin
+measurement that fails is the ordinary `check_failed`. Judging margin adequacy
+is the author's `limits`; the rule only requires it be measured. A `timing_margin`
+flag on analog item 5, or on a digital set that includes `sta` /
+`functional-verification`, is accepted (non-boolean is `invalid_evidence`) and
+ignored. Additive reason, no `schema_version` bump; a digital manifest citing
+only `sim` for item 5 and declaring no margin row now grades `unmet`.
 
 Every list-form item also carries `citations_graded` (per-citation status).
 Without `spec_rows`, several passing citations grade `met` as the union of
@@ -3654,6 +3674,7 @@ actually ran and failed):
 | `"coverage_unknown"`      | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, but its coverage cannot be classified: either its `coverage` block explicitly declares `known: false`, or (the legacy path) it is a KLayout-engine DRC result carrying a raw `violations` list with no `coverage` block at all to consult. The cited check did not fail on its own terms; it just does not establish whether the requested work was covered. |
 | `"malformed_coverage"`    | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, but its `coverage` block is present and structurally invalid — it is not an object, or it fails the schema/consistency checks a v1 block must satisfy. The cited check did not fail on its own terms; its own coverage claim simply cannot be trusted. |
 | `"partial_coverage"`      | no  | The evidence resolved to a recognised envelope whose producer applied the common rollup rule and reported its **partial** status token — `"clean_partial"`, `"pass_partial"`, the per-kind spelling of `f"{success}_partial"` (issue #2109, [coverage-contract.md](../coverage-contract.md)). Every check it ran passed, *and* it skipped requested work, so its result is real but not unconditional. The cited check did not fail on its own terms — re-run it over the work it skipped, do not go looking for a violation. Ordered like `"check_failed"` rather than like the three coverage reasons above it: it is decided from the envelope's own verdict, so it is reported even for a kind the item does not accept (exactly as a *failing* report of that kind reports `check_failed`, not `wrong_kind`). |
+| `"timing_margin_missing"` | no  | **(issue #4314)** Digital item 5 cites only passing `klt sim` envelopes (the full-custom sub-case) but no `spec_rows` row with `timing_margin: true` is evidenced by a passing, limited, `spec_row`-tagged measurement at every corner. `detail.missing_timing_margin` names the rows and corners. |
 
 ## Fleet roll-up (`--fleet`)
 
