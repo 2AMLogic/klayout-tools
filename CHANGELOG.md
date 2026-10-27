@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **gf180mcu eFuse extraction / LVS** (issue #4312). The `gf180mcu` extraction
+  deck now recognises the PDK eFuse as a two-terminal `efuse` device (link
+  `poly2 & plfuse` inside `efuse_mk`, anode `lvs_source` 100/8, cathode the rest
+  of the shape), via a new optional `ResistorDevice.anode_marker` field. A fuse
+  with no `lvs_source` is not a device and its `plfuse` is reported as
+  unclaimed. The PDK ignores the link's `R`, so scope it out with
+  `options.compare_parameters` (`{"efuse": ["L", "W"]}`). The `gf180mcu` deck
+  content hash changes.
 - **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
   Landing candidates are now enumerated per merged net polygon rather than over
   the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too

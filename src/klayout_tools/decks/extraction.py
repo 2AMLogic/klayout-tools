@@ -194,6 +194,23 @@ class ResistorDevice:
       layout that *does* overlap (a continuous bar marked by ``polyres``)
       keeps extracting as before.
 
+    ``anode_marker`` (issue #4312) declares a **split-terminal** resistor whose
+    two terminals are not the conductor on either side of the segment but two
+    named regions of one conductor shape, told apart by a marker layer -- the
+    gf180mcu eFuse, whose PDK LVS deck (``efuse_derivations.lvs``) draws one
+    poly2 bar inside ``efuse_mk`` with ``plfuse`` as the link, ``lvs_source``
+    over the anode end, and the rest as the cathode. ``requires`` is then the
+    *scope*: only ``body`` shapes lying entirely inside every ``requires`` layer
+    (``Region.inside``) take part. Within that scope the segment is
+    ``scope & marker`` (less ``excludes``), the anode is ``scope &
+    anode_marker`` (less the segment), and the cathode is ``scope`` less
+    ``anode_marker`` and ``marker``. The whole scope is cut out of the
+    ``body`` conductor's connectivity so anode and cathode, which abut one
+    another around the link, stay distinct nets; each is then connected to
+    ``contact`` on its own. A shape missing its anode, cathode or segment is
+    not a device and is left as ordinary conductor (the marker is then
+    reported as unclaimed). ``None`` (the default) is every other entry.
+
     ``name`` is the extracted device-class name (``devices[].class`` in the
     JSON response, and the model token on the written ``R`` card -- a
     consumer simulating the netlist supplies a matching ``.model``, exactly
@@ -271,12 +288,21 @@ class ResistorDevice:
     flavours: tuple[ResistorFlavour, ...] = ()
     provenance: RuleProvenance | None = None
     topology: str = "overlap"
+    anode_marker: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         if self.topology not in RESISTOR_TOPOLOGIES:
             raise ValueError(
                 f"ResistorDevice '{self.name}': unknown topology "
                 f"{self.topology!r} (expected one of {RESISTOR_TOPOLOGIES})"
+            )
+        if self.anode_marker is not None and (
+            self.topology != "overlap" or not self.requires
+        ):
+            raise ValueError(
+                f"ResistorDevice '{self.name}': anode_marker needs "
+                "topology='overlap' and a non-empty requires (the scope "
+                "layer(s) the split conductor must lie inside)"
             )
 
 
@@ -981,6 +1007,8 @@ class ExtractionDeck:
             layers.update(resistor.excludes)
             if resistor.terminal is not None:
                 layers.add(resistor.terminal)
+            if resistor.anode_marker is not None:
+                layers.add(resistor.anode_marker)
         for diode in self.diodes:
             layers.add(diode.marker)
             layers.update(diode.anode_requires)

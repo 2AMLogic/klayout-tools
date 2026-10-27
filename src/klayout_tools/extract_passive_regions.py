@@ -72,6 +72,10 @@ def _resistor_body_region(
     drawn anywhere on this layout -- matching :func:`_capacitor_plate_regions`'s
     own "no PDK marker drawn" convention.
     """
+    if resistor.anode_marker is not None:
+        if base is None:
+            base = _region(layout, top_cell, resistor.body)
+        return _split_terminal_regions(layout, top_cell, resistor, base)[1]
     if resistor.topology == "abutting_heads":
         # Issue #2679: the marker *is* the resistive body (sg13g2 polyres);
         # `base` is only the head conductor it abuts.
@@ -93,6 +97,54 @@ def _resistor_body_region(
             )
         body = _bodies_with_two_heads(body, heads)
     return body
+
+
+def _split_terminal_regions(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    resistor: ResistorDevice,
+    base: kdb.Region,
+) -> tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region]:
+    """``(scope, link, anode, cathode)`` for a split-terminal
+    :class:`ResistorDevice` (``anode_marker`` set, issue #4312), mirroring
+    gf180mcu's ``efuse_derivations.lvs``.
+
+    ``scope`` is every ``base`` shape lying entirely inside all of the
+    entry's ``requires`` layers; ``link`` is ``scope & marker`` less
+    ``excludes``; ``anode`` is ``scope & anode_marker`` less the link;
+    ``cathode`` is ``scope`` less ``anode_marker`` and ``marker``. Decided per
+    shape: one lacking its link, anode or cathode is not a device and
+    contributes to none of the four regions.
+    """
+    import klayout.db as kdb
+
+    assert resistor.anode_marker is not None
+    scope_layers = kdb.Region()
+    for index, layer in enumerate(resistor.requires):
+        region = _region(layout, top_cell, layer).merged()
+        scope_layers = region if index == 0 else scope_layers & region
+    marker = _region(layout, top_cell, resistor.marker)
+    anode_marker = _region(layout, top_cell, resistor.anode_marker)
+    excluded = kdb.Region()
+    for layer in resistor.excludes:
+        excluded += _region(layout, top_cell, layer)
+
+    scope = kdb.Region()
+    link = kdb.Region()
+    anode = kdb.Region()
+    cathode = kdb.Region()
+    for polygon in base.merged().inside(scope_layers).each():
+        shape = kdb.Region(polygon)
+        shape_link = (shape & marker) - excluded
+        shape_anode = (shape & anode_marker) - shape_link
+        shape_cathode = shape - anode_marker - marker
+        if shape_link.is_empty() or shape_anode.is_empty() or shape_cathode.is_empty():
+            continue
+        scope += shape
+        link += shape_link
+        anode += shape_anode
+        cathode += shape_cathode
+    return scope, link, anode, cathode
 
 
 def _bodies_with_two_heads(body: kdb.Region, heads: kdb.Region) -> kdb.Region:
@@ -126,7 +178,14 @@ def _resolve_resistors(
     metals: list[kdb.Region],
     dummy: kdb.Region,
 ) -> tuple[
-    list[tuple[ResistorDevice, kdb.Region, kdb.Region]],
+    list[
+        tuple[
+            ResistorDevice,
+            kdb.Region,
+            kdb.Region,
+            tuple[kdb.Region, kdb.Region] | None,
+        ]
+    ],
     kdb.Region,
     kdb.Region,
     list[kdb.Region],
@@ -137,7 +196,9 @@ def _resolve_resistors(
 
     Returns ``(resistors, poly, active, metals, poly_candidate_bodies,
     dummy_devices_dropped)`` where ``resistors`` is one ``(spec,
-    body_region, terminal_region)`` triple per *recognised* device class and
+    body_region, terminal_region, split)`` tuple per *recognised* device class
+    (``split`` is ``(anode, cathode)`` for an ``anode_marker`` entry, issue
+    #4312, whose whole scope is cut from the conductor, else ``None``) and
     the three conductor regions are the deck's originals with every
     recognised resistor body **subtracted** -- so the caller's connectivity
     graph (and its MOS gate/source-drain split) sees the resistor's heads as
@@ -201,7 +262,14 @@ def _resolve_resistors(
                 "of the deck's conductor layers (active/poly/metals)"
             ) from None
 
-    recognised: list[tuple[ResistorDevice, kdb.Region, tuple[int, int]]] = []
+    recognised: list[
+        tuple[
+            ResistorDevice,
+            kdb.Region,
+            tuple[int, int],
+            tuple[kdb.Region, kdb.Region, kdb.Region] | None,
+        ]
+    ] = []
     poly_candidate_bodies = kdb.Region()
     dummy_devices_dropped = 0
     for spec in deck.resistors:
@@ -209,9 +277,16 @@ def _resolve_resistors(
         terminal_layer = spec.terminal if spec.terminal is not None else spec.body
         _conductor(terminal_layer, "terminal", spec.name)
 
-        body = _resistor_body_region(
-            layout, top_cell, spec, base=base, heads=bases[terminal_layer]
-        )
+        split = None
+        if spec.anode_marker is not None:
+            scope, body, anode, cathode = _split_terminal_regions(
+                layout, top_cell, spec, base
+            )
+            split = (scope, anode, cathode)
+        else:
+            body = _resistor_body_region(
+                layout, top_cell, spec, base=base, heads=bases[terminal_layer]
+            )
         if body.is_empty():
             continue
         if spec.body == deck.poly:
@@ -223,13 +298,19 @@ def _resolve_resistors(
             body = body - dummy
         if body.is_empty():
             continue
-        recognised.append((spec, body, terminal_layer))
+        recognised.append((spec, body, terminal_layer, split))
 
-    for spec, body, _terminal_layer in recognised:
-        bases[spec.body] = bases[spec.body] - body
+    for spec, body, _terminal_layer, split in recognised:
+        bases[spec.body] = bases[spec.body] - (body if split is None else split[0])
 
     resistors = [
-        (spec, body, bases[terminal_layer]) for spec, body, terminal_layer in recognised
+        (
+            spec,
+            body,
+            bases[terminal_layer] if split is None else split[1] | split[2],
+            None if split is None else (split[1], split[2]),
+        )
+        for spec, body, terminal_layer, split in recognised
     ]
     return (
         resistors,
