@@ -89,3 +89,34 @@ def test_circular_definition_rejected():
         normalize_reference_netlist(
             ".param a=b b=a\nXM1 d g s b nfet_03v3 L=a W=1u\n", deck="gf180mcu"
         )
+
+
+def test_sky130_diode_subckt_call_converts_every_deck_class():
+    from klayout_tools.decks.sky130 import EXTRACTION_DECK
+
+    assert EXTRACTION_DECK.diodes
+    for diode in EXTRACTION_DECK.diodes:
+        text = f"X1 an ca sky130_fd_pr__{diode.name} area=1 perim=4\n"
+        out = normalize_reference_netlist(text, deck="sky130")
+        assert f"D1 an ca {diode.name} A=1P P=4U" in out, diode.name
+        # Auto-resolution (no deck) hits the same curated table.
+        auto = normalize_reference_netlist(
+            f"X1 an ca sky130_fd_pr__{diode.name} area=1p perim=4u\n"
+        )
+        assert f"D1 an ca {diode.name} A=1P P=4U" in auto, diode.name
+
+
+def test_sky130_diode_subckt_call_area_only_pj_and_mult():
+    out = normalize_reference_netlist(
+        "X1 an ca sky130_fd_pr__diode_pd2nw_05v5 area=2\n", deck="sky130"
+    )
+    assert "D1 an ca diode_pd2nw_05v5 A=2P" in out and " P=" not in out
+    out = normalize_reference_netlist(
+        "XD2 an ca sky130_fd_pr__diode_pd2nw_05v5 area=2 pj=6\n", deck="sky130"
+    )
+    assert "D2 an ca diode_pd2nw_05v5 A=2P P=6U" in out
+    with pytest.raises(NormalizeError, match="multi"):
+        normalize_reference_netlist(
+            "X1 an ca sky130_fd_pr__diode_pd2nw_05v5 area=2 perim=4 mult=2\n",
+            deck="sky130",
+        )
