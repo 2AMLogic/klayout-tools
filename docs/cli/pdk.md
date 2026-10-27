@@ -242,9 +242,12 @@ directory itself, or a named subdirectory of it). When present it wins over
   `library (<name>)` name and comments). klt merges them
   into one content-addressed `.lib` under `$KLT_CACHE_DIR` (default
   `~/.cache/klt/liberty-merged`, never inside the PDK tree) and hands that single
-  path to Yosys/OpenROAD/OpenSTA. Any other header difference (units,
-  templates, operating conditions) or a duplicate cell name is an error; the
-  merged header is the first file's; a one-element list equals the string form.
+  path to Yosys/OpenROAD/OpenSTA. Top-level `lu_table_template` and
+  `power_lut_template` groups are unioned by name (same name with different
+  content is an error). Any other header difference (units, operating
+  conditions) or a duplicate cell name is an error; the merged header is the
+  first file's plus any templates it lacks; a one-element list equals the
+  string form.
 - `views` (optional) maps `cell_library` → `{"cell_lef": path, "tech_lef":
   {"min"|"nom"|"max": path}, "gds": path}` (every key optional) for trees that
   do not use the open_pdks `lef/`, `techlef/`, `gds/` naming. `klt
