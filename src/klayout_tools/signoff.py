@@ -5717,6 +5717,7 @@ def _grade_evidence(
             None,
             {**_input_members_detail(resolution), **execution_detail},
         )
+    _attach_characterization_attestation(check_kind, item_id, envelope, citation)
     _record_envelope(envelope_sink, envelope)
     return "met", None, citation, {}
 
@@ -6309,6 +6310,45 @@ def _generic_item_binding_refusal(
     ):
         return _REASON_UNANCHORED_EVIDENCE
     return None
+
+
+#: T1 item 8 (Characterization report): the one item that accepts a bare
+#: generic envelope, so a met citation always discloses whether
+#: ``klt signoff --attest 8`` produced it (issue #4311).
+_CHARACTERIZATION_ITEM = 8
+
+
+def _attach_characterization_attestation(
+    check_kind: str,
+    item_id: int | None,
+    envelope: Mapping[str, Any],
+    citation: dict[str, Any],
+) -> None:
+    """Add ``citation["attestation"]`` for a met item-8 generic citation; a
+    no-op for every other kind/item."""
+    if check_kind == "generic" and item_id == _CHARACTERIZATION_ITEM:
+        citation["attestation"] = _characterization_attestation_disclosure(envelope)
+
+
+def _characterization_attestation_disclosure(
+    envelope: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The ``citation.attestation`` block for a met item-8 generic citation:
+    ``tool_produced`` is ``True`` (with the producer and check counts) only
+    when the envelope carries a ``klt signoff --attest`` attestation block;
+    ``False`` for a hand-written one, so the absence is visible, not implied.
+    Disclosure only -- never graded."""
+    attestation = envelope.get("attestation")
+    if isinstance(attestation, Mapping) and isinstance(
+        attestation.get("producer"), str
+    ):
+        return {
+            "tool_produced": True,
+            "producer": attestation["producer"],
+            "check_count": attestation.get("check_count"),
+            "passed_count": attestation.get("passed_count"),
+        }
+    return {"tool_produced": False}
 
 
 def _generic_artifact_binding(
