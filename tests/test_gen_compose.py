@@ -17396,3 +17396,32 @@ def test_tap_pad_ports_are_not_mistaken_for_a_closed_guard_ring():
     assert not _block_has_ring_taps({"port_names": ["U0_D", "TAP_PAD0", "TAP_PAD1"]})
     assert _block_has_ring_taps({"port_names": ["U0_D", "TAP_N", "TAP_PAD0"]})
     assert _block_has_ring_taps({"port_names": ["COLL_E"]})
+
+
+def test_compose_labels_esd_device_drain_port_via_pins(tmp_path, pdk_root):
+    """A lone `esd_device` block's drain port can be given a net name through
+    `gen-compose`'s `pins[]` (issue #4299): the label lands as a `kdb.Text`,
+    so `esd_device` needs no drain-net param of its own."""
+    import klayout.db as kdb
+
+    esd = _gen_block(tmp_path, pdk_root, "esd_device", "esd", voltage_flavor="hvi")
+    output = tmp_path / "esd_pad.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "esd", "generator_report": esd}],
+            "placement": {"strategy": "row", "order": ["esd"], "spacing_um": 1.0},
+            "pins": [{"net": "PAD", "block": "esd", "port": "M1_D"}],
+            "options": {"cell_name": "esd_pad_0", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == []
+    layout = kdb.Layout()
+    layout.read(str(output))
+    texts = [
+        s.text.string
+        for li in layout.layer_indexes()
+        for s in layout.cell("esd_pad_0").shapes(li).each()
+        if s.is_text()
+    ]
+    assert "PAD" in texts

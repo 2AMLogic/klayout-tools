@@ -33,6 +33,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     from klayout_tools.gen import (
         GATE_LENGTH_SAFE_MIN_UM,
         GUARD_RING_DEFAULT_PADDING_UM,
+        WELL_ENCLOSURE_MARGIN_UM,
         _clamp_cut_boxes,
         _esd_device_layout,
         _insert_boxes,
@@ -143,6 +144,27 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "voltage_flavor",
+                self.TypeString,
+                "Optional thick-oxide/medium-voltage device-class marker: "
+                "'' (default, no marker drawn) or a name the resolved PDK "
+                "family's role-layer table recognises (e.g. 'hvi' on sky130, "
+                "'medium_voltage' on gf180mcu) -- see mos_array's equivalent "
+                "param. A name the family doesn't recognise draws nothing and "
+                "is reported via drc_hints.notes",
+                default="",
+            )
+            self.param(
+                "total_width_um",
+                self.TypeDouble,
+                "Optional total device width (um); 0.0 (default) means unset. "
+                "When given, fingers/finger_width_um are derived: the "
+                "smallest finger count whose equal split stays within the "
+                "per-finger cap. Cannot be combined with an explicit fingers "
+                "or finger_width_um",
+                default=0.0,
+            )
+            self.param(
                 "active_layer",
                 self.TypeLayer,
                 "Active/diffusion drawing layer",
@@ -197,6 +219,42 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeBoolean,
                 "Whether salicide_block_layer is a real layer this PDK family cites",
                 default=False,
+            )
+            self.param(
+                "voltage_flavor_mark_layer",
+                self.TypeLayer,
+                "Thick-oxide/medium-voltage device-class marker drawing "
+                "layer, sized to enclose the finger array (only used when "
+                "voltage_flavor_mark_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "voltage_flavor_mark_present",
+                self.TypeBoolean,
+                "Whether voltage_flavor_mark_layer is a real layer resolved "
+                "for params.voltage_flavor on this PDK family",
+                default=False,
+            )
+            self.param(
+                "voltage_flavor_extra_mark_layer",
+                self.TypeLayer,
+                "Second voltage_flavor marker layer drawn over the same box "
+                "(only used when voltage_flavor_extra_mark_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "voltage_flavor_extra_mark_present",
+                self.TypeBoolean,
+                "Whether voltage_flavor_extra_mark_layer is a real layer "
+                "resolved for params.voltage_flavor on this PDK family",
+                default=False,
+            )
+            self.param(
+                "voltage_flavor_mark_margin_um",
+                self.TypeDouble,
+                "Harness-resolved margin the voltage_flavor marker box grows "
+                "beyond the finger array's active footprint",
+                default=WELL_ENCLOSURE_MARGIN_UM,
             )
             self.param(
                 "contact_gate_offset_um",
@@ -312,6 +370,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.bottom_endcap_um,
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
                 top_endcap_um=self.top_endcap_um,
+                voltage_flavor_mark_margin_um=self.voltage_flavor_mark_margin_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for role, li in (
@@ -336,6 +395,25 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             if self.esd_mark_present:
                 li_mark = self.layout.layer(self.esd_mark_layer)
                 _insert_boxes(self.cell, li_mark, dbu, unit_boxes["active"])
+
+            # Optional `voltage_flavor` marker (issue #4299): mirrors
+            # mos_array -- one box enclosing the finger array, plus the
+            # second marker layer some flavours need over the same box.
+            if self.voltage_flavor_mark_present:
+                mark_box = info["voltage_flavor_mark_box_um"]
+                _insert_boxes(
+                    self.cell,
+                    self.layout.layer(self.voltage_flavor_mark_layer),
+                    dbu,
+                    [mark_box],
+                )
+                if self.voltage_flavor_extra_mark_present:
+                    _insert_boxes(
+                        self.cell,
+                        self.layout.layer(self.voltage_flavor_extra_mark_layer),
+                        dbu,
+                        [mark_box],
+                    )
 
             if self.salicide_block and self.salicide_block_present:
                 li_block = self.layout.layer(self.salicide_block_layer)

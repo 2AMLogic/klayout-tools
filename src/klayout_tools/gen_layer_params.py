@@ -2710,7 +2710,31 @@ def _esd_device_layer_params(
     sd_implant = _role_layer_info(family, "nplus")
     sd_implant_margin = _sd_implant_margin_um(family)
     ring_implant = _ring_tap_implant_layer(family, well_tie=False)
+    # Optional `voltage_flavor` marker (issue #4299), resolved exactly like
+    # `_device_layer_params` does for `mos_array`.
+    voltage_flavor = params.get("voltage_flavor", "")
+    voltage_flavor_mark = (
+        _voltage_flavor_mark_layer(family, voltage_flavor) if voltage_flavor else None
+    )
+    voltage_flavor_extra_mark = (
+        _voltage_flavor_extra_mark_layer(family, voltage_flavor)
+        if voltage_flavor
+        else None
+    )
     return {
+        "voltage_flavor_mark_layer": (
+            voltage_flavor_mark
+            if voltage_flavor_mark is not None
+            else kdb.LayerInfo(0, 0)
+        ),
+        "voltage_flavor_mark_present": voltage_flavor_mark is not None,
+        "voltage_flavor_extra_mark_layer": (
+            voltage_flavor_extra_mark
+            if voltage_flavor_extra_mark is not None
+            else kdb.LayerInfo(0, 0)
+        ),
+        "voltage_flavor_extra_mark_present": voltage_flavor_extra_mark is not None,
+        "voltage_flavor_mark_margin_um": _voltage_flavor_mark_margin_um(family),
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
