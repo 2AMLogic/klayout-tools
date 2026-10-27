@@ -247,6 +247,11 @@ def _print_find_text(report: dict) -> None:
     version = report["version"]
     print(f"version: {version if version is not None else '-'}")
     print(f"resolved_via: {report['resolved_via']}")
+    for shadowed in report.get("ambiguous_roots") or []:
+        print(
+            f"warning: shadowed same-variant install: {shadowed['root']} "
+            f"({shadowed['resolved_via']})"
+        )
     print("assets:")
     assets = report["assets"]
     for key in _ASSET_KEYS:
