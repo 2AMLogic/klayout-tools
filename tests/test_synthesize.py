@@ -3346,6 +3346,39 @@ def test_generated_script_maps_constants_to_tie_cells_sg13g2_stdcell(
     )
 
 
+@pytest.mark.parametrize("cell_library", ["asap7sc7p5t_rvt", "asap7sc7p5t_28_R"])
+def test_generated_script_maps_constants_to_tie_cells_asap7(
+    tmp_path, monkeypatch, cell_library
+):
+    """ASAP7 RVT (issue #4273) gets its own verified tie cells
+    (`TIEHIx1_ASAP7_75t_R` port `H` / `TIELOx1_ASAP7_75t_R` port `L`) under
+    both names the library resolves by, so P&R never sees bare constants."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "asap7A",
+        cell_library=cell_library,
+        corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(pdk={"cell_library": cell_library, "corner": "tt_025C_1v80"}),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert _script_hilomap_line(_abs_path(report["script_path"], tmp_path)) == (
+        "hilomap -hicell TIEHIx1_ASAP7_75t_R H -locell TIELOx1_ASAP7_75t_R L"
+    )
+    assert not any(
+        "hilomap" in w for w in report.get("warnings", []) if isinstance(w, str)
+    )
+
+
 def test_cell_library_without_tie_cell_entry_emits_no_hilomap(tmp_path, monkeypatch):
     """A `cell_library` with no `_TIE_CELLS` entry is never given a guessed
     tie cell: the `hilomap` pass is omitted entirely rather than the run
@@ -3388,7 +3421,11 @@ def test_tie_cell_table_entries_are_hi_then_lo(tmp_path):
         (hi_cell, hi_port), (lo_cell, lo_port) = entry
         family_prefix = f"{cell_library.split('_')[0]}_"
         for cell in (hi_cell, lo_cell):
-            assert cell.startswith(family_prefix), cell
+            if cell_library.startswith("asap7"):
+                # ASAP7 names cells `<FUNC>x<drive>_ASAP7_75t_<flavor>`.
+                assert cell.endswith("_ASAP7_75t_R"), cell
+            else:
+                assert cell.startswith(family_prefix), cell
         assert hi_port and lo_port
         assert (hi_cell, hi_port) != (lo_cell, lo_port)
 
