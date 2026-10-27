@@ -1544,7 +1544,7 @@ def _device_only_fields(
         "parasitic_delta_pct": _delta_pct(value, extracted_value),
         "device_only_status": (
             device_only_measurement["status"]
-            if device_only_measurement is not None
+            if device_only_measurement is not None and value is not None
             else "error"
         ),
     }
@@ -2147,9 +2147,14 @@ def _measure_both_sides(
     timeout_s: float,
     repo_root: str | None,
     backend: str | None = None,
+    device_only_netlist: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run ``command`` once per side and return ``(delta rows, the report's
     ``measurement.sides`` block)`` (issue #2478).
+
+    ``device_only_netlist`` (``--device-only-leg``, issue #4293) adds a third
+    invocation on the parasitic-free netlist with ``$KLT_PEX_SIDE=device-only``;
+    a failure there is a :class:`PexError`, like the other two sides.
 
     The *diff* is still :func:`_build_delta_rows`, byte-for-byte the function
     testbench mode uses -- the caller-supplied command replaces the two `klt
@@ -2160,10 +2165,13 @@ def _measure_both_sides(
     """
     side_reports: dict[str, dict[str, Any]] = {}
     sides: dict[str, Any] = {}
-    for side, side_netlist in (
+    legs = [
         ("schematic", reference_netlist),
         ("extracted", extracted_netlist),
-    ):
+    ]
+    if device_only_netlist is not None:
+        legs.append(("device-only", device_only_netlist))
+    for side, side_netlist in legs:
         side_report, exit_status = _run_measure_command(
             command,
             side=side,
@@ -2173,7 +2181,7 @@ def _measure_both_sides(
             backend=backend,
         )
         side_reports[side] = side_report
-        sides[side] = {
+        sides[side.replace("-", "_")] = {
             "netlist": _report_path(side_netlist, repo_root=repo_root),
             "exit_status": exit_status,
             "corner_count": side_report["corner_count"],
@@ -2184,6 +2192,8 @@ def _measure_both_sides(
         spec_row_prefix=None,
         schematic_report=side_reports["schematic"],
         extracted_report=side_reports["extracted"],
+        device_only_report=side_reports.get("device-only"),
+        device_only_leg=device_only_netlist is not None,
     )
     return rows, sides
 
@@ -2550,19 +2560,6 @@ def _reject_resistance_graph_with_distributed_rc(
             "--resistance-graph cannot be combined with --distributed-rc: the "
             "ladder keeps the legacy per-level resistance, so a critical net "
             "would mix resistance sources"
-        )
-
-
-def _reject_device_only_in_command_mode(
-    device_only_leg: bool, command_mode: bool
-) -> None:
-    """``--device-only-leg`` re-runs ``klt sim`` testbenches (issue #3298),
-    which ``--measure-command`` mode does not use."""
-    if device_only_leg and command_mode:
-        raise PexError(
-            "--device-only-leg is not supported with --measure-command: the "
-            "third leg re-runs `klt sim` testbenches, which that mode does "
-            "not use"
         )
 
 
@@ -2947,7 +2944,6 @@ def run_pex(
         device_only_leg=device_only_leg,
     )
     command_mode = command is not None
-    _reject_device_only_in_command_mode(device_only_leg, command_mode)
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
 
     # Issue #1261: every input-path field this run's own JSON response
@@ -3282,6 +3278,7 @@ def run_pex(
             timeout_s=_measure_timeout(measure_timeout_s),
             repo_root=repo_root,
             backend=backend,
+            device_only_netlist=device_only_netlist_path,
         )
         delta.extend(command_rows)
 

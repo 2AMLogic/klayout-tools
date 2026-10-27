@@ -3456,7 +3456,8 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "device_only_value, representation_delta_pct (device-only vs "
             "schematic) and parasitic_delta_pct (extracted vs device-only), "
             "splitting device-representation effects from parasitics. Not "
-            "supported with --measure-command. Off by default -- "
+            "with --measure-command the command is run a third time on the "
+            "parasitic-free netlist ($KLT_PEX_SIDE=device-only). Off by default -- "
             "byte-identical to today's behavior."
         ),
     )

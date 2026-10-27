@@ -102,8 +102,9 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   (`--flatten-schematic`)" below.
 - `--device-only-leg` — measure a parasitic-free third leg (issue #3298) and
   split each `delta[]` row into a device-representation part and a parasitic
-  part. Off by default — byte-identical to before this flag existed. Not
-  supported with `--measure-command` (exit 1, error envelope). See "Separating
+  part. Off by default — byte-identical to before this flag existed. With
+  `--measure-command` the command is run a third time on the parasitic-free
+  netlist (`$KLT_PEX_SIDE=device-only`, issue #4293). See "Separating
   device representation from parasitics (`--device-only-leg`)" below.
 - `--extract-only` — extract and report, with no measurement leg (issue
   #3739). No testbench, `--measure-command` or placeholder measurement is
@@ -945,7 +946,7 @@ klt pex 06-layout.gds --deck sky130 \
 
   | Variable | Value |
   |---|---|
-  | `KLT_PEX_SIDE` | `schematic` or `extracted` |
+  | `KLT_PEX_SIDE` | `schematic` or `extracted`; `device-only` for the third run `--device-only-leg` adds (issue #4293) |
   | `KLT_PEX_NETLIST` | the same path passed as the final argument |
   | `KLT_PEX_ARTIFACTS_DIR` | a per-side directory under this run's `--outdir` (`<outdir>/measure/<side>/`), created before the command runs — for whatever decks/logs/raw files the harness wants to keep |
   | `KLT_PEX_BACKEND` | the `--backend` value (`local`/`batch`/…), set **only** when `klt pex` was given `--backend`; the same value is also exported as `KLT_SIM_BACKEND` so a child `klt sim` obeys it. Absent otherwise — the host's inherited `$KLT_SIM_BACKEND` default applies unchanged |
