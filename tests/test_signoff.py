@@ -8617,6 +8617,7 @@ def test_describe_grader_shape():
     assert {p["pdk"] for p in result["pinned_runsets"].values()} == {
         "ihp-sg13g2",
         "ihp-sg13cmos5l",
+        "gf180mcu",
     }
     assert result["schema_version"] == signoff_module.DESCRIBE_GRADER_SCHEMA_VERSION
     assert result["grading_ruleset_id"].startswith("sha256:")

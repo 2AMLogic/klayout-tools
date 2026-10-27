@@ -101,6 +101,8 @@ def run(args: argparse.Namespace) -> int:
             # was never given, unchanged from every call site that predates
             # it.
             rename_declared_pins=args.rename_declared_pins,
+            # `--tie-declared-pins` (issue #4383), passed to `klt extract`.
+            tie_declared_pins=args.tie_declared_pins,
             # `--label-layer` (issue #2686): which GDS purpose extraction
             # reads net/pin name text from, per label role, passed straight
             # through to `klt extract --label-layer`. `None` when the flag
