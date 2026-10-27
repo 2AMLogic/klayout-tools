@@ -109,6 +109,7 @@ from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
 from .place_and_route_pins import (
     check_io_pin_constraints,
     netlist_top_ports,
+    pin_abutment,
     read_def_instance_groups,
     read_def_pins,
     slot_shortage_hint,
@@ -2425,6 +2426,17 @@ def _run_single_corner(
         # Additive field (issue #3885): final edge/coordinates of every
         # top-level pin, read from the DEF above (`null` at "floorplan").
         "pins": read_def_pins(audited_def_path) if audited_def_path else None,
+        # Additive field (issue #4156): facing-pin abutment check over the
+        # `pins` above for opposite-edge `io.pin_constraints` entries.
+        "pin_abutment": (
+            pin_abutment(
+                (io_spec or {}).get("pin_constraints"),
+                netlist_top_ports(netlist_path, hdl_toplevel),
+                read_def_pins(audited_def_path),
+            )
+            if audited_def_path
+            else None
+        ),
         # Additive field (issue #4344): placed-origin bbox of each requested
         # `instance_groups` entry, read from the same DEF (`null` at
         # "floorplan"; `[]` when none were requested).
