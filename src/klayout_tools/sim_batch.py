@@ -107,6 +107,7 @@ from . import (
     _batch_common,
     _provenance,
     remote_transport,
+    sim_eye,
     sim_search,
     sim_snm_meas,
     sim_staging,
@@ -237,6 +238,13 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # compares below 0.8.0, so a 0.7.1.dev7xx+ runner that has the feature is
     # refused; that fails safe.
     "corners.params": "0.8.0",
+    # b24141ef9 corners.units (#2993), after v0.7.0; first in v0.8.0
+    # (`git tag --contains b24141ef9`). An older runner ignores the axis and
+    # runs one default corner.
+    "corners.units": "0.8.0",
+    # 0380f2a05 corners.temperature_param, after v0.7.0; first in v0.8.0
+    # (`git tag --contains 0380f2a05`).
+    "corners.temperature_param": "0.8.0",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
@@ -679,7 +687,8 @@ def _runner_gate_release(version: str) -> str | None:
 #: #3337), ``twoport`` (``analysis.kind: "twoport"``, #3338), and
 #: ``twoport_noise`` (``analysis.noise``, #3339), and ``snm``
 #: (``measurements[].snm``, #3895), and ``search`` (``measurements[].search``,
-#: #4121).
+#: #4121). ``eye`` (``measurements[].eye``, #4292) landed after ``v0.8.0``, so
+#: its first release segment is ``0.8.1``.
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
@@ -695,6 +704,12 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: bool(
             sim_snm_meas.snm_measurements(request.get("measurements") or [])
+        ),
+    ),
+    "eye": (
+        (0, 8, 1),
+        lambda request: bool(
+            sim_eye.eye_measurements(request.get("measurements") or [])
         ),
     ),
     "search": (
@@ -750,6 +765,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "transfer",
         "snm",
         "search",
+        "eye",
         "stimulus",
         "dual_injection",
         "complex_vectors",
@@ -801,6 +817,10 @@ _RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
     "corners.process[].sections[]": _uses_process_section_objects,
     "corners.params": lambda request: bool(
         (request.get("corners") or {}).get("params")
+    ),
+    "corners.units": lambda request: "units" in (request.get("corners") or {}),
+    "corners.temperature_param": lambda request: (
+        "temperature_param" in (request.get("corners") or {})
     ),
     "options.ngspice_init": _uses_option("ngspice_init"),
     "options.osdi_preload": _uses_option("osdi_preload"),

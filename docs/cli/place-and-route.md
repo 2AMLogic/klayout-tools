@@ -131,7 +131,12 @@ nothing about the real cause (issue #1868). `klt place-and-route` itself
 now recognizes this exact failure shape — a path `openroad` reports it
 cannot read that this process can itself still read — and appends a hint
 about mount coverage rather than passing the raw Tcl error through
-unexplained. [`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)'s
+unexplained. **Rule (issue #4191):** the container wrapper mounts only `$PWD`,
+`$PDK_ROOT` and `$TMPDIR`, so every input the request references (netlist,
+macro LEF, `--abstract-cell-lef`) must live under one of those. When the
+unreadable path is outside the invocation directory, the hint names that
+path and says to run `klt place-and-route` from a common ancestor of the
+request and its inputs. [`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)'s
 wrapper (below) already automates this fallback; only the bare snippet
 above needs it spelled out manually.
 
@@ -472,12 +477,17 @@ survey section 2):
 
 | `floorplan.method` | Required fields | Tcl call |
 | --- | --- | --- |
-| `"utilization"` (default) | `utilization_pct`, `site` (optional: `aspect_ratio`, `core_margin_um`) | `initialize_floorplan -utilization ...` |
+| `"utilization"` (default) | `utilization_pct`, `site`, `core_margin_um` (optional: `aspect_ratio`) | `initialize_floorplan -utilization ...` |
 | `"explicit"` | `die_area_um`, `core_area_um` (each `[llx, lly, urx, ury]`), `site` | `initialize_floorplan -die_area ... -core_area ...` |
 | `"def"` | `def_path` | `read_def -floorplan_initialize <def_path>` |
 
 A request naming fields from more than one method is rejected (exit 1),
 mirroring ORFS's own `methods_defined > 1` check.
+
+`core_margin_um` is **required** for `"utilization"` (issue #4191): OpenROAD's
+`initialize_floorplan -utilization` needs `-core_space` (`IFP-0034`), so a
+request without it is rejected before any OpenROAD run, naming the field,
+rather than failing after the engine starts.
 
 ### Explicit tracks (`floorplan.tracks`)
 
@@ -1973,6 +1983,8 @@ live re-measurement above.
 | `io.layer_h` / `.layer_v` | string | Horizontal/vertical I/O routing layers for `place_pins`. Required once `target_stage` reaches `"place"` or later. |
 | `io.pin_constraints` | array\<object\> \| omitted | Additive field (issue #3885). Pins top-level ports to a die edge so a block can abut or tile with a neighbour. Each entry: `pins` (non-empty array of port names or globs; bus bits are `a[3]`, `a[*]` matches a bus), `edge` (`"north"` \| `"east"` \| `"south"` \| `"west"`), `range_um` (optional `[lo, hi]` offset along that edge, `0 <= lo < hi`), `ordered` (optional boolean, default `false`; keeps the matched pins in listed order via `-group -order`). Each entry emits one `set_io_pin_constraint` before `place_pins`. A pattern matching no top-level port of `netlist`, or a port matched by two entries, is a request error. A `range_um` with fewer pin slots than the entry has pins fails `place`; the error names the `pin_constraints[i]` entry (or quotes OpenROAD's `PPL-0110` line) with its pin and slot counts. See "Pin placement" for slot pitch and range semantics. Omitted or `[]`, the Tcl is byte-identical to before. |
 | `pins` (response) | array\<object\> \| null | Additive field (issue #3885). Final placement of every top-level pin, read from the DEF this run wrote: `name`, `edge` (nearest die edge), `x_um`, `y_um`, `layer`. Present for every run that reaches `place` (constrained or not); `null` at `target_stage: "floorplan"`. Lets a caller verify abutment from the envelope without parsing the DEF. |
+| `instance_groups` | array\<object\> \| omitted | Additive field (issue #4344). Names sets of instances whose final proximity the response reports. Each entry: `name` (unique non-empty string), `instances` (non-empty array of instance names or globs; `[`/`]` are literal), `max_extent_um` (optional number `> 0`). Measurement only: it does **not** constrain placement. Globs match the instance names in the written DEF, which are the post-synthesis (yosys/ABC-renamed, flattened) names visible in `verilog_path`. Omitted or `[]`, the request and response are unchanged apart from `instance_groups: []`. |
+| `instance_groups` (response) | array\<object\> \| null | Additive field (issue #4344). One entry per request group, read from the DEF `COMPONENTS` section: `name`, `matched` (instances matching any glob), `bbox` (`x_min_um`/`x_max_um`/`y_min_um`/`y_max_um` over the matched instances' placed **origins** (COMPONENTS carries no master size, so this is not a cell-extent box); `null` when nothing matched, never a fabricated box), `max_extent_um` (echo, or `null`), `within_extent` (`max(x-span, y-span) <= max_extent_um`; `null` without a bound or without a `bbox`). The run never fails on a violated extent; assert on it from the envelope. `[]` when no groups were requested; `null` at `target_stage: "floorplan"`. |
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
 | `power` | object \| omitted | Power delivery (tapcell/PDN/fillers) — see "Power delivery" below. Omitted (the default) preserves prior behavior exactly for this full PDN: no tapcells/fillers. `sky130_fd_sc_hd` runs still emit a small, separate row-rail obstruction regardless (issue #1442) — see "Row-rail fallback" below. |
 | `power.power_net` / `.ground_net` | string \| omitted | Power/ground net names. Default `"VDD"`/`"VSS"`. Must differ from each other. |
@@ -2432,6 +2444,11 @@ above), so a caller citing a platform config can confirm its request
 actually reproduced it, rather than silently falling back to this command's
 plain defaults.
 
+The `gf180mcu_7t_6M` preset deliberately does **not** reproduce that
+`-split_cuts {Metal3 0.128}` (issue #4301): the generated via cells were
+reported DRC-dirty under `klt drc --deck gf180mcu`. `split_cuts` remains a
+supported request field, and `gf180mcu_9t_6M` still carries it, unverified.
+
 ### `sg13g2_stdcell`: a supported PDN with no tapcell step (issues #1784, #2441)
 
 `sg13g2_stdcell` ships **no tap or endcap cells at all** — IHP's own
@@ -2704,8 +2721,8 @@ platform at all:
 
 | `preset` | `pdk.cell_library` | Upstream source | Straps (bottom→top) | Via-stack tuning |
 | --- | --- | --- | --- | --- |
-| `"gf180mcu_7t_6M"` | `gf180mcu_fd_sc_mcu7t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg` | `Metal1` w 0.600 / p 3.92 / off 0, followpins · `Metal4` w 4.480 / sp 0.56 / p 44.8 / off 22.4 · `Metal5` w 4.480 / p 89.6 / off 44.8 | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`, `split_cuts {Metal3 0.128}`. `Metal4↔Metal5`: none. |
-| `"gf180mcu_9t_6M"` | `gf180mcu_fd_sc_mcu9t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` | `Metal1` w 0.900 / p 5.040 / off 0, followpins · `Metal4`/`Metal5` identical to the 7t row above | identical to the 7t row above |
+| `"gf180mcu_7t_6M"` | `gf180mcu_fd_sc_mcu7t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg` | `Metal1` w 0.600 / p 3.92 / off 0, followpins · `Metal4` w 4.480 / sp 0.56 / p 44.8 / off 22.4 · `Metal5` w 4.480 / p 89.6 / off 44.8 | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`; **no** `split_cuts` — a deliberate deviation from the ORFS cfg (issue #4301: its `-split_cuts {Metal3 0.128}` produced DRC-dirty vias under `klt drc --deck gf180mcu`). `Metal4↔Metal5`: none. |
+| `"gf180mcu_9t_6M"` | `gf180mcu_fd_sc_mcu9t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` | `Metal1` w 0.900 / p 5.040 / off 0, followpins · `Metal4`/`Metal5` identical to the 7t row above | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`, **keeps** the ORFS cfg's `split_cuts {Metal3 0.128}` on `Metal1↔Metal4`; whether that is DRC-dirty on this preset is **unverified** (only the 7t preset was reported). `Metal4↔Metal5`: none. |
 | `"sg13g2"` | `sg13g2_stdcell` | IHP-Open-PDK v0.3.0 `libs.tech/librelane/config.tcl` (+ `libs.tech/librelane/sg13g2_stdcell/config.tcl` for `PDN_RAIL_WIDTH`) | `Metal1` w 0.44 / **p 7.56 (derived — see below)** / off 0, followpins · `TopMetal1` w 2.2 / sp 4.0 / p 75.6 / off 13.6 · `TopMetal2` w 2.2 / sp 4.0 / p 75.6 / off 13.6 | none — that config names no via-stack tuning |
 | `"sky130hd"` | `sky130_fd_sc_hd` | ORFS `flow/platforms/sky130hd/pdn.tcl` | `met1` w 0.48 / p 5.44 / off 0, followpins · `met4` w 1.600 / p 27.140 / off 13.570 · `met5` w 1.600 / p 27.200 / off 13.600 | none — that config's two `add_pdn_connect` lines carry no flags |
 
@@ -3424,3 +3441,15 @@ Notes when sizing ranges (issue #4155):
 - **Slot pitch** follows the pin layer's track pitch: observed ~0.96 um on a vertical-layer edge and ~0.84 um on a horizontal-layer edge on sg13g2 (single observation, re-measure for your PDK). A group of N pins needs a `range_um` at least N x pitch wide.
 - **A range does not fix a position.** A `range_um` wider than the pins need leaves OpenROAD free to choose the offset, so two entries with the same range on opposite edges can land ~2.5 um apart. Facing edges only line up when each range equals its group's slot span.
 - **`VDD`/`VSS` in `pins[]`** report `edge` as the nearest die edge although they sit mid-die (TopMetal2); consumers filtering by edge should special-case them.
+
+### Checking instance proximity
+
+To assert that a delay chain stayed together, name it and bound its footprint:
+
+```json
+"instance_groups": [
+  { "name": "delay_chain", "instances": ["dly*"], "max_extent_um": 40 }
+]
+```
+
+The response's `instance_groups[0]` then reports `matched`, the origin `bbox` and `within_extent`. A `matched` of `0` means the glob names no instance in the DEF; yosys renames and flattens instances, so glob against the post-synthesis names in `verilog_path`. This reports proximity only; it does not steer placement.

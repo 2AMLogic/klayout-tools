@@ -173,6 +173,11 @@ _ROUTING_LAYER_STACK: dict[str, tuple[str, ...]] = {
 #:   (line-wrapped here only to fit this file's 88-column limit; the config
 #:   itself writes each call on one line)
 #:
+#:   The preset deviates from that config in one place: it omits the
+#:   ``-split_cuts {Metal3 0.128}`` (issue #4301, reporter-observed DRC-dirty
+#:   vias under ``klt drc --deck gf180mcu``). ``"gf180mcu_9t_6M"`` keeps it,
+#:   unverified either way.
+#:
 #: - ``"gf180mcu_9t_6M"`` -> the sibling ``pdn_grid_strategy_9t_6M.cfg``
 #:   (``gf180mcu_fd_sc_mcu9t5v0``, the platform's own ``TRACK_OPTION ?= 9t``
 #:   default). Byte-for-byte identical to the ``7t`` config above except its
@@ -281,7 +286,11 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
                 "layers": ["Metal1", "Metal4"],
                 "max_columns": 5,
                 "ongrid": ["Metal2", "Metal3", "Metal4"],
-                "split_cuts": {"layer": "Metal3", "width_um": 0.128},
+                # Deliberate deviation from the ORFS cfg (issue #4301): its
+                # `-split_cuts {Metal3 0.128}` produced negative CUTSPACING
+                # via cells and metal2/3/4.ongrid.1, via2/via3.ongrid.1 and
+                # via2/via3.width.1 hits under `klt drc --deck gf180mcu`.
+                "split_cuts": None,
             },
         ),
     },
@@ -443,6 +452,17 @@ def _resolve_netlist(netlist: Any, request_dir: str) -> str:
     return os.path.abspath(path)
 
 
+def _require_utilization_core_margin(method: str, floorplan: dict[str, Any]) -> None:
+    # Issue #4191: `initialize_floorplan -utilization` needs `-core_space`
+    # (OpenROAD IFP-0034); reject here rather than after a full OpenROAD run.
+    if method == "utilization" and floorplan.get("core_margin_um") is None:
+        raise PlaceAndRouteError(
+            "request.floorplan.core_margin_um is required for method "
+            "'utilization' (OpenROAD's initialize_floorplan -utilization "
+            "needs -core_space)"
+        )
+
+
 def _validate_floorplan(floorplan: Any) -> dict[str, Any]:
     if not isinstance(floorplan, dict):
         raise PlaceAndRouteError("request.floorplan must be a JSON object")
@@ -479,6 +499,8 @@ def _validate_floorplan(floorplan: Any) -> dict[str, Any]:
         raise PlaceAndRouteError(
             f"request.floorplan.site is required for method '{method}'"
         )
+
+    _require_utilization_core_margin(method, floorplan)
 
     if method == "explicit":
         for field in ("die_area_um", "core_area_um"):
@@ -663,6 +685,60 @@ def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
     if pin_constraints:
         result["pin_constraints"] = pin_constraints
     return result
+
+
+def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
+    """Shape-validate ``request.instance_groups`` (issue #4344)."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise PlaceAndRouteError("request.instance_groups must be an array")
+    groups: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        groups.append(
+            _validate_instance_group(entry, f"request.instance_groups[{index}]", seen)
+        )
+    return groups
+
+
+def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        raise PlaceAndRouteError(f"{where} must be a JSON object")
+    unknown = sorted(set(entry) - {"name", "instances", "max_extent_um"})
+    if unknown:
+        raise PlaceAndRouteError(f"{where} has unknown key(s): {', '.join(unknown)}")
+    name = entry.get("name")
+    if not (isinstance(name, str) and name.strip()):
+        raise PlaceAndRouteError(f"{where}.name must be a non-empty string")
+    if name in seen:
+        raise PlaceAndRouteError(f"{where}.name '{name}' is not unique")
+    seen.add(name)
+    instances = entry.get("instances")
+    if not (
+        isinstance(instances, list)
+        and instances
+        and all(isinstance(i, str) and i.strip() for i in instances)
+    ):
+        raise PlaceAndRouteError(
+            f"{where}.instances must be a non-empty array of strings"
+        )
+    item: dict[str, Any] = {"name": name, "instances": list(instances)}
+    bound = entry.get("max_extent_um")
+    if bound is not None:
+        _check_max_extent_um(bound, where)
+        item["max_extent_um"] = bound
+    return item
+
+
+def _check_max_extent_um(bound: Any, where: str) -> None:
+    if (
+        isinstance(bound, bool)
+        or not isinstance(bound, (int, float))
+        or not math.isfinite(bound)
+        or bound <= 0
+    ):
+        raise PlaceAndRouteError(f"{where}.max_extent_um must be a number > 0")
 
 
 _PIN_EDGES = ("north", "east", "south", "west")

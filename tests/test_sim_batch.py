@@ -8028,6 +8028,18 @@ def test_request_without_corners_params_runs_on_a_0_7_0_runner(tmp_path):
     assert marker.exists()
 
 
+def test_corner_axis_fields_are_registry_features():
+    request = {"corners": {"units": {"vdd": "V"}, "temperature_param": "temp_c"}}
+    assert sorted(sb._request_features(request)) == [
+        "corners.temperature_param",
+        "corners.units",
+    ]
+    for name in ("corners.units", "corners.temperature_param"):
+        assert sb._missing_runner_features([name], "0.7.0") == [name]
+        assert sb._missing_runner_features([name], "0.8.0") == []
+        assert sb._missing_runner_features([name], None) is None
+
+
 def test_expr_no_value_offhost_carries_runner_hint():
     report: dict = {}
     corners = [{"measurements": [{"name": "v", "value": None}]}]
