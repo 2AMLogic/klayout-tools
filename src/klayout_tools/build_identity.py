@@ -247,7 +247,7 @@ def _checkout_version(directory: str | None = None) -> str | None:
     return _version_scheme.version_for_checkout(root, base)
 
 
-def _klayout_version() -> str | None:
+def klayout_version() -> str | None:
     """``klayout.__version__`` (the KLayout Python engine build actually
     resolved into this process), or ``None`` when unresolvable.
 
@@ -481,6 +481,6 @@ def version_report() -> dict[str, Any]:
         # and the version this build/commit was tested against -- a caller
         # can detect a drifted engine before trusting a "reproduced" report
         # without waiting for a `klt drc`/`klt lvs` run to say so.
-        "klayout_version": _klayout_version(),
+        "klayout_version": klayout_version(),
         "klayout_version_expected": klayout_version_expected(),
     }
