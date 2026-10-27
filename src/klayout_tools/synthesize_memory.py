@@ -82,6 +82,7 @@ def memory_evidence_script_text(
     adder_techmap_path: str | None = None,
     parameters: dict[str, int | str] | None = None,
     defines: dict[str, str | None] | None = None,
+    macro_inputs: tuple[dict[str, str], ...] = (),
 ) -> str:
     """The side invocation's ``.ys`` text.
 
@@ -93,10 +94,23 @@ def memory_evidence_script_text(
     :fine``. The extra ``proc`` before the first ``stat`` is the pass
     ``synth``'s own ``coarse`` label (and the arithmetic insertion) would
     run first anyway; ``proc`` is idempotent, and ``stat``/``select -list``
-    never modify the design. No liberty is read -- nothing here is
-    technology-mapped.
+    never modify the design. No standard-cell liberty is read --
+    nothing here is technology-mapped. Declared hard macros' blackbox
+    declarations (``macro_inputs``, issue #4368) are read exactly as the
+    production script reads them -- after the RTL, before ``hierarchy`` --
+    because otherwise ``hierarchy -check`` fails on the undeclared macro cell
+    and ``memory_mapping`` degrades to ``indeterminate`` on every
+    macro-bearing design. Paths are embedded absolute, like every other path
+    here.
     """
     lines = [read_verilog_line(path, defines) for path in sources]
+    for macro_input in macro_inputs:
+        reader = (
+            "read_liberty -lib"
+            if macro_input["source"] == "liberty"
+            else "read_verilog -lib"
+        )
+        lines.append(f"{reader} {macro_input['path']}")
     lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     lines.append(f"tee -q -o {blackbox_list_path} select -list =A:blackbox =A:whitebox")
@@ -347,6 +361,7 @@ def collect_memory_evidence(
     repo_root: str | None = None,
     parameters: dict[str, int | str] | None = None,
     defines: dict[str, str | None] | None = None,
+    macro_inputs: tuple[dict[str, str], ...] = (),
 ) -> tuple[dict[str, Any], list[str] | None]:
     """Run the side evidence invocation and return ``(memory_mapping,
     blackbox_modules)`` for the response.
@@ -392,6 +407,7 @@ def collect_memory_evidence(
                 adder_techmap_path=adder_techmap_path,
                 parameters=parameters,
                 defines=defines,
+                macro_inputs=macro_inputs,
             ),
         )
         _run_yosys(script_path, cwd=repo_root)

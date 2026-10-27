@@ -1437,7 +1437,15 @@ def run_synthesize(
             **_library_capability_warnings(cell_library),
             **_missing_timing_warning(abc_log_path, timing),
             **_dont_use_unsupported_warning(cell_exclusions),
-            **_macro_area_warning(cells_without_area, macro_cells),
+            **_macro_area_warning(
+                cells_without_area,
+                macro_cells,
+                macros_with_lib=frozenset(
+                    macro_input["cell"]
+                    for macro_input in macro_inputs
+                    if macro_input["source"] == "liberty"
+                ),
+            ),
         },
     )
     # Issue #2745: memory-mapping evidence from a *separate* Yosys
@@ -1454,6 +1462,7 @@ def run_synthesize(
         repo_root=repo_root,
         parameters=parameters,
         defines=defines,
+        macro_inputs=tuple(macro_inputs),
     )
 
     equivalence = None
@@ -2160,7 +2169,9 @@ def _cells_without_area(
 
 
 def _macro_area_warning(
-    cells_without_area: list[str] | None, macro_cells: frozenset[str]
+    cells_without_area: list[str] | None,
+    macro_cells: frozenset[str],
+    macros_with_lib: frozenset[str] | None = None,
 ) -> dict[str, str]:
     """A ``warnings`` entry (issue #2635) whenever ``area_um2`` demonstrably
     does not account for every instantiated cell type.
@@ -2174,6 +2185,11 @@ def _macro_area_warning(
     unmapped type" because the dispositions differ: the first is expected
     and the caller must add the macro's own area themselves, the second is
     usually a ``-dont_use``/mapping problem.
+
+    ``macros_with_lib`` (issue #4368) names the macros that have a macro
+    liberty (``response.macros[].lib`` non-null); a LEF-only or
+    blackbox-only macro has no area there, so the text must not send the
+    caller to it. ``None`` treats every macro as having one.
     """
     if not cells_without_area:
         return {}
@@ -2181,14 +2197,34 @@ def _macro_area_warning(
     others_missing = [cell for cell in cells_without_area if cell not in macro_cells]
     warnings: dict[str, str] = {}
     if macros_missing:
-        warnings["macro_area_excluded"] = (
+        with_lib = [
+            cell
+            for cell in macros_missing
+            if macros_with_lib is None or cell in macros_with_lib
+        ]
+        without_lib = [cell for cell in macros_missing if cell not in with_lib]
+        text = (
             "area_um2 excludes the hard macro(s) "
             + ", ".join(macros_missing)
-            + ": their area lives in their own macro liberty, not in the "
-            "standard-cell liberty stat -liberty was handed. Add it from "
-            "response.macros[].lib before comparing area_um2 to an area "
-            "budget."
+            + ": the standard-cell liberty stat -liberty was handed has no "
+            "area for them."
         )
+        if with_lib:
+            text += (
+                " Add the area of "
+                + ", ".join(with_lib)
+                + " from its macro liberty (response.macros[].lib) before "
+                "comparing area_um2 to an area budget."
+            )
+        if without_lib:
+            text += (
+                " "
+                + ", ".join(without_lib)
+                + " has no macro liberty (response.macros[].lib is null: "
+                "LEF-only or verilog_blackbox), so no area is available "
+                "for it here."
+            )
+        warnings["macro_area_excluded"] = text
     if others_missing:
         warnings["cells_without_liberty_area"] = (
             "area_um2 excludes instantiated cell type(s) with no liberty "

@@ -6376,6 +6376,25 @@ def test_cells_without_area_reports_types_when_every_parsed_cell_lacks_area(
     assert "macro_area_excluded" in warning
 
 
+def test_macro_area_warning_does_not_point_a_lef_only_macro_at_its_lib():
+    """Issue #4368: `response.macros[].lib` is null for a LEF-only macro, so
+    the text must not tell the caller to add its area from there."""
+    warning = synthesize._macro_area_warning(
+        ["lef_only", "with_lib"],
+        frozenset({"lef_only", "with_lib"}),
+        macros_with_lib=frozenset({"with_lib"}),
+    )["macro_area_excluded"]
+    assert "Add the area of with_lib from its macro liberty" in warning
+    assert "lef_only has no macro liberty" in warning
+    assert "Add the area of lef_only" not in warning
+
+    only_lef = synthesize._macro_area_warning(
+        ["lef_only"], frozenset({"lef_only"}), macros_with_lib=frozenset()
+    )["macro_area_excluded"]
+    assert "Add" not in only_lef
+    assert "no area is available" in only_lef
+
+
 def test_cells_without_area_is_null_when_the_liberty_declares_no_cells(
     tmp_path, monkeypatch
 ):
