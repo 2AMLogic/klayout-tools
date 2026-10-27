@@ -16843,6 +16843,60 @@ def test_item5_declared_gap_row_is_reported_apart_and_never_met(tmp_path):
     ]
 
 
+def test_item5_all_gap_rows_without_evidence_is_partial_coverage_never_met():
+    rows = [
+        {"id": "A", "gap": "no sim yet"},
+        {"id": "B", "gap": "no sim yet"},
+    ]
+
+    item = _item5({}, rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["citation"] is None
+    assert item["detail"]["failed_rows"] == []
+    assert item["detail"]["uncovered_rows"] == []
+    assert [g["id"] for g in item["detail"]["declared_gaps"]] == ["A", "B"]
+
+
+def test_item5_mixed_rows_without_evidence_lists_uncovered_rows():
+    item = _item5({}, [{"id": "tdec"}, {"id": "zin", "gap": "later"}])
+
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == ["tdec"]
+    assert item["detail"]["declared_gaps"] == [{"id": "zin", "gap": "later"}]
+
+
+def test_item5_unratified_row_without_evidence_is_reported():
+    item = _item5({}, [{"id": "tdec", "ratified": False}])
+
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["unratified_rows"] == ["tdec"]
+
+
+def test_item6_rows_without_evidence_is_partial_coverage():
+    manifest = _manifest(evidence={})
+    manifest["spec_rows"] = {"6": [{"id": "mc", "gap": "pending"}]}
+
+    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 6)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+
+
+def test_item5_no_spec_rows_and_no_evidence_stays_no_evidence():
+    item = _item5({})
+
+    assert item["reason"] == "no_evidence"
+    assert "detail" not in item
+
+
+def test_item5_malformed_spec_rows_without_evidence_is_invalid_evidence():
+    item = _item5({}, [{"id": "a"}, {"id": "a"}])
+
+    assert item["reason"] == "invalid_evidence"
+
+
 def test_item5_all_declared_rows_covered_is_met_with_row_coverage(tmp_path):
     a = _write(tmp_path, "a.json", SIM_PASS_ENVELOPE)
 

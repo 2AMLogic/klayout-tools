@@ -6655,15 +6655,18 @@ def _build_tier_item(
             status, reason, not_applicable, failure_detail = _grade_not_applicable(
                 raw_entry["not_applicable"], partition_kind
             )
-    elif (
+    elif item_id in _ITEMS_ACCEPTING_MULTI_CITATION and (
         raw_entry is not None
-        and item_id in _ITEMS_ACCEPTING_MULTI_CITATION
         and (
             isinstance(raw_entry, list)
             or spec_rows is not None
             or spec_rows_invalid
             or required_kind_pair is not None
         )
+        # Issue #4190: declared ``spec_rows`` with no evidence entry at
+        # all grade as a zero-citation set (every row uncovered or a
+        # declared gap), not as ``no_evidence``.
+        or (raw_entry is None and (spec_rows is not None or spec_rows_invalid))
     ):
         # Issue #2959: item 5 may cite several envelopes (and declare the
         # spec rows they must cover) -- graded per citation, then aggregated.
@@ -6850,7 +6853,8 @@ def _grade_multi_citation(
     )
     if spec_rows_invalid:
         return invalid
-    members = _parse_multi_members(raw_entry)
+    # Issue #4190: no evidence entry -> zero members; only ``spec_rows`` grade.
+    members = [] if raw_entry is None else _parse_multi_members(raw_entry)
     if members is None or not _members_rows_declared(members, spec_rows):
         return invalid
 
@@ -6902,6 +6906,10 @@ def _grade_multi_citation(
                 )
     if row_info:
         extra["row_coverage"] = row_info
+    if not graded:
+        # Unreachable for a non-empty declared row set (every row is then
+        # uncovered or a gap); never grade a citation-less entry ``met``.
+        return "unmet", _REASON_NO_EVIDENCE, None, {}, extra
     extra["citations"] = [g[2] for _, _, g in graded]
     return "met", None, graded[0][2][2], {}, extra
 
