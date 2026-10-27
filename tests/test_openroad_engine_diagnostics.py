@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from klayout_tools import _openroad_engine as engine
-from klayout_tools._openroad_engine import _container_runtime_hint, _run_openroad
+from klayout_tools._openroad_engine import _run_openroad, container_runtime_hint
 from klayout_tools.place_and_route import _engine_error_message
 
 
@@ -59,23 +59,22 @@ def _no_batch_env(monkeypatch):
     ],
 )
 def test_classifies_each_signature(completed, needle):
-    hint = _container_runtime_hint(completed)
+    hint = container_runtime_hint(completed)
     assert hint is not None and needle in hint
 
 
 def test_exit_127_without_docker_is_not_classified():
     assert (
-        _container_runtime_hint(_completed(127, stderr="foo: command not found"))
-        is None
+        container_runtime_hint(_completed(127, stderr="foo: command not found")) is None
     )
 
 
 def test_docker_not_found_needs_exit_127():
-    assert _container_runtime_hint(_completed(1, stderr="docker: not found")) is None
+    assert container_runtime_hint(_completed(1, stderr="docker: not found")) is None
 
 
 def test_no_match_passthrough():
-    assert _container_runtime_hint(_completed(1, stderr="[ERROR ORD-1] bad")) is None
+    assert container_runtime_hint(_completed(1, stderr="[ERROR ORD-1] bad")) is None
     message = _engine_error_message(
         "floorplan", _completed(1, stderr="[ERROR ORD-1] bad")
     )
@@ -89,7 +88,7 @@ def test_batch_host_points_at_fleet(monkeypatch):
         _completed(127, stderr="docker: command not found"),
         _completed(125, stderr="Unable to find image"),
     ):
-        hint = _container_runtime_hint(completed)
+        hint = container_runtime_hint(completed)
         assert "--backend batch" in hint
         assert "docker' group" not in hint
 

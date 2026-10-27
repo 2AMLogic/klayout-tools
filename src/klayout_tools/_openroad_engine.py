@@ -135,7 +135,7 @@ _CONTAINER_RUNTIME_HINT_PREFIX = (
 )
 
 
-def _container_runtime_hint(completed: _OpenRoadResult) -> str | None:
+def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
     """``None``, or an actionable hint that ``openroad`` never really ran
     because its container runtime was unreachable (issue #2632).
 
@@ -187,50 +187,65 @@ def _container_runtime_hint(completed: _OpenRoadResult) -> str | None:
     local-install advice that cannot work on such a host.
     """
     batch_host = os.environ.get(_BATCH_BACKEND_ENV) == "batch"
-    for stream in (completed.stdout or "", completed.stderr or ""):
-        for line in stream.splitlines():
-            lowered = line.lower()
-            if "permission denied" in lowered and "docker" in lowered:
-                remedy = (
-                    "this host runs OpenROAD on the batch fleet, not locally; "
-                    + _BATCH_REMEDY
-                    if batch_host
-                    else "grant it access (e.g. add the user to the 'docker' "
-                    "group, or use a rootless runtime), then retry"
-                )
-                return (
-                    f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- this user is not "
-                    f"permitted to reach the container runtime's socket; {remedy}"
-                )
-            if _CONTAINER_RUNTIME_UNREACHABLE_RE.search(line):
-                remedy = (
-                    "this host runs OpenROAD on the batch fleet, not locally; "
-                    + _BATCH_REMEDY
-                    if batch_host
-                    else "verify the runtime is installed and its daemon is "
-                    "running ('docker info'), then retry; the request itself "
-                    "was never analyzed"
-                )
-                return f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- {remedy}"
+    lines = [
+        line.lower()
+        for stream in (completed.stdout or "", completed.stderr or "")
+        for line in stream.splitlines()
+    ]
+    matchers = [_runtime_unreachable_hint]
     if completed.returncode == 127:
-        for stream in (completed.stdout or "", completed.stderr or ""):
-            for line in stream.splitlines():
-                lowered = line.lower()
-                if "docker" in lowered and "not found" in lowered:
-                    return (
-                        f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- the wrapper ran "
-                        "but the 'docker' command is not installed or not on "
-                        f"PATH (exit 127); {_install_or_batch_remedy(batch_host)}"
-                    )
-    for stream in (completed.stdout or "", completed.stderr or ""):
-        for line in stream.splitlines():
-            lowered = line.lower()
-            if any(marker in lowered for marker in _IMAGE_MISSING_MARKERS):
-                return (
-                    f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- the OpenROAD "
-                    "container image is not present and could not be pulled; "
-                    f"{_install_or_batch_remedy(batch_host, pull=True)}"
-                )
+        matchers.append(_docker_missing_hint)
+    matchers.append(_image_missing_hint)
+    for matcher in matchers:
+        for lowered in lines:
+            hint = matcher(lowered, batch_host)
+            if hint:
+                return hint
+    return None
+
+
+def _runtime_unreachable_hint(lowered: str, batch_host: bool) -> str | None:
+    """Socket-permission (checked first, narrower) or daemon-unreachable line."""
+    if "permission denied" in lowered and "docker" in lowered:
+        remedy = (
+            "this host runs OpenROAD on the batch fleet, not locally; " + _BATCH_REMEDY
+            if batch_host
+            else "grant it access (e.g. add the user to the 'docker' "
+            "group, or use a rootless runtime), then retry"
+        )
+        return (
+            f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- this user is not "
+            f"permitted to reach the container runtime's socket; {remedy}"
+        )
+    if _CONTAINER_RUNTIME_UNREACHABLE_RE.search(lowered):
+        remedy = (
+            "this host runs OpenROAD on the batch fleet, not locally; " + _BATCH_REMEDY
+            if batch_host
+            else "verify the runtime is installed and its daemon is "
+            "running ('docker info'), then retry; the request itself "
+            "was never analyzed"
+        )
+        return f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- {remedy}"
+    return None
+
+
+def _docker_missing_hint(lowered: str, batch_host: bool) -> str | None:
+    if "docker" in lowered and "not found" in lowered:
+        return (
+            f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- the wrapper ran "
+            "but the 'docker' command is not installed or not on "
+            f"PATH (exit 127); {_install_or_batch_remedy(batch_host)}"
+        )
+    return None
+
+
+def _image_missing_hint(lowered: str, batch_host: bool) -> str | None:
+    if any(marker in lowered for marker in _IMAGE_MISSING_MARKERS):
+        return (
+            f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- the OpenROAD "
+            "container image is not present and could not be pulled; "
+            f"{_install_or_batch_remedy(batch_host, pull=True)}"
+        )
     return None
 
 
