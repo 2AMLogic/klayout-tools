@@ -479,6 +479,15 @@ def _validate_floorplan(floorplan: Any) -> dict[str, Any]:
             f"request.floorplan.site is required for method '{method}'"
         )
 
+    # Issue #4191: `initialize_floorplan -utilization` needs `-core_space`
+    # (OpenROAD IFP-0034); reject here rather than after a full OpenROAD run.
+    if method == "utilization" and floorplan.get("core_margin_um") is None:
+        raise PlaceAndRouteError(
+            "request.floorplan.core_margin_um is required for method "
+            "'utilization' (OpenROAD's initialize_floorplan -utilization "
+            "needs -core_space)"
+        )
+
     if method == "explicit":
         for field in ("die_area_um", "core_area_um"):
             value = floorplan[field]

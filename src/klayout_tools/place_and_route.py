@@ -2562,11 +2562,24 @@ def _mount_namespace_hint(
             f"{os.environ.get('PDK_ROOT') or '(unset)'})"
         )
 
+    # Issue #4191: the docker wrapper mounts only `$PWD`, `$PDK_ROOT` and
+    # `$TMPDIR`, so a readable path outside the invocation directory is the
+    # commonest trigger -- say the rule and the fix, not just the symptom.
+    cwd = os.path.realpath(os.getcwd())
+    real = os.path.realpath(path)
+    mount_note = ""
+    if real != cwd and not real.startswith(cwd.rstrip(os.sep) + os.sep):
+        mount_note = (
+            f"; '{path}' is outside the invocation directory '{cwd}', and the "
+            "container wrapper mounts only $PWD, $PDK_ROOT and $TMPDIR -- run "
+            "from a common ancestor of the request and its inputs"
+        )
+
     return (
         f"'openroad' could not read '{path}', but this process can read it"
         f"{pdk_note} -- if 'openroad' is a container/wrapper invocation, its "
         "mounts likely do not cover that path (see docs/cli/place-and-route.md's "
-        "'Installing OpenROAD' section)"
+        f"'Installing OpenROAD' section){mount_note}"
     )
 
 

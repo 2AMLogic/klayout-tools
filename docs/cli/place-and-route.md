@@ -131,7 +131,12 @@ nothing about the real cause (issue #1868). `klt place-and-route` itself
 now recognizes this exact failure shape — a path `openroad` reports it
 cannot read that this process can itself still read — and appends a hint
 about mount coverage rather than passing the raw Tcl error through
-unexplained. [`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)'s
+unexplained. **Rule (issue #4191):** the container wrapper mounts only `$PWD`,
+`$PDK_ROOT` and `$TMPDIR`, so every input the request references (netlist,
+macro LEF, `--abstract-cell-lef`) must live under one of those. When the
+unreadable path is outside the invocation directory, the hint names that
+path and says to run `klt place-and-route` from a common ancestor of the
+request and its inputs. [`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)'s
 wrapper (below) already automates this fallback; only the bare snippet
 above needs it spelled out manually.
 
@@ -472,12 +477,17 @@ survey section 2):
 
 | `floorplan.method` | Required fields | Tcl call |
 | --- | --- | --- |
-| `"utilization"` (default) | `utilization_pct`, `site` (optional: `aspect_ratio`, `core_margin_um`) | `initialize_floorplan -utilization ...` |
+| `"utilization"` (default) | `utilization_pct`, `site`, `core_margin_um` (optional: `aspect_ratio`) | `initialize_floorplan -utilization ...` |
 | `"explicit"` | `die_area_um`, `core_area_um` (each `[llx, lly, urx, ury]`), `site` | `initialize_floorplan -die_area ... -core_area ...` |
 | `"def"` | `def_path` | `read_def -floorplan_initialize <def_path>` |
 
 A request naming fields from more than one method is rejected (exit 1),
 mirroring ORFS's own `methods_defined > 1` check.
+
+`core_margin_um` is **required** for `"utilization"` (issue #4191): OpenROAD's
+`initialize_floorplan -utilization` needs `-core_space` (`IFP-0034`), so a
+request without it is rejected before any OpenROAD run, naming the field,
+rather than failing after the engine starts.
 
 ### Explicit tracks (`floorplan.tracks`)
 
