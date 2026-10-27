@@ -42,6 +42,7 @@ from typing import Any
 
 from . import macros as macro_spec
 from . import output_lock
+from . import place_and_route_resume as _resume
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -1125,15 +1126,44 @@ _TOP_LEVEL_METRIC_KEYS = (
 )
 
 
+# Issue #4230: every top-level request key some code path reads -- including
+# `backend`/`batch`, which only `place_and_route_batch` consumes.
+_ALLOWED_REQUEST_KEYS = (
+    "schema",
+    "engine",
+    "netlist",
+    "hdl_toplevel",
+    "pdk",
+    "floorplan",
+    "io",
+    "macros",
+    "power",
+    "constraints",
+    "seed",
+    "target_stage",
+    "route_critical_nets_percentage",
+    "max_antenna_repair_iterations",
+    "library",
+    "post_route_spef",
+    "post_route_sdf",
+    "portable_paths",
+    "backend",
+    "batch",
+    "outputs",
+    "instance_groups",
+)
+
+
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt place-and-route`` request JSON
     file.
 
     Raises :class:`PlaceAndRouteError` if the file is missing/unreadable,
     not valid JSON, or missing a required top-level field (``netlist``,
-    ``hdl_toplevel``, ``pdk``, ``floorplan``, ``seed``). Does not require a
-    ``schema`` field, matching every other request-taking verb's
-    ``load_request``.
+    ``hdl_toplevel``, ``pdk``, ``floorplan``, ``seed``), or carries an
+    unrecognised top-level key (issue #4230; ``_comment`` is exempt). Does
+    not require a ``schema`` field, matching every other request-taking
+    verb's ``load_request``.
     """
     request = _load_request_json(request_path, PlaceAndRouteError)
     request = validate_request_shape(
@@ -1141,6 +1171,11 @@ def load_request(request_path: str) -> dict[str, Any]:
         "request file",
         error_cls=PlaceAndRouteError,
         required_fields=("netlist", "hdl_toplevel", "pdk", "floorplan", "seed"),
+    )
+    # Issue #4230: a misspelt or foreign top-level key used to be dropped in
+    # silence (same hole `klt synthesize` closed in #3466). Reject it.
+    _reject_unknown_keys(
+        request, _ALLOWED_REQUEST_KEYS, request_path, "", PlaceAndRouteError
     )
     _validate_outputs(request, request_path)
     return request
@@ -1305,6 +1340,7 @@ def run_place_and_route(
     pdk_root: str | None = None,
     backend: str | None = None,
     reuse_outputs_dir: bool = False,
+    resume: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the OpenROAD place-and-route flow declared by the request at
@@ -1352,12 +1388,27 @@ def run_place_and_route(
     to the Spot batch fleet (:mod:`klayout_tools.place_and_route_batch`) and
     never falls back to running a unit on this host. A single-unit request
     stays local under a host-default ``batch``.
+
+    **Resume (issue #4411).** ``resume`` (``--resume``) skips each leading
+    stage whose commit record (:mod:`klayout_tools.place_and_route_resume`)
+    matches the stage's input hash and whose artifacts are on disk, and adds
+    ``resume: {"resumed_stages": [...]}`` to the response.
     """
     request = load_request(request_path)
+    # `resume` (issue #4411) reuses the stage artifacts of an interrupted run
+    # in the same directory, so it lifts the populated-`outputs.dir` refusal.
     _own_stage_root(
-        _ownership, request_path, request, reuse_outputs_dir=reuse_outputs_dir
+        _ownership,
+        request_path,
+        request,
+        reuse_outputs_dir=reuse_outputs_dir or resume,
     )
     rebuild_corners = _validate_rebuild_corners(request)
+    if resume and rebuild_corners is not None:
+        raise PlaceAndRouteError(
+            "--resume is not supported with pdk.rebuild_corners (each corner "
+            "re-runs in full)"
+        )
 
     from . import place_and_route_batch
 
@@ -1389,7 +1440,11 @@ def run_place_and_route(
             ownership=_ownership,
         )
     return _run_single_corner(
-        request_path, request, pdk_variant=pdk_variant, pdk_root=pdk_root
+        request_path,
+        request,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        resume=resume,
     )
 
 
@@ -1612,6 +1667,34 @@ def _audit_filler_masters(
     return _FILLER_CELLS.get(cell_library, ())
 
 
+def _select_sweep_corners(
+    corners: list[dict[str, Any]],
+    sweep_corners: list[str] | None,
+    cell_library: str,
+) -> list[dict[str, Any]]:
+    """Issue #1092: scope the sweep to `request.pdk.sweep_corners` when given
+    -- every requested name must actually be one of `cell_library`'s own
+    shipped corners, or this is a clear request error (matching this module's
+    existing unresolvable-request-field convention) rather than a
+    silently-dropped name."""
+    if sweep_corners is None:
+        return corners
+    available_names = {corner["name"] for corner in corners}
+    unknown_names = sorted(set(sweep_corners) - available_names)
+    if unknown_names:
+        raise PlaceAndRouteError(
+            "request.pdk.sweep_corners names unknown corner(s) "
+            f"{', '.join(unknown_names)} for cell_library "
+            f"'{cell_library}' -- available corners: "
+            + (
+                ", ".join(sorted(available_names))
+                if available_names
+                else "(none shipped)"
+            )
+        )
+    return [corner for corner in corners if corner["name"] in sweep_corners]
+
+
 def _run_single_corner(
     request_path: str,
     request: dict[str, Any],
@@ -1620,6 +1703,7 @@ def _run_single_corner(
     pdk_root: str | None,
     corner_override: str | None = None,
     output_subdir: str | None = None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """One full floorplan-through-``target_stage`` flow for an already-loaded
     ``request`` (issue #3507: the unit :func:`run_place_and_route` runs once,
@@ -1784,6 +1868,9 @@ def _run_single_corner(
     stages: list[dict[str, Any]] = []
     engine_logs: list[dict[str, Any]] = []
     checkpoint_path: str | None = None
+    previous_hash: str | None = None
+    resumed_stages: list[str] = []
+    can_resume = resume
 
     for stage in stages_to_run:
         script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_{stage}.tcl")
@@ -1819,6 +1906,40 @@ def _run_single_corner(
             library=library,
         )
         _write_script(script_path, lines)
+
+        # Issue #4411: reuse a committed stage under `--resume`; always drop
+        # a stale record before (re)running so a crash mid-stage leaves none.
+        stage_hash = _resume.stage_input_hash(
+            previous_hash=previous_hash,
+            request=request,
+            script_lines=lines,
+            input_files=_resume.input_files(
+                [netlist_path, tech_lef, cell_lef, liberty_path],
+                macro_liberty_paths,
+                macros,
+            ),
+        )
+        stage_artifacts = _resume.stage_artifacts(
+            hdl_toplevel, stage, next_checkpoint, metrics_path
+        )
+        record = _resume.reuse_or_invalidate(
+            output_dir,
+            hdl_toplevel,
+            stage,
+            stage_hash,
+            stage_artifacts,
+            attempt=can_resume,
+        )
+        can_resume = record is not None
+        if record is not None:
+            stages.append(record["stage_entry"])
+            engine_logs.extend(record["engine_logs"])
+            placement_routability = record["placement_routability"]
+            resumed_stages.append(stage)
+            checkpoint_path = next_checkpoint
+            previous_hash = stage_hash
+            continue
+        logs_before = len(engine_logs)
 
         completed = _run_openroad(
             script_path,
@@ -1888,28 +2009,7 @@ def _run_single_corner(
             # is a separate session rather than more Tcl appended above.
             assert io_spec is not None  # required to reach "route" (validated above)
             corners = list_lib_corners(cell_library, pdk_info)
-            # Issue #1092: scope the sweep to `request.pdk.sweep_corners`
-            # when given -- every requested name must actually be one of
-            # `cell_library`'s own shipped corners, or this is a clear
-            # request error (matching this module's existing unresolvable-
-            # request-field convention) rather than a silently-dropped name.
-            if sweep_corners is not None:
-                available_names = {corner["name"] for corner in corners}
-                unknown_names = sorted(set(sweep_corners) - available_names)
-                if unknown_names:
-                    raise PlaceAndRouteError(
-                        "request.pdk.sweep_corners names unknown corner(s) "
-                        f"{', '.join(unknown_names)} for cell_library "
-                        f"'{cell_library}' -- available corners: "
-                        + (
-                            ", ".join(sorted(available_names))
-                            if available_names
-                            else "(none shipped)"
-                        )
-                    )
-                corners = [
-                    corner for corner in corners if corner["name"] in sweep_corners
-                ]
+            corners = _select_sweep_corners(corners, sweep_corners, cell_library)
             (
                 worst_setup_slack_ns,
                 worst_hold_slack_ns,
@@ -1963,6 +2063,17 @@ def _run_single_corner(
             )
         )
         checkpoint_path = next_checkpoint
+        previous_hash = stage_hash
+        _resume.write_commit(
+            output_dir,
+            hdl_toplevel,
+            stage,
+            input_hash=stage_hash,
+            artifacts=stage_artifacts,
+            stage_entry=stages[-1],
+            engine_logs=engine_logs[logs_before:],
+            placement_routability=placement_routability,
+        )
 
     gds_path: str | None = None
     verilog_path: str | None = None
@@ -2390,6 +2501,7 @@ def _run_single_corner(
         "warnings": warnings,
         "provenance": provenance,
     }
+    _resume.annotate_response(response, resume, resumed_stages)
     return _finish_response(
         response,
         portable=portable_paths,

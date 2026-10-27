@@ -469,6 +469,49 @@ changes that net's own routing, so this mirrors ORFS's own
 then reports the post-repair violation count (`antenna_violation_count`)
 before `write_def`.
 
+## Resuming an interrupted run (`--resume`, issue #4411)
+
+A `route` stage on a large block can run for hours; if the `klt` process dies
+afterwards (host tool replaced, OOM, kill), the stage ODBs are on disk but a
+plain re-invocation starts again from `floorplan` — and, with `outputs.dir`
+set, is refused because the directory is populated. `--resume` picks the run
+up instead:
+
+```
+klt place-and-route request.json --resume
+```
+
+After each stage finishes, the flow writes `<top>_<stage>.commit.json` next to
+the checkpoint, holding the stage's `stages[]` entry, its `engine_logs`, the
+artifacts it produced (`<top>_<stage>.odb`, `<top>_<stage>_metrics.json`, plus
+`<top>.def` and `<top>.v` for `route`) and an **input hash**. On `--resume`,
+each stage in order is skipped iff its record exists, its input hash matches,
+and every listed artifact is still on disk. The first stage that fails the
+check — and every stage after it — runs normally. If every stage up to
+`target_stage` is reusable, only the DEF→GDS merge (and any `post_route_spef`
+pass) and response assembly run.
+
+The input hash covers the previous stage's hash (so a change invalidates all
+later stages), the request document except `target_stage`, the stage's
+generated Tcl script text, and the content hashes of the netlist, tech/cell
+LEF, liberty, and any macro LEF/liberty. A stage killed mid-run has no record
+(it is written last, and any stale one is deleted before the stage re-runs),
+so a partial `.odb` is never reused.
+
+* `--resume` lifts the populated-`outputs.dir` refusal (like `--rerun`). On an
+  empty or missing directory it behaves as a normal run.
+* Without `--resume`, behaviour is unchanged (the refusal stands) and the
+  response has no `resume` field.
+* The response gains an optional `resume` object, present only under
+  `--resume`: `{"resumed_stages": ["floorplan", "place", ...]}` (empty when
+  nothing was reusable). All other fields have the same shape and, for
+  reused stages, the same values as an uninterrupted run (`engine_logs`
+  entries of reused stages are the recorded ones).
+* Refused with a clear error (exit 1): `--resume` together with
+  `pdk.rebuild_corners` (each corner re-runs in full; resume is not applied
+  per corner), and `--resume` together with `--check`.
+* Out of scope: resuming inside a stage, and the `--backend batch` path.
+
 ## Floorplan methods
 
 Three of ORFS's four floorplan-initialization methods are supported (the
@@ -2013,6 +2056,19 @@ live re-measurement above.
 | `outputs` | object \| omitted | Additive field (issue #4231), mirroring `klt synthesize`'s `outputs.dir`. `{"dir": "<path>"}` replaces `.klt/place-and-route/` as the directory every artifact (DEF/GDS/Verilog/SPEF, Tcl, ODB, metrics) is written to; relative paths resolve against the request file's directory. Multi-corner requests write `<dir>/<corner>/` and `corner_runs[].output_dir` names it. Response paths are produced from this directory, so they name the committed location and `portable_paths` rewrites them as usual. Unknown keys and a non-string/empty `dir` are rejected, as is a `dir` that already exists and is non-empty (prior evidence is retained); an existing empty directory is accepted. The output-dir lock is held on this directory. `--check --rerun` reuses the directory in place (overwriting its own artifacts), so the non-empty refusal does not apply to a re-run. Not supported with `--backend batch` (rejected with an error). Omitting `outputs` leaves behaviour and JSON unchanged. |
 | `portable_paths` | boolean \| omitted | Additive field (issue #3820). Default `false`: the response is byte-identical to before this field existed (absolute paths, which `klt extract --def-pins` and `klt signoff` chain on). `true` rewrites every absolute host path in the response — `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path`, `stages[].def_path`, `power.placed.def_path`, `spef_sta.*_path`, `layer_map.path`, and paths embedded in messages — so it can be committed as evidence and passes `klt env-provenance lint-envelope`: inside the repo → `{"path": "<repo-relative>", "scope": "repo"}`; outside it (or no git root) → `{"path": null, "scope": "external"}`; under the PDK root → a `"$PDK_ROOT/<relative>"` string. Fields that are `null` stay `null`. An `external` path cannot be chained into `--def-pins`; keep `output_dir` inside the repo if you need both. No `schema_version` bump. |
 
+### Unknown request keys are errors (issue #4230)
+
+An unrecognised **top-level** request key is rejected with an error naming it
+and the request file (exit 1, nothing written), instead of being dropped in
+silence — a misspelt `post_route_spef` can no longer pass for a deliberate
+default. Recognised keys: `schema`, `engine`, `netlist`, `hdl_toplevel`, `pdk`,
+`floorplan`, `io`, `macros`, `power`, `constraints`, `seed`, `target_stage`,
+`route_critical_nets_percentage`, `max_antenna_repair_iterations`, `library`,
+`post_route_spef`, `post_route_sdf`, `portable_paths`, `backend`, `batch`, `outputs`,
+`instance_groups`; the `_comment` annotation is also accepted (its contents are never read). The same
+check applies to `--check` and `pdk.rebuild_corners`. Nested objects (`pdk`,
+`floorplan`, …) are not yet checked for unknown keys.
+
 ### IO pin layers must be inside the signal-routing range (#2473)
 
 `io.layer_h`/`io.layer_v` are rejected at **request time** — before any
@@ -2243,6 +2299,8 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
   "warnings": [],
   "provenance": {
     "klt_version": "0.1.0",
+    "klt_git_commit": null,
+    "klt_reinstall_spec": null,
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
     "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>", "path": { "path": null, "scope": "external" } },
@@ -2447,8 +2505,13 @@ plain defaults.
 
 The `gf180mcu_7t_6M` preset deliberately does **not** reproduce that
 `-split_cuts {Metal3 0.128}` (issue #4301): the generated via cells were
-reported DRC-dirty under `klt drc --deck gf180mcu`. `split_cuts` remains a
-supported request field, and `gf180mcu_9t_6M` still carries it, unverified.
+reported DRC-dirty under `klt drc --deck gf180mcu`, and neither does
+`gf180mcu_9t_6M`. Measured on a routed `gcd` block (`gf180mcuD`, one run per
+preset): with the ORFS `split_cuts` the 9t run had 2,624 hits on
+`metal2/3/4.ongrid.1`, `via2/via3.ongrid.1` and `via2/via3.width.1`; without
+it, the 7t run has none on those rules. The only hits left are
+`comp.tap_distance.{nwell,psub}.mv.1`, which come from the tapcell pitch, not
+the PDN. `split_cuts` remains a supported request field.
 
 ### `sg13g2_stdcell`: a supported PDN with no tapcell step (issues #1784, #2441)
 
@@ -2723,7 +2786,7 @@ platform at all:
 | `preset` | `pdk.cell_library` | Upstream source | Straps (bottom→top) | Via-stack tuning |
 | --- | --- | --- | --- | --- |
 | `"gf180mcu_7t_6M"` | `gf180mcu_fd_sc_mcu7t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg` | `Metal1` w 0.600 / p 3.92 / off 0, followpins · `Metal4` w 4.480 / sp 0.56 / p 44.8 / off 22.4 · `Metal5` w 4.480 / p 89.6 / off 44.8 | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`; **no** `split_cuts` — a deliberate deviation from the ORFS cfg (issue #4301: its `-split_cuts {Metal3 0.128}` produced DRC-dirty vias under `klt drc --deck gf180mcu`). `Metal4↔Metal5`: none. |
-| `"gf180mcu_9t_6M"` | `gf180mcu_fd_sc_mcu9t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` | `Metal1` w 0.900 / p 5.040 / off 0, followpins · `Metal4`/`Metal5` identical to the 7t row above | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`, **keeps** the ORFS cfg's `split_cuts {Metal3 0.128}` on `Metal1↔Metal4`; whether that is DRC-dirty on this preset is **unverified** (only the 7t preset was reported). `Metal4↔Metal5`: none. |
+| `"gf180mcu_9t_6M"` | `gf180mcu_fd_sc_mcu9t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` | `Metal1` w 0.900 / p 5.040 / off 0, followpins · `Metal4`/`Metal5` identical to the 7t row above | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`, **no** `split_cuts` — the same deliberate deviation from the ORFS cfg as the 7t row, measured DRC-dirty on this preset too (issue #4301). `Metal4↔Metal5`: none. |
 | `"sg13g2"` | `sg13g2_stdcell` | IHP-Open-PDK v0.3.0 `libs.tech/librelane/config.tcl` (+ `libs.tech/librelane/sg13g2_stdcell/config.tcl` for `PDN_RAIL_WIDTH`) | `Metal1` w 0.44 / **p 7.56 (derived — see below)** / off 0, followpins · `TopMetal1` w 2.2 / sp 4.0 / p 75.6 / off 13.6 · `TopMetal2` w 2.2 / sp 4.0 / p 75.6 / off 13.6 | none — that config names no via-stack tuning |
 | `"sky130hd"` | `sky130_fd_sc_hd` | ORFS `flow/platforms/sky130hd/pdn.tcl` | `met1` w 0.48 / p 5.44 / off 0, followpins · `met4` w 1.600 / p 27.140 / off 13.570 · `met5` w 1.600 / p 27.200 / off 13.600 | none — that config's two `add_pdn_connect` lines carry no flags |
 
@@ -3201,7 +3264,7 @@ committed one, reporting `status: "drifted"` with a `drift[]` list of
 `wirelength_um`, `setup_violation_count`, a `power.placed` count that stopped
 being reported, a changed `provenance.input.content_hash`.
 
-Excluded from the diff: `provenance.klt_version`/`klayout_version`/
+Excluded from the diff: `provenance.klt_version`/`klt_git_commit`/`klt_reinstall_spec`/`klayout_version`/
 `pdk.version` and `engine_version` (an OpenROAD upgrade that leaves the result
 untouched is tool churn, not evidence drift), plus the whole `engine_logs[]`
 block — every entry is keyed by a fresh `uuid4` `invocation_id` with its

@@ -117,6 +117,7 @@ indistinguishable from one where the numbers actually agreed.
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import json
 import os
@@ -158,6 +159,7 @@ from .extract import (
     extract_netlist_from_layout,
     spice_safe_net_name,
 )
+from .extract_progress import StageTimer, active_timer, stage
 from .lvs_combine import (
     _combine_circuit_devices_safely,
     _combine_devices_safely,
@@ -928,8 +930,14 @@ def run_lvs(
     *,
     deck_file: str | None = None,
     deck_vars: dict[str, str] | None = None,
+    progress: bool | str = False,
 ) -> dict[str, Any]:
     """Run the netlist compare declared by ``request``.
+
+    ``progress`` (issue #4347) is ``klt extract``'s own ``progress`` knob for
+    the inline-extraction phase: ``True`` narrates stage starts/finishes plus
+    a heartbeat on stderr, ``"heartbeat"`` the heartbeat alone, ``False``
+    nothing. stdout (the response) is never affected.
 
     ``deck_file``/``deck_vars`` (issue #3206) carry the ``klt lvs
     --deck-file``/``--deck-var`` CLI values for ``engine: klayout-runset``;
@@ -1249,6 +1257,10 @@ def run_lvs(
     # only -- see `_parse_layout_abstract_cells` for the shape and the
     # extraction-only rule.
     layout_abstraction = _parse_layout_abstract_cells(layout_spec, request_dir)
+    # Issue #4347: `layout.def_net_names`/`def_pins` mirror `klt extract
+    # --def-net-names`/`--def-pins` for inline extraction only.
+    def_net_names = _parse_layout_def_net_names(layout_spec)
+    def_pins, def_pins_echo = _parse_layout_def_pins(layout_spec, request_dir)
 
     options = request.get("options") or {}
     # Issue #2813: a FinFET extraction deck's devices are only correct with
@@ -1375,6 +1387,9 @@ def run_lvs(
         label_layers,
         reference_spec.get("deck"),
         layout_abstraction,
+        def_net_names,
+        def_pins,
+        progress,
     )
     # Inspect original scoped nets before any transform can discard a power
     # island or flatten independent child definitions into a shared scope.
@@ -2823,6 +2838,10 @@ def run_lvs(
         # see `_label_layers_echo`. Absent when no override was applied, so
         # those reports stay byte-identical to before.
         **_label_layers_echo(label_layers),
+        # Issue #4347: the applied `layout.def_net_names`/`def_pins` DEF-name
+        # options. Absent when not requested (byte-identical reports).
+        **({"def_net_names": True} if def_net_names else {}),
+        **({"def_pins": def_pins_echo} if def_pins_echo is not None else {}),
         # Issue #2853: the applied `layout.abstract_cells`/
         # `abstract_cell_lef` black-box abstraction and its per-cell report
         # -- see `_layout_abstraction_echo`. Absent when no abstraction was
@@ -3378,6 +3397,8 @@ def _reconstruct_lvs_request(
         # Issue #2686: replay the applied label-purpose override, `null`
         # roles included; a report without the echo replays without one.
         layout_spec.update(_label_layers_replay(committed))
+        # Issue #4347: replay the DEF-name options too.
+        layout_spec.update(_def_options_replay(committed))
         # Issue #2853: replay the cell-level black-box abstraction too.
         layout_spec.update(_layout_abstraction_replay(committed))
     else:
@@ -3983,6 +4004,19 @@ def _layout_abstraction_replay(committed: dict[str, Any]) -> dict[str, Any]:
     return replay
 
 
+def _def_options_replay(committed: dict[str, Any]) -> dict[str, Any]:
+    """The ``request.layout`` keys that rebuild a committed report's
+    ``def_net_names``/``def_pins`` echo (issue #4347), or ``{}`` for a report
+    without one. Passed through verbatim, so a malformed recorded value is
+    rejected by the request parsers on replay."""
+    replay: dict[str, Any] = {}
+    if committed.get("def_net_names") is True:
+        replay["def_net_names"] = True
+    if committed.get("def_pins") is not None:
+        replay["def_pins"] = committed["def_pins"]
+    return replay
+
+
 def _label_layers_echo(
     label_layers: Mapping[str, tuple[int, int] | None] | None,
 ) -> dict[str, Any]:
@@ -4122,6 +4156,9 @@ def _resolve_layout(
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     reference_deck_name: str | None = None,
     abstraction: _LayoutAbstraction | None = None,
+    def_net_names: bool = False,
+    def_pins: frozenset[str] | None = None,
+    progress: bool | str = False,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -4295,6 +4332,11 @@ def _resolve_layout(
         # requires `declared_pins`) to keep this function's
         # complexity-baselined branch count unchanged.
         rename_declared_pins = _parse_layout_rename_declared_pins(layout_spec)
+        # Issue #4347: stderr stage/heartbeat narration for the (possibly
+        # minutes-long) inline extraction, `klt extract`'s own mechanism.
+        progress_scope = contextlib.ExitStack()
+        progress_scope.enter_context(active_timer(StageTimer(progress=progress)))
+        progress_scope.enter_context(stage("extract_layout"))
         try:
             # LVS is topological -- no parasitics_deck, so the 5th return
             # (parasitic_nets) is always None here and is ignored. The 6th
@@ -4331,8 +4373,8 @@ def _resolve_layout(
             # class/parameter equivalence, not by originating GDS-level
             # instance, so it has no use here either. The 15th return
             # (def_pin_promotion, #2473) reports how a `def_pins` declared
-            # port set landed; `klt lvs` has no `--def-pins` equivalent
-            # request field, so it is always `None` here. The 17th return
+            # port set landed; `klt lvs` does not surface it (the
+            # `layout.def_pins` echo is the DEF path itself). The 17th return
             # (pin_renames, #2854) carries `layout.rename_declared_pins`'s
             # own report; its error-severity findings become
             # `pin.declared_short` mismatches[] entries in `run_lvs`.
@@ -4400,9 +4442,17 @@ def _resolve_layout(
                 abstract_cell_lef_paths=(
                     abstraction.lef_paths if abstraction is not None else ()
                 ),
+                # Issue #4347: `request.layout.def_net_names`/`def_pins`
+                # (validated by `_parse_layout_def_net_names`/
+                # `_parse_layout_def_pins`), mirroring `klt extract
+                # --def-net-names`/`--def-pins`. Defaults unchanged.
+                def_net_names=def_net_names,
+                def_pins=def_pins,
             )
         except ExtractError as exc:
             raise LvsError(str(exc)) from exc
+        finally:
+            progress_scope.close()
 
         extracted_netlist_path: str | None = None
         if keep_extracted:
@@ -5776,6 +5826,59 @@ def _strict_pin_count_check(
     return "mismatch", [finding]
 
 
+def _parse_layout_def_net_names(layout_spec: Mapping[str, Any]) -> bool:
+    """``request.layout.def_net_names`` (issue #4347), the counterpart of
+    ``klt extract --def-net-names``; default ``False``. Inline extraction
+    only: ``true`` on the pre-extracted ``layout.netlist`` shape is an error,
+    as for ``layout.label_layers``."""
+    value = layout_spec.get("def_net_names", False)
+    if not isinstance(value, bool):
+        raise LvsError("request.layout.def_net_names must be a boolean")
+    if value and "netlist" in layout_spec:
+        raise LvsError(
+            "request.layout.def_net_names applies only to inline extraction "
+            "(request.layout.file + request.layout.deck): a pre-extracted "
+            "request.layout.netlist already carries its net names -- "
+            "re-extract it with `klt extract --def-net-names`, or give "
+            "request.layout.file instead"
+        )
+    return value
+
+
+def _parse_layout_def_pins(
+    layout_spec: Mapping[str, Any], request_dir: str
+) -> tuple[frozenset[str] | None, str | None]:
+    """``request.layout.def_pins`` (issue #4347), the counterpart of ``klt
+    extract --def-pins``: a DEF path (resolved against the request
+    document's directory) whose ``PINS`` section yields the declared
+    top-level port net names. Returns ``(names, path as given)``, or
+    ``(None, None)`` when absent. Inline extraction only; a DEF without a
+    parseable ``PINS`` section is an error, as for ``klt extract``."""
+    raw = layout_spec.get("def_pins")
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str) or not raw:
+        raise LvsError("request.layout.def_pins must be a DEF file path string")
+    if "netlist" in layout_spec:
+        raise LvsError(
+            "request.layout.def_pins applies only to inline extraction "
+            "(request.layout.file + request.layout.deck): a pre-extracted "
+            "request.layout.netlist already has its pins fixed -- re-extract "
+            "it with `klt extract --def-pins`, or give request.layout.file "
+            "instead"
+        )
+    from .place_and_route import def_pin_names
+
+    names = def_pin_names(_resolve_relative(raw, request_dir))
+    if names is None:
+        raise LvsError(
+            f"request.layout.def_pins {raw!r} has no parseable DEF `PINS` "
+            "section -- pass the routed DEF `klt place-and-route` wrote for "
+            "this layout (its own response.def_path)"
+        )
+    return frozenset(names), raw
+
+
 def _parse_layout_rename_declared_pins(layout_spec: Mapping[str, Any]) -> bool:
     """Resolve ``request.layout.rename_declared_pins`` (issue #2854);
     default ``False``.
@@ -5802,11 +5905,11 @@ def _parse_layout_rename_declared_pins(layout_spec: Mapping[str, Any]) -> bool:
             "exactly one declared_pins name to that name, false (the "
             "default) to keep KLayout's joined multi-label net names"
         )
-    if value and "declared_pins" not in layout_spec:
+    if value and "declared_pins" not in layout_spec and "def_pins" not in layout_spec:
         raise LvsError(
             "request.layout.rename_declared_pins requires "
-            "request.layout.declared_pins -- there is no declared pin set "
-            "to rename to"
+            "request.layout.declared_pins or request.layout.def_pins -- there "
+            "is no declared pin set to rename to"
         )
     return value
 

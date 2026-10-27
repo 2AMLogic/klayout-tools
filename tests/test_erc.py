@@ -2443,6 +2443,77 @@ def test_extractor_global_net_is_not_reported_unconnected_and_is_disclosed(tmp_p
     assert all(f["net"] != "SUB" for f in report["erc_findings"])
 
 
+def _supply_disclosure(report):
+    return [
+        e
+        for e in report["erc_coverage"]["inapplicable"]
+        if e["id"] == "erc.supply_short"
+    ]
+
+
+def test_two_supply_nets_disclose_substrate_continuity_not_modelled(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "two.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "two.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "VDD2", "kind": "supply"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+
+    assert _supply_disclosure(report) == [
+        {"id": "erc.supply_short", "reason": "substrate_continuity_not_modelled"}
+    ]
+
+
+def test_fewer_than_two_supply_nets_emit_no_substrate_disclosure(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "one.gds"
+    layout.write(str(gds))
+    for name, nets in (
+        ("zero", []),
+        ("one", [{"name": "VDD", "kind": "supply"}]),
+        (
+            "signals",
+            [{"name": "A", "kind": "signal"}, {"name": "B", "kind": "signal"}],
+        ),
+    ):
+        spec = tmp_path / f"{name}.erc.json"
+        _write_spec(spec, _nets_spec(nets=nets))
+        report = run_erc(str(gds), str(spec))
+        assert _supply_disclosure(report) == [], name
+
+
+def test_substrate_disclosure_leaves_erc_status_unchanged(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "status.gds"
+    layout.write(str(gds))
+    base = tmp_path / "base.erc.json"
+    two = tmp_path / "two.erc.json"
+    _write_spec(base, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+    _write_spec(
+        two,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "SUB", "kind": "supply", "extractor_global": True},
+            ]
+        ),
+    )
+
+    assert _supply_disclosure(run_erc(str(gds), str(two)))
+    assert (
+        run_erc(str(gds), str(two))["status"] == run_erc(str(gds), str(base))["status"]
+    )
+
+
 def test_same_net_without_extractor_global_is_still_reported(tmp_path):
     layout, top, poly, li1, label = _nets_fixture_layout()
     gds = tmp_path / "notglobal.gds"
@@ -8580,18 +8651,95 @@ def test_omit_antenna_tables_coverage_collapses_and_validates(tmp_path):
     assert cov["checked"] == full["coverage"]["checked"] == []
 
 
-def test_omit_antenna_tables_without_findings_only_raises(tmp_path):
+def test_omit_antenna_tables_without_findings_only_no_pdk(tmp_path, capsys):
+    from klayout_tools.coverage import coverage_validation_error
+
     gds = tmp_path / "basic.gds"
     spec = tmp_path / "basic.erc.json"
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    with pytest.raises(ErcError, match="--findings-only"):
+    full = run_erc(str(gds), str(spec))
+    omitted = run_erc(str(gds), str(spec), omit_antenna_tables=True)
+
+    assert omitted["gates"] == []
+    assert omitted["gate_count"] == full["gate_count"] > 0
+    assert omitted["antenna_tables_omitted"] is True
+    cov = omitted["coverage"]
+    assert coverage_validation_error(cov) is None
+    assert [e["id"] for e in cov["skipped"]] == ["antenna:[]"]
+    assert [e["reason"] for e in cov["skipped"]] == ["missing_antenna_pdk"]
+    assert (
+        len([e for e in cov["inapplicable"] if e["reason"] == "gate_reference_level"])
+        == 1
+    )
+    for key in omitted:
+        if key in {"gates", "coverage", "antenna_tables_omitted"}:
+            continue
+        assert json.dumps(omitted[key], sort_keys=True) == json.dumps(
+            full[key], sort_keys=True
+        ), key
+    base = ["erc", str(gds), str(spec), "--format", "json"]
+    code_full = main(base)
+    code_omit = main([*base, "--omit-antenna-tables"])
+    capsys.readouterr()
+    assert code_omit == code_full
+
+
+def test_omit_antenna_tables_with_pdk_without_findings_only_raises(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    with pytest.raises(ErcError, match="--pdk"):
+        run_erc(str(gds), str(spec), pdk="sky130", omit_antenna_tables=True)
+    assert (
+        main(
+            [
+                "erc",
+                str(gds),
+                str(spec),
+                "--pdk",
+                "sky130",
+                "--omit-antenna-tables",
+                "--format",
+                "json",
+            ]
+        )
+        == 1
+    )
+
+
+def test_omit_antenna_tables_graded_antenna_limits_raises(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    _basic_spec(tmp_path / "basic.erc.json")
+    spec = tmp_path / "limits.erc.json"
+    _limits_spec(spec, [_limit("met1", 100.0)])
+
+    with pytest.raises(ErcError, match="antenna_limits"):
         run_erc(str(gds), str(spec), omit_antenna_tables=True)
     assert (
         main(["erc", str(gds), str(spec), "--omit-antenna-tables", "--format", "json"])
         == 1
     )
+
+
+def test_omit_antenna_tables_rerun_replays(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps(run_erc(str(gds), str(spec), omit_antenna_tables=True))
+    )
+
+    assert main(["erc", "--check", str(report), "--rerun", "--format", "json"]) in {
+        0,
+        4,
+    }
 
 
 def test_omit_antenna_tables_pdk_still_rejected(tmp_path):

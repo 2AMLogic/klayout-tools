@@ -824,6 +824,8 @@ stability statement, concrete precedents, and drift-detection guidance, and
 ```json
 "provenance": {
   "klt_version": "0.4.2",
+  "klt_git_commit": "<full sha> | null",
+  "klt_reinstall_spec": "klayout-tools==0.4.2 | null",
   "klayout_version": "0.29.8",
   "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
   "deck": {"name": "sky130", "content_hash": "sha256:<hex>", "released": true},
@@ -849,6 +851,16 @@ stability statement, concrete precedents, and drift-detection guidance, and
   version on non-release builds — it carries the same dev form as `version`.
   Field names, types, and the definition (`klayout_tools.__version__`) are
   unchanged, so no `schema_version` bump; see `docs/cli/version.md`.
+- `klt_git_commit`, `klt_reinstall_spec` (issue #4412, additive, no `schema_version` bump) — the
+  full commit behind this build and the `uvx --from`/`pip install` spec that
+  re-obtains it, with the same values as `klt version --format json`'s
+  `git_commit` and `reinstall_spec`. `klt_git_commit` is `null` only when no
+  commit is recoverable (tarball install, `X.Y.Z.dev0+unknown`) and stays
+  populated on a dirty tree; `klt_reinstall_spec` is `null` when the tree is
+  dirty or the commit is unrecoverable. Never fabricated. A `.devN+g<sha>`
+  `klt_version` is not published to an index, so `uvx --from
+  "klayout-tools==<version>"` fails by design; use `klt_reinstall_spec`. Both are
+  excluded from `--rerun`/`--check` drift like `klt_version`.
 - `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
   or `null` if unresolvable.
 - `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see
@@ -1638,7 +1650,10 @@ bookkeeping is canonicalized out of the `--rerun` diff on both sides
 `place-and-route`'s `engine_logs[]`, keyed by a fresh `uuid4` per
 OpenROAD invocation; `equiv`'s `elapsed_s` and its `resume` block,
 issue #2280) — without that, `--rerun` would report `"drifted"`
-unconditionally. `klt signoff` is the same shape one level up: a
+unconditionally. `place-and-route --resume` (issue #4411) adds an optional
+`resume: {resumed_stages: [...]}` object, present only when the flag was
+given (see [`cli/place-and-route.md`](cli/place-and-route.md), "Resuming an
+interrupted run"). `klt signoff` is the same shape one level up: a
 tier/fleet report echoes graded verdicts, never the manifest, so
 `--check` sits beside the `--manifest`/`--fleet` argument it re-grades.
 Per-verb detail:

@@ -4,6 +4,50 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-27
 
+- **PR #4420**: docs: clarify klt_git_commit is populated on a dirty tree
+- **PR #4418**: fix: parse real sby cover-reached line and add real-sby cover/prove tests
+- **PR #4359**: feat(lvs): accept layout.def_net_names/def_pins and --progress for inline extraction
+- **PR #4289**: feat: reject unknown top-level keys in klt place-and-route requests
+- **Issue #4416** (closed): docs: klt_git_commit is non-null on a dirty tree but docs say null (follow-on from PR #4413)
+- **Issue #4404** (closed): klt formal: verify cover-mode semantics and trace path against a real sby run
+- **Issue #4347** (closed): klt lvs: inline layout extraction cannot take DEF-derived pins/net names
+- **Issue #4230** (closed): place-and-route: unrecognized top-level request fields are silently accepted
+- **PR #4415**: feat: add place-and-route --resume to reuse committed stage artifacts
+- **PR #4413**: feat: record klt git commit and reinstall spec in report provenance
+- **PR #4407**: fix: reject device params that depend on a call-overridden subckt header parameter
+- **PR #4398**: feat: pin gf180mcu LVS runset in PINNED_RUNSETS
+- **PR #4387**: feat(pex): add --tie-declared-pins and record PDK root in pex response
+- **PR #4386**: feat(erc): disclose substrate continuity not modelled for multi-supply specs
+- **PR #4360**: feat: add klt formal verb for SymbiYosys property checking
+- **PR #4327**: feat: add --allow-unevaluated-expr flag to klt netlist
+- **PR #4253**: feat: add --tile abutment context to klt drc
+- **Issue #4412** (closed): Friction: development-version klt builds cannot be pinned with uvx --from ==
+- **Issue #4411** (closed): Friction: no resume after the place-and-route route stage; a late crash loses the whole run
+- **Issue #4406** (closed): klt lvs: subckt-call converter does not evaluate a subcircuit-parameter multiplier (m={SCALE}), silently compares it as 1
+- **Issue #4405** (closed): Record first post-merge cache hit/miss timings for ASAP7 klayout .deb cache (#4392)
+- **Issue #4395** (closed): Follow-on from PR #4322: pin the gf180mcu LVS runset digest (and live-verify klayout-runset on npn13G2)
+- **Issue #4384** (closed): klt erc: supply nets joined only through the substrate are reported as separate clean islands
+- **Issue #4383** (closed): pex: cannot bind an extracted DUT whose declared pins merge into one net; model_mismatch misparses parameter expressions
+- **Issue #4358** (closed): No formal-verification verb: SymbiYosys flow and mapped-netlist loading are hand-assembled
+- **Issue #4305** (closed): klt netlist: no opt-in to keep a netlist with unevaluated expr() for callers that resolve it downstream
+- **Issue #4226** (closed): klt drc: no way to check a tileable cell in abutment context (boundary-cut conductor flagged by width rules)
+- **PR #4378**: feat: select ERC well classes by cell name
+- **PR #4366**: fix: exclude and disclose well-layer LEF pins in lvs power_connectivity
+- **PR #4303**: feat(gen): esd_device voltage_flavor marker and total_width_um finger split
+- **PR #4394**: ci: cache klayout .deb closure in ASAP7 deck job
+- **PR #4401**: feat(signoff): optional per-command timeout_s for attest commands
+- **PR #4342**: feat(functional-verification): forward request.env to the cocotb test process
+- **PR #4380**: fix(erc): keep text-bearing undeclared layers under --deck coverage filter
+- **PR #4219**: feat: report missing erc/lvs parts for signoff item 11
+- **Issue #4193** (closed): signoff: T1 item 11 cannot be partially cited; no reason names the missing parts
+- **Issue #4376** (closed): klt erc: undeclared label purposes with text are hidden from layers_in_stream_without_declaration under --deck
+- **Issue #4338** (closed): functional-verification: no way to pass per-run environment to the cocotb testbench
+- **Issue #4400** (closed): signoff --attest: allow a per-command timeout above 1800 s for long-running cold-start commands
+- **Issue #4408** (closed): test flake: apt-get install klayout exhausts ci-apt-install budget on ASAP7 DRC deck fixtures job
+- **Issue #4392** (closed): CI: klayout apt install in ASAP7 deck job repeatedly slow/failing (recurs: #4059, #4075, #4372)
+- **Issue #4299** (closed): gen esd_device: no thick-oxide / ESD marker on sky130, and 20 um finger cap blocks a single 21.5 um finger
+- **Issue #4363** (closed): lvs power_connectivity: pwell-layer substrate pin (VNB) of abstracted std cells gets arbitrary signal nets
+- **Issue #4373** (closed): klt erc: well class selection for repeated, rotated cells needs top-coordinate boxes per placement
 - **PR #4382**: test: select macro liberty line past the std-cell read_liberty -lib
 - **PR #4377**: feat(erc): locate and classify unlabelled-conductor islands
 - **PR #4375**: docs(synthesize): correct macro lib area accounting in area_um2

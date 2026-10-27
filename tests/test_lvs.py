@@ -723,6 +723,8 @@ def test_clean_self_compare_reports_match(tmp_path):
     prov = report["provenance"]
     assert set(prov.keys()) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",
@@ -8191,6 +8193,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         deck_file=None,
         deck_var=None,
         layout=None,
+        progress=None,
     )
     assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
     payload = json.loads(capsys.readouterr().out)
@@ -25948,6 +25951,143 @@ def test_compare_heartbeat_goes_to_stderr_only_issue_4165(
     captured = capsys.readouterr()
     assert "comparing netlists" in captured.err
     assert json.loads(captured.out)["status"] == "inconclusive"
+
+
+# --------------------------------------------------------------------------- #
+# layout.def_net_names / layout.def_pins / --progress (issue #4347)
+# --------------------------------------------------------------------------- #
+
+_DEF_WITH_PINS = (
+    "VERSION 5.8 ;\nDESIGN top ;\nPINS 3 ;\n"
+    " - A + NET A + DIRECTION INPUT ;\n"
+    " - VGND + NET VGND + DIRECTION INOUT ;\n"
+    " - dout + NET dout + DIRECTION OUTPUT ;\n"
+    "END PINS\nEND DESIGN\n"
+)
+
+
+def _def_request(tmp_path, **layout_extra) -> dict:
+    layout = _make_single_nmos_layout(extra_drain_label="dout")
+    gds_path = tmp_path / "nmos.gds"
+    layout.write(str(gds_path))
+    return {
+        "layout": {"file": str(gds_path), "deck": "sky130", **layout_extra},
+        "reference": {"netlist": str(tmp_path / "ref.spice")},
+    }
+
+
+def test_def_pins_and_def_net_names_are_forwarded_and_echoed(tmp_path, monkeypatch):
+    import klayout_tools.lvs as lvs_mod
+
+    def_path = tmp_path / "top.def"
+    def_path.write_text(_DEF_WITH_PINS)
+    seen = {}
+    real = lvs_mod.extract_netlist_from_layout
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lvs_mod, "extract_netlist_from_layout", spy)
+    request = _def_request(
+        tmp_path,
+        def_pins=str(def_path),
+        def_net_names=True,
+        rename_declared_pins=True,
+    )
+    from klayout_tools.extract import run_extract
+
+    run_extract(
+        request["layout"]["file"],
+        "sky130",
+        output=request["reference"]["netlist"],
+        def_pins=frozenset({"A", "VGND", "dout"}),
+        rename_declared_pins=True,
+    )
+    report = run_lvs(json.dumps(request))
+    assert seen["def_pins"] == frozenset({"A", "VGND", "dout"})
+    assert seen["def_net_names"] is True
+    assert seen["rename_declared_pins"] is True
+    assert report["def_pins"] == str(def_path)
+    assert report["def_net_names"] is True
+
+
+def test_def_fields_absent_leave_report_without_them(tmp_path):
+    from klayout_tools.extract import run_extract
+
+    request = _def_request(tmp_path)
+    run_extract(
+        request["layout"]["file"], "sky130", output=request["reference"]["netlist"]
+    )
+    report = run_lvs(json.dumps(request))
+    assert "def_pins" not in report
+    assert "def_net_names" not in report
+
+
+def test_def_fields_reject_bad_values(tmp_path):
+    (tmp_path / "no_pins.def").write_text("VERSION 5.8 ;\nEND DESIGN\n")
+    cases = [
+        ({"def_net_names": "yes"}, "def_net_names must be a boolean"),
+        ({"def_pins": 3}, "def_pins must be a DEF file path string"),
+        ({"def_pins": "no_pins.def"}, "no parseable DEF `PINS` section"),
+    ]
+    for extra, match in cases:
+        request = _def_request(tmp_path, **extra)
+        request_file = tmp_path / "req.json"
+        request_file.write_text(json.dumps(request))
+        with pytest.raises(LvsError, match=match):
+            run_lvs(str(request_file))
+
+
+@pytest.mark.parametrize("extra", [{"def_net_names": True}, {"def_pins": "x.def"}])
+def test_def_fields_refused_on_preextracted_netlist(tmp_path, extra):
+    spice = tmp_path / "layout.spice"
+    spice.write_text(".subckt top\n.ends\n")
+    request = {
+        "layout": {"netlist": str(spice), **extra},
+        "reference": {"netlist": str(spice)},
+    }
+    with pytest.raises(LvsError, match="applies only to inline extraction"):
+        run_lvs(json.dumps(request))
+
+
+def test_rename_declared_pins_accepts_def_pins_alone(tmp_path):
+    def_path = tmp_path / "top.def"
+    def_path.write_text(_DEF_WITH_PINS)
+    from klayout_tools.lvs import _parse_layout_rename_declared_pins
+
+    assert _parse_layout_rename_declared_pins(
+        {"rename_declared_pins": True, "def_pins": str(def_path)}
+    )
+
+
+def test_progress_writes_stage_lines_to_stderr_only(tmp_path, capsys):
+    from klayout_tools.extract import run_extract
+
+    request = _def_request(tmp_path)
+    run_extract(
+        request["layout"]["file"], "sky130", output=request["reference"]["netlist"]
+    )
+    run_lvs(json.dumps(request), progress=True)
+    captured = capsys.readouterr()
+    assert "extract_layout started" in captured.err
+    assert "extract_layout started" not in captured.out
+
+
+def test_rerun_request_replays_def_fields(tmp_path):
+    from klayout_tools.lvs import _reconstruct_lvs_request
+
+    committed = {
+        "layout": str(tmp_path / "x.gds"),
+        "provenance": {"deck": {"name": "sky130"}},
+        "reference": "ref.spice",
+        "top": "top",
+        "def_net_names": True,
+        "def_pins": "top.def",
+    }
+    layout_spec = _reconstruct_lvs_request(committed)["layout"]
+    assert layout_spec["def_net_names"] is True
+    assert layout_spec["def_pins"] == "top.def"
 
 
 # --- Issue #4363: well/substrate-layer LEF pins are disclosed, not checked ----

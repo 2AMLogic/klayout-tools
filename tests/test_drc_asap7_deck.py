@@ -602,6 +602,44 @@ def test_cli_lig_without_lisd_returns_a_verdict(tmp_path, capsys, shapes):
 
 
 @_needs_klayout
+@pytest.mark.parametrize(
+    "shapes",
+    [
+        pytest.param(
+            [fx.box("LIG", 0, 0, 18, 100), fx.box("LISD", 37, 0, 61, 100)],
+            id="lig-lisd-clear-of-the-14nm-rule",
+        ),
+        pytest.param(
+            [fx.box("LIG", 0, 0, 18, 100), fx.box("SDT", 37, 0, 61, 100)],
+            id="lig-sdt-clear-of-the-14nm-rule",
+        ),
+        pytest.param(
+            [
+                fx.box("LIG", 0, -8, 108, 8),
+                fx.box("LISD", 42, 27, 66, 108),
+                fx.box("SDT", 42, 27, 66, 108),
+            ],
+            id="tie-cell-lig-and-one-diffusion-row",
+        ),
+    ],
+)
+def test_cli_lig_near_unconnected_lisd_sdt_returns_a_verdict(tmp_path, capsys, shapes):
+    """#4340: LIG within the search distance of a LISD/SDT it does not touch,
+    with no pair actually closer than the rule, aborted the net separation
+    ("m_type == Polygon" in Region::separation_check) on a tie or tap cell."""
+    gds = tmp_path / "lig_near_sd.gds"
+    fx.write_shapes(str(gds), shapes)
+    code, payload = _run_cli(
+        capsys, gds, "--expect-rule-categories", str(len(RULE_IDS))
+    )
+    assert code in (0, 3), payload
+    assert payload["status"] in ("clean", "violations")
+    assert payload["coverage_assertion"]["satisfied"] is True
+    assert "LIG.LISD.S.6" not in {v["rule"] for v in payload["violations"]}
+    assert "LIG.SDT.S.8" not in {v["rule"] for v in payload["violations"]}
+
+
+@_needs_klayout
 def test_cli_envelope_reports_rule_id(tmp_path, capsys):
     gds = tmp_path / "narrow_gate.gds"
     fx.write_shapes(str(gds), fx.device(gate_y0=27 - 4 + fx.D))

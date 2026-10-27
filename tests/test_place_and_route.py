@@ -416,6 +416,35 @@ def test_load_request_missing_required_field(tmp_path, field):
         load_request(path)
 
 
+@pytest.mark.parametrize("key", ["bogus_field", "post_route_spf", "output_dir"])
+def test_load_request_rejects_unknown_top_level_key(tmp_path, key):
+    path = _write_request(tmp_path / "request.json", _base_request(**{key: 1}))
+    with pytest.raises(PlaceAndRouteError, match=rf"unknown field '{key}'") as exc:
+        load_request(path)
+    assert "request.json" in str(exc.value)
+
+
+def test_load_request_accepts_comment_and_every_allowed_key(tmp_path):
+    from klayout_tools.place_and_route import _ALLOWED_REQUEST_KEYS
+
+    assert len(_ALLOWED_REQUEST_KEYS) == 22
+    request = _base_request(_comment="note", schema="klt.place_and_route.request/1")
+    for key in _ALLOWED_REQUEST_KEYS:
+        request.setdefault(key, {} if key in ("backend", "batch", "outputs") else 1)
+    path = _write_request(tmp_path / "request.json", request)
+    assert load_request(path)["_comment"] == "note"
+
+
+def test_cli_unknown_key_exits_one_and_writes_nothing(tmp_path, capsys):
+
+    path = _write_request(tmp_path / "request.json", _base_request(bogus_field=1))
+    report = _write(tmp_path / "report.json", "{}")
+    for extra in ([], ["--check", report]):
+        assert main(["place-and-route", path, "--format", "json", *extra]) == 1
+        assert "bogus_field" in capsys.readouterr().err
+    assert not (tmp_path / ".klt").exists()
+
+
 # --------------------------------------------------------------------------- #
 # `run_place_and_route` request validation (no PDK/OpenROAD involved)
 # --------------------------------------------------------------------------- #
@@ -1768,8 +1797,8 @@ _EXPECTED_PRESET_STRAPS: dict[str, list[dict[str, object]]] = {
 #: The via-stack tuning each preset must resolve to. The 9t gf180mcu config
 #: carries `add_pdn_connect -grid {block} -layers {Metal1 Metal4}
 #: -max_columns {5} -ongrid {Metal2 Metal3 Metal4} -split_cuts {Metal3
-#: 0.128}` plus a bare `{Metal4 Metal5}` pair; the 7t preset drops the
-#: `-split_cuts` (issue #4301: DRC-dirty vias under `klt drc --deck
+#: 0.128}` plus a bare `{Metal4 Metal5}` pair; both gf180mcu presets drop
+#: the `-split_cuts` (issue #4301: DRC-dirty vias under `klt drc --deck
 #: gf180mcu`). sky130hd's `pdn.tcl` carries two bare pairs and therefore no
 #: tuning at all, and IHP's LibreLane config names no via-stack tuning for
 #: `sg13g2` either.
@@ -1778,10 +1807,10 @@ _GF180MCU_9T_PRESET_CONNECTS = [
         "layers": ["Metal1", "Metal4"],
         "max_columns": 5,
         "ongrid": ["Metal2", "Metal3", "Metal4"],
-        "split_cuts": {"layer": "Metal3", "width_um": 0.128},
+        "split_cuts": None,
     }
 ]
-_GF180MCU_7T_PRESET_CONNECTS = [{**_GF180MCU_9T_PRESET_CONNECTS[0], "split_cuts": None}]
+_GF180MCU_7T_PRESET_CONNECTS = _GF180MCU_9T_PRESET_CONNECTS
 _EXPECTED_PRESET_CONNECTS: dict[str, list[dict[str, object]]] = {
     "gf180mcu_7t_6M": _GF180MCU_7T_PRESET_CONNECTS,
     "gf180mcu_9t_6M": _GF180MCU_9T_PRESET_CONNECTS,

@@ -39,6 +39,7 @@ import fnmatch
 import itertools
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1275,6 +1276,12 @@ class _DrcSetup:
     top_cells: list[Any]
     deck_layer_tuples: set[tuple[int, int]]
     stream_layer_tuples: set[tuple[int, int]]
+    # Issue #4226 (`--tile`): the parsed ``(columns, rows)``, and for each
+    # wrapper cell the checked top cells were swapped for -- its name mapped
+    # to ``(original cell name, centre-instance window)``. Both are empty/None
+    # for a default run.
+    tile: tuple[int, int] | None = None
+    tile_windows: dict[str, tuple[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -1292,6 +1299,144 @@ def _layer_str(layer_tuple: tuple[int, int]) -> str:
     return f"{layer_tuple[0]}/{layer_tuple[1]}"
 
 
+#: Reserved annotation layer carrying a cell's abutment boundary (see
+#: "Reserved annotation layer" in docs/cli/drc.md). Preferred over the
+#: geometry bbox as the tile pitch when a cell draws one.
+_PR_BOUNDARY_LAYER = (235, 4)
+
+
+def parse_tile(raw: str | None) -> tuple[int, int] | None:
+    """Parse a ``--tile`` value (issue #4226): ``<cols>x<rows>``, each a
+    positive odd integer so one instance sits exactly at the array centre.
+    ``None`` stays ``None``; anything malformed is a :class:`DrcError`."""
+    if raw is None:
+        return None
+    match = re.fullmatch(r"(\d+)[xX](\d+)", raw.strip())
+    if match is None:
+        raise DrcError(f"--tile must look like <cols>x<rows>, e.g. 3x1 (got {raw!r})")
+    cols, rows = int(match.group(1)), int(match.group(2))
+    if cols < 1 or rows < 1 or cols % 2 == 0 or rows % 2 == 0:
+        raise DrcError(
+            f"--tile counts must be positive odd integers so the checked cell "
+            f"sits at the array centre (got {raw!r})"
+        )
+    return cols, rows
+
+
+def _tile_pitch_box(layout: Any, cell: Any) -> Any:
+    """The abutment box of ``cell``: its ``prBoundary`` shapes' bbox when it
+    draws any, else the cell's own bbox. Empty for an empty cell."""
+    index = layout.find_layer(*_PR_BOUNDARY_LAYER)
+    if index is not None:
+        box = cell.bbox_per_layer(index)
+        if not box.empty():
+            return box
+    return cell.bbox()
+
+
+def _tile_top_cells(
+    layout: Any, top_cells: list[Any], tile: tuple[int, int]
+) -> tuple[list[Any], dict[str, tuple[str, Any]]]:
+    """Swap each top cell for an in-memory wrapper holding a
+    ``cols x rows`` array of it at its abutment pitch (issue #4226). The
+    array is offset so the centre instance sits at the original coordinates;
+    the returned windows map each wrapper's name to ``(original name, that
+    instance's pitch box)``. An empty cell, or a 1x1 tile, is left as is."""
+    import klayout.db as kdb
+
+    cols, rows = tile
+    if (cols, rows) == (1, 1):
+        return top_cells, {}
+    checked: list[Any] = []
+    windows: dict[str, tuple[str, Any]] = {}
+    for cell in top_cells:
+        box = _tile_pitch_box(layout, cell)
+        if box.empty() or box.width() == 0 or box.height() == 0:
+            checked.append(cell)
+            continue
+        wrapper = layout.create_cell(f"{cell.name}__klt_tile")
+        pitch_x, pitch_y = box.width(), box.height()
+        wrapper.insert(
+            kdb.CellInstArray(
+                cell.cell_index(),
+                kdb.Trans(-(cols // 2) * pitch_x, -(rows // 2) * pitch_y),
+                kdb.Vector(pitch_x, 0),
+                kdb.Vector(0, pitch_y),
+                cols,
+                rows,
+            )
+        )
+        checked.append(wrapper)
+        windows[wrapper.name] = (cell.name, box)
+    return checked, windows
+
+
+def _overlaps_window(low: int, high: int, start: int, stop: int) -> bool:
+    """Whether the marker span ``[low, high]`` falls in the half-open window
+    ``[start, stop)``: by interior overlap, or -- for a zero-extent span -- by
+    containing point. Merely touching the window edge does not count, so a
+    marker lying wholly in a neighbour instance is excluded."""
+    if low == high:
+        return start <= low < stop
+    return low < stop and high > start
+
+
+def _restrict_to_tile_centre(state: _DrcState, setup: _DrcSetup) -> None:
+    """Keep only the markers overlapping the centre instance's window,
+    relabelled to the original cell (issue #4226): neighbour-only
+    markers are dropped so the array's edge instances raise no findings."""
+    kept: list[dict[str, Any]] = []
+    for violation in state.violations:
+        entry = setup.tile_windows.get(violation["cell"])
+        if entry is None:
+            kept.append(violation)
+            continue
+        original, window = entry
+        bbox = violation["bbox"]
+        # Overlap, not centre-in-window: a violation on a conductor merged
+        # across instances spans several of them and must still be reported.
+        if not (
+            _overlaps_window(bbox["left"], bbox["right"], window.left, window.right)
+            and _overlaps_window(bbox["bottom"], bbox["top"], window.bottom, window.top)
+        ):
+            continue
+        path = violation["source_path"]
+        # The array instance of the cell under check is not a real child of
+        # it: drop that first hop so attribution matches an untiled run.
+        path = path[1:] if path else None
+        violation["cell"] = original
+        violation["source_path"] = path or None
+        violation["source_cell"] = path[-1] if path else None
+        kept.append(violation)
+    state.violations = kept
+    counts: dict[str, int] = {}
+    for violation in kept:
+        counts[violation["rule"]] = counts.get(violation["rule"], 0) + 1
+    state.rule_counts = counts
+
+
+def _deck_layer_tuples(deck: Any) -> set[tuple[int, int]]:
+    """Every (layer, datatype) any rule in ``deck`` references."""
+    # Deck-static: every (layer, datatype) any rule in this deck references,
+    # regardless of what's actually present in `path`.
+    deck_layer_tuples: set[tuple[int, int]] = set()
+    for rule in deck:
+        deck_layer_tuples.add(rule.layer)
+        if rule.other_layer is not None:
+            deck_layer_tuples.add(rule.other_layer)
+        deck_layer_tuples.update(_spec_layers(rule))
+        if rule.derived_layer is not None:
+            # `rule.layer` is only the derived rule's *reporting* identity
+            # (see DerivedLayer's docstring) -- the layer(s) actually read
+            # to compute the checked region are these, independent of
+            # whether either happens to equal `rule.layer`. `"holes"` mode
+            # (#1976) reads only `base` -- `intersect_with` is `None` for it.
+            deck_layer_tuples.add(rule.derived_layer.base)
+            if rule.derived_layer.intersect_with is not None:
+                deck_layer_tuples.add(rule.derived_layer.intersect_with)
+    return deck_layer_tuples
+
+
 def _prepare_drc(
     path: str,
     deck_name: str,
@@ -1300,6 +1445,7 @@ def _prepare_drc(
     pdk_root: str | None,
     rules: list[str] | None,
     waivers_file: str | None,
+    tile: tuple[int, int] | None = None,
 ) -> _DrcSetup:
     """The setup phase of :func:`run_drc`: PDK/path/deck resolution, rule
     selection, the layout load and the deck-static layer inventory."""
@@ -1346,24 +1492,11 @@ def _prepare_drc(
     dbu_scale = nominal_dbu_um / layout.dbu
 
     top_cells = _select_top_cells(layout, top, DrcError)
+    tile_windows: dict[str, tuple[str, Any]] = {}
+    if tile is not None:
+        top_cells, tile_windows = _tile_top_cells(layout, top_cells, tile)
 
-    # Deck-static: every (layer, datatype) any rule in this deck references,
-    # regardless of what's actually present in `path`.
-    deck_layer_tuples: set[tuple[int, int]] = set()
-    for rule in deck:
-        deck_layer_tuples.add(rule.layer)
-        if rule.other_layer is not None:
-            deck_layer_tuples.add(rule.other_layer)
-        deck_layer_tuples.update(_spec_layers(rule))
-        if rule.derived_layer is not None:
-            # `rule.layer` is only the derived rule's *reporting* identity
-            # (see DerivedLayer's docstring) -- the layer(s) actually read
-            # to compute the checked region are these, independent of
-            # whether either happens to equal `rule.layer`. `"holes"` mode
-            # (#1976) reads only `base` -- `intersect_with` is `None` for it.
-            deck_layer_tuples.add(rule.derived_layer.base)
-            if rule.derived_layer.intersect_with is not None:
-                deck_layer_tuples.add(rule.derived_layer.intersect_with)
+    deck_layer_tuples = _deck_layer_tuples(deck)
 
     # Reuse layers.py's existing per-layer enumeration (used today by
     # `klt layers`) for stream-layer enumeration, rather than a second
@@ -1388,6 +1521,8 @@ def _prepare_drc(
         top_cells=top_cells,
         deck_layer_tuples=deck_layer_tuples,
         stream_layer_tuples=stream_layer_tuples,
+        tile=tile,
+        tile_windows=tile_windows,
     )
 
 
@@ -1985,6 +2120,8 @@ def _assemble_report(
 ) -> dict[str, Any]:
     """The report-assembly phase of :func:`run_drc`: sort, coverage, waivers,
     verdict and provenance."""
+    if setup.tile_windows:
+        _restrict_to_tile_centre(state, setup)
     violations = state.violations
     rule_counts = state.rule_counts
     violations.sort(
@@ -2035,6 +2172,13 @@ def _assemble_report(
             else {"rule_selection": setup.rule_selection}
         ),
         **waiver_fields,
+        # Issue #4226: present only for a `--tile` run, so a default run's
+        # report is byte-identical to before.
+        **(
+            {}
+            if setup.tile is None
+            else {"tile": {"columns": setup.tile[0], "rows": setup.tile[1]}}
+        ),
     }
     report["provenance"] = build_provenance(
         deck_name=setup.deck_name,
@@ -2059,6 +2203,7 @@ def run_drc(
     pdk_root: str | None = None,
     rules: list[str] | None = None,
     waivers_file: str | None = None,
+    tile: str | tuple[int, int] | None = None,
     negative_control: str | None = None,
     negative_control_categories: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -2326,6 +2471,13 @@ def run_drc(
     ``pdk_variant``/``pdk_root`` is given but no matching PDK can be found,
     a ``rules`` selector matches no rule, or the negative control fails.
     """
+    # Issue #4226 (``--tile``): ``tile`` is ``"<cols>x<rows>"`` (odd counts)
+    # or an already-parsed pair. Each checked top cell is placed as that
+    # array at its abutment pitch (``prBoundary`` when drawn, else its bbox)
+    # and only markers overlapping the middle instance are reported, so a
+    # cell cut at its boundary is judged as placed among identical
+    # neighbours. The report gains ``tile``; absent otherwise.
+    tile_pair = parse_tile(tile) if isinstance(tile, str) else tile
     control_result = None
     if negative_control is not None:
         control_result = _run_curated_negative_control(
@@ -2338,7 +2490,7 @@ def run_drc(
             rules=rules,
         )
     setup = _prepare_drc(
-        path, deck_name, top, pdk_variant, pdk_root, rules, waivers_file
+        path, deck_name, top, pdk_variant, pdk_root, rules, waivers_file, tile_pair
     )
     state = _DrcState()
 
@@ -2526,6 +2678,18 @@ def _recorded_rule_selectors(committed: dict[str, Any]) -> list[str] | None:
     return parse_rule_selectors(selectors)
 
 
+def _recorded_tile(committed: dict[str, Any]) -> tuple[int, int] | None:
+    """The ``(columns, rows)`` a committed report's ``tile`` echo records
+    (issue #4226), or ``None`` for a report that carries none."""
+    recorded = committed.get("tile")
+    if not isinstance(recorded, dict):
+        return None
+    cols, rows = recorded.get("columns"), recorded.get("rows")
+    if isinstance(cols, int) and isinstance(rows, int):
+        return cols, rows
+    return None
+
+
 def rerun_drc_report(
     report_path: str, *, input_path: str | None = None
 ) -> dict[str, Any]:
@@ -2601,6 +2765,8 @@ def rerun_drc_report(
             rules=_recorded_rule_selectors(committed),
             # Issue #3483: replay the waivers the committed report applied.
             waivers_file=get_path(committed, ("provenance", "waivers", "file")),
+            # Issue #4226: replay the abutment context the report was run in.
+            tile=_recorded_tile(committed),
         )
 
     return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)

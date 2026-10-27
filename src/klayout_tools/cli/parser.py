@@ -34,6 +34,7 @@ from . import (
     eval_cmd,
     evidence_cmd,
     extract_cmd,
+    formal_cmd,
     functional_verification_cmd,
     gen_cmd,
     gen_compose_cmd,
@@ -337,6 +338,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_techmap_parser(subparsers)
 
     _add_equiv_parser(subparsers)
+
+    _add_formal_parser(subparsers)
 
     _add_erc_parser(subparsers)
 
@@ -3232,6 +3235,18 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "request already sets it or uses another engine"
         ),
     )
+    lvs_parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "write stage start/finish lines and a periodic heartbeat for "
+            "inline layout extraction to stderr (stdout stays the pure "
+            "response). Default: heartbeat lines only (every 30s of a long "
+            "stage) when stderr is not a TTY, nothing on a TTY; "
+            "--no-progress forces off"
+        ),
+    )
     _add_format_arg(lvs_parser)
     lvs_parser.set_defaults(func=lvs_cmd.run)
 
@@ -3356,6 +3371,47 @@ def _add_equiv_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(equiv_parser)
     equiv_parser.set_defaults(func=equiv_cmd.run)
+
+
+def _add_formal_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``formal`` verb for bounded/inductive property checking.
+
+    Check a design's assert/cover properties via SymbiYosys. See
+    docs/cli/formal.md for full details.
+    """
+    formal_parser = subparsers.add_parser(
+        "formal",
+        help="check assert/cover properties of RTL or a mapped netlist (SymbiYosys)",
+        description=(
+            "Formal property checking via SymbiYosys: bounded model checking "
+            "(`bmc`), k-induction (`prove`) or cover reachability (`cover`) "
+            "of an RTL design or a `klt synthesize` netlist (`netlist_path`, "
+            "with a `liberty` supplying cell models). Generates the .sby "
+            "itself, copying inputs in so a WASI-sandboxed Yosys works. "
+            "`fail` carries a VCD counterexample trace; a timeout is "
+            "`unknown`, never `pass`. See docs/cli/formal.md."
+        ),
+    )
+    formal_parser.add_argument(
+        "request",
+        help=(
+            "klt formal request: a path to a JSON file, '-' to read the "
+            "request from stdin, or an inline JSON object string"
+        ),
+    )
+    formal_parser.add_argument(
+        "--timeout-s",
+        dest="timeout_s",
+        type=float,
+        default=None,
+        help=(
+            "overall wall-clock timeout in seconds (default: 120, or the "
+            "request's own `timeout_s`); overrides the request field. A run "
+            "that does not finish is `unknown`, never `pass`"
+        ),
+    )
+    _add_format_arg(formal_parser)
+    formal_parser.set_defaults(func=formal_cmd.run)
 
 
 def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -4720,6 +4776,21 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
             "fleet and never falls back to running OpenROAD on this host; a "
             "single-unit request stays local under a host-default batch. See "
             "docs/cli/place-and-route.md, 'Physical rebuild per corner'"
+        ),
+    )
+    place_and_route_parser.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        default=False,
+        help=(
+            "resume an interrupted run (issue #4411): reuse each leading "
+            "stage whose <top>_<stage>.commit.json record matches a hash of "
+            "its inputs and whose artifacts are on disk, re-run the rest "
+            "(a fully-resumed run only redoes the DEF->GDS merge). Lifts "
+            "the populated outputs.dir refusal; adds a `resume` response "
+            "block. Not combinable with --check or pdk.rebuild_corners. "
+            "See docs/cli/place-and-route.md, 'Resuming an interrupted run'"
         ),
     )
     _add_flow_verify_args(
@@ -6637,6 +6708,20 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "See docs/cli/drc.md, 'Waivers'"
         ),
     )
+    drc_parser.add_argument(
+        "--tile",
+        dest="tile",
+        metavar="COLSxROWS",
+        default=None,
+        help=(
+            "abutment context (issue #4226, --engine curated only): check "
+            "each top cell as the centre of a COLSxROWS array of itself at "
+            "its prBoundary (else bbox) pitch, e.g. 3x1; counts must be odd. "
+            "Only markers in the centre instance are reported, so a "
+            "boundary-cut tileable cell is judged among its neighbours. "
+            "See docs/cli/drc.md, 'Abutment context'"
+        ),
+    )
     _add_format_arg(drc_parser)
     _record_request_argv_flags(
         drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")
@@ -7523,14 +7608,17 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
         "--omit-antenna-tables",
         action="store_true",
         help=(
-            "with --findings-only, drop the all-'unchecked' gates[] array "
+            "drop the all-ungraded gates[] array "
             "(gate_count keeps the real count) and collapse the antenna "
             "coverage's per-gate skipped/gate_reference_level entries to "
             "one aggregate entry each, so a dense layout's report is small "
             "enough to commit verbatim (issue #3011). Sets "
             "antenna_tables_omitted: true; every verdict, erc_findings and "
             "the exit code are identical to the same run without it. "
-            "Requires --findings-only -- passing it alone exits 1."
+            "Valid with --findings-only, or without --pdk when no antenna "
+            "level is graded (issue #4385); with --pdk (no --findings-only) "
+            "or spec antenna_limits that grade a level it exits 1, so a "
+            "real verdict is never dropped."
         ),
     )
     erc_parser.add_argument(

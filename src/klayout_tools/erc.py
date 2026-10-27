@@ -293,6 +293,15 @@ REASON_NO_GATES = "no_gates"
 #: ``erc_status`` untouched like every other ``inapplicable`` entry.
 REASON_EXTRACTOR_GLOBAL_NET = "extractor_global_net"
 
+#: ``erc_coverage.inapplicable[].reason`` (issue #4384) on
+#: ``erc.supply_short`` when the spec declares two or more ``kind: "supply"``
+#: nets: ``klt erc`` joins conductors only through the declared
+#: ``stackup``/``vias``, so supply rails that are one conductor through a
+#: shared substrate read as separate clean islands. A coverage disclosure,
+#: not a merge (substrate/well merging was rejected in #2192); additive and
+#: leaves ``erc_status`` untouched. Cross-check with ``klt lvs``.
+REASON_SUBSTRATE_CONTINUITY_NOT_MODELLED = "substrate_continuity_not_modelled"
+
 #: The skip reason for a level that could have been graded had ``--pdk``
 #: named a PDK with an antenna-ratio table (or named one at all), or had the
 #: spec's ``antenna_limits`` carried an entry for its layer (issue #4090).
@@ -819,6 +828,13 @@ def _connectivity_coverage(
     if not nets_decl:
         inapplicable.append(
             {"id": work_id("erc.net_connectivity"), "reason": "no_nets_declared"}
+        )
+    if sum(1 for decl in nets_decl if decl.get("kind") == "supply") >= 2:
+        inapplicable.append(
+            {
+                "id": "erc.supply_short",
+                "reason": REASON_SUBSTRATE_CONTINUITY_NOT_MODELLED,
+            }
         )
 
     for tie in ties:
@@ -3364,7 +3380,10 @@ def run_erc(
     half to a caller who asked for one.
 
     ``omit_antenna_tables`` (optional, default ``False``, issue #3011) is
-    valid only with ``findings_only`` (otherwise :class:`ErcError`). It
+    valid with ``findings_only``, or (issue #4385) with no ``pdk`` provided
+    no antenna level ends up graded (a spec ``antenna_limits`` entry can
+    grade one without a ``pdk``); otherwise :class:`ErcError`, so a real
+    verdict is never dropped. It
     projects the finished report, after every verdict is rolled up: ``gates``
     becomes ``[]`` (``gate_count`` keeps the real count) and the antenna
     ``coverage`` collapses to one aggregate entry per category, so the output
@@ -3400,10 +3419,11 @@ def run_erc(
     unresolvable layout/top cell, or a layout in which no net carries any
     geometry on the declared gate role at all.
     """
-    if omit_antenna_tables and not findings_only:
+    if omit_antenna_tables and not findings_only and pdk is not None:
         raise ErcError(
             "--omit-antenna-tables drops tables that only a --findings-only "
-            "run leaves empty, so it requires --findings-only"
+            "or --pdk-less run leaves ungraded, so it cannot be combined "
+            f"with --pdk {pdk!r} unless --findings-only is also given"
         )
     if compact and not findings_only:
         raise ErcError(
@@ -3716,6 +3736,17 @@ def run_erc(
     any_antenna_violation = any(
         level["verdict"] == "violate" for gate in gates for level in gate["levels"]
     )
+    if omit_antenna_tables and not findings_only:
+        if any(
+            level["verdict"] in {"pass", "violate"}
+            for gate in gates
+            for level in gate["levels"]
+        ):
+            raise ErcError(
+                "--omit-antenna-tables would drop graded antenna verdicts "
+                "(the spec's antenna_limits graded at least one level); "
+                "pass --findings-only or drop --omit-antenna-tables"
+            )
     coverage = _antenna_coverage(
         gates, pdk, findings_only, omit_antenna_tables, compact
     )

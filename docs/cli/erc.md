@@ -11,7 +11,7 @@ the antenna + ERC signoff epic
 
 ```
 klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
-                      [--findings-only [--omit-antenna-tables]]
+                      [--findings-only] [--omit-antenna-tables]
                       [--format text|json]
 klt erc --check <report> [--rerun] [--format text|json]
 ```
@@ -48,8 +48,11 @@ klt erc --check <report> [--rerun] [--format text|json]
   finding is identical to a full run; the antenna half reports `null`
   accumulation fields and `"unchecked"` verdicts. Mutually exclusive with
   `--pdk` (exit 1). See "Findings-only runs" below.
-- `--omit-antenna-tables` — valid only with `--findings-only` (otherwise exit
-  1): drop the all-`unchecked` `gates[]` array and collapse the antenna
+- `--omit-antenna-tables` — valid with `--findings-only`, or (issue
+  [#4385](https://github.com/2AMLogic/klayout-tools/issues/4385)) without
+  `--pdk` when no antenna level is graded; with `--pdk` and no
+  `--findings-only`, or when spec `antenna_limits` grade a level, exit 1 (a
+  real verdict is never dropped): drop the all-ungraded `gates[]` array and collapse the antenna
   `coverage` entries to one aggregate entry per category, so the report of a
   dense layout is small enough to commit verbatim (issue
   [#3011](https://github.com/2AMLogic/klayout-tools/issues/3011)). Sets
@@ -350,6 +353,12 @@ draws that the spec never declared" below.
     with `islands`, `same_net_as`, `roles` or `unlabelled_allowed_boxes`
     — or naming it from another entry's `same_net_as` — is a spec error.
     Example: `{ "name": "SUB", "kind": "supply", "extractor_global": true }`.
+  - Two or more `kind: "supply"` entries (issue #4384) add one
+    `erc_coverage.inapplicable` entry `{"id": "erc.supply_short", "reason":
+    "substrate_continuity_not_modelled"}`: `erc.supply_short` sees joins only
+    through the declared `stackup`/`vias`, so rails that are one conductor
+    through a shared substrate are not observable. Cross-check with
+    `klt lvs` (`hints.short_nets`). `erc_status` is unchanged.
   - `same_net_as` (string, optional, default absent, issue #2463) — the
     `name` of another `nets[]` entry this one is *intentionally* the same
     electrical net as. Declare it when the layout deliberately ties two
@@ -847,6 +856,15 @@ which is which. Once that triage has confirmed the islands are the
 *intended* partition (or a verified well-continuity artifact the spec
 cannot see), the entry can declare the count — `nets[].islands`, issue
 #2400 — so the name grades against it instead of an implicit 1.
+
+**Substrate continuity between supply nets is not modelled either (issue
+#4384).** Two `kind: "supply"` nets that are one conductor through a shared
+p-substrate are each reported as one clean island, with no
+`erc.supply_short`, while `klt lvs` sees a single merged net (it needs
+`hints.short_nets`). When a spec declares two or more supply nets, the report
+says so in `erc_coverage.inapplicable` (`erc.supply_short`, reason
+`substrate_continuity_not_modelled`), so "no short found" is distinguishable
+from "short not observable". Cross-check those rails with `klt lvs`.
 
 **That cross-check is not automatically an independent confirmation,
 either.** At least one widely used open-foundry LVS deck's connectivity
@@ -2584,8 +2602,14 @@ klt erc routed.gds supply.erc.json --findings-only --omit-antenna-tables --forma
 - `klt signoff` still recognises the envelope as an ERC report (a `gates`
   list plus `gate_role`) and grades it the same.
 
-Passing `--omit-antenna-tables` without `--findings-only` is a clean exit-1
-error: a full run's `gates[]` carries real measurements.
+Without `--findings-only`, the flag is also accepted on a `--pdk`-less run
+whose spec `antenna_limits` grade no level (issue #4385): the same `gates: []`
+projection applies, the aggregate `skipped` entry carries reason
+`missing_antenna_pdk` instead of `findings_only`, and `status` /
+`erc_status` / the exit code are identical to the run without the flag. With
+`--pdk` (and no `--findings-only`), or when `antenna_limits` grade at least
+one level, it is a clean exit-1 error: `gates[]` then carries real
+verdicts.
 
 ### Compact findings-only reports
 
