@@ -481,6 +481,15 @@ SUBSTRATE_DC_TIE_RESISTANCE_OHM = 1e12
 PIN_TIE_RESISTANCE = "1u"
 
 
+def _apply_pin_ties_if_circuit(
+    netlist_path: str, circuit: Any, ties: Sequence[Mapping[str, Any]]
+) -> None:
+    """Issue #4383: :func:`_apply_pin_ties_to_spice` on the extracted top
+    circuit; a device-free layout has none (and no ``.SUBCKT``), so skip."""
+    if circuit is not None:
+        _apply_pin_ties_to_spice(netlist_path, circuit.name, ties)
+
+
 def _apply_pin_ties_to_spice(
     netlist_path: str, top_name: str, ties: Sequence[Mapping[str, Any]]
 ) -> None:
@@ -3909,7 +3918,7 @@ def run_extract(
         raise ExtractError(f"could not write netlist '{netlist_path}': {exc}") from exc
 
     pin_ties = (pin_renames or {}).get("ties") or []
-    _apply_pin_ties_to_spice(netlist_path, circuit.name, pin_ties)
+    _apply_pin_ties_if_circuit(netlist_path, circuit, pin_ties)
 
     with stage("netlist_hash"):
         reported_netlist_path, netlist_sha256 = _finish_netlist_write(
