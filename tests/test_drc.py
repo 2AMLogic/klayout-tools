@@ -11385,3 +11385,137 @@ def test_cli_drc_check_rerun_with_explicit_input_on_external_report(
         "no 'file' field to rerun"
         in json.loads(capsys.readouterr().err)["error"]["message"]
     )
+
+
+# --------------------------------------------------------------------------- #
+# curated-engine --negative-control (#4320)
+# --------------------------------------------------------------------------- #
+
+
+def _negative_control_pair(tmp_path, *, bad_is_clean=False):
+    good = tmp_path / "good.gds"
+    bad = tmp_path / "bad.gds"
+    _make_clean_layout().write(str(good))
+    (_make_clean_layout() if bad_is_clean else _make_violation_layout()).write(str(bad))
+    return str(good), str(bad)
+
+
+def test_curated_negative_control_passes_and_is_reported(tmp_path):
+    good, bad = _negative_control_pair(tmp_path)
+
+    report = run_drc(
+        good,
+        "sky130",
+        negative_control=bad,
+        negative_control_categories=["poly.width.1"],
+    )
+
+    assert report["status"] == "clean"
+    assert report["negative_control"] == {
+        "file": bad,
+        "status": "passed",
+        "violation_count": 1,
+        "rules_found": ["poly.width.1"],
+        "expected_categories": ["poly.width.1"],
+    }
+
+
+def test_curated_report_without_negative_control_has_no_block(tmp_path):
+    good, _ = _negative_control_pair(tmp_path)
+
+    assert "negative_control" not in run_drc(good, "sky130")
+
+
+def test_curated_negative_control_without_findings_fails(tmp_path):
+    good, bad = _negative_control_pair(tmp_path, bad_is_clean=True)
+
+    with pytest.raises(DrcError) as exc:
+        run_drc(good, "sky130", negative_control=bad)
+
+    assert exc.value.code == "negative_control_failed"
+
+
+def test_curated_negative_control_missing_category_fails(tmp_path):
+    good, bad = _negative_control_pair(tmp_path)
+
+    with pytest.raises(DrcError) as exc:
+        run_drc(
+            good,
+            "sky130",
+            negative_control=bad,
+            negative_control_categories=["poly.angle.1"],
+        )
+
+    assert exc.value.code == "negative_control_failed"
+
+
+def test_curated_negative_control_honours_rules_subset(tmp_path):
+    good, bad = _negative_control_pair(tmp_path)
+
+    # The only selected rule cannot fire on the fixture, so the control fails.
+    with pytest.raises(DrcError) as exc:
+        run_drc(good, "sky130", rules=["poly.angle.1"], negative_control=bad)
+
+    assert exc.value.code == "negative_control_failed"
+
+
+def test_cli_curated_negative_control_json(tmp_path, capsys):
+    good, bad = _negative_control_pair(tmp_path)
+
+    code = main(
+        ["drc", good, "--deck", "sky130", "--negative-control", bad, "--format", "json"]
+    )
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["negative_control"]["status"] == (
+        "passed"
+    )
+
+
+def test_cli_curated_negative_control_failure_exit_1(tmp_path, capsys):
+    good, bad = _negative_control_pair(tmp_path, bad_is_clean=True)
+
+    code = main(
+        ["drc", good, "--deck", "sky130", "--negative-control", bad, "--format", "json"]
+    )
+
+    assert code == 1
+    assert "negative_control_failed" in capsys.readouterr().err
+
+
+def test_cli_curated_categories_without_control_refused(tmp_path, capsys):
+    good, _ = _negative_control_pair(tmp_path)
+
+    code = main(
+        [
+            "drc",
+            good,
+            "--deck",
+            "sky130",
+            "--negative-control-categories",
+            "poly.width.1",
+        ]
+    )
+
+    assert code == 1
+
+
+def test_curated_request_document_negative_control(tmp_path, capsys):
+    _negative_control_pair(tmp_path)
+    request = tmp_path / "req.json"
+    request.write_text(
+        json.dumps(
+            {
+                "file": "good.gds",
+                "deck": "sky130",
+                "negative_control": "bad.gds",
+                "negative_control_categories": "poly.width.1",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["drc", str(request), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["negative_control"]["status"] == (
+        "passed"
+    )
