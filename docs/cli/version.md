@@ -184,7 +184,10 @@ commit) cannot be reproduced and should not be used as a pin.
 Reports record the same handle: `provenance.klt_git_commit` and
 `provenance.klt_reinstall_spec` (issue #4412) equal `git_commit` and
 `reinstall_spec` above, so a committed report names a re-obtainable build
-without re-running `klt version`. Both are `null` when unrecoverable.
+without re-running `klt version`. `klt_git_commit` is `null` only when no
+commit is recoverable (tarball install, `X.Y.Z.dev0+unknown`) and stays
+populated on a dirty tree; `klt_reinstall_spec` is `null` when the tree is
+dirty or the commit is unrecoverable.
 
 ## How the identity is determined
 

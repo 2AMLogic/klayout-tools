@@ -854,8 +854,10 @@ stability statement, concrete precedents, and drift-detection guidance, and
 - `klt_git_commit`, `klt_reinstall_spec` (issue #4412, additive, no `schema_version` bump) — the
   full commit behind this build and the `uvx --from`/`pip install` spec that
   re-obtains it, with the same values as `klt version --format json`'s
-  `git_commit` and `reinstall_spec`. `null` when unrecoverable (dirty tree,
-  tarball install, `X.Y.Z.dev0+unknown`), never fabricated. A `.devN+g<sha>`
+  `git_commit` and `reinstall_spec`. `klt_git_commit` is `null` only when no
+  commit is recoverable (tarball install, `X.Y.Z.dev0+unknown`) and stays
+  populated on a dirty tree; `klt_reinstall_spec` is `null` when the tree is
+  dirty or the commit is unrecoverable. Never fabricated. A `.devN+g<sha>`
   `klt_version` is not published to an index, so `uvx --from
   "klayout-tools==<version>"` fails by design; use `klt_reinstall_spec`. Both are
   excluded from `--rerun`/`--check` drift like `klt_version`.
