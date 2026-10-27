@@ -533,7 +533,7 @@ def _spec_declared_layers(
         if tie.get("well_layer") is not None:
             declared.add(tie["well_layer"])
         declared.add(tie["tap_layer"])
-        for key in ("tap_requires", "well_requires", "well_excludes"):
+        for key in ("tap_requires", "tap_excludes", "well_requires", "well_excludes"):
             declared.update(tie.get(key) or ())
     for device in devices:
         declared.add(device["body_layer"])
@@ -2924,6 +2924,11 @@ def _extract_connectivity(
         tap_region = drawn_tap
         for required in tie["tap_requires"]:
             tap_region = tap_region & _region(layout, top_cell, required)
+        # `tap_excludes` (issue #4194): the mirror of `tap_requires` -- a tap
+        # defined by the absence of a marker (`active - pplus`). Feeds the
+        # same `tap_narrowed` degeneracy measurement below.
+        for excluded in tie["tap_excludes"]:
+            tap_region = tap_region - _region(layout, top_cell, excluded)
         # `tap_boxes` (issue #2234): a caller assertion of exactly where the
         # tap sites are, as literal micrometre boxes -- composes with
         # `tap_requires` (both narrow the same region) but needs no drawn
@@ -3126,12 +3131,15 @@ def run_erc(
       (optional, issue #2540),
       "tap_layer":
       "<layer>/<datatype>", "tap_requires": ["<layer>/<datatype>", ...]
-      (optional, issue #2169), "tap_is_dedicated": <bool> (optional, issue
+      (optional, issue #2169), "tap_excludes": ["<layer>/<datatype>", ...]
+      (optional, issue #4194), "tap_is_dedicated": <bool> (optional, issue
       #2199), "tap_boxes": [[left, bottom, right, top], ...] (optional,
       issue #2234), "connect_to": "<stackup role>", "net"}``. Drives the
       ``erc.missing_tie`` finding; omitted entirely -> none are computed.
       ``tap_requires`` intersects further layers into the tap so the spec
       can name the boolean a real PDK tap is drawn as (``Comp ∩ Nplus``);
+      ``tap_excludes`` subtracts layers (``Comp - Pplus``, a tap defined by
+      the absence of an implant);
       ``tap_is_dedicated`` says the ``tap_layer`` is already tap-only and
       needs no narrowing. A tie that says neither, and whose tap region is
       therefore whatever that layer draws inside the well, is graded as
