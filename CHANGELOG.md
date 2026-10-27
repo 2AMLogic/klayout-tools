@@ -14,6 +14,11 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`signoff_runset.PINNED_RUNSETS` pins the gf180mcu LVS runset** (issue #4395):
+  `klayout/lvs/gf180mcu.lvs` at `fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pv`
+  commit `1a4e4b5` (sha256 `09a4f1f1…fde9`, byte-identical in all four open_pdks
+  gf180mcuA-D trees), so a gf180mcu `klayout-runset` LVS report is no longer
+  refused `runset_not_pinned`. Allowlist data only; no schema change.
 - **`erc` `ties[].well_requires_cells` / `well_excludes_cells`** (issue #4373).
   Select a drawn well class by the cell it is drawn in, evaluated in each
   instance's transformed frame, instead of hand-generated per-placement
