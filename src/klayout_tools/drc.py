@@ -158,6 +158,13 @@ _VERTEX_CHECKS = _GRID_CHECKS | _ANGLE_CHECKS
 # distance primitive.
 _COMP_COVERAGE_CHECKS = {"comp_coverage"}
 _TAP_DISTANCE_CHECKS = {"tap_distance"}
+
+#: Triage note attached to every ``tap_distance`` violation (issue #4348).
+_TAP_DISTANCE_NOTE = (
+    "tap_distance is context-dependent (tap-cell placement): a standalone "
+    "standard cell carries no tap, so this may be expected there and is not "
+    "necessarily a cell defect; evaluate it on the placed design"
+)
 _REGION_CHECKS = _COMP_COVERAGE_CHECKS | _TAP_DISTANCE_CHECKS
 # Net-aware spacing (issue #3572): `"space"` restricted to facing edges of
 # polygons on different nets, per `DrcRule.net_spec` -- `_run_net_space_check`.
@@ -3482,24 +3489,25 @@ def _polygon_violations(
     for polygon in region.each():
         bbox = polygon.bbox()
         source_cell, source_path = _attribute_to_instance(cell, bbox)
-        records.append(
-            {
-                "rule": rule.id,
-                "description": rule.description,
-                "check": rule.check,
-                "layer": layer_label,
-                "cell": cell.name,
-                "source_cell": source_cell,
-                "source_path": source_path,
-                "bbox": {
-                    "left": bbox.left,
-                    "bottom": bbox.bottom,
-                    "right": bbox.right,
-                    "top": bbox.top,
-                },
-                "polygon": [[pt.x, pt.y] for pt in polygon.each_point_hull()],
-            }
-        )
+        record: dict[str, Any] = {
+            "rule": rule.id,
+            "description": rule.description,
+            "check": rule.check,
+            "layer": layer_label,
+            "cell": cell.name,
+            "source_cell": source_cell,
+            "source_path": source_path,
+            "bbox": {
+                "left": bbox.left,
+                "bottom": bbox.bottom,
+                "right": bbox.right,
+                "top": bbox.top,
+            },
+            "polygon": [[pt.x, pt.y] for pt in polygon.each_point_hull()],
+        }
+        if rule.check in _TAP_DISTANCE_CHECKS:
+            record["note"] = _TAP_DISTANCE_NOTE
+        records.append(record)
     return records
 
 

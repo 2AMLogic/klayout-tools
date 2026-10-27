@@ -1876,13 +1876,10 @@ def test_power_preset_must_be_a_non_empty_string_when_given(value):
     ("extra", "named"),
     [
         ({"straps": _BASE_STRAPS}, "straps"),
-        ({"connects": []}, "connects"),
-        ({"straps": _BASE_STRAPS, "connects": []}, "connects/straps"),
+        ({"straps": _BASE_STRAPS, "connects": []}, "straps"),
     ],
 )
-def test_power_preset_and_explicit_straps_or_connects_are_mutually_exclusive(
-    extra, named
-):
+def test_power_preset_and_explicit_straps_are_mutually_exclusive(extra, named):
     """Issue #2123's own open decision, resolved: mutually exclusive, not a
     per-field override. A partial override would recreate exactly the
     silently-half-transcribed block presets exist to eliminate."""
@@ -1896,6 +1893,26 @@ def test_power_preset_and_explicit_straps_or_connects_are_mutually_exclusive(
         place_and_route._validate_power(
             {"preset": "sky130hd", **extra}, "sky130_fd_sc_hd"
         )
+
+
+def test_power_preset_accepts_connects_override_issue_4348():
+    """Explicit `connects` replaces the preset's entries wholesale; `[]`
+    means no via tuning. The override is flagged for auditability."""
+    lib = "gf180mcu_fd_sc_mcu7t5v0"
+    plain = place_and_route._validate_power({"preset": "gf180mcu_7t_6M"}, lib)
+    assert plain["connects_overridden"] is False
+    assert any(c["split_cuts"] for c in plain["connects"])
+    over = place_and_route._validate_power(
+        {"preset": "gf180mcu_7t_6M", "connects": []}, lib
+    )
+    assert over["connects_overridden"] is True
+    assert over["preset"] == "gf180mcu_7t_6M"
+    assert over["straps"] == plain["straps"]
+    assert over["connects"] == []
+    assert (
+        place_and_route._validate_power({"straps": _BASE_STRAPS})["connects_overridden"]
+        is False
+    )
 
 
 def test_power_preset_rejects_a_mismatched_cell_library():
@@ -3070,6 +3087,7 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
         # issue #2123: an explicit `straps[]`/`connects[]` request is not a
         # preset run -- echoed as `None`, never a fabricated recipe name.
         "preset": None,
+        "connects_overridden": False,
         "pdn": True,
         "global_connect": True,
         "power_net": "VDD",

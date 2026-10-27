@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`place-and-route` `power.preset` accepts `power.connects`; `drc` tap_distance note**
+  (issue #4348). An explicit `connects` replaces the preset's connect entries
+  (`[]` = no via tuning); `power.straps` stays mutually exclusive. The response
+  gains an additive `power.connects_overridden` boolean. `klt drc` violations
+  from `tap_distance` rules carry an additive `note` that the rule is
+  tap-placement dependent.
 - **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
   Landing candidates are now enumerated per merged net polygon rather than over
   the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too
