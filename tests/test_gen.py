@@ -11921,3 +11921,67 @@ def test_sky130_no_ring_draws_no_opposite_implant(tmp_path, pdk_root):
     assert (93, 44) in present
     assert (94, 20) not in present
     assert (95, 20) not in present
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4203: res_array length_um mfg-grid / short-length warnings
+# --------------------------------------------------------------------------- #
+
+
+def _gen_res(tmp_path, root, tag, variant="gf180mcuD", **params):
+    return generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": variant, "root": str(root)},
+            "params": {"width_um": 1.0, "spacing_um": 1.0, "num": 1, **params},
+            "options": {"output": str(tmp_path / f"res_{tag}.gds")},
+        }
+    )
+
+
+def test_res_array_off_mfg_grid_length_warns(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "off", length_um=3.343)
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "params.length_um=3.343um" in warning
+    assert "0.005um" in warning
+    assert "3.34um (below)" in warning
+    assert "3.345um (above)" in warning
+
+
+def test_res_array_on_grid_length_no_warning(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "on", length_um=3.345)
+    assert _mfg_grid_warnings_of(report) == []
+
+
+def test_res_array_no_ongrid_rule_no_warning(tmp_path, both_pdk_root, monkeypatch):
+    from klayout_tools import gen_describe
+
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    report = _gen_res(tmp_path, both_pdk_root, "nogrid", length_um=3.343)
+    assert _mfg_grid_warnings_of(report) == []
+
+
+def test_res_array_off_grid_warning_leaves_geometry_unchanged(
+    tmp_path, both_pdk_root, monkeypatch
+):
+    from klayout_tools import gen_describe
+
+    warned = _gen_res(tmp_path, both_pdk_root, "warned", length_um=3.343)
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    silent = _gen_res(tmp_path, both_pdk_root, "silent", length_um=3.343)
+    assert _mfg_grid_warnings_of(warned) and not _mfg_grid_warnings_of(silent)
+    assert (tmp_path / "res_warned.gds").read_bytes() == (
+        tmp_path / "res_silent.gds"
+    ).read_bytes()
+
+
+def test_res_array_short_length_warns_on_gf180mcu(tmp_path, both_pdk_root):
+    short = _gen_res(tmp_path, both_pdk_root, "short", length_um=0.3)
+    assert any("minimum mask width" in w for w in short["warnings"])
+    long = _gen_res(tmp_path, both_pdk_root, "long", length_um=3.0)
+    assert not any("minimum mask width" in w for w in long["warnings"])
+
+
+def test_res_array_sky130_has_no_short_length_warning(tmp_path, pdk_root):
+    report = _gen_res(tmp_path, pdk_root, "sky", variant="sky130A", length_um=0.5)
+    assert not any("minimum mask width" in w for w in report["warnings"])

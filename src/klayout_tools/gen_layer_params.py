@@ -1440,6 +1440,29 @@ def _deck_cut_max_size_um(family: str, layer: tuple[int, int]) -> float | None:
     return round(min(bounds), 6) if bounds else None
 
 
+def _deck_min_width_um(family: str, layer: tuple[int, int]) -> tuple[str, float] | None:
+    """``(rule id, um)`` of the plain ``"width"`` rule in ``family``'s curated
+    deck with the largest minimum on ``layer`` (issue #4203), or ``None`` when
+    the deck declares none (or ``family`` has no registered deck)."""
+    from .decks import UnknownDeckError, get_deck, get_nominal_dbu
+
+    try:
+        rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+    except UnknownDeckError:
+        return None
+    mins = [
+        (rule.id, round(rule.threshold_dbu * nominal_dbu_um, 6))
+        for rule in rules
+        if rule.check == "width"
+        and rule.layer == layer
+        and rule.other_layer is None
+        and rule.derived_layer is None
+        and rule.threshold_dbu > 0
+    ]
+    return max(mins, key=lambda m: m[1]) if mins else None
+
+
 def _cut_fixed_size_um(family: str, layer: Any) -> float:
     """The fixed drawn side (um) a cut on ``layer`` must be clamped to on
     ``family`` (issue #2585), or ``0.0`` -- "no upper bound, draw the
