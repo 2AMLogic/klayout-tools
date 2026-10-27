@@ -37,7 +37,9 @@ discovery ``klt pdk``/``klt cells`` already use (Yosys survey section 0) --
 ``variant``/``root``): the resolved PDK install is whatever ``find_pdk()``'s
 own default search order (``$PDK_ROOT``/``$PDK``, then the ciel/volare
 stores, then the conventional prefixes) finds, exactly as ``klt pdk find``
-with no flags would -- unless the CLI's own ``--pdk``/``--pdk-root`` flags
+with no flags would (falling back to the first installed variant that ships
+``cell_library`` when the default pick lacks it and no ``--pdk``/``$PDK``
+was given, issue #4204) -- unless the CLI's own ``--pdk``/``--pdk-root`` flags
 (mirroring ``klt extract``'s identical pair) pin a specific installed
 variant/root, threaded straight through to :func:`run_synthesize`'s
 ``pdk_variant``/``pdk_root`` keyword args and from there to ``find_pdk()``.
@@ -1474,6 +1476,7 @@ def run_synthesize(
         adder_techmap_path=adder_techmap_path,
         repo_root=repo_root,
         parameters=parameters,
+        liberty_path=liberty_path,
         defines=defines,
     )
 
@@ -2898,7 +2901,11 @@ def _write_script(
     if constr_text is not None and abc_log_text is not None:
         abc_command = f"tee -q -o {abc_log_text} {abc_command}"
 
-    lines = [
+    # Issue #4205: load the request's own cell library as cell definitions
+    # first, so RTL may instantiate a library cell by name with no stub.
+    # `read_verilog` of a legacy stub for the same cell still works.
+    lines = [f"read_liberty -lib {liberty_text}"]
+    lines += [
         read_verilog_line(_script_path_text(path, repo_root=repo_root), defines)
         for path in sources
     ]

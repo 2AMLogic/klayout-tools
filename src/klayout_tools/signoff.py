@@ -142,12 +142,13 @@ from .signoff_power_delivery import (
     _strap_layers,
 )
 from .signoff_runset import (
-    REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
-)
-from .signoff_runset import (
+    PINNED_RUNSETS,
     runset_disclosure,
     runset_refusal,
     unrecognised_device_gaps,
+)
+from .signoff_runset import (
+    REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
 )
 
 __all__ = [
@@ -873,6 +874,10 @@ def describe_grader() -> dict[str, Any]:
         "not_applicable_items": {
             str(_STATISTICAL_CLAIMS_ITEM_ID): [_NOT_APPLICABLE_PARTITION]
         },
+        # Additive (issue #4309): the runset digests items 4/11 accept.
+        "pinned_runsets": {
+            digest: dict(pin) for digest, pin in sorted(PINNED_RUNSETS.items())
+        },
     }
 
 
@@ -911,6 +916,9 @@ _REASON_UNRECOGNIZED_ENVELOPE = "unrecognized_envelope"
 _REASON_CHECK_ERRORED = "check_errored"
 _REASON_CHECK_FAILED = "check_failed"
 _REASON_STALE_EVIDENCE = "stale_evidence"
+#: Issue #4314: a digital item-5 entry citing only ``klt sim`` (the full-custom
+#: sub-case) must also carry a measured per-corner timing-margin metric.
+_REASON_TIMING_MARGIN_MISSING = "timing_margin_missing"
 
 #: Issue #2198: the resolved evidence *is* a `klt` envelope -- it carries a
 #: kind's **primary** marker (see :data:`_NEAR_MISS_MARKERS`) -- but not the
@@ -1202,6 +1210,12 @@ _REASON_NEGATIVE_CONTROL_NOT_DETECTED = "negative_control_not_detected"
 #: refusals differ because they apply to an envelope that *passed*, where
 #: "cite a different artifact" really is the more actionable answer.
 _REASON_PARTIAL_COVERAGE = "partial_coverage"
+
+# Most ``skipped`` records a ``coverage_qualification`` quotes verbatim
+# (issue #4286). A run with no antenna table emits one record per
+# (gate, level), so an uncapped quote made the committed tier report
+# O(gates x levels); beyond this the full list stays in the cited envelope.
+_PARTIAL_COVERAGE_SKIPPED_CAP = 20
 
 # --- Item 6 ``not_applicable`` outcome (issue #2865) ----------------------- #
 #: The T1 item whose "statistical claims" requirement a block with no
@@ -3115,7 +3129,19 @@ def _partial_coverage_disclosure(envelope: dict[str, Any]) -> dict[str, Any] | N
     skipped = coverage_skipped_work(envelope)
     if not skipped:
         return None
-    return {"reason": _REASON_PARTIAL_COVERAGE, "skipped": skipped}
+    if len(skipped) <= _PARTIAL_COVERAGE_SKIPPED_CAP:
+        return {"reason": _REASON_PARTIAL_COVERAGE, "skipped": skipped}
+    by_reason: dict[str, int] = {}
+    for record in skipped:
+        reason = str(record.get("reason"))
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    return {
+        "reason": _REASON_PARTIAL_COVERAGE,
+        "skipped": skipped[:_PARTIAL_COVERAGE_SKIPPED_CAP],
+        "skipped_total": len(skipped),
+        "skipped_by_reason": dict(sorted(by_reason.items())),
+        "truncated": True,
+    }
 
 
 def _reports_partial_status(kind: str, envelope: dict[str, Any]) -> bool:
@@ -4420,8 +4446,12 @@ def build_tier_report(
       of it -- see :data:`_REASON_NEGATIVE_CONTROL_NOT_DETECTED`.
     - ``"no_pdn"`` (issue #2025, item 11 only) -- the cited `klt
       place-and-route` response says no power grid was built at all
-      (``power.pdn`` is not ``true``, or no ``power.tapcell_master`` was
-      placed). Re-run P&R with a ``request.power`` block.
+      (``power.pdn`` is not ``true``). Re-run P&R with a ``request.power``
+      block.
+    - ``"no_tapcell_master"`` (issue #4199, item 11 only) -- the grid was
+      built (``power.pdn: true``) but ``power.tapcell_master`` is null and
+      the response does not state ``power.tapless: true``. Re-run P&R on a
+      current ``klt``; a library documented tapless states it and grades.
     - ``"supply_spec_incomplete"`` (issue #2025, item 11 only) -- the cited
       `klt erc` run's own spec document does not ask the question item 11
       grades: unreadable, no ``"kind": "supply"`` net declared, no ``ties[]``
@@ -5687,6 +5717,7 @@ def _grade_evidence(
             None,
             {**_input_members_detail(resolution), **execution_detail},
         )
+    _attach_characterization_attestation(check_kind, item_id, envelope, citation)
     _record_envelope(envelope_sink, envelope)
     return "met", None, citation, {}
 
@@ -6279,6 +6310,45 @@ def _generic_item_binding_refusal(
     ):
         return _REASON_UNANCHORED_EVIDENCE
     return None
+
+
+#: T1 item 8 (Characterization report): the one item that accepts a bare
+#: generic envelope, so a met citation always discloses whether
+#: ``klt signoff --attest 8`` produced it (issue #4311).
+_CHARACTERIZATION_ITEM = 8
+
+
+def _attach_characterization_attestation(
+    check_kind: str,
+    item_id: int | None,
+    envelope: Mapping[str, Any],
+    citation: dict[str, Any],
+) -> None:
+    """Add ``citation["attestation"]`` for a met item-8 generic citation; a
+    no-op for every other kind/item."""
+    if check_kind == "generic" and item_id == _CHARACTERIZATION_ITEM:
+        citation["attestation"] = _characterization_attestation_disclosure(envelope)
+
+
+def _characterization_attestation_disclosure(
+    envelope: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The ``citation.attestation`` block for a met item-8 generic citation:
+    ``tool_produced`` is ``True`` (with the producer and check counts) only
+    when the envelope carries a ``klt signoff --attest`` attestation block;
+    ``False`` for a hand-written one, so the absence is visible, not implied.
+    Disclosure only -- never graded."""
+    attestation = envelope.get("attestation")
+    if isinstance(attestation, Mapping) and isinstance(
+        attestation.get("producer"), str
+    ):
+        return {
+            "tool_produced": True,
+            "producer": attestation["producer"],
+            "check_count": attestation.get("check_count"),
+            "passed_count": attestation.get("passed_count"),
+        }
+    return {"tool_produced": False}
 
 
 def _generic_artifact_binding(
@@ -6895,10 +6965,10 @@ def _read_spec_rows(
     manifest: dict[str, Any],
 ) -> dict[_SpecRowsKey, list[dict[str, Any]] | None]:
     """Read the manifest's optional ``spec_rows`` declaration (issue #2959):
-    ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?, "ratified": bool?},
-    ...]}``. A key may be partition-qualified (``"5.analog"``, issue #3768),
-    mirroring the evidence-key convention of :func:`_lookup_evidence`; see
-    :func:`_resolve_spec_rows`.
+    ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?, "ratified": bool?,
+    "timing_margin": bool?}, ...]}``. A key may be partition-qualified
+    (``"5.analog"``, issue #3768), mirroring the evidence-key convention of
+    :func:`_lookup_evidence`; see :func:`_resolve_spec_rows`.
 
     Returns ``(item id, partition | None) -> rows``; a malformed declaration
     maps to ``None`` so only that item degrades to ``invalid_evidence``, never
@@ -6906,7 +6976,9 @@ def _read_spec_rows(
     is reported as a declared gap and never counts as covered. ``ratified``
     (default ``true``, issue #2908) is ``false`` for a row whose target is a
     proposed, unratified limit: evidence against it is provisional and never
-    grades ``met``.
+    grades ``met``. ``timing_margin`` (default ``false``, issue #4314) marks the
+    row a digital ``sim``-only item 5 must evidence with a measured per-corner
+    timing margin; see :func:`_missing_timing_margin`.
     """
     raw = manifest.get("spec_rows")
     if raw is None:
@@ -6931,17 +7003,28 @@ def _read_spec_rows(
                 row_id = row.get("id") if isinstance(row, dict) else None
                 gap = row.get("gap") if isinstance(row, dict) else None
                 ratified = row.get("ratified", True) if isinstance(row, dict) else True
+                margin = (
+                    row.get("timing_margin", False) if isinstance(row, dict) else False
+                )
                 if (
                     not isinstance(row_id, str)
                     or not row_id
                     or row_id in seen
                     or (gap is not None and (not isinstance(gap, str) or not gap))
                     or not isinstance(ratified, bool)
+                    or not isinstance(margin, bool)
                 ):
                     valid = []
                     break
                 seen.add(row_id)
-                valid.append({"id": row_id, "gap": gap, "ratified": ratified})
+                valid.append(
+                    {
+                        "id": row_id,
+                        "gap": gap,
+                        "ratified": ratified,
+                        "timing_margin": margin,
+                    }
+                )
             parsed = valid or None
         out[slot] = parsed
     return out
@@ -7055,24 +7138,20 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
+    margin_unmet = _grade_timing_margin(
+        required_kind_pair, graded, spec_rows, met_envelopes, row_info, extra
+    )
+    if margin_unmet is not None:
+        return margin_unmet
     if row_info and (
         row_info["uncovered_rows"]
         or row_info["declared_gaps"]
         or row_info["unratified_rows"]
     ):
         return "unmet", _REASON_PARTIAL_COVERAGE, None, row_info, extra
-    if required_kind_pair is not None:
-        kinds = {g[2]["kind"] for _, _, g in graded if g[2] is not None}
-        if kinds & set(required_kind_pair):
-            missing = [k for k in required_kind_pair if k not in kinds]
-            if missing:
-                return (
-                    "unmet",
-                    _REASON_PARTIAL_COVERAGE,
-                    None,
-                    {**row_info, "missing_kinds": missing},
-                    extra,
-                )
+    kinds_unmet = _grade_required_kinds(required_kind_pair, graded, row_info, extra)
+    if kinds_unmet is not None:
+        return kinds_unmet
     if row_info:
         extra["row_coverage"] = row_info
     if not graded:
@@ -7081,6 +7160,129 @@ def _grade_multi_citation(
         return "unmet", _REASON_NO_EVIDENCE, None, {}, extra
     extra["citations"] = [g[2] for _, _, g in graded]
     return "met", None, graded[0][2][2], {}, extra
+
+
+def _grade_required_kinds(
+    required_kind_pair: tuple[str, ...] | None,
+    graded: list[tuple[Any, Any, Any]],
+    row_info: dict[str, Any],
+    extra: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
+    """The ``unmet``/``partial_coverage`` outcome when the passing kinds
+    include part of ``required_kind_pair`` but not all of it (issue #3741);
+    ``None`` otherwise."""
+    if required_kind_pair is None:
+        return None
+    kinds = {g[2]["kind"] for _, _, g in graded if g[2] is not None}
+    if not kinds & set(required_kind_pair):
+        return None
+    missing = [k for k in required_kind_pair if k not in kinds]
+    if not missing:
+        return None
+    return (
+        "unmet",
+        _REASON_PARTIAL_COVERAGE,
+        None,
+        {**row_info, "missing_kinds": missing},
+        extra,
+    )
+
+
+def _grade_timing_margin(
+    required_kind_pair: tuple[str, ...] | None,
+    graded: list[tuple[Any, Any, Any]],
+    spec_rows: list[dict[str, Any]] | None,
+    met_envelopes: dict[int, dict[str, Any]] | None,
+    row_info: dict[str, Any],
+    extra: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
+    """The ``unmet``/``timing_margin_missing`` outcome for the full-custom
+    digital sub-case (``sim`` evidence only, issue #4314); ``None`` when it
+    does not apply or the timing margin is satisfied."""
+    if required_kind_pair is None or not graded:
+        return None
+    if {g[2]["kind"] for _, _, g in graded if g[2] is not None} != {"sim"}:
+        return None
+    missing_margin = _missing_timing_margin(
+        spec_rows,
+        [(met_envelopes or {}).get(id(spec)) for spec, _, _ in graded],
+    )
+    if not missing_margin:
+        return None
+    return (
+        "unmet",
+        _REASON_TIMING_MARGIN_MISSING,
+        None,
+        {**row_info, "missing_timing_margin": missing_margin},
+        extra,
+    )
+
+
+def _missing_timing_margin(
+    spec_rows: list[dict[str, Any]] | None,
+    envelopes: list[dict[str, Any] | None],
+) -> list[dict[str, Any]]:
+    """``[{"row": id, "corners": [...]}]`` for the timing-margin evidence a
+    ``sim``-only digital item 5 lacks (issue #4314); empty when satisfied.
+
+    A ``timing_margin: true`` row is satisfied by a cited ``klt sim``
+    envelope whose rollup ``measurements[]`` has a passing, ``limits``-bearing
+    entry tagged ``spec_row: <row>`` and whose every ``corners[]`` entry has a
+    passing measurement of that name. No such row declared -> one entry with
+    ``row: None``. ``corners`` names the corners lacking the measurement
+    (``[]`` when no corner list exists or no tagged measurement was found).
+    """
+    rows = [r["id"] for r in spec_rows or [] if r.get("timing_margin")]
+    if not rows:
+        return [{"row": None, "corners": []}]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        best: list[str] | None = None
+        for envelope in envelopes:
+            lacking = _row_margin_lacking_corners(envelope, row)
+            if best is None or len(lacking) < len(best):
+                best = lacking
+        if best is None or best:
+            out.append({"row": row, "corners": best or []})
+    return out
+
+
+def _row_margin_lacking_corners(envelope: dict[str, Any] | None, row: str) -> list[str]:
+    """Corner ids lacking a passing measurement for ``row`` in ``envelope``;
+    ``["*"]`` when the envelope has no passing, limited, ``row``-tagged
+    measurement at all."""
+    if envelope is None:
+        return ["*"]
+    raw = envelope.get("measurements")
+    names = [
+        m.get("name")
+        for m in (raw if isinstance(raw, list) else [])
+        if isinstance(m, dict)
+        and m.get("spec_row") == row
+        and m.get("status") == "pass"
+        and m.get("limits")
+    ]
+    if not names:
+        return ["*"]
+    corners = envelope.get("corners")
+    corners = (
+        [c for c in corners if isinstance(c, dict)] if isinstance(corners, list) else []
+    )
+    best: list[str] | None = None
+    for name in names:
+        lacking = [
+            str(c.get("corner_id"))
+            for c in corners
+            if not any(
+                isinstance(m, dict)
+                and m.get("name") == name
+                and m.get("status") == "pass"
+                for m in c.get("measurements") or []
+            )
+        ]
+        if best is None or len(lacking) < len(best):
+            best = lacking
+    return best or []
 
 
 def _parse_multi_members(

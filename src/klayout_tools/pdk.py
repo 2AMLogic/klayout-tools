@@ -135,18 +135,22 @@ _ASSET_LAYOUT: dict[str, tuple[str, ...]] = {
     "libs_ref": ("libs.ref",),
 }
 
-#: Subdirectory of ``assets["klayout"]`` a PDK stages its own importable
-#: KLayout PyCell (Python PCell) library packages under -- see
-#: :func:`pdk_pcell_lib_dir`. Verified against three real installs for issue
-#: #1535: a ``volare``-fetched ``sky130A`` (``libs.tech/klayout/python/cells``
-#: -- the Mabrains-authored ``sky130`` PCell library the PDK's own
+#: Candidate subdirectories of ``assets["klayout"]`` a PDK stages its own
+#: importable KLayout PyCell (Python PCell) library packages under, probed in
+#: order -- see :func:`pdk_pcell_lib_dir`. Verified against real installs: a
+#: ``volare``-fetched ``sky130A`` (``libs.tech/klayout/python/cells`` -- the
+#: Mabrains-authored ``sky130`` PCell library the PDK's own
 #: ``pymacros/sky130_pcells.lym`` autoloads by putting exactly this directory
 #: on ``sys.path``), a fetched ``ihp-sg13g2``
 #: (``libs.tech/klayout/python/{sg13g2_native_pcell_lib,sg13g2_pycell_lib,...}``),
-#: and a ``volare``-fetched ``gf180mcuD`` (ships **no** ``python/`` at all).
-#: Unlike ``drc/``/``lvs/`` (see :func:`drc_deck_file`), no verified install
-#: nests this one under ``klayout/tech/``, so no nested fallback is probed.
-_PCELL_LIB_SUBDIR = "python"
+#: and an open_pdks ``gf180mcuC`` (no ``python/``; ships ``cells``,
+#: ``klayout_api_cells`` and ``sealring_cells`` under
+#: ``libs.tech/klayout/tech/pymacros/``, which its ``gf180mcu.lym`` puts on
+#: ``sys.path``). A ``volare``-fetched ``gf180mcuD`` ships neither.
+_PCELL_LIB_SUBDIRS: tuple[tuple[str, ...], ...] = (
+    ("python",),
+    ("tech", "pymacros"),
+)
 
 
 class PdkNotFoundError(Exception):
@@ -1153,11 +1157,19 @@ def _pcell_lib_dir_for_assets(assets: dict[str, str | None]) -> str | None:
     :func:`list_pdks` can compute their ``has_pcell_library`` field without
     recursing back into :func:`find_pdk`.
     """
+    for path in _pcell_search_dirs(assets):
+        if os.path.isdir(path):
+            return path
+    return None
+
+
+def _pcell_search_dirs(assets: dict[str, str | None]) -> list[str]:
+    """The ordered candidate PyCell-library directories probed for an
+    already-resolved ``assets`` map (``[]`` when it has no ``klayout`` dir)."""
     klayout_dir = assets.get("klayout")
     if klayout_dir is None:
-        return None
-    path = os.path.join(klayout_dir, _PCELL_LIB_SUBDIR)
-    return path if os.path.isdir(path) else None
+        return []
+    return [os.path.join(klayout_dir, *sub) for sub in _PCELL_LIB_SUBDIRS]
 
 
 def _pcell_packages_in(lib_dir: str) -> list[str]:
@@ -1242,16 +1254,14 @@ def pdk_pcell_lib_dir(
     exactly as :func:`find_pdk` does (same precedence, same
     :class:`PdkNotFoundError` on no match).
 
-    Layout convention (verified against three real installs, see
-    :data:`_PCELL_LIB_SUBDIR`): both sky130A and ihp-sg13g2 stage their PyCell
-    packages directly at ``libs.tech/klayout/python/<package>/``, and
-    gf180mcuD ships no such directory at all. Unlike ``drc/``/``lvs/``, no
-    verified install nests it under ``klayout/tech/``, so -- keeping this
-    module's "enumerate what is present, never guess" convention -- no nested
-    fallback is probed.
+    Layout convention (see :data:`_PCELL_LIB_SUBDIRS`): sky130A and
+    ihp-sg13g2 stage their PyCell packages at
+    ``libs.tech/klayout/python/<package>/``; gf180mcuC at
+    ``libs.tech/klayout/tech/pymacros/<package>/``. Both are probed, in that
+    order, and the first existing directory wins. gf180mcuD ships neither.
 
     Returns the absolute directory, or ``None`` when the variant ships no
-    ``klayout`` asset directory at all or no ``python/`` subdirectory under it.
+    ``klayout`` asset directory at all or neither candidate exists under it.
 
     Raises :class:`PdkNotFoundError` when no PDK install resolves at all.
     """

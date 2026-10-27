@@ -9436,3 +9436,124 @@ def test_check_erc_report_external_file_is_unverifiable(tmp_path_factory):
     result = erc.check_erc_report(str(report_path))
 
     assert result["status"] != "match"
+
+
+# Issue #4374: `erc.unlabelled_conductor` locates and classifies its islands,
+# and `nets[].unlabelled_allow_device_connected` excuses the gate-driven ones.
+
+
+def _device_connected_run(tmp_path, net_extra=None, boxes=None):
+    """VDD (labelled li1 5-6) owning li1, with two unlabelled li1 islands: a
+    gate-driven strap (0-1, via-joined to the gate poly) and a terminal-less
+    fragment (8-9)."""
+    layout, top, *_ = _severed_rail_layout()
+    licon = layout.layer(2, 0)
+    top.shapes(licon).insert(kdb.Box.new(_um(0.2), _um(0.2), _um(0.8), _um(0.8)))
+    gds = tmp_path / "devconn.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "devconn.erc.json"
+    body = _nets_spec(
+        nets=[
+            {
+                "name": "VDD",
+                "kind": "supply",
+                "roles": ["li1"],
+                **({"unlabelled_allowed_boxes": boxes} if boxes else {}),
+                **(net_extra or {}),
+            }
+        ]
+    )
+    body["vias"] = [{"name": "licon", "layer": "2/0", "between": ["poly", "li1"]}]
+    _write_spec(spec, body)
+    return run_erc(str(gds), str(spec))
+
+
+def test_unlabelled_conductor_islands_are_located_and_classified(tmp_path):
+    report = _device_connected_run(tmp_path)
+
+    (finding,) = _unlabelled_findings(report)
+    kinds = {island["bbox"]["left"]: island["kind"] for island in finding["islands"]}
+    assert kinds == {_um(0): "device_connected", _um(8): "floating"}
+    for island in finding["islands"]:
+        assert island["layer"] == "li1"
+        assert island["shape_count"] == 1
+    assert finding["islands"][0]["bbox"] == {
+        "left": _um(0),
+        "bottom": _um(0),
+        "right": _um(1),
+        "top": _um(1),
+    }
+
+
+def test_unlabelled_allow_device_connected_excuses_only_gate_driven_islands(
+    tmp_path,
+):
+    report = _device_connected_run(
+        tmp_path, {"unlabelled_allow_device_connected": True}
+    )
+
+    (finding,) = _unlabelled_findings(report)
+    assert [i["kind"] for i in finding["islands"]] == ["floating"]
+    assert finding["bbox"]["left"] == _um(8)
+    # Raw measurement stays raw; the excused island is counted and echoed.
+    assert report["nets"][0]["unlabelled_islands"] == 2
+    assert report["nets"][0]["unlabelled_allowed_islands"] == 1
+    (echo,) = report["provenance"]["net_exclusions"]
+    assert echo["allow_device_connected"] is True
+    assert echo["excluded_device_connected_islands"] == 1
+
+
+def test_unlabelled_allow_device_connected_composes_with_boxes(tmp_path):
+    """Carve-out box excuses the floating fragment, the key the gate-driven
+    one: nothing gates."""
+    report = _device_connected_run(
+        tmp_path,
+        {"unlabelled_allow_device_connected": True},
+        boxes=[[7.5, -0.5, 9.5, 1.5]],
+    )
+
+    assert _unlabelled_findings(report) == []
+    assert report["nets"][0]["unlabelled_allowed_islands"] == 2
+
+
+def test_unlabelled_allow_device_connected_false_matches_default(tmp_path):
+    report = _device_connected_run(
+        tmp_path, {"unlabelled_allow_device_connected": False}
+    )
+    (finding,) = _unlabelled_findings(report)
+    assert len(finding["islands"]) == 2
+    assert (
+        "allow_device_connected"
+        not in (report["provenance"].get("net_exclusions") or [{}])[0]
+    )
+
+
+@pytest.mark.parametrize(
+    "net, match",
+    [
+        (
+            {"name": "VDD", "unlabelled_allow_device_connected": True},
+            r"needs a non-empty",
+        ),
+        (
+            {
+                "name": "VDD",
+                "roles": ["li1"],
+                "unlabelled_allow_device_connected": "yes",
+            },
+            r"must be a boolean",
+        ),
+    ],
+)
+def test_unlabelled_allow_device_connected_rejects_bad_declarations(
+    tmp_path, net, match
+):
+    layout, *_ = _nets_fixture_layout()
+    gds = tmp_path / "adc_bad.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "adc_bad.erc.json"
+    _write_spec(spec, _nets_spec(nets=[net]))
+    with pytest.raises(
+        ErcError, match=rf"nets\[0\]\.unlabelled_allow_device_connected.*{match}"
+    ):
+        run_erc(str(gds), str(spec))
