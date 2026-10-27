@@ -231,9 +231,12 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     "corners.process[].sections[] (object form)": "0.7.0",
     # 1b51954f options.ngspice_init (#2530); first in v0.7.0.
     "options.ngspice_init": "0.7.0",
-    # 7849a377c corners.params parameter axis (#3035); first in v0.7.0
-    # (`git tag --contains 7849a377c`).
-    "corners.params": "0.7.0",
+    # 7849a377c corners.params parameter axis (#3035); first in v0.8.0
+    # (`git tag --contains 7849a377c` lists v0.8.0 only; `git describe` gives
+    # v0.7.0-709-g7849a377c). Post-tag dev builds render as `0.7.1.devN`, which
+    # compares below 0.8.0, so a 0.7.1.dev7xx+ runner that has the feature is
+    # refused; that fails safe.
+    "corners.params": "0.8.0",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
@@ -733,7 +736,9 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: unknown analysis kind or, worse, run it as a plain AC with no S-parameters
 #: (#3338). ``twoport_noise`` is mandatory because an older runner would reject
 #: ``analysis.noise`` as an unknown key or omit ``nf_db`` and the stability
-#: factors (#3339).
+#: factors (#3339). ``corners.params`` is mandatory because an older runner has
+#: no parser for the axis and ignores it, running one corner per process x
+#: temperature with ``status: pass`` (#4235).
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "transfer",
@@ -744,6 +749,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "complex_vectors",
         "twoport",
         "twoport_noise",
+        "corners.params",
     }
 )
 
