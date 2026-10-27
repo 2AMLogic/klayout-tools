@@ -249,6 +249,7 @@ from ._report_verify import (
     resolve_committed_path,
     strip_keys,
 )
+from ._sv2v import convert_sources, validate_sv_frontend
 from ._verilog_params import (
     chparam_lines,
     read_verilog_line,
@@ -1016,6 +1017,7 @@ _ALLOWED_REQUEST_KEYS = frozenset(
         "run_id",
         "outputs",
         "parameters",
+        "sv_frontend",
         "defines",
         "macros",
     }
@@ -1197,6 +1199,8 @@ def run_synthesize(
         request.get("defines"), SynthesizeError, "request.defines"
     )
 
+    sv_frontend = validate_sv_frontend(request.get("sv_frontend"), SynthesizeError)
+
     pdk_spec = request["pdk"]
     if not isinstance(pdk_spec, dict):
         raise SynthesizeError("request.pdk must be a JSON object")
@@ -1286,6 +1290,23 @@ def run_synthesize(
         request_dir, request, ignore_outputs_dir=_scratch_run_dir
     )
 
+    # Issue #4198: opt-in sv2v pre-conversion. Converted once; every pass
+    # that reads sources below gets the converted path, while the provenance
+    # hashes above stay over the user's original sources.
+    elab_sources = resolved_sources
+    if sv_frontend == "sv2v":
+        converted_path, sv2v_version_text = convert_sources(
+            resolved_sources,
+            os.path.join(output_dir, f"{hdl_toplevel}_sv2v.v"),
+            SynthesizeError,
+            defines,
+        )
+        elab_sources = [converted_path]
+        provenance["sv_frontend"] = {
+            "route": "sv2v",
+            "sv2v_version": sv2v_version_text,
+        }
+
     script_path = os.path.join(output_dir, f"synth_{hdl_toplevel}.ys")
     netlist_path = os.path.join(output_dir, f"{hdl_toplevel}_synth.v")
     stats_path = os.path.join(output_dir, f"{hdl_toplevel}_stats.json")
@@ -1327,7 +1348,7 @@ def run_synthesize(
         arithmetic, adder_sources, adder_techmap_path = _run_arithmetic_selection(
             config=arithmetic_config,
             output_dir=output_dir,
-            resolved_sources=resolved_sources,
+            resolved_sources=elab_sources,
             hdl_toplevel=hdl_toplevel,
             engine_options=engine_options,
             equiv_timeout_s=equiv_timeout_s,
@@ -1361,7 +1382,7 @@ def run_synthesize(
     # as `script_path`, and names the executed one in `run_script_path`.
     executed_script_path = _write_script(
         script_path=script_path,
-        sources=resolved_sources,
+        sources=elab_sources,
         hdl_toplevel=hdl_toplevel,
         liberty_path=liberty_path,
         stats_path=stats_path,
@@ -1446,7 +1467,7 @@ def run_synthesize(
     # never raises (an evidence failure is reported as `indeterminate`).
     memory_mapping, blackbox_modules = collect_memory_evidence(
         output_dir=output_dir,
-        resolved_sources=resolved_sources,
+        resolved_sources=elab_sources,
         hdl_toplevel=hdl_toplevel,
         final_stats_path=stats_path,
         adder_sources=adder_sources,
@@ -1460,7 +1481,7 @@ def run_synthesize(
     if verify_equivalence:
         equivalence = _verify_synthesis_equivalence(
             synthesize_output_dir=output_dir,
-            resolved_sources=resolved_sources,
+            resolved_sources=elab_sources,
             hdl_toplevel=hdl_toplevel,
             netlist_path=netlist_path,
             liberty_path=liberty_path,
@@ -1483,7 +1504,7 @@ def run_synthesize(
             delay_target_ps=delay_target_ps,
             sta=sta,
             output_dir=output_dir,
-            resolved_sources=resolved_sources,
+            resolved_sources=elab_sources,
             max_iterations=restructure_max_iterations,
             equiv_timeout_s=equiv_timeout_s,
             repo_root=repo_root,
