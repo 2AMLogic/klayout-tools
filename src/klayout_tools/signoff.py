@@ -5520,7 +5520,15 @@ def _grade_evidence(
     """
     resolution, reason = _resolve_evidence(spec, repo_root)
     if resolution is None:
-        return "unmet", reason, None, {}
+        detail: dict[str, Any] = {}
+        if reason == _REASON_UNREADABLE_EVIDENCE and spec.get("file") is not None:
+            # Evidence paths resolve against the process cwd, so name both
+            # the resolved path and the cwd that produced it.
+            detail = {
+                "path": os.path.abspath(spec["file"]),
+                "cwd": os.getcwd(),
+            }
+        return "unmet", reason, None, detail
 
     check_kind = resolution["kind"]
     envelope = resolution["envelope"]

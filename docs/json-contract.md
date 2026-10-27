@@ -1811,6 +1811,20 @@ depends on its meaning staying fixed:
 Field-level schema, path rules, examples and exit codes:
 [`cli/signoff.md`](cli/signoff.md#attesting-items-1-9-and-10---attest-issue-2844).
 
+Two behaviours worth knowing when running `--attest` or grading a manifest:
+
+- **Declared commands see the caller's `PATH`.** Inventory commands run with
+  the invoking environment, except that when `klt` itself runs inside a venv
+  (`sys.prefix != sys.base_prefix`, as under `uvx`/pipx) that venv's `bin`
+  directory is removed from `PATH`, so a bare `python3` resolves to the
+  repo's interpreter, not the tool's. Outside a venv the environment is
+  unchanged.
+- **Manifest evidence paths are cwd-relative.** A relative `file` evidence
+  path resolves against the process cwd, not the manifest's directory. When a
+  file-backed entry grades `unreadable_evidence`, the item's `detail` carries
+  `path` (the resolved absolute path) and `cwd` (the process cwd) — additive
+  fields; no existing field changes.
+
 ## Error shape
 
 Under `--format json`, errors are also JSON — not a plain-text line — written
