@@ -672,6 +672,7 @@ def run_sta(
     )
     propagated_clock = _validate_propagated_clock(request["constraints"], has_def)
     power_activity = _validate_power_activity(request["constraints"])
+    clock_uncertainty = _validate_clock_uncertainty(request["constraints"])
 
     spef_map: dict[str, str] | None = None
     if has_verilog:
@@ -760,6 +761,7 @@ def run_sta(
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
             power_activity=power_activity,
+            clock_uncertainty=clock_uncertainty,
             write_sdf=write_sdf,
             output_dir=output_dir,
             input_path=input_path,
@@ -923,6 +925,7 @@ def _dispatch_sta(
     wire_load_mode: str | None,
     propagated_clock: bool,
     power_activity: dict[str, float] | None,
+    clock_uncertainty: dict[str, float | None] | None,
     output_dir: str,
     input_path: str,
     basename: str,
@@ -966,6 +969,7 @@ def _dispatch_sta(
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
             power_activity=power_activity,
+            clock_uncertainty=clock_uncertainty,
             write_sdf=write_sdf,
             output_dir=output_dir,
             input_path=input_path,
@@ -998,6 +1002,7 @@ def _dispatch_sta(
         wire_load_mode=wire_load_mode,
         propagated_clock=propagated_clock,
         power_activity=power_activity,
+        clock_uncertainty=clock_uncertainty,
         output_dir=output_dir,
         script_tag=basename,
         scrub=report_paths.scrub,
@@ -1055,6 +1060,7 @@ def _dispatch_sta(
         # shapes; never infer it from clock_skew_ns, which is a measured
         # metric that is non-zero under ideal timing too.
         "clock_mode": "propagated" if propagated_clock else "ideal",
+        "clock_uncertainty": _clock_uncertainty_block(clock_uncertainty),
         "spef_path": report_paths.spef_path,
         "worst_slack_ns": corner_fields["worst_slack_ns"],
         "total_negative_slack_ns": corner_fields["total_negative_slack_ns"],
@@ -1134,6 +1140,7 @@ def _run_corner_session(
     wire_load_mode: str | None,
     propagated_clock: bool,
     power_activity: dict[str, float] | None,
+    clock_uncertainty: dict[str, float | None] | None,
     output_dir: str,
     script_tag: str,
     scrub: Callable[[str], str] = _identity,
@@ -1229,6 +1236,7 @@ def _run_corner_session(
             false_path_from=false_path_from,
             propagated_clock=propagated_clock,
             power_activity=power_activity,
+            clock_uncertainty=clock_uncertainty,
             sdf_path=sdf_path,
         )
     else:
@@ -1254,6 +1262,7 @@ def _run_corner_session(
             report_ports=report_ports,
             false_path_from=false_path_from,
             power_activity=power_activity,
+            clock_uncertainty=clock_uncertainty,
         )
     _write_script(script_path, lines)
 
@@ -1390,6 +1399,7 @@ def _run_multi_corner(
     wire_load_mode: str | None,
     propagated_clock: bool,
     power_activity: dict[str, float] | None,
+    clock_uncertainty: dict[str, float | None] | None,
     output_dir: str,
     input_path: str,
     basename: str,
@@ -1472,6 +1482,7 @@ def _run_multi_corner(
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
             power_activity=power_activity,
+            clock_uncertainty=clock_uncertainty,
             output_dir=output_dir,
             script_tag=script_tag,
             scrub=report_paths.scrub,
@@ -1545,6 +1556,7 @@ def _run_multi_corner(
         # entry carries that session's own `clock_propagation` evidence
         # block (the network latencies it reports *do* vary per corner).
         "clock_mode": "propagated" if propagated_clock else "ideal",
+        "clock_uncertainty": _clock_uncertainty_block(clock_uncertainty),
         "spef_path": report_paths.spef_path,
         "provenance": provenance,
         # Additive field (issue #1871): one entry per requested
@@ -2446,6 +2458,94 @@ def _power_activity_lines(power_activity: dict[str, float] | None) -> list[str]:
         if key in power_activity
     )
     return [f"set_power_activity -global{flags}"]
+
+
+_CLOCK_UNCERTAINTY_KEYS = ("setup_ns", "hold_ns")
+
+
+def _validate_clock_uncertainty(
+    constraints: dict[str, Any],
+) -> dict[str, float | None] | None:
+    """Validate ``constraints.clock_uncertainty_ns`` (issue #4240), returning
+    ``{"setup_ns": float | None, "hold_ns": float | None}`` (``None`` on a
+    side means unconstrained), or ``None`` when omitted or ``null`` (no
+    ``set_clock_uncertainty`` is emitted and the generated script is
+    unchanged).
+
+    The value is either a finite number ``>= 0`` (applied to setup and hold)
+    or an object with the optional keys ``setup_ns`` / ``hold_ns`` (each a
+    finite number ``>= 0``, at least one required). Booleans, non-finite or
+    negative numbers, unknown keys and any other type are request errors.
+    """
+    value = constraints.get("clock_uncertainty_ns")
+    if value is None:
+        return None
+
+    def _number(number: Any, name: str) -> float:
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, (int, float))
+            or not math.isfinite(number)
+        ):
+            raise PostRouteStaError(f"{name} must be a finite number")
+        if number < 0:
+            raise PostRouteStaError(f"{name} must be >= 0, got {number}")
+        return float(number)
+
+    if not isinstance(value, dict):
+        scalar = _number(value, "constraints.clock_uncertainty_ns")
+        return {"setup_ns": scalar, "hold_ns": scalar}
+    unknown = sorted(set(value) - set(_CLOCK_UNCERTAINTY_KEYS))
+    if unknown:
+        raise PostRouteStaError(
+            "constraints.clock_uncertainty_ns has unknown key(s): "
+            + ", ".join(unknown)
+            + " (allowed: setup_ns, hold_ns)"
+        )
+    if not value:
+        raise PostRouteStaError(
+            "constraints.clock_uncertainty_ns must give at least one of "
+            "'setup_ns' and 'hold_ns'"
+        )
+    return {
+        key: (
+            _number(value[key], f"constraints.clock_uncertainty_ns.{key}")
+            if value.get(key) is not None
+            else None
+        )
+        for key in _CLOCK_UNCERTAINTY_KEYS
+    }
+
+
+def _clock_uncertainty_lines(
+    clock_port: str, clock_uncertainty: dict[str, float | None] | None
+) -> list[str]:
+    """``set_clock_uncertainty -setup/-hold`` (issue #4240) on the clock
+    :func:`_clock_lines` created; empty when none was requested. Orthogonal
+    to ``set_propagated_clock``."""
+    if not clock_uncertainty:
+        return []
+    return [
+        f"set_clock_uncertainty -{key[:-3]} {clock_uncertainty[key]!r} "
+        f"[get_clocks {clock_port}]"
+        for key in _CLOCK_UNCERTAINTY_KEYS
+        if clock_uncertainty.get(key) is not None
+    ]
+
+
+def _clock_uncertainty_block(
+    clock_uncertainty: dict[str, float | None] | None,
+) -> dict[str, Any]:
+    """The ``clock_uncertainty`` response block (issue #4240): whether any
+    uncertainty was applied. A side not given is ``null`` (unconstrained),
+    never copied from the other."""
+    if not clock_uncertainty:
+        return {"applied": False}
+    return {
+        "applied": True,
+        "setup_ns": clock_uncertainty.get("setup_ns"),
+        "hold_ns": clock_uncertainty.get("hold_ns"),
+    }
 
 
 def _power_basis_block(
@@ -3433,6 +3533,7 @@ def _sta_script_lines(
     propagated_clock: bool = False,
     sdf_path: str | None = None,
     power_activity: dict[str, float] | None = None,
+    clock_uncertainty: dict[str, float | None] | None = None,
 ) -> list[str]:
     """Build the Tcl script for the single, from-scratch OpenSTA session
     this verb runs: load the LEF/DEF pair directly (no netlist, no
@@ -3479,6 +3580,7 @@ def _sta_script_lines(
     lines += _clock_lines(clock_port, clock_period_ns)
     if propagated_clock:
         lines += _propagated_clock_lines(clock_port)
+    lines += _clock_uncertainty_lines(clock_port, clock_uncertainty)
     lines += _request_io_delay_lines(
         clock_port,
         input_delay_ns,
@@ -3546,6 +3648,7 @@ def _sta_netlist_script_lines(
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
     power_activity: dict[str, float] | None = None,
+    clock_uncertainty: dict[str, float | None] | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
     session (issue #1825): no DEF, no placement, no routing. Links a
@@ -3589,6 +3692,7 @@ def _sta_netlist_script_lines(
         f"link_design {hdl_toplevel}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _clock_uncertainty_lines(clock_port, clock_uncertainty)
     lines += _request_io_delay_lines(
         clock_port,
         input_delay_ns,
