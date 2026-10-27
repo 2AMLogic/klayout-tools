@@ -37,7 +37,9 @@ discovery ``klt pdk``/``klt cells`` already use (Yosys survey section 0) --
 ``variant``/``root``): the resolved PDK install is whatever ``find_pdk()``'s
 own default search order (``$PDK_ROOT``/``$PDK``, then the ciel/volare
 stores, then the conventional prefixes) finds, exactly as ``klt pdk find``
-with no flags would -- unless the CLI's own ``--pdk``/``--pdk-root`` flags
+with no flags would (falling back to the first installed variant that ships
+``cell_library`` when the default pick lacks it and no ``--pdk``/``$PDK``
+was given, issue #4204) -- unless the CLI's own ``--pdk``/``--pdk-root`` flags
 (mirroring ``klt extract``'s identical pair) pin a specific installed
 variant/root, threaded straight through to :func:`run_synthesize`'s
 ``pdk_variant``/``pdk_root`` keyword args and from there to ``find_pdk()``.
