@@ -738,6 +738,76 @@ def test_parameters_values_must_be_scalars(tmp_path, value):
         run_functional_verification(request_path)
 
 
+@pytest.mark.parametrize(
+    "env",
+    [["X", "1"], {"X": 1}, {"X": None}, {"": "1"}, {"A=B": "1"}],
+)
+def test_env_malformed_is_a_request_error(tmp_path, env):
+    """`request.env` must be an object of non-empty, `=`-free keys to string
+    values -- anything else is a clear error naming `request.env`."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request(env=env))
+    with pytest.raises(FunctionalVerificationError, match="request.env"):
+        run_functional_verification(request_path)
+
+
+def test_stubbed_run_forwards_env_to_test_only_and_echoes_it(tmp_path, monkeypatch):
+    """`request.env` -> `Runner.test(extra_env=...)` (not the build), echoed
+    verbatim as `environment.env` (issue #4338)."""
+    _setup_inputs(tmp_path)
+    env = {"EXPECTED_SUM": "5"}
+    request_path = _write_request(tmp_path / "request.json", _base_request(env=env))
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    response = run_functional_verification(request_path)
+
+    assert runner.test_kwargs["extra_env"] == env
+    assert "extra_env" not in runner.build_kwargs
+    assert response["environment"]["env"] == env
+
+
+def test_stubbed_run_without_env_echoes_an_empty_mapping(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    response = run_functional_verification(request_path)
+
+    assert runner.test_kwargs["extra_env"] == {}
+    assert response["environment"]["env"] == {}
+
+
+def test_mutation_variant_forwards_env_to_its_test_step(tmp_path, monkeypatch):
+    """The per-mutant build+test sees the same `env` as the baseline run."""
+    captured: dict = {}
+    monkeypatch.setattr(fv, "_import_runner", lambda: object())
+    monkeypatch.setattr(fv, "_run_build", lambda *a, **k: object())
+    monkeypatch.setattr(
+        fv, "_run_test", lambda runner, **kwargs: captured.update(kwargs)
+    )
+    fv._build_and_test_variant(
+        engine="icarus",
+        sources=[],
+        hdl_toplevel="top",
+        build_dir=str(tmp_path),
+        build_args=[],
+        defines={},
+        includes=[],
+        timescale=("1ns", "1ps"),
+        parameters={},
+        env={"X": "1"},
+        build_log=str(tmp_path / "b.log"),
+        module="m",
+        module_dir=str(tmp_path),
+        testcase=None,
+        random_seed=None,
+        test_dir=str(tmp_path),
+        results_xml=str(tmp_path / "r.xml"),
+        test_log=str(tmp_path / "t.log"),
+    )
+    assert captured["extra_env"] == {"X": "1"}
+
+
 def test_missing_cocotb_is_an_actionable_error(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "cocotb_tools", None)
     with pytest.raises(
@@ -1201,6 +1271,7 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         "random_seed": 1785780800,
         # Additive (issue #3290): `{}` without `options.source_defines`.
         "source_defines": {},
+        "env": {},
         # Additive (issue #1002): `null` on any run without `options.sdf`,
         # so an unannotated verdict is never mistakable for an annotated one.
         "sdf": None,

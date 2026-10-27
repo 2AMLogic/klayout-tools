@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -319,6 +320,10 @@ def _path_list(
     return paths
 
 
+#: Upper bound (seconds) on a command's optional ``timeout_s``.
+COMMAND_TIMEOUT_CEILING_S = 21600
+
+
 def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
     """Validate one declared command: ``{"argv": [str, ...], "cwd"?: path}``.
 
@@ -348,6 +353,20 @@ def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
         raise AttestationError(f"'{field}.local_only' must be a boolean")
     if local_only:
         spec["local_only"] = True
+    if "timeout_s" in raw:
+        timeout_s = raw["timeout_s"]
+        if (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(timeout_s)
+            or timeout_s <= 0
+            or timeout_s > COMMAND_TIMEOUT_CEILING_S
+        ):
+            raise AttestationError(
+                f"'{field}.timeout_s' must be a positive number of seconds "
+                f"no greater than {COMMAND_TIMEOUT_CEILING_S}"
+            )
+        spec["timeout_s"] = timeout_s
     return spec
 
 
@@ -695,7 +714,7 @@ def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | 
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=_COMMAND_EVIDENCE_TIMEOUT_S,
+            timeout=spec.get("timeout_s", _COMMAND_EVIDENCE_TIMEOUT_S),
             check=False,
             env=_command_env(),
         )
