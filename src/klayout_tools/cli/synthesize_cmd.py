@@ -126,6 +126,7 @@ def _run_check(args: argparse.Namespace) -> int:
                 args.request,
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
+                netlist_override=args.netlist,
             )
     except SynthesizeError as exc:
         return emit_error("synthesize", str(exc), args.format)

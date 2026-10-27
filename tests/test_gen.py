@@ -158,6 +158,35 @@ def test_generate_writes_gds_and_matches_contract(tmp_path, pdk_root):
     assert report["warnings"] == []
 
 
+def test_generate_child_cell_named_after_cell_name_no_collision(tmp_path, pdk_root):
+    import klayout.db as kdb
+
+    names = []
+    layout = kdb.Layout()
+    for cell_name, num in (("a", 2), ("b", 3)):
+        output = tmp_path / f"{cell_name}.gds"
+        generate(
+            {
+                "generator": "resistor_strip",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"num": num},
+                "options": {"cell_name": cell_name, "output": str(output)},
+            }
+        )
+        single = kdb.Layout()
+        single.read(str(output))
+        names.append(sorted(c.name for c in single.each_cell()))
+        layout.read(str(output))
+
+    assert names == [["a", "a__core"], ["b", "b__core"]]
+    assert sorted(c.name for c in layout.each_cell()) == [
+        "a",
+        "a__core",
+        "b",
+        "b__core",
+    ]
+
+
 def test_generate_defaults_cell_name_and_output(tmp_path, pdk_root, monkeypatch):
     monkeypatch.chdir(tmp_path)
     request = {

@@ -7387,3 +7387,39 @@ def test_run_sta_power_basis_per_corner_entry(tmp_path, monkeypatch):
     for entry in report["corners"]:
         assert entry["power_basis"]["activity_source"] == "global"
         assert entry["power_basis"]["activity"] == 0.1
+
+
+# --------------------------------------------------------------------------- #
+# cwd independence (issue #4276)
+# --------------------------------------------------------------------------- #
+
+
+def test_run_verilog_mode_is_cwd_independent(tmp_path, monkeypatch):
+    """A `verilog` request addressed request-dir-relative (`../layout/...`)
+    must generate byte-identical Tcl -- every `read_*` argument absolute --
+    whether the process cwd is the repo root or the request's own directory."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    repo = tmp_path / "repo"
+    (repo / "layout" / "x").mkdir(parents=True)
+    (repo / "flow").mkdir()
+    _write(repo / "layout" / "x" / "top.v", "module top(input clk); endmodule\n")
+    flow = repo / "flow"
+    request_path = _write_request(
+        flow / "req.json", _verilog_base_request(verilog="../layout/x/top.v")
+    )
+    _stub_openroad_success(monkeypatch)
+
+    scripts = []
+    for cwd, arg in ((repo, "flow/req.json"), (flow, "req.json")):
+        monkeypatch.chdir(cwd)
+        run_sta(arg)
+        scripts.append((flow / ".klt" / "sta" / "sta_top.tcl").read_text("utf-8"))
+
+    assert request_path  # request lives in `flow/`
+    assert scripts[0] == scripts[1]
+    for line in scripts[0].splitlines():
+        if line.startswith("read_"):
+            assert os.path.isabs(line.split(maxsplit=1)[1]), line

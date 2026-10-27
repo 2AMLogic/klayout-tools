@@ -59,6 +59,7 @@ from . import _request_document as reqdoc
 from ._parsing import (
     parse_deck_options,
     parse_declared_pins,
+    parse_device_models,
     parse_label_layers,
     parse_probes,
 )
@@ -94,6 +95,12 @@ def _parse_label_layers(
     flag was never given -- this command's :class:`ExtractError` binding of
     the shared :func:`.._parsing.parse_label_layers` helper."""
     return parse_label_layers(raw, ExtractError)
+
+
+def _parse_device_models(raw: list[str] | None) -> dict[str, str] | None:
+    """``--device-model`` (issue #4234, repeatable) as the ``{class: model}``
+    mapping ``run_extract`` takes, or ``None`` when the flag was never given."""
+    return parse_device_models(raw, ExtractError)
 
 
 def _parse_declared_pins(raw: str | None) -> frozenset[str] | None:
@@ -393,6 +400,7 @@ _REQUEST_FIELD_DESTS = {
         "pin_source_cells",
         "deck_options",
         "label_layers",
+        "device_models",
         "probes",
         "defer_resistor_fixed_offset",
         "abstract_cells",
@@ -522,6 +530,13 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
                 flag="--label-layer",
                 error_cls=ExtractError,
             ),
+            "device_models": reqdoc.get_str_map_as_pairs(
+                request,
+                "device_models",
+                verb="extract",
+                flag="--device-model",
+                error_cls=ExtractError,
+            ),
             "probes": _request_probes(request),
             "defer_resistor_fixed_offset": _bool("defer_resistor_fixed_offset"),
             "abstract_cells": _str_list("abstract_cells"),
@@ -575,6 +590,7 @@ def run(args: argparse.Namespace) -> int:
         hierarchical_cells = _parse_hierarchical_cells(args.hierarchical_cells)
         deck_options = _parse_deck_options(args.deck_options)
         label_layers = _parse_label_layers(args.label_layers)
+        device_models = _parse_device_models(args.device_models)
         probes = parse_probes(args.probes, ExtractError)
         def_net_connections = _parse_def_net_connections(
             args.def_net_connections, spef_output=args.spef
@@ -618,6 +634,9 @@ def run(args: argparse.Namespace) -> int:
             # curated default. `None` when the flag was never given,
             # unchanged from every call site that predates it.
             label_layers=label_layers,
+            # `--device-model` (issue #4234): caller-named PDK model for a
+            # bipolar class with no curated binding. `None` when never given.
+            device_models=device_models,
             # `--probe` (issue #2986): point-to-net queries answered on this
             # run's own extraction. `[]` when the flag was never given.
             probes=probes,
@@ -773,6 +792,17 @@ def _run_check(args: argparse.Namespace) -> int:
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
+def _print_device_models(device_models: dict | None) -> None:
+    """One ``device_models: CLASS=SUBCKT, ...`` line (issue #4234); silent
+    when ``--device-model`` was never given."""
+    if not device_models:
+        return
+    rendered = ", ".join(
+        f"{name}={model}" for name, model in sorted(device_models.items())
+    )
+    print(f"device_models: {rendered}")
+
+
 def _print_label_layers(label_layers: dict | None) -> None:
     """One human-readable line for the response's ``label_layers`` echo
     (issue #2656), or nothing when ``--label-layer`` was not given.
@@ -861,6 +891,7 @@ def _print_text(report: dict) -> None:
     # this line adds no branch to an already long function -- the same shape
     # `_print_substrate_spreading` below already uses.
     _print_label_layers(report.get("label_layers"))
+    _print_device_models(report.get("device_models"))
     _print_probes(report.get("probes"))
     print(f"top: {report['top']}")
     print(f"dbu_um: {report['dbu_um']}")
