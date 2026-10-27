@@ -670,6 +670,7 @@ def _write_memory_evidence_stats(
     `select -list` blackbox listing."""
     stats_paths = []
     blackbox_path = None
+    select_paths = []
     with open(script_path, encoding="utf-8") as handle:
         for line in handle:
             match = _TEE_RE.match(line.rstrip("\n"))
@@ -678,6 +679,7 @@ def _write_memory_evidence_stats(
             match = _BLACKBOX_TEE_RE.match(line.rstrip("\n"))
             if match:
                 blackbox_path = _resolve_against(match.group(1), cwd)
+                select_paths.append(blackbox_path)
     assert len(stats_paths) == 2, stats_paths
     if memory_evidence is None:
         empty = {f"\\{hdl_toplevel}": {"num_memories": 0, "num_cells_by_type": {}}}
@@ -685,6 +687,11 @@ def _write_memory_evidence_stats(
     for path, modules in zip(stats_paths, memory_evidence, strict=True):
         with open(path, "w", encoding="utf-8") as handle:
             json.dump({"modules": modules}, handle)
+    # Issue #4205: a leading library-cell listing (empty here) precedes the
+    # blackbox listing; the last `select -list` tee is the blackbox one.
+    for path in select_paths[:-1]:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("")
     with open(blackbox_path, "w", encoding="utf-8") as handle:
         handle.write(blackbox_listing)
 
@@ -1024,8 +1031,8 @@ def test_home_rooted_liberty_makes_the_generated_script_scan_dirty_without_the_t
     """The oracle this issue is graded against is live: with the liberty left
     absolute (the pre-#1870 behaviour, reproduced here by withholding
     `pdk_root`), a `.ys` generated against a home-rooted PDK install really
-    does trip `env_provenance`'s `home-path` kind -- three times, once per
-    `-liberty` occurrence, exactly as the issue's repro reports.
+    does trip `env_provenance`'s `home-path` kind -- four times, once per
+    liberty occurrence, exactly as the issue's repro reports.
 
     Without this, the "scan is clean" assertions below could pass for the
     trivial reason that the scanner never looks at those lines."""
@@ -1034,7 +1041,7 @@ def test_home_rooted_liberty_makes_the_generated_script_scan_dirty_without_the_t
     scan = env_provenance.scan_files([script_path])
 
     assert scan["status"] == "leaked"
-    assert scan["leak_count"] == 3
+    assert scan["leak_count"] == 4
     assert {leak["kind"] for leak in scan["files"][0]["leaks"]} == {"home-path"}
 
 
@@ -1055,6 +1062,10 @@ def test_home_rooted_liberty_is_written_as_a_pdk_root_token_and_scans_clean(tmp_
         "$PDK_ROOT/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/"
         "gf180mcu_fd_sc_mcu7t5v0__tt_025C_1v80.lib"
     )
+    # Issue #4205: the liberty is loaded as cell definitions before any RTL.
+    lines = script_text.splitlines()
+    first_read = next(i for i, ln in enumerate(lines) if ln.startswith("read_"))
+    assert lines[first_read] == f"read_liberty -lib {token_path}"
     assert f"dfflibmap -liberty {token_path}" in script_text
     assert f"abc -liberty {token_path}" in script_text
     assert f"stat -liberty {token_path}" in script_text
@@ -6204,3 +6215,50 @@ def test_synthesis_error_svh_mixed_sources_path_gets_hint():
     line = "/tmp/a b/inc.svh:7: ERROR: syntax error, unexpected '[', expecting ')'"
     msg = synthesize._synthesis_error_message(fake_completed(stderr=line, returncode=1))
     assert "unpacked-array port" in msg
+
+
+_LIB_CELL_RTL = """\
+module libcell_inst(input a, output y);
+  sky130_fd_sc_hd__dlygate4sd3_1 u (.A(a), .X(y));
+endmodule
+"""
+
+_LIB_CELL_STUB = (
+    "(* blackbox *) module sky130_fd_sc_hd__dlygate4sd3_1(input A, output X);\n"
+    "endmodule\n"
+)
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    _REAL_SKY130_VARIANT is None,
+    reason="no real sky130_fd_sc_hd liberty resolves via list_pdks() on this machine",
+)
+@pytest.mark.parametrize("with_stub", [False, True])
+def test_integration_real_yosys_library_cell_instance_needs_no_stub(
+    tmp_path, monkeypatch, with_stub
+):
+    """Issue #4205: RTL instantiating a cell of the request's own cell
+    library synthesizes with no hand-written blackbox stub; the instance
+    survives, its liberty area is counted, it is not reported as a blackbox,
+    and a legacy stub for the same cell still works."""
+    root, variant = _REAL_SKY130_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+    _write(tmp_path / "libcell_inst.v", _LIB_CELL_RTL)
+    sources = ["libcell_inst.v"]
+    if with_stub:
+        _write(tmp_path / "stub.v", _LIB_CELL_STUB)
+        sources = ["stub.v", "libcell_inst.v"]
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(sources=sources, hdl_toplevel="libcell_inst"),
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["status"] == "ok"
+    assert report["instance_counts_by_type"] == {"sky130_fd_sc_hd__dlygate4sd3_1": 1}
+    assert report["instance_count"] == 1
+    assert report["area_um2"] > 0
+    assert report["blackbox_modules"] == []

@@ -1294,6 +1294,7 @@ def run_synthesize(
         adder_techmap_path=adder_techmap_path,
         repo_root=repo_root,
         parameters=parameters,
+        liberty_path=liberty_path,
     )
 
     equivalence = None
@@ -2461,7 +2462,11 @@ def _write_script(
     if constr_text is not None and abc_log_text is not None:
         abc_command = f"tee -q -o {abc_log_text} {abc_command}"
 
-    lines = [
+    # Issue #4205: load the request's own cell library as cell definitions
+    # first, so RTL may instantiate a library cell by name with no stub.
+    # `read_verilog` of a legacy stub for the same cell still works.
+    lines = [f"read_liberty -lib {liberty_text}"]
+    lines += [
         read_verilog_line(_script_path_text(path, repo_root=repo_root))
         for path in sources
     ]
