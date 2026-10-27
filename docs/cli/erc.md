@@ -11,7 +11,7 @@ the antenna + ERC signoff epic
 
 ```
 klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
-                      [--findings-only [--omit-antenna-tables]]
+                      [--findings-only] [--omit-antenna-tables]
                       [--format text|json]
 klt erc --check <report> [--rerun] [--format text|json]
 ```
@@ -48,8 +48,11 @@ klt erc --check <report> [--rerun] [--format text|json]
   finding is identical to a full run; the antenna half reports `null`
   accumulation fields and `"unchecked"` verdicts. Mutually exclusive with
   `--pdk` (exit 1). See "Findings-only runs" below.
-- `--omit-antenna-tables` — valid only with `--findings-only` (otherwise exit
-  1): drop the all-`unchecked` `gates[]` array and collapse the antenna
+- `--omit-antenna-tables` — valid with `--findings-only`, or (issue
+  [#4385](https://github.com/2AMLogic/klayout-tools/issues/4385)) without
+  `--pdk` when no antenna level is graded; with `--pdk` and no
+  `--findings-only`, or when spec `antenna_limits` grade a level, exit 1 (a
+  real verdict is never dropped): drop the all-ungraded `gates[]` array and collapse the antenna
   `coverage` entries to one aggregate entry per category, so the report of a
   dense layout is small enough to commit verbatim (issue
   [#3011](https://github.com/2AMLogic/klayout-tools/issues/3011)). Sets
@@ -2545,8 +2548,14 @@ klt erc routed.gds supply.erc.json --findings-only --omit-antenna-tables --forma
 - `klt signoff` still recognises the envelope as an ERC report (a `gates`
   list plus `gate_role`) and grades it the same.
 
-Passing `--omit-antenna-tables` without `--findings-only` is a clean exit-1
-error: a full run's `gates[]` carries real measurements.
+Without `--findings-only`, the flag is also accepted on a `--pdk`-less run
+whose spec `antenna_limits` grade no level (issue #4385): the same `gates: []`
+projection applies, the aggregate `skipped` entry carries reason
+`missing_antenna_pdk` instead of `findings_only`, and `status` /
+`erc_status` / the exit code are identical to the run without the flag. With
+`--pdk` (and no `--findings-only`), or when `antenna_limits` grade at least
+one level, it is a clean exit-1 error: `gates[]` then carries real
+verdicts.
 
 ### Compact findings-only reports
 

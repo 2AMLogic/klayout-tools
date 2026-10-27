@@ -8535,18 +8535,95 @@ def test_omit_antenna_tables_coverage_collapses_and_validates(tmp_path):
     assert cov["checked"] == full["coverage"]["checked"] == []
 
 
-def test_omit_antenna_tables_without_findings_only_raises(tmp_path):
+def test_omit_antenna_tables_without_findings_only_no_pdk(tmp_path, capsys):
+    from klayout_tools.coverage import coverage_validation_error
+
     gds = tmp_path / "basic.gds"
     spec = tmp_path / "basic.erc.json"
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    with pytest.raises(ErcError, match="--findings-only"):
+    full = run_erc(str(gds), str(spec))
+    omitted = run_erc(str(gds), str(spec), omit_antenna_tables=True)
+
+    assert omitted["gates"] == []
+    assert omitted["gate_count"] == full["gate_count"] > 0
+    assert omitted["antenna_tables_omitted"] is True
+    cov = omitted["coverage"]
+    assert coverage_validation_error(cov) is None
+    assert [e["id"] for e in cov["skipped"]] == ["antenna:[]"]
+    assert [e["reason"] for e in cov["skipped"]] == ["missing_antenna_pdk"]
+    assert (
+        len([e for e in cov["inapplicable"] if e["reason"] == "gate_reference_level"])
+        == 1
+    )
+    for key in omitted:
+        if key in {"gates", "coverage", "antenna_tables_omitted"}:
+            continue
+        assert json.dumps(omitted[key], sort_keys=True) == json.dumps(
+            full[key], sort_keys=True
+        ), key
+    base = ["erc", str(gds), str(spec), "--format", "json"]
+    code_full = main(base)
+    code_omit = main([*base, "--omit-antenna-tables"])
+    capsys.readouterr()
+    assert code_omit == code_full
+
+
+def test_omit_antenna_tables_with_pdk_without_findings_only_raises(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    with pytest.raises(ErcError, match="--pdk"):
+        run_erc(str(gds), str(spec), pdk="sky130", omit_antenna_tables=True)
+    assert (
+        main(
+            [
+                "erc",
+                str(gds),
+                str(spec),
+                "--pdk",
+                "sky130",
+                "--omit-antenna-tables",
+                "--format",
+                "json",
+            ]
+        )
+        == 1
+    )
+
+
+def test_omit_antenna_tables_graded_antenna_limits_raises(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    _basic_spec(tmp_path / "basic.erc.json")
+    spec = tmp_path / "limits.erc.json"
+    _limits_spec(spec, [_limit("met1", 100.0)])
+
+    with pytest.raises(ErcError, match="antenna_limits"):
         run_erc(str(gds), str(spec), omit_antenna_tables=True)
     assert (
         main(["erc", str(gds), str(spec), "--omit-antenna-tables", "--format", "json"])
         == 1
     )
+
+
+def test_omit_antenna_tables_rerun_replays(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps(run_erc(str(gds), str(spec), omit_antenna_tables=True))
+    )
+
+    assert main(["erc", "--check", str(report), "--rerun", "--format", "json"]) in {
+        0,
+        4,
+    }
 
 
 def test_omit_antenna_tables_pdk_still_rejected(tmp_path):

@@ -7444,14 +7444,17 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
         "--omit-antenna-tables",
         action="store_true",
         help=(
-            "with --findings-only, drop the all-'unchecked' gates[] array "
+            "drop the all-ungraded gates[] array "
             "(gate_count keeps the real count) and collapse the antenna "
             "coverage's per-gate skipped/gate_reference_level entries to "
             "one aggregate entry each, so a dense layout's report is small "
             "enough to commit verbatim (issue #3011). Sets "
             "antenna_tables_omitted: true; every verdict, erc_findings and "
             "the exit code are identical to the same run without it. "
-            "Requires --findings-only -- passing it alone exits 1."
+            "Valid with --findings-only, or without --pdk when no antenna "
+            "level is graded (issue #4385); with --pdk (no --findings-only) "
+            "or spec antenna_limits that grade a level it exits 1, so a "
+            "real verdict is never dropped."
         ),
     )
     erc_parser.add_argument(
