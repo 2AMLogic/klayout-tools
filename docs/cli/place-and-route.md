@@ -2444,6 +2444,11 @@ above), so a caller citing a platform config can confirm its request
 actually reproduced it, rather than silently falling back to this command's
 plain defaults.
 
+The `gf180mcu_7t_6M` preset deliberately does **not** reproduce that
+`-split_cuts {Metal3 0.128}` (issue #4301): the generated via cells were
+reported DRC-dirty under `klt drc --deck gf180mcu`. `split_cuts` remains a
+supported request field, and `gf180mcu_9t_6M` still carries it, unverified.
+
 ### `sg13g2_stdcell`: a supported PDN with no tapcell step (issues #1784, #2441)
 
 `sg13g2_stdcell` ships **no tap or endcap cells at all** — IHP's own
@@ -2716,8 +2721,8 @@ platform at all:
 
 | `preset` | `pdk.cell_library` | Upstream source | Straps (bottom→top) | Via-stack tuning |
 | --- | --- | --- | --- | --- |
-| `"gf180mcu_7t_6M"` | `gf180mcu_fd_sc_mcu7t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg` | `Metal1` w 0.600 / p 3.92 / off 0, followpins · `Metal4` w 4.480 / sp 0.56 / p 44.8 / off 22.4 · `Metal5` w 4.480 / p 89.6 / off 44.8 | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`, `split_cuts {Metal3 0.128}`. `Metal4↔Metal5`: none. |
-| `"gf180mcu_9t_6M"` | `gf180mcu_fd_sc_mcu9t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` | `Metal1` w 0.900 / p 5.040 / off 0, followpins · `Metal4`/`Metal5` identical to the 7t row above | identical to the 7t row above |
+| `"gf180mcu_7t_6M"` | `gf180mcu_fd_sc_mcu7t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg` | `Metal1` w 0.600 / p 3.92 / off 0, followpins · `Metal4` w 4.480 / sp 0.56 / p 44.8 / off 22.4 · `Metal5` w 4.480 / p 89.6 / off 44.8 | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`; **no** `split_cuts` — a deliberate deviation from the ORFS cfg (issue #4301: its `-split_cuts {Metal3 0.128}` produced DRC-dirty vias under `klt drc --deck gf180mcu`). `Metal4↔Metal5`: none. |
+| `"gf180mcu_9t_6M"` | `gf180mcu_fd_sc_mcu9t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` | `Metal1` w 0.900 / p 5.040 / off 0, followpins · `Metal4`/`Metal5` identical to the 7t row above | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`, **keeps** the ORFS cfg's `split_cuts {Metal3 0.128}` on `Metal1↔Metal4`; whether that is DRC-dirty on this preset is **unverified** (only the 7t preset was reported). `Metal4↔Metal5`: none. |
 | `"sg13g2"` | `sg13g2_stdcell` | IHP-Open-PDK v0.3.0 `libs.tech/librelane/config.tcl` (+ `libs.tech/librelane/sg13g2_stdcell/config.tcl` for `PDN_RAIL_WIDTH`) | `Metal1` w 0.44 / **p 7.56 (derived — see below)** / off 0, followpins · `TopMetal1` w 2.2 / sp 4.0 / p 75.6 / off 13.6 · `TopMetal2` w 2.2 / sp 4.0 / p 75.6 / off 13.6 | none — that config names no via-stack tuning |
 | `"sky130hd"` | `sky130_fd_sc_hd` | ORFS `flow/platforms/sky130hd/pdn.tcl` | `met1` w 0.48 / p 5.44 / off 0, followpins · `met4` w 1.600 / p 27.140 / off 13.570 · `met5` w 1.600 / p 27.200 / off 13.600 | none — that config's two `add_pdn_connect` lines carry no flags |
 
