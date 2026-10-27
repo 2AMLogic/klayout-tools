@@ -3044,6 +3044,31 @@ def _check_never_started(
         )
 
 
+def _report_if_unstarted(
+    grace_s: float | None,
+    *,
+    reported: bool,
+    last_state: str | None,
+    status: dict[str, Any] | None,
+    job_id: str,
+    elapsed: float,
+) -> bool:
+    """Print the never-started diagnostic once ``grace_s`` has passed with no
+    ``status.json`` ever observed (issue #4291); return the updated
+    ``reported`` flag. Kept out of :func:`poll_status` for its complexity
+    budget."""
+    due = (
+        grace_s is not None
+        and not reported
+        and last_state is None
+        and status is None
+        and elapsed >= grace_s
+    )
+    if due:
+        print(_format_never_started(job_id, elapsed), file=sys.stderr)
+    return reported or due
+
+
 def poll_status(
     config: BatchConfig,
     job_id: str,
@@ -3113,15 +3138,14 @@ def poll_status(
         polls += 1
         status = _read_status(config, job_id, run)
         now = monotonic()
-        if (
-            unstarted_grace_s is not None
-            and not unstarted_reported
-            and last_state is None
-            and status is None
-            and now - started >= unstarted_grace_s
-        ):
-            unstarted_reported = True
-            print(_format_never_started(job_id, now - started), file=sys.stderr)
+        unstarted_reported = _report_if_unstarted(
+            unstarted_grace_s,
+            reported=unstarted_reported,
+            last_state=last_state,
+            status=status,
+            job_id=job_id,
+            elapsed=now - started,
+        )
         if status is not None:
             new_state = str(status.get("state") or "")
             if on_state is not None and new_state != last_state:
