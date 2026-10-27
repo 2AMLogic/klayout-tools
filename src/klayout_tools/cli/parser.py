@@ -34,6 +34,7 @@ from . import (
     eval_cmd,
     evidence_cmd,
     extract_cmd,
+    formal_cmd,
     functional_verification_cmd,
     gen_cmd,
     gen_compose_cmd,
@@ -337,6 +338,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_techmap_parser(subparsers)
 
     _add_equiv_parser(subparsers)
+
+    _add_formal_parser(subparsers)
 
     _add_erc_parser(subparsers)
 
@@ -3356,6 +3359,47 @@ def _add_equiv_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(equiv_parser)
     equiv_parser.set_defaults(func=equiv_cmd.run)
+
+
+def _add_formal_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``formal`` verb for bounded/inductive property checking.
+
+    Check a design's assert/cover properties via SymbiYosys. See
+    docs/cli/formal.md for full details.
+    """
+    formal_parser = subparsers.add_parser(
+        "formal",
+        help="check assert/cover properties of RTL or a mapped netlist (SymbiYosys)",
+        description=(
+            "Formal property checking via SymbiYosys: bounded model checking "
+            "(`bmc`), k-induction (`prove`) or cover reachability (`cover`) "
+            "of an RTL design or a `klt synthesize` netlist (`netlist_path`, "
+            "with a `liberty` supplying cell models). Generates the .sby "
+            "itself, copying inputs in so a WASI-sandboxed Yosys works. "
+            "`fail` carries a VCD counterexample trace; a timeout is "
+            "`unknown`, never `pass`. See docs/cli/formal.md."
+        ),
+    )
+    formal_parser.add_argument(
+        "request",
+        help=(
+            "klt formal request: a path to a JSON file, '-' to read the "
+            "request from stdin, or an inline JSON object string"
+        ),
+    )
+    formal_parser.add_argument(
+        "--timeout-s",
+        dest="timeout_s",
+        type=float,
+        default=None,
+        help=(
+            "overall wall-clock timeout in seconds (default: 120, or the "
+            "request's own `timeout_s`); overrides the request field. A run "
+            "that does not finish is `unknown`, never `pass`"
+        ),
+    )
+    _add_format_arg(formal_parser)
+    formal_parser.set_defaults(func=formal_cmd.run)
 
 
 def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
