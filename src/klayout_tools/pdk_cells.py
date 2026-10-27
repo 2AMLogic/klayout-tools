@@ -236,6 +236,52 @@ def list_cell_libraries(
     return result
 
 
+def _ships_cell_library(info: dict[str, Any], cell_library: str) -> bool:
+    """True when the resolved install ships ``cell_library`` (libs_ref dir or
+    a ``klt-pdk.json`` liberty mapping)."""
+    libs_ref = info["assets"]["libs_ref"]
+    if libs_ref and os.path.isdir(os.path.join(libs_ref, cell_library)):
+        return True
+    variant_dir = variant_dir_of(info)
+    if variant_dir is None or not has_descriptor(variant_dir):
+        return False
+    try:
+        return cell_library in load_descriptor(variant_dir)["liberty"]
+    except DescriptorError:
+        return False
+
+
+def _variants_shipping(
+    cell_library: str,
+    *,
+    root: str | None = None,
+    exclude: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Installed ``find_pdk`` payloads that ship ``cell_library``.
+
+    In :func:`list_pdks` order (root precedence, then sorted variant).
+    ``root`` restricts the scan to one install root; ``exclude`` skips the
+    already-resolved variant/root pair.
+    """
+    found: list[dict[str, Any]] = []
+    for install in list_pdks(root=root)["installs"]:
+        for variant in install["variants"]:
+            name = variant["name"]
+            if (
+                exclude is not None
+                and name == exclude["variant"]
+                and install["root"] == exclude["root"]
+            ):
+                continue
+            try:
+                other = find_pdk(variant=name, root=install["root"])
+            except PdkNotFoundError:
+                continue
+            if _ships_cell_library(other, cell_library):
+                found.append(other)
+    return found
+
+
 def _other_variants_hint(cell_library: str, resolved: dict[str, Any]) -> str:
     """Suffix naming other installed variants that ship ``cell_library``.
 
@@ -245,20 +291,10 @@ def _other_variants_hint(cell_library: str, resolved: dict[str, Any]) -> str:
     """
     try:
         candidates: list[str] = []
-        for install in list_pdks()["installs"]:
-            for variant in install["variants"]:
-                name = variant["name"]
-                if name == resolved["variant"] and install["root"] == resolved["root"]:
-                    continue
-                try:
-                    other = find_pdk(variant=name, root=install["root"])
-                except PdkNotFoundError:
-                    continue
-                libs_ref = other["assets"]["libs_ref"]
-                if libs_ref and os.path.isdir(os.path.join(libs_ref, cell_library)):
-                    entry = f"'{name}' at '{install['root']}'"
-                    if entry not in candidates:
-                        candidates.append(entry)
+        for other in _variants_shipping(cell_library, exclude=resolved):
+            entry = f"'{other['variant']}' at '{other['root']}'"
+            if entry not in candidates:
+                candidates.append(entry)
         if not candidates:
             return ""
         return (
@@ -267,6 +303,31 @@ def _other_variants_hint(cell_library: str, resolved: dict[str, Any]) -> str:
         )
     except Exception:  # noqa: BLE001 -- best-effort hint only
         return ""
+
+
+def _default_variant_shipping(
+    cell_library: str,
+    info: dict[str, Any],
+    variant: str | None,
+    root: str | None,
+) -> dict[str, Any]:
+    """Return ``info``, or the first installed variant shipping ``cell_library``.
+
+    Only substitutes when no explicit variant/``$PDK`` choice was made and the
+    default pick lacks the library (issue #4204); same first-match posture as
+    :func:`find_pdk`, so the choice shows in the returned pdk_info.
+    """
+    if (
+        variant is not None
+        or os.environ.get("PDK")
+        or _ships_cell_library(info, cell_library)
+    ):
+        return info
+    try:
+        shipping = _variants_shipping(cell_library, root=root)
+    except Exception:  # noqa: BLE001 -- fall through to the original error
+        return info
+    return shipping[0] if shipping else info
 
 
 def resolve_liberty_for_cell_library(
@@ -294,6 +355,10 @@ def resolve_liberty_for_cell_library(
     installed PDK variant/root exactly as :func:`find_pdk` does; ``None`` for
     either leaves that resolver's own default search order in effect.
 
+    When neither ``variant`` nor ``$PDK`` is set and the default install lacks
+    ``cell_library``, the first installed variant that ships it is used
+    instead (issue #4204); an explicit ``variant``/``$PDK`` is never overridden.
+
     ``pdk_info`` is :func:`find_pdk`'s own resolution dict, returned
     unchanged for the caller to pass through to its own provenance builder.
 
@@ -308,6 +373,8 @@ def resolve_liberty_for_cell_library(
         info = find_pdk(variant=variant, root=root)
     except PdkNotFoundError as exc:
         raise error_cls(str(exc)) from exc
+
+    info = _default_variant_shipping(cell_library, info, variant, root)
 
     mapped = _descriptor_liberty(info, cell_library, requested_corner, error_cls)
     if mapped is not None:

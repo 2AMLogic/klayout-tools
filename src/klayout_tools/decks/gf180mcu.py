@@ -2268,6 +2268,114 @@ DECK += [
     )
 ]
 
+# ---------------------------------------------------------------------------
+# eFuse (`EF.*`) rules -- `rule_decks/efuse.rb` (issue #4316)
+# ---------------------------------------------------------------------------
+#
+# `efuse.rb` defines 27 rule ids over EFUSE_MK (80/5), PLFUSE (125/5) and the
+# derived `cathode`/`anode` poly regions. Until issue #4316 this deck carried
+# both marker layers as layer names / off-grid checks only, so drawn eFuse
+# geometry was unevaluated and a `clean` verdict had an undisclosed hole.
+#
+# Transcribed (the rules that need no derived cathode/anode layer):
+#
+# - `EF.14`: `lvs_source.not_outside(efuse_mk).not(efuse_mk)`, i.e. an
+#   LVS_SOURCE (100/8) shape touching EFUSE_MK must lie inside it -- an
+#   `"enclosing"` rule at margin 0 (interaction-scoped, like the runset).
+# - `EF.17`: EFUSE_MK to EFUSE_MK space, 0.26um.
+# - `EF.20`: `plfuse.separation(comp + nplus + esd + sab + resistor, 2.73,
+#   euclidian)`, one rule per layer (a union of five layers has no
+#   single-layer spelling; the violating distances are the same).
+#
+# Everything else is in `_EFUSE_UNMODELED_RULES` below, with the reason.
+_EFUSE_MK = (80, 5)  # EFUSE_MK
+_PLFUSE = (125, 5)  # PLFUSE
+_LVS_SOURCE = (100, 8)  # LVS_SOURCE
+_EF_PROVENANCE_FILE = "efuse"
+
+DECK += [
+    DrcRule(
+        id="efuse_mk.enclosing.lvs_source.1",
+        description="EFUSE_MK must enclose LVS_SOURCE",
+        layer=_EFUSE_MK,
+        other_layer=_LVS_SOURCE,
+        check="enclosing",
+        threshold_dbu=0,
+        # efuse.rb "EF.14": `lvs_source.not_outside(efuse_mk).not(efuse_mk)`
+        scope="EF",
+        provenance=_gf180mcu_klayout_deck_provenance(_EF_PROVENANCE_FILE, "EF.14"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="efuse_mk.space.1",
+        description="minimum EFUSE_MK to EFUSE_MK space",
+        layer=_EFUSE_MK,
+        check="space",
+        threshold_dbu=260,  # 0.26 um
+        # efuse.rb "EF.17": `efuse_mk.space(0.26.um, euclidian)`
+        scope="EF",
+        provenance=_gf180mcu_klayout_deck_provenance(_EF_PROVENANCE_FILE, "EF.17"),
+        voltage_independent=True,
+    ),
+]
+
+DECK += [
+    DrcRule(
+        id=f"plfuse.separation.{stem}.1",
+        description=f"minimum PLFUSE space to {name}",
+        layer=_PLFUSE,
+        other_layer=other,
+        check="separation",
+        threshold_dbu=2730,  # 2.73 um
+        # efuse.rb "EF.20": `plfuse.separation(comp + nplus + esd + sab +
+        # resistor, 2.73.um, euclidian)`
+        scope="EF",
+        provenance=_gf180mcu_klayout_deck_provenance(_EF_PROVENANCE_FILE, "EF.20"),
+        voltage_independent=True,
+    )
+    for stem, name, other in (
+        ("comp", "Comp", (22, 0)),
+        ("nplus", "Nplus", (32, 0)),
+        ("esd", "ESD", _ESD),
+        ("sab", "SAB", (49, 0)),
+        ("resistor", "Resistor", (62, 0)),
+    )
+]
+
+#: `efuse.rb` rule ids this deck knowingly does not transcribe (issue #4316),
+#: with the reason each is out of reach of the existing check kinds.
+#: `UNMODELED_RULES` surfaces every key as `coverage.unmodeled_rules`. Remove
+#: an id when its rule is added.
+_EFUSE_UNMODELED_RULES: dict[str, str] = {
+    "EF.01": "needs `efuse_mk_pplus = efuse_mk & pplus`, a derived layer",
+    "EF.02": (
+        "`plfuse.width != 0.18um`: a min/max width on the short side; the "
+        "bbox-based max half would flag the 1.26um length"
+    ),
+    "EF.03": "PLFUSE length via `centers`/edge-length selection",
+    "EF.04a": "`interacting(poly2 - plfuse, 2, 2)` count selector on PLFUSE",
+    "EF.04b": "`non_rectangles`: no check kind",
+    "EF.04c": "`non_rectangles` on the derived `cathode` poly region",
+    "EF.04d": "`non_rectangles` on the derived `anode` poly region",
+    "EF.05": "needs the derived `poly2 & efuse_mk` region and LVS_SOURCE boolean",
+    "EF.06": "edge-length test on the derived `cathode` region",
+    "EF.07": "edge-length test on the derived `cathode` region",
+    "EF.08": "edge-length test on the derived `anode` region",
+    "EF.09": "edge-length test on the derived `anode` region",
+    "EF.10": "needs the derived `cathode` region",
+    "EF.11": "needs the derived `anode` region",
+    "EF.12": "needs `contact & cathode` and a polygon-output separation",
+    "EF.13": "needs `contact & anode` and a polygon-output separation",
+    "EF.15": "`plfuse.interacting(contact)`: no polygon-selector check kind",
+    "EF.16a": "`cathode.not_covering(contact, 4, 4)`: derived region + count",
+    "EF.16b": "`anode.not_covering(contact, 4, 4)`: derived region + count",
+    "EF.18": "`plfuse.outside(...)` polygon selector over a union incl. Metal1/2",
+    "EF.19": "`plfuse.outside(metal1).outside(metal2)` polygon selector",
+    "EF.21": "`extents.edges` / `centers` edge-length test on derived regions",
+    "EF.22a": "edge-length test on the derived `cathode` region",
+    "EF.22b": "edge-length test on the derived `anode` region",
+}
+
 #: Upstream `esd.rb` / `guard_ring.rb` rule ids this deck knowingly does not
 #: transcribe, with the reason each is out of reach of the existing check kinds
 #: (issue #3792). `UNMODELED_RULES` below surfaces every key (plus the MT30/MSLOT
@@ -2398,6 +2506,7 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (241, 0): "Schottky_diode",
     (24, 0): "ESD",
     (167, 5): "GUARD_RING_MK",
+    (100, 8): "LVS_SOURCE",
 }
 
 #: Official gf180mcu rule ids this curated deck knowingly does *not*
@@ -2460,6 +2569,7 @@ UNMODELED_RULES: tuple[str, ...] = tuple(
     sorted(
         (
             *UNTRANSCRIBED_RULES,
+            *_EFUSE_UNMODELED_RULES,
             *_MT_MSLOT_UNMODELED_RULES,
             *_METAL_EOL_UNMODELED_RULES,
             *_UNMODELED_DUALGATE_RULES,
