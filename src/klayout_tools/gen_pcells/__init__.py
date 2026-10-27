@@ -43,6 +43,7 @@ from .bond_pad import _build_bond_pad_pcell
 from .cap_array import _build_cap_array_pcell
 from .cap_vpp_array import _build_cap_vpp_array_pcell
 from .diff_pair import _build_diff_pair_pcell
+from .diode import _build_diode_pcell
 from .esd_device import _build_esd_device_pcell
 from .guard_ring import _build_guard_ring_pcell
 from .mos_array import _build_mos_array_pcell
@@ -56,6 +57,7 @@ __all__ = [
     "_build_cap_array_pcell",
     "_build_cap_vpp_array_pcell",
     "_build_diff_pair_pcell",
+    "_build_diode_pcell",
     "_build_esd_device_pcell",
     "_build_guard_ring_pcell",
     "_build_mos_array_pcell",

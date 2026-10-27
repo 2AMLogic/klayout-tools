@@ -636,6 +636,11 @@ def _print_describe_grader_text(result: dict) -> None:
             ", ".join(str(i) for i in items) if items else "none (satisfies nothing)"
         )
         print(f"  {kind}: {scope}")
+    print("pinned PDK runsets (digest -> pdk @ commit):")
+    for digest, pin in result["pinned_runsets"].items():
+        print(
+            f"  {digest}: {pin.get('pdk')} @ {pin.get('commit') or pin.get('revision')}"
+        )
 
 
 def _print_text(result: dict) -> None:
