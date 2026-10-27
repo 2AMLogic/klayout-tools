@@ -282,6 +282,8 @@ def _plan_inputs(
     seen: set[str] = set()
     for index, item in enumerate(raw_inputs):
         label = f"{where}.inputs[{index}]"
+        ref: Any
+        name: Any
         if isinstance(item, str):
             ref, name = item, item
         elif isinstance(item, dict) and set(item) <= {"path", "name"}:
