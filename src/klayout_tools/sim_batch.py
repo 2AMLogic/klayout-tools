@@ -232,6 +232,9 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     "corners.process[].sections[] (object form)": "0.7.0",
     # 1b51954f options.ngspice_init (#2530); first in v0.7.0.
     "options.ngspice_init": "0.7.0",
+    # 75f738422 options.ngspice_options (#3111); first in v0.8.0
+    # (`git tag --contains 75f738422` -> v0.8.0 only, #4212).
+    "options.ngspice_options": "0.8.0",
     # 7849a377c corners.params parameter axis (#3035); first in v0.8.0
     # (`git tag --contains 7849a377c` lists v0.8.0 only; `git describe` gives
     # v0.7.0-709-g7849a377c). Post-tag dev builds render as `0.7.1.devN`, which
@@ -268,8 +271,9 @@ _BATCH_STDERR_TAIL_BYTES = 64 * 1024
 _BATCH_JOB_FAILURE_TAIL_BYTES = 1500
 
 #: ``$EDA_OUTPUT_DIR``-relative directory the job command points `klt sim`'s
-#: ``--outdir`` at when ``options.keep_artifacts`` is set, so per-corner
-#: logs/rawfiles land inside the one tree the harness collects.
+#: ``--outdir`` at, so per-corner logs/rawfiles land inside the one tree the
+#: harness collects (issue #4369: always, so a deck-abort log is readable;
+#: ``options.keep_artifacts`` only gates installing them for the caller).
 BATCH_ARTIFACTS_DIRNAME = "artifacts"
 
 #: ``job.json``'s ``tool`` field -- informational only (the harness echoes it
@@ -823,6 +827,7 @@ _RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
         "temperature_param" in (request.get("corners") or {})
     ),
     "options.ngspice_init": _uses_option("ngspice_init"),
+    "options.ngspice_options": _uses_option("ngspice_options"),
     "options.osdi_preload": _uses_option("osdi_preload"),
     "options.stage_model_inputs": _uses_option("stage_model_inputs"),
 }
@@ -1603,8 +1608,10 @@ def _build_batch_job_spec(
     # An explicit `options.max_workers` in the request still wins.
     if not (remote_request.get("options") or {}).get("max_workers"):
         command += ' ${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}'
-    if keep_artifacts:
-        command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
+    # Always collect the per-corner engine logs: without them a deck abort
+    # (`could not find a valid modelname`) never reaches the report (#4369).
+    # Only `keep_artifacts` installs them into the caller's artifact dir.
+    command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
     # stdout -> report.json (the success channel); stderr was teed into
     # stderr.log from the job command's first line (see
     # _job_stderr_capture_prefix), so it also covers the preflight.
@@ -5102,6 +5109,85 @@ class _CapacityWatch:
         self._finished = 0
         self._last_emit: float | None = None
         self._last_waiting = 0
+        self._states: dict[int, str] = {}
+        self._launch_events = 0
+        self._first_launch_at: float | None = None
+        self._last_counts: tuple[int, int, int, int] = (0, 0, total, 0)
+        self._last_progress: float | None = None
+        self._final_emitted = False
+
+    def seed(self, index: int, state: str | None) -> None:
+        """Record the state a resumed shard starts in (no progress line)."""
+        if state in ("launching", "launched", "collected"):
+            with self._lock:
+                self._states[index] = str(state)
+
+    def phase(self, index: int, state: str) -> None:
+        """Fold one shard lifecycle event into the launch-progress line
+        (issue #4349): per-state counts and a launch-rate ETA on stderr,
+        printed when the counts change, at most once per
+        :data:`BATCH_HEARTBEAT_INTERVAL_S`, and once more when the last shard
+        has launched. Single-shard runs print nothing."""
+        with self._lock:
+            if state == "launch_refused":
+                state = "submitted"
+            if state == "launched":
+                self._launch_events += 1
+                if self._first_launch_at is None:
+                    self._first_launch_at = self._monotonic()
+            self._states[index] = state
+            self._progress_locked()
+
+    def _counts(self) -> tuple[int, int, int, int]:
+        values = list(self._states.values())
+        launching = values.count("launching")
+        launched = values.count("launched")
+        collected = values.count("collected")
+        pending = self._total - launching - launched - collected
+        return launched, launching, pending, collected
+
+    def _progress_locked(self) -> None:
+        if self._total <= 1:
+            return
+        counts = self._counts()
+        if counts == self._last_counts:
+            return
+        now = self._monotonic()
+        final = counts[1] == 0 and counts[2] == 0 and not self._final_emitted
+        if (
+            not final
+            and self._last_progress is not None
+            and now - self._last_progress < BATCH_HEARTBEAT_INTERVAL_S
+        ):
+            return
+        self._last_counts = counts
+        self._last_progress = now
+        self._final_emitted = self._final_emitted or final
+        launched, launching, pending, collected = counts
+        rate = self._rate_per_min(now)
+        rate_text = "unknown" if rate is None else f"{rate:.1f}/min"
+        self._emit(
+            f"klt sim: shards {launched + collected}/{self._total} launched, "
+            f"{launching} launching, {pending} pending, {collected} collected; "
+            f"launch rate {rate_text}, ETA {self._eta_text(rate, pending + launching)}"
+        )
+
+    def _rate_per_min(self, now: float) -> float | None:
+        if self._first_launch_at is None or self._launch_events < 2:
+            return None
+        elapsed = now - self._first_launch_at
+        if elapsed <= 0:
+            return None
+        return (self._launch_events - 1) / elapsed * 60.0
+
+    @staticmethod
+    def _eta_text(rate: float | None, remaining: int) -> str:
+        if remaining <= 0:
+            return "0m"
+        if not rate:
+            return "unknown"
+        hours, mins = divmod(max(1, round(remaining / rate)), 60)
+        return f"{hours}h {mins}m" if hours else f"{mins}m"
 
     def refused(self, index: int, exc: BatchError) -> None:
         with self._lock:
@@ -5131,6 +5217,9 @@ class _CapacityWatch:
         with self._lock:
             self._waiting.discard(index)
             self._finished += 1
+            if self._states.get(index) == "launched":
+                self._states[index] = "collected"
+                self._progress_locked()
 
 
 def _abortable_sleep(abort: threading.Event) -> Callable[[float], None]:
@@ -5210,6 +5299,10 @@ class _BatchFleetRun:
         self.abort = threading.Event()
         self.budget_spent = threading.Event()
         self.watch = _CapacityWatch(len(shard_indexes))
+        if manifest is not None:
+            for index in shard_indexes.values():
+                prior = manifest.prior.get(str(index))
+                self.watch.seed(index, None if prior is None else prior.get("state"))
         self.abortable_sleep = _abortable_sleep(self.abort)
 
     def shard_config(self) -> BatchConfig:
@@ -5222,7 +5315,10 @@ class _BatchFleetRun:
 
     def _phase_hook(self, index: int | None) -> Callable[[str], None]:
         def _on_phase(state: str) -> None:
-            if self.manifest is None or index is None:
+            if index is None:
+                return
+            self.watch.phase(index, state)
+            if self.manifest is None:
                 return
             if state == "launch_refused":
                 self.manifest.unlaunch(index)
