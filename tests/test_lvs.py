@@ -12745,6 +12745,15 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__cap_mim_m3_2",
         "sky130_fd_pr__pnp_05v5_W0p68L0p68",
         "sky130_fd_pr__pnp_05v5_W3p40L3p40",
+        # Junction diodes (issue #4319) -- curated in `_DIODE_MODEL_TABLE`.
+        "sky130_fd_pr__diode_pw2nd_05v5",
+        "sky130_fd_pr__diode_pw2nd_05v5_lvt",
+        "sky130_fd_pr__diode_pw2nd_05v5_nvt",
+        "sky130_fd_pr__diode_pw2nd_11v0",
+        "sky130_fd_pr__diode_pd2nw_05v5",
+        "sky130_fd_pr__diode_pd2nw_05v5_lvt",
+        "sky130_fd_pr__diode_pd2nw_05v5_hvt",
+        "sky130_fd_pr__diode_pd2nw_11v0",
     }
 
 
@@ -25589,6 +25598,79 @@ def test_run_lvs_sky130_diode_matches_and_mismatches_on_removal(tmp_path, flavou
             sub, flavour, layout_diode=layout_diode, reference_diode=reference_diode
         )
         assert report["status"] != "match", (layout_diode, reference_diode)
+
+
+def _sky130_diode_subckt_call_report(tmp_path, flavour):
+    from klayout_tools.extract import run_extract
+    from test_lvs_device_provenance import _make_sky130_diode_layout, _write_gds
+
+    n_plus = flavour.startswith("diode_pw2nd")
+    gds = _write_gds(_make_sky130_diode_layout(flavour), tmp_path / "diode.gds")
+    extracted = tmp_path / "extracted.spice"
+    run_extract(gds, "sky130", output=str(extracted))
+    # Bare area/perim are um^2 / um under sky130's ambient `.option scale`.
+    ports, nodes = ("TERM VSUBS", "VSUBS TERM") if n_plus else ("TERM", "TERM WELL")
+    reference = (
+        f".subckt TOP {ports}\n"
+        f"X1 {nodes} sky130_fd_pr__{flavour} area=1 perim=4\n.ends\n"
+    )
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", extracted.read_text()),
+            "top": "TOP",
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", reference),
+            "top": "TOP",
+            "form": "subckt-call",
+            "deck": "sky130",
+        },
+    }
+    return run_lvs(json.dumps(request))
+
+
+@pytest.mark.parametrize("flavour", ["diode_pw2nd_05v5", "diode_pd2nw_05v5"])
+def test_run_lvs_sky130_diode_subckt_call_matches(tmp_path, flavour):
+    """Issue #4319: a PDK diode subcircuit call converts and A/P units agree
+    with the layout-extracted side."""
+    report = _sky130_diode_subckt_call_report(tmp_path, flavour)
+    assert report["status"] == "match", report
+    assert "reference.unresolved_subckt_call" not in json.dumps(report)
+
+
+def test_run_lvs_sky130_diode_subckt_call_polarity_matters(tmp_path):
+    """Two diodes sharing an anode do not match two diodes sharing a cathode
+    (a lone diode is graph-symmetric, so the check needs a shared net)."""
+    layout = (
+        ".subckt TOP A X Y\n"
+        "D1 A X DIODE_PD2NW_05V5 A=1P P=4U\n"
+        "D2 A Y DIODE_PD2NW_05V5 A=1P P=4U\n.ends\n"
+    )
+
+    def run(nodes1, nodes2, sub):
+        d = tmp_path / sub
+        d.mkdir()
+        ref = (
+            ".subckt TOP A X Y\n"
+            f"X1 {nodes1} sky130_fd_pr__diode_pd2nw_05v5 area=1 perim=4\n"
+            f"X2 {nodes2} sky130_fd_pr__diode_pd2nw_05v5 area=1 perim=4\n.ends\n"
+        )
+        return run_lvs(
+            json.dumps(
+                {
+                    "layout": {"netlist": _write(d / "l.spice", layout), "top": "TOP"},
+                    "reference": {
+                        "netlist": _write(d / "r.spice", ref),
+                        "top": "TOP",
+                        "form": "subckt-call",
+                        "deck": "sky130",
+                    },
+                }
+            )
+        )
+
+    assert run("A X", "A Y", "ok")["status"] == "match"
+    assert run("X A", "Y A", "swapped")["status"] != "match"
 
 
 # ---------------------------------------------------------------------------

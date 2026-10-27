@@ -707,6 +707,7 @@ def test_list_generators_includes_all_four_phase2_families():
         "diff_pair",
         "bjt_array",
         "bond_pad",
+        "diode",
         "esd_device",
         "cap_array",
         "cap_vpp_array",
