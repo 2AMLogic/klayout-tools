@@ -623,9 +623,7 @@ def test_cli_lig_without_lisd_returns_a_verdict(tmp_path, capsys, shapes):
         ),
     ],
 )
-def test_cli_lig_near_unconnected_lisd_sdt_returns_a_verdict(
-    tmp_path, capsys, shapes
-):
+def test_cli_lig_near_unconnected_lisd_sdt_returns_a_verdict(tmp_path, capsys, shapes):
     """#4340: LIG within the search distance of a LISD/SDT it does not touch,
     with no pair actually closer than the rule, aborted the net separation
     ("m_type == Polygon" in Region::separation_check) on a tie or tap cell."""
