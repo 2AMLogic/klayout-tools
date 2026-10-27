@@ -68,6 +68,7 @@ docs/
     report.md
     reset-coverage.md
     ring-check.md
+    seam-check.md
     signoff.md
     sim.md
     size.md

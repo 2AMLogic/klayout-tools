@@ -446,6 +446,14 @@
         "klayout_tools.ring_check"
       ]
     },
+    "seam_check": {
+      "kind": "verb",
+      "description": "`klt seam_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.seam_check_cmd",
+        "klayout_tools.seam_check"
+      ]
+    },
     "tap_distance": {
       "kind": "verb",
       "description": "`klt tap_distance` implementation: core modules plus CLI adapter.",
@@ -1158,6 +1166,11 @@
       "consumer": "ring_check",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "seam_check",
+      "exporter": "cli-infra",
+      "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
     },
     {
       "consumer": "shared-core",
