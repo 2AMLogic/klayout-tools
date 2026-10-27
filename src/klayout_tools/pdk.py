@@ -135,18 +135,22 @@ _ASSET_LAYOUT: dict[str, tuple[str, ...]] = {
     "libs_ref": ("libs.ref",),
 }
 
-#: Subdirectory of ``assets["klayout"]`` a PDK stages its own importable
-#: KLayout PyCell (Python PCell) library packages under -- see
-#: :func:`pdk_pcell_lib_dir`. Verified against three real installs for issue
-#: #1535: a ``volare``-fetched ``sky130A`` (``libs.tech/klayout/python/cells``
-#: -- the Mabrains-authored ``sky130`` PCell library the PDK's own
+#: Candidate subdirectories of ``assets["klayout"]`` a PDK stages its own
+#: importable KLayout PyCell (Python PCell) library packages under, probed in
+#: order -- see :func:`pdk_pcell_lib_dir`. Verified against real installs: a
+#: ``volare``-fetched ``sky130A`` (``libs.tech/klayout/python/cells`` -- the
+#: Mabrains-authored ``sky130`` PCell library the PDK's own
 #: ``pymacros/sky130_pcells.lym`` autoloads by putting exactly this directory
 #: on ``sys.path``), a fetched ``ihp-sg13g2``
 #: (``libs.tech/klayout/python/{sg13g2_native_pcell_lib,sg13g2_pycell_lib,...}``),
-#: and a ``volare``-fetched ``gf180mcuD`` (ships **no** ``python/`` at all).
-#: Unlike ``drc/``/``lvs/`` (see :func:`drc_deck_file`), no verified install
-#: nests this one under ``klayout/tech/``, so no nested fallback is probed.
-_PCELL_LIB_SUBDIR = "python"
+#: and an open_pdks ``gf180mcuC`` (no ``python/``; ships ``cells``,
+#: ``klayout_api_cells`` and ``sealring_cells`` under
+#: ``libs.tech/klayout/tech/pymacros/``, which its ``gf180mcu.lym`` puts on
+#: ``sys.path``). A ``volare``-fetched ``gf180mcuD`` ships neither.
+_PCELL_LIB_SUBDIRS: tuple[tuple[str, ...], ...] = (
+    ("python",),
+    ("tech", "pymacros"),
+)
 
 
 class PdkNotFoundError(Exception):
@@ -185,6 +189,7 @@ def find_pdk(
             },
             "broken_symlinks": [{"asset": <asset key>, "path": <abs path>}, ...],
             "has_pcell_library": <bool>,
+            "pcell_shim": <"present" | "missing" | "not_required">,
             "ambiguous_roots": [{"root": <abs root>, "resolved_via": <str>}, ...],
             "compatibility": {"status": <match|mismatch|unknown|not_declared>, ...},
         }
@@ -201,6 +206,14 @@ def find_pdk(
     routinely imports third-party modules klt does not depend on (verified:
     sky130A's ``cells`` needs ``gdsfactory``; ihp-sg13g2's needs ``cni``).
     Additive field; see ``docs/json-contract.md``.
+
+    ``pcell_shim`` (issue #4236) says whether the vendored compat shim a
+    shipped PyCell package imports (ihp-sg13g2's ``pycell4klayout-api``, a git
+    submodule the release tarball omits) is on disk: ``"present"``,
+    ``"missing"`` (absent or empty -- the package exists but cannot load), or
+    ``"not_required"`` (no shipped package needs one, e.g. sky130A). A cheap
+    filesystem check, so a repo can state PCell usability from ``pdk find``
+    alone. Additive field.
 
     ``broken_symlinks`` (issue #1406) reports every **dangling** symlink
     (:func:`_find_broken_symlinks`) found under any resolved ``assets``
@@ -287,6 +300,7 @@ def find_pdk(
             "assets": assets,
             "broken_symlinks": _broken_symlinks_in_assets(assets),
             "has_pcell_library": bool(_pcell_packages_for_assets(assets)),
+            "pcell_shim": _pcell_shim_status_for_assets(assets),
             "ambiguous_roots": _ambiguous_roots(
                 candidates[index + 1 :], chosen["name"], root_path
             ),
@@ -435,6 +449,9 @@ def list_pdks(root: str | None = None) -> dict[str, Any]:
                         "version": entry["version"],
                         "has_pcell_library": bool(
                             _pcell_packages_for_assets(_asset_dirs(entry["_dir"]))
+                        ),
+                        "pcell_shim": _pcell_shim_status_for_assets(
+                            _asset_dirs(entry["_dir"])
                         ),
                     }
                     for entry in variants
@@ -1140,11 +1157,19 @@ def _pcell_lib_dir_for_assets(assets: dict[str, str | None]) -> str | None:
     :func:`list_pdks` can compute their ``has_pcell_library`` field without
     recursing back into :func:`find_pdk`.
     """
+    for path in _pcell_search_dirs(assets):
+        if os.path.isdir(path):
+            return path
+    return None
+
+
+def _pcell_search_dirs(assets: dict[str, str | None]) -> list[str]:
+    """The ordered candidate PyCell-library directories probed for an
+    already-resolved ``assets`` map (``[]`` when it has no ``klayout`` dir)."""
     klayout_dir = assets.get("klayout")
     if klayout_dir is None:
-        return None
-    path = os.path.join(klayout_dir, _PCELL_LIB_SUBDIR)
-    return path if os.path.isdir(path) else None
+        return []
+    return [os.path.join(klayout_dir, *sub) for sub in _PCELL_LIB_SUBDIRS]
 
 
 def _pcell_packages_in(lib_dir: str) -> list[str]:
@@ -1174,6 +1199,46 @@ def _pcell_packages_for_assets(assets: dict[str, str | None]) -> list[str]:
     return [] if lib_dir is None else _pcell_packages_in(lib_dir)
 
 
+#: PyCell packages (by name) that import a PDK-bundled compat shim vendored as
+#: a git submodule next to them, mapped to the shim's directory (path segments
+#: relative to the PyCell ``lib_dir``). A release tarball omits submodules, so
+#: this directory is routinely empty (issue #4236). Pure path data so
+#: :func:`pcell_shim_status` stays a filesystem check; the import/``sys.path``
+#: details live in :mod:`klayout_tools.pdk_pcell`.
+_PCELL_SHIM_ROOTS: dict[str, tuple[str, ...]] = {
+    "sg13g2_pycell_lib": ("pycell4klayout-api",),
+}
+
+
+def _pcell_shim_status_for_assets(assets: dict[str, str | None]) -> str:
+    """``"present"`` | ``"missing"`` | ``"not_required"`` (issue #4236).
+
+    ``not_required`` when no PyCell package the variant ships needs a vendored
+    compat shim (sky130A, gf180mcuD, ...); otherwise ``missing`` when any such
+    shim directory is absent or empty -- the uninitialized-submodule shape --
+    and ``present`` when every required one has content. No imports, no pya.
+    """
+    lib_dir = _pcell_lib_dir_for_assets(assets)
+    if lib_dir is None:
+        return "not_required"
+    roots = [
+        _PCELL_SHIM_ROOTS[name]
+        for name in _pcell_packages_in(lib_dir)
+        if name in _PCELL_SHIM_ROOTS
+    ]
+    if not roots:
+        return "not_required"
+    for segments in roots:
+        shim_dir = os.path.join(lib_dir, *segments)
+        try:
+            populated = os.path.isdir(shim_dir) and bool(os.listdir(shim_dir))
+        except OSError:  # pragma: no cover - unreadable directory
+            populated = False
+        if not populated:
+            return "missing"
+    return "present"
+
+
 def pdk_pcell_lib_dir(
     variant: str | None = None, root: str | None = None
 ) -> str | None:
@@ -1189,16 +1254,14 @@ def pdk_pcell_lib_dir(
     exactly as :func:`find_pdk` does (same precedence, same
     :class:`PdkNotFoundError` on no match).
 
-    Layout convention (verified against three real installs, see
-    :data:`_PCELL_LIB_SUBDIR`): both sky130A and ihp-sg13g2 stage their PyCell
-    packages directly at ``libs.tech/klayout/python/<package>/``, and
-    gf180mcuD ships no such directory at all. Unlike ``drc/``/``lvs/``, no
-    verified install nests it under ``klayout/tech/``, so -- keeping this
-    module's "enumerate what is present, never guess" convention -- no nested
-    fallback is probed.
+    Layout convention (see :data:`_PCELL_LIB_SUBDIRS`): sky130A and
+    ihp-sg13g2 stage their PyCell packages at
+    ``libs.tech/klayout/python/<package>/``; gf180mcuC at
+    ``libs.tech/klayout/tech/pymacros/<package>/``. Both are probed, in that
+    order, and the first existing directory wins. gf180mcuD ships neither.
 
     Returns the absolute directory, or ``None`` when the variant ships no
-    ``klayout`` asset directory at all or no ``python/`` subdirectory under it.
+    ``klayout`` asset directory at all or neither candidate exists under it.
 
     Raises :class:`PdkNotFoundError` when no PDK install resolves at all.
     """

@@ -219,6 +219,7 @@
         "klayout_tools.gen",
         "klayout_tools.gen_cap_vpp",
         "klayout_tools.gen_describe",
+        "klayout_tools.gen_diode",
         "klayout_tools.gen_layer_params",
         "klayout_tools.gen_layer_tables",
         "klayout_tools.gen_pcells",
@@ -227,6 +228,7 @@
         "klayout_tools.gen_pcells.cap_array",
         "klayout_tools.gen_pcells.cap_vpp_array",
         "klayout_tools.gen_pcells.diff_pair",
+        "klayout_tools.gen_pcells.diode",
         "klayout_tools.gen_pcells.esd_device",
         "klayout_tools.gen_pcells.guard_ring",
         "klayout_tools.gen_pcells.mos_array",
@@ -260,6 +262,14 @@
       "modules": [
         "klayout_tools.cli.kb_cmd",
         "klayout_tools.kb"
+      ]
+    },
+    "array_check": {
+      "kind": "verb",
+      "description": "`klt array_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.array_check",
+        "klayout_tools.cli.array_check_cmd"
       ]
     },
     "keepout_check": {
@@ -489,6 +499,7 @@
         "klayout_tools.design_evidence_tiers",
         "klayout_tools.evidence_record",
         "klayout_tools.lef_header",
+        "klayout_tools.macros",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
         "klayout_tools.output_lock",
@@ -532,6 +543,7 @@
         "klayout_tools.sim_decks",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_errors",
+        "klayout_tools.sim_eye",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
@@ -604,6 +616,7 @@
       "kind": "verb",
       "description": "`klt synthesize` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools._sv2v",
         "klayout_tools.cli.synthesize_cmd",
         "klayout_tools.restructure",
         "klayout_tools.sta",
@@ -705,6 +718,11 @@
       "consumer": "corner_matrix",
       "exporter": "sim",
       "reason": "Issue #4045: `klt corner-matrix` must check the grid exactly as `klt sim` expands it, so it calls sim's expander and catches SimError rather than duplicating the expansion."
+    },
+    {
+      "consumer": "array_check",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --layers parser, as every verb does."
     },
     {
       "consumer": "keepout_check",

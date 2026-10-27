@@ -157,6 +157,12 @@ refused before simulating (exit 1, usual error envelope) with both stamps in
 the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "`environment.netlist_identity`".
 
+`klt sim --job-status` (issue #4291) passes an optional `progress` object
+(e.g. `sim_time_s`, `stop_time_s`) through from the fleet's `status.json` when
+the runner publishes one. Additive and absent otherwise; the existing fields
+and `schema_version` are unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s
+"Asynchronous submit and status".
+
 `measurements[].on_unreached` (issue #3108) is the same shape: an optional
 request field (`"error"` default, `"null"` opt-in) whose default reproduces
 today's response byte-for-byte. Opting in adds a new measurement `status`
@@ -540,6 +546,13 @@ indistinguishable in the output, so a signoff claim can't be checked or
 reproduced. This block is **additive** (see above): adopting it required no
 `schema_version` bump on any verb.
 
+**Build drift in `klt signoff` (issue #4223).** `klt signoff` compares each
+cited check's `provenance.klt_version` with the running build and reports an
+additive, report-only `checks[].build_drift` object
+(`state` = `current` | `stale` | `unverifiable`, plus `cited_klt_version` and
+`running_klt_version`). See
+[`cli/signoff.md`](cli/signoff.md#build-drift-a-verdict-from-a-different-klt-build-issue-4223).
+
 **Client vs. worker scope (issue #2834).** `provenance` (and
 `environment.client_klt_version`) describes the *submitting client*. For
 `klt sim --backend batch`, what the executing worker actually resolved --
@@ -662,7 +675,12 @@ three now renders `unmet`/`wrong_kind`, an existing `reason` value; this is a
 no `schema_version` bump (the `build.grading_ruleset_id` hash moves, which
 is what it is for). `citation.artifact_binding` gains an optional
 `attestation` object when the cited envelope came from `--attest`. Item 2 is
-unchanged. The inventory `--attest` reads is its own versioned contract —
+unchanged in grading; issue #4188 adds a producer for it,
+`klt signoff --attest 2 --input STREAM [--generator CMD --regenerated-hash H
+[--hash-kind {bytes,geometry}]]`, emitting the same `generic` envelope with
+`attestation.checks[]` entries `stream_readable`, `top_cell_non_empty` and
+`dbu_on_grid`, `provenance.klayout_version` populated, and an optional
+`provenance.regeneration` (additive; no `schema_version` bump). The inventory `--attest` reads is its own versioned contract —
 see "A versioned *input* contract" below.
 
 Issue #3044 adds an optional `provenance.input.paths` set form to that
@@ -733,6 +751,15 @@ report what it actually removed. Same reasoning as `provenance.devices`'
 disagree about a finding with nothing in either payload to say why, and a
 box over empty space is indistinguishable from one that bit. See
 [`docs/cli/erc.md`](cli/erc.md)'s "The remainder gates".
+
+Issue #4374 is additive on the same surface: an `erc.unlabelled_conductor`
+finding now populates `islands[]` (previously `null` for that rule) with
+`{bbox, layer, shape_count, kind}` entries, `kind` being `"device_connected"`
+or `"floating"`; the optional spec key `nets[].unlabelled_allow_device_connected`
+(default `false`) excuses the former; and a `provenance.net_exclusions` entry
+gains `allow_device_connected` / `excluded_device_connected_islands` only when
+that key is declared. Nothing is renamed or removed and `schema_version` is
+unchanged.
 
 Issue #2415 adds a fourth, `provenance.label_layers`: one entry per
 `stackup` role that declares a `label_layer`, in stackup order (`{name,
@@ -1150,6 +1177,12 @@ plain Python module, any byte change to it — cosmetic or
 device-recognition-affecting — changes `content_hash`, and `--check`/
 `--rerun` are what turn that into a caller-visible signal instead of a
 silent mismatch.
+
+`klt synthesize --check <report.json> --skip-deck` (issue #4315) adds an
+optional top-level `skipped[]` (`{field, reason}` entries) to the cheap-mode
+payload, naming checks deliberately not run; the key is absent otherwise. It is
+an additive field — no `schema_version` bump. A consumer must treat a `match`
+with a non-empty `skipped` as a partial verification.
 
 `klt extract --check <report.json> --rerun` additionally normalizes every
 **bookkeeping** field (issue #1559 — see `docs/cli/extract.md`'s "Field

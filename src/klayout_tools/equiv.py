@@ -337,7 +337,12 @@ from ._report_verify import (
     load_committed_report,
     strip_keys,
 )
-from ._verilog_params import chparam_lines, read_verilog_line, validate_parameters
+from ._verilog_params import (
+    chparam_lines,
+    read_verilog_line,
+    validate_defines,
+    validate_parameters,
+)
 from .equiv_errors import EquivError
 from .equiv_replay import (  # noqa: F401 -- sim-backend constants stay public here
     CANONICAL_SIM_BACKEND,
@@ -849,11 +854,15 @@ def _resolve_side(spec: Any, request_dir: str, label: str) -> dict[str, Any]:
     parameters = validate_parameters(
         spec.get("parameters"), EquivError, f"request.{label}.parameters"
     )
+    defines = validate_defines(
+        spec.get("defines"), EquivError, f"request.{label}.defines"
+    )
     return {
         "top": top,
         "sources": resolved,
         "liberty": resolved_liberty,
         "parameters": parameters,
+        "defines": defines,
     }
 
 
@@ -915,7 +924,7 @@ def _side_prep_lines(
         # it.
         lines.append(f"read_liberty -ignore_miss_func {side['liberty']}")
     for path in side["sources"]:
-        lines.append(read_verilog_line(path))
+        lines.append(read_verilog_line(path, side.get("defines") or {}))
     # Issue #3466: optional top-level parameter overrides for this side.
     lines += chparam_lines(side.get("parameters") or {}, side["top"])
     lines += [

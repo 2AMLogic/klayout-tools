@@ -242,9 +242,12 @@ directory itself, or a named subdirectory of it). When present it wins over
   `library (<name>)` name and comments). klt merges them
   into one content-addressed `.lib` under `$KLT_CACHE_DIR` (default
   `~/.cache/klt/liberty-merged`, never inside the PDK tree) and hands that single
-  path to Yosys/OpenROAD/OpenSTA. Any other header difference (units,
-  templates, operating conditions) or a duplicate cell name is an error; the
-  merged header is the first file's; a one-element list equals the string form.
+  path to Yosys/OpenROAD/OpenSTA. Top-level `lu_table_template` and
+  `power_lut_template` groups are unioned by name (same name with different
+  content is an error). Any other header difference (units, operating
+  conditions) or a duplicate cell name is an error; the merged header is the
+  first file's plus any templates it lacks; a one-element list equals the
+  string form.
 - `views` (optional) maps `cell_library` → `{"cell_lef": path, "tech_lef":
   {"min"|"nom"|"max": path}, "gds": path}` (every key optional) for trees that
   do not use the open_pdks `lef/`, `techlef/`, `gds/` naming. `klt
@@ -444,6 +447,7 @@ Resolves one install/variant.
   },
   "broken_symlinks": [],
   "has_pcell_library": true,
+  "pcell_shim": "not_required",
   "ambiguous_roots": [],
   "alternative_variants": []
 }
@@ -461,6 +465,7 @@ Resolves one install/variant.
 | `assets` | object | Tool area → absolute directory. |
 | `broken_symlinks` | array | Dangling symlinks found under any resolved `assets` directory (issue #1406). `[]` when the install is clean. |
 | `has_pcell_library` | boolean | The variant ships at least one Python package under `libs.tech/klayout/python/` (issue #1535) — the PDK's own KLayout PCell library. See below. |
+| `pcell_shim` | string | Additive (issue #4236): `present`, `missing` or `not_required` — whether the vendored compat shim a shipped PyCell package imports (ihp-sg13g2's `pycell4klayout-api`) is on disk. `missing` means the package exists but cannot load. See below. |
 | `ambiguous_roots` | array | Later candidate roots in the search order that **also** hold a variant of the resolved name (issue #2564) — `[{"root", "resolved_via"}]`, in search order. `[]` for the common single-install case, and always `[]` when `--pdk-root` pinned the root (the search is disabled). See below. |
 | `alternative_variants` | array | Additive (issue #3814): sorted names of the *other* variants in the chosen root when no variant was selected (no `--pdk`, no `$PDK`) and the first variant was taken as the default. `[]` when a variant was pinned or the root holds only one. See below. |
 | `compatibility` | object | Additive (issue #2759): whether the install's version identity matches the one a klt technology package declares. See "Package compatibility" below. |
@@ -624,6 +629,21 @@ chain reaches `cni`). Use [`klt gen --list-pdk-pcells`](gen.md#pdk-shipped-pcell
 to find out which packages actually load and what cells/parameters they
 expose, and `klt gen --pdk-pcell <library>/<cell>` to instantiate one.
 
+#### `pcell_shim` (issue #4236)
+
+`pcell_shim` is a cheap filesystem check (no imports) that tells a repo whether
+the PDK's PyCell packages are usable before it tries to load them. It is
+`not_required` when no shipped package needs a vendored compat shim (sky130A,
+gf180mcuD), `present` when each required shim directory has content, and
+`missing` when one is absent or empty. The ihp-sg13g2 release tarball omits git
+submodules, so a `fetched:<version>` install reports `missing` for
+`sg13g2_pycell_lib` (its `pycell4klayout-api` shim): `has_pcell_library` is
+`true` but the package cannot load. The `reason` `klt gen --list-pdk-pcells` /
+`klt pdk pcell-check` print then names the source to populate it from
+(<https://github.com/IHP-GmbH/pycell4klayout-api>, at the revision the PDK
+release pins). The text output of `klt pdk find` prints a `pcell_shim: missing`
+line in that state.
+
 **`assets` keys are always present.** Each of `ngspice`, `xschem`, `klayout`,
 `magic`, `netgen` (under `libs.tech/`) and `libs_ref` (`libs.ref/`) maps to its
 absolute directory when that directory exists on disk, or `null` when the
@@ -705,8 +725,8 @@ result is **success (exit 0)**, not an error.
       "root": "/usr/share/pdk",
       "resolved_via": "PDK_ROOT environment variable",
       "variants": [
-        { "name": "sky130A", "version": "open_pdks 0fe599b", "has_pcell_library": true },
-        { "name": "sky130B", "version": null, "has_pcell_library": true }
+        { "name": "sky130A", "version": "open_pdks 0fe599b", "has_pcell_library": true, "pcell_shim": "not_required" },
+        { "name": "sky130B", "version": null, "has_pcell_library": true, "pcell_shim": "not_required" }
       ]
     }
   ]
@@ -863,6 +883,7 @@ gf180mcu_fd_sc_mcu9t5v0  nfet_06v0/pfet_06v0  1.8V @ tt_025C_1v80 (+ 3.3V, 5V)
 | `libraries[].supplies_v` | array of float | **Every** distinct supply (volts) the library's nominal-corner `.lib` views are characterised at, sorted ascending — e.g. `[1.8]` for a single-supply library, or `[1.8, 3.3, 5.0]` for a library separately, fully characterised at multiple voltages (e.g. gf180mcu's `gf180mcu_fd_sc_mcu9t5v0`). `[]` alongside a `null` `nominal_supply_v`. See "Nominal supply selection" below. |
 | `libraries[].voltage_class` | `"core"` \| `"io"` \| null | `"core"` when `nominal_supply_v <= 2.5`, `"io"` above that. A documented heuristic threshold — not a field the PDK itself declares. `null` when `nominal_supply_v` is `null`. |
 | `libraries[].corners` | array of string | Sorted names of the liberty corners the library ships under `lib/` — exactly the names `request.pdk.corner` / `pdk.corners` accept (e.g. `tt_025C_1v80` for open_pdks-shaped libraries, `typ_1p20V_25C` for IHP's `sg13g2_stdcell`); the `<name>__` / `<name>_` filename prefix is stripped and `_ccsnoise` views are excluded. `[]` when the library ships no `lib/` directory. |
+| `libraries[].corner_points` | array of object | One `{name, process, temperature_c, supply_v}` per `corners` entry, in the same order, parsed from the open_pdks-style name (`ss_n40C_3v00` -> `"ss"`, `-40`, `3.0`; `n` marks a negative temperature). A name the parser does not recognise (e.g. IHP's `typ_1p20V_25C`) yields `null` for `process`, `temperature_c` and `supply_v` — never a guess. `[]` when `corners` is `[]`. Additive: `corners` is unchanged. |
 | `libraries[].compatible` | boolean | **Present only when `--supply` is given.** See "Compatibility verdict (`--supply`)" below. |
 | `supply_v` | float | **Present only when `--supply` is given.** Echoes the caller-stated supply. |
 | `any_compatible` | boolean | **Present only when `--supply` is given.** `true` when at least one library is compatible; the CLI's exit code is derived from this. |
@@ -948,6 +969,40 @@ the same non-clean/non-error exit-code pattern `klt drc` uses for "ran fine,
 found violations" — so this can gate CI rather than being a manual check
 (`klt pdk cells --pdk sky130A --supply 1.8 || exit 1` in a block repo's
 decision-record check).
+
+### Shipped liberty corner sets
+
+The corner set a library offers is exactly the `.lib` files the PDK ships;
+`klt` cannot widen it. As of ciel gf180mcu build `f6eeac7dad08` (2026-10-27),
+both `gf180mcu_fd_sc_mcu7t5v0` and `gf180mcu_fd_sc_mcu9t5v0` (variant
+`gf180mcuD`) ship these 15 corners:
+
+| process | temperature | 1.8 V family | 3.3 V family | 5.0 V family |
+| ------- | ----------- | ------------ | ------------ | ------------ |
+| `ff` | -40 C, 125 C | 1.98 V | 3.60 V | 5.50 V |
+| `ss` | -40 C, 125 C | 1.62 V | 3.00 V | 4.50 V |
+| `tt` | 25 C only | 1.80 V | 3.30 V | 5.00 V |
+
+Not shipped: skewed `fs`/`sf` process corners; `tt` at -40/125 C; `ss`/`ff`
+at 25 C; and the 3.3 V family is bracketed at 3.00/3.60 V (about -9 %/+9 %)
+rather than +/-10 %. A 5-process x 3-temperature x +/-10 % matrix therefore
+cannot be expressed through `pdk.corners`. The set is a property of the
+installed PDK and changes with the PDK commit; regenerate this table from
+`corner_points` after a PDK upgrade rather than trusting it.
+
+To list what a requested matrix is missing, diff it against `corner_points`:
+
+```
+$ klt pdk cells --pdk gf180mcuD --format json | jq -c --argjson want \
+    '[{"process":"fs","temperature_c":25,"supply_v":3.3},
+      {"process":"tt","temperature_c":125,"supply_v":3.3}]' '
+    .libraries[] | select(.name == "gf180mcu_fd_sc_mcu7t5v0")
+    | .corner_points as $have
+    | [$want[] | select(. as $w | $have
+        | any(.process == $w.process and .temperature_c == $w.temperature_c
+              and .supply_v == $w.supply_v) | not)]'
+[{"process":"fs","temperature_c":25,"supply_v":3.3},{"process":"tt","temperature_c":125,"supply_v":3.3}]
+```
 
 ### Design choice: live-parsed, not a curated table
 
@@ -1486,7 +1541,10 @@ failure with the same generic import-error text:
   at '<path>', next to '<package>'), but that directory is missing or appears
   empty in this install -- likely an uninitialized git submodule. This is a
   compat shim the PDK itself vendors, not a third-party PyPI dependency klt
-  would need to add."` klt already adds this shim's own directory to
+  would need to add. The PDK release tarball omits git submodules; populate
+  '<path>' from <upstream source and pinned revision>."` (issue #4236 added the
+  last sentence; `klt pdk find` reports the same state as `pcell_shim:
+  "missing"`) klt already adds this shim's own directory to
   `sys.path` before importing the package that needs it (no manual step
   required once it is populated) — this reason only fires when that
   directory is still missing or empty afterward.

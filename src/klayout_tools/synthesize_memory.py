@@ -67,6 +67,7 @@ _MEMORY_CELL_TYPES = ("$mem", "$mem_v2")
 #: the side invocation's own artifacts.
 EVIDENCE_SCRIPT_SUFFIX = "_memory_evidence.ys"
 _BLACKBOX_LIST_SUFFIX = "_blackboxes.txt"
+_LIBRARY_CELLS_SUFFIX = "_library_cells.txt"
 _ELABORATED_STATS_SUFFIX = "_memory_elaborated.json"
 _PRE_LOWERING_STATS_SUFFIX = "_memory_pre_lowering.json"
 
@@ -81,6 +82,9 @@ def memory_evidence_script_text(
     adder_sources: tuple[str, ...] = (),
     adder_techmap_path: str | None = None,
     parameters: dict[str, int | str] | None = None,
+    liberty_path: str | None = None,
+    library_cells_path: str | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> str:
     """The side invocation's ``.ys`` text.
 
@@ -93,9 +97,18 @@ def memory_evidence_script_text(
     ``synth``'s own ``coarse`` label (and the arithmetic insertion) would
     run first anyway; ``proc`` is idempotent, and ``stat``/``select -list``
     never modify the design. No liberty is read -- nothing here is
-    technology-mapped.
+    technology-mapped. The one exception (issue #4205): when ``liberty_path``
+    is given it is loaded ``-lib`` first, exactly as the production script
+    does, so RTL instantiating a library cell elaborates; the cells that load
+    declares are listed to ``library_cells_path`` so they are not reported as
+    surviving blackboxes (they carry area).
     """
-    lines = [read_verilog_line(path) for path in sources]
+    lines = []
+    if liberty_path is not None:
+        lines.append(f"read_liberty -lib {liberty_path}")
+        if library_cells_path is not None:
+            lines.append(f"tee -q -o {library_cells_path} select -list =A:blackbox")
+    lines += [read_verilog_line(path, defines) for path in sources]
     lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     lines.append(f"tee -q -o {blackbox_list_path} select -list =A:blackbox =A:whitebox")
@@ -345,6 +358,8 @@ def collect_memory_evidence(
     adder_techmap_path: str | None = None,
     repo_root: str | None = None,
     parameters: dict[str, int | str] | None = None,
+    liberty_path: str | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> tuple[dict[str, Any], list[str] | None]:
     """Run the side evidence invocation and return ``(memory_mapping,
     blackbox_modules)`` for the response.
@@ -370,6 +385,9 @@ def collect_memory_evidence(
     blackbox_list_path = os.path.join(
         output_dir, f"{hdl_toplevel}{_BLACKBOX_LIST_SUFFIX}"
     )
+    library_cells_path = os.path.join(
+        output_dir, f"{hdl_toplevel}{_LIBRARY_CELLS_SUFFIX}"
+    )
     elaborated_path = os.path.join(
         output_dir, f"{hdl_toplevel}{_ELABORATED_STATS_SUFFIX}"
     )
@@ -389,6 +407,9 @@ def collect_memory_evidence(
                 adder_sources=adder_sources,
                 adder_techmap_path=adder_techmap_path,
                 parameters=parameters,
+                liberty_path=liberty_path,
+                library_cells_path=library_cells_path,
+                defines=defines,
             ),
         )
         _run_yosys(script_path, cwd=repo_root)
@@ -401,6 +422,12 @@ def collect_memory_evidence(
             declared: set[str] | None = parse_declared_blackboxes(handle.read())
     except (OSError, UnicodeDecodeError):
         declared = None
+    if declared is not None and liberty_path is not None:
+        try:
+            with open(library_cells_path, encoding="utf-8") as handle:
+                declared -= parse_declared_blackboxes(handle.read())
+        except (OSError, UnicodeDecodeError):
+            declared = None
 
     mapping = build_memory_mapping(
         elaborated_modules=_load_modules(elaborated_path),

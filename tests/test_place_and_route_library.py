@@ -24,7 +24,7 @@ _PINS = [
 _RC = {"resistance_ohm_per_um": 0.0123, "capacitance_pf_per_um": 0.000045}
 
 
-def _stage_lines(cell_library, stage, *, library=None, power=None):
+def _stage_lines(cell_library, stage, *, library=None, power=None, iterations=2):
     return place_and_route._stage_script_lines(
         stage=stage,
         checkpoint_in="/tmp/in.odb",
@@ -49,7 +49,7 @@ def _stage_lines(cell_library, stage, *, library=None, power=None):
         seed=1,
         output_dir="/tmp",
         route_critical_nets_percentage=0,
-        max_antenna_repair_iterations=2,
+        max_antenna_repair_iterations=iterations,
         library=library,
     )
 
@@ -316,3 +316,61 @@ def test_missing_tables_skipped_by_supplied_keys():
             power=power,
             library=partial,
         )
+
+
+def _route_text(lib, cell_library="asap7_lib", iterations=2):
+    if lib is not None and cell_library == "asap7_lib":
+        lib = {**lib, "route_layers": "M2-M7"}
+    return "\n".join(
+        _stage_lines(cell_library, "route", library=lib, iterations=iterations)
+    )
+
+
+def _missing(lib, cell_library="acme"):
+    return place_and_route._missing_stage_tables(
+        place_and_route.STAGE_ORDER.index("route"), "route", cell_library, lib
+    )
+
+
+def test_null_antenna_diode_validates_and_keeps_key():
+    lib = _validate_library({"antenna_diode": None})
+    assert "antenna_diode" in lib and lib["antenna_diode"] is None
+
+
+def test_null_antenna_diode_is_not_a_missing_table():
+    assert not any(
+        "antenna" in m for m in _missing(_validate_library({"antenna_diode": None}))
+    )
+    assert any("antenna-diode" in m for m in _missing({}))
+
+
+@pytest.mark.parametrize("iterations", [0, 2])
+def test_null_antenna_diode_skips_repair_but_keeps_antenna_check(iterations):
+    lib = _validate_library({"antenna_diode": None})
+    text = _route_text(lib, iterations=iterations)
+    assert "repair_antennas" not in text
+    assert "check_antennas" in text
+    assert text.count("detailed_route ") == 1
+    assert text == _route_text(lib, iterations=0)
+
+
+def test_null_antenna_diode_overrides_built_in_entry():
+    lib = _validate_library({"antenna_diode": None})
+    assert "repair_antennas" not in _route_text(lib, "sky130_fd_sc_hd")
+    assert "repair_antennas" in _route_text(None, "sky130_fd_sc_hd")
+
+
+def test_diode_cell_script_still_repairs():
+    lib = _validate_library({"antenna_diode": {"cell": "D", "pin": "I"}})
+    assert _route_text(lib).count("repair_antennas D") == 2
+
+
+def test_null_antenna_diode_warns_on_route_target_only():
+    lib = _validate_library({"antenna_diode": None})
+    (warning,) = place_and_route._antenna_repair_warnings("route", lib)
+    assert "antenna repair did not run" in warning
+    assert "antenna_diode is null" in warning
+    assert place_and_route._antenna_repair_warnings("place", lib) == []
+    assert place_and_route._antenna_repair_warnings("route", None) == []
+    diode = _validate_library({"antenna_diode": {"cell": "D", "pin": "I"}})
+    assert place_and_route._antenna_repair_warnings("route", diode) == []

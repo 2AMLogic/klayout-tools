@@ -136,6 +136,7 @@ dimension is now independently checkable — see the note itself.)
 | `esd_device` | yes | yes | no | no |
 | `bond_pad` | yes | yes | no | no |
 | `bjt_array` | yes | yes | no | no |
+| `diode` | yes | no | no | no |
 
 **gf180mcu — `mos_array`'s unit-device geometry was margined against the
 six-rule signoff gap (issue #1577), but this remains an *unverified*
@@ -1955,6 +1956,42 @@ current-sharing an ESD pulse depends on avoiding.
 | `gate_contact`       | bool   | `false` | Draw a contact + local-metal pad on the gate landing pad and report `M1_G` on the `metal` role instead of `poly` — see `mos_array`'s equivalent note above. |
 | `salicide_block`     | bool   | `false` | Draw the PDK's salicide-block layer over the finger array on families that curate one (gf180mcu only — see above). |
 
+### `diode` (junction diode / pad ESD clamp primitive, issue #4300)
+
+A single sky130 junction diode that extracts as the deck's own diode class.
+**sky130 only** — other families raise a clear `GenError` ("not yet supported
+by this generator"); gf180mcu and sg13g2 declare diode classes too and are a
+follow-up.
+
+- `kind="n_psub"` — n+ diffusion (`nsdm`) in the p-substrate. The substrate
+  is the anode; `ANODE` is a contacted p+ substrate tap beside the diode and
+  `CATHODE` is the diffusion's local metal. Extracts as `diode_pw2nd_*`.
+- `kind="p_nwell"` — p+ diffusion (`psdm`) in an nwell. `ANODE` is the
+  diffusion's local metal; `CATHODE` is a contacted n+ well tap in the same
+  well. Extracts as `diode_pd2nw_*`.
+- `voltage_class="05v5"` (default) or `"11v0"`, which adds the `hvi`
+  implant (covering the whole nwell for `p_nwell`, per `nwell.9`) so the
+  device extracts as `*_11v0`.
+
+Both draw the `areaid.diode` (81/23) recognition mark over the junction.
+**`areaid.ed` (81/19) is never drawn**: the extraction deck treats it as an
+exclusion, so an ESD-flagged diode would not extract as `diode_*`. Ports are
+`ANODE`/`CATHODE` on `li1`; `device_count` is `1` and
+`drc_hints.matched_group_id` is `null`. `lvt`/`nvt`/`hvt` flavours, guard
+rings, arrays and matching are not drawn.
+
+| `params` field  | Type   | Default    | Description |
+| --------------- | ------ | ---------- | ----------- |
+| `kind`          | string | `"n_psub"` | `"n_psub"` or `"p_nwell"`. |
+| `voltage_class` | string | `"05v5"`   | `"05v5"` or `"11v0"`. |
+| `width_um`      | double | `2.0`      | Junction diffusion width (µm). Must be `>= 0.4`. |
+| `length_um`     | double | `2.0`      | Junction diffusion length (µm). Must be `>= 0.4`. |
+
+The contact count is derived from the diffusion area. To verify against a
+schematic, label the two ports' `li1` (positions are in `ports[]`), run
+`klt extract`, and compare with a `D` element of the matching class under
+`klt lvs`.
+
 ## Output database unit (dbu)
 
 **Every generator writes its GDS at the resolved PDK's own database unit,
@@ -2236,7 +2273,10 @@ against the vendor's own declaration — the same sequence the PDK's own KLayout
 autoload macro performs. klt never re-executes, re-implements, or
 reinterprets vendor PCell code.
 
-`klt pdk find`/`klt pdk list` carry a `has_pcell_library` boolean
+`klt pdk find`/`klt pdk list` carry a `has_pcell_library` boolean and a
+`pcell_shim` state (`present`/`missing`/`not_required`; a `missing` vendored
+compat shim, as on an ihp-sg13g2 release tarball, makes the `unavailable`
+reason below name where to get it — issue #4236)
 ([`docs/cli/pdk.md`](pdk.md)) so a caller can discover PyCell availability
 without invoking this command at all. As of issue #1610,
 [`klt pdk pcell-check`](pdk.md#klt-pdk-pcell-check) goes one step further and
@@ -2251,11 +2291,12 @@ A PDK's PyCell package routinely imports third-party modules klt has no
 dependency on. klt does **not** vendor or reimplement those. Verified against
 the three real installs available when this landed:
 
-| Install | Ships `libs.tech/klayout/python/`? | Shape | Loadable with klt's own dependencies? |
+| Install | Ships `libs.tech/klayout/python/`? (or `tech/pymacros/`, probed second) | Shape | Loadable with klt's own dependencies? |
 | --- | --- | --- | --- |
 | `sky130A` (volare) | yes — `cells`, `import_netlist` | **plain `pya`** (`class pfet(pya.PCellDeclarationHelper)`, registered by `class sky130(pya.Library)`) — *not* Cadence-DLO/`cni`-based | no — its `__init__` chain reaches `import gdsfactory` (and `kfactory`), a genuine third-party PyPI dependency klt has no relationship to. The PDK's own `pymacros/sky130_pcells.lym` checks for exactly that import and disables the PCells when it is absent. |
 | `ihp-sg13g2` | yes — `sg13g2_native_pcell_lib`, `sg13g2_pycell_lib`, … | `sg13g2_native_pcell_lib` is plain `pya`, but transitively imports `sg13g2_pycell_lib`, whose first statement is `from cni.tech import Tech` | **yes, on a fully-provisioned install** (issue #1630) — `cni` is not a third-party PyPI package but the `pycell4klayout-api` compat layer *the PDK itself vendors*, at `pycell4klayout-api/source/python/cni`, one level deeper than the `sys.path` entry klt adds for every other package. klt adds that extra, PDK-relative directory to `sys.path` for this specific package before importing it (see `_VENDOR_COMPAT_SHIMS` in `src/klayout_tools/pdk_pcell.py`), and works around an unrelated `tkinter`-presence crash inside that same shim's PCell-instantiation path. Still reported `unavailable` when `pycell4klayout-api` itself checked out empty (an uninitialized git submodule) — see the `reason` breakdown below. |
-| `gf180mcuD` (volare) | **no** `python/` at all | — | n/a (`--list-pdk-pcells` enumerates empty, exit `0`) |
+| `gf180mcuC` (open_pdks) | no `python/`; packages `cells`, `klayout_api_cells`, `sealring_cells` under `libs.tech/klayout/tech/pymacros/` | PDK's `gf180mcu.lym` puts that dir on `sys.path` | per package; failures land in `unavailable` |
+| `gf180mcuD` (volare) | **no** `python/` or `tech/pymacros/` | — | n/a (`--list-pdk-pcells` enumerates empty, exit `0`) |
 
 A package that cannot be imported here is reported, never guessed at:
 
@@ -2283,6 +2324,7 @@ are told apart when a package still fails to load.
   "schema_version": 1,
   "pdk": { "name": "ihp-sg13g2", "variant": "ihp-sg13g2", "version": null },
   "pcell_lib_dir": "/…/ihp-sg13g2/libs.tech/klayout/python",
+  "searched_dirs": ["/…/ihp-sg13g2/libs.tech/klayout/python", "/…/ihp-sg13g2/libs.tech/klayout/tech/pymacros"],
   "libraries": [
     {
       "library": "SG13_native_pcell_lib",
@@ -2313,8 +2355,11 @@ imports and `sg13g2_pycell_lib` loads instead — see the table above (issue
 `{ "package": "cells", "missing_dependency": "gdsfactory", "reason": "requires
 Python module 'gdsfactory', which is not importable in this environment" }`.
 
-- `pcell_lib_dir` — the resolved `libs.tech/klayout/python` directory, or
-  `null` when the PDK ships none. A PDK with no such directory returns
+- `pcell_lib_dir` — the first existing of `libs.tech/klayout/python` then
+  `libs.tech/klayout/tech/pymacros`, or `null` when the PDK ships neither.
+- `searched_dirs` — the candidate directories probed, in order (empty when the
+  PDK has no `klayout` asset dir), so "not shipped" is distinguishable from
+  "not found". The text output lists them when nothing matched. A PDK with no such directory returns
   `libraries: []`, `unavailable: []` and exit `0` — a successful "this PDK
   ships none", never an error.
 - `library` — the name the vendor's own `pya.Library.register()` call used.
