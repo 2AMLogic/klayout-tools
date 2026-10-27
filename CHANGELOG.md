@@ -20,6 +20,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   `*_boxes`. Unknown cell names are a spec error; a tie selected this way is not
   listed in `erc_coverage.checked_by_well_assertion`. Additive: no
   `schema_version` bump, byte-identical output when the keys are omitted.
+- **`klt place-and-route` gains `instance_groups` (request) and `instance_groups[]`
+  (response)** (issue #4344, documented in
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)): name sets of
+  instances (globs allowed) and read back each set's placed-origin bounding box
+  and, with `max_extent_um`, a `within_extent` flag, from the run's DEF
+  `COMPONENTS`. Measurement only, not a placement constraint. Additive; no
+  `schema_version` bump.
 - **`place-and-route` accepts `library.antenna_diode: null`** (issue #4274).
   A library with no antenna cell and no antenna rules (ASAP7) can now reach
   `route`: JSON `null` (like `library.tapcell: null`) skips `repair_antennas`

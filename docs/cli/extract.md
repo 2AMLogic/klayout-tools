@@ -4322,6 +4322,17 @@ R$2 MID_A OUT_A 289.2 res_generic_po L=6U W=1U
   some placement and the run fails naming the cell. (Typical cause: an
   outside wire shorting two of a placement's nets.)
 
+- **Placed-cell naming for composed layouts (issue #4200).** A cell placed
+  by `klt gen-compose` is named `<block id>__<cell name>`, and that full name
+  is what `--hierarchical-cells` must be given (e.g.
+  `--hierarchical-cells ota__diff_pair,ota__mirror`). Splitting the hierarchy
+  this way keeps same-case-folded net names (`pb` / `PB`) in different
+  circuits; a flat extraction that contains such names emits a `warnings[]`
+  entry ("differ only by case"), because `klt lvs` reads the netlist back
+  case-insensitively and would report a false `net.merged`. Pair it with
+  `options.flatten_layout` in `klt lvs` — see
+  [`klt lvs`](lvs.md) (`options.flatten_layout`).
+
 ### Flat vs hierarchical
 
 | | flat (default) | `--hierarchical-cells` |

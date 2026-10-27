@@ -2808,6 +2808,15 @@ their verdicts. A single string/dict entry with no `spec_rows` renders
 exactly as before. The list form applies to items 5 and 6 (item 6:
 #2908, below).
 
+Item 4 (LVS clean) also accepts a list (issue #4354): one `klt lvs` report per
+cell of an analog partition. It grades `met` only if every member is `match`
+with `power_connectivity.status` not `"mismatch"`; a failing member makes it
+`unmet` with that member's reason and `detail.failed_citations` naming it, a
+non-`lvs` member is `wrong_kind`, and a malformed member or empty list is
+`invalid_evidence`. `spec_rows` has no meaning for LVS and is ignored for
+item 4. The manifest is the record of which cells were cited; `klt signoff`
+does not check they cover the partition.
+
 #### Partition-qualified `spec_rows` keys (issue #3768)
 
 On a `mixed-signal` block the bare key `"5"` (or `"6"`) imposes one row set on

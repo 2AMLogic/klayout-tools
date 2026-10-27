@@ -516,6 +516,20 @@ DECK: list[DrcRule] = [
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "poly.1a"),
     ),
     DrcRule(
+        id="poly.space.1",
+        description="minimum poly spacing",
+        layer=(66, 20),  # poly.drawing
+        check="space",
+        threshold_dbu=210,  # 0.21 um
+        # sky130A_mr.drc rule "poly.2": poly.not(areaid_ce).space(0.21,
+        # euclidian) -> "poly.2 : min. poly spacing : 0.21um". The deck is
+        # areaid-marker-blind (MARKER_BLIND_LAYERS), so the 0.21 um general
+        # value is applied everywhere, including inside areaid:core where the
+        # runset relaxes it to poly.3's 0.16 um (listed in UNMODELED_RULES).
+        scope="poly",  # sky130.lydrc "poly.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "poly.2"),
+    ),
+    DrcRule(
         id="poly.endcap.diff.1",
         description="minimum poly extension past diff at a gate (endcap)",
         layer=(65, 20),  # diff.drawing -- the gate-end edges being probed
@@ -577,6 +591,33 @@ DECK: list[DrcRule] = [
         # -> "difftap.1 : min. difftap width : 0.15um"
         scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "difftap.1"),
+    ),
+    DrcRule(
+        id="diff.space.1",
+        description="minimum diff spacing (approximates the official difftap.3 rule)",
+        layer=(65, 20),  # diff.drawing
+        check="space",
+        threshold_dbu=270,  # 0.27 um
+        # sky130A_mr.drc rule "difftap.3": difftap.space(0.27, euclidian),
+        # where difftap = diff.or(tap) -- a compound layer our engine does not
+        # evaluate; approximated like difftap.1 as a pair of single-layer
+        # rules (this one and tap.space.1). Diff-to-tap spacing across the two
+        # layers is NOT checked here (diff/tap abutting or overlapping merges
+        # in the source union, which a per-layer check cannot reproduce).
+        # -> "difftap.3 : min. difftap spacing : 0.27um"
+        scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "difftap.3"),
+    ),
+    DrcRule(
+        id="tap.space.1",
+        description="minimum tap spacing (approximates the official difftap.3 rule)",
+        layer=(65, 44),  # tap.drawing
+        check="space",
+        threshold_dbu=270,  # 0.27 um
+        # sky130A_mr.drc rule "difftap.3" -- tap-side half; see diff.space.1.
+        # -> "difftap.3 : min. difftap spacing : 0.27um"
+        scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "difftap.3"),
     ),
     DrcRule(
         id="li1.width.1",
@@ -2072,11 +2113,25 @@ MARKER_BLIND_LAYERS: tuple[tuple[int, int], ...] = ((81, 2),)
 UNMODELED_RULES: tuple[str, ...] = (
     # Implant/npc/well rules (issue #2934) scoped to compound layer
     # expressions (diff.and(psdm), npsdm enclosing diff/tap, gate, ...) that
-    # `DrcRule` cannot evaluate; ids from sky130.lydrc.
+    # `DrcRule` cannot evaluate; ids from sky130.lydrc. Also the spacing rules
+    # of sky130A_mr.drc this deck omits (issue #4282): marker/special layers
+    # not modelled (dnwell, lvtn, ncm, nsm, rpm, urpm, tunm, thkox, ldntm),
+    # licon spacing, areaid:core splits (poly.3, li.7) and capacitor-plate
+    # separations needing two-layer checks (capm.*, cap2m.*).
+    "MR_licon.SP.1",
+    "cap2m.11",
+    "cap2m.2b",
+    "cap2m.2b_a",
+    "cap2m.5",
+    "capm.11",
+    "capm.2b",
+    "capm.2b_a",
+    "capm.5",
     "difftap.10",
     "difftap.11",
     "difftap.8",
     "difftap.9",
+    "dnwell.2",
     "hvi.1",
     "hvi.2a",
     "hvntm.1",
@@ -2086,6 +2141,10 @@ UNMODELED_RULES: tuple[str, ...] = (
     "hvtr.1",
     "hvtr.2",
     "hvtr.2_a",
+    "ldntm.2",
+    "li.7",
+    "licon.13",
+    "lvtn.2",
     "m1.3ab",
     "m1.5",
     "m2.3ab",
@@ -2099,10 +2158,17 @@ UNMODELED_RULES: tuple[str, ...] = (
     "n/psdm.6",
     "n/psdm.7",
     "n/psdm.8",
+    "ncm.2a",
     "npc.4",
+    "nsm.1",
     "pad.2",
+    "poly.3",
     "rdl.1",
     "rdl.2",
+    "rpm.2",
+    "thkox.2",
+    "tunm.2",
+    "urpm.2",
     "via.5a",
     "via2.5",
     "via3.5",

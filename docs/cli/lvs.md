@@ -3535,6 +3535,18 @@ neither `fixed_offset_ohm` nor `end_term_ohm_um`, or N is 1. Covers `options.com
 `options.combine_devices_per_circuit`. The effect of `width_offset_um` is not
 disclosed.
 
+#### `net.merged` caused by case-colliding net names (issue #4200)
+
+On an inline-extraction layout (`layout.file`), a flat extraction can contain
+nets whose names differ only by case (`pb` / `PB`). The SPICE read-back is
+case-insensitive, so they merge and surface as `net.merged` / `device.unmatched`.
+When the extracted nets contain such a collision, each `net.merged` entry's
+`description` gains a note naming the cause; `status`, `severity` and counts
+are unchanged. Fix: extract the composed layout hierarchically with
+`klt extract --hierarchical-cells <block id>__<cell name>,...` (the placed-cell
+name `klt gen-compose` gives each cell) and compare that netlist with
+`options.flatten_layout: true`, so each cell keeps its own namespace.
+
 #### `topology.flattened`: `options.flatten_reference`/`options.flatten_layout` collapsed a side's hierarchy before comparing
 
 Only possible when `options.flatten_reference: true` and/or
