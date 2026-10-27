@@ -41,13 +41,14 @@ Four modes, one verb:
    which T1 item ids this build has grading rules for, plus the content hash
    identifying the grading code itself, without reading a manifest or
    running any check. See "Identifying the grading build" below.
-5. **Attest T1 items 1, 9 and 10** (`--attest {1,9,10} --inventory FILE`,
-   issue #2844) — run the item-specific mechanical checks a versioned
+5. **Attest T1 items 1, 8, 9 and 10** (`--attest {1,8,9,10} --inventory FILE`,
+   issues #2844, #4311) — run the item-specific mechanical checks a versioned
    inventory declares and emit the artifact-anchored `generic` envelope
    `--manifest` binds for that item. Its `status` is derived from the
    checks, not asserted. Since this producer exists, items 1, 9 and 10
-   **no longer accept native envelopes** (item 2 still does). See
-   "Attesting items 1, 9 and 10" below.
+   **no longer accept native envelopes** (item 2 still does; item 8 still
+   accepts a bare generic envelope — `--attest 8` is the tool-produced
+   alternative). See "Attesting items 1, 8, 9 and 10" below.
 
 Plus one modifier on modes 2 and 3: **`--check <committed-report>`** (issue
 #2249) re-grades the manifest and reports whether a previously committed
@@ -66,8 +67,8 @@ klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|js
 klt signoff --manifest <manifest-file> --check <committed-report> [--tiers-doc <path>] [--format text|json]
 klt signoff --fleet <fleet-manifest-file> --check <committed-report> [--tiers-doc <path>] [--format text|json]
 klt signoff --describe-grader [--format text|json]
-klt signoff --attest {1,9,10} --inventory <file> [-o <envelope>] [--format text|json]
-klt signoff --attest {1,9,10} --inventory <file> --check <committed-envelope> [--format text|json]
+klt signoff --attest {1,8,9,10} --inventory <file> [-o <envelope>] [--format text|json]
+klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> [--format text|json]
 ```
 
 - `<file>...` — one or more paths to `klt drc`/`klt lvs`/`klt extract`/`klt
@@ -109,12 +110,12 @@ klt signoff --attest {1,9,10} --inventory <file> --check <committed-envelope> [-
   for, plus its grading-code content hash. Mutually exclusive with
   `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`. See
   "Identifying the grading build" below.
-- `--attest` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** `1`, `9` or `10`: produce the attestation envelope for that
-  T1 item from `--inventory` (issue #2844). Any other value is a usage error
+- `--attest` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** `1`, `8`, `9` or `10`: produce the attestation envelope for
+  that T1 item from `--inventory` (issues #2844, #4311). Any other value is a usage error
   (exit `2`). Mutually exclusive with
   `<file>...`/`--manifest`/`--fleet`/`--describe-grader`/`--tiers-doc`.
   With `--check <committed-envelope>`, re-attests and diffs instead of
-  writing. See "Attesting items 1, 9 and 10" below.
+  writing. See "Attesting items 1, 8, 9 and 10" below.
 - `--inventory` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** With `--attest`: path to the attestation inventory (a
   file inside a git repository, not `-`). Refused without `--attest`.
 - `-o`/`--output` — with `--attest`: also write the envelope to this path,
@@ -1570,7 +1571,7 @@ Nothing about how the four are *graded* changes: they are still `unmet` when
 uncited, and a block still reaches `tier: "T1"` only once every T1 item —
 these four included — is `"met"`.
 
-### Attesting items 1, 9 and 10 (`--attest`, issue #2844)
+### Attesting items 1, 8, 9 and 10 (`--attest`, issues #2844, #4311)
 
 Item 2 is attested from a layout stream rather than an inventory — see
 "Item 2: attest a committed layout stream" below.
@@ -1579,7 +1580,7 @@ Item 2 is attested from a layout stream rather than an inventory — see
 > (PyPI). Release-pinned installs of 0.7.0 and earlier fail with
 > `unrecognized arguments`.
 
-`klt signoff --attest {1,9,10} --inventory FILE` is the producer for the
+`klt signoff --attest {1,8,9,10} --inventory FILE` is the producer for the
 artifact-anchored envelope above. It reads a versioned **attestation
 inventory**, runs the mechanical checks that inventory declares for the
 item, and emits a `generic` envelope whose `status` is `"pass"` only when
@@ -1649,6 +1650,11 @@ an inventory the author did not write.
 | ---- | ----- | -------- | ---------- |
 | **1** Design sources | `sources`: list of paths | yes, non-empty | each file exists (`present`, role `source`) |
 | | `derived`: list of `{path, generator, check}` | yes, non-empty | each file exists (`present`, role `derived`), **and** its `check` command exits `0` (`command`, role `freshness`). `generator` names what produced it (e.g. `"klt netlist"`). |
+| **8** Characterization report | `report`: path | yes | the report file exists (`present`, role `report`) |
+| | `spec_rows`: list of row ids | yes, non-empty | each row has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) |
+| | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no entry fails its `citation` check |
+| | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check` |
+| | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. |
 | **9** Testbenches shipped | `testbenches`: list of paths | yes, non-empty | each file exists (`present`, role `testbench`) |
 | | `cold_start`: command | yes | exits `0` (`command`, role `cold_start`) |
 | | `pins`: `{"pdk": {"name", "revision"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty (`pin`, role `pdk`); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
@@ -1686,6 +1692,21 @@ refused: there is no path to pin).
   (or `null` when it is missing). The bound artifact is the inventory, so a
   changed *source* does not change the manifest pin. `--check` catches that
   drift through these per-file hashes; run it in CI.
+
+#### Item 8: characterization report
+
+Item 8 is **not** restricted to attested evidence: a bare hand-written
+generic envelope still grades `met` (compatibility). A met item-8 generic
+citation therefore always carries `citation.attestation`, so a reader can tell
+the two apart: `{"tool_produced": true, "producer": "klt signoff --attest",
+"check_count": N, "passed_count": N}` for an envelope this producer made, and
+`{"tool_produced": false}` for any other. Disclosure only; it never changes
+the verdict. The envelope pins the inventory (as for the other items); the
+report and cited envelopes are recorded by hash in their `present` checks, and
+`--check` reports drift in any of them, in the row map, or in a recorded
+metric value. The `field` of each metric binding is chosen by the inventory
+author for the cited envelope's kind (for example `place-and-route` reports
+Fmax as `fmax_mhz`); the producer reads only what is named.
 
 #### Envelope
 

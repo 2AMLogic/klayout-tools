@@ -435,9 +435,14 @@ written to every block.
    tool). For a digital or mixed-signal digital partition this includes
    Fmax, area, and power across the corner set, not just functional
    pass/fail. Unlike every other T1 item, this one names no specific `klt`
-   verb — there is no dedicated aggregation command, and its evidence may be
-   a hand-assembled record (e.g. a committed Markdown characterization
-   report) rather than one `klt` verb's own JSON output. `klt signoff
+   verb for its evidence, which may be a hand-assembled record (e.g. a
+   committed Markdown characterization report) rather than one `klt` verb's
+   own JSON output. `klt signoff --attest 8 --inventory FILE` (issue #4311)
+   produces the generic envelope mechanically — report present, each spec row
+   cited, each cited envelope present and passing its own `--check`, and for a
+   digital partition Fmax/area/power bound per corner — and a met citation
+   discloses whether the tool produced it; a bare hand-written envelope still
+   grades. `klt signoff
    --manifest` grades it via an opt-in **generic evidence envelope**
    (`"kind": "generic"`, issue #1152) — a minimal, hand-rolled JSON wrapper
    asserting `status: "pass"|"fail"` for whatever record backs it. Item 8

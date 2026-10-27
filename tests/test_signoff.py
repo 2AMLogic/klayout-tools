@@ -6063,6 +6063,9 @@ def test_generic_evidence_satisfies_item_8(tmp_path):
         # nothing to verify against an artifact either.
         "input_verified": None,
         "exit_status": 0,
+        # Issue #4311: a bare (hand-written) item-8 envelope discloses that
+        # no tool produced it.
+        "attestation": {"tool_produced": False},
     }
 
 
@@ -16148,7 +16151,7 @@ def test_attest_refuses_an_inventory_outside_any_repository(tmp_path):
 
 def test_attest_refuses_unsupported_item_and_unreadable_inventory(tmp_path):
     repo = _attest_repo(tmp_path)
-    with pytest.raises(AttestationError, match="supports T1 items 1, 9, 10"):
+    with pytest.raises(AttestationError, match="supports T1 items 1, 8, 9, 10"):
         build_attestation(2, _write_inventory(repo, 1))
     with pytest.raises(AttestationError, match="not found"):
         build_attestation(1, str(repo / "missing.json"))
