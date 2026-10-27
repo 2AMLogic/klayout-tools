@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **ASAP7 deck no longer aborts on LIG near unconnected LISD/SDT** (issue
+  #4340). The LIG.LISD.S.6 / LIG.SDT.S.8 / LIG.LISD.S.7 net separation
+  tripped a KLayout 0.28 assertion on tie and tap cells whose LIG sat within
+  the search distance of a LISD/SDT with no pair closer than the rule, leaving
+  a partial report. An empty plain separation now short-circuits the
+  net-aware call; the rules are still declared, so coverage is unchanged.
+  `provenance.deck` (sha256) changes.
 - **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
   Landing candidates are now enumerated per merged net polygon rather than over
   the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too
