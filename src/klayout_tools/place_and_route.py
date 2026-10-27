@@ -1126,15 +1126,44 @@ _TOP_LEVEL_METRIC_KEYS = (
 )
 
 
+# Issue #4230: every top-level request key some code path reads -- including
+# `backend`/`batch`, which only `place_and_route_batch` consumes.
+_ALLOWED_REQUEST_KEYS = (
+    "schema",
+    "engine",
+    "netlist",
+    "hdl_toplevel",
+    "pdk",
+    "floorplan",
+    "io",
+    "macros",
+    "power",
+    "constraints",
+    "seed",
+    "target_stage",
+    "route_critical_nets_percentage",
+    "max_antenna_repair_iterations",
+    "library",
+    "post_route_spef",
+    "post_route_sdf",
+    "portable_paths",
+    "backend",
+    "batch",
+    "outputs",
+    "instance_groups",
+)
+
+
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt place-and-route`` request JSON
     file.
 
     Raises :class:`PlaceAndRouteError` if the file is missing/unreadable,
     not valid JSON, or missing a required top-level field (``netlist``,
-    ``hdl_toplevel``, ``pdk``, ``floorplan``, ``seed``). Does not require a
-    ``schema`` field, matching every other request-taking verb's
-    ``load_request``.
+    ``hdl_toplevel``, ``pdk``, ``floorplan``, ``seed``), or carries an
+    unrecognised top-level key (issue #4230; ``_comment`` is exempt). Does
+    not require a ``schema`` field, matching every other request-taking
+    verb's ``load_request``.
     """
     request = _load_request_json(request_path, PlaceAndRouteError)
     request = validate_request_shape(
@@ -1142,6 +1171,11 @@ def load_request(request_path: str) -> dict[str, Any]:
         "request file",
         error_cls=PlaceAndRouteError,
         required_fields=("netlist", "hdl_toplevel", "pdk", "floorplan", "seed"),
+    )
+    # Issue #4230: a misspelt or foreign top-level key used to be dropped in
+    # silence (same hole `klt synthesize` closed in #3466). Reject it.
+    _reject_unknown_keys(
+        request, _ALLOWED_REQUEST_KEYS, request_path, "", PlaceAndRouteError
     )
     _validate_outputs(request, request_path)
     return request

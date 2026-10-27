@@ -14,6 +14,11 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt place-and-route` rejects unknown top-level request keys** (issue
+  #4230, documented in [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)):
+  a misspelt or foreign key now exits 1 naming the key instead of being
+  dropped silently, matching `klt synthesize` (#3466). Behaviour change for
+  requests carrying stray keys; response schema unchanged.
 - **`signoff_runset.PINNED_RUNSETS` pins the gf180mcu LVS runset** (issue #4395):
   `klayout/lvs/gf180mcu.lvs` at `fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pv`
   commit `1a4e4b5` (sha256 `09a4f1f1…fde9`, byte-identical in all four open_pdks
