@@ -1511,10 +1511,20 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
     report = run_drc(str(path), "sky130")
 
     assert report["coverage"]["unmodeled_rules"] == [
+        "MR_licon.SP.1",
+        "cap2m.11",
+        "cap2m.2b",
+        "cap2m.2b_a",
+        "cap2m.5",
+        "capm.11",
+        "capm.2b",
+        "capm.2b_a",
+        "capm.5",
         "difftap.10",
         "difftap.11",
         "difftap.8",
         "difftap.9",
+        "dnwell.2",
         "hvi.1",
         "hvi.2a",
         "hvntm.1",
@@ -1524,6 +1534,10 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "hvtr.1",
         "hvtr.2",
         "hvtr.2_a",
+        "ldntm.2",
+        "li.7",
+        "licon.13",
+        "lvtn.2",
         "m1.3ab",
         "m1.5",
         "m2.3ab",
@@ -1537,10 +1551,17 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "n/psdm.6",
         "n/psdm.7",
         "n/psdm.8",
+        "ncm.2a",
         "npc.4",
+        "nsm.1",
         "pad.2",
+        "poly.3",
         "rdl.1",
         "rdl.2",
+        "rpm.2",
+        "thkox.2",
+        "tunm.2",
+        "urpm.2",
         "via.5a",
         "via2.5",
         "via3.5",
@@ -6351,18 +6372,19 @@ def test_sky130_deck_check_kind_breakdown():
     `rpm.width.1`/`urpm.width.1`; #2936 adds `poly.endcap.diff.1`, the first
     `enclosed` rule; #3031 adds `nwell.enclosed.hvi.1`; #3316 adds the 4
     `enclosing_adjacent` rules; #2934 adds npc/nsdm/psdm width + isolated
-    spacing): 150 rules total -- 23 `width`, 13 `space`,
+    spacing; #4282 adds `poly.space.1`/`diff.space.1`/`tap.space.1`): 153 rules
+    total -- 23 `width`, 16 `space`,
     4 `isolated`, 17 `enclosing`, 2 `enclosed`, 4 `enclosing_adjacent`,
     2 `separation`, 10 `area`, 38 `ongrid`, 37 `angle`. Fails loudly (at the
     exact number that changed) if a future rule addition/removal drifts from
     that table without updating it."""
     deck = get_deck("sky130")
 
-    assert len(deck) == 150
+    assert len(deck) == 153
     counts = Counter(rule.check for rule in deck)
     assert counts == {
         "width": 23,
-        "space": 13,
+        "space": 16,
         "isolated": 4,
         "enclosing": 17,
         "enclosed": 2,

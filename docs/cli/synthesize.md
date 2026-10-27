@@ -9,6 +9,7 @@ flow").
 ```
 klt synthesize <request> [--pdk VARIANT] [--pdk-root ROOT] \
     [--verify-equivalence] [--equiv-timeout-s SECONDS] \
+    [--equiv-engine yosys|yosys-sequential] \
     [--restructure-timing] [--restructure-max-iterations N] \
     [--format text|json]
 ```
@@ -45,6 +46,11 @@ flag line carries cleanly — not positional RTL file args.
   `--verify-equivalence` proof (default: `klt equiv`'s own `60`); no effect
   unless `--verify-equivalence` is given. Also bounds the `klt equiv` check
   `--restructure-timing` runs on any netlist it actually resizes.
+- `--equiv-engine` — `klt equiv` proof engine for the `--verify-equivalence`
+  gate: `yosys` (the default, combinational only) or `yosys-sequential`
+  (register-correspondence proof, for designs with flip-flops). No effect
+  unless `--verify-equivalence` is given. The `--restructure-timing` check
+  stays combinational. Must be re-passed with `--check --rerun`.
 - `--restructure-timing` — close (or reduce) a setup violation on the
   native `sta` critical path via a bounded cell-resizing loop, when it
   exceeds `constraints.clock_period_ns`. Requires
@@ -267,7 +273,7 @@ retained directory next to that request.
 | `<top>_abc.constr` | The generated two-line ABC constraint file (`set_driving_cell` / `set_load`) — present only for a `cell_library` with a constraint-table entry (see below). |
 | `synth_<top>.run.log` | Captured stdout and stderr for the executed script, retained on success, nonzero exit, and timeout. Named `synth_<top>.log` when no rehydrated script is needed; trial/probe/baseline scripts have their own sibling logs. Abrupt process interruption preserves files already written. |
 | `<top>_abc.log` | The captured `abc` pass output, including ABC's own `stime -p` summary line this command parses into `timing` — same file, same `tee -q -o` discipline as the stats capture. |
-| `<top>_memory_evidence.ys` / `.log` | The side memory-evidence script (`memory_mapping.script_path`) and its captured log (issue #2745). Never the production script; see "`memory_mapping`" below. |
+| `<top>_memory_evidence.ys` / `.log` | The side memory-evidence script (`memory_mapping.script_path`) and its captured log (issue #2745). Never the production script; see "`memory_mapping`" below. **Commit-safe** when its sources and `outputs.dir` sit inside the repo: those paths are written repo-relative (anything outside the repo stays absolute). |
 | `<top>_blackboxes.txt` | The evidence script's `select -list =A:blackbox =A:whitebox` output, read for `blackbox_modules`. |
 | `<top>_memory_elaborated.json` / `<top>_memory_pre_lowering.json` | The evidence script's two `stat -json` captures — the `elaborated` and `pre_lowering` stages `memory_mapping` is derived from. |
 
@@ -445,6 +451,7 @@ table:
 | `gf180mcu_fd_sc_mcu9t5v0` | `gf180mcu_fd_sc_mcu9t5v0__tieh` `Z` | `gf180mcu_fd_sc_mcu9t5v0__tiel` `ZN` |
 | `gf180mcu_fd_sc_mcu7t5v0` | `gf180mcu_fd_sc_mcu7t5v0__tieh` `Z` | `gf180mcu_fd_sc_mcu7t5v0__tiel` `ZN` |
 | `sg13g2_stdcell` | `sg13g2_tiehi` `L_HI` | `sg13g2_tielo` `L_LO` |
+| `asap7sc7p5t_rvt`, `asap7sc7p5t_28_R` | `TIEHIx1_ASAP7_75t_R` `H` | `TIELOx1_ASAP7_75t_R` `L` |
 
 The first three rows are ORFS's own `TIEHI_CELL_AND_PORT`/`TIELO_CELL_AND_PORT`
 for that platform, cross-checked against the installed liberty (the sky130
@@ -536,7 +543,10 @@ default search order finds (`$PDK_ROOT`/`$PDK` environment variables, then
 the ciel/volare stores, then the conventional install prefixes) — exactly as
 `klt pdk find` with no flags would resolve — unless the CLI's own `--pdk`/
 `--pdk-root` flags (mirroring `klt extract`'s identical pair) pin a specific
-installed variant/root instead.
+installed variant/root instead. When neither `--pdk` nor `$PDK` is set and
+the default pick does not ship `pdk.cell_library`, the first installed
+variant that does (search order) is used instead, and the result's PDK
+provenance names it.
 
 - `pdk.cell_library` — a standard-cell library name. Not restricted to a
   single PDK family: any standard-cell library the resolved install ships a
@@ -1190,12 +1200,14 @@ like every other file this command writes. The outcome:
   `"inconclusive"` verdict (timeout) is never treated as a pass, mirroring
   `klt equiv`'s own "timeout is never equivalent" discipline one level up.
 
-**Combinational designs only** — `klt equiv`'s Phase 0 MVP scope (#707) is
-combinational-only; a design containing flip-flops, latches, or memories
-(e.g. the GCD worked example below) makes the gate itself fail with a clear
-scope error, even though synthesis succeeded. `--verify-equivalence` is not
-yet usable on sequential designs — see `docs/cli/equiv.md`'s "Scope"
-section and Out of scope below.
+**Combinational by default; `--equiv-engine yosys-sequential` for sequential
+designs.** The default `yosys` engine is combinational-only; a design
+containing flip-flops, latches, or memories (e.g. the GCD worked example
+below) makes the gate fail with a clear scope error, even though synthesis
+succeeded. Pass `--equiv-engine yosys-sequential` to gate such a design
+through `klt equiv`'s register-correspondence engine instead; the engine that
+ran is echoed as `equivalence.engine`. See `docs/cli/equiv.md`'s "Scope"
+section.
 
 **`equivalence.artifacts` is not normalized (known gap, issue #1844).**
 Unlike `netlist_path`/`script_path` above, `equivalence.artifacts.
@@ -1218,7 +1230,10 @@ separately if it turns out to matter for evidence-record committing.
     "cell_library": "sky130_fd_sc_hd",
     "corner": "tt_025C_1v80"
   },
-  "constraints": { "clock_period_ns": null }
+  "constraints": { "clock_period_ns": null },
+  "macros": [
+    { "lef": "sram_8x8.lef", "lib": { "tt_025C_1v80": "sram_8x8_tt.lib" } }
+  ]
 }
 ```
 
@@ -1226,13 +1241,15 @@ separately if it turns out to matter for evidence-record committing.
 | --- | --- | --- |
 | `schema` | string | Request contract identifier + major version. Not validated — user-authored input, never emitted by this tool. |
 | `engine` | string | `"yosys"` (default; only value implemented). |
-| `sources` | array\<string\> | RTL source file paths (`read_verilog` inputs), resolved relative to the request file's own directory. Required, non-empty. Sources with a `.sv` or `.svh` extension (case-insensitive) are read with `read_verilog -sv` so ordinary SystemVerilog (`logic`, `always_ff`) parses; every other extension keeps plain `read_verilog` (Verilog-2005). Supported subset: whatever Yosys's native `-sv` front end parses (known good: `logic`, `always_ff`, per #3797). Known unsupported: unpacked-array module ports (`input logic [31:0] a_i[2]`) -- the failure keeps the raw Yosys `ERROR:` line and appends a hint naming the construct class (message text only, no new JSON fields, issue #4181); workaround: rewrite as a packed/flattened port or pre-convert the source before listing it. Other constructs beyond the front end surface as a raw Yosys error. The same rule applies in the arithmetic probe, the memory evidence pass and the `--verify-equivalence` gold side (issue #3797). |
+| `sources` | array\<string\> | RTL source file paths (`read_verilog` inputs), resolved relative to the request file's own directory. Required, non-empty. Sources with a `.sv` or `.svh` extension (case-insensitive) are read with `read_verilog -sv` so ordinary SystemVerilog (`logic`, `always_ff`) parses; every other extension keeps plain `read_verilog` (Verilog-2005). Supported subset: whatever Yosys's native `-sv` front end parses (known good: `logic`, `always_ff`, per #3797). Known unsupported: unpacked-array module ports (`input logic [31:0] a_i[2]`) -- the failure keeps the raw Yosys `ERROR:` line and appends a hint naming the construct class (message text only, no new JSON fields, issue #4181); workaround: set `sv_frontend` to `"sv2v"` (below), or rewrite as a packed/flattened port. Other constructs beyond the front end surface as a raw Yosys error. The same rule applies in the arithmetic probe, the memory evidence pass and the `--verify-equivalence` gold side (issue #3797). |
+| `sv_frontend` | string \| omitted | SystemVerilog front end (issue #4198): `"yosys"` (default; unchanged behavior, including the #4181 hint on a native-front-end failure) or `"sv2v"`. With `"sv2v"` all `sources` (`.v`/`.sv`, `.svh` as include directories) are converted **once** by a single `sv2v` invocation (resolved from `PATH`) into `<top>_sv2v.v` in the run directory, and that Verilog-2005 file is what the main synthesis script, the arithmetic probe, the memory evidence pass and the `--verify-equivalence` gold side all read, so every number describes one elaboration; `parameters` overrides apply after conversion, and `defines` are passed to `sv2v` itself as `--define=NAME[=VALUE]` (sorted by name) because `sv2v` preprocesses the sources during conversion. `provenance.input.content_hash` still hashes the original `sources`. The route is recorded as `provenance.sv_frontend` = `{"route": "sv2v", "sv2v_version": "<sv2v --version first line>"}` (additive; the field is absent for the default route). A missing `sv2v`, a failed conversion or any other value is a structured error -- never a silent fallback to the native front end. `sv2v` is not provisioned by `klt`; install the pinned release on the host. |
 | `hdl_toplevel` | string | The design's top module name. Required; must not contain path separators. |
 | `parameters` | object \| omitted | Top-level Verilog `parameter` overrides, `name -> value` (issue #3466), applied with Yosys `chparam -set` after the `read_verilog` lines and before `hierarchy`, so one committed RTL file can be synthesised at several parameterisations without per-point source rewrites. Keys must be Verilog identifiers; values must be integers or plain strings (booleans, floats, and strings containing quotes, backslashes, `;`, `#` or control characters are rejected — values land in a generated `.ys` script). A name the top module does not declare fails the run (`yosys synthesis failed: … Can't find object for defparam`). Only parameters of `hdl_toplevel` itself are reachable; a sub-module's parameter cannot be overridden this way. The same override is applied to every pass that re-elaborates the sources (arithmetic probe and trial runs, the memory-mapping evidence pass, and the `--verify-equivalence` gold side), so all reported numbers describe one elaboration. Echoed as the response's `parameters` and `provenance.parameters`. |
 | `defines` | object \| omitted | Verilog preprocessor defines, `name -> string \| null` (issue #4196): each is passed as `read_verilog -D NAME[=VALUE]` (`null` = bare `-D NAME`) on every `read_verilog` of the RTL sources, in sorted-name order, so a source that selects a variant with `` `ifdef `` can be synthesised in that variant. Keys must be Verilog identifiers; values may use only letters, digits and `_ . , : / + - = @ %` (quotes, backslashes, whitespace, `;`, `#` and control characters are rejected — values land in a generated `.ys` script). Applied to every pass that re-elaborates the sources (arithmetic probe and trial runs, the memory-mapping evidence pass, and the `--verify-equivalence` gold side via `gold.defines`). Echoed as the response's `defines` and `provenance.defines`. Recorded separately from `provenance.input.content_hash`, so existing committed reports keep their hash. |
 | `run_id` | string \| omitted | Optional safe identifier for an exclusively created invocation directory; see "Artifacts". Omit to allocate a new ID automatically. Reusing an existing ID fails. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
+| `macros` | array\<object\> \| omitted | Hard-macro declarations (issue #2635) — pre-characterized blocks this design instantiates but carries no RTL for. See "Hard macros" below for the shared shape and per-verb behaviour. `[]`/omitted (the default) leaves every pre-#2635 request byte-identical. |
 | `constraints.clock_period_ns` | number \| null | The target clock period in nanoseconds, consumed as ABC's own delay target: passed as `abc -D <clock_period_ns × 1000>` picoseconds, and echoed in the response as `timing.delay_target_ps`. Must be a positive number when given (a non-numeric or non-positive value is an error, never silently ignored). Yosys still has no SDC-reading step — this is the request field translated into the one delay knob the engine does expose. Also the target `--restructure-timing` restructures the `sta` stage's `worst_path` against — required (not `null`) whenever that flag is given. |
 | `constraints.clocks` | array\<{port, period_ns}\> \| null | Per-clock periods for a multi-clock design (issue #2883). Each entry needs a unique non-empty `port` and a positive `period_ns`; unknown keys, an empty list, or a malformed entry are errors. `abc -D` takes a single global number, so per-clock periods are **not** individually enforced: when `clock_period_ns` is omitted the **smallest** listed `period_ns` becomes the ABC delay target (and the `--restructure-timing` target); an explicit `clock_period_ns` always takes precedence. The response's `clock_targets` states exactly what was applied. |
 | `constraints.dont_use` | array\<string\> \| omitted | Standard cells this run must not map to, as ABC `-dont_use` cell names/globs (issue #2382) — **merged with** the built-in per-library exclusion table by default, see "ABC constraints, delay target, and cell exclusions" above for the merge semantics and `constraints.dont_use_mode`. Each entry must be a non-empty string of cell-name/glob characters (`[A-Za-z0-9_.*?!\[\]-]`) and must match **at least one** cell in the resolved liberty — a pattern matching nothing is an error, never a silent no-op. The fully-resolved list is echoed back as the response's `cell_exclusions.effective`. |
@@ -1285,6 +1302,20 @@ same check applies to `--check` and `--rerun`. Nested objects (`pdk`,
     "sky130_fd_sc_hd__a211o_1": 1,
     "sky130_fd_sc_hd__dfrtp_1": 50
   },
+  "macros": [
+    {
+      "cell": "sram_8x8",
+      "lef": { "path": "sram_8x8.lef", "scope": "repo" },
+      "lib": { "tt_025C_1v80": { "path": "sram_8x8_tt.lib", "scope": "repo" } },
+      "gds": null,
+      "verilog_blackbox": null,
+      "blackbox_source": "liberty",
+      "blackbox_path": { "path": "sram_8x8_tt.lib", "scope": "repo" }
+    }
+  ],
+  "macro_instance_counts_by_type": { "sram_8x8": 1 },
+  "macro_instance_count": 1,
+  "cells_without_area": [],
   "leakage_power_nw": 5.7321,
   "leakage_by_type_nw": {
     "sky130_fd_sc_hd__a211o_1": 0.00199315,
@@ -1365,13 +1396,16 @@ same check applies to `--check` and `--rerun`. Nested objects (`pdk`,
 | `instance_count` | integer | Total standard-cell instances after liberty mapping, rolled up over the **whole design hierarchy** — `stat -json`'s per-module `num_cells` aggregated recursively across every sub-module Yosys left un-flattened, each level scaled by its instance count (issue #821; the top module's own `num_cells` alone is `0` for a design whose top is a pure wrapper). Matches `stat -json`'s own `design.num_cells` rollup. **Deliberately not named `cell_count`**: `klt layout-metrics`'s existing `cell_count` field counts *distinct cell definitions* in a GDS hierarchy, a different concept. |
 | `area_um2` | number | `stat -json`'s `area`, in µm² (the liberty's own unit). `0.0` for a design whose only cells are internal, non-liberty primitives (e.g. an inferred latch — Yosys's own `stat -liberty ... -json` omits the `area` key entirely in that case; verified live, issue #1588). |
 | `sequential_area_um2` | number \| null | `stat -json`'s `sequential_area` — a floorplan hint for a future P&R step. `null` when the resolved Yosys build's `stat -json` output omits the field (distro-packaged Yosys < ~0.67, e.g. Ubuntu 24.04's 0.33 — see #560); present as a number on Yosys 0.67+. |
-| `instance_counts_by_type` | object\<string, int\> | `stat -json`'s `num_cells_by_type`, rolled up over the whole hierarchy the same way `instance_count` is, keys sorted for determinism — the synthesis analogue of `klt drc`'s `rule_counts` / `klt extract`'s `device_counts`. Keys are always real leaf standard-cell types; a sub-module *name* (which `stat -json` reports as a pseudo cell type in the parent module's own block) is never reported as one, it is expanded into the cells it instantiates (issue #821). |
+| `instance_counts_by_type` | object\<string, int\> | `stat -json`'s `num_cells_by_type`, rolled up over the whole hierarchy the same way `instance_count` is, keys sorted for determinism — the synthesis analogue of `klt drc`'s `rule_counts` / `klt extract`'s `device_counts`. Keys are always real leaf standard-cell types; a sub-module *name* (which `stat -json` reports as a pseudo cell type in the parent module's own block) is never reported as one, it is expanded into the cells it instantiates (issue #821). Includes every declared macro's own cell type — see `macro_instance_counts_by_type`/`macro_instance_count` below for the split-out view. |
+| `macros` | array\<object\> | **Always present** (issue #2635) — echo of `request.macros`, each entry's `lef`/`lib`/`gds`/`verilog_blackbox` paths in the `{path, scope}` shape (same convention as `netlist_path`), plus `blackbox_source` (`"liberty"` \| `"verilog_blackbox"` \| `"lef"` — which of the three ways this run made the macro visible to Yosys, see "Hard macros" below) and `blackbox_path` (the file actually `read_liberty -lib`/`read_verilog -lib`'d, including a `"lef"`-sourced run's generated stub). `[]` when the request declared none. |
+| `macro_instance_counts_by_type` / `macro_instance_count` | object\<string, int\> / integer | **Always present** (issue #2635). The subset of `instance_counts_by_type` whose cell type is one of `request.macros[].cell` — macro instances reported *separately* from standard cells, so a caller can compare a standard-cell count/budget without first subtracting out the macros by hand. `{}`/`0` when the request declared no macros. |
+| `cells_without_area` | array\<string\> \| null | **Always present** (issue #2635). Every instantiated cell type (standard cell or macro) for which the resolved standard-cell liberty reports no `area` — i.e. every type whose instances contribute a silent `0` to `area_um2`. A blackboxed hard macro is always in this list (its real area lives in its own macro liberty/LEF, never in the standard-cell liberty); see `macros_response`'s `cells_without_area` note in `warnings` below. `[]` when every instantiated type does have an area (or the design instantiates nothing); `null` when this cannot be established from the resolved liberty at all. |
 | `leakage_power_nw` | number \| null | Static leakage power, in nanowatts — issue #1626. `sum(cell_leakage_power[cell_type] * instance_count[cell_type])` over `instance_counts_by_type`, read from the same resolved liberty already loaded for `dfflibmap`/`abc -liberty` (no second liberty fetch). **Not** switching/dynamic power — that needs an activity factor this command has no vectors to supply, and is out of scope. `null` when the resolved liberty reports no `cell_leakage_power` for *any* instantiated cell type — see "`leakage_power_nw`/`leakage_by_type_nw`" below. |
 | `leakage_by_type_nw` | object\<string, number\> \| null | Per-cell-type leakage, in nanowatts — the liberty `cell_leakage_power` entry `leakage_power_nw` was summed from, one entry per instantiated cell type that had one. Keys sorted for determinism. A caller can diff this object's keys against `instance_counts_by_type`'s to spot an instantiated cell type with no leakage data (e.g. a `-dont_use`d or otherwise-unmapped type) for free. `null` exactly when `leakage_power_nw` is `null`. |
 | `clock_targets` | object | Always present (issue #2883). `{clocks, delay_target_ps, delay_target_basis, per_clock_enforced}`: `clocks` echoes the validated `constraints.clocks` (`[]` when none); `delay_target_ps` equals `timing.delay_target_ps`; `delay_target_basis` is `"none"`, `"clock_period_ns"` (single global shorthand), or `"min_clocks_period_ns"` (tightest listed clock); `per_clock_enforced` is always `false` — only one global ABC target is used, so `timing.critical_path_ps` vs `delay_target_ps` is not a per-domain result for a multi-clock design. |
 | `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. **`critical_path_ps` contains no register content at all**: no clk-to-Q launch and no setup/hold — `dfflibmap` maps every flip-flop to a liberty cell *before* `abc` runs, so registers bound the cone ABC times rather than appearing in it. See "Registers, clk-to-Q, and setup/hold" above. |
-| `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair — `sta_unavailable_reason` below says which. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. **`worst_reg_to_reg_path.delay_ns` models the launching register's clk-to-Q but excludes setup/hold**, which are parsed and then dropped from delay propagation; see "Registers, clk-to-Q, and setup/hold" above. Additive as of issue #925 — `timing` is unaffected. |
-| `sta_unavailable_reason` | string \| null | **Always present** (issue #2628) — why `sta` is `null`, so "STA unavailable here" and "STA not applicable to this netlist" are not the same value. `null` **exactly when** `sta` is non-`null`; a non-`null` string exactly when `sta` is `null`. Two cases are distinguished: the optional `klt_statime_native` extension is not installed (the reason names the install path — `uv sync --group statime`; a caller can act on this one and retry), or the engine ran and raised `StaError` while analyzing this netlist/liberty pair (the reason carries `StaError`'s own message, e.g. a mapped cell type with no liberty entry). **Free text for humans, not a fixed vocabulary** — match on `sta`'s own `null`-ness for control flow, matching the `unavailable_reason` precedent in `klt place-and-route`'s `power.placed` block. Additive field, no `schema_version` bump. |
+| `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). For a multi-module design the analysis runs over a flattened temp copy of the netlist (hops carry flattened instance names). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair — `sta_unavailable_reason` below says which. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. **`worst_reg_to_reg_path.delay_ns` models the launching register's clk-to-Q but excludes setup/hold**, which are parsed and then dropped from delay propagation; see "Registers, clk-to-Q, and setup/hold" above. Additive as of issue #925 — `timing` is unaffected. |
+| `sta_unavailable_reason` | string \| null | **Always present** (issue #2628) — why `sta` is `null`, so "STA unavailable here" and "STA not applicable to this netlist" are not the same value. `null` **exactly when** `sta` is non-`null`; a non-`null` string exactly when `sta` is `null`. Two cases are distinguished: the optional `klt_statime_native` extension is not installed (the reason names the install path — `uv sync --group statime`; a caller can act on this one and retry), or the engine ran and raised `StaError` while analyzing this netlist/liberty pair (the reason carries `StaError`'s own message, e.g. a mapped cell type with no liberty entry). A multi-module (hierarchical) netlist is flattened into a throwaway copy for the `sta` stage only — the committed `netlist_path` stays hierarchical — and if that flatten fails the reason says the netlist is hierarchical and points to `klt sta` with a `verilog` request. **Free text for humans, not a fixed vocabulary** — match on `sta`'s own `null`-ness for control flow, matching the `unavailable_reason` precedent in `klt place-and-route`'s `power.placed` block. Additive field, no `schema_version` bump. |
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
 | `cell_exclusions` | object | **Always present** (issue #2382) — the standard-cell exclusion this run actually applied, and how it was arrived at: `{mode, requested, library_defaults, effective, validated, engine_supports_dont_use}`. `mode` is the resolved `constraints.dont_use_mode` (`"additive"` by default); `requested` is the request's own `constraints.dont_use`, normalized and deduplicated; `library_defaults` is the built-in per-library table's entry for the resolved `pdk.cell_library` (always reported, even when `mode` suppressed it, so a report says what was *not* excluded too); **`effective` is exactly the `-dont_use` glob list handed to ABC**, deduplicated and order-preserved. `validated` is `true` when every `requested` pattern was matched against the resolved liberty's cell names, or `null` when there was nothing to check or that cell list could not be established. `engine_supports_dont_use` is the `yosys -p 'help abc'` probe result, or `null` when there was nothing to exclude and no probe was made — `false` with a non-empty `requested` and an empty `effective` is the "older Yosys build dropped it" case, also surfaced as a `dont_use_unsupported` warning. Additive field, no `schema_version` bump. See "Request-level cell exclusion" above. |
 | `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log plus missing-library-capability warnings, never the raw log itself: `{total, by_category, representatives}`. `total` counts engine warning lines plus capability warnings (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`, `unsupported_cell_library`, `dont_use_unsupported`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
@@ -1431,6 +1465,70 @@ heuristic and Yosys's own optimization already resolve these structurally
 runs) — `structural` only *reports* that the design carried the condition,
 it does not gate netlist production.
 
+## Hard macros (`request.macros`)
+
+Issue #2635 adds an optional `macros` array — a **shared shape**, accepted
+identically by `klt synthesize`, `klt sta`, and (plus its own
+placement-specific fields) `klt place-and-route`, documented once in
+`klayout_tools.macros` rather than three times. A hard macro is a
+pre-characterized block the design instantiates but carries no RTL for: a
+compiled SRAM, an analog block `klt lef-abstract` emitted, a third-party IP
+core shipped as LEF + liberty + GDS.
+
+| `macros[]` field | Type | Description |
+| --- | --- | --- |
+| `lef` | string | Path to the macro's LEF abstract. Required; must declare exactly one `MACRO`. Resolved relative to the request file's own directory. |
+| `cell` | string \| omitted | The macro's cell/master name. Derived from the LEF's own `MACRO` name when omitted; when given, must match it exactly — a `cell` that disagrees with its own `lef` is always a mistake and is rejected rather than silently reconciled. |
+| `lib` (alias `liberty`) | object\<string, string\> \| omitted | A **per-corner** liberty map, `{"<corner>": "<path>"}`, keyed the same way `pdk.corner` names a corner. The reserved key `"default"` applies to any corner with no exact entry. Give at most one of `lib`/`liberty` — they are two spellings of the same field, never two independent values. Omitted means a LEF-only macro: legal, and handled as an untimed blackbox. |
+| `gds` | string \| omitted | The macro's GDS view. Unused by `klt synthesize` itself (no layout step here); accepted so one declaration serves all three verbs without per-verb pruning. |
+| `verilog_blackbox` | string \| omitted | A hand-written `(* blackbox *)` Verilog module declaration. Only `klt synthesize` consumes this field — see "Making the macro visible to Yosys" below. |
+
+**Making the macro visible to Yosys.** Before `hierarchy -check -top`, this
+command emits one line per declared macro, in precedence order:
+
+1. A `lib` entry matching this run's resolved corner (falling back to
+   `"default"`) → `read_liberty -lib <macro liberty>`. Preferred: the macro
+   liberty itself carries the macro's real timing and area, so a later
+   `klt sta`/`klt place-and-route` run on the same declaration sees the same
+   numbers. (Loading it here only makes the macro visible to Yosys as a
+   blackbox; it does not feed `area_um2` — see "Area accounting" below.)
+2. `verilog_blackbox`, when given → `read_verilog -lib <blackbox>`.
+3. Neither → a `(* blackbox *)` module is **generated** from the macro's own
+   LEF `PIN DIRECTION`s and written into the run directory as
+   `<cell>_blackbox.v`, then loaded the same way. A caller with only a LEF
+   never has to hand-write (or hand-maintain, against a vendor's own port
+   list) a stub.
+
+Every disposition has the same effect: the macro survives
+`hierarchy`/`synth`/`abc`/`clean` as one opaque instance in
+`write_verilog`'s netlist and in `stat`'s own `num_cells_by_type`, instead of
+being implemented out of standard cells — the entire point of a hard macro,
+and the opposite of what feeding the vendor's behavioural Verilog through
+`sources` does. **A macro referenced by the netlist but absent from
+`request.macros`** fails `hierarchy -check -top` with Yosys's own `Module
+`\<cell>' referenced in module `\<top>' in cell `\<inst>' is not part of the
+design` — this command's own error message appends a hint naming the
+`request.macros` entry that would fix it, rather than leaving a caller to
+guess between "missing RTL source" and "undeclared hard macro".
+
+**A macro `lib` map with no entry for the run's corner (and no `"default"`)
+is a request error**, naming the macro, the corner, and the keys that are
+available — never a silent fallback to another corner's timing.
+
+**Area accounting.** `stat -liberty`'s `area_um2` sums only the one
+standard-cell liberty this run loaded. A macro's own `lib` is read with
+`read_liberty -lib` for blackboxing only; it is never passed to
+`stat -liberty`, so a blackboxed macro contributes a silent `0` whether it
+was declared with a `lib`, a `verilog_blackbox`, or LEF only. To get a
+macro's area, read it from its own liberty (`response.macros[].lib`) and add
+it to `area_um2` yourself. `cells_without_area` above names every
+instantiated type (macro or otherwise) `area_um2` does not account for, and
+a non-empty result also surfaces as a `macro_area_excluded` /
+`cells_without_liberty_area` entry in `warnings` — see "`warnings`" below.
+
+See `docs/cli/sta.md`'s and `docs/cli/place-and-route.md`'s own "Hard
+macros"/"Hard-macro placement" sections for how the other two verbs consume
+the same declaration.
 ## `memory_mapping`: inferred-memory evidence
 
 [Issue #2745](https://github.com/2AMLogic/klayout-tools/issues/2745) (part of
@@ -1647,9 +1745,48 @@ as `{}`), so the same sources elaborated with different overrides report
 request's `defines` (issue #4196): a changed, added or removed define reports
 `drifted`.
 
+A fifth check, `netlist_sha256` (issue #4313), re-hashes the committed
+gate-level netlist (SHA-256 of its bytes, bare lowercase hex) and compares it
+with the report's recorded top-level `netlist_sha256`, so a hand-edited or
+stale-after-resynthesis netlist reports `drifted` with no Yosys and no extra
+tooling. The file is `--netlist FILE` when given (it always wins); otherwise
+the report's own `netlist_path`, resolved from this checkout when it is
+`scope: "repo"`. A netlist that cannot be located (`external`/`absent` path,
+missing file) or a report with no recorded `netlist_sha256` renders
+`match: false` (`actual: null` for the former) — never silently skipped. This
+proves the committed bytes are the ones the report recorded; it does **not**
+prove those bytes are what Yosys would produce from the sources today — that
+is `--rerun`.
+
 `status` is `"match"` only when every `checks[]` entry matches. A recorded
 hash that is itself `null` (a report predating the field) always renders
 `match: false` — a missing baseline is never a pass.
+
+#### `--skip-deck`: PDK-less cheap mode (issue #4315)
+
+`--check REPORT --skip-deck` never resolves the standard-cell liberty, so it
+runs on a host with no PDK install (e.g. a signoff CI job with `PDK_ROOT`
+unset). The `provenance.deck.content_hash` entry is omitted from `checks[]`
+and the response gains an additive `skipped` list naming it:
+
+```json
+"skipped": [{"field": "provenance.deck.content_hash",
+             "reason": "--skip-deck: liberty not resolved"}]
+```
+
+`status` is computed over the checks that ran (RTL sources, `parameters`,
+`defines`, `netlist_sha256`). Without the flag the payload is unchanged and has
+no `skipped` key. In `--format text` each skipped check prints as
+`[SKIPPED] <field>: <reason>`.
+
+A `--skip-deck` `match` proves the committed report still corresponds to these
+RTL bytes, parameters and defines, and that the committed netlist is the one the
+report recorded. It does **not** prove the standard-cell library is the one the
+report was mapped against: a changed liberty is `drifted` on a normal `--check`
+and invisible under `--skip-deck`. Run a normal `--check` (or `--rerun`) on a
+PDK host for that. `--skip-deck` is a usage error without `--check` and with
+`--rerun` (a rerun runs Yosys and needs the liberty). A CI that holds a liberty
+copy can instead point the unchanged `--check` at it with `--pdk-root`/`--pdk`.
 
 Tool identity is deliberately **not** among the checks: a Yosys upgrade that
 leaves the synthesis result untouched is tool churn, not evidence drift, and
@@ -1663,7 +1800,10 @@ Actually re-synthesizes from the request and diffs the fresh report against
 the committed one, field by field, reporting `status: "drifted"` with a
 `drift[]` list of `{field, committed, fresh}` entries. A moved
 `instance_count`/`area_um2`/`timing`, a newly inferred latch under
-`structural`, a changed `provenance.input.content_hash` — all drift.
+`structural`, a changed `provenance.input.content_hash` — all drift. The
+optional flags are not echoed in the report, so re-pass them (including
+`--equiv-engine`, like `--equiv-timeout-s`); a different engine shows up as
+drift on `equivalence.engine`.
 
 Run-scoped bookkeeping is dropped from **both** sides before the diff:
 `run_id`, `netlist_path`, `script_path`, `run_script_path`,
@@ -1761,7 +1901,8 @@ cells — measured live on Yosys 0.67+post, CI's own pinned, from-source
 build (`scripts/install-yosys.sh`, run in CI's Linux/x86_64/gcc
 environment), against a volare `sky130A` install. Note this particular
 design is **sequential** (it has a clocked `always` block) — see
-"Equivalence gate" above, `--verify-equivalence` is not usable on it. GCD
+"Equivalence gate" above, `--verify-equivalence` needs
+`--equiv-engine yosys-sequential` on it. GCD
 carries no latches/comb loops/multi-driven nets, so `structural.has_critical`
 is `false` and the exit code is `0`.
 
@@ -1932,13 +2073,12 @@ the RTL `$readmemh`s its ROM tables relative to the synthesis cwd, which
   (issue #1626) are static leakage only. Dynamic power needs an activity
   factor — a testbench, vectors, or a toggle-rate estimate — this command
   has no way to know; that is a different, unaddressed ask.
-- **Sequential-design equivalence checking.** `--verify-equivalence` only
-  works on combinational designs today — `klt equiv`'s Phase 0 MVP scope
-  (#707). A future phase of #707 (temporal induction / BMC via SymbiYosys)
-  extends the gate to sequential designs; until then, running
-  `--verify-equivalence` against a design with flip-flops, latches, or
-  memories fails the gate with a clear scope error, not a misleadingly
-  confident verdict.
+- **Induction depth, resume and port-map plumbing for sequential
+  equivalence.** `--equiv-engine yosys-sequential` runs `klt equiv`'s
+  sequential engine with its defaults; `--restructure-timing`'s internal
+  equiv check and `klt techmap --verify-equivalence` stay combinational.
+  Running the default `yosys` engine against a design with flip-flops,
+  latches, or memories still fails the gate with a clear scope error.
 - **Signoff timing.** Neither delay this command reports is signoff STA.
   `timing` is ABC's pre-layout, wire-free, combinational-cone-only estimate
   (see "`timing`" above); `sta` walks the whole netlist and does report
