@@ -2519,26 +2519,17 @@ def _engine_error_message(
             f"{completed.returncode}: {snippet}"
         )
 
-    hint = _mount_namespace_hint(completed, pdk_info)
-    if hint is not None:
-        message = f"{message} -- {hint}"
-    # Issue #2635: `ORD-2013` is what a hard macro with no `request.macros`
-    # entry looks like, and the raw diagnostic says nothing about which
-    # request field would have supplied its physical view. Appended as a
-    # further `--` clause, the same recognized-hint structure
-    # `_mount_namespace_hint` above already uses.
-    macro_hint = macro_spec.missing_lef_master_hint(
-        (completed.stdout or "") + "\n" + (completed.stderr or "")
+    # Each recognized-hint helper appends a further `--` clause. Issue
+    # #2635: `ORD-2013` is what a hard macro with no `request.macros` entry
+    # looks like, and the raw diagnostic says nothing about which request
+    # field would have supplied its physical view.
+    streams = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+    hints = (
+        _mount_namespace_hint(completed, pdk_info),
+        macro_spec.missing_lef_master_hint(streams),
+        slot_shortage_hint(streams, pin_constraints, top_ports),
     )
-    if macro_hint is not None:
-        message = f"{message} -- {macro_hint}"
-    slot_hint = slot_shortage_hint(
-        f"{completed.stdout or ''}\n{completed.stderr or ''}",
-        pin_constraints,
-        top_ports,
-    )
-    if slot_hint is not None:
-        message = f"{message} -- {slot_hint}"
+    message += "".join(f" -- {hint}" for hint in hints if hint is not None)
     return message
 
 
