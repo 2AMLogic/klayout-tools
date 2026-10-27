@@ -536,7 +536,10 @@ default search order finds (`$PDK_ROOT`/`$PDK` environment variables, then
 the ciel/volare stores, then the conventional install prefixes) — exactly as
 `klt pdk find` with no flags would resolve — unless the CLI's own `--pdk`/
 `--pdk-root` flags (mirroring `klt extract`'s identical pair) pin a specific
-installed variant/root instead.
+installed variant/root instead. When neither `--pdk` nor `$PDK` is set and
+the default pick does not ship `pdk.cell_library`, the first installed
+variant that does (search order) is used instead, and the result's PDK
+provenance names it.
 
 - `pdk.cell_library` — a standard-cell library name. Not restricted to a
   single PDK family: any standard-cell library the resolved install ships a
