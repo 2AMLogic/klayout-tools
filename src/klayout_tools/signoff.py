@@ -911,6 +911,9 @@ _REASON_UNRECOGNIZED_ENVELOPE = "unrecognized_envelope"
 _REASON_CHECK_ERRORED = "check_errored"
 _REASON_CHECK_FAILED = "check_failed"
 _REASON_STALE_EVIDENCE = "stale_evidence"
+#: Issue #4314: a digital item-5 entry citing only ``klt sim`` (the full-custom
+#: sub-case) must also carry a measured per-corner timing-margin metric.
+_REASON_TIMING_MARGIN_MISSING = "timing_margin_missing"
 
 #: Issue #2198: the resolved evidence *is* a `klt` envelope -- it carries a
 #: kind's **primary** marker (see :data:`_NEAR_MISS_MARKERS`) -- but not the
@@ -6845,10 +6848,10 @@ def _read_spec_rows(
     manifest: dict[str, Any],
 ) -> dict[_SpecRowsKey, list[dict[str, Any]] | None]:
     """Read the manifest's optional ``spec_rows`` declaration (issue #2959):
-    ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?, "ratified": bool?},
-    ...]}``. A key may be partition-qualified (``"5.analog"``, issue #3768),
-    mirroring the evidence-key convention of :func:`_lookup_evidence`; see
-    :func:`_resolve_spec_rows`.
+    ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?, "ratified": bool?,
+    "timing_margin": bool?}, ...]}``. A key may be partition-qualified
+    (``"5.analog"``, issue #3768), mirroring the evidence-key convention of
+    :func:`_lookup_evidence`; see :func:`_resolve_spec_rows`.
 
     Returns ``(item id, partition | None) -> rows``; a malformed declaration
     maps to ``None`` so only that item degrades to ``invalid_evidence``, never
@@ -6856,7 +6859,9 @@ def _read_spec_rows(
     is reported as a declared gap and never counts as covered. ``ratified``
     (default ``true``, issue #2908) is ``false`` for a row whose target is a
     proposed, unratified limit: evidence against it is provisional and never
-    grades ``met``.
+    grades ``met``. ``timing_margin`` (default ``false``, issue #4314) marks the
+    row a digital ``sim``-only item 5 must evidence with a measured per-corner
+    timing margin; see :func:`_missing_timing_margin`.
     """
     raw = manifest.get("spec_rows")
     if raw is None:
@@ -6881,17 +6886,28 @@ def _read_spec_rows(
                 row_id = row.get("id") if isinstance(row, dict) else None
                 gap = row.get("gap") if isinstance(row, dict) else None
                 ratified = row.get("ratified", True) if isinstance(row, dict) else True
+                margin = (
+                    row.get("timing_margin", False) if isinstance(row, dict) else False
+                )
                 if (
                     not isinstance(row_id, str)
                     or not row_id
                     or row_id in seen
                     or (gap is not None and (not isinstance(gap, str) or not gap))
                     or not isinstance(ratified, bool)
+                    or not isinstance(margin, bool)
                 ):
                     valid = []
                     break
                 seen.add(row_id)
-                valid.append({"id": row_id, "gap": gap, "ratified": ratified})
+                valid.append(
+                    {
+                        "id": row_id,
+                        "gap": gap,
+                        "ratified": ratified,
+                        "timing_margin": margin,
+                    }
+                )
             parsed = valid or None
         out[slot] = parsed
     return out
@@ -7005,6 +7021,21 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
+    if required_kind_pair is not None and graded:
+        # Issue #4314: the full-custom digital sub-case (``sim`` only).
+        if {g[2]["kind"] for _, _, g in graded if g[2] is not None} == {"sim"}:
+            missing_margin = _missing_timing_margin(
+                spec_rows,
+                [(met_envelopes or {}).get(id(spec)) for spec, _, _ in graded],
+            )
+            if missing_margin:
+                return (
+                    "unmet",
+                    _REASON_TIMING_MARGIN_MISSING,
+                    None,
+                    {**row_info, "missing_timing_margin": missing_margin},
+                    extra,
+                )
     if row_info and (
         row_info["uncovered_rows"]
         or row_info["declared_gaps"]
@@ -7031,6 +7062,73 @@ def _grade_multi_citation(
         return "unmet", _REASON_NO_EVIDENCE, None, {}, extra
     extra["citations"] = [g[2] for _, _, g in graded]
     return "met", None, graded[0][2][2], {}, extra
+
+
+def _missing_timing_margin(
+    spec_rows: list[dict[str, Any]] | None,
+    envelopes: list[dict[str, Any] | None],
+) -> list[dict[str, Any]]:
+    """``[{"row": id, "corners": [...]}]`` for the timing-margin evidence a
+    ``sim``-only digital item 5 lacks (issue #4314); empty when satisfied.
+
+    A ``timing_margin: true`` row is satisfied by a cited ``klt sim``
+    envelope whose rollup ``measurements[]`` has a passing, ``limits``-bearing
+    entry tagged ``spec_row: <row>`` and whose every ``corners[]`` entry has a
+    passing measurement of that name. No such row declared -> one entry with
+    ``row: None``. ``corners`` names the corners lacking the measurement
+    (``[]`` when no corner list exists or no tagged measurement was found).
+    """
+    rows = [r["id"] for r in spec_rows or [] if r.get("timing_margin")]
+    if not rows:
+        return [{"row": None, "corners": []}]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        best: list[str] | None = None
+        for envelope in envelopes:
+            lacking = _row_margin_lacking_corners(envelope, row)
+            if best is None or len(lacking) < len(best):
+                best = lacking
+        if best is None or best:
+            out.append({"row": row, "corners": best or []})
+    return out
+
+
+def _row_margin_lacking_corners(envelope: dict[str, Any] | None, row: str) -> list[str]:
+    """Corner ids lacking a passing measurement for ``row`` in ``envelope``;
+    ``["*"]`` when the envelope has no passing, limited, ``row``-tagged
+    measurement at all."""
+    if envelope is None:
+        return ["*"]
+    raw = envelope.get("measurements")
+    names = [
+        m.get("name")
+        for m in (raw if isinstance(raw, list) else [])
+        if isinstance(m, dict)
+        and m.get("spec_row") == row
+        and m.get("status") == "pass"
+        and m.get("limits")
+    ]
+    if not names:
+        return ["*"]
+    corners = envelope.get("corners")
+    corners = (
+        [c for c in corners if isinstance(c, dict)] if isinstance(corners, list) else []
+    )
+    best: list[str] | None = None
+    for name in names:
+        lacking = [
+            str(c.get("corner_id"))
+            for c in corners
+            if not any(
+                isinstance(m, dict)
+                and m.get("name") == name
+                and m.get("status") == "pass"
+                for m in c.get("measurements") or []
+            )
+        ]
+        if best is None or len(lacking) < len(best):
+            best = lacking
+    return best or []
 
 
 def _parse_multi_members(
