@@ -3377,6 +3377,82 @@ def test_tap_requires_that_narrows_nothing_is_still_degenerate(tmp_path):
     assert report["erc_status"] == "clean_partial"
 
 
+# --- ties: tap_excludes (issue #4194) -----------------------------------
+#
+# The mirror of `tap_requires`: a tap defined by the *absence* of a marker.
+# Layer 14/0 stands in for a p+ implant drawn over the PMOS source/drain
+# contacts in the n-well; the genuine VDD tap contact carries none.
+
+
+def _run_tap_excludes(tmp_path, stem, nwell_tie, *, vdd_tap=True, pplus=True):
+    layout, top = _routed_tie_layout(vdd_tap=vdd_tap)
+    if pplus:
+        pp = layout.layer(14, 0)
+        for x in (7.0, 13.0):
+            top.shapes(pp).insert(kdb.Box.new(_um(x), _um(8.3), _um(x + 0.6), _um(9.1)))
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{stem}.erc.json"
+    entry = {
+        "name": "nwell_tie",
+        "well_layer": "10/0",
+        "tap_layer": "11/0",
+        "connect_to": "li1",
+        "net": "VDD",
+        **nwell_tie,
+    }
+    _write_spec(spec, _routed_tie_spec(ties=[entry]))
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+def test_tap_excludes_derives_the_tap_from_the_absence_of_a_layer(tmp_path):
+    report = _run_tap_excludes(tmp_path, "excl_ok", {"tap_excludes": ["14/0"]})
+
+    assert not any(f["rule"] == "erc.missing_tie" for f in report["erc_findings"])
+    assert _tie_skips(report) == {}
+    assert 'erc.missing_tie:["nwell_tie"]' in report["erc_coverage"]["checked"]
+    # Layer-derived, not caller-asserted.
+    assert report["erc_coverage"]["checked_by_assertion"] == []
+
+
+def test_tap_excludes_reports_missing_tie_when_only_excluded_taps_exist(tmp_path):
+    report = _run_tap_excludes(
+        tmp_path, "excl_missing", {"tap_excludes": ["14/0"]}, vdd_tap=False
+    )
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 1
+    assert missing[0]["net"] == "VDD"
+
+
+def test_tap_excludes_that_removes_nothing_is_degenerate(tmp_path):
+    # Excluded layer absent from the stream: nothing is narrowed.
+    report = _run_tap_excludes(
+        tmp_path, "excl_absent", {"tap_excludes": ["99/0"]}, pplus=False
+    )
+
+    assert _tie_skips(report) == {
+        'erc.missing_tie:["nwell_tie"]': "degenerate_tap_declaration"
+    }
+    assert report["erc_status"] == "clean_partial"
+
+
+def test_tap_excludes_composes_with_tap_requires(tmp_path):
+    report = _run_tap_excludes(
+        tmp_path,
+        "excl_compose",
+        {"tap_requires": ["12/0"], "tap_excludes": ["14/0"]},
+    )
+
+    assert not any(f["rule"] == "erc.missing_tie" for f in report["erc_findings"])
+    assert _tie_skips(report) == {}
+
+
+def test_tap_excludes_rejects_a_malformed_value(tmp_path):
+    with pytest.raises(ErcError, match=r"ties\[0\]\.tap_excludes"):
+        _run_tap_excludes(tmp_path, "excl_bad", {"tap_excludes": "14/0"})
+
+
 def test_a_tie_whose_tap_matches_no_geometry_is_not_called_degenerate(tmp_path):
     """An empty tap region asserts nothing about taps either -- but it
     cannot produce a false pass: every well in it is reported as having no
