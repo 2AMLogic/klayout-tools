@@ -4497,6 +4497,13 @@ def build_tier_report(
       defect" and "this block cited no supply evidence at all" read
       identically. Fix: the LVS defect (item 4 is blocked on it too), never
       the ERC spec.
+    - ``"power_delivery_parts_missing"`` (issue #4193, item 11 only) -- the
+      cited set resolved cleanly but lacks the ``erc`` and/or ``lvs`` part.
+      Distinct from ``"wrong_kind"``: what is cited is right, the set is
+      incomplete. ``detail.power_delivery`` names ``missing_parts`` and
+      ``cited_parts`` and, when the ERC spec resolved, the ``supply_nets`` it
+      proved. An ERC part whose spec does not resolve reports its own reason
+      first. Never ``"met"``.
     - ``"ungradeable_by_build"`` (issue #2176) -- the manifest cited
       evidence for an item this build has no grading rules for at all
       (``graded_by_build: False``, see above). Not a statement about the
@@ -5512,6 +5519,17 @@ def _verify_pex_schematic_inputs(
     return results
 
 
+def _unresolved_evidence_detail(
+    spec: dict[str, Any], reason: str | None
+) -> dict[str, Any]:
+    """The ``failure_detail`` for evidence :func:`_resolve_evidence` could not
+    resolve: an unreadable evidence file names both the resolved path and the
+    process cwd it resolved against (evidence paths are cwd-relative)."""
+    if reason == _REASON_UNREADABLE_EVIDENCE and spec.get("file") is not None:
+        return {"path": os.path.abspath(spec["file"]), "cwd": os.getcwd()}
+    return {}
+
+
 def _grade_evidence(
     spec: dict[str, Any],
     *,
@@ -5630,7 +5648,7 @@ def _grade_evidence(
     """
     resolution, reason = _resolve_evidence(spec, repo_root)
     if resolution is None:
-        return "unmet", reason, None, {}
+        return "unmet", reason, None, _unresolved_evidence_detail(spec, reason)
 
     check_kind = resolution["kind"]
     envelope = resolution["envelope"]

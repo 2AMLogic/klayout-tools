@@ -12269,18 +12269,50 @@ def test_item_11_edited_spec_beside_the_evidence_is_still_stale(tmp_path):
     assert item["citation"] is None
 
 
-def test_item_11_requires_both_an_erc_and_an_lvs_citation(tmp_path):
-    """An ERC run alone proves supply continuity but says nothing about
-    whether the supplies were part of the LVS compare -- "cite a different
-    artifact", which is what `wrong_kind` means everywhere in this module."""
-    erc_path = _erc_evidence(tmp_path)
+def test_item_11_erc_only_is_unmet_parts_missing_and_credits_supplies(tmp_path):
+    """Issue #4193: an ERC run alone is a correct but incomplete set -- not
+    "cite a different artifact" (`wrong_kind`). Never `met`; the reason names
+    the absent part and the detail credits the supplies ERC proved."""
+    parts = _power_delivery_evidence(tmp_path)[:1]
 
-    result = build_tier_report(_manifest(kind="analog", evidence={"11": erc_path}))
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
 
     item = _item_11(result)
     assert item["status"] == "unmet"
-    assert item["reason"] == "wrong_kind"
+    assert item["reason"] == "power_delivery_parts_missing"
     assert item["citation"] is None
+    assert item["detail"]["power_delivery"] == {
+        "missing_parts": ["lvs"],
+        "cited_parts": ["erc"],
+        "supply_nets": ["VPWR", "VGND"],
+    }
+
+
+def test_item_11_lvs_only_is_unmet_parts_missing_without_credit(tmp_path):
+    parts = _power_delivery_evidence(tmp_path)[1:2]
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "power_delivery_parts_missing"
+    assert item["detail"]["power_delivery"] == {
+        "missing_parts": ["erc"],
+        "cited_parts": ["lvs"],
+    }
+
+
+def test_item_11_erc_only_with_unresolved_spec_keeps_the_erc_reason(tmp_path):
+    """The more actionable ERC defect wins over the missing-parts reason."""
+    parts = _power_delivery_evidence(
+        tmp_path, erc_spec={**ERC_SUPPLY_SPEC, "ties": []}
+    )[:1]
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_incomplete"
 
 
 def test_item_11_rejects_an_unrelated_kind_in_the_cited_set(tmp_path):
@@ -17978,6 +18010,64 @@ def test_synthesize_citation_for_analog_item_1_is_wrong_kind(tmp_path):
     item = next(row for row in result["items"] if row["id"] == 1)
     assert item["status"] == "unmet"
     assert item["reason"] == "wrong_kind"
+
+
+def test_unreadable_file_evidence_detail_names_path_and_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = build_tier_report(_manifest(evidence={"3": "missing/drc.json"}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["reason"] == "unreadable_evidence"
+    assert item_3["detail"]["path"] == os.path.abspath("missing/drc.json")
+    assert item_3["detail"]["cwd"] == os.getcwd()
+
+
+def test_unreadable_file_evidence_absolute_path_is_unchanged(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    gone = str(tmp_path / "gone.json")
+    result = build_tier_report(_manifest(evidence={"3": gone}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["detail"]["path"] == gone
+
+
+def _capture_attest_env(monkeypatch):
+    from klayout_tools import signoff_attest
+
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(argv, 0, stdout=b"")
+
+    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
+    signoff_attest._run_command(".", {"argv": ["python3"], "cwd": "."})
+    return seen["env"]
+
+
+def test_attest_command_env_drops_venv_bin_from_path(monkeypatch):
+    venv_bin = os.path.dirname(sys.executable)
+    monkeypatch.setattr(sys, "prefix", "/venv")
+    monkeypatch.setattr(sys, "base_prefix", "/base")
+    monkeypatch.setenv("PATH", os.pathsep.join([venv_bin, "/usr/bin"]))
+    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
+
+
+def test_attest_command_env_unchanged_outside_venv(monkeypatch):
+    monkeypatch.setattr(sys, "prefix", "/base")
+    monkeypatch.setattr(sys, "base_prefix", "/base")
+    path = os.pathsep.join([os.path.dirname(sys.executable), "/usr/bin"])
+    monkeypatch.setenv("PATH", path)
+    assert _capture_attest_env(monkeypatch)["PATH"] == path
+
+
+def test_attest_command_env_tolerates_unset_path_and_absent_venv_bin(monkeypatch):
+    monkeypatch.setattr(sys, "prefix", "/venv")
+    monkeypatch.setattr(sys, "base_prefix", "/base")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
+    monkeypatch.delenv("PATH")
+    assert "PATH" not in _capture_attest_env(monkeypatch)
 
 
 # --------------------------------------------------------------------------- #
