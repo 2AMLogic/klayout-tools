@@ -6341,11 +6341,11 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         metavar="LAYOUT",
         default=None,
         help=(
-            "known-bad fixture layout the same native deck must flag "
-            "(--engine klayout only): run first with identical options; "
-            "zero violations fails the run (error.code "
-            "negative_control_failed), proving the deck executed. "
-            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+            "known-bad fixture layout the same deck must flag (curated "
+            "and klayout engines): run first with identical options "
+            "(waivers not applied); zero violations fails the run "
+            "(error.code negative_control_failed), proving the deck "
+            "executed. See docs/cli/drc.md, 'Negative control'."
         ),
     )
     drc_parser.add_argument(
