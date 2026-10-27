@@ -792,6 +792,17 @@ def _run_check(args: argparse.Namespace) -> int:
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
+def _print_device_models(device_models: dict | None) -> None:
+    """One ``device_models: CLASS=SUBCKT, ...`` line (issue #4234); silent
+    when ``--device-model`` was never given."""
+    if not device_models:
+        return
+    rendered = ", ".join(
+        f"{name}={model}" for name, model in sorted(device_models.items())
+    )
+    print(f"device_models: {rendered}")
+
+
 def _print_label_layers(label_layers: dict | None) -> None:
     """One human-readable line for the response's ``label_layers`` echo
     (issue #2656), or nothing when ``--label-layer`` was not given.
@@ -880,11 +891,7 @@ def _print_text(report: dict) -> None:
     # this line adds no branch to an already long function -- the same shape
     # `_print_substrate_spreading` below already uses.
     _print_label_layers(report.get("label_layers"))
-    if report.get("device_models"):
-        rendered = ", ".join(
-            f"{name}={model}" for name, model in sorted(report["device_models"].items())
-        )
-        print(f"device_models: {rendered}")
+    _print_device_models(report.get("device_models"))
     _print_probes(report.get("probes"))
     print(f"top: {report['top']}")
     print(f"dbu_um: {report['dbu_um']}")
