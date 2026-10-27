@@ -4089,11 +4089,10 @@ def run_extract(
         # point, both `null` when `found` is false. See `_evaluate_probes`.
         "probes": probe_results,
     }
-    if tie_declared_pins:
-        # Additive field (issue #4383): only present under
-        # `--tie-declared-pins`; each net's canonical port plus the declared
-        # names tied to it by a `Rtie_*` resistor in the written `.SUBCKT`.
-        result["pin_ties"] = pin_ties
+    # Additive field (issue #4383): only present under `--tie-declared-pins`;
+    # each net's canonical port plus the declared names tied to it by a
+    # `Rtie_*` resistor in the written `.SUBCKT`.
+    result.update(_pin_ties_field(tie_declared_pins, pin_ties))
     if pdk_info is not None:
         result["pdk"] = {
             "variant": pdk_info["variant"],
@@ -5964,6 +5963,53 @@ def _rename_disclosure_prose(renamed: list[dict[str, str]]) -> list[str]:
     ]
 
 
+def _pin_ties_field(tie_declared_pins: bool, pin_ties: list[Any]) -> dict[str, Any]:
+    """The ``pin_ties`` key of the extract report (issue #4383), present only
+    under ``--tie-declared-pins``."""
+    return {"pin_ties": pin_ties} if tie_declared_pins else {}
+
+
+def _ties_block_field(tie: bool, ties: list[dict[str, Any]]) -> dict[str, Any]:
+    """The ``ties`` key of the ``--rename-declared-pins`` report block: only
+    present under ``--tie-declared-pins`` (issue #4383)."""
+    return {"ties": ties} if tie else {}
+
+
+def _handle_multi_hit_pin_net(
+    circuit: Any,
+    net: Any,
+    pin_ids: list[int],
+    hit: list[str],
+    before: str,
+    taken: set[str],
+    tie: bool,
+    findings: list[dict[str, Any]],
+    prose: list[str],
+    ties: list[dict[str, Any]],
+) -> None:
+    """A promoted pin net matching 2+ declared names: report the short as an
+    ``error`` and leave the net alone, or -- under ``--tie-declared-pins``
+    (issue #4383) with the first name free -- rename it to the first name and
+    record the tie. See :func:`_rename_declared_pin_nets`."""
+    if tie and hit[0] not in taken - {net.expanded_name()}:
+        short = _declared_pin_short_finding(before, hit, tied=True)
+        findings.append(short)
+        prose.append(short["message"])
+        taken.discard(net.expanded_name())
+        taken.add(hit[0])
+        net.name = hit[0]
+        for pin_id in pin_ids:
+            circuit.rename_pin(pin_id, hit[0])
+        ties.append({"net": before, "pin": hit[0], "tied_pins": hit[1:]})
+        return
+    short = _declared_pin_short_finding(before, hit)
+    findings.append(short)
+    # Mirrored with the `ERROR:` prefix, the same way
+    # `def_pin_promotion`'s error-severity findings are, so a caller
+    # checking only `warnings[]` (and `--format text`) still sees it.
+    prose.append("ERROR: " + short["message"])
+
+
 def _rename_declared_pin_nets(
     netlist: kdb.Netlist,
     top_name: str,
@@ -6071,24 +6117,10 @@ def _rename_declared_pin_nets(
         hit = sorted(set(net.expanded_name().split(",")) & declared)
         if not hit:
             continue
-        if len(hit) > 1 and tie and hit[0] not in taken - {net.expanded_name()}:
-            short = _declared_pin_short_finding(before, hit, tied=True)
-            findings.append(short)
-            prose.append(short["message"])
-            taken.discard(net.expanded_name())
-            taken.add(hit[0])
-            net.name = hit[0]
-            for pin_id in pin_ids:
-                circuit.rename_pin(pin_id, hit[0])
-            ties.append({"net": before, "pin": hit[0], "tied_pins": hit[1:]})
-            continue
         if len(hit) > 1:
-            short = _declared_pin_short_finding(before, hit)
-            findings.append(short)
-            # Mirrored with the `ERROR:` prefix, the same way
-            # `def_pin_promotion`'s error-severity findings are, so a caller
-            # checking only `warnings[]` (and `--format text`) still sees it.
-            prose.append("ERROR: " + short["message"])
+            _handle_multi_hit_pin_net(
+                circuit, net, pin_ids, hit, before, taken, tie, findings, prose, ties
+            )
             continue
         target = hit[0]
         raw_name = net.expanded_name()
@@ -6116,9 +6148,8 @@ def _rename_declared_pin_nets(
         **declared_pin_echoes,
         "renamed": sorted(renamed, key=lambda entry: entry["from"]),
         "findings": findings,
+        **_ties_block_field(tie, ties),
     }
-    if tie:
-        block["ties"] = ties
     return (
         block,
         prose + _rename_disclosure_prose(renamed),
