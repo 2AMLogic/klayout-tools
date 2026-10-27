@@ -540,6 +540,7 @@
         "klayout_tools.sim_decks",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_errors",
+        "klayout_tools.sim_eye",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
