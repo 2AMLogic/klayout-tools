@@ -565,6 +565,34 @@ _SYMBOL_OR_NUMBER_RE = re.compile(
 CallOverrides = dict[str, dict[str, tuple[str, str]]]
 
 
+def _record_call_overrides(
+    card: str, current: str, scopes: ParamScopes, overrides: CallOverrides
+) -> None:
+    """Add to ``overrides`` each header parameter the ``X`` ``card`` (inside
+    subcircuit ``current``) passes with a value other than the callee's
+    default."""
+    tokens = _tokenize(card)
+    positional, params = _split_params(tokens[1:])
+    if not positional:
+        return
+    callee = positional[-1].lower()
+    callee_scope = scopes.get(callee)
+    if callee_scope is None:
+        return
+    for key, value in params.items():
+        if key not in callee_scope:
+            continue
+        try:
+            same = (
+                _resolve_value(value, [scopes.get(current, {}), scopes[""]])[0]
+                == _resolve_value(callee_scope[key], [callee_scope, scopes[""]])[0]
+            )
+        except _Unresolved:
+            same = value.strip().lower() == callee_scope[key].strip().lower()
+        if not same:
+            overrides.setdefault(callee, {}).setdefault(key, (tokens[0], value))
+
+
 def _collect_call_overrides(lines: list[str], scopes: ParamScopes) -> CallOverrides:
     """Find every ``X`` call that passes a ``.subckt`` header parameter with a
     value other than the header default (issue #4406). The converter rewrites
@@ -584,26 +612,7 @@ def _collect_call_overrides(lines: list[str], scopes: ParamScopes) -> CallOverri
             continue
         if not stripped or stripped[0] not in "Xx":
             continue
-        tokens = _tokenize(stripped)
-        positional, params = _split_params(tokens[1:])
-        if not positional:
-            continue
-        callee = positional[-1].lower()
-        callee_scope = scopes.get(callee)
-        if callee_scope is None:
-            continue
-        for key, value in params.items():
-            if key not in callee_scope:
-                continue
-            try:
-                same = (
-                    _resolve_value(value, [scopes.get(current, {}), scopes[""]])[0]
-                    == _resolve_value(callee_scope[key], [callee_scope, scopes[""]])[0]
-                )
-            except _Unresolved:
-                same = value.strip().lower() == callee_scope[key].strip().lower()
-            if not same:
-                overrides.setdefault(callee, {}).setdefault(key, (tokens[0], value))
+        _record_call_overrides(stripped, current, scopes, overrides)
     return overrides
 
 
@@ -635,6 +644,34 @@ def _overridden_dependency(
                     return hit
                 break
     return None
+
+
+def _reject_overridden_params(
+    name_token: str,
+    raw_params: dict[str, str],
+    subckt_scope: str,
+    scopes: ParamScopes | None,
+    overrides: CallOverrides | None,
+) -> None:
+    """Raise :class:`NormalizeError` if a read parameter of device
+    ``name_token`` depends on a header parameter some call overrides (a no-op
+    without ``scopes`` or ``overrides``)."""
+    if scopes is None or not overrides:
+        return
+    for key, raw in raw_params.items():
+        if key in _UNREAD_PARAMS:
+            continue
+        hit = _overridden_dependency(raw, subckt_scope, scopes, overrides)
+        if hit is not None:
+            param, caller, value = hit
+            raise NormalizeError(
+                f"device '{name_token}': {key.upper()}={raw} in subcircuit "
+                f"'{subckt_scope}' depends on header parameter "
+                f"{param.upper()}, which call '{caller}' overrides to "
+                f"{value}; call-site parameters are not propagated into "
+                "the definition -- write the device with the literal "
+                "value or give the subcircuit a single parameter value"
+            )
 
 
 def _split_params(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
@@ -756,23 +793,9 @@ def _convert_x_card(
     ):
         return line
 
-    if param_scopes is not None and call_overrides:
-        for key, raw in raw_params.items():
-            if key in _UNREAD_PARAMS:
-                continue
-            hit = _overridden_dependency(
-                raw, subckt_scope, param_scopes, call_overrides
-            )
-            if hit is not None:
-                param, caller, value = hit
-                raise NormalizeError(
-                    f"device '{name_token}': {key.upper()}={raw} in subcircuit "
-                    f"'{subckt_scope}' depends on header parameter "
-                    f"{param.upper()}, which call '{caller}' overrides to "
-                    f"{value}; call-site parameters are not propagated into "
-                    "the definition -- write the device with the literal "
-                    "value or give the subcircuit a single parameter value"
-                )
+    _reject_overridden_params(
+        name_token, raw_params, subckt_scope, param_scopes, call_overrides
+    )
 
     lookup = _resolve_binding(subckt_name, subckt_to_binding)
     instance = _instance_name(name_token, lookup.kind)
