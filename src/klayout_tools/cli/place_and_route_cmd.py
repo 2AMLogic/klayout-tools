@@ -53,6 +53,12 @@ EXIT_DRIFTED = 3
 
 def run(args: argparse.Namespace) -> int:
     if args.check is not None:
+        if args.resume:
+            return emit_error(
+                "place-and-route",
+                "--resume cannot be combined with --check",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
@@ -66,6 +72,7 @@ def run(args: argparse.Namespace) -> int:
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
             backend=args.backend,
+            resume=args.resume,
         )
     except PlaceAndRouteError as exc:
         return _emit_flow_error(exc, args.format)
@@ -165,6 +172,9 @@ def _print_text(report: dict) -> None:
     print(f"status: {report['status']}")
     print(f"stage_reached: {report['stage_reached']}")
     print(f"seed: {report['seed']}")
+    if "resume" in report:
+        resumed = report["resume"]["resumed_stages"]
+        print(f"resumed_stages: {', '.join(resumed) if resumed else '(none)'}")
     print()
     print(f"die_area_um2: {report['die_area_um2']}")
     print(f"core_area_um2: {report['core_area_um2']}")

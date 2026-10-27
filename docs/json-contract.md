@@ -1648,7 +1648,10 @@ bookkeeping is canonicalized out of the `--rerun` diff on both sides
 `place-and-route`'s `engine_logs[]`, keyed by a fresh `uuid4` per
 OpenROAD invocation; `equiv`'s `elapsed_s` and its `resume` block,
 issue #2280) — without that, `--rerun` would report `"drifted"`
-unconditionally. `klt signoff` is the same shape one level up: a
+unconditionally. `place-and-route --resume` (issue #4411) adds an optional
+`resume: {resumed_stages: [...]}` object, present only when the flag was
+given (see [`cli/place-and-route.md`](cli/place-and-route.md), "Resuming an
+interrupted run"). `klt signoff` is the same shape one level up: a
 tier/fleet report echoes graded verdicts, never the manifest, so
 `--check` sits beside the `--manifest`/`--fleet` argument it re-grades.
 Per-verb detail:

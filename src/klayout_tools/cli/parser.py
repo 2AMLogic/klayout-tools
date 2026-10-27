@@ -4766,6 +4766,21 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
             "docs/cli/place-and-route.md, 'Physical rebuild per corner'"
         ),
     )
+    place_and_route_parser.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        default=False,
+        help=(
+            "resume an interrupted run (issue #4411): reuse each leading "
+            "stage whose <top>_<stage>.commit.json record matches a hash of "
+            "its inputs and whose artifacts are on disk, re-run the rest "
+            "(a fully-resumed run only redoes the DEF->GDS merge). Lifts "
+            "the populated outputs.dir refusal; adds a `resume` response "
+            "block. Not combinable with --check or pdk.rebuild_corners. "
+            "See docs/cli/place-and-route.md, 'Resuming an interrupted run'"
+        ),
+    )
     _add_flow_verify_args(
         place_and_route_parser,
         verb="place-and-route",
