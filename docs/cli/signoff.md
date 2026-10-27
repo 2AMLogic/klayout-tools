@@ -1680,15 +1680,18 @@ an inventory the author did not write.
 | | `cold_start`: command | yes | exits `0` (`command`, role `cold_start`) |
 | | `pins`: `{"pdk": {"name", "revision"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty (`pin`, role `pdk`); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
 | **10** Repo hygiene | `hygiene`: list of paths | yes, non-empty | each file exists (`present`, role `hygiene`) |
-| | `checks`: list of `{name, argv, cwd?, local_only?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
+| | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
 A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "local_only": false}`.
 `local_only` is optional (boolean, default `false`; anything else is refused,
 exit `1`). It marks a command that needs a toolchain the `--check` runner may
 not have (xschem, a PDK): see "CI usage" below.
+`timeout_s` is optional (positive finite number of seconds, at most `21600`;
+a string, boolean, non-positive, non-finite or larger value is refused, exit
+`1`). It raises or lowers that one command's time limit; omitted, the command
+gets the default `1800` s, the same as command-backed manifest evidence.
 `argv` is run directly, never through a shell, with stdin closed and output
-discarded. `cwd` defaults to the repository root. Each command is bounded by
-the same timeout as command-backed manifest evidence. A command that cannot
+discarded. `cwd` defaults to the repository root. A command that cannot
 be launched or times out fails its check with `exit_status: null` and
 `error: "launch_failed"`/`"timeout"`.
 

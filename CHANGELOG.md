@@ -21,6 +21,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   from `tap_distance` rules carry an additive `note` that the rule is
   tap-placement dependent.
 
+
+- **`erc` `ties[].well_requires_cells` / `well_excludes_cells`** (issue #4373).
+  Select a drawn well class by the cell it is drawn in, evaluated in each
+  instance's transformed frame, instead of hand-generated per-placement
+  `*_boxes`. Unknown cell names are a spec error; a tie selected this way is not
+  listed in `erc_coverage.checked_by_well_assertion`. Additive: no
+  `schema_version` bump, byte-identical output when the keys are omitted.
 - **`klt signoff` item 11: a partial `erc`/`lvs` set renders
   `power_delivery_parts_missing`** (issue #4193, documented in
   [`docs/cli/signoff.md`](docs/cli/signoff.md)). A cited set lacking the `erc`
@@ -34,7 +41,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   area=… perim=…` now converts to a `D` card in the deck's diode class instead
   of raising `reference.unresolved_subckt_call`, for all 8 classes in the sky130
   deck's `diodes`. Additive; other decks unchanged.
-
 - **`klt place-and-route` gains `instance_groups` (request) and `instance_groups[]`
   (response)** (issue #4344, documented in
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)): name sets of

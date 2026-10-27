@@ -89,8 +89,45 @@ def _parse_power_connectivity(
     return True, expected, dict(value)
 
 
+#: LEF ``LAYER`` name fragments that mark a well/substrate-implant pin (issue
+#: #4363): a standard-cell body-bias pin (``VNB``/``VPB`` on sky130) is drawn
+#: as a ``pwell``/``nwell`` rectangle, not metal.
+_WELL_LAYER_TAGS = ("pwell", "nwell", "psub", "nsub", "subs")
+
+
+def _well_layer_lef_pins(lef_paths: tuple[str, ...]) -> frozenset[tuple[str, str]]:
+    """``{(MACRO, PIN)}`` (both upper-cased) for every LEF pin whose ``PORT``
+    geometry sits only on well/substrate layers (issue #4363).
+
+    Decided from the LEF pin's own layer, never from its name: an abstract-cell
+    probe of such a pin lands on whatever conductor happens to cross the well
+    at that point, so its per-instance net is arbitrary rather than a wiring
+    fact. Empty when ``lef_paths`` is empty or no LEF is readable (an
+    unreadable path was already reported by the extraction itself)."""
+    if not lef_paths:
+        return frozenset()
+    from .extract import ExtractError
+    from .extract_abstract import _load_abstract_cell_lefs
+
+    try:
+        macros = _load_abstract_cell_lefs(tuple(lef_paths))
+    except ExtractError:
+        return frozenset()
+    found: set[tuple[str, str]] = set()
+    for macro, (_path, pins) in macros.items():
+        for pin, boxes in pins.items():
+            layers = [str(box.get("layer") or "").lower() for box in boxes]
+            if layers and all(
+                any(tag in layer for tag in _WELL_LAYER_TAGS) for layer in layers
+            ):
+                found.add((macro.upper(), pin.upper()))
+    return frozenset(found)
+
+
 def _power_pin_connections(
-    layout_netlist: Any, power_pin_names: frozenset[str]
+    layout_netlist: Any,
+    power_pin_names: frozenset[str],
+    well_layer_pins: frozenset[tuple[str, str]] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Every ``(instance, power/ground pin) -> net`` edge in
     ``layout_netlist`` (issue #1952).
@@ -100,7 +137,10 @@ def _power_pin_connections(
     library-derived power-pin universe :func:`_gate_level_power_pin_names`
     computes, never a hardcoded per-PDK name table -- records which net that
     instance actually connects it to. ``net`` is ``None`` when the pin
-    resolved to no net at all.
+    resolved to no net at all. A row whose ``(master, pin)`` is in
+    ``well_layer_pins`` (:func:`_well_layer_lef_pins`, issue #4363) carries
+    ``well_layer: True``; :func:`_power_connectivity_report` sets those aside
+    and discloses them instead of checking them.
 
     **Must run before :func:`_prune_power_only_circuits`**, not
     after. A filler/tap cell is *only* power pins, so pruning removes
@@ -128,9 +168,36 @@ def _power_pin_connections(
                         "cell": ref.name,
                         "pin": name.upper(),
                         "net": net.expanded_name() if net is not None else None,
+                        "well_layer": (ref.name.upper(), name.upper())
+                        in well_layer_pins,
                     }
                 )
     return rows
+
+
+def _excluded_well_pins(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``power_connectivity.excluded_pins[]`` (issue #4363): one entry per pin
+    name whose rows were set aside because the LEF draws it on a well/substrate
+    layer."""
+    by_pin: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_pin.setdefault(row["pin"], []).append(row)
+    return [
+        {
+            "pin": pin,
+            "cells": sorted({row["cell"] for row in members}),
+            "instance_count": len(
+                {(row["circuit"], row["instance"]) for row in members}
+            ),
+            "reason": (
+                "well/substrate-layer LEF pin; its per-instance net comes from "
+                "probing whatever conductor crosses the well, and substrate "
+                "continuity through the cells' taps is not modelled in "
+                "abstract-cell extraction, so it is not checked"
+            ),
+        }
+        for pin, members in sorted(by_pin.items())
+    ]
 
 
 def _power_net_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -556,6 +623,7 @@ def _power_connectivity_unchecked(
         "instance_count": 0,
         "expected_nets": None,
         "unchecked_expected_pins": [],
+        "excluded_pins": [],
         "findings": [],
         "finding_count": 0,
     }
@@ -642,6 +710,7 @@ def _power_connectivity_report(
     library_pin_orders: Mapping[str, list[str]] | None,
     *,
     expected_nets: dict[str, str] | None,
+    well_layer_pins: frozenset[tuple[str, str]] = frozenset(),
 ) -> dict[str, Any]:
     """The ``power_connectivity`` block for a
     ``reference.form: "gate-level-verilog"`` compare (issue #1952).
@@ -715,8 +784,8 @@ def _power_connectivity_report(
             "which of this design's pins are power/ground pins",
             derivation,
         )
-    rows = _power_pin_connections(layout_netlist, power_pin_names)
-    if not rows:
+    all_rows = _power_pin_connections(layout_netlist, power_pin_names, well_layer_pins)
+    if not all_rows:
         return _power_connectivity_unchecked(
             "no layout-side subcircuit instance declares any of the "
             "reference library's power/ground pins "
@@ -724,6 +793,18 @@ def _power_connectivity_report(
             "carries no power connectivity to check",
             derivation,
         )
+    # Issue #4363: well/substrate-layer LEF pins are disclosed, not checked.
+    excluded = _excluded_well_pins([row for row in all_rows if row["well_layer"]])
+    rows = [row for row in all_rows if not row["well_layer"]]
+    if not rows:
+        block = _power_connectivity_unchecked(
+            "every power/ground pin the layout's instances declare is a "
+            "well/substrate-layer LEF pin (see excluded_pins) -- no metal "
+            "power pin was available to check",
+            derivation,
+        )
+        block["excluded_pins"] = excluded
+        return block
     findings = _power_connectivity_findings(rows, expected_nets)
     observed_pins = {row["pin"] for row in rows}
     return {
@@ -736,6 +817,7 @@ def _power_connectivity_report(
         "unchecked_expected_pins": (
             sorted(set(expected_nets) - observed_pins) if expected_nets else []
         ),
+        "excluded_pins": excluded,
         "findings": findings,
         "finding_count": len(findings),
     }

@@ -119,6 +119,8 @@ _TIE_KEYS = (
     "well_excludes",
     "well_requires_boxes",
     "well_excludes_boxes",
+    "well_requires_cells",
+    "well_excludes_cells",
 )
 _TIES_DISCLOSURE_KEYS = ("reason", "kind", "undeclared_classes")
 _ANTENNA_LIMIT_KEYS = ("layer", "max_ratio", "source")
@@ -669,6 +671,27 @@ def _parse_tie_layer_list(
     ]
 
 
+def _parse_cell_names(
+    entry: dict[str, Any], key: str, spec_path: str, index: int
+) -> list[str]:
+    """One ``ties[]`` entry's array of cell names under ``key`` (issue
+    #4373: ``well_requires_cells`` / ``well_excludes_cells``). Omitted/``null``
+    -> ``[]``. Every entry must be a non-empty string; whether the name exists
+    in the stream is checked at run time against the layout, where it is
+    known (:func:`~klayout_tools.erc._cells_region`)."""
+    raw = entry.get(key, [])
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list) or not all(
+        isinstance(name, str) and name for name in raw
+    ):
+        raise ErcError(
+            f"spec '{spec_path}': ties[{index}].{key} must be an array of "
+            "non-empty cell-name strings"
+        )
+    return list(raw)
+
+
 def _parse_tap_requires(
     entry: dict[str, Any], spec_path: str, index: int
 ) -> list[tuple[int, int]]:
@@ -864,8 +887,14 @@ def _parse_well_selection(
       same shape ``tap_boxes``/``well_boxes`` take. A shape is kept when it
       interacts with the union of ``well_requires_boxes`` and with none of the
       ``well_excludes_boxes`` union.
+    - ``well_requires_cells`` / ``well_excludes_cells`` (optional, issue
+      #4373) -- *cell names*. A shape is kept when it interacts with the
+      ``well_layer`` geometry drawn directly in instances of the
+      ``well_requires_cells`` cells and with none of the
+      ``well_excludes_cells`` geometry, evaluated in each instance's
+      transformed frame (see :func:`~klayout_tools.erc._cells_region`).
 
-    All four exist for the one thing the tap side cannot express: a single
+    All six exist for the one thing the tap side cannot express: a single
     drawn tub layer carrying two differently-biased well classes (device-body
     wells on one rail, a vertical bipolar's base tub on the other). Each class
     is declared as its own ``ties[]`` entry with its own ``net``.
@@ -891,7 +920,7 @@ def _parse_well_selection(
     ignored, for the same reason :func:`_parse_um_boxes` rejects a malformed
     box.
 
-    Returns the four parsed values as a dict, merged into the tie entry by
+    Returns the six parsed values as a dict, merged into the tie entry by
     :func:`_parse_well_declaration`. Split out of that function to keep it
     under the repo's C901 complexity ratchet, as :func:`_parse_tap_requires`
     is split out of :func:`_validate_ties`.
@@ -908,6 +937,12 @@ def _parse_well_selection(
         ),
         "well_excludes_boxes": _parse_um_boxes(
             entry, "well_excludes_boxes", spec_path, index
+        ),
+        "well_requires_cells": _parse_cell_names(
+            entry, "well_requires_cells", spec_path, index
+        ),
+        "well_excludes_cells": _parse_cell_names(
+            entry, "well_excludes_cells", spec_path, index
         ),
     }
     named = next((key for key, value in selection.items() if value), None)
