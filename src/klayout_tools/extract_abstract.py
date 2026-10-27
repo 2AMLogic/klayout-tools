@@ -1367,7 +1367,8 @@ def _def_net_name_probes(
     routed geometry directly in *its own* top cell, and
     ``klt gen-compose``'s ``_write_composed_gds`` places that exact top cell
     one level down as a composed block's sub-cell
-    (``f"{block_id}__{src_cell_name}"``, per its own docstring -- hierarchy is
+    (``f"{block_id}__{src_cell_name}"`` by default, or the block's
+    ``placed_cell_name`` (#4246) when set -- hierarchy is
     preserved, not flattened, when a block is placed as a whole-cell
     instance). So a depth-1 shape carrying this property is either the
     composed top's own DEF-merged geometry (as before) or a composed block's

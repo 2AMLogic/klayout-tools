@@ -231,6 +231,37 @@ def parse_tie_nets(
     return list(pairs.items())
 
 
+def parse_device_models(
+    raw: list[str] | None,
+    error_cls: ErrorFactory,
+    flag: str = "--device-model",
+) -> dict[str, str] | None:
+    """Parse the ``--device-model`` flag's ``CLASS=SUBCKT`` entries (issue
+    #4234, repeatable) into the ``{device class: PDK model name}`` mapping
+    ``run_extract``'s ``device_models`` parameter takes, or ``None`` when the
+    flag was never given. Shared by ``klt extract`` and ``klt pex``.
+
+    Raises ``error_cls`` for a malformed entry (no ``=``, blank class or blank
+    model name). A later entry for the same CLASS wins. Whether CLASS exists
+    in the deck, or already has a curated binding, is checked at binding
+    resolution, where the deck's class list can be quoted.
+    """
+    if raw is None:
+        return None
+    models: dict[str, str] = {}
+    for entry in raw:
+        name, sep, value = entry.partition("=")
+        name = name.strip()
+        value = value.strip()
+        if not sep or not name or not value:
+            raise error_cls(
+                f"{flag} entry {entry!r} is not CLASS=SUBCKT -- e.g. "
+                f"{flag} bjt=pnp_05p00x05p00"
+            )
+        models[name] = value
+    return models
+
+
 #: The spelling :func:`parse_label_layers` accepts for "this role reads no
 #: label layer at all" -- compared case-insensitively against the value half
 #: of a ``ROLE=VALUE`` entry.

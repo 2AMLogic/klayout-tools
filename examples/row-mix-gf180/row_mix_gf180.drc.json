@@ -70,6 +70,7 @@
       "75/0",
       "80/5",
       "81/0",
+      "100/8",
       "110/5",
       "112/1",
       "115/5",
@@ -94,6 +95,7 @@
       "7.8 Nplus",
       "7.9 Pplus",
       "9.1 Bond Pad",
+      "EF",
       "ESD",
       "GR",
       "OFFGRID",
@@ -153,7 +155,15 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "efuse_mk.enclosing.lvs_source.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "efuse_mk.ongrid.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "efuse_mk.space.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -317,6 +327,26 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "plfuse.separation.comp.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "plfuse.separation.esd.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "plfuse.separation.nplus.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "plfuse.separation.resistor.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "plfuse.separation.sab.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "poly2.enclosing.sab.1",
         "reason": "no_applicable_geometry"
       },
@@ -463,7 +493,9 @@
       "dualgate.ongrid.1",
       "dualgate.space.1",
       "dualgate.width.1",
+      "efuse_mk.enclosing.lvs_source.1",
       "efuse_mk.ongrid.1",
+      "efuse_mk.space.1",
       "esd.area.1",
       "esd.holes_area.1",
       "esd.overlap.comp.1",
@@ -504,6 +536,11 @@
       "pad.enclosing.metal5.1",
       "pad.ongrid.1",
       "plfuse.ongrid.1",
+      "plfuse.separation.comp.1",
+      "plfuse.separation.esd.1",
+      "plfuse.separation.nplus.1",
+      "plfuse.separation.resistor.1",
+      "plfuse.separation.sab.1",
       "poly2.enclosing.sab.1",
       "poly2.separation.guard_ring_mk.1",
       "res_mk.ongrid.1",
@@ -527,6 +564,8 @@
     "unchecked_rules": [],
     "unknown": [],
     "unmodeled_rules": [
+      "CO.6a",
+      "CO.6b",
       "DF.15a_MV",
       "DF.15b_MV",
       "DF.16_MV",
@@ -550,6 +589,30 @@
       "DV.7",
       "DV.8",
       "DV.9",
+      "EF.01",
+      "EF.02",
+      "EF.03",
+      "EF.04a",
+      "EF.04b",
+      "EF.04c",
+      "EF.04d",
+      "EF.05",
+      "EF.06",
+      "EF.07",
+      "EF.08",
+      "EF.09",
+      "EF.10",
+      "EF.11",
+      "EF.12",
+      "EF.13",
+      "EF.15",
+      "EF.16a",
+      "EF.16b",
+      "EF.18",
+      "EF.19",
+      "EF.21",
+      "EF.22a",
+      "EF.22b",
       "ESD.10",
       "ESD.3a",
       "ESD.3b",
@@ -566,6 +629,11 @@
       "LPW.1_MV",
       "LPW.2a_MV",
       "LPW.2b_MV",
+      "M1.2b",
+      "M2.2b",
+      "M3.2b",
+      "M4.2b",
+      "M5.2b",
       "MSLOT.1",
       "MSLOT.2",
       "MSLOT.3",
@@ -600,7 +668,23 @@
       "PL.4_MV",
       "PL.5a_MV",
       "PL.5b_MV",
-      "PL.7_MV"
+      "PL.7_MV",
+      "V1.3c",
+      "V1.3d",
+      "V1.4b",
+      "V1.4c",
+      "V2.3c",
+      "V2.3d",
+      "V2.4b",
+      "V2.4c",
+      "V3.3c",
+      "V3.3d",
+      "V3.4b",
+      "V3.4c",
+      "V4.3c",
+      "V4.3d",
+      "V4.4b",
+      "V4.4c"
     ],
     "voltage_domain_warnings": []
   },
@@ -610,7 +694,7 @@
     "drc__error__count": 0
   },
   "rule_counts": {},
-  "schema_version": 2,
+  "schema_version": 3,
   "status": "clean",
   "violation_count": 0,
   "violations": []

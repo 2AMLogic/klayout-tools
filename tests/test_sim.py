@@ -3773,6 +3773,29 @@ def test_corner_nonzero_exit_gets_engine_aborted_with_tail(
     assert "engine_aborted" in sim.DIAGNOSTIC_CODES
 
 
+def test_engine_aborted_quotes_log_error_line_ahead_of_banner(tmp_path, monkeypatch):
+    """Issue #4218: an unclassified abort quotes the log's ERROR: line, not just
+    the stdout banner."""
+    corner = _abort_corner(
+        tmp_path,
+        monkeypatch,
+        keep_artifacts=True,
+        returncode=1,
+        stdout="Note: banner\n",
+        log_text="Circuit: x\nERROR: weird unclassified failure\n    detail line\n",
+    )
+    first = corner["diagnostics"][0]
+    assert first["code"] == "engine_aborted"
+    assert "ERROR: weird unclassified failure" in first["message"]
+    assert "detail line" in first["message"]
+
+
+def test_engine_log_error_absent_or_empty():
+    assert sim._engine_log_error("") == ""
+    assert sim._engine_log_error("Circuit: x\nno problems\n") == ""
+    assert sim._engine_log_error("a\nERROR: last") == "ERROR: last"
+
+
 def test_corner_killed_demotes_measurement_cascade(tmp_path, monkeypatch):
     corner = _abort_corner(
         tmp_path, monkeypatch, keep_artifacts=False, returncode=-9, stderr="Killed\n"

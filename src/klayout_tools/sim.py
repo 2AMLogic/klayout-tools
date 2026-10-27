@@ -9797,6 +9797,7 @@ def _run_corner(
         )
     else:
         output_tail = _engine_abort_tail(stderr_text, stdout_text, log_text)
+        output_tail = _prepend_engine_log_error(output_tail, log_text)
         tail_suffix = f"; last output:\n{output_tail}" if output_tail else ""
         if engine_killed_by_signal is not None:
             diagnostics.append(
@@ -10160,6 +10161,33 @@ def _engine_abort_tail(*sources: str) -> str:
         if lines:
             return "\n".join(lines[-_ENGINE_TAIL_LINES:])
     return ""
+
+
+def _engine_log_error(log_text: str) -> str:
+    """The first ``ERROR:``/``Error:`` line of the engine log plus its indented
+    continuation lines, or ``""`` when the log has none (issue #4218). Keeps an
+    unclassified abort's message from showing only the stdout banner."""
+    lines = log_text.splitlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(("ERROR:", "Error:")):
+            out = [line.rstrip()]
+            if (
+                i + 1 < len(lines)
+                and lines[i + 1][:1].isspace()
+                and lines[i + 1].strip()
+            ):
+                out.append(lines[i + 1].rstrip())
+            return "\n".join(out)
+    return ""
+
+
+def _prepend_engine_log_error(output_tail: str, log_text: str) -> str:
+    """``output_tail`` led by the engine log's ERROR line, unless it already
+    shows it (issue #4218)."""
+    log_error = _engine_log_error(log_text)
+    if not log_error or log_error in output_tail:
+        return output_tail
+    return f"{log_error}\n{output_tail}" if output_tail else log_error
 
 
 _ENGINE_OUTPUT_TAIL_BYTES = 2048
@@ -11098,9 +11126,32 @@ def _no_value_message(
             "complex result prints as a table instead; reduce it with e.g. "
             "vecmax()/mean()/db()/<expr>[0])"
         )
+        message += _unsupported_function_hint(spec["expr"])
     if save_mode == "netlist":
         message += SAVE_MODE_NETLIST_NO_VALUE_HINT
     return message
+
+
+#: ngspice control-language functions that do not exist, with the working
+#: replacement (issue #4290; docs/cli/sim.md "Functions `expr` does not have").
+_UNSUPPORTED_EXPR_FUNCTIONS = {
+    "sum": "mean(x)*length(x)",
+    "sgn": "(x gt 0) - (x lt 0)",
+    "max": "vecmax(x) (max() takes two arguments)",
+    "min": "vecmin(x) (min() takes two arguments)",
+}
+
+
+def _unsupported_function_hint(expr: str) -> str:
+    """Name the replacement for any unsupported ngspice function in ``expr``."""
+    found = [
+        f"{name}() -> {fix}"
+        for name, fix in _UNSUPPORTED_EXPR_FUNCTIONS.items()
+        if re.search(rf"(?<![\w.]){name}\(", expr)
+    ]
+    if not found:
+        return ""
+    return " -- ngspice has no such function; use: " + "; ".join(found)
 
 
 #: The trailing hint :func:`_no_value_message` (and the step-sequence

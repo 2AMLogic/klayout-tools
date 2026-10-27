@@ -424,7 +424,8 @@ could re-check mechanically.
   manufacturing grid, not a deck-nominal-dbu count), so unlike every other
   entry here it is reported unconverted.
 - **Rules a deck never transcribed are not listed here.** gf180mcu's `ESD.*` /
-  `GR.*` rules (scopes `ESD`, `GR`; issue #3792) appear when transcribed; the
+  `GR.*` / `EF.*` rules (scopes `ESD`, `GR`, `EF`; issues #3792, #4316) appear
+  when transcribed; the
   upstream ids it does not transcribe (`ESD.3a`, `GR.1`, ...) are reported by
   `klt drc` in `coverage.unmodeled_rules`, which is informational and does not
   change `status` (see [`drc.md`](drc.md)).

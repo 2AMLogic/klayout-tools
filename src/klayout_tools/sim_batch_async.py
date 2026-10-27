@@ -64,8 +64,10 @@ BATCH_JOB_ID_INVALID_CODE = "batch_job_id_invalid"
 #: ``status.json`` (not booted yet) -- a normal condition, not an error.
 PENDING_STATE = "pending"
 
-#: ``status.json`` scalars passed through to the status payload verbatim
-#: (absent ones are dropped, not nulled).
+#: ``status.json`` fields passed through to the status payload verbatim
+#: (absent ones are dropped, not nulled). ``progress`` (issue #4291) is an
+#: object the runner may publish while a job runs, e.g.
+#: ``{"sim_time_s": ..., "stop_time_s": ...}``; absent when it does not.
 _STATUS_PASSTHROUGH = (
     "detail",
     "started_at",
@@ -73,6 +75,7 @@ _STATUS_PASSTHROUGH = (
     "elapsed_seconds",
     "exit_code",
     "tool",
+    "progress",
 )
 _STATUS_INSTANCE_FIELDS = (
     "instance_id",

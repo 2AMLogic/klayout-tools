@@ -916,6 +916,7 @@ the exit code describes the read, `state` describes the job:
 | `state` | `pending` (no `status.json` yet — the instance has not booted; not an error), `running`, `interrupted`, `done`, `failed` or `timeout` |
 | `terminal` | `true` for `done`/`failed`/`timeout` |
 | `detail`, `started_at`, `updated_at`, `elapsed_seconds`, `exit_code`, `tool` | As written by the fleet harness; absent ones are omitted |
+| `progress` | Optional object the runner publishes into `status.json` while a job runs, e.g. `{"sim_time_s": 1.5e-6, "stop_time_s": 1e-5}` (simulated time reached, and the target stop time when known). Passed through verbatim and additive: omitted when the runner publishes none, so callers must treat it as optional ([#4291](https://github.com/2AMLogic/klayout-tools/issues/4291)) |
 | `instance` | `instance_id`, `instance_type`, `availability_zone`, `lifecycle`, `spot`, ... when published |
 
 An unknown job id (no `job.json` under the prefix) is an error envelope with
@@ -923,12 +924,18 @@ An unknown job id (no `job.json` under the prefix) is an error envelope with
 `"batch_job_id_invalid"`. Reading an `interrupted` job re-launches nothing —
 2am's own `reconcile` does that.
 
-**No unit counts.** The fleet's `status.json` is written at state transitions
-only (`fetching inputs`, `executing`, the terminal state) and carries no
-completed/total unit count; `outputs/` is uploaded only after the job ends. A
-status read therefore cannot say how far through the grid a running job is, and
-`klt` does not estimate one from elapsed time. That needs the fleet to publish
-progress first (tracked against 2AMLogic/2am).
+**Progress and unit counts.** The fleet's `status.json` is written at state
+transitions only and carries no completed/total unit count; `outputs/` is
+uploaded only after the job ends, and `klt` does not estimate progress from
+elapsed time. A simulated-time `progress` object appears in the status payload
+only if the runner publishes one; the client side is a passthrough, so a runner
+that does not write it leaves the field absent (runner dependency tracked on
+[#4291](https://github.com/2AMLogic/klayout-tools/issues/4291)).
+
+`--attach` on a job that has a `job.json` but no `status.json` after 120 s
+(the launch was refused, e.g. `batch_concurrency_cap`, or never issued) prints
+one stderr line naming the job as never started. It only reports: polling
+continues to its normal timeout.
 
 `--submit-only` also writes the [submit receipt](#submit-receipt-and-client-termination-3065)
 (`batch-receipt.json`, `state: null`) into the artifacts directory, so the job
@@ -1790,6 +1797,15 @@ also carries `runner_code: "batch_runner_version_mismatch"` and both klt
 versions. `--job-status` is a `status.json` passthrough only and never
 fetches outputs, so it can show just `job command exited 87`; read the full
 report for the cause.
+
+Any other non-zero exit with nothing recovered
+([#4217](https://github.com/2AMLogic/klayout-tools/issues/4217)) is named the
+same way: the `batch_job_failed` message states the runner exit code, that no
+`report.json`, `stderr.log` envelope or engine log came back, and points to
+`harness.log` under the job's S3 prefix and to bisecting the request (the
+client's submit-only credential cannot read `harness.log` itself). The change is
+additive -- only the message grows; no field is added or changed. A job whose
+envelope *was* recovered keeps its structured `runner_error` diagnostic.
 
 #### Pre-launch check from the AMI manifest ([#2851](https://github.com/2AMLogic/klayout-tools/issues/2851))
 
@@ -3728,6 +3744,42 @@ relying on `print`:
 A `print`ed scalar uses ngspice's `numdgt` digit count; see "Measurement
 output precision" above for widening it via `options.ngspice_init`.
 
+### Functions `expr` does not have
+
+ngspice's control language is smaller than SPICE `.meas` or numpy. These
+are not available (verified on ngspice-42: `no function as sum with that
+arity`); use the replacement:
+
+| Not available | Use instead |
+| --- | --- |
+| `sum(x)` | `mean(x)*length(x)` |
+| `sgn(x)` | a comparison: `(x gt 0)` is `1`/`0`; `(x gt 0) - (x lt 0)` is the sign |
+| one-argument `max(x)` / `min(x)` | `vecmax(x)` / `vecmin(x)` (`max`/`min` take two arguments) |
+
+Spell comparisons `gt` / `lt` (see the runner-skew note on `<` / `>`).
+
+### Counting edges with `expr`
+
+There is no edge-count measurement in `expr`, but a signed first difference
+of a thresholded signal gives one with index slices. `x[a,b]` selects samples
+`a..b` inclusive, so `s[1,length(s)-1] - s[0,length(s)-2]` is `s[i+1]-s[i]`:
+`+1` on a rising edge, `-1` on a falling edge, `0` elsewhere. Counting uses
+`mean(...)*length(...)` in place of the missing `sum`. For `v(in)` thresholded
+at 0.5 V (`s = (v(in) gt 0.5)`, `n = length(time)-1` steps):
+
+```json
+{ "name": "rises", "expr": "mean(((v(in) gt 0.5)[1,length(time)-1] - (v(in) gt 0.5)[0,length(time)-2]) gt 0.5)*(length(time)-1)" },
+{ "name": "falls", "expr": "mean(((v(in) gt 0.5)[1,length(time)-1] - (v(in) gt 0.5)[0,length(time)-2]) lt -0.5)*(length(time)-1)" }
+```
+
+Wrap the step in `abs(...)` and drop the `gt`/`lt` for the total edge count.
+Worked example: a `PULSE(0 1 0 1n 1n 5u 10u)` source over a `100u` transient
+returns `rises = 10`, `falls = 10` and (with `abs`) `edges = 20`. The
+recipe is exercised by `tests/test_sim_expr_edge_count.py`. The count is over
+the saved time points, so the transient must resolve every edge (a `tstep`
+or `.options` maximum step finer than the shortest pulse); where the edge
+*times* are needed, use a `crossings` measurement instead.
+
 Worked `op` example — the case that had no expression at all before:
 
 ```json
@@ -3960,7 +4012,10 @@ mid-rail threshold follows the supply sweep. The resolved threshold is echoed as
 `level` (volts) inside that corner's `crossings` object; a literal-number
 `level` leaves the report unchanged. `frac_of` must be a `corners.supply_v`
 key of every corner and `fraction` a finite number `>= 0`; otherwise the
-request is refused before any corner runs. (This is the supply-relative path;
+request is refused before any corner runs. **Runner version:** `frac_of`
+first shipped in `klt` v0.8.0 (it is not in v0.7.x); a fleet runner older than
+that does not understand it, so on such a runner give `level` as a literal
+number per corner. (This is the supply-relative path;
 see the `.meas` note under *`WHEN` thresholds must be literal numbers*.)
 
 `crossings` is a third measurement form: an entry declares **exactly one** of
