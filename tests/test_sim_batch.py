@@ -8023,6 +8023,62 @@ def test_capacity_watch_throttles_to_the_heartbeat_interval():
     assert "(last refusal: batch_no_capacity)" in lines[0]
 
 
+def test_capacity_watch_progress_line_counts_rate_and_eta():
+    now = [0.0]
+    lines: list[str] = []
+    watch = sb._CapacityWatch(4, monotonic=lambda: now[0], emit=lines.append)
+
+    watch.phase(0, "submitted")  # still pending: counts unchanged, no line
+    watch.phase(0, "launching")
+    assert lines == [
+        "klt sim: shards 0/4 launched, 1 launching, 3 pending, "
+        "0 collected; launch rate unknown, ETA unknown"
+    ]
+    now[0] += sb.BATCH_HEARTBEAT_INTERVAL_S
+    watch.phase(0, "launched")  # first launch: no rate yet
+    assert "1/4 launched" in lines[-1] and "ETA unknown" in lines[-1]
+    watch.phase(1, "launching")  # inside the interval: suppressed
+    assert len(lines) == 2
+    now[0] += 60.0
+    watch.phase(1, "launched")  # suppressed again (interval not elapsed)
+    now[0] += sb.BATCH_HEARTBEAT_INTERVAL_S
+    watch.phase(2, "launching")
+    assert "2/4 launched" in lines[-1]
+    assert "launch rate 0.2/min" in lines[-1]
+    assert "ETA 12m" in lines[-1]
+
+
+def test_capacity_watch_progress_final_line_and_refusal_rollback():
+    now = [0.0]
+    lines: list[str] = []
+    watch = sb._CapacityWatch(2, monotonic=lambda: now[0], emit=lines.append)
+    watch.phase(0, "launching")
+    now[0] += sb.BATCH_HEARTBEAT_INTERVAL_S
+    watch.phase(0, "launch_refused")  # back to pending
+    assert "0 launching, 2 pending" in lines[-1]
+    for i in (0, 1):
+        watch.phase(i, "launching")
+        watch.phase(i, "launched")
+    assert "2/2 launched, 0 launching, 0 pending" in lines[-1]
+    count = len(lines)
+    watch.finished(0)  # throttled, final already printed
+    assert len(lines) == count
+
+
+def test_capacity_watch_progress_seeded_and_single_shard_silent():
+    lines: list[str] = []
+    watch = sb._CapacityWatch(3, emit=lines.append)
+    watch.seed(0, "collected")
+    watch.seed(1, "launched")
+    watch.phase(2, "launching")
+    assert "1 launching, 0 pending, 1 collected" in lines[-1]
+    quiet: list[str] = []
+    one = sb._CapacityWatch(1, emit=quiet.append)
+    one.phase(0, "launching")
+    one.phase(0, "launched")
+    assert quiet == []
+
+
 def test_models_pdk_root_local_directory_is_refused(tmp_path):
     request = _lib_request(
         tmp_path, models={"pdk": "gf180mcuD", "pdk_root": str(tmp_path)}

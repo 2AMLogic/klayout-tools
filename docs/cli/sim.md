@@ -770,6 +770,15 @@ plain `klt sim ... --backend local-parallel --format json` invocation on the
 fleet's own pinned image, so corner expansion, ordering, measurement
 extraction, and pass/fail classification are never reimplemented for it.
 
+**Launch progress.** A sharded run (`remote.hosts` > 1) prints one aggregate
+line on stderr as shards move through the fleet, for example
+`klt sim: shards 170/4200 launched, 40 launching, 3990 pending, 0 collected; launch rate 5.7/min, ETA 11h 49m`.
+It is emitted when the counts change, at most once per
+`BATCH_HEARTBEAT_INTERVAL_S` (300 s), plus once when the last shard has
+launched. The rate is observed launches per minute since the first launch; until
+two launches are seen it reads `unknown`. stdout and the JSON report are
+unchanged ([#4349](https://github.com/2AMLogic/klayout-tools/issues/4349)).
+
 **Retry contract, up front.** A launch refused for lack of Spot capacity is
 *not* retried unless you opt in: `batch.capacity_wait_s` defaults to `0` (one
 attempt), and the refusal then fails the request with
