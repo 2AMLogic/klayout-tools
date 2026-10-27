@@ -9797,9 +9797,7 @@ def _run_corner(
         )
     else:
         output_tail = _engine_abort_tail(stderr_text, stdout_text, log_text)
-        log_error = _engine_log_error(log_text)
-        if log_error and log_error not in output_tail:
-            output_tail = f"{log_error}\n{output_tail}" if output_tail else log_error
+        output_tail = _prepend_engine_log_error(output_tail, log_text)
         tail_suffix = f"; last output:\n{output_tail}" if output_tail else ""
         if engine_killed_by_signal is not None:
             diagnostics.append(
@@ -10181,6 +10179,15 @@ def _engine_log_error(log_text: str) -> str:
                 out.append(lines[i + 1].rstrip())
             return "\n".join(out)
     return ""
+
+
+def _prepend_engine_log_error(output_tail: str, log_text: str) -> str:
+    """``output_tail`` led by the engine log's ERROR line, unless it already
+    shows it (issue #4218)."""
+    log_error = _engine_log_error(log_text)
+    if not log_error or log_error in output_tail:
+        return output_tail
+    return f"{log_error}\n{output_tail}" if output_tail else log_error
 
 
 _ENGINE_OUTPUT_TAIL_BYTES = 2048
