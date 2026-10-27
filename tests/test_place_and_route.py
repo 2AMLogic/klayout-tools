@@ -1768,8 +1768,8 @@ _EXPECTED_PRESET_STRAPS: dict[str, list[dict[str, object]]] = {
 #: The via-stack tuning each preset must resolve to. The 9t gf180mcu config
 #: carries `add_pdn_connect -grid {block} -layers {Metal1 Metal4}
 #: -max_columns {5} -ongrid {Metal2 Metal3 Metal4} -split_cuts {Metal3
-#: 0.128}` plus a bare `{Metal4 Metal5}` pair; the 7t preset drops the
-#: `-split_cuts` (issue #4301: DRC-dirty vias under `klt drc --deck
+#: 0.128}` plus a bare `{Metal4 Metal5}` pair; both gf180mcu presets drop
+#: the `-split_cuts` (issue #4301: DRC-dirty vias under `klt drc --deck
 #: gf180mcu`). sky130hd's `pdn.tcl` carries two bare pairs and therefore no
 #: tuning at all, and IHP's LibreLane config names no via-stack tuning for
 #: `sg13g2` either.
@@ -1778,10 +1778,10 @@ _GF180MCU_9T_PRESET_CONNECTS = [
         "layers": ["Metal1", "Metal4"],
         "max_columns": 5,
         "ongrid": ["Metal2", "Metal3", "Metal4"],
-        "split_cuts": {"layer": "Metal3", "width_um": 0.128},
+        "split_cuts": None,
     }
 ]
-_GF180MCU_7T_PRESET_CONNECTS = [{**_GF180MCU_9T_PRESET_CONNECTS[0], "split_cuts": None}]
+_GF180MCU_7T_PRESET_CONNECTS = _GF180MCU_9T_PRESET_CONNECTS
 _EXPECTED_PRESET_CONNECTS: dict[str, list[dict[str, object]]] = {
     "gf180mcu_7t_6M": _GF180MCU_7T_PRESET_CONNECTS,
     "gf180mcu_9t_6M": _GF180MCU_9T_PRESET_CONNECTS,
