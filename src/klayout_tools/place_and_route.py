@@ -280,6 +280,9 @@ from .place_and_route_script import (
     _antenna_check_lines as _antenna_check_lines,
 )
 from .place_and_route_script import (
+    _antenna_diode_absent as _antenna_diode_absent,
+)
+from .place_and_route_script import (
     _clock_lines as _clock_lines,
 )
 from .place_and_route_script import (
@@ -1168,6 +1171,19 @@ def _validate_pdn_core_fit(
     )
     if message is not None:
         raise PlaceAndRouteError(message)
+
+
+def _antenna_repair_warnings(
+    target_stage: str, library: dict[str, Any] | None
+) -> list[str]:
+    """Warn when a ``route`` run skips antenna repair (``antenna_diode: null``)."""
+    if target_stage != "route" or not _antenna_diode_absent(library):
+        return []
+    return [
+        "antenna repair did not run: request.library.antenna_diode is "
+        "null (the library has no antenna diode), so repair_antennas "
+        "was not called; the antenna check still ran"
+    ]
 
 
 def _response_warnings(
@@ -2122,6 +2138,7 @@ def _run_single_corner(
         row_rail_emitted=row_rail_info["emitted"],
         row_rail_layer=row_rail_info["layer"],
     )
+    warnings.extend(_antenna_repair_warnings(target_stage, library))
 
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
