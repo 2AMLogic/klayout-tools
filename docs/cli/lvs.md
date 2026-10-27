@@ -619,7 +619,7 @@ When a device name is not one of the curated devices, supply it explicitly:
 The converter recognises four device families through that same curated
 table, never a second, independent device-name mapping — MOS, resistor,
 capacitor, and bipolar (issue #1130 extended the original, MOS-only #280
-converter). See `netlist_normalize.py`'s module docstring for the full
+converter), plus sky130's junction diodes (issue #4319, below). See `netlist_normalize.py`'s module docstring for the full
 per-family rationale. It is deliberately narrow and loud (a wrong
 parameter/unit mapping into a sign-off tool must never pass silently):
 
@@ -755,6 +755,19 @@ model-reference `R` card rather than a subcircuit) is not fabricated.
 Bipolar is never derived at all: it carries no geometry parameter to
 cross-check a name against, so an assumed identity could silently rewrite a
 genuine hierarchical instance into a `Q` card.
+
+**sky130 junction diodes** (issue #4319). Each of the deck's `diodes` classes
+(`diode_pw2nd_05v5{,_lvt,_nvt}`, `diode_pw2nd_11v0`,
+`diode_pd2nw_05v5{,_lvt,_hvt}`, `diode_pd2nw_11v0`) resolves from its PDK
+subcircuit name `sky130_fd_pr__<class>`: `X<n> anode cathode
+sky130_fd_pr__diode_pd2nw_05v5 area=<A> perim=<P>` becomes `D<n> anode cathode
+diode_pd2nw_05v5 A=.. P=..`, the `DeviceClassDiode` the layout-side extractor
+emits. `area` is um² and `perim` (alias `pj`) um under sky130's ambient
+`.option scale` for bare numbers (`area=1 perim=4`); suffixed/exponent literals
+are SI (`area=1p perim=4u`). Either may be omitted (class default). Anode is the
+first node, cathode the second, and polarity is compared. `mult`/`m` > 1 is
+rejected like resistors/capacitors. Other decks' diodes are not mapped, and
+`device_map`'s `kind` enum has no `diode`.
 
 Anything outside that union — including a subcircuit whose real upstream
 name differs from the deck's device-class label and has no curated entry yet

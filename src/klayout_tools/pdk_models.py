@@ -858,8 +858,8 @@ class DeviceLookup:
     tables that are already deck-name-keyed.
 
     ``kind`` mirrors :attr:`DeviceBinding.kind`
-    (``"mos"``/``"resistor"``/``"capacitor"``/``"bipolar"``). ``device_class``
-    is the plain-element card's model-field label (``nfet``,
+    (``"mos"``/``"resistor"``/``"capacitor"``/``"bipolar"``/``"diode"``).
+    ``device_class`` is the plain-element card's model-field label (``nfet``,
     ``res_generic_po``, ...). ``length_param``/``width_param`` are the *real*
     subcircuit's own call-site parameter spellings (``l``/``w`` for sky130,
     ``r_length``/``r_width`` or ``c_length``/``c_width`` for gf180mcu) --
@@ -907,6 +907,42 @@ class DeviceLookup:
     emitter_area_um2: float | None = None
     fixed_length_um: float | None = None
     fixed_width_um: float | None = None
+
+
+#: ``(deck_name, family) -> {device-class name: subcircuit name}`` for the PDK
+#: junction-diode subcircuits (issue #4319). Each is a two-terminal
+#: ``anode cathode`` cell taking ``area``/``perim`` (``pj``) call-site
+#: parameters; the subcircuit name is ``sky130_fd_pr__`` + the deck's
+#: ``DiodeDevice`` class name (a test iterates ``EXTRACTION_DECK.diodes`` so a
+#: new class cannot be silently missed).
+_DIODE_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
+    ("sky130", "sky130"): {
+        name: f"sky130_fd_pr__{name}"
+        for name in (
+            "diode_pw2nd_05v5",
+            "diode_pw2nd_05v5_lvt",
+            "diode_pw2nd_05v5_nvt",
+            "diode_pw2nd_11v0",
+            "diode_pd2nw_05v5",
+            "diode_pd2nw_05v5_lvt",
+            "diode_pd2nw_05v5_hvt",
+            "diode_pd2nw_11v0",
+        )
+    },
+}
+
+
+def _diode_bindings(deck_name: str, family: str) -> dict[str, DeviceLookup]:
+    """``<subckt-name> -> DeviceLookup("diode", ...)`` for every junction-diode
+    :data:`_DIODE_MODEL_TABLE` curates for one ``(deck_name, family)`` pair;
+    empty for a pair the table does not cover. Like bipolar, resolved purely
+    by subcircuit name (the call carries no length/width parameter)."""
+    return {
+        subckt: DeviceLookup("diode", device_class)
+        for device_class, subckt in _DIODE_MODEL_TABLE.get(
+            (deck_name, family), {}
+        ).items()
+    }
 
 
 _BindingValue = TypeVar("_BindingValue")
@@ -1035,6 +1071,10 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
     for deck_name, family in _BIPOLAR_MODEL_TABLE:
         _setdefault_bindings(
             result, _tagged_bindings(deck_name, _bipolar_bindings(deck_name, family))
+        )
+    for deck_name, family in _DIODE_MODEL_TABLE:
+        _setdefault_bindings(
+            result, _tagged_bindings(deck_name, _diode_bindings(deck_name, family))
         )
     return result
 
@@ -1167,6 +1207,7 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
             subckt, DeviceLookup("capacitor", device_class, cap_len, cap_wid)
         )
     _setdefault_bindings(result, _bipolar_bindings(deck_name, family))
+    _setdefault_bindings(result, _diode_bindings(deck_name, family))
     if res_table is None or cap_table is None:
         declared_resistors, declared_capacitors = _declared_non_mos_classes(deck_name)
         if res_table is None:

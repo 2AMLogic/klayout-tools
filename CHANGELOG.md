@@ -14,6 +14,11 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` `subckt-call` converts sky130 junction diodes** (issue #4319,
+  documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)): `X… sky130_fd_pr__diode_*
+  area=… perim=…` now converts to a `D` card in the deck's diode class instead
+  of raising `reference.unresolved_subckt_call`, for all 8 classes in the sky130
+  deck's `diodes`. Additive; other decks unchanged.
 - **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
   Landing candidates are now enumerated per merged net polygon rather than over
   the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too
