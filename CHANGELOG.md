@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`erc` `ties[].well_requires_cells` / `well_excludes_cells`** (issue #4373).
+  Select a drawn well class by the cell it is drawn in, evaluated in each
+  instance's transformed frame, instead of hand-generated per-placement
+  `*_boxes`. Unknown cell names are a spec error; a tie selected this way is not
+  listed in `erc_coverage.checked_by_well_assertion`. Additive: no
+  `schema_version` bump, byte-identical output when the keys are omitted.
+- **`klt signoff` item 11: a partial `erc`/`lvs` set renders
+  `power_delivery_parts_missing`** (issue #4193, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)). A cited set lacking the `erc`
+  and/or `lvs` part used to render `unmet`/`wrong_kind` with an empty detail;
+  it now renders `unmet`/`power_delivery_parts_missing` with
+  `detail.power_delivery.{missing_parts,cited_parts}` and, when the ERC spec
+  resolved, `supply_nets`. Value change on an existing field for that case
+  only; never `met`.
 - **New verb `klt formal`** (issue #4358, documented in
   [`docs/cli/formal.md`](docs/cli/formal.md)): bounded model checking,
   k-induction and cover via SymbiYosys on RTL or a `klt synthesize` netlist

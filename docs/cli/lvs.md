@@ -1587,6 +1587,7 @@ would silently exempt them.
   "instance_count": 462,
   "expected_nets": null,
   "unchecked_expected_pins": [],
+  "excluded_pins": [],
   "findings": [
     {
       "rule": "power.inconsistent_pin_net",
@@ -1624,6 +1625,7 @@ would silently exempt them.
 | `instance_count` | integer | How many distinct layout-side instances carried at least one of those pins. `0` when `status` is `"unchecked"`. |
 | `expected_nets` | object\<string, string\> \| `null` | The resolved `options.power_connectivity.expected_nets` mapping (upper-cased, key-sorted), or `null` when none was declared. |
 | `unchecked_expected_pins` | array\<string\> | Issue #1978. `expected_nets` keys that named a power/ground pin no layout-side instance was actually observed to carry — a typo, or a PDK standard cell whose tie pin has no in-cell label/LEF port at all. Such a pin matches zero rows in `_power_pin_connections` and so produces zero findings, which reads identically to "checked and found correct" unless this field is consulted; a non-empty list means at least one declared expectation was never exercised by this run. `[]` on a clean check, and always `[]` when `status` is `"unchecked"`. |
+| `excluded_pins` | array\<object\> | Issue #4363. Power/ground pins set aside rather than checked, because the LEF given as `layout.abstract_cell_lef` draws them only on a well/substrate layer (`pwell`/`nwell`/`psub`/`nsub`/`subs` in the LEF `LAYER` name) — e.g. sky130's `VNB`/`VPB`. Decided from the pin's LEF layer, never its name. An abstract-cell probe of such a pin lands on whatever conductor crosses the well, so its per-instance net is arbitrary, and substrate continuity through the cells' taps is not modelled; checking it produced a spurious `power.inconsistent_pin_net`. Each entry is `{pin, cells, instance_count, reason}`. Excluded pins appear in neither `power_pins` nor `findings`; the metal power pins are still checked in full. If *every* declared power pin is excluded the status is `"unchecked"`. `[]` when nothing was excluded (always, without `abstract_cell_lef`). |
 | `findings` | array\<object\> | One entry per offending **pin name** (never per instance) — see the rule table above. `[]` on a clean check. |
 | `finding_count` | integer | `len(findings)`. |
 | `findings[].nets[]` | array\<object\> | Per finding, the nets that pin reached, each with the exact untruncated `instance_count` and a bounded `instances` sample (at most 10 `{circuit, instance, cell}` entries, with `instances_truncated` saying whether anything was left out). A real routed block puts hundreds of instances on one rail; a finding that dumped all of them would bury the few that differ. A `net` of `null` is an unconnected pin. |
@@ -2259,7 +2261,7 @@ section this engine buckets rather than fully structures:
 | `reference` | string | Echo of `reference.netlist`, exactly as provided — deliberately **not** retyped by issue #2659 (see `layout` above). The reference netlist is pinned by its own `environment.reference_sha256` digest rather than by `provenance.input`, which covers the layout side only, so it is not the field `input_verified` re-hashes. |
 | `top` | string | The compared top circuit's name (the layout side's resolved top cell/circuit name). |
 | `reference_top` | string | The **reference** side's resolved top circuit name (issue #1205). Equal to `top` for the ordinary compare, but different by construction for an LVS negative control — a deliberately-broken `<cell>_shorted` layout compared against the *intact* `<cell>`'s reference netlist. Recording only one top made such a report unreconstructable by `--check --rerun` (it applied the single `top` to both sides and failed with "top cell/subcircuit not found in reference netlist"). |
-| `reference_conversion` | object | Issue #2673. Present **only** for `reference.form: "subckt-call"` (omitted for every other form): `{"form": "subckt-call", "deck": <string\|null>, "device_map": <object\|null>}`, the request-side context the reference conversion depends on, echoed as given. It lets `--check --rerun` re-convert the reference and rebuild its placeholder-value exclusions; a report without it replays the reference as plain-element SPICE, as before. |
+| `reference_conversion` | object | Issue #2673. Present **only** for `reference.form: "subckt-call"` or `"gate-level-verilog"` (omitted for every other form). `subckt-call`: `{"form": "subckt-call", "deck": <string\|null>, "device_map": <object\|null>}`; `gate-level-verilog` (issue #4353): `{"form": "gate-level-verilog", "library": <string\|null>, "pdk": <string\|null>, "pdk_root": <string\|null>, "pin_order_files": <array of resolved absolute paths\|null>}`. The request-side context the reference conversion depends on, echoed as given. It lets `--check --rerun` re-convert the reference (and, for `subckt-call`, rebuild its placeholder-value exclusions); a report without it replays the reference as plain-element SPICE, as before. |
 | `parameter_tolerance` | number \| `null` | Echo of the effective `options.parameter_tolerance` (issue #589) — `null` when the option was omitted (the default exact compare). Always present, never omitted, so a consumer reading only the response can always tell whether a `"match"` was reached under a caller-supplied design tolerance at all. |
 | `options` | object | Echo of every request option that shapes *what was compared*, as resolved (issue #1205): `combine_devices` (boolean, or the normalised array of device-class names when the array shape was used — issue #1370), `combine_devices_max_attempts` (positive integer, issue #2682 — the resolved retry budget, the default `5` when the option was omitted), `combine_devices_per_circuit` (object \| `null`, issue #1552 — the resolved `{"<circuit-name-glob>": <boolean>}` mapping, or `null` when the option was omitted), `flatten_layout`, `flatten_reference` (booleans), `netgen_setup` (string \| `null`, echoed exactly as given, not resolved against the request file's directory), `parameter_tolerance` (number \| `null`, the same value as the top-level field above, repeated here so this block is a complete request-side view), `compare_parameters` (object \| `null`, issue #1928 — the resolved `{"<device-class>": [<parameter>, ...]}` mapping, or `null` when the option was omitted), and `power_connectivity` (boolean \| object \| `null`, issue #1952 — the caller's own `options.power_connectivity` value verbatim, or `null` when the option was omitted; note that `null` here means the check ran under its default-on setting, *not* that it was skipped — read `power_connectivity.status` for that), and `anchor_top_level_pins` (boolean \| `null`, issue #2692 — the caller's own value verbatim, or `null` when the option was omitted, which means the form-dependent default applied: on for `reference.form: "gate-level-verilog"`, off for every other form; read the `topology.top_level_pins_anchored` entry in `mismatches[]` to see whether anchoring actually ran, and which pins it anchored). Every key is always present, never omitted — so a consumer reading only the response can tell which compare the verdict belongs to, and `--check --rerun` can re-run *that* compare rather than a differently-shaped one whose difference it would then report as drift. `options.keep_extracted` is deliberately not echoed here (it is an output-side flag that cannot change a verdict, and is already visible as `environment.extracted_netlist`), nor is `options.netgen_timeout_s` (a runtime guard, not a compare input), nor `options.netgen_binary` (issue #2373 — host-side binary selection, already visible in its *resolved* form as `environment.netgen_binary`, which is strictly more informative than an echo of the raw request value; `--rerun` re-resolves it on the verifying host rather than replaying a path that may not exist there, and `environment.netgen_binary` is excluded from that mode's drift diff for the same reason — see "Full mode (`--rerun`)" below).  Also echoes the resolved `supply_nets` list, including `[]`, so `--rerun` preserves the chosen supply-name policy, and `finfet_bulk` (object \| `null`, issue #2813 — the resolved FinFET bulk-tie policy). |
 | `constant_nets_applied` | object\<string, string\> \| `null` | Issue #3014. The `hints.constant_nets` bindings this run applied, as `{"<reference constant net>": "<layout net>"}`; `null` when none were declared. The echo `--check --rerun` replays the bindings from. |
@@ -4622,6 +4624,11 @@ reference and rebuilds the proven placeholder-value exclusions on both
 engines, with `options.netgen_setup` still composed ahead of them. A
 `subckt-call` report committed before that echo existed has no
 `reference_conversion` (excluded from its drift diff) and stays best-effort.
+A `"gate-level-verilog"` reference **is** replayed too (issue #4353): its
+`reference_conversion` echo carries `form`, `library`, `pdk`, `pdk_root` and
+the resolved `pin_order_files`, so `--rerun` re-reads the Verilog with the
+same pin-order sources. A gate-level report committed before that echo
+existed stays best-effort.
 A `layout.label_layers` override **is** replayed (issue #2686) from the
 report's top-level `label_layers` echo, `null` roles included; a report
 without that field (no override, or committed before it existed) replays
@@ -4629,15 +4636,14 @@ with none, so it cannot acquire drift from the echo alone.
 `layout.abstract_cells`/`abstract_cell_lef` **are** replayed (issue #2853)
 from the report's top-level `abstract_cells`/`abstract_cell_lef` echo, under
 the same rule.
-A `"gate-level-verilog"` `reference.form`,
-`reference.device_bulk`, and
+`reference.device_bulk` and
 `layout.top_cell_pins`/`declared_pins`/`pin_source_cells`/`rename_declared_pins`
 are never echoed
 anywhere in the response and are always reconstructed as each option's own
 default. Use cheap mode instead when any of these apply to the original
 request. When the omitted `reference.form` makes the default
 `"plain-element"` re-read of the reference fail to parse (e.g. a
-gate-level Verilog `.v` reference), `--rerun` exits `1` with the usual
+gate-level Verilog `.v` reference committed before issue #4353), `--rerun` exits `1` with the usual
 "could not parse reference netlist" error followed by a note that the
 original request may have used a non-default `reference.form` and pointing
 to cheap mode (issue #2250).

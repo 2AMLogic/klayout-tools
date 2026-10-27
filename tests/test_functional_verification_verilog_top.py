@@ -87,6 +87,12 @@ def test_cocotb_only_options_are_rejected(tmp_path, option, value):
         run_functional_verification(request)
 
 
+def test_env_is_rejected_with_verilog_top(tmp_path):
+    request = _edit(_stage(tmp_path), env={"X": "1"})
+    with pytest.raises(FunctionalVerificationError, match="request.env"):
+        run_functional_verification(request)
+
+
 def test_verilator_is_rejected(tmp_path):
     request = _edit(_stage(tmp_path), engine="verilator")
     with pytest.raises(FunctionalVerificationError, match="requires engine 'icarus'"):

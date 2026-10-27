@@ -85,6 +85,7 @@ from .gen_describe import (
     _diode_describe,
     _diode_validate,
     _esd_device_describe,
+    _esd_device_resolve_total_width,
     _esd_device_validate,
     _guard_ring_describe,
     _guard_ring_validate,
@@ -3020,6 +3021,7 @@ def _esd_device_layout(
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
     top_endcap_um: float = 0.0,
+    voltage_flavor_mark_margin_um: float = WELL_ENCLOSURE_MARGIN_UM,
 ) -> dict[str, Any]:
     """Grounded-gate multi-finger ESD MOS clamp (issue #569): a single
     :func:`_mos_unit_layout` unit device with ``fingers`` gate stripes across
@@ -3037,7 +3039,12 @@ def _esd_device_layout(
 
     ``contact_gate_offset_um``/``bottom_endcap_um``/``sd_implant_margin_um``
     (issue #1577) are forwarded to :func:`_mos_unit_layout` unchanged -- see
-    that function's own docstring."""
+    that function's own docstring.
+
+    ``voltage_flavor_mark_margin_um`` sizes the returned
+    ``voltage_flavor_mark_box_um`` -- the unit device's active footprint grown
+    by that margin, the same construction :func:`_mos_array_layout` uses for
+    its own ``voltage_flavor`` marker (issue #4299)."""
     unit = _mos_unit_layout(
         finger_width_um,
         l_um,
@@ -3047,6 +3054,14 @@ def _esd_device_layout(
         bottom_endcap_um=bottom_endcap_um,
         sd_implant_margin_um=sd_implant_margin_um,
         top_endcap_um=top_endcap_um,
+    )
+    active_boxes = unit["boxes_um"]["active"]
+    mark_margin = voltage_flavor_mark_margin_um
+    voltage_flavor_mark_box = (
+        min(b[0] for b in active_boxes) - mark_margin,
+        min(b[1] for b in active_boxes) - mark_margin,
+        max(b[2] for b in active_boxes) + mark_margin,
+        max(b[3] for b in active_boxes) + mark_margin,
     )
 
     ring = None
@@ -3069,6 +3084,7 @@ def _esd_device_layout(
         "unit": unit,
         "ring": ring,
         "ring_offset_um": ring_offset,
+        "voltage_flavor_mark_box_um": voltage_flavor_mark_box,
     }
 
 
@@ -3869,6 +3885,8 @@ def _resolve_params(spec: _GeneratorSpec, raw_params: dict[str, Any]) -> dict[st
             )
         else:
             resolved[name] = pdecl.default
+    if spec.name == "esd_device":
+        _esd_device_resolve_total_width(raw_params, resolved)
     return resolved
 
 
