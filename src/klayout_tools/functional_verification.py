@@ -1450,9 +1450,10 @@ def _resolve_parameters(parameters: Any) -> dict[str, Any]:
     return parameters
 
 
-def _resolve_env(env: Any) -> dict[str, str]:
+def _resolve_env(env: Any, *, verilog_top: bool = False) -> dict[str, str]:
     """Validate the optional ``request.env`` object and return it unchanged
-    (or ``{}`` when omitted).
+    (or ``{}`` when omitted). ``verilog_top`` rejects a non-empty env: the
+    Verilog-bench path has no cocotb test process to apply it to.
 
     Forwarded to ``Runner.test(extra_env=...)`` so the cocotb test process
     sees each entry in ``os.environ`` (issue #4338). Echoed verbatim as
@@ -1475,6 +1476,11 @@ def _resolve_env(env: Any) -> dict[str, str]:
                 f"request.env[{key!r}] must be a string -- got a {type(value).__name__}"
             )
 
+    if verilog_top and env:
+        raise FunctionalVerificationError(
+            "request.env cannot be combined with testbench.verilog_top -- "
+            "the Verilog-bench path has no cocotb test process to apply it to"
+        )
     return env
 
 
@@ -3272,12 +3278,7 @@ def run_functional_verification(
             "generated wrapper as the root and scans a single transcript)"
         )
     parameters = _resolve_parameters(request_doc.get("parameters"))
-    env = _resolve_env(request_doc.get("env"))
-    if verilog_tb is not None and env:
-        raise FunctionalVerificationError(
-            "request.env cannot be combined with testbench.verilog_top -- "
-            "the Verilog-bench path has no cocotb test process to apply it to"
-        )
+    env = _resolve_env(request_doc.get("env"), verilog_top=verilog_tb is not None)
     source_defines = _resolve_source_defines(
         request_doc.get("options"), sources, request_dir
     )
