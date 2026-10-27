@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt place-and-route` gains `instance_groups` (request) and `instance_groups[]`
+  (response)** (issue #4344, documented in
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)): name sets of
+  instances (globs allowed) and read back each set's placed-origin bounding box
+  and, with `max_extent_um`, a `within_extent` flag, from the run's DEF
+  `COMPONENTS`. Measurement only, not a placement constraint. Additive; no
+  `schema_version` bump.
 - **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
   Landing candidates are now enumerated per merged net polygon rather than over
   the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too

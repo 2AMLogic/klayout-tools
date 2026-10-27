@@ -105,6 +105,7 @@ from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
 from .place_and_route_pins import (
     check_io_pin_constraints,
     netlist_top_ports,
+    read_def_instance_groups,
     read_def_pins,
     slot_shortage_hint,
 )
@@ -223,6 +224,9 @@ from .place_and_route_request import (
 )
 from .place_and_route_request import (
     _validate_floorplan as _validate_floorplan,
+)
+from .place_and_route_request import (
+    _validate_instance_groups as _validate_instance_groups,
 )
 from .place_and_route_request import (
     _validate_io as _validate_io,
@@ -1610,6 +1614,7 @@ def _run_single_corner(
     # no-op.
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
+    instance_groups = _validate_instance_groups(request.get("instance_groups"))
     library = _validate_library(request.get("library"))
     power = _validate_power(request.get("power"), cell_library, library)
     (
@@ -2196,6 +2201,14 @@ def _run_single_corner(
         # Additive field (issue #3885): final edge/coordinates of every
         # top-level pin, read from the DEF above (`null` at "floorplan").
         "pins": read_def_pins(audited_def_path) if audited_def_path else None,
+        # Additive field (issue #4344): placed-origin bbox of each requested
+        # `instance_groups` entry, read from the same DEF (`null` at
+        # "floorplan"; `[]` when none were requested).
+        "instance_groups": (
+            read_def_instance_groups(audited_def_path, instance_groups)
+            if audited_def_path
+            else None
+        ),
         # Additive field (issue #1826): see this function's own comment
         # above (right before `unrouted_def_path` is computed) for the
         # "when is this populated" contract.

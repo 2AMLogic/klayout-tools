@@ -245,3 +245,78 @@ def read_def_pins(def_path: str) -> list[dict[str, Any]] | None:
             }
         )
     return pins
+
+
+_COMPONENTS_STMT_RE = re.compile(r"-\s+(\S+)\s+\S+([^;]*);")
+
+
+def read_def_instance_groups(
+    def_path: str, groups: list[dict[str, Any]]
+) -> list[dict[str, Any]] | None:
+    """Placed-origin bounding box of each ``request.instance_groups`` entry,
+    read from the DEF ``COMPONENTS`` section (issue #4344), or ``None`` when
+    the DEF is unreadable or has no ``UNITS``.
+
+    Each result is ``{name, matched, bbox, max_extent_um, within_extent}``:
+    ``matched`` counts the instances whose name matches any glob of the group;
+    ``bbox`` is ``{x_min_um, x_max_um, y_min_um, y_max_um}`` over the *origins*
+    of those that are placed (COMPONENTS carries no master size), or ``None``
+    when none are; ``within_extent`` is ``None`` unless ``max_extent_um`` was
+    given and a ``bbox`` exists.
+    """
+    try:
+        with open(def_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    units = _UNITS_RE.search(text)
+    if units is None:
+        return None
+    scale = int(units.group(1))
+    start = text.find("\nCOMPONENTS ")
+    end = text.find("END COMPONENTS", start)
+    placed: list[tuple[str, int | None, int | None]] = []
+    if start >= 0 and end >= 0:
+        for name, rest in _COMPONENTS_STMT_RE.findall(text[start:end]):
+            at = _PIN_PLACED_RE.search(rest)
+            placed.append(
+                (
+                    name.replace("\\", ""),
+                    int(at.group(1)) if at else None,
+                    int(at.group(2)) if at else None,
+                )
+            )
+    names = [name for name, _, _ in placed]
+    results: list[dict[str, Any]] = []
+    for group in groups:
+        hits = {
+            hit for pattern in group["instances"] for hit in match_pins(pattern, names)
+        }
+        origins = [(x, y) for name, x, y in placed if name in hits and x is not None]
+        bbox = None
+        if origins:
+            xs = [x for x, _ in origins]
+            ys = [y for _, y in origins]
+            bbox = {
+                "x_min_um": round(min(xs) / scale, 4),
+                "x_max_um": round(max(xs) / scale, 4),
+                "y_min_um": round(min(ys) / scale, 4),
+                "y_max_um": round(max(ys) / scale, 4),
+            }
+        bound = group.get("max_extent_um")
+        within = None
+        if bbox is not None and bound is not None:
+            span = max(
+                bbox["x_max_um"] - bbox["x_min_um"], bbox["y_max_um"] - bbox["y_min_um"]
+            )
+            within = span <= bound
+        results.append(
+            {
+                "name": group["name"],
+                "matched": len(hits),
+                "bbox": bbox,
+                "max_extent_um": bound,
+                "within_extent": within,
+            }
+        )
+    return results

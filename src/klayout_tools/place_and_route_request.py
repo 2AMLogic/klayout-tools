@@ -664,6 +664,53 @@ def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
     return result
 
 
+def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
+    """Shape-validate ``request.instance_groups`` (issue #4344)."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise PlaceAndRouteError("request.instance_groups must be an array")
+    groups: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        where = f"request.instance_groups[{index}]"
+        if not isinstance(entry, dict):
+            raise PlaceAndRouteError(f"{where} must be a JSON object")
+        unknown = sorted(set(entry) - {"name", "instances", "max_extent_um"})
+        if unknown:
+            raise PlaceAndRouteError(
+                f"{where} has unknown key(s): {', '.join(unknown)}"
+            )
+        name = entry.get("name")
+        if not (isinstance(name, str) and name.strip()):
+            raise PlaceAndRouteError(f"{where}.name must be a non-empty string")
+        if name in seen:
+            raise PlaceAndRouteError(f"{where}.name '{name}' is not unique")
+        seen.add(name)
+        instances = entry.get("instances")
+        if not (
+            isinstance(instances, list)
+            and instances
+            and all(isinstance(i, str) and i.strip() for i in instances)
+        ):
+            raise PlaceAndRouteError(
+                f"{where}.instances must be a non-empty array of strings"
+            )
+        item: dict[str, Any] = {"name": name, "instances": list(instances)}
+        bound = entry.get("max_extent_um")
+        if bound is not None:
+            if (
+                isinstance(bound, bool)
+                or not isinstance(bound, (int, float))
+                or not math.isfinite(bound)
+                or bound <= 0
+            ):
+                raise PlaceAndRouteError(f"{where}.max_extent_um must be a number > 0")
+            item["max_extent_um"] = bound
+        groups.append(item)
+    return groups
+
+
 _PIN_EDGES = ("north", "east", "south", "west")
 
 
