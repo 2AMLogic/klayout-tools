@@ -363,3 +363,14 @@ def test_null_antenna_diode_overrides_built_in_entry():
 def test_diode_cell_script_still_repairs():
     lib = _validate_library({"antenna_diode": {"cell": "D", "pin": "I"}})
     assert _route_text(lib).count("repair_antennas D") == 2
+
+
+def test_null_antenna_diode_warns_on_route_target_only():
+    lib = _validate_library({"antenna_diode": None})
+    (warning,) = place_and_route._antenna_repair_warnings("route", lib)
+    assert "antenna repair did not run" in warning
+    assert "antenna_diode is null" in warning
+    assert place_and_route._antenna_repair_warnings("place", lib) == []
+    assert place_and_route._antenna_repair_warnings("route", None) == []
+    diode = _validate_library({"antenna_diode": {"cell": "D", "pin": "I"}})
+    assert place_and_route._antenna_repair_warnings("route", diode) == []

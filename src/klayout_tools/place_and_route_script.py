@@ -696,6 +696,27 @@ def _dont_use_lines(cell_library: str) -> list[str]:
     ]
 
 
+def _antenna_diode_absent(library: dict[str, Any] | None) -> bool:
+    """True when the request states ``library.antenna_diode: null`` (#4274)."""
+    return library is not None and library.get("antenna_diode", ()) is None
+
+
+def _route_diode_cell(cell_library: str, library: dict[str, Any] | None) -> str | None:
+    """The antenna-repair diode master, or ``None`` when the library has none."""
+    if _antenna_diode_absent(library):
+        return None
+    if library is not None and "antenna_diode" in library:
+        return library["antenna_diode"][0]
+    from .place_and_route import _ANTENNA_DIODE_CELLS
+
+    return _ANTENNA_DIODE_CELLS[cell_library][0]
+
+
+def _repair_iterations(diode_cell: str | None, requested: int) -> int:
+    """Antenna-repair iterations to emit: 0 when there is no diode to insert."""
+    return 0 if diode_cell is None else requested
+
+
 def _stage_script_lines(
     *,
     stage: str,
@@ -725,7 +746,6 @@ def _stage_script_lines(
     library: dict[str, Any] | None = None,
 ) -> list[str]:
     from .place_and_route import (
-        _ANTENNA_DIODE_CELLS,
         _CTS_BUFFER_CELLS,
         _GLOBAL_PLACEMENT_DENSITY,
         _ROUTING_LAYER_RANGE,
@@ -916,18 +936,10 @@ def _stage_script_lines(
         # no antenna diode: no `repair_antennas` call and no reroute pass,
         # exactly the `max_antenna_repair_iterations: 0` path (initial
         # `detailed_route`, `check_antennas` and everything after still run).
-        antenna_diode_absent = (
-            library is not None and library.get("antenna_diode", ()) is None
+        diode_cell = _route_diode_cell(cell_library, library)
+        max_antenna_repair_iterations = _repair_iterations(
+            diode_cell, max_antenna_repair_iterations
         )
-        if antenna_diode_absent:
-            max_antenna_repair_iterations = 0
-            diode_cell = None
-        else:
-            diode_cell = (
-                library["antenna_diode"][0]
-                if library is not None and "antenna_diode" in library
-                else _ANTENNA_DIODE_CELLS[cell_library][0]
-            )
         # `-critical_nets_percentage` (issue #939, native-routing survey
         # section 4.1): a real, documented `global_route` flag -- see this
         # module's own docstring, "Timing-driven global routing + bounded
