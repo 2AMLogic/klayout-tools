@@ -305,6 +305,31 @@ def _other_variants_hint(cell_library: str, resolved: dict[str, Any]) -> str:
         return ""
 
 
+def _default_variant_shipping(
+    cell_library: str,
+    info: dict[str, Any],
+    variant: str | None,
+    root: str | None,
+) -> dict[str, Any]:
+    """Return ``info``, or the first installed variant shipping ``cell_library``.
+
+    Only substitutes when no explicit variant/``$PDK`` choice was made and the
+    default pick lacks the library (issue #4204); same first-match posture as
+    :func:`find_pdk`, so the choice shows in the returned pdk_info.
+    """
+    if (
+        variant is not None
+        or os.environ.get("PDK")
+        or _ships_cell_library(info, cell_library)
+    ):
+        return info
+    try:
+        shipping = _variants_shipping(cell_library, root=root)
+    except Exception:  # noqa: BLE001 -- fall through to the original error
+        return info
+    return shipping[0] if shipping else info
+
+
 def resolve_liberty_for_cell_library(
     cell_library: str,
     requested_corner: str | None,
@@ -349,20 +374,7 @@ def resolve_liberty_for_cell_library(
     except PdkNotFoundError as exc:
         raise error_cls(str(exc)) from exc
 
-    if (
-        variant is None
-        and not os.environ.get("PDK")
-        and not _ships_cell_library(info, cell_library)
-    ):
-        # No explicit variant choice, and the default pick lacks the library:
-        # take the first installed variant that ships it (same first-match
-        # posture as find_pdk; the choice shows in the returned pdk_info).
-        try:
-            shipping = _variants_shipping(cell_library, root=root)
-        except Exception:  # noqa: BLE001 -- fall through to the original error
-            shipping = []
-        if shipping:
-            info = shipping[0]
+    info = _default_variant_shipping(cell_library, info, variant, root)
 
     mapped = _descriptor_liberty(info, cell_library, requested_corner, error_cls)
     if mapped is not None:
