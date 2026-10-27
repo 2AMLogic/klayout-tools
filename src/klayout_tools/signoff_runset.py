@@ -49,6 +49,9 @@ _GF_PV_REPO = "fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pv"
 _REVIEW = (
     "klayout-tools#4309: fetched at the commit and hashed; digest reviewed in that PR"
 )
+_REVIEW_GF180 = (
+    "klayout-tools#4395: fetched at the commit and hashed; digest reviewed in that PR"
+)
 
 #: ``sha256:<hex>`` of a PDK-published LVS runset file -> ``{"pdk", "revision",
 #: "repo", "commit", "path", "reviewed_by"}``. Signoff-side on purpose; see the
@@ -79,7 +82,7 @@ PINNED_RUNSETS: dict[str, dict[str, str]] = {
         "repo": _GF_PV_REPO,
         "commit": "1a4e4b59f5d1ea4dfd7b108a02bc085151609ccb",
         "path": "klayout/lvs/gf180mcu.lvs",
-        "reviewed_by": "klayout-tools#4395: fetched at the commit and hashed; digest reviewed in that PR",
+        "reviewed_by": _REVIEW_GF180,
     },
 }
 
