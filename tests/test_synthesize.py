@@ -5564,8 +5564,10 @@ def test_check_synthesize_report_clean_pass(tmp_path, monkeypatch):
     assert result["mode"] == "check"
     assert result["report"] == report_path
     assert result["status"] == "match"
-    assert len(result["checks"]) == 3
+    assert len(result["checks"]) == 4
     assert all(check["match"] for check in result["checks"])
+    defines = [c for c in result["checks"] if c["field"] == "defines"]
+    assert len(defines) == 1 and defines[0]["match"] is True
 
 
 def test_check_synthesize_report_detects_moved_source_hash(tmp_path, monkeypatch):
