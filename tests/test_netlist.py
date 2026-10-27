@@ -1475,3 +1475,114 @@ def test_check_still_drifts_on_subckt_card_port_order(tmp_path, argv_log, monkey
     report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
 
     assert report["status"] == "drifted"
+
+
+# --------------------------------------------------------------------------- #
+# Resolved PDK is exported to xschem (issue #4186)
+# --------------------------------------------------------------------------- #
+
+#: Records the PDK variables xschem was launched with ("<unset>" when absent).
+_STUB_RECORDS_PDK_ENV = (
+    _STUB_PREAMBLE
+    + """
+printf 'PDK_ROOT=%s\\nPDK=%s\\n' "${PDK_ROOT-<unset>}" "${PDK-<unset>}" > "$ENV_LOG"
+printf '%s\\n' "$NETLIST_BODY" > "$out_dir/$stem.spice"
+exit 1
+"""
+)
+
+
+def _recorded_env(log: Path) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in log.read_text().splitlines())
+
+
+@pytest.fixture
+def env_log(tmp_path, monkeypatch) -> Path:
+    log = tmp_path / "env.log"
+    monkeypatch.setenv("ENV_LOG", str(log))
+    return log
+
+
+@pytest.mark.parametrize("check", [False, True])
+def test_resolved_pdk_is_exported_to_xschem(
+    tmp_path, argv_log, env_log, monkeypatch, check
+):
+    root = _fake_pdk_root(tmp_path)
+    monkeypatch.setenv("PDK_ROOT", "/stale/root")
+    monkeypatch.setenv("PDK", "stale")
+    binary = _write_stub(tmp_path, _STUB_RECORDS_PDK_ENV)
+    run_netlist(
+        _write_schematic(tmp_path),
+        str(tmp_path / "b.spice"),
+        check=check,
+        xschem_binary=binary,
+        pdk="sky130A",
+        pdk_root=str(root),
+    )
+    seen = _recorded_env(env_log)
+    assert seen["PDK_ROOT"] == str(root)
+    assert seen["PDK"] == "sky130A"
+
+
+def test_pdk_via_discovery_is_exported(tmp_path, argv_log, env_log, monkeypatch):
+    root = _fake_pdk_root(tmp_path)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.setenv("PDK_ROOT", str(root))
+    binary = _write_stub(tmp_path, _STUB_RECORDS_PDK_ENV)
+    run_netlist(
+        _write_schematic(tmp_path),
+        str(tmp_path / "b.spice"),
+        xschem_binary=binary,
+        pdk="sky130A",
+    )
+    seen = _recorded_env(env_log)
+    assert seen["PDK_ROOT"] == str(root)
+    assert seen["PDK"] == "sky130A"
+
+
+def test_no_pdk_leaves_xschem_env_unchanged(tmp_path, argv_log, env_log, monkeypatch):
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    binary = _write_stub(tmp_path, _STUB_RECORDS_PDK_ENV)
+    run_netlist(
+        _write_schematic(tmp_path), str(tmp_path / "b.spice"), xschem_binary=binary
+    )
+    assert _recorded_env(env_log) == {"PDK_ROOT": "<unset>", "PDK": "<unset>"}
+
+
+def test_unresolved_symbol_message_names_rcfile_and_pdk_env(
+    tmp_path, argv_log, monkeypatch
+):
+    root = _fake_pdk_root(tmp_path)
+    monkeypatch.setenv("NETLIST_BODY", _MISSING_BODY)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    rc = _rc(tmp_path, "# empty\n")
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(
+            _write_schematic(tmp_path),
+            str(tmp_path / "b.spice"),
+            xschem_binary=binary,
+            rcfile=rc,
+            pdk="sky130A",
+            pdk_root=str(root),
+        )
+    assert excinfo.value.code == "unresolved_symbol"
+    message = str(excinfo.value)
+    assert f"--rcfile {rc}" in message
+    assert f"PDK_ROOT={root} PDK=sky130A (exported by klt)" in message
+
+
+def test_unresolved_symbol_message_reports_inherited_env(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", _MISSING_BODY)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(
+            _write_schematic(tmp_path), str(tmp_path / "b.spice"), xschem_binary=binary
+        )
+    message = str(excinfo.value)
+    assert "--rcfile none" in message
+    assert "PDK_ROOT=not set PDK=not set (inherited, not set by klt)" in message

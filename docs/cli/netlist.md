@@ -428,6 +428,15 @@ naming a *different* variant under the same install root, or merely sitting
 above the install root, is a mismatch. A mismatch is a **warning**, not an
 error: the netlist is still produced and the exit code is unchanged.
 
+When a PDK resolves, `klt netlist` also **exports it to xschem**: the xschem
+process is launched with `PDK_ROOT` set to the resolved install root and `PDK`
+to the resolved variant, overriding any inherited values, so an `xschemrc`
+that reads `$env(PDK_ROOT)`/`$env(PDK)` agrees with `--pdk`/`--pdk-root`. With
+no PDK in play, xschem inherits klt's environment unchanged. The
+`unresolved_symbol` error names the `--rcfile` used and the `PDK_ROOT`/`PDK`
+xschem was given (or "inherited / not set"). The `--backend batch` runner
+resolves its own `$PDK_ROOT`.
+
 - `--pdk`/`--pdk-root` given: strict — an unresolvable PDK is an error (exit `1`).
 - Neither given, `--rcfile` given, and `$PDK`/`$PDK_ROOT` set: best effort — an
   unresolvable PDK is silently skipped.

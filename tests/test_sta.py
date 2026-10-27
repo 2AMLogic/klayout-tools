@@ -358,3 +358,100 @@ def test_real_extension_malformed_input_raises_sta_error_not_panic(tmp_path):
 
     with pytest.raises(StaError):
         compute_critical_path(str(netlist), str(liberty), "top")
+
+
+# ---------------------------------------------------------------------------
+# Hierarchical netlists -- issue #4224
+# ---------------------------------------------------------------------------
+
+_TWO_MODULE_NETLIST = (
+    "module sub(a, y);\n  input a;\n  output y;\n  assign y = a;\nendmodule\n"
+    "module sub_top(a, y);\n  input a;\n  output y;\n  sub u0 (.a(a), .y(y));\n"
+    "endmodule\n"
+)
+
+
+def test_hierarchical_netlist_is_flattened_for_sta_only(monkeypatch, tmp_path):
+    """A netlist with more than one module is flattened into a throwaway copy
+    that the engine analyzes; the committed netlist is never touched."""
+    from klayout_tools import synthesize
+
+    netlist = tmp_path / "sub_top_synth.v"
+    netlist.write_text(_TWO_MODULE_NETLIST)
+    seen = {}
+
+    def _fake_yosys(script_path, **kwargs):
+        flat = script_path.replace("_sta_flatten.ys", "_sta_flat.v")
+        with open(flat, "w") as handle:
+            handle.write("module sub_top(a, y);\nendmodule\n")
+        return ""
+
+    def _fake_sta(path, liberty, top):
+        seen["path"] = path
+        return {"source": "klt_statime_native"}
+
+    monkeypatch.setattr(synthesize, "_run_yosys", _fake_yosys)
+    monkeypatch.setattr(synthesize, "compute_critical_path", _fake_sta)
+
+    sta, reason = synthesize._read_sta_timing(str(netlist), "/tmp/l.lib", "sub_top")
+
+    assert sta == {"source": "klt_statime_native"}
+    assert reason is None
+    assert seen["path"] != str(netlist)
+    assert netlist.read_text() == _TWO_MODULE_NETLIST
+
+
+def test_single_module_netlist_skips_yosys(monkeypatch, tmp_path):
+    from klayout_tools import synthesize
+
+    netlist = tmp_path / "n.v"
+    netlist.write_text("module top(a, y);\nendmodule\n")
+
+    def _no_yosys(*args, **kwargs):
+        raise AssertionError("yosys must not run for a single-module netlist")
+
+    seen = {}
+    monkeypatch.setattr(synthesize, "_run_yosys", _no_yosys)
+    monkeypatch.setattr(
+        synthesize,
+        "compute_critical_path",
+        lambda path, liberty, top: seen.setdefault("path", path) and {"ok": 1},
+    )
+
+    sta, reason = synthesize._read_sta_timing(str(netlist), "/tmp/l.lib", "top")
+
+    assert sta == {"ok": 1}
+    assert reason is None
+    assert seen["path"] == str(netlist)
+
+
+def test_flatten_failure_reason_names_the_hierarchy(monkeypatch, tmp_path):
+    from klayout_tools import synthesize
+
+    netlist = tmp_path / "sub_top_synth.v"
+    netlist.write_text(_TWO_MODULE_NETLIST)
+
+    def _failing_yosys(*args, **kwargs):
+        raise synthesize.SynthesizeError("boom")
+
+    monkeypatch.setattr(synthesize, "_run_yosys", _failing_yosys)
+    _install_stub(monkeypatch, lambda *args: json.dumps(_FAKE_RESULT))
+
+    sta, reason = synthesize._read_sta_timing(str(netlist), "/tmp/l.lib", "sub_top")
+
+    assert sta is None
+    assert "hierarchical" in reason
+    assert "klt sta" in reason
+    assert "verilog" in reason
+
+
+def test_module_names_sharing_a_prefix_count_separately(tmp_path):
+    from klayout_tools.synthesize import _netlist_is_hierarchical
+
+    one = tmp_path / "one.v"
+    one.write_text("module top(a);\nendmodule\n// module top_not_a_module\n")
+    two = tmp_path / "two.v"
+    two.write_text("module top(a);\nendmodule\nmodule top_sub(a);\nendmodule\n")
+
+    assert not _netlist_is_hierarchical(str(one))
+    assert _netlist_is_hierarchical(str(two))
