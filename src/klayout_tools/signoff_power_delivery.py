@@ -48,9 +48,13 @@ from .signoff_runset import runset_disclosure, runset_refusal
 #: checklist text:
 #:
 #: - :data:`_REASON_NO_PDN` -- the cited `klt place-and-route` response says
-#:   no power grid was built (``power.pdn`` is not ``true``, or no
-#:   ``power.tapcell_master`` was placed). Fix: re-run P&R with a
-#:   ``request.power`` block.
+#:   no power grid was built (``power.pdn`` is not ``true``). Fix: re-run
+#:   P&R with a ``request.power`` block.
+#: - :data:`_REASON_NO_TAPCELL_MASTER` -- the grid was built (``power.pdn``
+#:   is ``true``) but ``power.tapcell_master`` is null and the response does
+#:   not state ``power.tapless: true`` (issue #4199). A library documented
+#:   tapless (``sg13g2_stdcell``) states it and is exempt; a tapped library
+#:   whose tap step did not run, or a pre-#4199 envelope, is not.
 #: - :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- the cited `klt erc` run's own
 #:   spec document does not ask the question item 11 grades: it could not be
 #:   read at *any* path it could mean from here (issue #2608 --
@@ -137,6 +141,7 @@ from .signoff_runset import runset_disclosure, runset_refusal
 #:   is blocked on it too) -- never the ERC spec, which already asked and
 #:   answered.
 _REASON_NO_PDN = "no_pdn"
+_REASON_NO_TAPCELL_MASTER = "no_tapcell_master"
 _REASON_SUPPLY_SPEC_INCOMPLETE = "supply_spec_incomplete"
 _REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE = "supply_spec_disclosed_unexpressible"
 _REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION = "supply_spec_disclosed_tool_limitation"
@@ -690,8 +695,9 @@ def _pdn_branch_reason(
 
     Three conditions, in the order a reader would debug them: the response
     itself must pass (a P&R run that errored proves nothing); it must report
-    ``power.pdn: true`` with a ``power.tapcell_master`` named, i.e. a grid
-    was actually built (:data:`_REASON_NO_PDN`); and every
+    ``power.pdn: true`` (:data:`_REASON_NO_PDN`) with a
+    ``power.tapcell_master`` named, or ``power.tapless: true`` for a library
+    documented tapless (:data:`_REASON_NO_TAPCELL_MASTER`); and every
     ``power.straps[].layer`` it reports must be covered by the ERC spec's own
     stackup (:data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- an ERC run that never
     looked at the layers the supply is routed on says nothing about the grid
@@ -705,8 +711,10 @@ def _pdn_branch_reason(
     if not _check_passed("place-and-route", par["envelope"]):
         return _REASON_CHECK_FAILED
     power = par["envelope"].get("power") or {}
-    if power.get("pdn") is not True or not power.get("tapcell_master"):
+    if power.get("pdn") is not True:
         return _REASON_NO_PDN
+    if not power.get("tapcell_master") and power.get("tapless") is not True:
+        return _REASON_NO_TAPCELL_MASTER
     strap_layers = _strap_layers(par["envelope"])
     if not strap_layers or any(
         layer not in supply_spec["stackup"] for layer in strap_layers
@@ -1645,6 +1653,17 @@ def _port_accessibility_verdict(
     )
 
 
+def _par_tapless_field(par: dict[str, Any] | None) -> dict[str, Any]:
+    """``{"tapless": True}`` when the cited ``place-and-route`` part states
+    ``power.tapless`` is ``true`` (issue #4199), else ``{}``; split out of
+    :func:`_grade_power_delivery` to keep its own complexity under the repo's
+    ratchet (issue #2094)."""
+    if par is None:
+        return {}
+    tapless = (par["envelope"].get("power") or {}).get("tapless") is True
+    return {"tapless": True} if tapless else {}
+
+
 def _grade_power_delivery(
     specs: list[dict[str, Any]],
     *,
@@ -1880,6 +1899,9 @@ def _grade_power_delivery(
         citation["power_delivery"]["disclosed_undeclared_tie_classes"] = (
             disclosed_undeclared_tie_classes
         )
+    # Issue #4199: present only when the cited P&R response states the
+    # library is tapless, so a `null` tapcell_master reads as by-design.
+    citation["power_delivery"].update(_par_tapless_field(par))
     # Issue #2839: present only when the port-accessibility half was graded,
     # so a block that does not opt in renders this citation exactly as before.
     citation["power_delivery"].update(

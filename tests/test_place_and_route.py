@@ -2874,6 +2874,7 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
         "power_net": None,
         "ground_net": None,
         "tapcell_master": None,
+        "tapless": False,
         "endcap_master": None,
         "tapcell_distance_um": None,
         "filler_masters": [],
@@ -3098,6 +3099,7 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
         "power_net": "VDD",
         "ground_net": "VSS",
         "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
+        "tapless": False,
         "endcap_master": None,
         "tapcell_distance_um": 14,
         "filler_masters": [
@@ -7063,6 +7065,7 @@ def test_sg13g2_stdcell_power_run_skips_tapcell_instead_of_raising(
     assert power["pdn"] is True
     assert power["global_connect"] is True
     assert power["tapcell_master"] is None
+    assert power["tapless"] is True
     assert power["endcap_master"] is None
     assert power["filler_masters"] == ["sg13g2_fill_1", "sg13g2_fill_2"]
     assert [strap["layer"] for strap in power["straps"]] == [
@@ -10339,6 +10342,7 @@ def test_integration_real_openroad_power_pdn_sg13g2(tmp_path, monkeypatch):
     assert power["global_connect"] is True
     # No master is named for cells this library does not have.
     assert power["tapcell_master"] is None
+    assert power["tapless"] is True
     assert power["endcap_master"] is None
     assert power["filler_masters"] == ["sg13g2_fill_1", "sg13g2_fill_2"]
 

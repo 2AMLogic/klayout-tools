@@ -343,6 +343,13 @@ def _parse_header(statement: str) -> tuple[str, list[str]]:
             f"'module' declaration has no port list: {statement.strip()[:80]!r}"
         )
     name = rest[:open_paren].strip()
+    if _ESCAPED_IDENT_RE.fullmatch(name) and not _IDENT_RE.fullmatch(name):
+        raise VerilogNetlistError(
+            f"'module' declaration uses an escaped identifier ({name!r}), "
+            "which this reader does not support (e.g. a Yosys "
+            "'\\$paramod$<hash>\\<name>' module); flatten the netlist or "
+            "rename the module first"
+        )
     if not _IDENT_RE.fullmatch(name):
         raise VerilogNetlistError(f"'module' declaration has no valid name: {rest!r}")
     close_paren = rest.rfind(")")

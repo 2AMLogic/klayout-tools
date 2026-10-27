@@ -23,10 +23,13 @@ engine's own envelope cannot assert about itself, all decided here:
   that differs between layout and reference, must still fail
   (:func:`unrecognised_device_gaps`).
 
-The allowlist ships **empty**: a hash is only added after someone has fetched
-the PDK's published runset at a named revision and recorded its digest here
-(one entry, one reviewed commit). Until then a runset report is refused as
-unpinned rather than trusted -- the safe default.
+An entry is only added after someone has fetched the PDK's published runset
+at a named commit and recorded its digest here (one entry, one reviewed
+commit; the procedure is in ``docs/design-evidence-tiers.md`` item 4). A
+runset report whose hash is not in the table is refused as unpinned rather
+than trusted. The hash covers the top-level runset file only, not the
+``rule_decks/`` files it includes, so the pinned ``commit`` is what ties the
+entry to a full tree.
 """
 
 from __future__ import annotations
@@ -41,9 +44,34 @@ REASON_RUNSET_NOT_PINNED = "runset_not_pinned"
 REASON_RUNSET_HASH_MISMATCH = "runset_hash_mismatch"
 REASON_RUNSET_UNRECOGNISED_DEVICE = "runset_unrecognised_device"
 
-#: ``sha256:<hex>`` of a PDK-published LVS runset file -> ``{"pdk": ...,
-#: "revision": ...}``. Signoff-side on purpose; see the module docstring.
-PINNED_RUNSETS: dict[str, dict[str, str]] = {}
+_IHP_REPO = "IHP-GmbH/IHP-Open-PDK"
+_REVIEW = (
+    "klayout-tools#4309: fetched at the commit and hashed; digest reviewed in that PR"
+)
+
+#: ``sha256:<hex>`` of a PDK-published LVS runset file -> ``{"pdk", "revision",
+#: "repo", "commit", "path", "reviewed_by"}``. Signoff-side on purpose; see the
+#: module docstring. Not pinned (runset not fetchable/runnable at a verifiable
+#: commit): gf180mcu, whose only local copy is an open_pdks/ciel build with no
+#: upstream path to hash against.
+PINNED_RUNSETS: dict[str, dict[str, str]] = {
+    "sha256:e01bcb1ec5858e8069bade8f7fd7ec28c1026fc2fd0590e8f611d3398a5bbbd7": {
+        "pdk": "ihp-sg13g2",
+        "revision": "v0.3.0",
+        "repo": _IHP_REPO,
+        "commit": "5cccb161f7492697cfa52eb14dc03beb00bdca9e",
+        "path": "ihp-sg13g2/libs.tech/klayout/tech/lvs/sg13g2.lvs",
+        "reviewed_by": _REVIEW,
+    },
+    "sha256:0d91cb6e4c4aba974ffb07175614c183faab1cb8c6b7fab483e38d3cfcb5df5c": {
+        "pdk": "ihp-sg13cmos5l",
+        "revision": "dev@f7bca32",
+        "repo": _IHP_REPO,
+        "commit": "f7bca32694fe3d58be0cc7d9df4b9f5db7161a14",
+        "path": "ihp-sg13cmos5l/libs.tech/klayout/tech/lvs/sg13cmos5l.lvs",
+        "reviewed_by": _REVIEW,
+    },
+}
 
 
 def is_runset_report(envelope: dict[str, Any]) -> bool:

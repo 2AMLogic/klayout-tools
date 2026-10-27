@@ -1228,6 +1228,14 @@ entry — see "`topology.power_only_pruned`" below — rather than reporting a
 false `topology` mismatch. You do not need to exclude these cells from
 `--abstract-cells` yourself.
 
+**Troubleshooting: a direct `lvs` on a standard-cell GDS mismatches
+wholesale.** Running `klt lvs` straight on a routed standard-cell GDS against
+a gate-level Verilog reference compares the library cells' *transistors*
+against device-less cell stubs, so nearly everything reports as unmatched.
+Extract with `klt extract --abstract-cells` first and compare that netlist, as
+shown above. This note is documentation only: the command does not detect
+that shape and print a hint.
+
 **Not every `write_verilog` consumer honors the "never instantiates a
 power-only cell" assumption above.** A gate-level netlist produced by
 reading a routed DEF back through `write_verilog` (as opposed to `klt
@@ -3586,6 +3594,30 @@ never silently indistinguishable from one reached against the netlist's
 original hierarchy — the same transparency precedent
 `device.parameter_tolerated`/`device.bulk_reconciled` establish for their own
 opt-in normalisations.
+
+#### `topology.dangling_output_ambiguous`: interchangeable instances on unconnected outputs (issue #4296)
+
+Identical cell instances whose outputs connect to nothing (CTS dummy loads,
+unused flop outputs) have no distinguishing topology: the reference side names
+each such pin `__NC_<instance>_<pin>__` (a one-terminal net), the layout side
+has an anonymous one-terminal net, and `NetlistComparer` cannot pair the
+instances. Rather than `topology` ("subcircuit instance could not be matched")
+and `net.split`/`net.merged` errors, `klt lvs` reports one `severity:
+"warning"` entry per `(circuit, cell type)` group, with `details`
+`{cell_type, instance_count, layout_instances, reference_instances}` and
+`circuit`/`subcircuit` naming the group, plus one aggregate entry
+(`details.net_event_count`) for the dangling nets themselves.
+
+It applies only when every unmatched instance has a dangling pin, each cell
+type has as many unmatched layout as reference instances, and every net
+mismatch is dangling-only on each side it appears on. A one-sided dangling net
+(connected on the other side), differing cell types, an unbalanced count, or
+any real mismatch beside them leaves the ordinary `error` findings in place.
+
+`status` is still `NetlistComparer.compare()`'s own verdict, so such a run
+reports `status: "mismatch"` with no `error`-severity entries; gate on
+`error_count` to distinguish it from a real defect. This is a report-side
+reclassification: the comparer is unchanged.
 
 #### `topology.power_only_pruned`: a power-only circuit was removed before comparing
 
