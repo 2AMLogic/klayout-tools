@@ -50,6 +50,7 @@ docs/
     gen-compose.md
     gen.md
     kb.md
+    array-check.md
     keepout-check.md
     layers.md
     layout-metrics.md
@@ -68,6 +69,7 @@ docs/
     report.md
     reset-coverage.md
     ring-check.md
+    seam-check.md
     signoff.md
     sim.md
     size.md

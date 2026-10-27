@@ -444,6 +444,7 @@ Resolves one install/variant.
   },
   "broken_symlinks": [],
   "has_pcell_library": true,
+  "pcell_shim": "not_required",
   "ambiguous_roots": [],
   "alternative_variants": []
 }
@@ -461,6 +462,7 @@ Resolves one install/variant.
 | `assets` | object | Tool area → absolute directory. |
 | `broken_symlinks` | array | Dangling symlinks found under any resolved `assets` directory (issue #1406). `[]` when the install is clean. |
 | `has_pcell_library` | boolean | The variant ships at least one Python package under `libs.tech/klayout/python/` (issue #1535) — the PDK's own KLayout PCell library. See below. |
+| `pcell_shim` | string | Additive (issue #4236): `present`, `missing` or `not_required` — whether the vendored compat shim a shipped PyCell package imports (ihp-sg13g2's `pycell4klayout-api`) is on disk. `missing` means the package exists but cannot load. See below. |
 | `ambiguous_roots` | array | Later candidate roots in the search order that **also** hold a variant of the resolved name (issue #2564) — `[{"root", "resolved_via"}]`, in search order. `[]` for the common single-install case, and always `[]` when `--pdk-root` pinned the root (the search is disabled). See below. |
 | `alternative_variants` | array | Additive (issue #3814): sorted names of the *other* variants in the chosen root when no variant was selected (no `--pdk`, no `$PDK`) and the first variant was taken as the default. `[]` when a variant was pinned or the root holds only one. See below. |
 | `compatibility` | object | Additive (issue #2759): whether the install's version identity matches the one a klt technology package declares. See "Package compatibility" below. |
@@ -624,6 +626,21 @@ chain reaches `cni`). Use [`klt gen --list-pdk-pcells`](gen.md#pdk-shipped-pcell
 to find out which packages actually load and what cells/parameters they
 expose, and `klt gen --pdk-pcell <library>/<cell>` to instantiate one.
 
+#### `pcell_shim` (issue #4236)
+
+`pcell_shim` is a cheap filesystem check (no imports) that tells a repo whether
+the PDK's PyCell packages are usable before it tries to load them. It is
+`not_required` when no shipped package needs a vendored compat shim (sky130A,
+gf180mcuD), `present` when each required shim directory has content, and
+`missing` when one is absent or empty. The ihp-sg13g2 release tarball omits git
+submodules, so a `fetched:<version>` install reports `missing` for
+`sg13g2_pycell_lib` (its `pycell4klayout-api` shim): `has_pcell_library` is
+`true` but the package cannot load. The `reason` `klt gen --list-pdk-pcells` /
+`klt pdk pcell-check` print then names the source to populate it from
+(<https://github.com/IHP-GmbH/pycell4klayout-api>, at the revision the PDK
+release pins). The text output of `klt pdk find` prints a `pcell_shim: missing`
+line in that state.
+
 **`assets` keys are always present.** Each of `ngspice`, `xschem`, `klayout`,
 `magic`, `netgen` (under `libs.tech/`) and `libs_ref` (`libs.ref/`) maps to its
 absolute directory when that directory exists on disk, or `null` when the
@@ -705,8 +722,8 @@ result is **success (exit 0)**, not an error.
       "root": "/usr/share/pdk",
       "resolved_via": "PDK_ROOT environment variable",
       "variants": [
-        { "name": "sky130A", "version": "open_pdks 0fe599b", "has_pcell_library": true },
-        { "name": "sky130B", "version": null, "has_pcell_library": true }
+        { "name": "sky130A", "version": "open_pdks 0fe599b", "has_pcell_library": true, "pcell_shim": "not_required" },
+        { "name": "sky130B", "version": null, "has_pcell_library": true, "pcell_shim": "not_required" }
       ]
     }
   ]
@@ -1486,7 +1503,10 @@ failure with the same generic import-error text:
   at '<path>', next to '<package>'), but that directory is missing or appears
   empty in this install -- likely an uninitialized git submodule. This is a
   compat shim the PDK itself vendors, not a third-party PyPI dependency klt
-  would need to add."` klt already adds this shim's own directory to
+  would need to add. The PDK release tarball omits git submodules; populate
+  '<path>' from <upstream source and pinned revision>."` (issue #4236 added the
+  last sentence; `klt pdk find` reports the same state as `pcell_shim:
+  "missing"`) klt already adds this shim's own directory to
   `sys.path` before importing the package that needs it (no manual step
   required once it is populated) — this reason only fires when that
   directory is still missing or empty afterward.

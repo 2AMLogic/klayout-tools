@@ -291,6 +291,13 @@ horizontal), leaving the perpendicular axis exactly as the row placement
 left it. A `warnings[]` entry records every time this actually changes an
 already-placed group's offset, so the override is never silent.
 
+**Group origins are snapped onto the PDK manufacturing grid.** After rows and
+abutment resolve, every group's `offset_um` (`x` and `y`) is rounded *up* to
+the coarsest `ongrid` grid the PDK deck declares (so `spacing_um` / `gap_um`
+stay lower bounds), because an off-grid origin makes every shape in the group
+fail `*.ongrid.1`. Each group that moves gets a `warnings[]` entry naming it and
+the shift; a PDK family with no ongrid rule is left unchanged.
+
 ## Response
 
 Extends [`klt gen-compose`](gen-compose.md)'s response shape (per the
