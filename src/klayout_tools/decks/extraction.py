@@ -1005,10 +1005,9 @@ class ExtractionDeck:
             layers.add(resistor.marker)
             layers.update(resistor.requires)
             layers.update(resistor.excludes)
-            if resistor.terminal is not None:
-                layers.add(resistor.terminal)
-            if resistor.anode_marker is not None:
-                layers.add(resistor.anode_marker)
+            # `filter(None, ...)` keeps this ratcheted function's complexity
+            # put (issue #4312 added the second optional layer).
+            layers.update(filter(None, (resistor.terminal, resistor.anode_marker)))
         for diode in self.diodes:
             layers.add(diode.marker)
             layers.update(diode.anode_requires)
