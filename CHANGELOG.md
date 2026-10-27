@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff` item 11: a partial `erc`/`lvs` set renders
+  `power_delivery_parts_missing`** (issue #4193, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)). A cited set lacking the `erc`
+  and/or `lvs` part used to render `unmet`/`wrong_kind` with an empty detail;
+  it now renders `unmet`/`power_delivery_parts_missing` with
+  `detail.power_delivery.{missing_parts,cited_parts}` and, when the ERC spec
+  resolved, `supply_nets`. Value change on an existing field for that case
+  only; never `met`.
 - **`klt lvs` gains `options.compare_timeout_s` and a stderr heartbeat for large
   flat compares** (issue #4165, documented in
   [`docs/cli/lvs.md`](docs/cli/lvs.md) "Large flat designs"). When the
