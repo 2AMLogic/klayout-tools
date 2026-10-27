@@ -2842,3 +2842,79 @@ def _esd_device_describe(
             else []
         ),
     }
+
+
+def _diode_validate(params: dict[str, Any]) -> None:
+    from .gen import GenError
+    from .gen_diode import DIODE_KINDS, DIODE_MIN_EDGE_UM, DIODE_VOLTAGE_CLASSES
+
+    if params["kind"] not in DIODE_KINDS:
+        raise GenError(
+            f"generator 'diode': params.kind must be one of {list(DIODE_KINDS)}"
+        )
+    if params["voltage_class"] not in DIODE_VOLTAGE_CLASSES:
+        raise GenError(
+            "generator 'diode': params.voltage_class must be one of "
+            f"{list(DIODE_VOLTAGE_CLASSES)}"
+        )
+    for name in ("width_um", "length_um"):
+        if params[name] < DIODE_MIN_EDGE_UM:
+            raise GenError(
+                f"generator 'diode': params.{name} must be >= {DIODE_MIN_EDGE_UM} "
+                "(the smallest diffusion that fits an enclosed contact)"
+            )
+
+
+def _diode_describe(
+    params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
+) -> dict[str, Any]:
+    from .gen import MIN_SAME_LAYER_SPACING_UM, _grid_snapped
+    from .gen_diode import _diode_layout
+
+    info = _diode_layout(
+        params["kind"], params["voltage_class"], params["width_um"], params["length_um"]
+    )
+    metal_pair = _PDK_ROLE_LAYERS[_pdk_family(pdk_info["variant"])]["metal"]
+    assert metal_pair is not None
+    metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
+    ports = []
+    for name, box, direction in (
+        ("ANODE", info["anode_li"], 90),
+        ("CATHODE", info["cathode_li"], 90),
+    ):
+        ports.append(
+            {
+                "name": name,
+                "net": None,
+                "layer": metal_layer,
+                "x_um": (box[0] + box[2]) / 2,
+                "y_um": (box[1] + box[3]) / 2,
+                "width_um": box[2] - box[0],
+                "direction_deg": direction,
+            }
+        )
+    snapped = _grid_snapped(dbu, params["width_um"], params["length_um"])
+    notes = [
+        "areaid.ed (81/19) is never drawn -- the extraction deck treats it as "
+        "an exclusion, so an ESD-flagged diode would not extract as diode_*"
+    ]
+    if params["kind"] == "n_psub":
+        notes.append(
+            "ANODE is a p+ substrate tap; the p-substrate itself is the anode "
+            "terminal in the extracted netlist"
+        )
+    return {
+        "device_count": 1,
+        "ports": ports,
+        "drc_hints": {
+            "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
+            "matched_group_id": None,
+            "snapped_to_grid": snapped,
+            "notes": notes,
+        },
+        "warnings": (
+            ["one or more dimensions were rounded to the technology grid"]
+            if snapped
+            else []
+        ),
+    }
