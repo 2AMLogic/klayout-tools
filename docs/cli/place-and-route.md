@@ -2064,8 +2064,8 @@ silence — a misspelt `post_route_spef` can no longer pass for a deliberate
 default. Recognised keys: `schema`, `engine`, `netlist`, `hdl_toplevel`, `pdk`,
 `floorplan`, `io`, `macros`, `power`, `constraints`, `seed`, `target_stage`,
 `route_critical_nets_percentage`, `max_antenna_repair_iterations`, `library`,
-`post_route_spef`, `post_route_sdf`, `portable_paths`, `backend`, `batch`; the
-`_comment` annotation is also accepted (its contents are never read). The same
+`post_route_spef`, `post_route_sdf`, `portable_paths`, `backend`, `batch`, `outputs`,
+`instance_groups`; the `_comment` annotation is also accepted (its contents are never read). The same
 check applies to `--check` and `pdk.rebuild_corners`. Nested objects (`pdk`,
 `floorplan`, …) are not yet checked for unknown keys.
 
