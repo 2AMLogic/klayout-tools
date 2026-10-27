@@ -4,6 +4,19 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-27
 
+- **PR #4427**: fix(gen): widen sg13g2/sg13cmos5l guard ring NWell margin to clear NW.e
+- **PR #4421**: docs: list outputs and instance_groups as recognised place-and-route keys
+- **PR #4391**: fix: drop split_cuts from the gf180mcu_9t_6M PDN preset
+- **PR #4388**: feat: allow --omit-antenna-tables without --findings-only when nothing is graded
+- **PR #4346**: fix(drc): skip the ASAP7 LIG net separation when no pair is in range
+- **Issue #4426** (closed): gen (sg13g2): pfet add_guard_ring N+ tap under-encloses by NWell vs. curated deck nwell.enclosing.nactiv.1
+- **Issue #4425** (closed): gen: output grid/footprint changes between minor versions are undocumented; no compatibility mode
+- **Issue #4423** (closed): signoff --attest: declared commands see the uvx venv first on PATH
+- **Issue #4402** (closed): docs: place-and-route 'Recognised keys' list omits outputs and instance_groups
+- **Issue #4385** (closed): klt erc: --omit-antenna-tables should also compact missing_antenna_pdk entries without --findings-only
+- **Issue #4340** (closed): asap7 DRC deck aborts in Region::separation_check (m_type == Polygon) on a layout with LIG but no SDT in one diffusion row
+- **Issue #4301** (closed): gf180mcu_7t_6M PDN preset yields DRC-dirty via stacks; old klt ignores power.tapcell silently
+- **Issue #4109** (closed): klt sim batch: fleet runner image (klt 0.7.0) still rejects decks[] requests; compatibility reported as 'match'
 - **PR #4420**: docs: clarify klt_git_commit is populated on a dirty tree
 - **PR #4418**: fix: parse real sby cover-reached line and add real-sby cover/prove tests
 - **PR #4359**: feat(lvs): accept layout.def_net_names/def_pins and --progress for inline extraction
