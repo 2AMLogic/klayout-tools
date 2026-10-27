@@ -12745,6 +12745,15 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__cap_mim_m3_2",
         "sky130_fd_pr__pnp_05v5_W0p68L0p68",
         "sky130_fd_pr__pnp_05v5_W3p40L3p40",
+        # Junction diodes (issue #4319) -- curated in `_DIODE_MODEL_TABLE`.
+        "sky130_fd_pr__diode_pw2nd_05v5",
+        "sky130_fd_pr__diode_pw2nd_05v5_lvt",
+        "sky130_fd_pr__diode_pw2nd_05v5_nvt",
+        "sky130_fd_pr__diode_pw2nd_11v0",
+        "sky130_fd_pr__diode_pd2nw_05v5",
+        "sky130_fd_pr__diode_pd2nw_05v5_lvt",
+        "sky130_fd_pr__diode_pd2nw_05v5_hvt",
+        "sky130_fd_pr__diode_pd2nw_11v0",
     }
 
 
@@ -17812,8 +17821,8 @@ def test_run_lvs_gate_level_verilog_reference_converts_and_matches(tmp_path):
 
 def _committed_gate_level_verilog_report(tmp_path: Path) -> Path:
     """Commit a clean `reference.form: "gate-level-verilog"` report (issue
-    #2250) -- a form `--rerun` cannot reconstruct, since no report echoes
-    `reference.form`."""
+    #2250) in the legacy shape -- `reference_conversion` stripped (issue
+    #4353 added it), so `--rerun` cannot reconstruct `reference.form`."""
     root = _make_fake_pdk_library(
         tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
     )
@@ -17832,6 +17841,7 @@ def _committed_gate_level_verilog_report(tmp_path: Path) -> Path:
     }
     report = run_lvs(json.dumps(request))
     assert report["status"] == "match"
+    report.pop("reference_conversion")
     report_path = tmp_path / "lvs.json"
     _write_report(report_path, report)
     return report_path
@@ -23523,6 +23533,43 @@ def test_rerun_report_without_reference_conversion_is_not_drift(tmp_path):
         rerun_lvs_report(_commit_report(tmp_path, old))
 
 
+# Issue #4353: `reference.form: "gate-level-verilog"` is replayed too.
+def _gate_level_replay_request(tmp_path, *, with_library):
+    if with_library:
+        macro = _write(tmp_path / "macro.spice", _SRAM_MACRO_SPICE)
+        extra = {
+            "library": "sky130_fd_sc_hd",
+            "pdk": "sky130A",
+            "pdk_root": _make_fake_macro_pdk(tmp_path),
+            "pin_order_files": [macro],
+        }
+    else:
+        cells = _SKY130_HD_LIBRARY_SPICE + _SRAM_MACRO_SPICE
+        extra = {"pin_order_files": [_write(tmp_path / "all_cells.spice", cells)]}
+    return _macro_request(tmp_path, extra)
+
+
+@pytest.mark.parametrize("with_library", [True, False])
+def test_rerun_replays_gate_level_verilog_reference(tmp_path, with_library):
+    report = run_lvs(_gate_level_replay_request(tmp_path, with_library=with_library))
+    assert report["status"] == "match"
+    _assert_lvs_report_conforms(report)
+    echo = report["reference_conversion"]
+    assert echo["form"] == "gate-level-verilog"
+    assert echo["library"] == ("sky130_fd_sc_hd" if with_library else None)
+    assert echo["pdk"] == ("sky130A" if with_library else None)
+    assert all(os.path.isabs(path) for path in echo["pin_order_files"])
+    result = rerun_lvs_report(_commit_report(tmp_path, report))
+    assert result["status"] == "match", result
+
+
+def test_rerun_gate_level_report_without_echo_stays_best_effort(tmp_path):
+    report = run_lvs(_gate_level_replay_request(tmp_path, with_library=False))
+    old = {k: v for k, v in report.items() if k != "reference_conversion"}
+    with pytest.raises(LvsError):
+        rerun_lvs_report(_commit_report(tmp_path, old))
+
+
 # --------------------------------------------------------------------------- #
 # `layout.label_layers` (issue #2686): `klt extract --label-layer`'s per-request
 # label-purpose override (issue #2656), adopted by inline-extraction LVS.
@@ -25589,6 +25636,79 @@ def test_run_lvs_sky130_diode_matches_and_mismatches_on_removal(tmp_path, flavou
             sub, flavour, layout_diode=layout_diode, reference_diode=reference_diode
         )
         assert report["status"] != "match", (layout_diode, reference_diode)
+
+
+def _sky130_diode_subckt_call_report(tmp_path, flavour):
+    from klayout_tools.extract import run_extract
+    from test_lvs_device_provenance import _make_sky130_diode_layout, _write_gds
+
+    n_plus = flavour.startswith("diode_pw2nd")
+    gds = _write_gds(_make_sky130_diode_layout(flavour), tmp_path / "diode.gds")
+    extracted = tmp_path / "extracted.spice"
+    run_extract(gds, "sky130", output=str(extracted))
+    # Bare area/perim are um^2 / um under sky130's ambient `.option scale`.
+    ports, nodes = ("TERM VSUBS", "VSUBS TERM") if n_plus else ("TERM", "TERM WELL")
+    reference = (
+        f".subckt TOP {ports}\n"
+        f"X1 {nodes} sky130_fd_pr__{flavour} area=1 perim=4\n.ends\n"
+    )
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", extracted.read_text()),
+            "top": "TOP",
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", reference),
+            "top": "TOP",
+            "form": "subckt-call",
+            "deck": "sky130",
+        },
+    }
+    return run_lvs(json.dumps(request))
+
+
+@pytest.mark.parametrize("flavour", ["diode_pw2nd_05v5", "diode_pd2nw_05v5"])
+def test_run_lvs_sky130_diode_subckt_call_matches(tmp_path, flavour):
+    """Issue #4319: a PDK diode subcircuit call converts and A/P units agree
+    with the layout-extracted side."""
+    report = _sky130_diode_subckt_call_report(tmp_path, flavour)
+    assert report["status"] == "match", report
+    assert "reference.unresolved_subckt_call" not in json.dumps(report)
+
+
+def test_run_lvs_sky130_diode_subckt_call_polarity_matters(tmp_path):
+    """Two diodes sharing an anode do not match two diodes sharing a cathode
+    (a lone diode is graph-symmetric, so the check needs a shared net)."""
+    layout = (
+        ".subckt TOP A X Y\n"
+        "D1 A X DIODE_PD2NW_05V5 A=1P P=4U\n"
+        "D2 A Y DIODE_PD2NW_05V5 A=1P P=4U\n.ends\n"
+    )
+
+    def run(nodes1, nodes2, sub):
+        d = tmp_path / sub
+        d.mkdir()
+        ref = (
+            ".subckt TOP A X Y\n"
+            f"X1 {nodes1} sky130_fd_pr__diode_pd2nw_05v5 area=1 perim=4\n"
+            f"X2 {nodes2} sky130_fd_pr__diode_pd2nw_05v5 area=1 perim=4\n.ends\n"
+        )
+        return run_lvs(
+            json.dumps(
+                {
+                    "layout": {"netlist": _write(d / "l.spice", layout), "top": "TOP"},
+                    "reference": {
+                        "netlist": _write(d / "r.spice", ref),
+                        "top": "TOP",
+                        "form": "subckt-call",
+                        "deck": "sky130",
+                    },
+                }
+            )
+        )
+
+    assert run("A X", "A Y", "ok")["status"] == "match"
+    assert run("X A", "Y A", "swapped")["status"] != "match"
 
 
 # ---------------------------------------------------------------------------
