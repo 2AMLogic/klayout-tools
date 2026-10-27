@@ -350,6 +350,12 @@ draws that the spec never declared" below.
     with `islands`, `same_net_as`, `roles` or `unlabelled_allowed_boxes`
     — or naming it from another entry's `same_net_as` — is a spec error.
     Example: `{ "name": "SUB", "kind": "supply", "extractor_global": true }`.
+  - Two or more `kind: "supply"` entries (issue #4384) add one
+    `erc_coverage.inapplicable` entry `{"id": "erc.supply_short", "reason":
+    "substrate_continuity_not_modelled"}`: `erc.supply_short` sees joins only
+    through the declared `stackup`/`vias`, so rails that are one conductor
+    through a shared substrate are not observable. Cross-check with
+    `klt lvs` (`hints.short_nets`). `erc_status` is unchanged.
   - `same_net_as` (string, optional, default absent, issue #2463) — the
     `name` of another `nets[]` entry this one is *intentionally* the same
     electrical net as. Declare it when the layout deliberately ties two
@@ -813,6 +819,15 @@ which is which. Once that triage has confirmed the islands are the
 *intended* partition (or a verified well-continuity artifact the spec
 cannot see), the entry can declare the count — `nets[].islands`, issue
 #2400 — so the name grades against it instead of an implicit 1.
+
+**Substrate continuity between supply nets is not modelled either (issue
+#4384).** Two `kind: "supply"` nets that are one conductor through a shared
+p-substrate are each reported as one clean island, with no
+`erc.supply_short`, while `klt lvs` sees a single merged net (it needs
+`hints.short_nets`). When a spec declares two or more supply nets, the report
+says so in `erc_coverage.inapplicable` (`erc.supply_short`, reason
+`substrate_continuity_not_modelled`), so "no short found" is distinguishable
+from "short not observable". Cross-check those rails with `klt lvs`.
 
 **That cross-check is not automatically an independent confirmation,
 either.** At least one widely used open-foundry LVS deck's connectivity

@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt erc` discloses that substrate continuity is not modelled** (issue
+  #4384, documented in [`docs/cli/erc.md`](docs/cli/erc.md)): a spec declaring
+  two or more `kind: "supply"` nets gains one `erc_coverage.inapplicable`
+  entry `{"id": "erc.supply_short", "reason": "substrate_continuity_not_modelled"}`,
+  so "no short found" is distinguishable from "short not observable". Additive;
+  `erc_status`, findings and exit code are unchanged.
 - **`klt place-and-route` gains `instance_groups` (request) and `instance_groups[]`
   (response)** (issue #4344, documented in
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)): name sets of
