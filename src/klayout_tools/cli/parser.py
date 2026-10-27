@@ -3211,6 +3211,18 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "request already sets it or uses another engine"
         ),
     )
+    lvs_parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "write stage start/finish lines and a periodic heartbeat for "
+            "inline layout extraction to stderr (stdout stays the pure "
+            "response). Default: heartbeat lines only (every 30s of a long "
+            "stage) when stderr is not a TTY, nothing on a TTY; "
+            "--no-progress forces off"
+        ),
+    )
     _add_format_arg(lvs_parser)
     lvs_parser.set_defaults(func=lvs_cmd.run)
 

@@ -37,6 +37,7 @@ normal run (see ``klayout_tools._report_verify``).
 """
 
 import argparse
+import sys
 
 from ..env_provenance import render_path_field
 from ..lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
@@ -88,6 +89,13 @@ def run(args: argparse.Namespace) -> int:
             args.request,
             deck_file=args.deck_file,
             deck_vars=_parse_deck_vars(args.deck_var),
+            # `--progress` (issue #4347), same default as `klt extract`:
+            # heartbeat only, and only when stderr is not a TTY.
+            progress=(
+                args.progress
+                if args.progress is not None
+                else ("heartbeat" if not sys.stderr.isatty() else False)
+            ),
         )
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
