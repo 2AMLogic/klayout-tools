@@ -176,12 +176,13 @@ from __future__ import annotations
 import math
 import os
 import tempfile
+from collections.abc import Callable
 from typing import Any
 
 from . import layout_plan
 from ._paths import _resolve_relative
 from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
-from .gen_compose import GenComposeError, _translate_bbox, compose, compute_row_offsets
+from .gen_compose import GenComposeError, _translate_bbox, compose
 from .netlist_digest import build_netlist_digest
 from .pdk import PdkNotFoundError
 
@@ -801,9 +802,10 @@ def _resolve_placement(
     bboxes_um: dict[str, dict[str, float]],
     group_ids: set[str],
     min_spacing_um_by_group: dict[str, float],
+    grid_um: float = 0.0,
 ) -> tuple[dict[str, dict[str, float]], list[str]]:
-    """Row-of-rows placement (compiled onto ``gen_compose.compute_row_offsets``
-    per row, then stacked vertically by each preceding row's tallest group),
+    """Row-of-rows placement (the ``gen_compose.compute_row_offsets``
+    recurrence per row, then stacked vertically by each preceding row's tallest group),
     followed by ``abutment[]`` applied as a final constraint pass -- see the
     module docstring's "core idea" and scope decision 4.
 
@@ -820,11 +822,34 @@ def _resolve_placement(
     clearance warning. The first row has no predecessor, so no margin is
     added before it.
 
+    **Manufacturing-grid snap (issues #4202, #4267).** When ``grid_um > 0``
+    every origin is snapped onto the grid *as it is resolved*, before any
+    successor is derived from it, so ``spacing_um`` / ``gap_um`` /
+    ``margin_um`` stay lower bounds by construction: offsets round *up*,
+    except along the gap axis of a ``left``/``bottom`` abutment (which grows
+    toward negative coordinates) where they round *down*. One ``warnings[]``
+    entry names each group whose origin moved. ``grid_um <= 0.0`` disables
+    snapping.
+
     Raises :class:`LayoutPlanExecuteError` if any ``group_ids`` entry is
     unreachable from ``rows[]``/``abutment[]`` (scope decision 2).
     """
     warnings: list[str] = []
     offsets_um: dict[str, dict[str, float]] = {}
+    shifts: dict[str, dict[str, float]] = {}
+
+    def snap(group_id: str, axis: str, value: float, *, up: bool = True) -> float:
+        if grid_um <= 0.0:
+            return value
+        steps = value / grid_um
+        snapped = round(
+            (math.ceil(steps - 1e-6) if up else math.floor(steps + 1e-6)) * grid_um, 6
+        )
+        if abs(snapped - value) > 1e-9:
+            shifts.setdefault(group_id, {})[axis] = snapped - value
+            return snapped
+        shifts.get(group_id, {}).pop(axis, None)
+        return value
 
     cumulative_y = 0.0
     previous_row_order: list[str] | None = None
@@ -841,21 +866,32 @@ def _resolve_placement(
                     default=0.0,
                 )
             cumulative_y += margin_um
-        x_offsets = compute_row_offsets(order, bboxes_um, row["spacing_um"])
         row_height = max(
             bboxes_um[group_id]["y1"] - bboxes_um[group_id]["y0"] for group_id in order
         )
         align = row["align"]
+        cursor_x1: float | None = None
+        row_top = cumulative_y + row_height
         for group_id in order:
             bbox = bboxes_um[group_id]
+            # Same recurrence as ``compute_row_offsets`` (first block
+            # untranslated, each successor ``spacing_um`` past the previous
+            # block's right edge), but built from the *snapped* predecessor.
+            if cursor_x1 is None:
+                x = 0.0
+            else:
+                x = snap(group_id, "x", (cursor_x1 + row["spacing_um"]) - bbox["x0"])
+            cursor_x1 = bbox["x1"] + x
             if align == "bottom":
                 y = cumulative_y - bbox["y0"]
             elif align == "top":
                 y = (cumulative_y + row_height) - bbox["y1"]
             else:  # "center"
                 y = (cumulative_y + row_height / 2) - (bbox["y0"] + bbox["y1"]) / 2
-            offsets_um[group_id] = {"x": x_offsets[group_id]["x"], "y": y}
-        cumulative_y += row_height
+            y = snap(group_id, "y", y)
+            row_top = max(row_top, y + bbox["y1"])
+            offsets_um[group_id] = {"x": x, "y": y}
+        cumulative_y = row_top
         previous_row_order = order
 
     pending = list(abutment)
@@ -876,6 +912,9 @@ def _resolve_placement(
                     bboxes_um[b_id],
                     b_offset,
                 )
+                new_b_offset = _snap_abutment_offset(
+                    snap, b_id, new_b_offset, entry["edge"], b_offset is None
+                )
                 if b_offset is not None and new_b_offset != b_offset:
                     warnings.append(
                         f"abutment (a: '{a_id}', b: '{b_id}', edge: "
@@ -893,6 +932,9 @@ def _resolve_placement(
                     bboxes_um[a_id],
                     None,
                 )
+                new_a_offset = _snap_abutment_offset(
+                    snap, a_id, new_a_offset, _INVERT_EDGE[entry["edge"]], True
+                )
                 offsets_um[a_id] = new_a_offset
                 made_progress = True
             else:
@@ -909,7 +951,39 @@ def _resolve_placement(
             "encloses alone does not place a group at this phase; see "
             "device_groups[]'s own row/abutment placement guidance)"
         )
+    for group_id, shift in shifts.items():
+        if shift and group_id in offsets_um:
+            moved = ", ".join(
+                f"{axis}: {delta:+.6f}um" for axis, delta in shift.items()
+            )
+            warnings.append(
+                f"placement (group '{group_id}'): origin was off the "
+                f"{grid_um:g}um manufacturing grid; snapped by {moved}"
+            )
     return offsets_um, warnings
+
+
+def _snap_abutment_offset(
+    snap: Callable[..., float],
+    group_id: str,
+    offset: dict[str, float],
+    edge: str,
+    snap_perpendicular: bool,
+) -> dict[str, float]:
+    """Snap an abutment-derived ``offset`` via ``snap``: the gap axis rounds
+    away from the anchor (up for ``top``/``right``, down for ``bottom``/
+    ``left``) so ``gap_um`` stays a lower bound; the perpendicular axis (only
+    when it was freshly centered rather than inherited, already-snapped, from
+    the row placement) rounds up.
+    """
+    gap_axis, perp_axis = ("y", "x") if edge in ("top", "bottom") else ("x", "y")
+    snapped = dict(offset)
+    snapped[gap_axis] = snap(
+        group_id, gap_axis, offset[gap_axis], up=edge in ("top", "right")
+    )
+    if snap_perpendicular:
+        snapped[perp_axis] = snap(group_id, perp_axis, offset[perp_axis])
+    return snapped
 
 
 def _family_mfg_grid_um(family: str) -> float:
@@ -928,36 +1002,6 @@ def _family_mfg_grid_um(family: str) -> float:
         (rule.grid_um for rule in rules if rule.check == "ongrid" and rule.grid_um),
         default=0.0,
     )
-
-
-def _snap_offsets_to_grid(
-    offsets_um: dict[str, dict[str, float]], grid_um: float
-) -> list[str]:
-    """Round every resolved group origin *up* onto ``grid_um`` in place, so a
-    requested ``spacing_um`` / ``gap_um`` stays a lower bound, and return one
-    ``warnings[]`` entry per group whose origin moved. ``grid_um <= 0.0`` is
-    a no-op (issue #4202).
-    """
-    if grid_um <= 0.0:
-        return []
-    warnings: list[str] = []
-    for group_id, offset in offsets_um.items():
-        snapped = {
-            axis: round(math.ceil(value / grid_um - 1e-6) * grid_um, 6)
-            for axis, value in offset.items()
-        }
-        if any(abs(snapped[axis] - offset[axis]) > 1e-9 for axis in offset):
-            shift = ", ".join(
-                f"{axis}: +{snapped[axis] - offset[axis]:.6f}um"
-                for axis in offset
-                if abs(snapped[axis] - offset[axis]) > 1e-9
-            )
-            warnings.append(
-                f"placement (group '{group_id}'): origin was off the "
-                f"{grid_um:g}um manufacturing grid; snapped up by {shift}"
-            )
-            offsets_um[group_id] = snapped
-    return warnings
 
 
 def execute_layout_plan(
@@ -1063,16 +1107,11 @@ def execute_layout_plan(
             bboxes_um,
             group_ids,
             min_spacing_um_by_group,
+            _family_mfg_grid_um(
+                _pdk_family(generated[device_groups[0]["id"]]["pdk"]["variant"])
+            ),
         )
         warnings.extend(placement_warnings)
-        warnings.extend(
-            _snap_offsets_to_grid(
-                offsets_um,
-                _family_mfg_grid_um(
-                    _pdk_family(generated[device_groups[0]["id"]]["pdk"]["variant"])
-                ),
-            )
-        )
 
         connectivity, unmapped_netlist_nets, connectivity_warnings = (
             _build_connectivity(device_groups, digest, generated)
