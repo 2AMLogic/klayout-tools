@@ -456,8 +456,14 @@ def _voltage_flavor_mark_margin_um(family: str) -> float:
 #: ``sky130`` only (issue #3115): the PDK's ``diff/tap.10`` (nwell overlap of
 #: n-tap) is 0.18um, which this repo's curated sky130 deck does not
 #: transcribe; 0.2um clears it with headroom.
+#:
+#: ``sg13g2`` and ``sg13cmos5l`` (issue #4426): IHP ``NW.e`` (NWell enclosure
+#: of N+ Activ well tie, deck rule ``nwell.enclosing.nactiv.1``) is 0.24um in
+#: both decks; 0.25um matches ``WELL_TAP_ENCLOSURE_MARGIN_UM`` (issue #3573).
 _PDK_RING_WELL_MARGIN_UM: dict[str, float] = {
     "sky130": 0.2,  # diff/tap.10 (nwell overlap of n-tap) is 0.18um
+    "sg13g2": 0.25,  # NW.e (nwell enclosure of N+ Activ) is 0.24um
+    "sg13cmos5l": 0.25,  # NW.e (nwell enclosure of N+ Activ) is 0.24um
 }
 
 
