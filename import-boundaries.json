@@ -944,6 +944,11 @@
     },
     {
       "consumer": "functional_verification",
+      "exporter": "env_provenance",
+      "reason": "`klt functional-verification` emits its artifact paths as env_provenance's committable repo-relative {path, scope} envelope (issue #4279)."
+    },
+    {
+      "consumer": "functional_verification",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
@@ -1665,6 +1670,12 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Request-shape validation of the outputs object, mirroring klt synthesize (issue #4231); promote to a public name when _paths is next reworked."
     },
     {
       "consumer": "klayout_tools.synthesize",
