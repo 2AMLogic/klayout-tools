@@ -1983,6 +1983,8 @@ live re-measurement above.
 | `io.layer_h` / `.layer_v` | string | Horizontal/vertical I/O routing layers for `place_pins`. Required once `target_stage` reaches `"place"` or later. |
 | `io.pin_constraints` | array\<object\> \| omitted | Additive field (issue #3885). Pins top-level ports to a die edge so a block can abut or tile with a neighbour. Each entry: `pins` (non-empty array of port names or globs; bus bits are `a[3]`, `a[*]` matches a bus), `edge` (`"north"` \| `"east"` \| `"south"` \| `"west"`), `range_um` (optional `[lo, hi]` offset along that edge, `0 <= lo < hi`), `ordered` (optional boolean, default `false`; keeps the matched pins in listed order via `-group -order`). Each entry emits one `set_io_pin_constraint` before `place_pins`. A pattern matching no top-level port of `netlist`, or a port matched by two entries, is a request error. A `range_um` with fewer pin slots than the entry has pins fails `place`; the error names the `pin_constraints[i]` entry (or quotes OpenROAD's `PPL-0110` line) with its pin and slot counts. See "Pin placement" for slot pitch and range semantics. Omitted or `[]`, the Tcl is byte-identical to before. |
 | `pins` (response) | array\<object\> \| null | Additive field (issue #3885). Final placement of every top-level pin, read from the DEF this run wrote: `name`, `edge` (nearest die edge), `x_um`, `y_um`, `layer`. Present for every run that reaches `place` (constrained or not); `null` at `target_stage: "floorplan"`. Lets a caller verify abutment from the envelope without parsing the DEF. |
+| `instance_groups` | array\<object\> \| omitted | Additive field (issue #4344). Names sets of instances whose final proximity the response reports. Each entry: `name` (unique non-empty string), `instances` (non-empty array of instance names or globs; `[`/`]` are literal), `max_extent_um` (optional number `> 0`). Measurement only: it does **not** constrain placement. Globs match the instance names in the written DEF, which are the post-synthesis (yosys/ABC-renamed, flattened) names visible in `verilog_path`. Omitted or `[]`, the request and response are unchanged apart from `instance_groups: []`. |
+| `instance_groups` (response) | array\<object\> \| null | Additive field (issue #4344). One entry per request group, read from the DEF `COMPONENTS` section: `name`, `matched` (instances matching any glob), `bbox` (`x_min_um`/`x_max_um`/`y_min_um`/`y_max_um` over the matched instances' placed **origins** (COMPONENTS carries no master size, so this is not a cell-extent box); `null` when nothing matched, never a fabricated box), `max_extent_um` (echo, or `null`), `within_extent` (`max(x-span, y-span) <= max_extent_um`; `null` without a bound or without a `bbox`). The run never fails on a violated extent; assert on it from the envelope. `[]` when no groups were requested; `null` at `target_stage: "floorplan"`. |
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
 | `power` | object \| omitted | Power delivery (tapcell/PDN/fillers) — see "Power delivery" below. Omitted (the default) preserves prior behavior exactly for this full PDN: no tapcells/fillers. `sky130_fd_sc_hd` runs still emit a small, separate row-rail obstruction regardless (issue #1442) — see "Row-rail fallback" below. |
 | `power.power_net` / `.ground_net` | string \| omitted | Power/ground net names. Default `"VDD"`/`"VSS"`. Must differ from each other. |
@@ -3434,3 +3436,15 @@ Notes when sizing ranges (issue #4155):
 - **Slot pitch** follows the pin layer's track pitch: observed ~0.96 um on a vertical-layer edge and ~0.84 um on a horizontal-layer edge on sg13g2 (single observation, re-measure for your PDK). A group of N pins needs a `range_um` at least N x pitch wide.
 - **A range does not fix a position.** A `range_um` wider than the pins need leaves OpenROAD free to choose the offset, so two entries with the same range on opposite edges can land ~2.5 um apart. Facing edges only line up when each range equals its group's slot span.
 - **`VDD`/`VSS` in `pins[]`** report `edge` as the nearest die edge although they sit mid-die (TopMetal2); consumers filtering by edge should special-case them.
+
+### Checking instance proximity
+
+To assert that a delay chain stayed together, name it and bound its footprint:
+
+```json
+"instance_groups": [
+  { "name": "delay_chain", "instances": ["dly*"], "max_extent_um": 40 }
+]
+```
+
+The response's `instance_groups[0]` then reports `matched`, the origin `bbox` and `within_extent`. A `matched` of `0` means the glob names no instance in the DEF; yosys renames and flattens instances, so glob against the post-synthesis names in `verilog_path`. This reports proximity only; it does not steer placement.
