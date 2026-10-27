@@ -7021,39 +7021,20 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
-    if required_kind_pair is not None and graded:
-        # Issue #4314: the full-custom digital sub-case (``sim`` only).
-        if {g[2]["kind"] for _, _, g in graded if g[2] is not None} == {"sim"}:
-            missing_margin = _missing_timing_margin(
-                spec_rows,
-                [(met_envelopes or {}).get(id(spec)) for spec, _, _ in graded],
-            )
-            if missing_margin:
-                return (
-                    "unmet",
-                    _REASON_TIMING_MARGIN_MISSING,
-                    None,
-                    {**row_info, "missing_timing_margin": missing_margin},
-                    extra,
-                )
+    margin_unmet = _grade_timing_margin(
+        required_kind_pair, graded, spec_rows, met_envelopes, row_info, extra
+    )
+    if margin_unmet is not None:
+        return margin_unmet
     if row_info and (
         row_info["uncovered_rows"]
         or row_info["declared_gaps"]
         or row_info["unratified_rows"]
     ):
         return "unmet", _REASON_PARTIAL_COVERAGE, None, row_info, extra
-    if required_kind_pair is not None:
-        kinds = {g[2]["kind"] for _, _, g in graded if g[2] is not None}
-        if kinds & set(required_kind_pair):
-            missing = [k for k in required_kind_pair if k not in kinds]
-            if missing:
-                return (
-                    "unmet",
-                    _REASON_PARTIAL_COVERAGE,
-                    None,
-                    {**row_info, "missing_kinds": missing},
-                    extra,
-                )
+    kinds_unmet = _grade_required_kinds(required_kind_pair, graded, row_info, extra)
+    if kinds_unmet is not None:
+        return kinds_unmet
     if row_info:
         extra["row_coverage"] = row_info
     if not graded:
@@ -7062,6 +7043,62 @@ def _grade_multi_citation(
         return "unmet", _REASON_NO_EVIDENCE, None, {}, extra
     extra["citations"] = [g[2] for _, _, g in graded]
     return "met", None, graded[0][2][2], {}, extra
+
+
+def _grade_required_kinds(
+    required_kind_pair: tuple[str, ...] | None,
+    graded: list[tuple[Any, Any, Any]],
+    row_info: dict[str, Any],
+    extra: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
+    """The ``unmet``/``partial_coverage`` outcome when the passing kinds
+    include part of ``required_kind_pair`` but not all of it (issue #3741);
+    ``None`` otherwise."""
+    if required_kind_pair is None:
+        return None
+    kinds = {g[2]["kind"] for _, _, g in graded if g[2] is not None}
+    if not kinds & set(required_kind_pair):
+        return None
+    missing = [k for k in required_kind_pair if k not in kinds]
+    if not missing:
+        return None
+    return (
+        "unmet",
+        _REASON_PARTIAL_COVERAGE,
+        None,
+        {**row_info, "missing_kinds": missing},
+        extra,
+    )
+
+
+def _grade_timing_margin(
+    required_kind_pair: tuple[str, ...] | None,
+    graded: list[tuple[Any, Any, Any]],
+    spec_rows: list[dict[str, Any]] | None,
+    met_envelopes: dict[int, dict[str, Any]] | None,
+    row_info: dict[str, Any],
+    extra: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
+    """The ``unmet``/``timing_margin_missing`` outcome for the full-custom
+    digital sub-case (``sim`` evidence only, issue #4314); ``None`` when it
+    does not apply or the timing margin is satisfied."""
+    if required_kind_pair is None or not graded:
+        return None
+    if {g[2]["kind"] for _, _, g in graded if g[2] is not None} != {"sim"}:
+        return None
+    missing_margin = _missing_timing_margin(
+        spec_rows,
+        [(met_envelopes or {}).get(id(spec)) for spec, _, _ in graded],
+    )
+    if not missing_margin:
+        return None
+    return (
+        "unmet",
+        _REASON_TIMING_MARGIN_MISSING,
+        None,
+        {**row_info, "missing_timing_margin": missing_margin},
+        extra,
+    )
 
 
 def _missing_timing_margin(
