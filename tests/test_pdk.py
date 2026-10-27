@@ -718,6 +718,42 @@ def test_cli_find_text_surfaces_broken_symlink_count(tmp_path, capsys):
     assert "broken_symlinks: 1" in out
 
 
+def test_cli_find_text_names_shadowed_same_variant_roots(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel", "~/.volare"])
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    home = tmp_path / "home"
+    _make_install(home / ".ciel", "sky130A")
+    _make_install(home / ".volare", "sky130A")
+
+    exit_code = main(["pdk", "find", "--pdk", "sky130A", "--format", "text"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    warnings = [line for line in out.splitlines() if line.startswith("warning:")]
+    assert warnings == [
+        f"warning: shadowed same-variant install: {home / '.volare'} "
+        "(search root: ~/.volare)"
+    ]
+
+
+def test_cli_find_text_unchanged_for_single_install_or_pinned_root(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel", "~/.volare"])
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    home = tmp_path / "home"
+    _make_install(home / ".ciel", "sky130A")
+    _make_install(home / ".volare", "sky130A")
+
+    main(["pdk", "find", "--pdk-root", str(home / ".ciel"), "--format", "text"])
+    assert "warning:" not in capsys.readouterr().out
+
+    single = tmp_path / "single"
+    _make_install(single, "sky130A")
+    main(["pdk", "find", "--pdk-root", str(single), "--format", "text"])
+    assert "warning:" not in capsys.readouterr().out
+
+
 # --------------------------------------------------------------------------- #
 # Flat single-PDK layout (issue #522 -- IHP-Open-PDK's SG13G2)
 #
