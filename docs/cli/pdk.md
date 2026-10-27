@@ -238,11 +238,13 @@ directory itself, or a named subdirectory of it). When present it wins over
   `lib/<cell_library>__<corner>.lib` convention; unmapped libraries keep the
   convention. With several mapped corners, pass the corner explicitly.
 - `liberty.<cell_library>.<corner>` may also be a **list** of `.lib` files (a
-  library split into cell-group files with identical headers). klt merges them
+  library split into cell-group files whose headers match apart from the
+  `library (<name>)` name and comments). klt merges them
   into one content-addressed `.lib` under `$KLT_CACHE_DIR` (default
   `~/.cache/klt/liberty-merged`, never inside the PDK tree) and hands that single
-  path to Yosys/OpenROAD/OpenSTA. Differing headers or a duplicate cell name are
-  errors; a one-element list equals the string form.
+  path to Yosys/OpenROAD/OpenSTA. Any other header difference (units,
+  templates, operating conditions) or a duplicate cell name is an error; the
+  merged header is the first file's; a one-element list equals the string form.
 - `views` (optional) maps `cell_library` → `{"cell_lef": path, "tech_lef":
   {"min"|"nom"|"max": path}, "gds": path}` (every key optional) for trees that
   do not use the open_pdks `lef/`, `techlef/`, `gds/` naming. `klt

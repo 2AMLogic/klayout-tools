@@ -265,6 +265,26 @@ def test_liberty_one_element_list_equals_string(tmp_path, monkeypatch):
     assert path == str(root / "d" / "g1.lib")
 
 
+@pytest.mark.parametrize(
+    "header",
+    [
+        'library (x_group2) {\n  /* generated 2026-01-02 */\n  time_unit : "1ps";\n',
+        'library (x) {\n  // generated 2026-01-02\n  time_unit : "1ps";\n',
+        'library (other) {\n  time_unit : "1ps";\n',
+    ],
+)
+def test_liberty_header_name_and_comment_differences_merge(
+    tmp_path, monkeypatch, header
+):
+    root = _views_tree(tmp_path, monkeypatch)
+    info = pdk.find_pdk(root=str(root))
+    (root / "d" / "g2.lib").write_text(_lib("C", header=header), encoding="utf-8")
+    result = pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+    path = result[0] if isinstance(result, tuple) else result
+    merged = open(path, encoding="utf-8").read()
+    assert all(f"cell ({c})" in merged for c in "ABC")
+
+
 def test_liberty_header_mismatch_and_duplicate(tmp_path, monkeypatch):
     root = _views_tree(tmp_path, monkeypatch)
     info = pdk.find_pdk(root=str(root))
