@@ -7232,3 +7232,118 @@ def test_run_sta_power_basis_per_corner_entry(tmp_path, monkeypatch):
     for entry in report["corners"]:
         assert entry["power_basis"]["activity_source"] == "global"
         assert entry["power_basis"]["activity"] == 0.1
+
+
+# -- multi-clock `constraints.clocks` / `clock_groups` (issue #4241) ---------#
+
+
+def _clocks_constraints(**overrides) -> dict:
+    constraints = {
+        "clocks": [
+            {"port": "clk_a", "period_ns": 2.0},
+            {"port": "clk_b", "period_ns": 5.0},
+        ]
+    }
+    constraints.update(overrides)
+    return constraints
+
+
+def test_validate_clocks_primary_is_first_entry():
+    port, period, _, _ = post_route_sta._validate_constraints(_clocks_constraints())
+    assert (port, period) == ("clk_a", 2.0)
+    extras = post_route_sta._validate_clock_extras(_clocks_constraints())
+    assert extras == {"clocks": [{"port": "clk_b", "period_ns": 5.0}], "groups": []}
+
+
+def test_validate_clocks_single_entry_equals_shorthand():
+    constraints = {"clocks": [{"port": "clk", "period_ns": 1.1}]}
+    assert post_route_sta._validate_constraints(constraints)[:2] == ("clk", 1.1)
+    assert post_route_sta._validate_clock_extras(constraints) is None
+
+
+@pytest.mark.parametrize(
+    "constraints, message",
+    [
+        (
+            {"clocks": [{"port": "a", "period_ns": 1}], "clock_port": "a"},
+            "cannot be combined",
+        ),
+        (
+            {"clocks": [{"port": "a", "period_ns": 1}], "clock_period_ns": 1},
+            "cannot be combined",
+        ),
+        ({"clocks": []}, "non-empty array"),
+        ({"clocks": "clk"}, "non-empty array"),
+        ({"clocks": ["clk"]}, r"clocks\[0\] must be"),
+        ({"clocks": [{"port": "a", "period_ns": 1, "x": 1}]}, "unknown key"),
+        ({"clocks": [{"port": "", "period_ns": 1}]}, r"clocks\[0\]\.port"),
+        ({"clocks": [{"port": "a", "period_ns": 0}]}, "greater than zero"),
+        ({"clocks": [{"port": "a", "period_ns": True}]}, "positive number"),
+        (
+            {"clocks": [{"port": "a", "period_ns": 1}, {"port": "a", "period_ns": 2}]},
+            "more than once",
+        ),
+    ],
+)
+def test_validate_clocks_rejects(constraints, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_constraints(constraints)
+
+
+@pytest.mark.parametrize(
+    "groups, message",
+    [
+        ([["clk_a"], ["nope"]], "not a declared clock"),
+        ([["clk_a", "clk_b"]], "at least two groups"),
+        ([], "non-empty array"),
+        ([[], ["clk_b"]], "non-empty array"),
+    ],
+)
+def test_validate_clock_groups_rejects(groups, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_clock_extras(_clocks_constraints(clock_groups=groups))
+
+
+def test_sta_script_lines_multi_clock_and_groups():
+    extras = post_route_sta._validate_clock_extras(
+        _clocks_constraints(clock_groups=[["clk_a"], ["clk_b"]])
+    )
+    lines = post_route_sta._sta_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        def_path="/design/top.def",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk_a",
+        clock_period_ns=2.0,
+        propagated_clock=True,
+        clock_extras=extras,
+    )
+    assert "create_clock -name clk_a -period 2.0 [get_ports clk_a]" in lines
+    assert "create_clock -name clk_b -period 5.0 [get_ports clk_b]" in lines
+    assert (
+        "set_clock_groups -asynchronous -group [get_clocks {clk_a}] "
+        "-group [get_clocks {clk_b}]"
+    ) in lines
+    assert "set_propagated_clock [get_clocks clk_a]" in lines
+    assert "set_propagated_clock [get_clocks clk_b]" in lines
+
+
+def test_sta_script_lines_single_clock_unchanged_by_extras_none():
+    kwargs = dict(
+        tech_lef="/t.lef",
+        cell_lef="/c.lef",
+        def_path="/d.def",
+        liberty_path="/l.lib",
+        clock_port="clk",
+        clock_period_ns=1.1,
+    )
+    lines = post_route_sta._sta_script_lines(**kwargs)
+    assert not any(ln.startswith("set_clock_groups") for ln in lines)
+    assert sum(ln.startswith("create_clock") for ln in lines) == 1
+
+
+def test_clock_targets_echo():
+    assert post_route_sta._clock_targets("clk", 1.1, None) == {
+        "clocks": [{"port": "clk", "period_ns": 1.1}],
+        "clock_groups": [],
+    }

@@ -656,6 +656,7 @@ def run_sta(
         input_delay_ns,
         output_delay_ns,
     ) = _validate_constraints(request["constraints"])
+    clock_extras = _validate_clock_extras(request["constraints"])
     input_delays, output_delays = _validate_port_delay_maps(
         request["constraints"], clock_port
     )
@@ -759,6 +760,7 @@ def run_sta(
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
+            clock_extras=clock_extras,
             power_activity=power_activity,
             write_sdf=write_sdf,
             output_dir=output_dir,
@@ -922,6 +924,7 @@ def _dispatch_sta(
     wire_load_model: str | None,
     wire_load_mode: str | None,
     propagated_clock: bool,
+    clock_extras: dict[str, Any] | None,
     power_activity: dict[str, float] | None,
     output_dir: str,
     input_path: str,
@@ -965,6 +968,7 @@ def _dispatch_sta(
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
+            clock_extras=clock_extras,
             power_activity=power_activity,
             write_sdf=write_sdf,
             output_dir=output_dir,
@@ -997,6 +1001,7 @@ def _dispatch_sta(
         wire_load_model=wire_load_model,
         wire_load_mode=wire_load_mode,
         propagated_clock=propagated_clock,
+        clock_extras=clock_extras,
         power_activity=power_activity,
         output_dir=output_dir,
         script_tag=basename,
@@ -1055,6 +1060,7 @@ def _dispatch_sta(
         # shapes; never infer it from clock_skew_ns, which is a measured
         # metric that is non-zero under ideal timing too.
         "clock_mode": "propagated" if propagated_clock else "ideal",
+        "clock_targets": _clock_targets(clock_port, clock_period_ns, clock_extras),
         "spef_path": report_paths.spef_path,
         "worst_slack_ns": corner_fields["worst_slack_ns"],
         "total_negative_slack_ns": corner_fields["total_negative_slack_ns"],
@@ -1133,6 +1139,7 @@ def _run_corner_session(
     wire_load_model: str | None,
     wire_load_mode: str | None,
     propagated_clock: bool,
+    clock_extras: dict[str, Any] | None,
     power_activity: dict[str, float] | None,
     output_dir: str,
     script_tag: str,
@@ -1228,6 +1235,7 @@ def _run_corner_session(
             report_ports=report_ports,
             false_path_from=false_path_from,
             propagated_clock=propagated_clock,
+            clock_extras=clock_extras,
             power_activity=power_activity,
             sdf_path=sdf_path,
         )
@@ -1254,6 +1262,7 @@ def _run_corner_session(
             report_ports=report_ports,
             false_path_from=false_path_from,
             power_activity=power_activity,
+            clock_extras=clock_extras,
         )
     _write_script(script_path, lines)
 
@@ -1389,6 +1398,7 @@ def _run_multi_corner(
     wire_load_model: str | None,
     wire_load_mode: str | None,
     propagated_clock: bool,
+    clock_extras: dict[str, Any] | None,
     power_activity: dict[str, float] | None,
     output_dir: str,
     input_path: str,
@@ -1471,6 +1481,7 @@ def _run_multi_corner(
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
+            clock_extras=clock_extras,
             power_activity=power_activity,
             output_dir=output_dir,
             script_tag=script_tag,
@@ -1545,6 +1556,7 @@ def _run_multi_corner(
         # entry carries that session's own `clock_propagation` evidence
         # block (the network latencies it reports *do* vary per corner).
         "clock_mode": "propagated" if propagated_clock else "ideal",
+        "clock_targets": _clock_targets(clock_port, clock_period_ns, clock_extras),
         "spef_path": report_paths.spef_path,
         "provenance": provenance,
         # Additive field (issue #1871): one entry per requested
@@ -1823,8 +1835,13 @@ def _validate_constraints(
     validated and emitted here too, never inherited."""
     if not isinstance(constraints, dict):
         raise PostRouteStaError("request.constraints must be a JSON object")
-    clock_port = constraints.get("clock_port")
-    clock_period_ns = constraints.get("clock_period_ns")
+    clocks = _validate_clocks_list(constraints)
+    if clocks:
+        clock_port = clocks[0]["port"]
+        clock_period_ns = clocks[0]["period_ns"]
+    else:
+        clock_port = constraints.get("clock_port")
+        clock_period_ns = constraints.get("clock_period_ns")
     if not (isinstance(clock_port, str) and clock_port):
         raise PostRouteStaError("request.constraints.clock_port is required")
     if (
@@ -1838,6 +1855,114 @@ def _validate_constraints(
     input_delay_ns = _validate_io_delay(constraints.get("input_delay_ns"), "input")
     output_delay_ns = _validate_io_delay(constraints.get("output_delay_ns"), "output")
     return clock_port, float(clock_period_ns), input_delay_ns, output_delay_ns
+
+
+def _validate_clocks_list(constraints: dict[str, Any]) -> list[dict[str, Any]]:
+    """``constraints.clocks`` (issue #4241) as ``[{port, period_ns}]``, empty
+    when omitted/``null``. The multi-clock alternative to the
+    ``clock_port``/``clock_period_ns`` shorthand -- the two are mutually
+    exclusive, and the first entry is the primary clock (it keeps every role
+    ``clock_port`` has: the I/O-delay ``-clock``, ``report_ports`` /
+    ``false_path_from`` anchors and the input-delay exclusion). Mirrors
+    ``synthesize.py``'s ``constraints.clocks`` (issue #2883) rules."""
+    raw = constraints.get("clocks")
+    if raw is None:
+        return []
+    if constraints.get("clock_port") is not None or (
+        constraints.get("clock_period_ns") is not None
+    ):
+        raise PostRouteStaError(
+            "request.constraints.clocks cannot be combined with "
+            "clock_port/clock_period_ns -- give either the single-clock "
+            "shorthand or the clocks list"
+        )
+    if not isinstance(raw, list) or not raw:
+        raise PostRouteStaError(
+            "request.constraints.clocks must be a non-empty array of "
+            "{port, period_ns} objects"
+        )
+    clocks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        where = f"request.constraints.clocks[{index}]"
+        if not isinstance(entry, dict):
+            raise PostRouteStaError(f"{where} must be a {{port, period_ns}} object")
+        unknown = sorted(set(entry) - {"port", "period_ns"})
+        if unknown:
+            raise PostRouteStaError(
+                f"{where} has unknown key(s): {', '.join(map(str, unknown))} "
+                "(allowed: port, period_ns)"
+            )
+        port = entry.get("port")
+        if not isinstance(port, str) or not port.strip():
+            raise PostRouteStaError(f"{where}.port must be a non-empty string")
+        period = entry.get("period_ns")
+        if isinstance(period, bool) or not isinstance(period, (int, float)):
+            raise PostRouteStaError(f"{where}.period_ns must be a positive number")
+        if period <= 0:
+            raise PostRouteStaError(f"{where}.period_ns must be greater than zero")
+        if port in seen:
+            raise PostRouteStaError(f"{where}.port '{port}' is listed more than once")
+        seen.add(port)
+        clocks.append({"port": port, "period_ns": float(period)})
+    return clocks
+
+
+def _validate_clock_extras(constraints: dict[str, Any]) -> dict[str, Any] | None:
+    """The multi-clock additions beyond the primary clock (issue #4241):
+    ``{"clocks": [{port, period_ns}, ...secondary], "groups": [[port, ...]]}``,
+    or ``None`` when the request is the plain single-clock shorthand with no
+    ``clock_groups`` -- which keeps the generated Tcl byte-identical to the
+    pre-#4241 output. ``constraints.clock_groups`` names declared clocks only
+    and is emitted as ``set_clock_groups -asynchronous``."""
+    clocks = _validate_clocks_list(constraints)
+    groups_raw = constraints.get("clock_groups")
+    groups: list[list[str]] = []
+    if groups_raw is not None:
+        declared = {c["port"] for c in clocks}
+        if not clocks:
+            declared = {constraints.get("clock_port")}
+        if not isinstance(groups_raw, list) or not groups_raw:
+            raise PostRouteStaError(
+                "request.constraints.clock_groups must be a non-empty array "
+                "of non-empty port-name arrays"
+            )
+        for index, group in enumerate(groups_raw):
+            where = f"request.constraints.clock_groups[{index}]"
+            if not isinstance(group, list) or not group:
+                raise PostRouteStaError(f"{where} must be a non-empty array")
+            ports: list[str] = []
+            for port in group:
+                if not isinstance(port, str) or not port:
+                    raise PostRouteStaError(f"{where} entries must be port names")
+                if port not in declared:
+                    raise PostRouteStaError(
+                        f"{where} names '{port}', which is not a declared clock"
+                    )
+                if port not in ports:
+                    ports.append(port)
+            groups.append(ports)
+        if len(groups) < 2:
+            raise PostRouteStaError(
+                "request.constraints.clock_groups needs at least two groups "
+                "for an asynchronous relationship"
+            )
+    if len(clocks) <= 1 and not groups:
+        return None
+    return {"clocks": clocks[1:], "groups": groups}
+
+
+def _clock_targets(
+    clock_port: str, clock_period_ns: float, clock_extras: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The response's additive ``clock_targets`` echo (issue #4241): every
+    clock applied (primary first), and the asynchronous groups."""
+    clocks = [{"port": clock_port, "period_ns": clock_period_ns}]
+    groups: list[list[str]] = []
+    if clock_extras:
+        clocks += clock_extras["clocks"]
+        groups = clock_extras["groups"]
+    return {"clocks": clocks, "clock_groups": groups}
 
 
 def _validate_io_delay(value: Any, which: str) -> float | None:
@@ -2680,6 +2805,25 @@ def _propagated_clock_lines(clock_port: str) -> list[str]:
     return [f"set_propagated_clock [get_clocks {clock_port}]"]
 
 
+def _extra_clock_lines(clock_extras: dict[str, Any] | None) -> list[str]:
+    """Issue #4241: one ``create_clock`` per secondary clock, then any
+    ``set_clock_groups -asynchronous``. Empty for a single-clock request."""
+    if not clock_extras:
+        return []
+    lines = [
+        f"create_clock -name {c['port']} -period {c['period_ns']} "
+        f"[get_ports {c['port']}]"
+        for c in clock_extras["clocks"]
+    ]
+    groups = clock_extras["groups"]
+    if groups:
+        lines.append(
+            "set_clock_groups -asynchronous "
+            + " ".join(f"-group [get_clocks {{{' '.join(g)}}}]" for g in groups)
+        )
+    return lines
+
+
 def _clock_latency_lines() -> list[str]:
     """Marker-delimited ``report_clock_latency -digits 6`` (issue #2739) --
     the machine-readable evidence of what propagation actually reached: one
@@ -3431,6 +3575,7 @@ def _sta_script_lines(
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
     propagated_clock: bool = False,
+    clock_extras: dict[str, Any] | None = None,
     sdf_path: str | None = None,
     power_activity: dict[str, float] | None = None,
 ) -> list[str]:
@@ -3477,8 +3622,12 @@ def _sta_script_lines(
         f"read_liberty {liberty_path}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _extra_clock_lines(clock_extras)
     if propagated_clock:
         lines += _propagated_clock_lines(clock_port)
+        if clock_extras:
+            for extra in clock_extras["clocks"]:
+                lines += _propagated_clock_lines(extra["port"])
     lines += _request_io_delay_lines(
         clock_port,
         input_delay_ns,
@@ -3546,6 +3695,7 @@ def _sta_netlist_script_lines(
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
     power_activity: dict[str, float] | None = None,
+    clock_extras: dict[str, Any] | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
     session (issue #1825): no DEF, no placement, no routing. Links a
@@ -3589,6 +3739,7 @@ def _sta_netlist_script_lines(
         f"link_design {hdl_toplevel}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _extra_clock_lines(clock_extras)
     lines += _request_io_delay_lines(
         clock_port,
         input_delay_ns,
