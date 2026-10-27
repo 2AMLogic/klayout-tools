@@ -81,6 +81,7 @@ def memory_evidence_script_text(
     adder_sources: tuple[str, ...] = (),
     adder_techmap_path: str | None = None,
     parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> str:
     """The side invocation's ``.ys`` text.
 
@@ -95,7 +96,7 @@ def memory_evidence_script_text(
     never modify the design. No liberty is read -- nothing here is
     technology-mapped.
     """
-    lines = [read_verilog_line(path) for path in sources]
+    lines = [read_verilog_line(path, defines) for path in sources]
     lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     lines.append(f"tee -q -o {blackbox_list_path} select -list =A:blackbox =A:whitebox")
@@ -345,6 +346,7 @@ def collect_memory_evidence(
     adder_techmap_path: str | None = None,
     repo_root: str | None = None,
     parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> tuple[dict[str, Any], list[str] | None]:
     """Run the side evidence invocation and return ``(memory_mapping,
     blackbox_modules)`` for the response.
@@ -389,6 +391,7 @@ def collect_memory_evidence(
                 adder_sources=adder_sources,
                 adder_techmap_path=adder_techmap_path,
                 parameters=parameters,
+                defines=defines,
             ),
         )
         _run_yosys(script_path, cwd=repo_root)

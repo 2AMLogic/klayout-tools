@@ -61,15 +61,60 @@ def chparam_lines(parameters: dict[str, int | str], top: str) -> list[str]:
     return [f"chparam {sets} {top}"]
 
 
-def read_verilog_line(path: object) -> str:
+#: Characters a define value may carry: no quotes, backslashes, whitespace,
+#: ``;`` or ``#`` (script separators/comments) or control characters.
+_DEFINE_VALUE_RE = re.compile(r"[A-Za-z0-9_.,:/+\-=@%]*")
+
+
+def validate_defines(
+    defines: Any, error_cls: type[Exception], field: str
+) -> dict[str, str | None]:
+    """Validate the optional ``defines`` object; ``{}`` when omitted (issue
+    #4196).
+
+    Keys must be Verilog identifiers; values are a plain string
+    (``-D NAME=VALUE``) or ``null`` (bare ``-D NAME``). The values land in a
+    generated ``.ys`` script, so nothing that could end a script line or
+    break out of a token is accepted.
+    """
+    if defines is None:
+        return {}
+    if not isinstance(defines, dict):
+        raise error_cls(f"{field} must be a JSON object (name -> string or null)")
+    for key, value in defines.items():
+        if not isinstance(key, str) or not _NAME_RE.fullmatch(key):
+            raise error_cls(f"{field} keys must be Verilog identifiers; got {key!r}")
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise error_cls(
+                f"{field}[{key!r}] must be a string or null -- got "
+                f"{type(value).__name__}"
+            )
+        if not _DEFINE_VALUE_RE.fullmatch(value):
+            raise error_cls(
+                f"{field}[{key!r}] value {value!r} has characters outside the "
+                "supported set (letters, digits and _ . , : / + - = @ %)"
+            )
+    return dict(defines)
+
+
+def read_verilog_line(
+    path: object, defines: dict[str, str | None] | None = None
+) -> str:
     """The Yosys ``read_verilog`` line for RTL source ``path`` (issue #3797).
 
     ``.sv``/``.svh`` sources (case-insensitive) are read with ``-sv`` so
     ordinary SystemVerilog (``logic``, ``always_ff``) parses; every other
     extension keeps the plain Verilog-2005 front end, so existing ``.v``
     designs are parsed exactly as before.
+
+    ``defines`` (issue #4196) adds ``-D NAME[=VALUE]`` preprocessor defines,
+    in sorted-name order so the script is deterministic.
     """
     text = str(path)
-    if text.lower().endswith((".sv", ".svh")):
-        return f"read_verilog -sv {text}"
-    return f"read_verilog {text}"
+    flags = "-sv " if text.lower().endswith((".sv", ".svh")) else ""
+    for name in sorted(defines or {}):
+        value = (defines or {})[name]
+        flags += f"-D {name} " if value is None else f"-D {name}={value} "
+    return f"read_verilog {flags}{text}"
