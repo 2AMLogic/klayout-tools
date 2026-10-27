@@ -70,6 +70,7 @@ from typing import TYPE_CHECKING, Any
 from ._layout import write_layout
 from .gen import _PARAM_TYPE_NAMES, GenError, _coerce_param
 from .pdk import (
+    _PCELL_SHIM_ROOTS,
     PdkNotFoundError,
     _pcell_lib_dir_for_assets,
     _pcell_packages_in,
@@ -139,6 +140,11 @@ class _VendorCompatShim:
     #: around immediately before instantiating any PCell from the package.
     needs_tkinter_workaround: bool
 
+    #: Where to obtain the shim when the install lacks it (issue #4236): named
+    #: in the unavailable reason. Release tarballs omit git submodules, so the
+    #: fix is to populate ``shim_root`` from the PDK's own pinned submodule.
+    source_hint: str = ""
+
 
 #: Packages (by name, as returned by :func:`klayout_tools.pdk._pcell_packages_in`)
 #: known to need a PDK-bundled compat shim beyond what :func:`_load_libraries`
@@ -146,9 +152,15 @@ class _VendorCompatShim:
 _VENDOR_COMPAT_SHIMS: dict[str, _VendorCompatShim] = {
     "sg13g2_pycell_lib": _VendorCompatShim(
         sys_path_hint=("pycell4klayout-api", "source", "python"),
-        shim_root=("pycell4klayout-api",),
+        shim_root=_PCELL_SHIM_ROOTS["sg13g2_pycell_lib"],
         provides_module="cni",
         needs_tkinter_workaround=True,
+        source_hint=(
+            "https://github.com/IHP-GmbH/pycell4klayout-api, at the revision "
+            "the PDK release pins (clone IHP-Open-PDK at the same tag with "
+            "`git clone --recurse-submodules`, or run `git submodule update "
+            "--init` for that path)"
+        ),
     ),
 }
 
@@ -702,7 +714,7 @@ def _classify_missing_compat_shim(
             "but that directory is missing or appears empty in this install -- "
             "likely an uninitialized git submodule. This is a compat shim the "
             "PDK itself vendors, not a third-party PyPI dependency klt would "
-            "need to add."
+            "need to add." + _shim_remedy(shim, shim_root_display)
         )
 
     hint_display = "/".join(shim.sys_path_hint)
@@ -711,6 +723,16 @@ def _classify_missing_compat_shim(
         f"own bundled compat shim directory ('{hint_display}') to sys.path, "
         "but the module still failed to import; this looks like a bug in the "
         "vendor shim itself, not a missing third-party dependency."
+    )
+
+
+def _shim_remedy(shim: _VendorCompatShim, shim_root_display: str) -> str:
+    """The "where to get it" sentence appended to a missing-shim reason."""
+    if not shim.source_hint:
+        return ""
+    return (
+        " The PDK release tarball omits git submodules; populate "
+        f"'{shim_root_display}' from {shim.source_hint}."
     )
 
 

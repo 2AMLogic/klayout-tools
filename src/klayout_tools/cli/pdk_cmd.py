@@ -255,6 +255,11 @@ def _print_find_text(report: dict) -> None:
     broken = report.get("broken_symlinks", [])
     if broken:
         print(f"broken_symlinks: {len(broken)} (see `klt pdk check` for detail)")
+    if report.get("pcell_shim") == "missing":
+        print(
+            "pcell_shim: missing (PyCell package present but its vendored compat "
+            "shim is absent/empty; see `klt gen --list-pdk-pcells`)"
+        )
     _print_compatibility_text(report)
     alternatives = alternative_variants_warning(report)
     if alternatives:

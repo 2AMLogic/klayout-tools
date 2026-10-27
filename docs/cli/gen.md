@@ -2236,7 +2236,10 @@ against the vendor's own declaration — the same sequence the PDK's own KLayout
 autoload macro performs. klt never re-executes, re-implements, or
 reinterprets vendor PCell code.
 
-`klt pdk find`/`klt pdk list` carry a `has_pcell_library` boolean
+`klt pdk find`/`klt pdk list` carry a `has_pcell_library` boolean and a
+`pcell_shim` state (`present`/`missing`/`not_required`; a `missing` vendored
+compat shim, as on an ihp-sg13g2 release tarball, makes the `unavailable`
+reason below name where to get it — issue #4236)
 ([`docs/cli/pdk.md`](pdk.md)) so a caller can discover PyCell availability
 without invoking this command at all. As of issue #1610,
 [`klt pdk pcell-check`](pdk.md#klt-pdk-pcell-check) goes one step further and
