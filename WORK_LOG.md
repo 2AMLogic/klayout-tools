@@ -4,6 +4,12 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-27
 
+- **PR #4433**: fix(ingest-canary): retry transient git clone/fetch failures in clone_repo
+- **PR #4429**: feat: print shadowed same-variant PDK roots in klt pdk find text output
+- **PR #4362**: feat: allow connects override with PDN preset; add tap_distance drc note
+- **Issue #4430** (closed): test flake: test_full_ingest_real_public_canary_with_layout fails on network git clone
+- **Issue #4428** (closed): klt pdk find: --format text omits ambiguous_roots, so a shadowed same-variant PDK install is invisible outside JSON
+- **Issue #4348** (closed): place-and-route: gf180mcu_7t_6M preset PDN via tuning fails klt drc; preset and connects are mutually exclusive
 - **PR #4427**: fix(gen): widen sg13g2/sg13cmos5l guard ring NWell margin to clear NW.e
 - **PR #4421**: docs: list outputs and instance_groups as recognised place-and-route keys
 - **PR #4391**: fix: drop split_cuts from the gf180mcu_9t_6M PDN preset
