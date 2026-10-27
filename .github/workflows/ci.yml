@@ -1709,7 +1709,22 @@ jobs:
       - name: Install dependencies (includes the klayout wheel)
         run: uv sync --locked --extra dev
 
+      - name: Restore cached klayout .deb closure
+        # Issue #4392: the apt `klayout` package drags in a large Qt5 .deb
+        # set, and a slow mirror (#4059, #4075, #4372) either failed the
+        # install or pushed the job past its wall-clock budget. Caching the
+        # downloaded .debs means most runs never touch the mirror. Restore
+        # anywhere, save only on main (same pattern as the uv cache, #2559).
+        # Bump the `v1` in the key when the pinned version/deps change.
+        id: klayout-debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/klayout-debs
+          key: klayout-0.28.16-ubuntu24.04-v1-${{ hashFiles('scripts/ci-apt-install.sh') }}
+
       - name: Install the klayout binary
+        # Cache hit: install offline from the restored .debs; any failure
+        # (stale/corrupt cache, missing dep) falls through to the apt path.
         # Same bounded, mirror-tolerant apt wrapper as the `test` job's
         # ngspice step (issues #1204, #1219). The apt `klayout` package
         # pulls Qt5 widgets libs, so the bare 90s per-command cap killed a
@@ -1723,7 +1738,24 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
           CI_APT_DEADLINE: "380"
           CI_APT_PER_CMD_TIMEOUT: "150"
-        run: scripts/ci-apt-install.sh klayout
+        run: |
+          DEBS="$HOME/.cache/klayout-debs"
+          if [ "${{ steps.klayout-debs.outputs.cache-hit }}" = "true" ] \
+             && sudo dpkg -i "$DEBS"/*.deb && klayout -v; then
+            echo "klayout installed from cached .debs (no network)"
+            exit 0
+          fi
+          scripts/ci-apt-install.sh klayout
+          # Populate the cache dir for the save step (miss / fallback path).
+          rm -rf "$DEBS" && mkdir -p "$DEBS"
+          cp /var/cache/apt/archives/*.deb "$DEBS"/
+
+      - name: Save klayout .deb closure (main only)
+        if: github.ref == 'refs/heads/main' && steps.klayout-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/klayout-debs
+          key: ${{ steps.klayout-debs.outputs.cache-primary-key }}
 
       - name: ASAP7 deck fixtures
         run: |
