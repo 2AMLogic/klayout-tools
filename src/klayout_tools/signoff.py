@@ -4497,6 +4497,13 @@ def build_tier_report(
       defect" and "this block cited no supply evidence at all" read
       identically. Fix: the LVS defect (item 4 is blocked on it too), never
       the ERC spec.
+    - ``"power_delivery_parts_missing"`` (issue #4193, item 11 only) -- the
+      cited set resolved cleanly but lacks the ``erc`` and/or ``lvs`` part.
+      Distinct from ``"wrong_kind"``: what is cited is right, the set is
+      incomplete. ``detail.power_delivery`` names ``missing_parts`` and
+      ``cited_parts`` and, when the ERC spec resolved, the ``supply_nets`` it
+      proved. An ERC part whose spec does not resolve reports its own reason
+      first. Never ``"met"``.
     - ``"ungradeable_by_build"`` (issue #2176) -- the manifest cited
       evidence for an item this build has no grading rules for at all
       (``graded_by_build: False``, see above). Not a statement about the
