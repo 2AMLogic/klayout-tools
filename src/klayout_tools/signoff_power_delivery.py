@@ -1653,6 +1653,17 @@ def _port_accessibility_verdict(
     )
 
 
+def _par_tapless_field(par: dict[str, Any] | None) -> dict[str, Any]:
+    """``{"tapless": True}`` when the cited ``place-and-route`` part states
+    ``power.tapless`` is ``true`` (issue #4199), else ``{}``; split out of
+    :func:`_grade_power_delivery` to keep its own complexity under the repo's
+    ratchet (issue #2094)."""
+    if par is None:
+        return {}
+    tapless = (par["envelope"].get("power") or {}).get("tapless") is True
+    return {"tapless": True} if tapless else {}
+
+
 def _grade_power_delivery(
     specs: list[dict[str, Any]],
     *,
@@ -1890,8 +1901,7 @@ def _grade_power_delivery(
         )
     # Issue #4199: present only when the cited P&R response states the
     # library is tapless, so a `null` tapcell_master reads as by-design.
-    if par is not None and (par["envelope"].get("power") or {}).get("tapless") is True:
-        citation["power_delivery"]["tapless"] = True
+    citation["power_delivery"].update(_par_tapless_field(par))
     # Issue #2839: present only when the port-accessibility half was graded,
     # so a block that does not opt in renders this citation exactly as before.
     citation["power_delivery"].update(
