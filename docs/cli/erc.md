@@ -551,6 +551,25 @@ draws that the spec never declared" below.
     graded. Same falsifiability test, same reason token: a selection keeping
     every drawn shape, or none of them (including boxes matching no shape at
     all), is recorded as skipped work (`degenerate_well_selection`).
+  - `well_requires_cells` / `well_excludes_cells` (optional arrays of cell
+    names, default `[]`, issue #4373) — the same well-side class selection,
+    named by the **cell** a well is drawn in instead of by coordinates, for a
+    hierarchical block that places one cell many times (rotated, mirrored or
+    arrayed) with only some placements on another supply. A merged shape of
+    `well_layer` is kept when it interacts with the union of `well_layer`
+    geometry drawn **directly** in instances of the `well_requires_cells`
+    cells and with none of the `well_excludes_cells` geometry, evaluated in
+    each instance's transformed frame, so no per-placement input goes stale.
+    Whole drawn shapes are selected, as for the box and marker forms; it
+    composes with the other four selectors and the degeneracy verdict
+    (`degenerate_well_selection`) is measured on the combined result. A cell
+    name absent from the layout is a spec error, not an empty selection.
+    Limits: well geometry in a named cell's *child* cells belongs to the child
+    and is not matched, and abutting wells of different classes merge into one
+    shape before selection, so the selector cannot split it. The cell name
+    comes from the stream hierarchy, not asserted coordinates, so (like the
+    marker form) a tie selected this way is **not** listed in
+    `erc_coverage.checked_by_well_assertion`.
   - `tap_layer` (string, `"<layer>/<datatype>"`, required) — the tap
     (substrate/well contact) layer expected inside each well shape.
   - `tap_requires` (optional array of `"<layer>/<datatype>"`, default
