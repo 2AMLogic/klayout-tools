@@ -173,6 +173,7 @@ exception at all -- it is a normal, successful return value; call
 
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 from typing import Any
@@ -911,6 +912,54 @@ def _resolve_placement(
     return offsets_um, warnings
 
 
+def _family_mfg_grid_um(family: str) -> float:
+    """The coarsest ``check="ongrid"`` grid (um) declared by ``family``'s
+    curated deck over any layer, or ``0.0`` when the family has no deck or no
+    ongrid rule -- the same deck rule ``klt drc`` checks, so the snap below
+    and the DRC cannot disagree (issue #4202).
+    """
+    from .decks import UnknownDeckError, get_deck
+
+    try:
+        rules = get_deck(family)
+    except UnknownDeckError:
+        return 0.0
+    return max(
+        (rule.grid_um for rule in rules if rule.check == "ongrid" and rule.grid_um),
+        default=0.0,
+    )
+
+
+def _snap_offsets_to_grid(
+    offsets_um: dict[str, dict[str, float]], grid_um: float
+) -> list[str]:
+    """Round every resolved group origin *up* onto ``grid_um`` in place, so a
+    requested ``spacing_um`` / ``gap_um`` stays a lower bound, and return one
+    ``warnings[]`` entry per group whose origin moved. ``grid_um <= 0.0`` is
+    a no-op (issue #4202).
+    """
+    if grid_um <= 0.0:
+        return []
+    warnings: list[str] = []
+    for group_id, offset in offsets_um.items():
+        snapped = {
+            axis: round(math.ceil(value / grid_um - 1e-6) * grid_um, 6)
+            for axis, value in offset.items()
+        }
+        if any(abs(snapped[axis] - offset[axis]) > 1e-9 for axis in offset):
+            shift = ", ".join(
+                f"{axis}: +{snapped[axis] - offset[axis]:.6f}um"
+                for axis in offset
+                if abs(snapped[axis] - offset[axis]) > 1e-9
+            )
+            warnings.append(
+                f"placement (group '{group_id}'): origin was off the "
+                f"{grid_um:g}um manufacturing grid; snapped up by {shift}"
+            )
+            offsets_um[group_id] = snapped
+    return warnings
+
+
 def execute_layout_plan(
     request: dict[str, Any],
     digest: dict[str, Any],
@@ -1016,6 +1065,14 @@ def execute_layout_plan(
             min_spacing_um_by_group,
         )
         warnings.extend(placement_warnings)
+        warnings.extend(
+            _snap_offsets_to_grid(
+                offsets_um,
+                _family_mfg_grid_um(
+                    _pdk_family(generated[device_groups[0]["id"]]["pdk"]["variant"])
+                ),
+            )
+        )
 
         connectivity, unmapped_netlist_nets, connectivity_warnings = (
             _build_connectivity(device_groups, digest, generated)

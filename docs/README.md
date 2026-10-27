@@ -50,6 +50,7 @@ docs/
     gen-compose.md
     gen.md
     kb.md
+    array-check.md
     keepout-check.md
     layers.md
     layout-metrics.md

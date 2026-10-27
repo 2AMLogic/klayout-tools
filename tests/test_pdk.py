@@ -828,7 +828,12 @@ def test_flat_layout_list_reports_single_variant(tmp_path):
     install = report["installs"][0]
     assert install["root"] == str(root)
     assert install["variants"] == [
-        {"name": "ihp-sg13g2", "version": None, "has_pcell_library": False}
+        {
+            "name": "ihp-sg13g2",
+            "version": None,
+            "has_pcell_library": False,
+            "pcell_shim": "not_required",
+        }
     ]
 
 
@@ -906,7 +911,12 @@ def test_flat_layout_list_reports_ihp_sg13cmos5l(tmp_path):
     install = report["installs"][0]
     assert install["root"] == str(root)
     assert install["variants"] == [
-        {"name": "ihp-sg13cmos5l", "version": None, "has_pcell_library": False}
+        {
+            "name": "ihp-sg13cmos5l",
+            "version": None,
+            "has_pcell_library": False,
+            "pcell_shim": "not_required",
+        }
     ]
 
 
