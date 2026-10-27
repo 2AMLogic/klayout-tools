@@ -434,6 +434,36 @@ def _invert_gds_to_lef(
 # --------------------------------------------------------------------------- #
 
 
+def _match_drawn_boxes(
+    layout: Any,
+    top_cell: Any,
+    search_layers: list[tuple[int, int]],
+    point: Any,
+) -> list[tuple[int, int, int, int]]:
+    """Return the placed bboxes of every polygon on ``search_layers`` that
+    contains ``point``.
+
+    Issue #4283: tests the polygon itself (edges inclusive), not its bbox --
+    a notched/holed polygon whose bbox merely covers the pin must not become
+    the pin's PORT.
+    """
+    boxes: list[tuple[int, int, int, int]] = []
+    for search_layer in search_layers:
+        layer_index = layout.find_layer(*search_layer)
+        if layer_index is None:
+            continue
+        iterator = top_cell.begin_shapes_rec(layer_index)
+        while not iterator.at_end():
+            polygon = iterator.shape().polygon
+            if polygon is not None:
+                placed = polygon.transformed(iterator.trans())
+                bbox = placed.bbox()
+                if bbox.contains(point) and placed.inside(point):
+                    boxes.append((bbox.left, bbox.bottom, bbox.right, bbox.top))
+            iterator.next()
+    return boxes
+
+
 def _resolve_pins(
     *,
     layout: Any,
@@ -500,26 +530,7 @@ def _resolve_pins(
         y_dbu = round(pin["y"] / dbu_um)
         point = kdb.Point(x_dbu, y_dbu)
 
-        drawn_boxes: list[tuple[int, int, int, int]] = []
-        for search_layer in search_layers:
-            layer_index = layout.find_layer(*search_layer)
-            if layer_index is None:
-                continue
-            iterator = top_cell.begin_shapes_rec(layer_index)
-            while not iterator.at_end():
-                shape = iterator.shape()
-                polygon = shape.polygon
-                if polygon is not None:
-                    placed = polygon.transformed(iterator.trans())
-                    # Issue #4283: test the polygon itself (edges inclusive),
-                    # not its bbox -- a notched/holed polygon whose bbox
-                    # merely covers the pin must not become the pin's PORT.
-                    if placed.bbox().contains(point) and placed.inside(point):
-                        bbox = placed.bbox()
-                        drawn_boxes.append(
-                            (bbox.left, bbox.bottom, bbox.right, bbox.top)
-                        )
-                iterator.next()
+        drawn_boxes = _match_drawn_boxes(layout, top_cell, search_layers, point)
 
         if drawn_boxes:
             geometry_source = "drawn"
