@@ -33,9 +33,12 @@ Design notes (additive envelope, not a wrapping one):
 
 from __future__ import annotations
 
+import gzip
+import io
 import json
 import sys
 from collections.abc import Callable
+from typing import Any
 
 #: Application-level error exit code (as opposed to argparse's usage-error 2).
 ERROR_EXIT_CODE = 1
@@ -63,6 +66,27 @@ def emit_success(
         print()
     else:
         text_renderer(payload)
+
+
+def write_json_file(payload: dict, path: str) -> None:
+    """Write ``payload`` to ``path`` byte-identical to what
+    :func:`emit_success` puts on stdout under ``--format json``.
+
+    A ``.gz`` ``path`` is gzip-compressed with ``mtime=0`` and no embedded
+    filename, so identical payloads give byte-identical files. Streams via
+    ``json.dump`` rather than building a second in-memory copy. Raises
+    :class:`OSError` if ``path`` cannot be written.
+    """
+    if path.endswith(".gz"):
+        with open(path, "wb") as raw:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+                with io.TextIOWrapper(gz, encoding="utf-8", newline="") as text:
+                    json.dump(payload, text, indent=2)
+                    text.write("\n")
+    else:
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
 
 
 def render_table(
@@ -144,12 +168,56 @@ def render_rerun_drift(result: dict) -> None:
             print(f"  {entry['field']}")
 
 
+def render_check_text(result: dict) -> None:
+    """Print the ``--format text`` rendering of a cheap-mode ``--check`` result.
+
+    Shared across the ``klt`` verbs that verify a stored report (issue #4139);
+    the ``input_not_found`` and ``advisories`` branches only fire when those
+    keys are present, so verbs without them print the plain hash-check list.
+    """
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    for check in result["checks"]:
+        mark = "OK" if check["match"] else "DRIFTED"
+        print(f"  [{mark}] {check['field']}")
+        if not check["match"]:
+            print(f"      expected: {check['expected']}")
+            # Issue #2595: an echoed `layout`/`reference` that resolves to no
+            # existing file re-hashes to `null`, which on its own reads as
+            # "the recorded hash moved". Say what actually happened, and --
+            # for the common cause, a committed request/report pair whose
+            # relative paths were written against the report's own directory
+            # -- where the input really is.
+            missing = check.get("input_not_found")
+            if missing is None:
+                print(f"      actual:   {check['actual']}")
+            else:
+                print(f"      actual:   None (input not found: {missing['resolved']})")
+                if missing["found_relative_to_report"] is not None:
+                    print(
+                        "      note:     it exists relative to the report's own "
+                        f"directory ({missing['found_relative_to_report']}); "
+                        "--check resolves relative paths against the current "
+                        "working directory -- re-run from there"
+                    )
+    # Issue #1373: engine-version drift is a non-fatal advisory, never folded
+    # into the `[OK]`/`[DRIFTED]` hash-integrity list above -- it does not
+    # affect `status`/exit code, so a scripted gate parsing that list alone
+    # never sees it.
+    for advisory in result.get("advisories", ()):
+        print(
+            f"  [DRIFT] {advisory['field']}: {advisory['report']} (report) "
+            f"vs {advisory['current']} (current)"
+        )
+
+
 def emit_error(
     command: str,
     message: str,
     format: str,
     exit_code: int = ERROR_EXIT_CODE,
     code: str | None = None,
+    details: dict[str, Any] | None = None,
 ) -> int:
     """Emit an error envelope and return the exit code to use.
 
@@ -170,11 +238,17 @@ def emit_error(
     emitted as ``error.code`` **only when set** -- the envelope of every
     error without one is byte-for-byte unchanged. It does not appear in the
     ``--format text`` line, which stays the plain message.
+
+    ``details`` is an optional mapping of extra structured fields merged into
+    ``error`` (after the standard keys, which it cannot override); like
+    ``code`` it appears only in the JSON envelope and only when set.
     """
     if format == "json":
-        error: dict[str, str] = {"command": command, "message": message}
+        error: dict[str, Any] = {"command": command, "message": message}
         if code is not None:
             error["code"] = code
+        for key, value in (details or {}).items():
+            error.setdefault(key, value)
         error_payload = {"schema_version": 1, "error": error}
         json.dump(error_payload, sys.stderr, indent=2)
         print(file=sys.stderr)

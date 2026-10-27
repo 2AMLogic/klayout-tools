@@ -375,9 +375,12 @@ def test_deck_hashes_records_each_deck_module(tmp_path):
     decks.mkdir(parents=True)
     (decks / "sky130.py").write_bytes(b"DECK = []\n")
     (decks / "notes.txt").write_text("ignored")
+    (decks / "sky130.drc").write_bytes(b"# drc\n")
 
     assert module.deck_hashes(str(tmp_path)) == {
-        "sky130": "sha256:" + hashlib.sha256(b"DECK = []\n").hexdigest()
+        "sky130": "sha256:" + hashlib.sha256(b"DECK = []\n").hexdigest(),
+        # A standalone DRC deck file is its own artifact (issue #3826).
+        "sky130.drc": "sha256:" + hashlib.sha256(b"# drc\n").hexdigest(),
     }
     assert module.deck_hashes(str(tmp_path / "missing")) is None
 

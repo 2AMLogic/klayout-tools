@@ -20,9 +20,16 @@
    content hash identifying the grading code itself -- purely informational,
    reads no manifest and runs no check. See :func:`..signoff.describe_grader`.
 
-The four modes are mutually exclusive: ``--manifest``/``--fleet``/
-``--describe-grader`` each replace the positional ``<file>...`` arguments and
-each other.
+5. **Attest T1 items 1, 9, 10** (``--attest ITEM --inventory FILE``, issue
+   #2844): run the item-specific checks a versioned inventory declares and
+   emit the artifact-anchored generic envelope ``--manifest`` binds (see
+   :mod:`..signoff_attest`). With ``--check COMMITTED`` it re-attests and
+   diffs instead, writing nothing; exit ``0`` only when the committed
+   envelope still reproduces and still passes, ``3`` otherwise.
+
+The modes are mutually exclusive: ``--manifest``/``--fleet``/
+``--describe-grader``/``--attest`` each replace the positional ``<file>...``
+arguments and each other.
 
 ``--check REPORT`` (issue #2249) is a *modifier* on the two doc-parsing
 modes, not a fifth mode: it re-grades the same manifest and, instead of
@@ -111,6 +118,7 @@ from typing import Any
 
 from ..design_evidence_tiers import DesignEvidenceTiersError
 from ..signoff import (
+    _ITEMS_ACCEPTING_REGENERATION_CLAIMS,
     _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
     SignoffError,
     _read_json_source,
@@ -120,6 +128,20 @@ from ..signoff import (
     check_fleet_report,
     check_tier_report,
     describe_grader,
+)
+from ..signoff_attest import (
+    STREAM_ATTESTABLE_ITEM,
+    build_attestation,
+    build_stream_attestation,
+    check_attestation,
+    check_stream_attestation,
+    failed_output_tail,
+    write_attestation,
+)
+from ..signoff_generator_batch import (
+    GeneratorApprovalError,
+    GeneratorExecution,
+    resolve_execution,
 )
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
@@ -142,6 +164,9 @@ _CHECK_EXIT_CODES = {"match": EXIT_PASS, "drifted": EXIT_FAIL}
 def run(args: argparse.Namespace) -> int:
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
+    attest_result = _maybe_run_attest(args, manifest_source, fleet_source)
+    if attest_result is not None:
+        return attest_result
     if getattr(args, "describe_grader", False):
         return _run_describe_grader(args, manifest_source, fleet_source)
     if manifest_source and fleet_source:
@@ -189,6 +214,40 @@ def run(args: argparse.Namespace) -> int:
     return _run_envelope_aggregation(args)
 
 
+def _maybe_run_attest(
+    args: argparse.Namespace,
+    manifest_source: str | None,
+    fleet_source: str | None,
+) -> int | None:
+    """``--attest`` dispatch (issue #2844) -- run it, or refuse its flags.
+
+    Returns the exit code when the invocation is an ``--attest`` one (run it)
+    or an ``--inventory``/``--output`` misuse (refuse them), and ``None``
+    otherwise so ``run`` can fall through to the other modes.
+    """
+    if getattr(args, "attest", None) is not None:
+        return _run_attest(args, manifest_source, fleet_source)
+    stray = [
+        flag
+        for flag, attr in (
+            ("--inventory", "inventory"),
+            ("--output", "output"),
+            ("--input", "attest_input"),
+            ("--generator", "generator"),
+            ("--regenerated-hash", "regenerated_hash"),
+        )
+        if getattr(args, attr, None)
+    ]
+    if stray or getattr(args, "hash_kind", None) is not None:
+        return emit_error(
+            "signoff",
+            "--inventory/--output/--input/--generator/--regenerated-hash/"
+            "--hash-kind only apply to --attest",
+            args.format,
+        )
+    return None
+
+
 def _run_describe_grader(
     args: argparse.Namespace,
     manifest_source: str | None,
@@ -228,7 +287,200 @@ def _run_describe_grader(
     return EXIT_PASS
 
 
+def _attest_flag_problem(
+    args: argparse.Namespace, inventory: str | None, stream: str | None
+) -> str | None:
+    """The refusal message for an invalid ``--attest`` flag combination (item 2
+    takes ``--input``; items 1, 9 and 10 take ``--inventory``), else ``None``."""
+    if args.attest == STREAM_ATTESTABLE_ITEM:
+        if inventory:
+            return (
+                "--inventory does not apply to --attest 2: the layout stream is "
+                "the artifact -- pass it with --input <stream>"
+            )
+        if not stream:
+            return (
+                "--attest 2 requires --input <stream> (the committed GDS/OASIS "
+                "layout stream; see docs/cli/signoff.md)"
+            )
+        return None
+    if stream or any(
+        getattr(args, attr, None) is not None
+        for attr in ("generator", "regenerated_hash", "hash_kind")
+    ):
+        return (
+            "--input/--generator/--regenerated-hash/--hash-kind only apply "
+            f"to --attest {STREAM_ATTESTABLE_ITEM} (items 1, 9 and 10 take "
+            "--inventory)"
+        )
+    if not inventory:
+        return (
+            "--attest requires --inventory <file> (the versioned attestation "
+            "inventory; see docs/cli/signoff.md)"
+        )
+    return None
+
+
+def _compute_attestation(
+    args: argparse.Namespace,
+    inventory: str | None,
+    stream: str | None,
+    committed: str | None,
+) -> dict:
+    """Build (or, with ``committed``, re-check) the attestation. The flag
+    combination was validated by :func:`_attest_flag_problem`."""
+    if args.attest == STREAM_ATTESTABLE_ITEM:
+        assert stream is not None
+        generator = getattr(args, "generator", None)
+        regenerated_hash = getattr(args, "regenerated_hash", None)
+        hash_kind = getattr(args, "hash_kind", None) or "bytes"
+        if committed is not None:
+            return check_stream_attestation(
+                stream,
+                committed,
+                generator=generator,
+                regenerated_hash=regenerated_hash,
+                hash_kind=hash_kind,
+            )
+        return build_stream_attestation(
+            stream,
+            generator=generator,
+            regenerated_hash=regenerated_hash,
+            hash_kind=hash_kind,
+        )
+    assert inventory is not None
+    if committed is not None:
+        return check_attestation(args.attest, inventory, committed)
+    return build_attestation(args.attest, inventory)
+
+
+def _run_attest(
+    args: argparse.Namespace,
+    manifest_source: str | None,
+    fleet_source: str | None,
+) -> int:
+    """``--attest ITEM --inventory FILE [-o OUT] [--check COMMITTED]`` (issue
+    #2844) -- see :mod:`..signoff_attest`.
+
+    Generate mode prints the envelope (``--format json``) and, when it
+    passes, writes it to ``--output`` only if its bytes changed; a failing
+    attestation exits ``3`` and writes nothing, so a committed passing
+    envelope is never silently replaced by a failing one. ``--check`` writes
+    nothing ever and exits ``0`` only when the committed envelope still
+    reproduces *and* still passes."""
+    if (
+        args.files
+        or manifest_source
+        or fleet_source
+        or getattr(args, "describe_grader", False)
+        or getattr(args, "tiers_doc", None)
+    ):
+        return emit_error(
+            "signoff",
+            "--attest cannot be combined with <file> arguments, --manifest, "
+            "--fleet, --describe-grader, or --tiers-doc",
+            args.format,
+        )
+    inventory = getattr(args, "inventory", None)
+    stream = getattr(args, "attest_input", None)
+    problem = _attest_flag_problem(args, inventory, stream)
+    if problem is not None:
+        return emit_error("signoff", problem, args.format)
+    committed = getattr(args, "check", None)
+    output = getattr(args, "output", None)
+    if committed is not None and output:
+        return emit_error(
+            "signoff",
+            "--check and --output are mutually exclusive with --attest: "
+            "--check verifies a committed envelope and never writes",
+            args.format,
+        )
+    try:
+        result = _compute_attestation(args, inventory, stream, committed)
+    except SignoffError as exc:
+        return emit_error("signoff", str(exc), args.format)
+
+    if committed is not None:
+        emit_success(result, args.format, _print_attestation_check_text)
+        ok = result["status"] == "match" and result["fresh_status"] == "pass"
+        return EXIT_PASS if ok else EXIT_FAIL
+
+    if result["status"] == "pass" and output:
+        try:
+            write_attestation(result, output)
+        except OSError as exc:
+            return emit_error(
+                "signoff", f"could not write --output '{output}': {exc}", args.format
+            )
+    emit_success(result, args.format, _print_attestation_text)
+    return EXIT_PASS if result["status"] == "pass" else EXIT_FAIL
+
+
+def _attestation_check_line(check: dict) -> str:
+    marker = "PASS" if check["passed"] else "FAIL"
+    if check.get("skipped"):
+        marker = "SKIP"
+    if check["check"] == "present":
+        what = f"{check['role']} {check['path']} present"
+    elif check["check"] == "stream_readable":
+        what = f"layout stream readable ({check['content_hash']})"
+    elif check["check"] == "top_cell_non_empty":
+        what = f"non-empty top cell(s): {', '.join(check['top_cells']) or 'none'}"
+    elif check["check"] == "dbu_on_grid":
+        what = f"dbu on grid ({check['dbu']})"
+    elif check["check"] == "command":
+        label = check.get("target") or check.get("name") or check["role"]
+        status = check.get("error") or f"exit {check['exit_status']}"
+        what = f"{check['role']} {label}: {' '.join(check['argv'])} ({status})"
+    else:
+        what = (
+            f"pin {check['role']}: {check['value'] if check['passed'] else 'missing'}"
+        )
+    line = f"[{marker}] {what}"
+    if check["check"] == "command" and not check["passed"]:
+        tail = failed_output_tail(check)
+        if tail:
+            line += "\n" + "\n".join(f"    | {row}" for row in tail.splitlines())
+    return line
+
+
+def _print_attestation_text(result: dict) -> None:
+    print(f"attest: T1 item {result['t1_item']}  status: {result['status']}")
+    attestation = result["attestation"]
+    print(f"checks: {attestation['passed_count']}/{attestation['check_count']} passed")
+    binding = result["provenance"]["input"]
+    label = "stream" if result["t1_item"] == STREAM_ATTESTABLE_ITEM else "inventory"
+    print(f"{label}: {binding['path']['path']} ({binding['content_hash']})")
+    print()
+    for check in attestation["checks"]:
+        print(_attestation_check_line(check))
+
+
+def _print_attestation_check_text(result: dict) -> None:
+    render_rerun_drift(result)
+    print(f"fresh_status: {result['fresh_status']}")
+    failed = [c for c in result["fresh"]["attestation"]["checks"] if not c["passed"]]
+    for check in failed:
+        print(_attestation_check_line(check))
+    for check in result.get("skipped_checks", []):
+        label = check.get("target") or check.get("name") or check["role"]
+        outcome = "pass" if check["passed"] else "fail"
+        print(
+            f"[SKIP] {check['role']} {label}: {' '.join(check['argv'])} "
+            f"(local_only, not run; committed outcome: {outcome})"
+        )
+
+
 def _run_envelope_aggregation(args: argparse.Namespace) -> int:
+    if getattr(args, "allow_generator_exec", False) or getattr(
+        args, "generator_approvals", None
+    ):
+        return emit_error(
+            "signoff",
+            "--allow-generator-exec/--generator-approvals only apply to "
+            "--manifest/--fleet (envelope aggregation regenerates nothing)",
+            args.format,
+        )
     if not args.files:
         return emit_error(
             "signoff",
@@ -246,6 +498,17 @@ def _run_envelope_aggregation(args: argparse.Namespace) -> int:
     emit_success(result, args.format, _print_text)
 
     return _EXIT_CODES[result["status"]]
+
+
+def _generator_execution(args: argparse.Namespace) -> GeneratorExecution | None:
+    """``--allow-generator-exec`` / ``--generator-approvals`` (issue #3289):
+    the opt-in, or ``None`` (off) unless the caller asked for it. Raises
+    :class:`GeneratorApprovalError` when the opt-in has no usable trusted
+    approvals."""
+    return resolve_execution(
+        bool(getattr(args, "allow_generator_exec", False)),
+        getattr(args, "generator_approvals", None),
+    )
 
 
 def _run_tier_report(
@@ -267,14 +530,24 @@ def _run_tier_report(
                 f"{type(manifest).__name__}"
             )
         tiers_doc = getattr(args, "tiers_doc", None)
+        generator_exec = _generator_execution(args)
         result = (
-            build_tier_report(manifest, tiers_doc=tiers_doc, repo_root=repo_root)
+            build_tier_report(
+                manifest,
+                tiers_doc=tiers_doc,
+                repo_root=repo_root,
+                generator_exec=generator_exec,
+            )
             if committed is None
             else check_tier_report(
-                committed, manifest, tiers_doc=tiers_doc, repo_root=repo_root
+                committed,
+                manifest,
+                tiers_doc=tiers_doc,
+                repo_root=repo_root,
+                generator_exec=generator_exec,
             )
         )
-    except (SignoffError, DesignEvidenceTiersError) as exc:
+    except (SignoffError, DesignEvidenceTiersError, GeneratorApprovalError) as exc:
         return emit_error("signoff", str(exc), args.format)
 
     if committed is not None:
@@ -308,14 +581,24 @@ def _run_fleet_report(
                 f"{type(fleet).__name__}"
             )
         tiers_doc = getattr(args, "tiers_doc", None)
+        generator_exec = _generator_execution(args)
         result = (
-            build_fleet_report(fleet, tiers_doc=tiers_doc, repo_root=repo_root)
+            build_fleet_report(
+                fleet,
+                tiers_doc=tiers_doc,
+                repo_root=repo_root,
+                generator_exec=generator_exec,
+            )
             if committed is None
             else check_fleet_report(
-                committed, fleet, tiers_doc=tiers_doc, repo_root=repo_root
+                committed,
+                fleet,
+                tiers_doc=tiers_doc,
+                repo_root=repo_root,
+                generator_exec=generator_exec,
             )
         )
-    except (SignoffError, DesignEvidenceTiersError) as exc:
+    except (SignoffError, DesignEvidenceTiersError, GeneratorApprovalError) as exc:
         return emit_error("signoff", str(exc), args.format)
 
     if committed is not None:
@@ -450,6 +733,16 @@ def _print_input_verified(citation: dict) -> None:
         print(f"        pex input {pex_input['role']}: {pex_input['status']}")
 
 
+def _print_binding_members(members: list[dict] | None) -> None:
+    """Print each member of a set-bound generic citation (issue #3044) with
+    its verification status, so a drifted member is named on the row."""
+    for member in members or []:
+        path = member.get("path")
+        if isinstance(path, dict):
+            path = path.get("path")
+        print(f"        member {path}: {member.get('status')}")
+
+
 def _print_artifact_binding(item: dict, citation: dict) -> None:
     """Print what a met item 1/2/9/10 citation is actually bound to (issue
     #2718), or nothing for every other item.
@@ -465,18 +758,52 @@ def _print_artifact_binding(item: dict, citation: dict) -> None:
         return
     binding = citation.get("artifact_binding")
     if binding:
+        members = binding.get("members")
         path = binding.get("path")
         if isinstance(path, dict):
             path = path.get("path")
+        if members:
+            path = f"{len(members)} members"
         print(
             f"        bound: T1 item #{binding.get('t1_item')} -> {path} "
             f"(content_hash={binding.get('content_hash')})"
         )
+        _print_binding_members(members)
+        if item.get("id") in _ITEMS_ACCEPTING_REGENERATION_CLAIMS:
+            _print_regeneration(binding.get("regeneration"))
         return
     print(
         f"        topic: not bound -- a passing {citation.get('kind')} envelope "
         "satisfies this item, but klt signoff cannot judge its relevance "
         "(cite an artifact-anchored generic envelope to bind it)"
+    )
+
+
+def _print_regeneration(regeneration: Any) -> None:
+    """The ``regeneration:`` line under an item-1/2 ``bound:`` line (issue
+    #2887): what was checked (the attested regenerated hash equals the bound
+    artifact's) and what was not (the generator was never run by klt, and
+    neither its correctness nor the artifact's topical relevance is judged).
+    """
+    if not regeneration:
+        print("        regeneration: not claimed")
+        return
+    if regeneration.get("executed_by_klt"):
+        execution = regeneration.get("execution") or {}
+        print(
+            f"        regeneration: klt ran approved recipe "
+            f"`{execution.get('recipe')}` on the batch runner "
+            f"(job {(execution.get('remote') or {}).get('job_id')}); output "
+            f"{execution.get('output_hash')} is byte-identical to the "
+            "committed artifact (generator correctness and topical relevance "
+            "not checked)"
+        )
+        return
+    print(
+        f"        regeneration: {regeneration.get('regenerated_hash')} matches "
+        f"the bound artifact; generator `{regeneration.get('generator')}` was "
+        "attested, not run by klt (generator correctness and topical relevance "
+        "not checked)"
     )
 
 
@@ -644,12 +971,54 @@ def _print_partition_boundary(result: dict) -> None:
         print(f"  {partition}: {text}")
 
 
+def _status_marker(status: str, palette: Palette) -> tuple[str, str]:
+    """The ``(marker, color)`` for an item ``status`` in the text report."""
+    if status == "met":
+        return "MET  ", palette.green
+    if status == "not_applicable":
+        return "N/A  ", palette.green
+    return "UNMET", palette.red
+
+
+def _not_applicable_suffix(report: dict) -> str:
+    """``", N not_applicable"`` when the report has items satisfied by a
+    recorded "not applicable" (issue #2865); empty otherwise, so a report
+    with none renders exactly as before."""
+    count = report.get("t1_not_applicable_count")
+    return f", {count} not_applicable" if count else ""
+
+
+def _print_not_applicable(item: dict) -> None:
+    """The evidence behind a ``not_applicable`` item (issue #2865): the
+    ratified spec and the committed statement, each with its content hash,
+    and the statement's per-row reasons."""
+    block = item.get("not_applicable")
+    if not block:
+        return
+    spec = block["spec"]
+    statement = block["statement"]
+    print(
+        f"        not applicable: spec {spec['file']} "
+        f"(status={spec['status']}, rows={spec['row_count']}, "
+        f"content_hash={spec['content_hash']})"
+    )
+    print(
+        f"        statement: {statement['file']} "
+        f"(content_hash={statement['content_hash']})"
+    )
+    for row in statement["rows"]:
+        print(f"          {row['id']} [{row['class']}]: {row['reason']}")
+
+
 def _print_tier_report_text(result: dict, palette: Palette) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
     _print_partition_boundary(result)
     print(f"tier: {result['tier'] or 'none'}")
-    print(f"T1: {result['t1_met_count']}/{result['t1_item_count']} items met")
+    print(
+        f"T1: {result['t1_met_count']}/{result['t1_item_count']} items met"
+        f"{_not_applicable_suffix(result)}"
+    )
     # Issue #2202: the reverse of the per-row `graded_by_build` note below.
     # A `--tiers-doc`/`$KLT_TIERS_DOC` copy listing *fewer* T1 items than
     # this build grades renders a shorter checklist, so `11/11 items met`
@@ -662,8 +1031,9 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
     print()
 
     for item in result["items"]:
-        marker = "MET  " if item["status"] == "met" else "UNMET"
-        color = palette.green if item["status"] == "met" else palette.red
+        # Issue #2865: a recorded "not applicable" is its own marker, never
+        # the plain MET one.
+        marker, color = _status_marker(item["status"], palette)
         item_id = str(item["id"]) if item["id"] is not None else "-"
         partition = f" [{item['partition']}]" if item["partition"] else ""
         print(
@@ -682,6 +1052,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
                 f"(no rules for item #{item_id} in klt {result['build']['version']}"
                 f"; it is in {result['source_doc']}, not this build's own doc)"
             )
+        _print_not_applicable(item)
         citation = item["citation"]
         if citation:
             # Command-backed evidence (issue #825) has no static file --
@@ -748,6 +1119,13 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             # from "a check ran and did not pass" (e.g. check_failed) even
             # in the terminal-first text rendering, not just the JSON.
             print(f"        {palette.red}reason: {item['reason']}{palette.reset}")
+            # Issue #2865: a refused `not_applicable` names the offending row.
+            row = (item.get("detail") or {}).get("row")
+            if row:
+                print(f"        row: {row}")
+            _print_binding_members(
+                (item.get("detail") or {}).get("artifact_binding", {}).get("members")
+            )
 
     print()
     print(
@@ -774,6 +1152,7 @@ def _print_fleet_report_text(result: dict, palette: Palette) -> None:
             f"[{color}{marker}{palette.reset}] {block['block']} "
             f"({block['kind']})  "
             f"T1: {block['t1_met_count']}/{block['t1_item_count']} items met"
+            f"{_not_applicable_suffix(block)}"
         )
         # Issue #2202: same disclosure as tier-report mode, for the same
         # reason -- this row renders `t1_item_count`, so it must also render

@@ -1712,3 +1712,242 @@ def test_run_aws_cli_raises_clear_error_when_aws_not_on_path(monkeypatch):
     monkeypatch.setattr(rl.shutil, "which", lambda _name: None)
     with pytest.raises(rl.RemoteLaunchError, match="aws' CLI was not found"):
         rl._run_aws_cli(["ec2", "describe-instances"])
+
+
+# --------------------------------------------------------------------------- #
+# Runner klt identity in the AMI manifest (issue #2851)
+# --------------------------------------------------------------------------- #
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_MANIFEST_SCHEMA = (
+    _REPO_ROOT / "docs" / "schemas" / "remote-sim-ami-manifest.schema.json"
+)
+_BUILD_SCRIPT = _REPO_ROOT / "scripts" / "aws" / "build-remote-sim-ami.sh"
+
+
+def _entry(**overrides):
+    entry = {
+        "pdk": "sky130A",
+        "region": "us-east-1",
+        "ami_id": "ami-0123456789abcdef0",
+        "pdk_snapshot": "sky130A-2026.10.01",
+        "ngspice_version": "46",
+        "built_at": "2026-10-01T00:00:00Z",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _validate_manifest(images):
+    import jsonschema
+
+    schema = json.loads(_MANIFEST_SCHEMA.read_text())
+    jsonschema.validate({"schema_version": 1, "images": images}, schema)
+
+
+def test_resolve_ami_legacy_entry_has_explicitly_unknown_runner_identity(tmp_path):
+    manifest = _write_manifest(tmp_path, [_entry()])
+    resolved = rl.resolve_ami("sky130A", "us-east-1", manifest)
+    assert resolved["ami_id"] == "ami-0123456789abcdef0"
+    assert resolved["klt_version"] is None
+    assert resolved["klt_ref"] is None
+
+
+def test_resolve_ami_returns_published_runner_identity(tmp_path):
+    manifest = _write_manifest(
+        tmp_path, [_entry(klt_version="0.7.1.dev3+gabc1234", klt_ref="abc1234")]
+    )
+    resolved = rl.resolve_ami("sky130A", "us-east-1", manifest)
+    assert resolved["klt_version"] == "0.7.1.dev3+gabc1234"
+    assert resolved["klt_ref"] == "abc1234"
+
+
+@pytest.mark.parametrize("value", ["", "  ", 7, None, "klt 0.7.0", "v0.7.0"])
+def test_resolve_ami_unusable_klt_version_reads_as_unknown(tmp_path, value):
+    manifest = _write_manifest(tmp_path, [_entry(klt_version=value)])
+    assert rl.resolve_ami("sky130A", "us-east-1", manifest)["klt_version"] is None
+
+
+def test_manifest_schema_accepts_legacy_and_new_entries():
+    _validate_manifest([_entry()])
+    _validate_manifest([_entry(klt_version="0.7.0", klt_ref="v0.7.0")])
+    # The checked-in manifest (all legacy entries) stays valid.
+    shipped = json.loads(
+        (_REPO_ROOT / "data" / "remote-sim-ami-manifest.json").read_text()
+    )
+    _validate_manifest(shipped["images"])
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"klt_version": ""},
+        {"klt_version": "klt 0.7.0"},
+        {"klt_version": 7},
+        {"klt_ref": ""},
+        {"klt_ref": "two words"},
+    ],
+)
+def test_manifest_schema_rejects_malformed_runner_fields(fields):
+    import jsonschema
+
+    with pytest.raises(jsonschema.ValidationError):
+        _validate_manifest([_entry(**fields)])
+
+
+def test_published_runner_identities_latest_per_pdk_and_region(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            _entry(ami_id="ami-0000000000000001", klt_version="0.5.0"),
+            _entry(
+                ami_id="ami-0000000000000002",
+                built_at="2026-10-12T00:00:00Z",
+                klt_version="0.7.0",
+                klt_ref="v0.7.0",
+            ),
+            _entry(region="us-west-2", ami_id="ami-0000000000000003"),
+            _entry(pdk="gf180mcu", ami_id="ami-0000000000000004"),
+        ],
+    )
+    pinned = rl.published_runner_identities("sky130A", "us-east-1", manifest)
+    assert pinned == [
+        {
+            "pdk": "sky130A",
+            "region": "us-east-1",
+            "ami_id": "ami-0000000000000002",
+            "klt_version": "0.7.0",
+            "klt_ref": "v0.7.0",
+            "pdk_variants": None,
+        }
+    ]
+    any_region = rl.published_runner_identities("sky130A", None, manifest)
+    assert [i["ami_id"] for i in any_region] == [
+        "ami-0000000000000002",
+        "ami-0000000000000003",
+    ]
+    assert any_region[1]["klt_version"] is None
+    everything = rl.published_runner_identities(None, None, manifest)
+    assert len(everything) == 3
+    # A variant name maps to its manifest key, exactly as in resolve_ami.
+    assert rl.published_runner_identities("gf180mcuC", None, manifest)[0]["ami_id"] == (
+        "ami-0000000000000004"
+    )
+
+
+def test_parse_build_klt_version_reads_the_user_data_marker():
+    marker = rl.BUILD_KLT_VERSION_MARKER
+    console = "\n".join(
+        [
+            "[  41.2] cloud-init[812]: + KLT_BUILT_VERSION='klt 0.7.0'",
+            f"[  41.2] cloud-init[812]: + echo '{marker}[0.7.0]'",
+            f"[  41.2] cloud-init[812]: {marker}[0.7.0]",
+            "[  41.3] cloud-init[812]: + touch /var/log/klt-build-complete",
+        ]
+    )
+    assert rl.parse_build_klt_version(console) == "0.7.0"
+    assert rl.parse_build_klt_version("no marker here") is None
+    assert rl.parse_build_klt_version(f"{marker}[]") is None
+    assert rl.parse_build_klt_version(f"{marker}[not-a-version]") is None
+
+
+def test_ami_manifest_entry_publishes_version_and_ref():
+    entry = rl.ami_manifest_entry(
+        pdk="sky130A",
+        region="us-east-1",
+        ami_id="ami-0123456789abcdef0",
+        pdk_snapshot="sky130A-2026.10.13",
+        ngspice_version="46",
+        built_at="2026-10-13T00:00:00Z",
+        klt_version="klt 0.7.0",
+        klt_ref="deadbeefcafe",
+    )
+    assert entry["klt_version"] == "0.7.0"
+    assert entry["klt_ref"] == "deadbeefcafe"
+    _validate_manifest([entry])
+    with pytest.raises(rl.RemoteLaunchError, match="klt_version"):
+        rl.ami_manifest_entry(**{**entry, "klt_version": ""})
+    with pytest.raises(rl.RemoteLaunchError, match="klt_ref"):
+        rl.ami_manifest_entry(**{**entry, "klt_ref": " "})
+
+
+def _emit_entry(*args):
+    import subprocess
+    import sys
+
+    env = {**os.environ, "KLT_AMI_BUILD_PYTHON": sys.executable}
+    return subprocess.run(
+        ["bash", str(_BUILD_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+
+
+def test_build_script_publishes_the_pinned_klt_ref_and_installed_version():
+    """The build script's own publication path, run offline: the entry
+    carries the `--klt-ref` the user-data pip-installs and the version that
+    install reported -- no AWS call is reachable from this mode."""
+    result = _emit_entry(
+        "--pdk", "sky130A", "--region", "us-east-1",
+        "--klt-ref", "0123456789abcdef",
+        "--emit-manifest-entry", "ami-0123456789abcdef0", "0.7.0",
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    entry = json.loads(result.stdout)
+    assert entry["klt_ref"] == "0123456789abcdef"
+    assert entry["klt_version"] == "0.7.0"
+    assert entry["ami_id"] == "ami-0123456789abcdef0"
+    assert entry["region"] == "us-east-1"
+    _validate_manifest([entry])
+
+    script = _BUILD_SCRIPT.read_text()
+    # The same $KLT_REF is what the build instance installs.
+    assert 'klayout-tools@${KLT_REF}"' in script
+    assert '"$BUILT_AT" "$3" "$KLT_REF" "$PDK_VARIANTS")' in script
+
+
+def test_build_script_refuses_to_publish_an_unknown_version():
+    result = _emit_entry(
+        "--pdk", "sky130A", "--region", "us-east-1",
+        "--emit-manifest-entry", "ami-0123456789abcdef0", "",
+    )  # fmt: skip
+    assert result.returncode == 2
+    assert "klt_version" in result.stderr
+
+
+def test_manifest_entry_round_trips_pdk_variants():
+    base = dict(
+        pdk="gf180mcu",
+        region="us-east-1",
+        ami_id="ami-0123456789abcdef0",
+        pdk_snapshot="gf180mcu-2026.10.01",
+        ngspice_version="46",
+        built_at="2026-10-01T00:00:00Z",
+        klt_version="0.7.0",
+        klt_ref="v0.7.0",
+    )
+    assert "pdk_variants" not in rl.ami_manifest_entry(**base)
+    entry = rl.ami_manifest_entry(**base, pdk_variants=["gf180mcuD"])
+    assert entry["pdk_variants"] == ["gf180mcuD"]
+    _validate_manifest([entry])
+    _validate_manifest([_entry()])  # legacy shape still validates
+    with pytest.raises(rl.RemoteLaunchError):
+        rl.ami_manifest_entry(**base, pdk_variants=[])
+    with pytest.raises(rl.RemoteLaunchError):
+        rl.ami_manifest_entry(**base, pdk_variants=["gf180 mcuD"])
+
+
+def test_published_runner_identities_carry_pdk_variants(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            _entry(pdk="gf180mcu", pdk_variants=["gf180mcuD"]),
+            _entry(pdk="sky130A", pdk_variants="bogus"),
+        ],
+    )
+    by_pdk = {i["pdk"]: i for i in rl.published_runner_identities(None, None, manifest)}
+    assert by_pdk["gf180mcu"]["pdk_variants"] == ["gf180mcuD"]
+    assert by_pdk["sky130A"]["pdk_variants"] is None

@@ -280,6 +280,80 @@ def test_deck_info_reports_released_true_with_release_details(tmp_path, monkeypa
     }
 
 
+def _drc_file_hash() -> str:
+    import hashlib
+
+    from klayout_tools.decks import history as _h
+
+    path = _h._drc_deck_path("asap7")
+    return "sha256:" + hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+
+def test_deck_info_reports_drc_deck_as_its_own_artifact(_history_table):
+    """Issue #3826: the packaged ``asap7.drc`` is hashed separately from the
+    ``asap7`` extraction deck module."""
+    entry = history.deck_info(name="asap7")["decks"][0]
+
+    drc = entry["drc_deck"]
+    assert drc["path_kind"] == "packaged"
+    assert drc["content_hash"] == _drc_file_hash()
+    assert drc["content_hash"] != entry["content_hash"]
+    assert drc["released"] is False
+    assert drc["release"] is None
+
+
+def test_deck_info_drc_deck_released_when_history_has_its_hash(tmp_path, monkeypatch):
+    drc_hash = _drc_file_hash()
+    entries = [
+        {
+            "deck": "asap7",
+            "artifact": "drc_deck",
+            "content_hash": drc_hash,
+            "git_tag": "v9.9.9",
+            "git_commit": "f" * 40,
+            "package_version": "9.9.9",
+        }
+    ]
+    path = tmp_path / "_history.json"
+    path.write_text(json.dumps({"entries": entries}))
+    monkeypatch.setattr(history, "_HISTORY_PATH", path)
+
+    entry = history.deck_info(name="asap7")["decks"][0]
+
+    assert entry["drc_deck"]["released"] is True
+    assert entry["drc_deck"]["release"]["package_version"] == "9.9.9"
+    assert entry["released"] is False  # the extraction module is unrecorded
+    assert history.resolve_deck(content_hash=drc_hash)["artifact"] == "drc_deck"
+
+
+def test_resolve_by_version_prefers_deck_module_over_drc_artifact(
+    tmp_path, monkeypatch
+):
+    base = {"deck": "asap7", "git_tag": "v1", "git_commit": "a" * 40}
+    entries = [
+        {**base, "content_hash": "sha256:" + "1" * 64, "package_version": "1.0.0"},
+        {
+            **base,
+            "artifact": "drc_deck",
+            "content_hash": "sha256:" + "2" * 64,
+            "package_version": "1.0.0",
+        },
+    ]
+    path = tmp_path / "_history.json"
+    path.write_text(json.dumps({"entries": entries}))
+    monkeypatch.setattr(history, "_HISTORY_PATH", path)
+
+    report = history.resolve_deck(deck="asap7", version="1.0.0")
+
+    assert report["content_hash"] == "sha256:" + "1" * 64
+    assert "artifact" not in report
+
+
+def test_deck_info_omits_drc_deck_for_decks_without_a_drc_file(_history_table):
+    entry = history.deck_info(name="sky130")["decks"][0]
+    assert "drc_deck" not in entry
+
+
 def test_deck_info_defaults_to_every_registered_deck(_history_table):
     from klayout_tools.decks import known_extraction_deck_names
 
@@ -678,6 +752,61 @@ def test_deck_devices_reports_the_full_diode_predicate_set_without_the_deck_sour
     assert entry["provenance"]["rule_id"] == "gf180mcu_fd_pr__diode_pd2nw_06v0"
 
 
+def test_deck_devices_drawn_bipolar_markers_report_no_expression():
+    """sky130/gf180mcu bipolars keep their single drawn `marker` layer; the
+    `marker_expression` field (issue #2860) is `null` for them."""
+    for deck, name, pair in (
+        ("sky130", "pnp", (82, 44)),
+        ("gf180mcu", "bjt", (127, 5)),
+    ):
+        entry = _device_class(deck, name)
+        assert (entry["marker"]["layer"], entry["marker"]["datatype"]) == pair
+        assert entry["marker_expression"] is None
+        assert entry["marker_gated"] is True
+
+
+def test_deck_devices_projects_a_derived_bipolar_marker_expression(capsys):
+    """A `LayerExpr` marker (issue #2860) reports as `marker_expression`, with
+    its leaves folded into `required_layers`/`excluded_layers` by polarity."""
+    import dataclasses
+
+    from klayout_tools.cli.deck_cmd import _print_devices_text
+    from klayout_tools.decks import LayerExpr, get_extraction_deck
+
+    pwell = LayerExpr.not_((240, 0), (31, 0), (241, 0), name="pwell")
+    npn_mk = LayerExpr.and_((26, 0), pwell, (242, 0), name="npn_mk")
+    deck = get_extraction_deck("sky130")
+    (pnp,) = deck.bipolars
+    deck = dataclasses.replace(
+        deck, bipolars=(dataclasses.replace(pnp, marker=npn_mk),)
+    )
+
+    (entry,) = [
+        e for e in history._project_device_classes(deck, {}) if e["kind"] == "bipolar"
+    ]
+    assert entry["marker"] is None
+    assert entry["marker_gated"] is True
+    expr = entry["marker_expression"]
+    assert expr["op"] == "and" and expr["name"] == "npn_mk"
+    assert expr["operands"][0] == {"layer": 26, "datatype": 0, "name": None}
+    assert expr["operands"][1]["op"] == "not"
+    assert expr["operands"][1]["name"] == "pwell"
+    assert _layer_pairs(expr["operands"][1]["operands"]) == [
+        (240, 0),
+        (31, 0),
+        (241, 0),
+    ]
+    assert _layer_pairs(entry["required_layers"])[:3] == [(26, 0), (240, 0), (242, 0)]
+    assert _layer_pairs(entry["excluded_layers"]) == [(31, 0), (241, 0)]
+    json.dumps(entry)  # JSON-serialisable as-is
+
+    _print_devices_text({"deck": "x", "content_hash": None, "device_classes": [entry]})
+    assert (
+        "marker: npn_mk = (26/0 & pwell = (240/0 - 31/0 - 241/0) & 242/0)"
+        in capsys.readouterr().out
+    )
+
+
 def test_deck_devices_reports_the_deck_content_hash_and_declaration_order():
     report = history.deck_devices("gf180mcu")
 
@@ -706,6 +835,7 @@ def test_deck_devices_covers_every_declared_device_class_of_every_deck():
         declared |= {entry.class_name for entry in deck.bipolars}
         declared |= {entry.name for entry in deck.capacitors}
         declared |= {entry.name for entry in deck.mom_capacitors}
+        declared |= {entry.name for entry in deck.mos_capacitors}
         declared |= {entry.name for entry in deck.resistors}
         declared |= {entry.name for entry in deck.diodes}
         assert reported == declared, name
@@ -728,6 +858,22 @@ def test_deck_devices_marks_markerless_classes_as_such():
     assert _layer_pairs([flavour["marker"] for flavour in nfet["flavours"]]) == [
         (55, 0)
     ]
+
+
+def test_deck_devices_reports_resistor_topology():
+    """Issue #2679: each resistor class reports how its `body` layer relates
+    to its `marker` -- sg13g2's poly resistors are `abutting_heads` (the
+    marker *is* the body, GatPoly only the two heads); every other resistor
+    keeps the default `overlap`. Non-resistor classes carry no such key."""
+    for name in ("rsil", "rppd", "rhigh"):
+        assert _device_class("sg13g2", name)["topology"] == "abutting_heads"
+    assert _device_class("sg13g2", "res_metal1")["topology"] == "overlap"
+    assert _device_class("gf180mcu", "ppolyf_u")["topology"] == "overlap"
+    for entry in history.deck_devices("sky130")["device_classes"]:
+        if entry["kind"] == "resistor":
+            assert entry["topology"] == "overlap"
+        else:
+            assert "topology" not in entry
 
 
 def test_deck_devices_narrows_to_a_single_class():
@@ -959,6 +1105,25 @@ def test_installed_release_matches_recorded_deck_hash(_history_table, monkeypatc
     assert history.is_deck_hash_released("sky130", recorded) is True
 
 
+def test_installed_release_vouches_for_recorded_drc_deck_hash(
+    _history_table, monkeypatch
+):
+    """Issue #3826: a clean release build vouches for its packaged ``.drc``
+    file, recorded under ``"<name>.drc"`` in ``DECK_HASHES``."""
+    _fake_identity(monkeypatch, True)
+    drc_hash = "sha256:" + "e" * 64
+    _fake_build_info(
+        monkeypatch, {"asap7": "sha256:" + "d" * 64, "asap7.drc": drc_hash}
+    )
+    assert history.is_deck_hash_released("asap7", drc_hash) is True
+
+
+def test_dev_build_does_not_vouch_for_drc_deck(_history_table, monkeypatch):
+    _fake_identity(monkeypatch, False)
+    _fake_build_info(monkeypatch, present=False)
+    assert history.is_deck_hash_released("asap7", _drc_file_hash()) is False
+
+
 def test_installed_release_edited_deck_does_not_self_identify(
     _history_table, monkeypatch
 ):
@@ -991,3 +1156,127 @@ def test_release_tag_with_unknown_dirty_state_does_not_self_identify(
     monkeypatch.setattr(build_identity, "identity", lambda: ident)
     _fake_build_info(monkeypatch, present=False)
     assert history.is_deck_hash_released("sky130", _own_hash("sky130")) is False
+
+
+# --- layer_refs / layer_table (issue #3092) -----------------------------------
+
+
+@pytest.mark.parametrize("deck", ["sky130", "gf180mcu", "sg13g2", "sg13cmos5l"])
+def test_deck_rules_layer_refs_parallel_layers_and_resolve_through_layer_table(deck):
+    report = history.deck_rules(deck)
+    table = {(e["layer"], e["datatype"]): e["name"] for e in report["layer_table"]}
+    assert report["layer_table"] == sorted(
+        report["layer_table"], key=lambda e: (e["layer"], e["datatype"])
+    )
+
+    for rule in report["rules"]:
+        assert len(rule["layer_refs"]) == len(rule["layers"])
+        for label, ref in zip(rule["layers"], rule["layer_refs"], strict=True):
+            pair = (ref["layer"], ref["datatype"])
+            if ref["name"] is None:
+                assert label == f"{pair[0]}/{pair[1]}"
+                assert pair not in table
+            else:
+                assert label == ref["name"]
+                assert table[pair] == ref["name"]
+
+    unresolved = {(u["layer"], u["datatype"]) for u in report["unresolved"]}
+    expected = {
+        (ref["layer"], ref["datatype"])
+        for rule in report["rules"]
+        for ref in rule["layer_refs"]
+        if ref["name"] is None
+    }
+    assert unresolved == expected
+
+
+def test_deck_rules_layer_refs_match_the_deck_pair_for_every_rule():
+    from klayout_tools.decks import get_deck
+
+    report = history.deck_rules("sky130")
+    for rule, entry in zip(get_deck("sky130"), report["rules"], strict=True):
+        pairs = [rule.layer] + ([rule.other_layer] if rule.other_layer else [])
+        assert [(r["layer"], r["datatype"]) for r in entry["layer_refs"]] == pairs
+
+
+def test_deck_rules_reports_ambiguous_and_unresolved_explicitly(monkeypatch):
+    from klayout_tools import decks
+
+    names = {(1, 0): "dup.drawing", (2, 0): "dup.drawing", (3, 0): "solo.drawing"}
+    monkeypatch.setattr(decks, "get_layer_names", lambda _name: names)
+
+    report = history.deck_rules("sky130")
+
+    assert report["ambiguous_names"] == [
+        {
+            "name": "dup.drawing",
+            "pairs": [
+                {"layer": 1, "datatype": 0},
+                {"layer": 2, "datatype": 0},
+            ],
+        }
+    ]
+    # Both pairs of the ambiguous name stay in the table (nothing dropped).
+    assert [e["name"] for e in report["layer_table"]] == [
+        "dup.drawing",
+        "dup.drawing",
+        "solo.drawing",
+    ]
+    assert report["unresolved"], "rule layers absent from the patched table"
+    assert all(u["rules"] for u in report["unresolved"])
+    assert all(
+        ref["name"] is None
+        for rule in report["rules"]
+        for ref in rule["layer_refs"]
+        if (ref["layer"], ref["datatype"]) not in names
+    )
+
+
+# ---------------------------------------------------------------------------
+# library: unmodeled_rules disclosure (issue #3796)
+# ---------------------------------------------------------------------------
+
+
+def test_deck_rules_gf180mcu_lists_unmodeled_thick_metal_families_apart_from_rules():
+    report = history.deck_rules("gf180mcu")
+
+    unmodeled = report["unmodeled_rules"]
+    assert {"MT30.1a", "MT30.4", "MT.2b", "MT.3", "MT.4", "MSLOT.1", "MSLOT.8"} <= set(
+        unmodeled
+    )
+    # Disclosed rules are not enforced ones: nothing is listed in both.
+    assert not set(unmodeled) & {entry["id"] for entry in report["rules"]}
+    # A single-rule query does not narrow the disclosure.
+    one = history.deck_rules("gf180mcu", rule_id="metaltop.width.1")
+    assert one["unmodeled_rules"] == unmodeled
+
+
+def test_deck_rules_gf180mcu_lists_wide_metal_and_eol_ids_apart_from_rules():
+    """Issue #3968: Mn.2b wide-metal and the narrow-line end-of-line ids."""
+    report = history.deck_rules("gf180mcu")
+
+    unmodeled = report["unmodeled_rules"]
+    expected = {"CO.6a", "CO.6b"}
+    expected |= {f"M{n}.2b" for n in range(1, 6)}
+    expected |= {f"V{n}.{r}" for n in range(1, 5) for r in ("3c", "3d", "4b", "4c")}
+    assert expected <= set(unmodeled)
+    # Stack-keyed: the 6LM-only Via5 ids are not disclosed for this 5LM deck.
+    assert not any(rule.startswith("V5.") for rule in unmodeled)
+    assert unmodeled == sorted(set(unmodeled))
+    assert not set(unmodeled) & {entry["id"] for entry in report["rules"]}
+    assert not expected & set(history.deck_rules("sky130")["unmodeled_rules"])
+
+
+def test_deck_info_reports_unmodeled_rules_per_deck(_history_table):
+    entry = history.deck_info(name="gf180mcu")["decks"][0]
+    assert "MT30.1a" in entry["unmodeled_rules"]
+    assert "MSLOT.1" in entry["unmodeled_rules"]
+    assert "unmodeled_rules" in history.deck_info(name="sg13g2")["decks"][0]
+
+
+def test_deck_rules_reports_marker_blind_layers():
+    """Issue #3815: deck-static, discoverable pre-layout, not narrowed by rule."""
+    assert history.deck_rules("sky130")["marker_blind_layers"] == ["81/2"]
+    one = history.deck_rules("sky130", rule_id="poly.width.1")
+    assert one["marker_blind_layers"] == ["81/2"]
+    assert history.deck_rules("gf180mcu")["marker_blind_layers"] == []

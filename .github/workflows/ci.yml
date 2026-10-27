@@ -109,6 +109,15 @@ jobs:
         # review cycle.
         run: uv run --frozen --extra dev python scripts/check_complexity_baseline.py
 
+      - name: Type-check ratchet (mypy)
+        # scripts/check_type_baseline.py (issue #3221): mypy over src/ against
+        # type-baseline.json, keyed on (file, error code, message). Fails on a
+        # new diagnostic or a baselined one occurring more often; decreases
+        # never fail. Runs on this job's single Python version only. Refresh
+        # procedure: docs/type-checking.md. GATES -- do not add
+        # continue-on-error.
+        run: uv run --frozen --extra dev python scripts/check_type_baseline.py
+
       - name: Verb-module import boundaries
         # scripts/check_import_boundaries.py (issue #2767): static AST gate
         # for docs/ARCHITECTURE.md's "verb modules stay self-contained"
@@ -996,7 +1005,20 @@ jobs:
         # silently pass) if this step is ever unavailable, but CI always has it.
         run: scripts/fetch-cell-netlists.sh
 
+      - name: Cache pinned Yosys build
+        id: yosys-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/yosys-0.67
+          key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh', 'scripts/_install_common.sh') }}
+
       - name: Install Yosys build dependencies
+        # Cache-hit gate (issue #4100): these packages exist only to compile
+        # Yosys, and the compile step below is already skipped on a cache hit,
+        # so a warm-cache leg no longer touches the apt mirror at all. The
+        # cache step therefore runs before this one. Cache-miss runs still
+        # install and build, and remain exposed to mirror flakes by design.
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
         # scripts/install-yosys.sh builds Yosys from a pinned, checksum-
         # verified source release (issue #417) -- `apt-get install yosys`
         # would resolve Ubuntu 24.04's 0.33-5build2, ~30 releases stale
@@ -1059,13 +1081,6 @@ jobs:
           scripts/ci-apt-install.sh \
             cmake bison flex libfl-dev libreadline-dev gawk tcl-dev \
             libffi-dev pkg-config zlib1g-dev
-
-      - name: Cache pinned Yosys build
-        id: yosys-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ~/.cache/yosys-0.67
-          key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh', 'scripts/_install_common.sh') }}
 
       - name: Build + install pinned Yosys (cache miss only)
         if: steps.yosys-cache.outputs.cache-hit != 'true'
@@ -1274,11 +1289,33 @@ jobs:
         # coverage percentages, plus the `options.random_seed` end-to-end
         # pinning/echo tests (issue #423 AC #4) -- including that two runs of
         # the same seeded request reproduce identical `tests[]` content.
-        run: uv run --frozen --extra dev --extra functional-verification pytest
+        #
+        # Report-only coverage (issue #3223): COV_ARGS is non-empty on the
+        # 3.12 leg only (one leg, to respect the wall-clock budget), where it
+        # adds --cov and a JSON report that the two steps below publish.
+        # No --cov-fail-under: measure first, ratchet in a follow-up. Config
+        # lives in pyproject.toml's [tool.coverage.*]; see
+        # docs/guides/test-coverage.md.
+        run: uv run --frozen --extra dev --extra functional-verification pytest $COV_ARGS
         env:
           GH_TOKEN: ${{ github.token }}
           PDK_ROOT: ${{ github.workspace }}/pdks/sky130-liberty
           PDK: sky130A
+          COV_ARGS: ${{ matrix.python-version == '3.12' && '--cov --cov-report=json:coverage.json --cov-report=term' || '' }}
+
+      - name: Coverage job summary (report-only)
+        # `!cancelled()` so a red pytest still publishes what was measured;
+        # hashFiles guards the legs that did not collect coverage.
+        if: ${{ !cancelled() && matrix.python-version == '3.12' && hashFiles('coverage.json') != '' }}
+        run: python3 scripts/coverage_summary.py coverage.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: ${{ !cancelled() && matrix.python-version == '3.12' && hashFiles('coverage.json') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage.json
+          retention-days: 30
 
       - name: klt kb validate
         # Belt-and-suspenders alongside tests/test_kb.py (which calls the same
@@ -1674,10 +1711,18 @@ jobs:
 
       - name: Install the klayout binary
         # Same bounded, mirror-tolerant apt wrapper as the `test` job's
-        # ngspice step (issues #1204, #1219).
-        timeout-minutes: 5
+        # ngspice step (issues #1204, #1219). The apt `klayout` package
+        # pulls Qt5 widgets libs, so the bare 90s per-command cap killed a
+        # slow-but-live mirror mid-download on every retry (issue #4059).
+        # Same sizing as the Yosys-deps step (#2662): two full-length
+        # attempts fit (60 + 150 + 5 backoff + 150 = 365s <= 380s) inside
+        # the 420s (`timeout-minutes: 7`) backstop. Only a degraded-mirror
+        # day pays the worst case; a normal run is unchanged (~30s).
+        timeout-minutes: 7
         env:
           DEBIAN_FRONTEND: noninteractive
+          CI_APT_DEADLINE: "380"
+          CI_APT_PER_CMD_TIMEOUT: "150"
         run: scripts/ci-apt-install.sh klayout
 
       - name: ASAP7 deck fixtures

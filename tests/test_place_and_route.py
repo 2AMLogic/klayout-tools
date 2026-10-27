@@ -59,6 +59,7 @@ Four tiers, mirroring `tests/test_synthesize.py`'s own structure:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -1274,6 +1275,86 @@ def test_power_net_fields_default_to_vdd_vss():
     validated = place_and_route._validate_power({"straps": _BASE_STRAPS})
     assert validated["power_net"] == "VDD"
     assert validated["ground_net"] == "VSS"
+
+
+def test_power_tapcell_distance_defaults_to_none():
+    validated = place_and_route._validate_power({"straps": _BASE_STRAPS})
+    assert validated["tapcell_distance_um"] is None
+
+
+def test_power_tapcell_distance_accepted():
+    validated = place_and_route._validate_power(
+        {"straps": _BASE_STRAPS, "tapcell": {"distance_um": 50}}
+    )
+    assert validated["tapcell_distance_um"] == 50
+
+
+@pytest.mark.parametrize(
+    "tapcell",
+    [
+        {"distance_um": 0},
+        {"distance_um": -5},
+        {"distance_um": True},
+        {"distance_um": "50"},
+        {"distance_um": float("nan")},
+        {"distance_um": float("inf")},
+        {},
+        {"distance_um": 50, "halo": 1},
+        "50",
+    ],
+)
+def test_power_tapcell_rejects_invalid(tapcell):
+    with pytest.raises(PlaceAndRouteError, match=r"request\.power\.tapcell"):
+        place_and_route._validate_power({"straps": _BASE_STRAPS, "tapcell": tapcell})
+
+
+def test_power_tapcell_override_rejected_without_tapcell_library():
+    with pytest.raises(PlaceAndRouteError, match="no tap/endcap"):
+        place_and_route._validate_power(
+            {"straps": _BASE_STRAPS, "tapcell": {"distance_um": 50}},
+            "sg13g2_stdcell",
+        )
+
+
+def test_tapcell_lines_default_and_override():
+    default = "tapcell -distance 14 -tapcell_master sky130_fd_sc_hd__tapvpwrvgnd_1"
+    assert place_and_route._tapcell_lines("sky130_fd_sc_hd") == [default]
+    assert place_and_route._tapcell_lines("sky130_fd_sc_hd", None) == [default]
+    assert place_and_route._tapcell_lines("sky130_fd_sc_hd", 50) == [
+        "tapcell -distance 50 -tapcell_master sky130_fd_sc_hd__tapvpwrvgnd_1"
+    ]
+    assert place_and_route._tapcell_lines("sky130_fd_sc_hd", 12.5)[0].startswith(
+        "tapcell -distance 12.5 "
+    )
+
+
+def test_stubbed_route_tapcell_distance_override_in_tcl_and_report(
+    tmp_path, monkeypatch
+):
+    """Issue #3051: `request.power.tapcell.distance_um` reaches the Tcl and
+    the report's `power` block."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        power={"straps": _BASE_STRAPS, "tapcell": {"distance_um": 50}},
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["power"]["tapcell_distance_um"] == 50
+    floorplan_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_floorplan.tcl",
+    )
+    lines = _script_lines(floorplan_script)
+    assert (
+        "tapcell -distance 50 -tapcell_master sky130_fd_sc_hd__tapvpwrvgnd_1" in lines
+    )
 
 
 def test_power_normalizes_strap_numbers_and_defaults():
@@ -2571,6 +2652,40 @@ def _stub_merge_def_to_gds(monkeypatch) -> list[dict]:
     return calls
 
 
+def _netlist_field_report(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    return run_place_and_route(request_path)
+
+
+def test_response_names_input_netlist_in_repo(tmp_path, monkeypatch):
+    """Issue #3751: `netlist` is the `{path, scope}` of the file whose bytes
+    `provenance.input.content_hash` digests, so a consumer can re-hash it."""
+    (tmp_path / ".git").mkdir()
+    report = _netlist_field_report(tmp_path, monkeypatch)
+
+    assert report["netlist"] == {"path": "gcd_synth.v", "scope": "repo"}
+    digest = hashlib.sha256((tmp_path / report["netlist"]["path"]).read_bytes())
+    assert (
+        report["provenance"]["input"]["content_hash"] == f"sha256:{digest.hexdigest()}"
+    )
+    assert report["provenance"]["input"]["role"] == "netlist"
+
+
+def test_response_netlist_outside_repo_is_external(tmp_path, monkeypatch):
+    """Issue #3751: a netlist outside the repo never leaks an absolute path."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    report = _netlist_field_report(repo, monkeypatch)
+    assert report["netlist"]["scope"] == "repo"
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    report = _netlist_field_report(outside, monkeypatch)
+    assert report["netlist"] == {"path": None, "scope": "external"}
+
+
 def test_stubbed_full_route_success(tmp_path, monkeypatch):
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(
@@ -2677,7 +2792,7 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # path strings, not the `{path, scope}` envelope `klt synthesize`/`klt
     # pex`/`klt sim`/`klt size` use for their own output paths -- a
     # deliberate, documented split (see `docs/json-contract.md`'s
-    # "Output-artifact path fields: envelope vs. plain string"), not an
+    # "Path fields: envelope vs. plain string"), not an
     # oversight. These assertions are a regression guard for that shape:
     # they should keep passing exactly as-is unless a future issue migrates
     # `place-and-route` onto the envelope (which would also require bumping
@@ -2704,6 +2819,11 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert provenance["klt_version"]
     assert provenance["pdk"]["name"] == "sky130A"
     assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
+    # Issue #3785: the Liberty is located by the `{path, scope}` envelope,
+    # never an absolute host path.
+    assert set(provenance["deck"]["path"]) == {"path", "scope"}
+    assert provenance["deck"]["path"]["scope"] in {"repo", "external"}
+    assert not os.path.isabs(provenance["deck"]["path"]["path"] or "")
 
     # Issue #1091: `request.power` omitted (the default here) preserves
     # today's exact prior behavior for the *full, caller-configured* PDN --
@@ -2732,6 +2852,7 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
         "ground_net": None,
         "tapcell_master": None,
         "endcap_master": None,
+        "tapcell_distance_um": None,
         "filler_masters": [],
         "straps": [],
         "connects": [],
@@ -2791,13 +2912,13 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # see `_row_rail_lines`'s own docstring).
     assert "pdngen -dont_add_pins" in route_lines
     assert route_lines.index("pdngen -dont_add_pins") < route_lines.index(
-        "global_route"
+        "global_route -verbose"
     )
     assert (
         "filler_placement {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
         "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}" in route_lines
     )
-    assert route_lines.index("global_route") < route_lines.index(
+    assert route_lines.index("global_route -verbose") < route_lines.index(
         "filler_placement {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
         "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}"
     )
@@ -2955,6 +3076,7 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
         "ground_net": "VSS",
         "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
         "endcap_master": None,
+        "tapcell_distance_um": 14,
         "filler_masters": [
             "sky130_fd_sc_hd__fill_1",
             "sky130_fd_sc_hd__fill_2",
@@ -7302,7 +7424,8 @@ def test_route_stage_omits_critical_nets_percentage_flag_by_default(
     tmp_path, monkeypatch
 ):
     """Issue #939: `request.route_critical_nets_percentage` omitted must
-    reproduce the original `global_route` call exactly -- no flag emitted,
+    reproduce the original `global_route` call apart from the `-verbose` flag
+    (issue #2994) -- no critical-nets flag emitted,
     the A/B disable path."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(monkeypatch)
@@ -7311,7 +7434,7 @@ def test_route_stage_omits_critical_nets_percentage_flag_by_default(
     run_place_and_route(request_path)
 
     route_lines = _script_lines(_stage_script(request_path, "route"))
-    assert "global_route" in route_lines
+    assert "global_route -verbose" in route_lines
     assert not any("critical_nets_percentage" in line for line in route_lines)
 
 
@@ -7333,7 +7456,7 @@ def test_route_stage_passes_critical_nets_percentage_flag_when_requested(
     run_place_and_route(request_path)
 
     route_lines = _script_lines(_stage_script(request_path, "route"))
-    assert "global_route -critical_nets_percentage 30" in route_lines
+    assert "global_route -verbose -critical_nets_percentage 30" in route_lines
 
 
 @pytest.mark.parametrize("value", [-1, 101, 1.5, "30", True])
@@ -8151,7 +8274,7 @@ def _fake_pdk_info(root: Path, variant: str = "sky130A") -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# `_resolve_layer_map` -- variant-exact vs. family-fallback vs. none found
+# `resolve_klayout_layer_map` -- variant-exact vs. family-fallback vs. none found
 # (issue #1029: gf180mcu ships a single family-level `gf180mcu.map` shared
 # across every variant rather than a `<variant>.map` per variant, unlike
 # sky130).
@@ -8168,7 +8291,7 @@ def test_resolve_layer_map_prefers_exact_variant_match(tmp_path):
     pdk_info = _fake_pdk_info(tmp_path, variant="sky130A")
     pdk_info["assets"]["klayout"] = str(klayout_dir)
 
-    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+    path, resolution = pdk_module.resolve_klayout_layer_map(pdk_info)
 
     assert path == str(tech_dir / "sky130A.map")
     assert resolution == "exact"
@@ -8186,7 +8309,7 @@ def test_resolve_layer_map_falls_back_to_family_level_file(tmp_path):
     pdk_info = _fake_pdk_info(tmp_path, variant="gf180mcuC")
     pdk_info["assets"]["klayout"] = str(klayout_dir)
 
-    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+    path, resolution = pdk_module.resolve_klayout_layer_map(pdk_info)
 
     assert path == str(tech_dir / "gf180mcu.map")
     assert resolution == "family"
@@ -8204,7 +8327,7 @@ def test_resolve_layer_map_strips_ihp_prefix_for_family_file(tmp_path):
     pdk_info = _fake_pdk_info(tmp_path, variant="ihp-sg13g2")
     pdk_info["assets"]["klayout"] = str(klayout_dir)
 
-    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+    path, resolution = pdk_module.resolve_klayout_layer_map(pdk_info)
 
     assert path == str(tech_dir / "sg13g2.map")
     assert resolution == "family"
@@ -8218,7 +8341,7 @@ def test_resolve_layer_map_returns_none_when_neither_file_exists(tmp_path):
     pdk_info = _fake_pdk_info(tmp_path, variant="gf180mcuC")
     pdk_info["assets"]["klayout"] = str(klayout_dir)
 
-    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+    path, resolution = pdk_module.resolve_klayout_layer_map(pdk_info)
 
     assert path is None
     assert resolution == "none"
@@ -8228,7 +8351,7 @@ def test_resolve_layer_map_returns_none_when_no_klayout_asset(tmp_path):
     pdk_info = _fake_pdk_info(tmp_path, variant="sky130A")
     assert pdk_info["assets"]["klayout"] is None
 
-    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+    path, resolution = pdk_module.resolve_klayout_layer_map(pdk_info)
 
     assert path is None
     assert resolution == "none"
@@ -9361,7 +9484,7 @@ def _write_tie_cell_def(path: Path, *, nets: str) -> None:
 def _tie_cell_merge_inputs(tmp_path: Path, *, layer_map: bool = True) -> dict:
     """Every `_merge_def_to_gds` keyword the tie-cell fixture needs, with the
     standard-cell GDS view (and, optionally, the `li1` layer map) written to
-    the open_pdks-shaped locations `_resolve_gds_view`/`_resolve_layer_map`
+    the open_pdks-shaped locations `_resolve_gds_view`/`resolve_klayout_layer_map`
     look in."""
     root = tmp_path / "install"
     tech_lef = tmp_path / "tech.tlef"
@@ -9651,7 +9774,7 @@ def test_merge_reports_unresolved_single_pin_nets_without_a_layer_map(tmp_path):
     """No open_pdks layer-map file means no way to resolve a LEF `PORT`'s own
     layer name to the GDS layer the cell's view actually draws that pin on,
     so every single-pin net is reported unresolved rather than guessed at --
-    the same "degrade gracefully, never fabricate" posture `_resolve_layer_map`
+    the same "degrade gracefully, never fabricate" posture `resolve_klayout_layer_map`
     itself takes (`resolution: "none"`)."""
     inputs = _tie_cell_merge_inputs(tmp_path, layer_map=False)
     def_path = tmp_path / "design.def"
@@ -10848,7 +10971,7 @@ def test_envelope_lint_finds_the_plain_string_path_fields(tmp_path, monkeypatch)
     """The other half of issue #2224, against a real envelope.
 
     `def_path`/`gds_path`/`verilog_path` are the *plain-string* path fields
-    `docs/json-contract.md`'s "Output-artifact path fields" table documents
+    `docs/json-contract.md`'s "Path fields: envelope vs. plain string" table documents
     for this verb -- absolute, with no `{path, scope}` envelope to make them
     committable. Retyping them is explicitly out of scope here (it is a
     breaking change to each field); what this pins is that
@@ -11576,3 +11699,254 @@ def test_macro_pdn_rejects_supply_layer_missing_from_straps():
     with pytest.raises(place_and_route.PlaceAndRouteError) as excinfo:
         place_and_route._macro_pdn_grid_lines([_pdn_macro(["met1", "met3"])], power)
     assert "met3" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
+# `request.portable_paths` (issue #3820): opt-in committable response paths
+# --------------------------------------------------------------------------- #
+
+
+def _stub_merge_with_pdk_layer_map(monkeypatch) -> None:
+    """`_stub_merge_def_to_gds`, but reporting a layer-map file under the
+    installed PDK root (the always-`external` path the real merge returns)."""
+
+    def fake_merge(**kwargs):
+        Path(kwargs["out_path"]).write_text("fake gds\n")
+        return {
+            "path": os.path.join(
+                os.environ["PDK_ROOT"], "sky130A", "libs.tech", "klayout", "m.map"
+            ),
+            "resolution": "family",
+            "def_net_names": {
+                "single_pin_markers": 0,
+                "unresolved_single_pin_nets": [],
+            },
+            "min_area_repair": {"status": "skipped", "reason": "stub", "rules": []},
+        }
+
+    monkeypatch.setattr(place_and_route, "_merge_def_to_gds", fake_merge)
+
+
+def test_portable_paths_default_response_keeps_absolute_paths(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_with_pdk_layer_map(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert os.path.isabs(report["def_path"])
+    assert os.path.isabs(report["gds_path"])
+    assert os.path.isabs(report["layer_map"]["path"])
+
+
+def test_portable_paths_true_leaves_no_absolute_host_path(tmp_path, monkeypatch):
+    from klayout_tools.env_provenance import find_absolute_path_fields
+
+    # An outside-the-repo run: every artifact is `external`, the PDK layer map
+    # is a `$PDK_ROOT/...` string.
+    request_path = _setup_success_env(tmp_path, monkeypatch, portable_paths=True)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_with_pdk_layer_map(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert find_absolute_path_fields(report) == []
+    assert report["def_path"] == {"path": None, "scope": "external"}
+    assert report["gds_path"] == {"path": None, "scope": "external"}
+    assert report["verilog_path"] == {"path": None, "scope": "external"}
+    assert report["unrouted_def_path"] is None
+    assert report["layer_map"]["path"] == "$PDK_ROOT/sky130A/libs.tech/klayout/m.map"
+    assert report["power"]["placed"]["def_path"] == {"path": None, "scope": "external"}
+
+
+def test_portable_paths_repo_internal_outputs_are_repo_relative(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    request_path = _setup_success_env(tmp_path, monkeypatch, portable_paths=True)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_with_pdk_layer_map(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["def_path"] == {
+        "path": ".klt/place-and-route/gcd.def",
+        "scope": "repo",
+    }
+    assert report["gds_path"]["scope"] == "repo"
+    assert all(
+        stage["def_path"] is None or stage["def_path"]["scope"] == "repo"
+        for stage in report["stages"]
+        if "def_path" in stage
+    )
+
+
+def test_portable_paths_pre_route_stage_nulls_stay_null(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, target_stage="place", portable_paths=True
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+
+    report = run_place_and_route(request_path)
+
+    assert report["def_path"] is None
+    assert report["gds_path"] is None
+    assert report["verilog_path"] is None
+    assert report["unrouted_def_path"] == {"path": None, "scope": "external"}
+
+
+def test_portable_paths_must_be_boolean(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch, portable_paths="yes")
+
+    with pytest.raises(PlaceAndRouteError, match="portable_paths must be a boolean"):
+        run_place_and_route(request_path)
+
+
+# --------------------------------------------------------------------------- #
+# `floorplan.tracks` + negative-OFFSET tech LEF preflight (issue #4088).
+# --------------------------------------------------------------------------- #
+
+_TRACKS_FLOORPLAN = {
+    "method": "utilization",
+    "utilization_pct": 40,
+    "site": "asap7sc7p5t",
+}
+_GOOD_TRACK = {
+    "layer": "M2",
+    "x_offset_um": 0.0,
+    "x_pitch_um": 0.048,
+    "y_offset_um": 0.0,
+    "y_pitch_um": 0.048,
+}
+
+
+def _tech_lef_with_offset(tmp_path, offset, layer_type="ROUTING"):
+    path = tmp_path / "tech.lef"
+    path.write_text(
+        "VERSION 5.7 ;\n"
+        "LAYER M2\n"
+        f"  TYPE {layer_type} ;\n"
+        "  DIRECTION VERTICAL ;\n"
+        "  PITCH 0.048 ;\n"
+        f"  OFFSET {offset} ;\n"
+        "  WIDTH 0.024 ;\n"
+        "END M2\n"
+        "END LIBRARY\n"
+    )
+    return str(path)
+
+
+def test_negative_offset_tech_lef_without_tracks_is_rejected(tmp_path):
+    tech_lef = _tech_lef_with_offset(tmp_path, "-0.27")
+    with pytest.raises(PlaceAndRouteError) as exc:
+        place_and_route.validate_tech_lef_track_offsets(_TRACKS_FLOORPLAN, tech_lef)
+    message = str(exc.value)
+    assert "M2" in message and "-0.27" in message
+    assert "floorplan.tracks" in message
+
+
+def test_negative_offset_tech_lef_with_tracks_is_accepted(tmp_path):
+    tech_lef = _tech_lef_with_offset(tmp_path, "-0.27")
+    floorplan = {**_TRACKS_FLOORPLAN, "tracks": [_GOOD_TRACK]}
+    place_and_route.validate_tech_lef_track_offsets(floorplan, tech_lef)
+
+
+def test_nonnegative_or_nonrouting_offset_does_not_trigger_preflight(tmp_path):
+    place_and_route.validate_tech_lef_track_offsets(
+        _TRACKS_FLOORPLAN, _tech_lef_with_offset(tmp_path, "0.024")
+    )
+    place_and_route.validate_tech_lef_track_offsets(
+        _TRACKS_FLOORPLAN, _tech_lef_with_offset(tmp_path, "-0.27", "MASTERSLICE")
+    )
+
+
+def test_tracks_emit_explicit_make_tracks_lines():
+    from klayout_tools.place_and_route_script import _make_tracks_lines
+
+    assert _make_tracks_lines(_TRACKS_FLOORPLAN) == ["make_tracks"]
+    lines = _make_tracks_lines(
+        {**_TRACKS_FLOORPLAN, "tracks": [_GOOD_TRACK, {**_GOOD_TRACK, "layer": "M3"}]}
+    )
+    assert lines == [
+        "make_tracks M2 -x_offset 0.0 -x_pitch 0.048 -y_offset 0.0 -y_pitch 0.048",
+        "make_tracks M3 -x_offset 0.0 -x_pitch 0.048 -y_offset 0.0 -y_pitch 0.048",
+    ]
+
+
+@pytest.mark.parametrize(
+    "tracks",
+    [
+        "M2",
+        [],
+        ["M2"],
+        [{k: v for k, v in _GOOD_TRACK.items() if k != "x_pitch_um"}],
+        [{**_GOOD_TRACK, "layer": ""}],
+        [{**_GOOD_TRACK, "x_pitch_um": "0.048"}],
+        [{**_GOOD_TRACK, "y_pitch_um": 0}],
+        [{**_GOOD_TRACK, "x_offset_um": -0.27}],
+        [{**_GOOD_TRACK, "x_pitch_um": float("inf")}],
+        [_GOOD_TRACK, _GOOD_TRACK],
+    ],
+)
+def test_malformed_tracks_rejected(tracks):
+    with pytest.raises(PlaceAndRouteError, match="floorplan.tracks"):
+        place_and_route._validate_floorplan({**_TRACKS_FLOORPLAN, "tracks": tracks})
+
+
+def test_valid_tracks_pass_floorplan_validation():
+    out = place_and_route._validate_floorplan(
+        {**_TRACKS_FLOORPLAN, "tracks": [_GOOD_TRACK]}
+    )
+    assert out["tracks"] == [_GOOD_TRACK]
+
+
+def test_place_and_route_clock_lines_pin_units_issue_4089():
+    assert place_and_route._clock_lines("clk", 1.0) == [
+        "set_cmd_units -time ns -capacitance pF",
+        "create_clock -name clk -period 1.0 [get_ports clk]",
+    ]
+    assert place_and_route._clock_lines(None, None) == []
+
+
+_PPL_0110_STDOUT = (
+    "[ERROR PPL-0110] Constraint has 4 pins, but only 2 available slots.\n"
+    "[ERROR PPL-0111] 1 constraint(s) does not have available slots.\n"
+)
+
+
+def test_engine_error_message_names_over_subscribed_pin_constraint():
+    completed = fake_completed(returncode=1, stdout=_PPL_0110_STDOUT)
+    constraints = [
+        {"pins": ["a[*]"], "edge": "west", "range_um": [0, 2]},
+        {"pins": ["b[*]"], "edge": "east"},
+    ]
+    ports = [f"a[{i}]" for i in range(4)] + ["b[0]", "b[1]"]
+
+    message = place_and_route._engine_error_message(
+        "place", completed, pin_constraints=constraints, top_ports=ports
+    )
+
+    assert "openroad 'place' stage failed: [ERROR PPL-0110]" in message
+    assert "io.pin_constraints[0] has 4 pins" in message
+    assert "only 2 available slots" in message
+
+
+def test_engine_error_message_quotes_ppl_0110_when_entry_unmappable():
+    completed = fake_completed(returncode=1, stdout=_PPL_0110_STDOUT)
+
+    message = place_and_route._engine_error_message("place", completed)
+
+    assert "Constraint has 4 pins, but only 2 available slots" in message
+    assert "io.pin_constraints[" not in message
+
+
+def test_engine_error_message_ppl_0111_alone_is_unchanged():
+    completed = fake_completed(
+        returncode=1,
+        stdout="[ERROR PPL-0111] 2 constraint(s) does not have available slots\n",
+    )
+
+    message = place_and_route._engine_error_message("place", completed)
+
+    assert message == (
+        "openroad 'place' stage failed: [ERROR PPL-0111] 2 constraint(s) "
+        "does not have available slots"
+    )

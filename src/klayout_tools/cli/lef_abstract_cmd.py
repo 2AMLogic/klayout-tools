@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..lef_abstract import LefAbstractError, run_lef_abstract
 from .output import emit_error, emit_success
 
@@ -69,7 +70,7 @@ def _default_output_path(macro_name: str) -> str:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    print(f"file: {render_path_field(report['file'])}")
     print(f"socket: {report['socket']}")
     print(f"macro_name: {report['macro_name']}")
     print(f"class: {report['class']}")

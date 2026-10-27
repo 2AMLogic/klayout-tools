@@ -30,9 +30,10 @@ in-process -- there is no Python binding for Yosys the way ``klayout.db``
 already is for ``klt lvs``/``klt extract``.
 
 Liberty resolution reuses ``klayout_tools.pdk.find_pdk``/
-``list_cell_libraries`` -- the same ``libs_ref`` discovery ``klt pdk``/
-``klt cells`` already use (Yosys survey section 0) -- **no new PDK-fetch
-mechanism**. ``request.pdk`` carries only ``cell_library``/``corner`` (no
+``klayout_tools.pdk_cells.list_cell_libraries`` -- the same ``libs_ref``
+discovery ``klt pdk``/``klt cells`` already use (Yosys survey section 0) --
+**no new PDK-fetch mechanism**. ``request.pdk`` carries only
+``cell_library``/``corner`` (no
 ``variant``/``root``): the resolved PDK install is whatever ``find_pdk()``'s
 own default search order (``$PDK_ROOT``/``$PDK``, then the ciel/volare
 stores, then the conventional prefixes) finds, exactly as ``klt pdk find``
@@ -50,7 +51,7 @@ matching ``klt drc``'s existing "deck requires an asset the resolved install
 doesn't ship" posture (the Yosys survey's own open question, resolved here).
 When ``request.pdk.corner`` is omitted, the nominal (typical-process,
 room-temperature) corner ``klt pdk cells``' own ``nominal_corner`` selection
-already picks is used, via :func:`klayout_tools.pdk.list_cell_libraries`.
+already picks is used, via :func:`klayout_tools.pdk_cells.list_cell_libraries`.
 
 ``timing`` carries ABC's own ``stime -p`` critical-path estimate (issue
 #807, Epic #704 Phase 1a). The Yosys survey section 3.5/3.6 finding stands
@@ -227,7 +228,7 @@ from typing import Any
 
 from . import env_provenance
 from . import macros as macro_spec
-from ._paths import _load_request_json, validate_request_shape
+from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
@@ -246,7 +247,14 @@ from ._report_verify import (
     load_committed_report,
     strip_keys,
 )
+from ._verilog_params import (
+    chparam_lines,
+    read_verilog_line,
+    validate_defines,
+    validate_parameters,
+)
 from .equiv import EquivError, run_equiv
+from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
 from .restructure import RestructureError, restructure_for_timing
 from .sta import StaError, compute_critical_path
@@ -705,24 +713,8 @@ _WARNING_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: requirement).
 _MAX_WARNING_REPRESENTATIVES = 10
 
-#: Matches a liberty ``cell (name) {`` header -- used by
-#: :func:`_parse_liberty_leakage_nw` to isolate each cell's own body without
-#: a full brace-matching parse. ``cell_leakage_power`` is always a direct,
-#: top-level attribute of its enclosing ``cell (...) { ... }`` block, never
-#: nested inside a ``pin``/``timing`` sub-block (the Liberty grammar does not
-#: permit it there), so the text between one cell header and the next is
-#: exactly that cell's own body -- :func:`_match_brace`'s full parse (as
-#: ``restructure.py``'s pin-compatibility check needs, since a pin *is*
-#: nested) is not required here. The cell name's own quotes are optional --
-#: a real volare `sky130_fd_sc_hd` liberty quotes it (``cell
-#: ("sky130_fd_sc_hd__buf_1") {``); a synthetic/other-vendor liberty may not
-#: (verified live against both, issue #1626).
-_LIBERTY_CELL_HEADER_RE = re.compile(
-    r'\bcell\s*\(\s*"?(?P<name>[A-Za-z0-9_]+)"?\s*\)\s*\{'
-)
-
-#: The scalar ``cell_leakage_power : <value>;`` attribute Liberty defines for
-#: a cell's state-independent leakage figure -- what issue #1626 asks this
+#: ``cell_leakage_power`` is the scalar attribute Liberty defines for a
+#: cell's state-independent leakage figure -- what issue #1626 asks this
 #: module to sum. Not every cell library populates it: some (verified live,
 #: ``gf180mcu_fd_sc_mcu9t5v0``) report leakage only via per-input-state
 #: ``leakage_power () { when : "..."; value : "..."; }`` groups instead, with
@@ -730,10 +722,17 @@ _LIBERTY_CELL_HEADER_RE = re.compile(
 #: this command has no vector data to supply -- exactly the same "no
 #: activity factor available" gap the issue explicitly carves switching
 #: power out for. :func:`_parse_liberty_leakage_nw` therefore reads *only*
-#: this scalar field and leaves a cell with no such entry absent from its
+#: this scalar attribute and leaves a cell with no such entry absent from its
 #: result, rather than guessing from the conditional groups.
-_CELL_LEAKAGE_POWER_RE = re.compile(
-    r"\bcell_leakage_power\s*:\s*(?P<value>[-+0-9.eE]+)\s*;"
+
+#: A Liberty ``cell ("<name>") {`` group header. Each cell's body runs from
+#: its header to the next header -- enough to read a cell's scalar ``area``
+#: attribute without :func:`parse_liberty_text`'s full parse. The cell name's
+#: quotes are optional: a real volare `sky130_fd_sc_hd` liberty quotes it, a
+#: synthetic/other-vendor liberty may not (verified live against both, issue
+#: #1626).
+_LIBERTY_CELL_HEADER_RE = re.compile(
+    r'\bcell\s*\(\s*"?(?P<name>[A-Za-z0-9_]+)"?\s*\)\s*\{'
 )
 
 #: The scalar ``area : <value>;`` attribute Liberty defines for a cell's
@@ -750,13 +749,13 @@ _CELL_LEAKAGE_POWER_RE = re.compile(
 #: :func:`_parse_liberty_leakage_nw` states for itself.
 _CELL_AREA_RE = re.compile(r"\barea\s*:\s*(?P<value>[-+0-9.eE]+)\s*;")
 
-#: ``leakage_power_unit : "1nW";`` (sky130_fd_sc_hd) / ``leakage_power_unit :
-#: 1uW ;`` (gf180mcu_fd_sc_mcu9t5v0, unquoted, space before the semicolon) --
+#: The value of a library's ``leakage_power_unit`` attribute --
+#: ``"1nW"`` (sky130_fd_sc_hd) / ``1uW`` (gf180mcu_fd_sc_mcu9t5v0, unquoted) --
 #: the multiplier a bare ``cell_leakage_power`` number in this liberty is
 #: expressed in. Verified live against both installed liberty families
 #: (issue #1626).
 _LEAKAGE_POWER_UNIT_RE = re.compile(
-    r'\bleakage_power_unit\s*:\s*"?(?P<magnitude>[-+0-9.eE]+)\s*(?P<unit>[a-zA-Z]+)"?\s*;'
+    r"^(?P<magnitude>[-+0-9.eE]+)\s*(?P<unit>[a-zA-Z]+)$"
 )
 
 #: Multiplier from one ``leakage_power_unit`` unit to nanowatts.
@@ -978,6 +977,31 @@ def _baseline_ref_fallback(resolved_path: str, *, repo_root: str | None) -> str:
     )
 
 
+#: Top-level request keys ``klt synthesize`` reads (issue #3466). ``schema``
+#: is an inert, unvalidated tag user-authored requests commonly carry.
+_ALLOWED_REQUEST_KEYS = frozenset(
+    {
+        "schema",
+        "engine",
+        "sources",
+        "hdl_toplevel",
+        "pdk",
+        "constraints",
+        "structural",
+        "baseline",
+        "arithmetic",
+        "run_id",
+        "outputs",
+        "parameters",
+        "defines",
+        "macros",
+    }
+)
+
+#: Keys allowed inside the optional request ``outputs`` object (issue #3795).
+_ALLOWED_OUTPUTS_KEYS = frozenset({"dir"})
+
+
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt synthesize`` request JSON file.
 
@@ -988,12 +1012,41 @@ def load_request(request_path: str) -> dict[str, Any]:
     input, never emitted by this tool).
     """
     request = _load_request_json(request_path, SynthesizeError)
-    return validate_request_shape(
+    request = validate_request_shape(
         request,
         "request file",
         error_cls=SynthesizeError,
         required_fields=("sources", "hdl_toplevel", "pdk"),
     )
+    # Issue #3466: an unrecognised top-level key used to be dropped in
+    # silence, so a misspelt or unsupported field produced a plausible
+    # default-configuration result. Reject it instead (`_comment` exempt).
+    _reject_unknown_keys(
+        request, _ALLOWED_REQUEST_KEYS, request_path, "", SynthesizeError
+    )
+    _validate_outputs(request, request_path)
+    return request
+
+
+def _validate_outputs(request: dict[str, Any], request_path: str) -> None:
+    """Reject a malformed ``outputs`` object before any engine work (issue #3795)."""
+    if "outputs" not in request:
+        return
+    outputs = request["outputs"]
+    if not isinstance(outputs, dict):
+        raise SynthesizeError("request.outputs must be an object")
+    _reject_unknown_keys(
+        outputs, _ALLOWED_OUTPUTS_KEYS, request_path, "outputs", SynthesizeError
+    )
+    if "dir" in outputs:
+        out_dir = outputs["dir"]
+        if not isinstance(out_dir, str) or not out_dir.strip():
+            raise SynthesizeError("request.outputs.dir must be a non-empty string")
+        if "run_id" in request:
+            raise SynthesizeError(
+                "request.outputs.dir and request.run_id both name the run "
+                "directory; give only one"
+            )
 
 
 def run_synthesize(
@@ -1005,6 +1058,7 @@ def run_synthesize(
     equiv_timeout_s: float | None = None,
     restructure_timing: bool = False,
     restructure_max_iterations: int | None = None,
+    _scratch_run_dir: bool = False,
 ) -> dict[str, Any]:
     """Run the Yosys synthesis declared by the request at ``request_path``.
 
@@ -1076,6 +1130,11 @@ def run_synthesize(
     an optional request ``run_id`` exclusively reserves that directory and
     collisions are errors. Declared inputs are checked for mutation before
     returning; transitive Verilog includes are not snapshotted.
+
+    ``_scratch_run_dir`` is private to :func:`rerun_synthesize_report`: it
+    ignores the request's ``outputs.dir`` (still validated) and uses a fresh
+    ``.klt/synthesize/run-<uuid>/`` directory, so a re-run never collides
+    with the populated stable directory the committed report came from.
     """
     request_state = _input_file_state(request_path)
     request = load_request(request_path)
@@ -1103,6 +1162,12 @@ def run_synthesize(
         raise SynthesizeError("request.hdl_toplevel must be a non-empty string")
     if re.search(r"[/\\\x00]", hdl_toplevel):
         raise SynthesizeError("request.hdl_toplevel must not contain path separators")
+    parameters = validate_parameters(
+        request.get("parameters"), SynthesizeError, "request.parameters"
+    )
+    defines = validate_defines(
+        request.get("defines"), SynthesizeError, "request.defines"
+    )
 
     pdk_spec = request["pdk"]
     if not isinstance(pdk_spec, dict):
@@ -1183,7 +1248,15 @@ def run_synthesize(
             "content_hash": _combined_content_hash(resolved_sources),
             "role": INPUT_ROLE_SOURCE,
         }
-    output_dir = _create_run_directory(request_dir, request)
+    # Issue #3466: record which elaboration this is, so two parameterisations
+    # of the same sources are distinguishable in provenance.
+    provenance["parameters"] = dict(parameters)
+    # Issue #4196: likewise for preprocessor defines (a separate field, so the
+    # input content hash of existing committed reports is unchanged).
+    provenance["defines"] = dict(defines)
+    output_dir = _create_run_directory(
+        request_dir, request, ignore_outputs_dir=_scratch_run_dir
+    )
 
     script_path = os.path.join(output_dir, f"synth_{hdl_toplevel}.ys")
     netlist_path = os.path.join(output_dir, f"{hdl_toplevel}_synth.v")
@@ -1231,6 +1304,8 @@ def run_synthesize(
             engine_options=engine_options,
             equiv_timeout_s=equiv_timeout_s,
             repo_root=repo_root,
+            parameters=parameters,
+            defines=defines,
         )
 
     # Issue #1844: `repo_root` is threaded into this run's own script so
@@ -1273,6 +1348,8 @@ def run_synthesize(
         macro_inputs=tuple(macro_inputs),
         repo_root=repo_root,
         pdk_root=pdk_info["root"],
+        parameters=parameters,
+        defines=defines,
     )
 
     # `cwd=repo_root` is what makes the relative paths `_write_script` just
@@ -1347,6 +1424,8 @@ def run_synthesize(
         adder_sources=adder_sources,
         adder_techmap_path=adder_techmap_path,
         repo_root=repo_root,
+        parameters=parameters,
+        defines=defines,
     )
 
     equivalence = None
@@ -1358,6 +1437,8 @@ def run_synthesize(
             netlist_path=netlist_path,
             liberty_path=liberty_path,
             timeout_s=equiv_timeout_s,
+            parameters=parameters,
+            defines=defines,
         )
 
     sta, sta_unavailable_reason = _read_sta_timing(
@@ -1377,6 +1458,8 @@ def run_synthesize(
             max_iterations=restructure_max_iterations,
             equiv_timeout_s=equiv_timeout_s,
             repo_root=repo_root,
+            parameters=parameters,
+            defines=defines,
         )
 
     response: dict[str, Any] = {
@@ -1384,6 +1467,12 @@ def run_synthesize(
         "engine": engine,
         "engine_version": engine_version,
         "hdl_toplevel": hdl_toplevel,
+        # Issue #3466: the top-level parameter overrides this run elaborated
+        # with (`{}` when none). Additive field, no `schema_version` bump
+        # (docs/json-contract.md).
+        "parameters": dict(parameters),
+        # Issue #4196: preprocessor defines (`read_verilog -D`), `{}` when none.
+        "defines": dict(defines),
         "run_id": os.path.basename(output_dir),
         "status": "ok",
         "instance_count": module_stats["num_cells"],
@@ -1439,6 +1528,10 @@ def run_synthesize(
         "leakage_power_nw": leakage_power_nw,
         "leakage_by_type_nw": leakage_by_type_nw,
         "timing": timing,
+        # Issue #2883: which clock constraints the request carried and that
+        # `timing.delay_target_ps` is ONE global ABC target (never per-clock).
+        # Additive field, no `schema_version` bump (docs/json-contract.md).
+        "clock_targets": _describe_clock_targets(constraints, delay_target_ps),
         "sta": sta,
         # Issue #2628: *why* `sta` is `null`, so a caller can tell "STA
         # unavailable here -- install the optional extension and retry" from
@@ -1509,8 +1602,34 @@ def run_synthesize(
     return response
 
 
-def _create_run_directory(request_dir: str, request: dict[str, Any]) -> str:
-    """Exclusively claim a retained directory; an existing ID is never reused."""
+def _create_run_directory(
+    request_dir: str, request: dict[str, Any], *, ignore_outputs_dir: bool = False
+) -> str:
+    """Exclusively claim a retained directory; an existing ID is never reused.
+
+    ``outputs.dir`` (issue #3795) names the run directory itself, relative to
+    the request file's directory; it may be absent or an existing *empty*
+    directory, never a populated one. ``ignore_outputs_dir`` (``--rerun``)
+    skips that claim and allocates a fresh ``run-<uuid>`` directory instead.
+    """
+    _validate_outputs(request, "request")
+    out_dir = None if ignore_outputs_dir else request.get("outputs", {}).get("dir")
+    if out_dir is not None:
+        output_dir = os.path.normpath(os.path.join(request_dir, out_dir))
+        try:
+            os.makedirs(os.path.dirname(output_dir), exist_ok=True)
+            try:
+                os.mkdir(output_dir)
+            except FileExistsError:
+                # Only an existing empty directory may be reused.
+                if not os.path.isdir(output_dir) or os.listdir(output_dir):
+                    raise
+        except OSError as exc:
+            raise SynthesizeError(
+                f"could not claim outputs.dir '{output_dir}': {exc}; it must "
+                "not exist or be an empty directory (prior evidence is retained)"
+            ) from exc
+        return output_dir
     run_id = request.get("run_id", f"run-{uuid.uuid4().hex}")
     if not isinstance(run_id, str) or not re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_id
@@ -1604,6 +1723,8 @@ def _verify_synthesis_equivalence(
     liberty_path: str,
     timeout_s: float | None,
     request_filename: str | None = None,
+    parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """The ``verify_equivalence`` gate :func:`run_synthesize` calls after a
     successful synthesis: reuses :func:`klayout_tools.equiv.run_equiv`'s
@@ -1640,7 +1761,7 @@ def _verify_synthesis_equivalence(
         synthesize_output_dir,
         request_filename or f"equiv_request_{hdl_toplevel}.json",
     )
-    equiv_request = {
+    equiv_request: dict[str, Any] = {
         "gold": {"sources": resolved_sources, "top": hdl_toplevel},
         "gate": {
             "sources": [netlist_path],
@@ -1648,6 +1769,12 @@ def _verify_synthesis_equivalence(
             "liberty": liberty_path,
         },
     }
+    if parameters:
+        # Issue #3466: the gold RTL must be elaborated like the synthesis was.
+        equiv_request["gold"]["parameters"] = dict(parameters)
+    if defines:
+        # Issue #4196: ... and preprocessed with the same defines.
+        equiv_request["gold"]["defines"] = dict(defines)
     try:
         with open(equiv_request_path, "w", encoding="utf-8") as handle:
             json.dump(equiv_request, handle, indent=2)
@@ -1721,6 +1848,8 @@ def _run_timing_restructuring(
     max_iterations: int | None,
     equiv_timeout_s: float | None,
     repo_root: str | None = None,
+    parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """The ``restructure_timing`` gate :func:`run_synthesize` calls after the
     ``sta`` stage: runs
@@ -1802,6 +1931,8 @@ def _run_timing_restructuring(
             liberty_path=liberty_path,
             timeout_s=equiv_timeout_s,
             request_filename=f"equiv_request_{hdl_toplevel}_restructured.json",
+            parameters=parameters,
+            defines=defines,
         )
 
     # Issue #1844: `restructured_netlist_path` is `restructure_for_timing`'s
@@ -2070,9 +2201,79 @@ def _resolve_liberty(
     )
 
 
+def _resolve_clocks(constraints: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The validated ``constraints.clocks`` list as ``[{port, period_ns}]``
+    (issue #2883), empty when omitted/``null``.
+
+    Each entry must be an object with a non-empty string ``port`` (unique
+    across the list) and a positive numeric ``period_ns``. Unknown entry keys
+    and a non-array / empty list are errors -- a request that means to
+    constrain several clocks but expresses it wrongly must not be silently
+    downgraded, exactly as for ``clock_period_ns``.
+    """
+    if not constraints:
+        return []
+    raw = constraints.get("clocks")
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not raw:
+        raise SynthesizeError(
+            "request.constraints.clocks must be a non-empty array of "
+            "{port, period_ns} objects or null"
+        )
+    clocks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        where = f"request.constraints.clocks[{index}]"
+        clock = _validate_clock_entry(entry, where)
+        port = clock["port"]
+        if port in seen:
+            raise SynthesizeError(f"{where}.port '{port}' is listed more than once")
+        seen.add(port)
+        clocks.append(clock)
+    return clocks
+
+
+def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
+    """One validated ``constraints.clocks`` entry as ``{port, period_ns}``
+    (issue #2883).
+
+    Checks the entry in isolation -- object shape, no unknown keys, a
+    non-empty string ``port`` and a positive numeric ``period_ns``. The
+    list-level checks (array type, non-empty, unique ports) stay in
+    :func:`_resolve_clocks`. ``where`` prefixes every error message.
+    """
+    if not isinstance(entry, dict):
+        raise SynthesizeError(f"{where} must be a {{port, period_ns}} object")
+    unknown = sorted(set(entry) - {"port", "period_ns"})
+    if unknown:
+        raise SynthesizeError(
+            f"{where} has unknown key(s): {', '.join(map(str, unknown))} "
+            "(allowed: port, period_ns)"
+        )
+    port = entry.get("port")
+    if not isinstance(port, str) or not port.strip():
+        raise SynthesizeError(f"{where}.port must be a non-empty string")
+    period = entry.get("period_ns")
+    if isinstance(period, bool) or not isinstance(period, (int, float)):
+        raise SynthesizeError(
+            f"{where}.period_ns must be a positive number (nanoseconds)"
+        )
+    if period <= 0:
+        raise SynthesizeError(f"{where}.period_ns must be greater than zero")
+    return {"port": port, "period_ns": period}
+
+
 def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
-    """``constraints.clock_period_ns`` as an integer picosecond ABC delay
-    target (``abc -D``), or ``None`` when the request does not supply one.
+    """The integer picosecond ABC delay target (``abc -D``) derived from
+    ``constraints``, or ``None`` when the request does not supply one.
+
+    Precedence (issue #2883): an explicit ``constraints.clock_period_ns`` is
+    the global target; otherwise, when ``constraints.clocks`` is given, the
+    *tightest* (smallest) listed ``period_ns`` -- ABC takes a single global
+    ``-D``, so the conservative choice is the one that cannot under-target
+    any listed domain. See :func:`_describe_clock_targets` for the envelope
+    echo of which one was used.
 
     ``None``/omitted is a deliberate, documented state, not an oversight
     (``docs/cli/synthesize.md``): the run still gets ``-constr`` -- so ABC's
@@ -2087,8 +2288,11 @@ def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
     """
     if not constraints:
         return None
+    clocks = _resolve_clocks(constraints)
     clock_period_ns = constraints.get("clock_period_ns")
     if clock_period_ns is None:
+        if clocks:
+            return int(round(min(c["period_ns"] for c in clocks) * 1000))
         return None
     if isinstance(clock_period_ns, bool) or not isinstance(
         clock_period_ns, (int, float)
@@ -2102,6 +2306,34 @@ def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
             "request.constraints.clock_period_ns must be greater than zero"
         )
     return int(round(clock_period_ns * 1000))
+
+
+def _describe_clock_targets(
+    constraints: dict[str, Any] | None, delay_target_ps: int | None
+) -> dict[str, Any]:
+    """The response's ``clock_targets`` object (issue #2883): which clock
+    constraints the request carried and how the single ABC delay target was
+    derived from them.
+
+    ``abc -D`` is one global number, so per-clock periods are *never*
+    individually enforced; ``per_clock_enforced`` is always ``false`` and
+    ``delay_target_basis`` names where ``delay_target_ps`` came from:
+    ``"none"``, ``"clock_period_ns"`` or ``"min_clocks_period_ns"``.
+    """
+    clocks = _resolve_clocks(constraints)
+    explicit = (constraints or {}).get("clock_period_ns") is not None
+    if explicit:
+        basis = "clock_period_ns"
+    elif clocks:
+        basis = "min_clocks_period_ns"
+    else:
+        basis = "none"
+    return {
+        "clocks": clocks,
+        "delay_target_ps": delay_target_ps,
+        "delay_target_basis": basis,
+        "per_clock_enforced": False,
+    }
 
 
 def _write_constr(constr_path: str, driving_cell: str, load_ff: float) -> None:
@@ -2263,32 +2495,28 @@ def _liberty_cell_names(liberty_path: str) -> frozenset[str] | None:
     """Every ``cell (<name>) { ... }`` group name in the resolved liberty, or
     ``None`` when that set cannot be established (issue #2382).
 
-    Deliberately minimal, the same scope discipline
-    :func:`_parse_liberty_leakage_nw` states for itself -- it reuses that
-    function's own :data:`_LIBERTY_CELL_HEADER_RE` and extracts *only* the
-    names, never a pin/timing model. This is the cell list
-    :func:`_validate_dont_use_against_liberty` checks a request's exclusion
-    patterns against, so that a typo cannot silently change the mapped
-    netlist.
+    This is the cell list :func:`_validate_dont_use_against_liberty` checks a
+    request's exclusion patterns against, so that a typo cannot silently
+    change the mapped netlist. Read via
+    :func:`~klayout_tools.liberty_compare.parse_liberty_text`, so quoted and
+    unquoted names alike are seen.
 
     ``None`` -- meaning "not establishable", which the caller treats as "do
     not validate" rather than "zero cells, reject everything" -- when the file
-    cannot be read *or* when it contains no ``cell (...)`` group at all. The
-    second case is the important one: a liberty this regex cannot see any cell
-    in is a limitation of this deliberately-partial parser, not evidence that
-    the caller's pattern is a typo, and concluding otherwise would reject a
-    perfectly good request. Never raises, matching
+    cannot be read, cannot be parsed as liberty, *or* when it contains no
+    ``cell (...)`` group at all: a liberty we cannot see any cell in is not
+    evidence that the caller's pattern is a typo, and concluding otherwise
+    would reject a perfectly good request. Never raises, matching
     :func:`_abc_supports_dont_use`'s "never break a run over an optional
     probe" posture.
     """
     try:
         with open(liberty_path, encoding="utf-8") as handle:
             liberty_text = handle.read()
-    except (OSError, UnicodeDecodeError):
+        library = parse_liberty_text(liberty_text, source=liberty_path)
+    except (OSError, UnicodeDecodeError, LibertyCompareError):
         return None
-    names = frozenset(
-        match.group("name") for match in _LIBERTY_CELL_HEADER_RE.finditer(liberty_text)
-    )
+    names = frozenset(cell.args[0] for cell in library.children("cell") if cell.args)
     return names or None
 
 
@@ -2440,6 +2668,8 @@ def _write_script(
     macro_inputs: tuple[dict[str, str], ...] = (),
     repo_root: str | None = None,
     pdk_root: str | None = None,
+    parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> str:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
@@ -2616,7 +2846,7 @@ def _write_script(
         abc_command = f"tee -q -o {abc_log_text} {abc_command}"
 
     lines = [
-        f"read_verilog {_script_path_text(path, repo_root=repo_root)}"
+        read_verilog_line(_script_path_text(path, repo_root=repo_root), defines)
         for path in sources
     ]
     # Issue #2635: every declared hard macro's blackbox declaration, before
@@ -2632,6 +2862,9 @@ def _write_script(
             macro_input["path"], repo_root=repo_root, pdk_root=pdk_root
         )
         lines.append(f"{reader} {macro_text}")
+    # Issue #3466: top-level parameter overrides apply between the reads and
+    # `hierarchy`, so elaboration sees the overridden value.
+    lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     if adder_techmap_path is not None:
         lines += ["proc", "opt_expr", "opt_clean"]
@@ -2792,6 +3025,31 @@ def _write_yosys_log(
     )
 
 
+_SV_SOURCE_ERROR_RE = re.compile(r"(?:^|[\s/\\])\S*\.svh?:\d+:\s*ERROR:")
+
+
+def _sv_frontend_hint_if_applicable(error_line: str) -> str:
+    """Hint appended when Yosys's native ``-sv`` front end rejects a
+    SystemVerilog construct (issue #4181).
+
+    Yosys prefixes a parse error with ``<file>:<line>:``, so the source
+    extension is read straight off the error line -- a ``.v`` source with
+    the same syntax error gets no hint. Conservative table: only the
+    unpacked-array-port class (``syntax error, unexpected '['`` while a
+    port list is expected) is recognised; anything else returns ``""``.
+    """
+    if not _SV_SOURCE_ERROR_RE.search(error_line):
+        return ""
+    if "syntax error, unexpected '['" not in error_line:
+        return ""
+    return (
+        " -- hint: this looks like an unpacked-array port (e.g. "
+        "`input logic [31:0] a_i[2]`), a SystemVerilog construct Yosys's "
+        "native `read_verilog -sv` front end does not support; rewrite it "
+        "as a packed/flattened port or pre-convert the source"
+    )
+
+
 def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
     """Build an actionable error message from a failed ``yosys -s`` run.
 
@@ -2823,6 +3081,7 @@ def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
             macro_hint = macro_spec.undeclared_module_hint(error_lines[-1])
             if macro_hint is not None:
                 message = f"{message} -- {macro_hint}"
+            message += _sv_frontend_hint_if_applicable(error_lines[-1])
             return message
 
     tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
@@ -3117,10 +3376,13 @@ def _read_abc_timing(
 #: absence. Kept as a module constant so the test suite pins the exact
 #: string a consumer branches on.
 STA_UNAVAILABLE_EXTENSION_NOT_INSTALLED = (
-    "the optional klt_statime_native extension is not installed, so no "
-    "gate-level static timing analysis was attempted -- from a repo "
-    "checkout, run `uv sync --group statime` (or `maturin develop "
-    "--release` inside native/statime/) and re-run to populate `sta`"
+    "the optional klt_statime_native extension is not installed (it is not "
+    "shipped with the published klayout-tools package), so no gate-level "
+    "static timing analysis was attempted -- from a repo checkout, run "
+    "`uv sync --group statime` (or `maturin develop --release` inside "
+    "native/statime/) and re-run to populate `sta`; from an installed "
+    "package, `klt sta` with a `verilog` request gives a netlist-level "
+    "timing estimate (needs OpenSTA)"
 )
 
 
@@ -3202,22 +3464,24 @@ def _read_sta_timing(
         )
 
 
-def _leakage_unit_scale_to_nw(liberty_text: str) -> float:
-    """The multiplier from this liberty's own ``leakage_power_unit`` to
-    nanowatts (see :data:`_LEAKAGE_POWER_UNIT_RE`). Defaults to ``1.0`` --
-    i.e. assumes the file's own ``cell_leakage_power`` numbers are already
-    nanowatts, Liberty's conventional default unit -- when the file declares
-    no ``leakage_power_unit`` at all, or names a unit :data:`_LEAKAGE_UNIT_TO_NW`
-    does not recognise. Never raises, matching
-    :func:`_abc_supports_dont_use`'s own "never break a run over an
-    optional/best-effort probe" posture.
+def _leakage_unit_scale_to_nw(unit_text: str | None) -> float:
+    """Multiplier turning a ``cell_leakage_power`` number expressed in the
+    library's ``leakage_power_unit`` (``unit_text``, the attribute's value --
+    see :data:`_LEAKAGE_POWER_UNIT_RE`) into nanowatts. Defaults to ``1.0``
+    -- liberty's own ``1nW`` default is not assumed to apply, but a library
+    declaring nothing is read as nanowatts -- when ``unit_text`` is absent or
+    names a unit :data:`_LEAKAGE_UNIT_TO_NW` does not recognise. Never
+    raises, matching :func:`_abc_supports_dont_use`'s own "never break a run
+    over an optional/best-effort probe" posture.
     """
-    match = _LEAKAGE_POWER_UNIT_RE.search(liberty_text)
+    if unit_text is None:
+        return 1.0
+    match = _LEAKAGE_POWER_UNIT_RE.match(unit_text.strip())
     if match is None:
         return 1.0
     try:
         magnitude = float(match.group("magnitude"))
-    except ValueError:  # pragma: no cover - regex only matches numbers
+    except ValueError:
         return 1.0
     per_unit_nw = _LEAKAGE_UNIT_TO_NW.get(match.group("unit").lower())
     if per_unit_nw is None:
@@ -3230,36 +3494,32 @@ def _parse_liberty_leakage_nw(liberty_text: str) -> dict[str, float]:
     scalar out of ``liberty_text``, converted to nanowatts via that
     liberty's own ``leakage_power_unit`` (:func:`_leakage_unit_scale_to_nw`).
 
-    Deliberately minimal, matching ``restructure.py``'s
-    :func:`~klayout_tools.restructure._parse_liberty_pins`'s own scope
-    discipline: this is not a general liberty parser, it extracts only the
-    one scalar :func:`_compute_leakage` needs. A cell with no
-    ``cell_leakage_power`` line (see :data:`_CELL_LEAKAGE_POWER_RE`'s
-    docstring -- some libraries, e.g. gf180mcu_fd_sc_mcu9t5v0, report
-    leakage only via per-input-state groups instead) is simply absent from
-    the result, never assigned a guessed value.
+    Extracts only the one scalar :func:`_compute_leakage` needs. A cell with
+    no ``cell_leakage_power`` attribute (see the note above
+    :data:`_LEAKAGE_POWER_UNIT_RE` -- some libraries, e.g.
+    gf180mcu_fd_sc_mcu9t5v0, report leakage only via per-input-state groups
+    instead) is simply absent from the result, never assigned a guessed
+    value. Text that is not parseable liberty yields ``{}`` -- the caller
+    treats that as "leakage not establishable" (``None``), never as a zero.
     """
-    unit_scale = _leakage_unit_scale_to_nw(liberty_text)
-    headers = list(_LIBERTY_CELL_HEADER_RE.finditer(liberty_text))
+    try:
+        library = parse_liberty_text(liberty_text)
+    except LibertyCompareError:
+        return {}
+    unit_scale = _leakage_unit_scale_to_nw(library.attributes.get("leakage_power_unit"))
     leakage_by_cell: dict[str, float] = {}
-    for index, header in enumerate(headers):
-        body_start = header.end()
-        body_end = (
-            headers[index + 1].start()
-            if index + 1 < len(headers)
-            else len(liberty_text)
-        )
-        match = _CELL_LEAKAGE_POWER_RE.search(liberty_text, body_start, body_end)
-        if match is None:
+    for cell in library.children("cell"):
+        raw_value = cell.attributes.get("cell_leakage_power")
+        if raw_value is None or not cell.args:
             continue
         try:
-            value = float(match.group("value"))
-        except ValueError:  # pragma: no cover - regex only matches numbers
+            value = float(raw_value)
+        except ValueError:
             continue
         # A later block for the same cell name (should not happen in a
-        # well-formed liberty) overwrites, matching `_parse_liberty_pins`'s
-        # own "last one wins" convention.
-        leakage_by_cell[header.group("name")] = value * unit_scale
+        # well-formed liberty) overwrites, "last one wins" -- the same
+        # convention as `restructure._parse_liberty_pins`.
+        leakage_by_cell[cell.args[0]] = value * unit_scale
     return leakage_by_cell
 
 
@@ -3284,7 +3544,7 @@ def _compute_leakage(
     *none* of those types have a ``cell_leakage_power`` entry at all (e.g.
     gf180mcu_fd_sc_mcu9t5v0, which reports leakage only via per-input-state
     ``leakage_power()`` groups this module deliberately does not average --
-    see :data:`_CELL_LEAKAGE_POWER_RE`'s docstring). When *some* (not all)
+    see the note above :data:`_LEAKAGE_POWER_UNIT_RE`). When *some* (not all)
     instantiated types are covered, the total sums exactly those --
     ``leakage_by_type_nw`` (the bonus per-type breakdown the issue asks for)
     names precisely which types were covered, so a caller comparing its own
@@ -3838,6 +4098,53 @@ def _synthesize_provenance_hashes(
     return input_hash, _content_hash(liberty_path)
 
 
+def _synthesize_request_parameters(request_path: str) -> dict[str, int | str]:
+    """The validated ``parameters`` override of the request at
+    ``request_path`` (``{}`` when absent) -- what ``--check`` compares against
+    the committed report's recorded ``parameters`` (issue #3466)."""
+    return validate_parameters(
+        load_request(request_path).get("parameters"),
+        SynthesizeError,
+        "request.parameters",
+    )
+
+
+def _synthesize_request_defines(request_path: str) -> dict[str, str | None]:
+    """The validated ``defines`` of the request at ``request_path`` (``{}``
+    when absent) -- what ``--check`` compares against the committed report's
+    recorded ``defines`` (issue #4196)."""
+    return validate_defines(
+        load_request(request_path).get("defines"),
+        SynthesizeError,
+        "request.defines",
+    )
+
+
+def _defines_check(recorded: Any, current: dict[str, str | None]) -> dict[str, Any]:
+    """Cheap-mode comparison entry for ``defines`` (issue #4196); an absent
+    recorded ``defines`` counts as ``{}``."""
+    expected = {} if recorded is None else recorded
+    return {
+        "field": "defines",
+        "expected": expected,
+        "actual": current,
+        "match": expected == current,
+    }
+
+
+def _parameters_check(recorded: Any, current: dict[str, int | str]) -> dict[str, Any]:
+    """Cheap-mode comparison entry for the ``parameters`` override (issue
+    #3466). A report that predates the field recorded no override, so an
+    absent ``parameters`` counts as ``{}``."""
+    expected = {} if recorded is None else recorded
+    return {
+        "field": "parameters",
+        "expected": expected,
+        "actual": current,
+        "match": expected == current,
+    }
+
+
 def check_synthesize_report(
     report_path: str,
     request_path: str,
@@ -3886,6 +4193,14 @@ def check_synthesize_report(
             get_path(committed, ("provenance", "deck", "content_hash")),
             deck_hash,
         ),
+        _parameters_check(
+            get_path(committed, ("parameters",)),
+            _synthesize_request_parameters(request_path),
+        ),
+        _defines_check(
+            get_path(committed, ("defines",)),
+            _synthesize_request_defines(request_path),
+        ),
     ]
     return build_check_result(report_path=report_path, checks=checks)
 
@@ -3925,6 +4240,10 @@ def rerun_synthesize_report(
     run directory, and that refusal (a :class:`SynthesizeError` naming the
     directory) is surfaced unchanged rather than swallowed -- "could not
     verify" is the honest answer there, never a false ``"match"``.
+    A request using ``outputs.dir`` *can* be re-run: the re-run ignores that
+    stable directory (which the first run left populated) and writes into a
+    fresh ``.klt/synthesize/run-<uuid>/`` scratch directory instead, so the
+    committed artifacts are never touched.
 
     Raises :class:`SynthesizeError` for a missing/unparseable committed
     report or any error the re-run itself raises -- never a traceback.
@@ -3938,6 +4257,7 @@ def rerun_synthesize_report(
         equiv_timeout_s=equiv_timeout_s,
         restructure_timing=restructure_timing,
         restructure_max_iterations=restructure_max_iterations,
+        _scratch_run_dir=True,
     )
     return build_rerun_result(
         report_path=report_path,

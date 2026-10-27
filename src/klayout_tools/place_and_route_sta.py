@@ -51,7 +51,12 @@ import os
 import re
 from typing import Any
 
-from ._openroad_engine import _count_violations, _run_openroad, _timing_status
+from ._openroad_engine import (
+    _count_violations,
+    _run_openroad,
+    _timing_status,
+    write_sdf_line,
+)
 from ._paths import _count_spef_nets_annotated, _tcl_net_list
 
 
@@ -67,6 +72,7 @@ def _corner_sweep_script_lines(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    library: dict[str, Any] | None = None,
 ) -> list[str]:
     """Tcl for the post-route multi-corner setup/hold sweep (issue #949,
     ``docs/design/post-route-sta-survey.md`` section 4.2) -- a **second**,
@@ -179,6 +185,7 @@ def _corner_sweep_script_lines(
         _design_rule_check_lines,
         _design_rule_constraint_lines,
         _io_delay_lines,
+        _wire_rc_lines,
     )
 
     lines = [f"read_db {checkpoint_in}"]
@@ -195,7 +202,7 @@ def _corner_sweep_script_lines(
     # input-port -> register / register -> output-port.
     lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
     lines += [
-        f"set_wire_rc -layer {io_spec['layer_v']}",
+        *_wire_rc_lines(io_spec, library),
         "estimate_parasitics -global_routing",
     ]
     # Issue #2357: the library-only design-rule pass -- no caller-stated
@@ -343,7 +350,7 @@ def _spef_sta_script_lines(
         f"read_spef {spef_path}",
     ]
     if sdf_path is not None:
-        lines.append(f"write_sdf -divider . -include_typ {sdf_path}")
+        lines.append(write_sdf_line(sdf_path))
     lines += _metrics_report_lines(include_fmax=False, include_power=False)
     lines += _violation_count_lines()
     return lines
@@ -825,6 +832,7 @@ def _run_corner_sweep(
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
     engine_logs: list[dict[str, Any]] | None = None,
+    library: dict[str, Any] | None = None,
 ) -> tuple[
     float | None,
     float | None,
@@ -969,6 +977,7 @@ def _run_corner_sweep(
         max_fanout=max_fanout,
         input_delay_ns=input_delay_ns,
         output_delay_ns=output_delay_ns,
+        library=library,
     )
     _write_script(script_path, lines)
 
@@ -1083,6 +1092,7 @@ def _run_corner_sweep(
             max_fanout=max_fanout,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            library=library,
         )
         _write_script(corner_script_path, corner_lines)
 

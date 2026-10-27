@@ -278,6 +278,26 @@ class _SocketCheckEnvelope(_SocketCheckRequired, total=False):
     provenance: dict[str, Any] | None
 
 
+class _SeamCheckRequired(_EnvelopeCommon):
+    # Issue #4189: `klt seam-check` (docs/cli/seam-check.md). `tiling` and
+    # `bands_um` (null when that assertion was not requested) plus the
+    # `violations` list are what `_classify` recognises this shape by;
+    # `status` is what `_check_passed` grades.
+    status: str
+    violations: list[Any]
+    tiling: Any
+    bands_um: Any
+
+
+class _SeamCheckEnvelope(_SeamCheckRequired, total=False):
+    file: Any
+    layer: Any
+    dbu_um: Any
+    violation_count: Any
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
 class _LefAbstractRequired(_EnvelopeCommon):
     # Issue #2839: `klt lef-abstract` (docs/cli/lef-abstract.md).
     # `macro_name` plus the `pins` list and the `self_check` block are the
@@ -294,6 +314,22 @@ class _LefAbstractEnvelope(_LefAbstractRequired, total=False):
     output: Any
     size_um: dict[str, Any]
     power_pins: dict[str, Any]
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _SynthesizeRequired(_EnvelopeCommon):
+    # Issue #4015: `klt synthesize` (docs/cli/synthesize.md). `structural`
+    # plus `netlist_sha256`/`netlist_path` are the fields `_classify`
+    # recognises this shape by; `status` and `structural`'s counts are what
+    # `_check_passed` grades.
+    status: str
+    structural: dict[str, Any]
+    netlist_sha256: str
+    netlist_path: Any
+
+
+class _SynthesizeEnvelope(_SynthesizeRequired, total=False):
     metrics: dict[str, Any]
     provenance: dict[str, Any] | None
 
@@ -344,7 +380,9 @@ _EvidenceEnvelope = (
     | _ErcEnvelope
     | _PlaceAndRouteEnvelope
     | _SocketCheckEnvelope
+    | _SeamCheckEnvelope
     | _LefAbstractEnvelope
+    | _SynthesizeEnvelope
     | _GenericEnvelope
     | _ErrorEnvelope
 )
@@ -368,7 +406,9 @@ _ENVELOPE_SHAPES: dict[str, Any] = {
     "erc": _ErcEnvelope,
     "place-and-route": _PlaceAndRouteEnvelope,
     "socket-check": _SocketCheckEnvelope,
+    "seam-check": _SeamCheckEnvelope,
     "lef-abstract": _LefAbstractEnvelope,
+    "synthesize": _SynthesizeEnvelope,
     "generic": _GenericEnvelope,
     "error": _ErrorEnvelope,
 }

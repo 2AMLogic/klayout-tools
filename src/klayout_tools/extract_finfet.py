@@ -212,6 +212,29 @@ class _Channel:
         self.dbu = dbu
 
 
+def _ordered_source_drain(neighbours: Iterable[Any]) -> tuple[Any, Any]:
+    """The channel's two S/D neighbours as ``(source, drain)``, ordered by
+    geometry rather than by region iteration order.
+
+    A merged :class:`klayout.db.Region` iterates in an order that is an
+    implementation detail of its storage -- it differs between the macOS and
+    Linux ``klayout`` wheels -- so taking the neighbours "as iterated" made
+    the S/D assignment (and with it the emitted ``M… D G S B`` card and the
+    JSON ``nets``) depend on the host platform (issue #3154). The rule here
+    is fixed: the neighbour whose bbox sorts first by ``(left, bottom,
+    right, top)`` is the source. S/D interchange stays electrically legal
+    (LVS and the parallel-finger combiner both accept it); this only makes
+    the choice reproducible.
+    """
+
+    def key(polygon: Any) -> tuple[int, int, int, int]:
+        box = polygon.bbox()
+        return (box.left, box.bottom, box.right, box.top)
+
+    source, drain = sorted(neighbours, key=key)
+    return source, drain
+
+
 def _neighbour_problem(ch: _Channel, _deck: FinFETExtractionDeck) -> str | None:
     count = ch.neighbours.count()
     if count != 2:
@@ -337,7 +360,7 @@ def _make_extractor(
             device.set_parameter("W", ch.width_dbu * ch.dbu)
             device.set_parameter(NFIN_PARAM, float(ch.fins.count()))
             device.set_parameter(FINGERS_PARAM, 1.0)
-            source, drain = list(ch.neighbours.each())
+            source, drain = _ordered_source_drain(ch.neighbours.each())
             self.define_terminal(device, cls.terminal_id("S"), 0, source)
             self.define_terminal(device, cls.terminal_id("D"), 0, drain)
             self.define_terminal(device, cls.terminal_id("G"), 2, ch.polygon)
