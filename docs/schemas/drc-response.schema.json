@@ -57,6 +57,7 @@
           ]
         },
         "rule_selection": {"$ref": "#/$defs/rule_selection"},
+        "tile": {"$ref": "#/$defs/tile"},
         "engine_deck_errors": {"$ref": "#/$defs/engine_deck_errors"},
         "coverage_assertion": {"$ref": "#/$defs/coverage_assertion"},
         "provenance": {"$ref": "#/$defs/provenance"}
@@ -66,7 +67,8 @@
         "description": "Native-KLayout report: no `metrics`; `coverage` additionally lists the RDB `rule_categories`. `engine_deck_errors` appears only when --allow-deck-errors tolerated a failed deck run; `coverage_assertion` only when --expect-rule-categories(-file) was given.",
         "properties": {
           "coverage": {"required": ["rule_categories"]},
-          "rule_selection": false
+          "rule_selection": false,
+          "tile": false
         }
       },
       "else": {
@@ -244,6 +246,16 @@
             "additionalProperties": true
           }
         }
+      },
+      "additionalProperties": true
+    },
+    "tile": {
+      "description": "Curated `--tile` runs only (issue #4226): the abutment array each top cell was checked as the centre of.",
+      "type": "object",
+      "required": ["columns", "rows"],
+      "properties": {
+        "columns": {"type": "integer", "minimum": 1},
+        "rows": {"type": "integer", "minimum": 1}
       },
       "additionalProperties": true
     },
