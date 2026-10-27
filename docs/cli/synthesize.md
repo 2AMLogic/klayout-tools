@@ -1525,6 +1525,9 @@ it to `area_um2` yourself. `cells_without_area` above names every
 instantiated type (macro or otherwise) `area_um2` does not account for, and
 a non-empty result also surfaces as a `macro_area_excluded` /
 `cells_without_liberty_area` entry in `warnings` — see "`warnings`" below.
+The `macro_area_excluded` text sends the caller to `response.macros[].lib`
+only for macros that have one; a LEF-only (or `verilog_blackbox`-only) macro
+has `lib: null`, so the warning says no area is available for it here.
 
 See `docs/cli/sta.md`'s and `docs/cli/place-and-route.md`'s own "Hard
 macros"/"Hard-macro placement" sections for how the other two verbs consume

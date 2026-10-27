@@ -85,6 +85,7 @@ def memory_evidence_script_text(
     liberty_path: str | None = None,
     library_cells_path: str | None = None,
     defines: dict[str, str | None] | None = None,
+    macro_inputs: tuple[dict[str, str], ...] = (),
     repo_root: str | None = None,
 ) -> str:
     """The side invocation's ``.ys`` text.
@@ -97,12 +98,17 @@ def memory_evidence_script_text(
     :fine``. The extra ``proc`` before the first ``stat`` is the pass
     ``synth``'s own ``coarse`` label (and the arithmetic insertion) would
     run first anyway; ``proc`` is idempotent, and ``stat``/``select -list``
-    never modify the design. No liberty is read -- nothing here is
+    never modify the design. No liberty is read for mapping -- nothing is
     technology-mapped. The one exception (issue #4205): when ``liberty_path``
     is given it is loaded ``-lib`` first, exactly as the production script
     does, so RTL instantiating a library cell elaborates; the cells that load
     declares are listed to ``library_cells_path`` so they are not reported as
-    surviving blackboxes (they carry area).
+    surviving blackboxes (they carry area). Declared hard macros' blackbox
+    declarations (``macro_inputs``, issue #4368) are read exactly as the
+    production script reads them -- after the RTL, before ``hierarchy`` --
+    because otherwise ``hierarchy -check`` fails on the undeclared macro cell
+    and ``memory_mapping`` degrades to ``indeterminate`` on every
+    macro-bearing design.
 
     With ``repo_root`` set, every path that resolves inside it is written
     repo-relative (the main script's ``_script_path_text`` rule), so the
@@ -126,6 +132,13 @@ def memory_evidence_script_text(
                 f"tee -q -o {rel(library_cells_path)} select -list =A:blackbox"
             )
     lines += [read_verilog_line(rel(path), defines) for path in sources]
+    for macro_input in macro_inputs:
+        reader = (
+            "read_liberty -lib"
+            if macro_input["source"] == "liberty"
+            else "read_verilog -lib"
+        )
+        lines.append(f"{reader} {rel(macro_input['path'])}")
     lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     lines.append(f"tee -q -o {blackbox_list_path} select -list =A:blackbox =A:whitebox")
@@ -377,6 +390,7 @@ def collect_memory_evidence(
     parameters: dict[str, int | str] | None = None,
     liberty_path: str | None = None,
     defines: dict[str, str | None] | None = None,
+    macro_inputs: tuple[dict[str, str], ...] = (),
 ) -> tuple[dict[str, Any], list[str] | None]:
     """Run the side evidence invocation and return ``(memory_mapping,
     blackbox_modules)`` for the response.
@@ -429,6 +443,7 @@ def collect_memory_evidence(
                 liberty_path=liberty_path,
                 library_cells_path=library_cells_path,
                 defines=defines,
+                macro_inputs=macro_inputs,
                 repo_root=repo_root,
             ),
         )

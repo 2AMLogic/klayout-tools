@@ -50,6 +50,43 @@ def test_evidence_script_mirrors_production_prefix_and_stops_before_fine():
     ]
 
 
+def test_evidence_script_declares_macros_after_rtl_before_hierarchy():
+    """Issue #4368: the production script reads each macro's blackbox
+    declaration before `hierarchy -check`; the side script must too, or
+    `memory_mapping` is `indeterminate` on every macro-bearing design."""
+    lines = sm.memory_evidence_script_text(
+        sources=["/a/x.v"],
+        hdl_toplevel="top",
+        blackbox_list_path="/o/bb.txt",
+        elaborated_stats_path="/o/e.json",
+        pre_lowering_stats_path="/o/p.json",
+        macro_inputs=(
+            {"cell": "sram", "source": "liberty", "path": "/m/sram.lib"},
+            {"cell": "rom", "source": "verilog_blackbox", "path": "/m/rom.v"},
+            {"cell": "pll", "source": "lef", "path": "/o/pll_blackbox.v"},
+        ),
+    ).splitlines()
+    assert lines[:5] == [
+        "read_verilog /a/x.v",
+        "read_liberty -lib /m/sram.lib",
+        "read_verilog -lib /m/rom.v",
+        "read_verilog -lib /o/pll_blackbox.v",
+        "hierarchy -check -top top",
+    ]
+
+
+def test_evidence_script_without_macros_is_unchanged():
+    text = sm.memory_evidence_script_text(
+        sources=["/a/x.v"],
+        hdl_toplevel="top",
+        blackbox_list_path="/o/bb.txt",
+        elaborated_stats_path="/o/e.json",
+        pre_lowering_stats_path="/o/p.json",
+        macro_inputs=(),
+    )
+    assert "-lib" not in text
+
+
 def test_evidence_script_loads_liberty_first_and_lists_library_cells():
     lines = sm.memory_evidence_script_text(
         sources=["/a/x.v"],
