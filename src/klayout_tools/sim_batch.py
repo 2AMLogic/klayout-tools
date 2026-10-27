@@ -234,6 +234,13 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # 7849a377c corners.params parameter axis (#3035); first in v0.7.0
     # (`git tag --contains 7849a377c`).
     "corners.params": "0.7.0",
+    # b24141ef9 corners.units (#2993), after v0.7.0; first in v0.8.0
+    # (`git tag --contains b24141ef9`). An older runner ignores the axis and
+    # runs one default corner.
+    "corners.units": "0.8.0",
+    # 0380f2a05 corners.temperature_param, after v0.7.0; first in v0.8.0
+    # (`git tag --contains 0380f2a05`).
+    "corners.temperature_param": "0.8.0",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
@@ -789,6 +796,10 @@ _RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
     "corners.process[].sections[]": _uses_process_section_objects,
     "corners.params": lambda request: bool(
         (request.get("corners") or {}).get("params")
+    ),
+    "corners.units": lambda request: "units" in (request.get("corners") or {}),
+    "corners.temperature_param": lambda request: (
+        "temperature_param" in (request.get("corners") or {})
     ),
     "options.ngspice_init": _uses_option("ngspice_init"),
     "options.osdi_preload": _uses_option("osdi_preload"),
