@@ -527,8 +527,21 @@ s2a_pairs.polygons.raw.not_overlapping(active)
 # LISD or SDT). With an empty second layer there is nothing to separate LIG
 # from, so the result is the (empty) edge pairs of that layer. The rule is
 # still declared via output(), so the coverage count is unchanged.
+#
+# The same net separation also aborts KLayout 0.28 ("m_type == Polygon was not
+# true in Region::separation_check", #4340) when its operands are non-empty
+# but no pair lies within the distance: a tie or tap cell whose LIG sits
+# near, but not within, the LISD/SDT. The net-aware result is always a subset
+# of the plain one (props_ne only drops pairs on one net), so an empty plain
+# separation is already the answer and the net-aware call is skipped; the
+# rule is still declared via output().
 lig_net_separation = lambda do |other, other_nets, *args|
-  other.is_empty? ? other.space(1.nm) : lig_nets.separation(other_nets, *args, props_ne)
+  if other.is_empty?
+    other.space(1.nm)
+  else
+    plain = lig.separation(other, *args)
+    plain.is_empty? ? plain : lig_nets.separation(other_nets, *args, props_ne)
+  end
 end
 lig_net_separation.call(lisd, lisd_nets, 14.nm, euclidian)
   .output("LIG.LISD.S.6", "Table 3.10.1: min spacing between LIG and LISD not on the same net 14 nm")
