@@ -4,6 +4,9 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-27
 
+- **PR #4444**: feat: stream OpenROAD stdout/stderr to retained logs while it runs
+- **Issue #4436** (closed): Friction: place-and-route route stage is one non-resumable process of 2 h or more, with no progress output
+- **Issue #4439** (closed): env_provenance records a host-absolute PDK path, tripping chip repos' evidence host-path ratchets
 - **PR #4370**: fix: declare macros in memory-evidence script and word macro_area_excluded per macro
 - **Issue #4368** (closed): Follow-on from PR #2645: macro-bearing designs and memory_mapping evidence
 - **PR #4433**: fix(ingest-canary): retry transient git clone/fetch failures in clone_repo
