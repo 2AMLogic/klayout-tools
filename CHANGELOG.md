@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **New verb `klt formal`** (issue #4358, documented in
+  [`docs/cli/formal.md`](docs/cli/formal.md)): bounded model checking,
+  k-induction and cover via SymbiYosys on RTL or a `klt synthesize` netlist
+  plus liberty. Generates the `.sby` itself (inputs copied via `[files]`, so
+  WASI-sandboxed Yosys works); report carries `status` (`pass`|`fail`|
+  `unknown`), `depth_reached`, `trace_path`, `netlist_path`. Timeout is
+  `unknown`, never `pass`. Exit codes 0/1/3/4. New command; no existing
+  `schema_version` changes.
 - **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
   Landing candidates are now enumerated per merged net polygon rather than over
   the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too

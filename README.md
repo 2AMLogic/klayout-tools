@@ -147,6 +147,7 @@ klt power routed.gds power.json          # routed power/ground nets -> resistive
 klt erc routed.gds erc.json --pdk sky130 # per-gate connectivity model + antenna-ratio verdict + core ERC findings (floating gate, unconnected/shorted net, missing tie)
 klt functional-verification verify.json  # cocotb regression (Icarus/Verilator) -> pass/fail + coverage
 klt equiv request.json                   # combinational equivalence (Yosys miter/SAT) -> proof or counterexample
+klt formal request.json                  # bmc / k-induction / cover on RTL or a mapped netlist (SymbiYosys)
 klt eval descriptor.json --candidate '{"layout": "..."}'  # score a candidate: valid + one objective
 klt gen-compose plan.json                # place + wire generated blocks into one circuit
 klt socket-check design.gds --socket socket.json  # pins/outline/budgets vs a socket descriptor

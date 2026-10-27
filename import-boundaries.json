@@ -200,6 +200,14 @@
         "klayout_tools.substrate_resistance"
       ]
     },
+    "formal": {
+      "kind": "verb",
+      "description": "`klt formal` implementation: core module plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.formal_cmd",
+        "klayout_tools.formal"
+      ]
+    },
     "functional_verification": {
       "kind": "verb",
       "description": "`klt functional_verification` implementation: core modules plus CLI adapter.",
@@ -818,6 +826,11 @@
       "consumer": "env_provenance",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "formal",
+      "exporter": "cli-infra",
+      "reason": "Verb CLI adapter uses the shared output envelope helpers (docs/json-contract.md), as equiv does."
     },
     {
       "consumer": "equiv",
