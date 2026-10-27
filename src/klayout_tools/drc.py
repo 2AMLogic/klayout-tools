@@ -1408,6 +1408,28 @@ def _restrict_to_tile_centre(state: _DrcState, setup: _DrcSetup) -> None:
     state.rule_counts = counts
 
 
+def _deck_layer_tuples(deck: Any) -> set[tuple[int, int]]:
+    """Every (layer, datatype) any rule in ``deck`` references."""
+    # Deck-static: every (layer, datatype) any rule in this deck references,
+    # regardless of what's actually present in `path`.
+    deck_layer_tuples: set[tuple[int, int]] = set()
+    for rule in deck:
+        deck_layer_tuples.add(rule.layer)
+        if rule.other_layer is not None:
+            deck_layer_tuples.add(rule.other_layer)
+        deck_layer_tuples.update(_spec_layers(rule))
+        if rule.derived_layer is not None:
+            # `rule.layer` is only the derived rule's *reporting* identity
+            # (see DerivedLayer's docstring) -- the layer(s) actually read
+            # to compute the checked region are these, independent of
+            # whether either happens to equal `rule.layer`. `"holes"` mode
+            # (#1976) reads only `base` -- `intersect_with` is `None` for it.
+            deck_layer_tuples.add(rule.derived_layer.base)
+            if rule.derived_layer.intersect_with is not None:
+                deck_layer_tuples.add(rule.derived_layer.intersect_with)
+    return deck_layer_tuples
+
+
 def _prepare_drc(
     path: str,
     deck_name: str,
@@ -1467,23 +1489,7 @@ def _prepare_drc(
     if tile is not None:
         top_cells, tile_windows = _tile_top_cells(layout, top_cells, tile)
 
-    # Deck-static: every (layer, datatype) any rule in this deck references,
-    # regardless of what's actually present in `path`.
-    deck_layer_tuples: set[tuple[int, int]] = set()
-    for rule in deck:
-        deck_layer_tuples.add(rule.layer)
-        if rule.other_layer is not None:
-            deck_layer_tuples.add(rule.other_layer)
-        deck_layer_tuples.update(_spec_layers(rule))
-        if rule.derived_layer is not None:
-            # `rule.layer` is only the derived rule's *reporting* identity
-            # (see DerivedLayer's docstring) -- the layer(s) actually read
-            # to compute the checked region are these, independent of
-            # whether either happens to equal `rule.layer`. `"holes"` mode
-            # (#1976) reads only `base` -- `intersect_with` is `None` for it.
-            deck_layer_tuples.add(rule.derived_layer.base)
-            if rule.derived_layer.intersect_with is not None:
-                deck_layer_tuples.add(rule.derived_layer.intersect_with)
+    deck_layer_tuples = _deck_layer_tuples(deck)
 
     # Reuse layers.py's existing per-layer enumeration (used today by
     # `klt layers`) for stream-layer enumeration, rather than a second
