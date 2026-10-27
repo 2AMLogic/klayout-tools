@@ -183,8 +183,11 @@ _DEVICE_LIKE_PARAMS = _CARRIED_PARAMS + ("r_length", "r_width", "c_length", "c_w
 #: instead of rejecting it (see :func:`_resolve_finger_count` and
 #: :func:`_expand_mos_fingers`); resistor/capacitor calls still route their
 #: own ``nf`` through this same rejection tuple (:func:`_convert_geometry_card`/
-#: :func:`_convert_capacitor_card` call :func:`_reject_multiplicity` with no
-#: ``exclude``), so a resistor/capacitor ``nf>1`` is still a hard error.
+#: :func:`_convert_capacitor_card` call :func:`_reject_multiplicity`), so a
+#: resistor/capacitor ``nf>1`` is still a hard error. A capacitor's instance
+#: multiplier ``m`` is the exception: it is excluded and expanded into ``m``
+#: parallel plain ``C`` cards (issue #4318), so only its ``nf``/``mult``/``mf``
+#: are still rejected.
 _MULTIPLICITY_PARAMS = ("nf", "m", "mult", "mf")
 
 #: The multiplicity parameters :func:`_reject_multiplicity` never rejects for
@@ -193,6 +196,10 @@ _MULTIPLICITY_PARAMS = ("nf", "m", "mult", "mf")
 #: :func:`_resolve_multiplier` (``m``, issue #3123) and
 #: :func:`_check_mos_mult` (``mult``, mismatch-only) handle them instead.
 _MOS_EXCLUDED_MULTIPLICITY_PARAMS = ("nf", "m", "mult")
+
+#: The multiplicity parameter :func:`_reject_multiplicity` never rejects for a
+#: capacitor call -- :func:`_convert_capacitor_card` expands ``m`` (issue #4318).
+_CAPACITOR_EXCLUDED_MULTIPLICITY_PARAMS = ("m",)
 
 #: Terminal count of the curated capacitor primitive, used the same way
 #: :data:`_MOS_TERMINALS` is for MOS -- a hard, named error on a mismatched
@@ -1067,6 +1074,10 @@ def _convert_capacitor_card(
     Same ``0``-placeholder-value convention as :func:`_convert_geometry_card`
     (this module has no farad-per-area coefficient to compute a real
     capacitance from either -- that also lives in ``klayout_tools.decks``).
+
+    An instance multiplier ``m`` (issue #4318, mirroring #3123 for MOS)
+    expands into ``m`` parallel cards named ``<instance>_m0``, ...; ``A``/``P``
+    stay per copy. ``mf``/``nf``/``mult`` greater than 1 are still rejected.
     """
     if len(nodes) != _CAPACITOR_TERMINALS:
         raise NormalizeError(
@@ -1074,7 +1085,19 @@ def _convert_capacitor_card(
             f"{_CAPACITOR_TERMINALS} terminals (A B), found {len(nodes)} "
             f"({' '.join(nodes) or '<none>'})"
         )
-    _reject_multiplicity(instance, subckt_name, params)
+    multiplier = _resolve_positive_int(
+        instance,
+        subckt_name,
+        params,
+        "m",
+        "to expand into that many parallel plain-element devices",
+    )
+    _reject_multiplicity(
+        instance,
+        subckt_name,
+        params,
+        exclude=_CAPACITOR_EXCLUDED_MULTIPLICITY_PARAMS,
+    )
 
     has_length_param = lookup.length_param in params
     has_width_param = lookup.width_param in params
@@ -1103,7 +1126,14 @@ def _convert_capacitor_card(
         perimeter_um = 2.0 * (l_um + w_um)
         extra = f" A={_format_um2(area_um2)} P={_format_um(perimeter_um)}"
 
-    return f"{instance} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
+    if multiplier == 1:
+        return f"{instance} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
+    # Instance multiplier ``m`` (issue #4318): ``m`` parallel copies, each
+    # carrying the per-copy A/P, folded back by ``options.combine_devices``.
+    return "\n".join(
+        f"{instance}_m{j} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
+        for j in range(multiplier)
+    )
 
 
 def _convert_bipolar_card(

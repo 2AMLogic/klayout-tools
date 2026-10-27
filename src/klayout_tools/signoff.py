@@ -58,7 +58,7 @@ from ._report_verify import (
     load_committed_report,
     strip_path_patterns,
 )
-from .build_identity import version_report
+from .build_identity import build_version, version_report
 from .coverage import (
     RESULT_PARTIAL,
     coverage_nothing_checked,
@@ -911,6 +911,9 @@ _REASON_UNRECOGNIZED_ENVELOPE = "unrecognized_envelope"
 _REASON_CHECK_ERRORED = "check_errored"
 _REASON_CHECK_FAILED = "check_failed"
 _REASON_STALE_EVIDENCE = "stale_evidence"
+#: Issue #4314: a digital item-5 entry citing only ``klt sim`` (the full-custom
+#: sub-case) must also carry a measured per-corner timing-margin metric.
+_REASON_TIMING_MARGIN_MISSING = "timing_margin_missing"
 
 #: Issue #2198: the resolved evidence *is* a `klt` envelope -- it carries a
 #: kind's **primary** marker (see :data:`_NEAR_MISS_MARKERS`) -- but not the
@@ -1636,6 +1639,12 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                     "passed": <bool>,
                     "detail": {...},  # kind-specific summary, see _detail()
                     "provenance": {...} | None,
+                    # Issue #4223, report-only: never changes `passed`/`status`.
+                    "build_drift": {
+                        "state": "current" | "stale" | "unverifiable",
+                        "cited_klt_version": <str> | None,
+                        "running_klt_version": <str>,
+                    },
                 },
                 ...
             ],
@@ -2316,7 +2325,39 @@ def _build_check(kind: str, envelope: _EvidenceEnvelope, source: str) -> dict[st
         "passed": _check_passed(kind, envelope) and coverage_refusal is None,
         "detail": _detail(kind, envelope),
         "provenance": envelope.get("provenance"),
+        "build_drift": _build_drift(envelope.get("provenance")),
     }
+
+
+#: ``build_drift.state`` values (issue #4223).
+_BUILD_DRIFT_CURRENT = "current"
+_BUILD_DRIFT_STALE = "stale"
+_BUILD_DRIFT_UNVERIFIABLE = "unverifiable"
+
+
+def _build_drift(provenance: Any) -> dict[str, Any]:
+    """Compare a cited envelope's ``provenance.klt_version`` with the running
+    build (issue #4223), for one ``checks[]`` entry.
+
+    ``klt_version`` is the full build identity (``klt --version``), so a
+    different string means a different build produced the verdict. Report-only:
+    the marker is disclosed, never folded into ``passed`` or the overall
+    ``status``. An envelope with no ``klt_version`` (no provenance block, a
+    generic envelope) or an identity either side could not resolve (``+unknown``)
+    is ``unverifiable`` -- absence of evidence, never ``stale``.
+    """
+    running = build_version()
+    cited = provenance.get("klt_version") if isinstance(provenance, dict) else None
+    if not isinstance(cited, str) or not cited:
+        state = _BUILD_DRIFT_UNVERIFIABLE
+        cited = None
+    elif "+unknown" in cited or "+unknown" in running:
+        state = _BUILD_DRIFT_UNVERIFIABLE
+    elif cited == running:
+        state = _BUILD_DRIFT_CURRENT
+    else:
+        state = _BUILD_DRIFT_STALE
+    return {"state": state, "cited_klt_version": cited, "running_klt_version": running}
 
 
 def _sta_corner_timing_passed(fields: dict[str, Any]) -> bool:
@@ -4382,8 +4423,12 @@ def build_tier_report(
       of it -- see :data:`_REASON_NEGATIVE_CONTROL_NOT_DETECTED`.
     - ``"no_pdn"`` (issue #2025, item 11 only) -- the cited `klt
       place-and-route` response says no power grid was built at all
-      (``power.pdn`` is not ``true``, or no ``power.tapcell_master`` was
-      placed). Re-run P&R with a ``request.power`` block.
+      (``power.pdn`` is not ``true``). Re-run P&R with a ``request.power``
+      block.
+    - ``"no_tapcell_master"`` (issue #4199, item 11 only) -- the grid was
+      built (``power.pdn: true``) but ``power.tapcell_master`` is null and
+      the response does not state ``power.tapless: true``. Re-run P&R on a
+      current ``klt``; a library documented tapless states it and grades.
     - ``"supply_spec_incomplete"`` (issue #2025, item 11 only) -- the cited
       `klt erc` run's own spec document does not ask the question item 11
       grades: unreadable, no ``"kind": "supply"`` net declared, no ``ties[]``
@@ -5742,11 +5787,9 @@ def _bind_anchored_citation(
         _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE
     ):
         return None
-    input_verified = resolution.get("input_verified")
-    if input_verified is False:
-        return _REASON_STALE_EVIDENCE
-    if input_verified is not True:
-        return _REASON_UNVERIFIABLE_PROVENANCE
+    input_refusal = _anchored_input_refusal(resolution, repo_root, execution_detail)
+    if input_refusal is not None:
+        return input_refusal
     binding = _generic_artifact_binding(resolution["envelope"], resolution)
     if item_id in _ITEMS_ACCEPTING_REGENERATION_CLAIMS:
         regeneration, refusal = _regeneration_claim(
@@ -5774,6 +5817,85 @@ def _bind_anchored_citation(
             binding["regeneration"] = regeneration
     citation["artifact_binding"] = binding
     return None
+
+
+def _anchored_input_refusal(
+    resolution: Mapping[str, Any],
+    repo_root: str | Path | None,
+    detail: dict[str, Any] | None,
+) -> str | None:
+    """The refusing reason when an anchored citation's input did not re-hash
+    (stale or unverifiable) or an attested ``present`` file drifted (issue
+    #4197), else ``None``."""
+    input_verified = resolution.get("input_verified")
+    if input_verified is False:
+        return _REASON_STALE_EVIDENCE
+    if input_verified is not True:
+        return _REASON_UNVERIFIABLE_PROVENANCE
+    return _attested_checks_refusal(resolution, repo_root, detail)
+
+
+def _attested_check_members(
+    envelope: Mapping[str, Any],
+) -> list[tuple[Any, str]]:
+    """``({path, scope}, recorded_hash)`` for every ``present`` check of a
+    ``klt signoff --attest`` envelope that recorded a ``sha256:`` content
+    hash (issue #4197) -- the inventory's listed ``sources`` and ``derived``
+    files. ``[]`` for an envelope with no ``attestation.checks[]``."""
+    attestation = envelope.get("attestation")
+    checks = attestation.get("checks") if isinstance(attestation, Mapping) else None
+    if not isinstance(checks, list):
+        return []
+    members: list[tuple[Any, str]] = []
+    for check in checks:
+        if not isinstance(check, Mapping) or check.get("check") != "present":
+            continue
+        path = check.get("path")
+        recorded = check.get("content_hash")
+        if (
+            isinstance(path, str)
+            and path
+            and isinstance(recorded, str)
+            and recorded.startswith("sha256:")
+        ):
+            members.append(({"path": path, "scope": "repo"}, recorded))
+    return members
+
+
+def _attested_checks_refusal(
+    resolution: Mapping[str, Any],
+    repo_root: str | Path | None,
+    detail: dict[str, Any] | None,
+) -> str | None:
+    """Re-hash the files an attestation's ``present`` checks recorded (issue
+    #4197). The envelope's ``provenance.input`` pins only the inventory, so
+    without this an edit to a listed source or derived file stays ``met``
+    until re-attested. A drifted file is :data:`_REASON_STALE_EVIDENCE`; one
+    that cannot be read from the grading context is
+    :data:`_REASON_UNVERIFIABLE_PROVENANCE`. ``None`` -- and nothing added to
+    the citation -- when every file re-hashes or the envelope carries none."""
+    members = _attested_check_members(resolution["envelope"])
+    if not members:
+        return None
+    results = _verify_generic_input_set(
+        members, resolution["spec"], resolution.get("file"), repo_root
+    )
+    bad = [
+        {
+            "path": member["path"]["path"],
+            "content_hash": member["content_hash"],
+            "status": member["status"],
+        }
+        for member in results
+        if member["status"] != "verified"
+    ]
+    if not bad:
+        return None
+    if detail is not None:
+        detail["artifact_binding"] = {"members": bad}
+    if any(member["status"] == "stale" for member in bad):
+        return _REASON_STALE_EVIDENCE
+    return _REASON_UNVERIFIABLE_PROVENANCE
 
 
 def _bound_artifact(
@@ -6688,6 +6810,7 @@ def _build_tier_item(
         if item_id == 5 and partition_kind == "digital"
         else None
     )
+    lvs_report_list = item_id == _LVS_ITEM_ID and isinstance(raw_entry, list)
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
     elif (
@@ -6705,22 +6828,31 @@ def _build_tier_item(
                 raw_entry["not_applicable"], partition_kind
             )
     elif (
-        raw_entry is not None
-        and item_id in _ITEMS_ACCEPTING_MULTI_CITATION
+        lvs_report_list
+        or item_id in _ITEMS_ACCEPTING_MULTI_CITATION
         and (
-            isinstance(raw_entry, list)
-            or spec_rows is not None
-            or spec_rows_invalid
-            or required_kind_pair is not None
+            raw_entry is not None
+            and (
+                isinstance(raw_entry, list)
+                or spec_rows is not None
+                or spec_rows_invalid
+                or required_kind_pair is not None
+            )
+            # Issue #4190: declared ``spec_rows`` with no evidence entry at
+            # all grade as a zero-citation set (every row uncovered or a
+            # declared gap), not as ``no_evidence``.
+            or (raw_entry is None and (spec_rows is not None or spec_rows_invalid))
         )
     ):
         # Issue #2959: item 5 may cite several envelopes (and declare the
         # spec rows they must cover) -- graded per citation, then aggregated.
+        # Issue #4354: item 4 may cite one ``klt lvs`` report per cell;
+        # ``spec_rows`` has no meaning for LVS, so it is ignored there.
         status, reason, citation, failure_detail, extra = _grade_multi_citation(
             raw_entry,
             grade_spec,
-            spec_rows=spec_rows,
-            spec_rows_invalid=spec_rows_invalid,
+            spec_rows=None if lvs_report_list else spec_rows,
+            spec_rows_invalid=False if lvs_report_list else spec_rows_invalid,
             met_envelopes=met_envelopes,
             required_kind_pair=required_kind_pair,
         )
@@ -6758,6 +6890,11 @@ def _build_tier_item(
 #: block whose spec has several statistical rows, only some evidenced).
 _ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5, 6})
 
+#: T1 item 4 (LVS): accepts a list of ``klt lvs`` reports -- one per cell of
+#: an analog partition (issue #4354) -- but never ``spec_rows``, so it is
+#: kept out of :data:`_ITEMS_ACCEPTING_MULTI_CITATION`.
+_LVS_ITEM_ID = 4
+
 #: Issue #3741: the RTL-flow evidence kinds of T1 item 5, digital -- the tier
 #: doc's "multi-corner STA **plus** a bit-exact functional test suite". A
 #: digital entry citing either must cite both; a ``sim``-only entry (the
@@ -6772,10 +6909,10 @@ def _read_spec_rows(
     manifest: dict[str, Any],
 ) -> dict[_SpecRowsKey, list[dict[str, Any]] | None]:
     """Read the manifest's optional ``spec_rows`` declaration (issue #2959):
-    ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?, "ratified": bool?},
-    ...]}``. A key may be partition-qualified (``"5.analog"``, issue #3768),
-    mirroring the evidence-key convention of :func:`_lookup_evidence`; see
-    :func:`_resolve_spec_rows`.
+    ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?, "ratified": bool?,
+    "timing_margin": bool?}, ...]}``. A key may be partition-qualified
+    (``"5.analog"``, issue #3768), mirroring the evidence-key convention of
+    :func:`_lookup_evidence`; see :func:`_resolve_spec_rows`.
 
     Returns ``(item id, partition | None) -> rows``; a malformed declaration
     maps to ``None`` so only that item degrades to ``invalid_evidence``, never
@@ -6783,7 +6920,9 @@ def _read_spec_rows(
     is reported as a declared gap and never counts as covered. ``ratified``
     (default ``true``, issue #2908) is ``false`` for a row whose target is a
     proposed, unratified limit: evidence against it is provisional and never
-    grades ``met``.
+    grades ``met``. ``timing_margin`` (default ``false``, issue #4314) marks the
+    row a digital ``sim``-only item 5 must evidence with a measured per-corner
+    timing margin; see :func:`_missing_timing_margin`.
     """
     raw = manifest.get("spec_rows")
     if raw is None:
@@ -6808,17 +6947,28 @@ def _read_spec_rows(
                 row_id = row.get("id") if isinstance(row, dict) else None
                 gap = row.get("gap") if isinstance(row, dict) else None
                 ratified = row.get("ratified", True) if isinstance(row, dict) else True
+                margin = (
+                    row.get("timing_margin", False) if isinstance(row, dict) else False
+                )
                 if (
                     not isinstance(row_id, str)
                     or not row_id
                     or row_id in seen
                     or (gap is not None and (not isinstance(gap, str) or not gap))
                     or not isinstance(ratified, bool)
+                    or not isinstance(margin, bool)
                 ):
                     valid = []
                     break
                 seen.add(row_id)
-                valid.append({"id": row_id, "gap": gap, "ratified": ratified})
+                valid.append(
+                    {
+                        "id": row_id,
+                        "gap": gap,
+                        "ratified": ratified,
+                        "timing_margin": margin,
+                    }
+                )
             parsed = valid or None
         out[slot] = parsed
     return out
@@ -6899,7 +7049,8 @@ def _grade_multi_citation(
     )
     if spec_rows_invalid:
         return invalid
-    members = _parse_multi_members(raw_entry)
+    # Issue #4190: no evidence entry -> zero members; only ``spec_rows`` grade.
+    members = [] if raw_entry is None else _parse_multi_members(raw_entry)
     if members is None or not _members_rows_declared(members, spec_rows):
         return invalid
 
@@ -6931,28 +7082,151 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
+    margin_unmet = _grade_timing_margin(
+        required_kind_pair, graded, spec_rows, met_envelopes, row_info, extra
+    )
+    if margin_unmet is not None:
+        return margin_unmet
     if row_info and (
         row_info["uncovered_rows"]
         or row_info["declared_gaps"]
         or row_info["unratified_rows"]
     ):
         return "unmet", _REASON_PARTIAL_COVERAGE, None, row_info, extra
-    if required_kind_pair is not None:
-        kinds = {g[2]["kind"] for _, _, g in graded if g[2] is not None}
-        if kinds & set(required_kind_pair):
-            missing = [k for k in required_kind_pair if k not in kinds]
-            if missing:
-                return (
-                    "unmet",
-                    _REASON_PARTIAL_COVERAGE,
-                    None,
-                    {**row_info, "missing_kinds": missing},
-                    extra,
-                )
+    kinds_unmet = _grade_required_kinds(required_kind_pair, graded, row_info, extra)
+    if kinds_unmet is not None:
+        return kinds_unmet
     if row_info:
         extra["row_coverage"] = row_info
+    if not graded:
+        # Unreachable for a non-empty declared row set (every row is then
+        # uncovered or a gap); never grade a citation-less entry ``met``.
+        return "unmet", _REASON_NO_EVIDENCE, None, {}, extra
     extra["citations"] = [g[2] for _, _, g in graded]
     return "met", None, graded[0][2][2], {}, extra
+
+
+def _grade_required_kinds(
+    required_kind_pair: tuple[str, ...] | None,
+    graded: list[tuple[Any, Any, Any]],
+    row_info: dict[str, Any],
+    extra: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
+    """The ``unmet``/``partial_coverage`` outcome when the passing kinds
+    include part of ``required_kind_pair`` but not all of it (issue #3741);
+    ``None`` otherwise."""
+    if required_kind_pair is None:
+        return None
+    kinds = {g[2]["kind"] for _, _, g in graded if g[2] is not None}
+    if not kinds & set(required_kind_pair):
+        return None
+    missing = [k for k in required_kind_pair if k not in kinds]
+    if not missing:
+        return None
+    return (
+        "unmet",
+        _REASON_PARTIAL_COVERAGE,
+        None,
+        {**row_info, "missing_kinds": missing},
+        extra,
+    )
+
+
+def _grade_timing_margin(
+    required_kind_pair: tuple[str, ...] | None,
+    graded: list[tuple[Any, Any, Any]],
+    spec_rows: list[dict[str, Any]] | None,
+    met_envelopes: dict[int, dict[str, Any]] | None,
+    row_info: dict[str, Any],
+    extra: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
+    """The ``unmet``/``timing_margin_missing`` outcome for the full-custom
+    digital sub-case (``sim`` evidence only, issue #4314); ``None`` when it
+    does not apply or the timing margin is satisfied."""
+    if required_kind_pair is None or not graded:
+        return None
+    if {g[2]["kind"] for _, _, g in graded if g[2] is not None} != {"sim"}:
+        return None
+    missing_margin = _missing_timing_margin(
+        spec_rows,
+        [(met_envelopes or {}).get(id(spec)) for spec, _, _ in graded],
+    )
+    if not missing_margin:
+        return None
+    return (
+        "unmet",
+        _REASON_TIMING_MARGIN_MISSING,
+        None,
+        {**row_info, "missing_timing_margin": missing_margin},
+        extra,
+    )
+
+
+def _missing_timing_margin(
+    spec_rows: list[dict[str, Any]] | None,
+    envelopes: list[dict[str, Any] | None],
+) -> list[dict[str, Any]]:
+    """``[{"row": id, "corners": [...]}]`` for the timing-margin evidence a
+    ``sim``-only digital item 5 lacks (issue #4314); empty when satisfied.
+
+    A ``timing_margin: true`` row is satisfied by a cited ``klt sim``
+    envelope whose rollup ``measurements[]`` has a passing, ``limits``-bearing
+    entry tagged ``spec_row: <row>`` and whose every ``corners[]`` entry has a
+    passing measurement of that name. No such row declared -> one entry with
+    ``row: None``. ``corners`` names the corners lacking the measurement
+    (``[]`` when no corner list exists or no tagged measurement was found).
+    """
+    rows = [r["id"] for r in spec_rows or [] if r.get("timing_margin")]
+    if not rows:
+        return [{"row": None, "corners": []}]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        best: list[str] | None = None
+        for envelope in envelopes:
+            lacking = _row_margin_lacking_corners(envelope, row)
+            if best is None or len(lacking) < len(best):
+                best = lacking
+        if best is None or best:
+            out.append({"row": row, "corners": best or []})
+    return out
+
+
+def _row_margin_lacking_corners(envelope: dict[str, Any] | None, row: str) -> list[str]:
+    """Corner ids lacking a passing measurement for ``row`` in ``envelope``;
+    ``["*"]`` when the envelope has no passing, limited, ``row``-tagged
+    measurement at all."""
+    if envelope is None:
+        return ["*"]
+    raw = envelope.get("measurements")
+    names = [
+        m.get("name")
+        for m in (raw if isinstance(raw, list) else [])
+        if isinstance(m, dict)
+        and m.get("spec_row") == row
+        and m.get("status") == "pass"
+        and m.get("limits")
+    ]
+    if not names:
+        return ["*"]
+    corners = envelope.get("corners")
+    corners = (
+        [c for c in corners if isinstance(c, dict)] if isinstance(corners, list) else []
+    )
+    best: list[str] | None = None
+    for name in names:
+        lacking = [
+            str(c.get("corner_id"))
+            for c in corners
+            if not any(
+                isinstance(m, dict)
+                and m.get("name") == name
+                and m.get("status") == "pass"
+                for m in c.get("measurements") or []
+            )
+        ]
+        if best is None or len(lacking) < len(best):
+            best = lacking
+    return best or []
 
 
 def _parse_multi_members(

@@ -284,6 +284,7 @@ Nothing is fabricated and nothing silently substitutes for it:
 | `gold.sources` / `gate.sources` | array\<string\> | RTL/gate-level Verilog source file paths (`read_verilog` inputs), resolved relative to the request's own directory. Required, non-empty. `.sv`/`.svh` sources (case-insensitive) are read with `read_verilog -sv`; other extensions use plain `read_verilog`. SystemVerilog coverage is that of Yosys's `-sv` front end (issue #3797). |
 | `gold.top` / `gate.top` | string | That side's top module name. The two sides may legally use the *same* top module name (e.g. both `"top"`) — each is elaborated in its own namespace before comparison. Required. |
 | `gold.liberty` / `gate.liberty` | string \| omitted | A standard-cell liberty file, read via `read_liberty -ignore_miss_func` (no `-lib`, so each cell's liberty `function` string becomes real logic, not a blackbox) before that side's `sources`. **Required for a post-synthesis gate-level netlist** (e.g. `klt synthesize`'s own `netlist_path` output) — without it, the netlist's standard-cell instances have no logic definition and elaboration fails outright. Omit for self-contained RTL. |
+| `gold.defines` / `gate.defines` | object \| omitted | Verilog preprocessor defines for that side, `name -> string \| null` (issue #4196): each is passed as `read_verilog -D NAME[=VALUE]` (`null` = bare `-D NAME`), in sorted-name order. Keys must be Verilog identifiers; values may use only letters, digits and `_ . , : / + - = @ %`. `klt synthesize --verify-equivalence` sets it on the gold side so the RTL is preprocessed as it was synthesised. |
 | `port_map` | object\<string,string\> \| null | The **I/O mapping** between the two sides, `{"<gate_port_name>": "<gold_port_name>"}` — only needed when a port was renamed between the two representations (e.g. by a synthesis or netlist-rewriting step that does not preserve top-level port names). Ports not listed are assumed identically named on both sides. Omit (or `null`) when both sides already share the same port names — the common case. |
 | `engine` | string | `"yosys"` (default, combinational) or `"yosys-sequential"` (register-correspondence sequential, #1313). |
 | `sim_backend` | string | Which simulator replays a counterexample: `"iverilog"` (default, canonical), `"verilator"` (compiled fast path), or `"both"` (run both, require agreement). Overridden by `--sim-backend` when given. See "Replay backend" above. |
@@ -799,6 +800,9 @@ real OpenROAD/sky130 pipeline — distinct from the fixture-based
 
 ## Out of scope
 
+- **Property checking (`assert`/`cover` via SymbiYosys).** Not a `klt`
+  verb; see [`docs/guides/property-checking.md`](../guides/property-checking.md)
+  for the supported downstream recipe.
 - **General sequential equivalence.** The `"yosys-sequential"` engine
   proves *register-correspondence* equivalence only (§"Scope" above) —
   retiming, register cloning, and FSM re-encoding (cases with no 1:1

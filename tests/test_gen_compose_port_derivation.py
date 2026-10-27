@@ -115,6 +115,42 @@ def test_no_legal_point_lists_rejection_reasons(tmp_path):
         _blocks(gds, _spec(["A"], ACCESS))
 
 
+def _thin_wire_macro(tmp_path):
+    # 0.4 um x 1400 um wire: bbox grid at the default step is >4M points.
+    return _make_macro(
+        tmp_path,
+        [(MET1, (0.0, 0.0, 0.4, 1400.0))],
+        [(MET1_PIN, "A", 0.2, 700.0)],
+    )
+
+
+def test_long_thin_wire_default_grid_derives_port(tmp_path):
+    gds = _thin_wire_macro(tmp_path)
+    blocks = _blocks(gds, _spec(["A"], ACCESS))
+    assert "A" in blocks["m"]["ports"]
+
+
+def test_long_thin_wire_coarse_grid_derives_port(tmp_path):
+    gds = _thin_wire_macro(tmp_path)
+    blocks = _blocks(gds, _spec(["A"], {**ACCESS, "grid_um": 10.0}))
+    port = blocks["m"]["ports"]["A"]
+    assert 0.0 <= port["x_um"] <= 0.4
+
+
+def test_no_candidate_error_names_cause(tmp_path, monkeypatch):
+    import klayout_tools.gen_compose_port_access as access_mod
+
+    # Force the enumerator to yield nothing so _search_landing reaches the
+    # empty-candidate error instead of the per-category rejection summary.
+    monkeypatch.setattr(access_mod, "_grid_candidates", lambda *a, **k: ([], False))
+    gds = _two_strip_macro(tmp_path)
+    with pytest.raises(
+        GenComposeError,
+        match=r"no candidate landing point for port 'A'.*lower access\.grid_um",
+    ):
+        _blocks(gds, _spec(["A"], ACCESS))
+
+
 def test_keepout_layer_rejects_and_steers(tmp_path):
     gds = _make_macro(
         tmp_path,

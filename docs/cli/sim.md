@@ -770,6 +770,15 @@ plain `klt sim ... --backend local-parallel --format json` invocation on the
 fleet's own pinned image, so corner expansion, ordering, measurement
 extraction, and pass/fail classification are never reimplemented for it.
 
+**Launch progress.** A sharded run (`remote.hosts` > 1) prints one aggregate
+line on stderr as shards move through the fleet, for example
+`klt sim: shards 170/4200 launched, 40 launching, 3990 pending, 0 collected; launch rate 5.7/min, ETA 11h 49m`.
+It is emitted when the counts change, at most once per
+`BATCH_HEARTBEAT_INTERVAL_S` (300 s), plus once when the last shard has
+launched. The rate is observed launches per minute since the first launch; until
+two launches are seen it reads `unknown`. stdout and the JSON report are
+unchanged ([#4349](https://github.com/2AMLogic/klayout-tools/issues/4349)).
+
 **Retry contract, up front.** A launch refused for lack of Spot capacity is
 *not* retried unless you opt in: `batch.capacity_wait_s` defaults to `0` (one
 attempt), and the refusal then fails the request with
@@ -916,6 +925,7 @@ the exit code describes the read, `state` describes the job:
 | `state` | `pending` (no `status.json` yet — the instance has not booted; not an error), `running`, `interrupted`, `done`, `failed` or `timeout` |
 | `terminal` | `true` for `done`/`failed`/`timeout` |
 | `detail`, `started_at`, `updated_at`, `elapsed_seconds`, `exit_code`, `tool` | As written by the fleet harness; absent ones are omitted |
+| `progress` | Optional object the runner publishes into `status.json` while a job runs, e.g. `{"sim_time_s": 1.5e-6, "stop_time_s": 1e-5}` (simulated time reached, and the target stop time when known). Passed through verbatim and additive: omitted when the runner publishes none, so callers must treat it as optional ([#4291](https://github.com/2AMLogic/klayout-tools/issues/4291)) |
 | `instance` | `instance_id`, `instance_type`, `availability_zone`, `lifecycle`, `spot`, ... when published |
 
 An unknown job id (no `job.json` under the prefix) is an error envelope with
@@ -923,12 +933,18 @@ An unknown job id (no `job.json` under the prefix) is an error envelope with
 `"batch_job_id_invalid"`. Reading an `interrupted` job re-launches nothing —
 2am's own `reconcile` does that.
 
-**No unit counts.** The fleet's `status.json` is written at state transitions
-only (`fetching inputs`, `executing`, the terminal state) and carries no
-completed/total unit count; `outputs/` is uploaded only after the job ends. A
-status read therefore cannot say how far through the grid a running job is, and
-`klt` does not estimate one from elapsed time. That needs the fleet to publish
-progress first (tracked against 2AMLogic/2am).
+**Progress and unit counts.** The fleet's `status.json` is written at state
+transitions only and carries no completed/total unit count; `outputs/` is
+uploaded only after the job ends, and `klt` does not estimate progress from
+elapsed time. A simulated-time `progress` object appears in the status payload
+only if the runner publishes one; the client side is a passthrough, so a runner
+that does not write it leaves the field absent (runner dependency tracked on
+[#4291](https://github.com/2AMLogic/klayout-tools/issues/4291)).
+
+`--attach` on a job that has a `job.json` but no `status.json` after 120 s
+(the launch was refused, e.g. `batch_concurrency_cap`, or never issued) prints
+one stderr line naming the job as never started. It only reports: polling
+continues to its normal timeout.
 
 `--submit-only` also writes the [submit receipt](#submit-receipt-and-client-termination-3065)
 (`batch-receipt.json`, `state: null`) into the artifacts directory, so the job
@@ -1597,6 +1613,8 @@ but no tagged release contains it yet.
 | `measurements[].expr` | 0.7.0 |
 | `corners.process[].sections[]` (object form) | 0.7.0 |
 | `corners.params` | 0.8.0 |
+| `corners.units` | 0.8.0 |
+| `corners.temperature_param` | 0.8.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
@@ -1758,7 +1776,7 @@ established. `runner_compatibility` itself stays a major.minor gate.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121)).**
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
 undriven), so
@@ -1790,6 +1808,15 @@ also carries `runner_code: "batch_runner_version_mismatch"` and both klt
 versions. `--job-status` is a `status.json` passthrough only and never
 fetches outputs, so it can show just `job command exited 87`; read the full
 report for the cause.
+
+Any other non-zero exit with nothing recovered
+([#4217](https://github.com/2AMLogic/klayout-tools/issues/4217)) is named the
+same way: the `batch_job_failed` message states the runner exit code, that no
+`report.json`, `stderr.log` envelope or engine log came back, and points to
+`harness.log` under the job's S3 prefix and to bisecting the request (the
+client's submit-only credential cannot read `harness.log` itself). The change is
+additive -- only the message grows; no field is added or changed. A job whose
+envelope *was* recovered keeps its structured `runner_error` diagnostic.
 
 #### Pre-launch check from the AMI manifest ([#2851](https://github.com/2AMLogic/klayout-tools/issues/2851))
 
@@ -2129,6 +2156,12 @@ aid, not a diagnosis. Equal PDK commits, equal library hashes and an equal
 ngspice major version do not by themselves show the two executions are
 equivalent.
 
+0. Read `environment.pdk_stamp_comparison` first (the worker's PDK
+   `SOURCES` stamp, or under `options.stage_model_inputs` the per-file sha256
+   of the shipped model files, against the submitter's). A `match` does not
+   prove the model closures are equal. The fatal ngspice line and its code
+   (`model_bin_range`, `ngspice_fatal`, ...) are on the errored unit's
+   `diagnostics` even without `options.keep_artifacts`.
 1. Run with `options.keep_artifacts` locally and on `batch`; diff the
    generated per-corner decks (`artifacts.deck`) and logs.
 2. Compare how every `.include`/`.lib` resolved: the expanded paths and
@@ -3728,6 +3761,42 @@ relying on `print`:
 A `print`ed scalar uses ngspice's `numdgt` digit count; see "Measurement
 output precision" above for widening it via `options.ngspice_init`.
 
+### Functions `expr` does not have
+
+ngspice's control language is smaller than SPICE `.meas` or numpy. These
+are not available (verified on ngspice-42: `no function as sum with that
+arity`); use the replacement:
+
+| Not available | Use instead |
+| --- | --- |
+| `sum(x)` | `mean(x)*length(x)` |
+| `sgn(x)` | a comparison: `(x gt 0)` is `1`/`0`; `(x gt 0) - (x lt 0)` is the sign |
+| one-argument `max(x)` / `min(x)` | `vecmax(x)` / `vecmin(x)` (`max`/`min` take two arguments) |
+
+Spell comparisons `gt` / `lt` (see the runner-skew note on `<` / `>`).
+
+### Counting edges with `expr`
+
+There is no edge-count measurement in `expr`, but a signed first difference
+of a thresholded signal gives one with index slices. `x[a,b]` selects samples
+`a..b` inclusive, so `s[1,length(s)-1] - s[0,length(s)-2]` is `s[i+1]-s[i]`:
+`+1` on a rising edge, `-1` on a falling edge, `0` elsewhere. Counting uses
+`mean(...)*length(...)` in place of the missing `sum`. For `v(in)` thresholded
+at 0.5 V (`s = (v(in) gt 0.5)`, `n = length(time)-1` steps):
+
+```json
+{ "name": "rises", "expr": "mean(((v(in) gt 0.5)[1,length(time)-1] - (v(in) gt 0.5)[0,length(time)-2]) gt 0.5)*(length(time)-1)" },
+{ "name": "falls", "expr": "mean(((v(in) gt 0.5)[1,length(time)-1] - (v(in) gt 0.5)[0,length(time)-2]) lt -0.5)*(length(time)-1)" }
+```
+
+Wrap the step in `abs(...)` and drop the `gt`/`lt` for the total edge count.
+Worked example: a `PULSE(0 1 0 1n 1n 5u 10u)` source over a `100u` transient
+returns `rises = 10`, `falls = 10` and (with `abs`) `edges = 20`. The
+recipe is exercised by `tests/test_sim_expr_edge_count.py`. The count is over
+the saved time points, so the transient must resolve every edge (a `tstep`
+or `.options` maximum step finer than the shortest pulse); where the edge
+*times* are needed, use a `crossings` measurement instead.
+
 Worked `op` example — the case that had no expression at all before:
 
 ```json
@@ -3960,7 +4029,10 @@ mid-rail threshold follows the supply sweep. The resolved threshold is echoed as
 `level` (volts) inside that corner's `crossings` object; a literal-number
 `level` leaves the report unchanged. `frac_of` must be a `corners.supply_v`
 key of every corner and `fraction` a finite number `>= 0`; otherwise the
-request is refused before any corner runs. (This is the supply-relative path;
+request is refused before any corner runs. **Runner version:** `frac_of`
+first shipped in `klt` v0.8.0 (it is not in v0.7.x); a fleet runner older than
+that does not understand it, so on such a runner give `level` as a literal
+number per corner. (This is the supply-relative path;
 see the `.meas` note under *`WHEN` thresholds must be literal numbers*.)
 
 `crossings` is a third measurement form: an entry declares **exactly one** of
@@ -4331,6 +4403,59 @@ measurement, with no out-of-tool waveform post-processing:
   wrappers or cell templates. A bounded bisection over a source value is the
   separate [`measurements[].search`](#bisection--threshold-search-measurementssearch)
   form.
+
+## Eye / phase-fold measurement (`measurements[].eye`)
+
+Issue [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292). Eye
+height, width and best sampling phase of a repeating pattern are one built-in
+measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
+`vecmin` over a time-folded vector plus pairwise max):
+
+```json
+{"analysis": {"kind": "tran", "args": "5p 7n"},
+ "measurements": [
+   {"name": "eye_rx",
+    "eye": {"signal": "v(rx)", "ui": "100p", "uis": 64, "from": "500p"},
+    "unit": "V",
+    "limits": {"min": 0.1}}]}
+```
+
+- **Form.** `eye` is an object `{signal, ui, uis, from?, level?, metric?}`.
+  `signal` is a single-line ngspice vector expression (`"v(outp) - v(outn)"`
+  works); `ui` is the unit interval (seconds or a SPICE literal such as
+  `"100p"`); `uis` is the integer number of unit intervals in the window
+  (`>= 2`); `from` is the window start (default `0`); `level` is the decision
+  level (default: midpoint of the signal's min and max in the window); `metric`
+  selects which scalar becomes `value` (`height` default, `width`,
+  `best_phase`). A non-integer `uis`, unknown keys, or `eye` beside any other
+  value form is refused up front (exit 1), as is any `analysis.kind` other than
+  `tran` and a window `[from, from + uis * ui]` that runs past the transient
+  stop time. `engine: "xyce"` is refused.
+- **Method.** Every interpolated crossing of the level inside the window is
+  folded to its phase within a unit interval. `width` is the widest circular
+  gap between folded crossing phases (the UI minus the crossing spread -- the
+  horizontal opening at the level), `best_phase` is the middle of that gap
+  (seconds from the start of a UI), and `height` is read there: the minimum of
+  the samples above the level minus the maximum of those at or below it, one
+  sample per UI. The data pattern is not known, so decisions are threshold
+  decisions at the sampling phase.
+- **Value.** `value` is the selected metric, graded against `limits` like any
+  scalar. An additive `eye` sibling carries
+  `{height, width, best_phase, level, ui, uis}`.
+- **Errors.** `status: "error"`, `value: null`, and a `code: "measurement"`
+  diagnostic whose message starts with a reason token:
+
+  | Token | Meaning |
+  |---|---|
+  | `[eye_vector_missing]` | `signal` did not resolve, or its rawfile was unreadable |
+  | `[eye_window_outside_transient]` | the window is not inside the sampled transient |
+  | `[eye_no_levels]` | the signal never crosses the level inside the window, or sits on one side of it at the best phase |
+- **Backends.** The signal is dumped to a corner-local rawfile (`eye_<k>.raw`)
+  and reduced in Python on the worker, so `local`, `local-parallel`, `remote`
+  and `batch` return the same scalars. It is a mandatory runner feature (`eye`,
+  first `klt` release segment `0.8.1`): see "Mandatory features" under
+  "Runner/client `klt` version skew".
+- **Out of scope.** RJ/DJ jitter decomposition and bathtub curves.
 
 ## Bisection / threshold search (`measurements[].search`)
 

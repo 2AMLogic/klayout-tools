@@ -1511,10 +1511,20 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
     report = run_drc(str(path), "sky130")
 
     assert report["coverage"]["unmodeled_rules"] == [
+        "MR_licon.SP.1",
+        "cap2m.11",
+        "cap2m.2b",
+        "cap2m.2b_a",
+        "cap2m.5",
+        "capm.11",
+        "capm.2b",
+        "capm.2b_a",
+        "capm.5",
         "difftap.10",
         "difftap.11",
         "difftap.8",
         "difftap.9",
+        "dnwell.2",
         "hvi.1",
         "hvi.2a",
         "hvntm.1",
@@ -1524,6 +1534,10 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "hvtr.1",
         "hvtr.2",
         "hvtr.2_a",
+        "ldntm.2",
+        "li.7",
+        "licon.13",
+        "lvtn.2",
         "m1.3ab",
         "m1.5",
         "m2.3ab",
@@ -1537,10 +1551,17 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "n/psdm.6",
         "n/psdm.7",
         "n/psdm.8",
+        "ncm.2a",
         "npc.4",
+        "nsm.1",
         "pad.2",
+        "poly.3",
         "rdl.1",
         "rdl.2",
+        "rpm.2",
+        "thkox.2",
+        "tunm.2",
+        "urpm.2",
         "via.5a",
         "via2.5",
         "via3.5",
@@ -6351,18 +6372,19 @@ def test_sky130_deck_check_kind_breakdown():
     `rpm.width.1`/`urpm.width.1`; #2936 adds `poly.endcap.diff.1`, the first
     `enclosed` rule; #3031 adds `nwell.enclosed.hvi.1`; #3316 adds the 4
     `enclosing_adjacent` rules; #2934 adds npc/nsdm/psdm width + isolated
-    spacing): 150 rules total -- 23 `width`, 13 `space`,
+    spacing; #4282 adds `poly.space.1`/`diff.space.1`/`tap.space.1`): 153 rules
+    total -- 23 `width`, 16 `space`,
     4 `isolated`, 17 `enclosing`, 2 `enclosed`, 4 `enclosing_adjacent`,
     2 `separation`, 10 `area`, 38 `ongrid`, 37 `angle`. Fails loudly (at the
     exact number that changed) if a future rule addition/removal drifts from
     that table without updating it."""
     deck = get_deck("sky130")
 
-    assert len(deck) == 150
+    assert len(deck) == 153
     counts = Counter(rule.check for rule in deck)
     assert counts == {
         "width": 23,
-        "space": 13,
+        "space": 16,
         "isolated": 4,
         "enclosing": 17,
         "enclosed": 2,
@@ -11384,4 +11406,138 @@ def test_cli_drc_check_rerun_with_explicit_input_on_external_report(
     assert (
         "no 'file' field to rerun"
         in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# curated-engine --negative-control (#4320)
+# --------------------------------------------------------------------------- #
+
+
+def _negative_control_pair(tmp_path, *, bad_is_clean=False):
+    good = tmp_path / "good.gds"
+    bad = tmp_path / "bad.gds"
+    _make_clean_layout().write(str(good))
+    (_make_clean_layout() if bad_is_clean else _make_violation_layout()).write(str(bad))
+    return str(good), str(bad)
+
+
+def test_curated_negative_control_passes_and_is_reported(tmp_path):
+    good, bad = _negative_control_pair(tmp_path)
+
+    report = run_drc(
+        good,
+        "sky130",
+        negative_control=bad,
+        negative_control_categories=["poly.width.1"],
+    )
+
+    assert report["status"] == "clean"
+    assert report["negative_control"] == {
+        "file": bad,
+        "status": "passed",
+        "violation_count": 1,
+        "rules_found": ["poly.width.1"],
+        "expected_categories": ["poly.width.1"],
+    }
+
+
+def test_curated_report_without_negative_control_has_no_block(tmp_path):
+    good, _ = _negative_control_pair(tmp_path)
+
+    assert "negative_control" not in run_drc(good, "sky130")
+
+
+def test_curated_negative_control_without_findings_fails(tmp_path):
+    good, bad = _negative_control_pair(tmp_path, bad_is_clean=True)
+
+    with pytest.raises(DrcError) as exc:
+        run_drc(good, "sky130", negative_control=bad)
+
+    assert exc.value.code == "negative_control_failed"
+
+
+def test_curated_negative_control_missing_category_fails(tmp_path):
+    good, bad = _negative_control_pair(tmp_path)
+
+    with pytest.raises(DrcError) as exc:
+        run_drc(
+            good,
+            "sky130",
+            negative_control=bad,
+            negative_control_categories=["poly.angle.1"],
+        )
+
+    assert exc.value.code == "negative_control_failed"
+
+
+def test_curated_negative_control_honours_rules_subset(tmp_path):
+    good, bad = _negative_control_pair(tmp_path)
+
+    # The only selected rule cannot fire on the fixture, so the control fails.
+    with pytest.raises(DrcError) as exc:
+        run_drc(good, "sky130", rules=["poly.angle.1"], negative_control=bad)
+
+    assert exc.value.code == "negative_control_failed"
+
+
+def test_cli_curated_negative_control_json(tmp_path, capsys):
+    good, bad = _negative_control_pair(tmp_path)
+
+    code = main(
+        ["drc", good, "--deck", "sky130", "--negative-control", bad, "--format", "json"]
+    )
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["negative_control"]["status"] == (
+        "passed"
+    )
+
+
+def test_cli_curated_negative_control_failure_exit_1(tmp_path, capsys):
+    good, bad = _negative_control_pair(tmp_path, bad_is_clean=True)
+
+    code = main(
+        ["drc", good, "--deck", "sky130", "--negative-control", bad, "--format", "json"]
+    )
+
+    assert code == 1
+    assert "negative_control_failed" in capsys.readouterr().err
+
+
+def test_cli_curated_categories_without_control_refused(tmp_path, capsys):
+    good, _ = _negative_control_pair(tmp_path)
+
+    code = main(
+        [
+            "drc",
+            good,
+            "--deck",
+            "sky130",
+            "--negative-control-categories",
+            "poly.width.1",
+        ]
+    )
+
+    assert code == 1
+
+
+def test_curated_request_document_negative_control(tmp_path, capsys):
+    _negative_control_pair(tmp_path)
+    request = tmp_path / "req.json"
+    request.write_text(
+        json.dumps(
+            {
+                "file": "good.gds",
+                "deck": "sky130",
+                "negative_control": "bad.gds",
+                "negative_control_categories": "poly.width.1",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["drc", str(request), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["negative_control"]["status"] == (
+        "passed"
     )

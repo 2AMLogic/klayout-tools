@@ -203,6 +203,7 @@ from .lvs_gate_level import (
     _supply_pin_universe,
 )
 from .lvs_mismatch import (
+    _annotate_case_collision_merges,
     _apply_tolerance_snaps,
     _body_net_warnings,
     _build_mismatches,
@@ -431,6 +432,11 @@ CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED = "combine_devices_per_circuit.un
 #: on which side(s) actually instantiate it -- see
 #: `_prune_power_only_circuits`.
 CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED = "topology.power_only_pruned"
+#: Issue #4296: interchangeable same-cell instances whose outputs are
+#: one-terminal dangling nets on both sides (CTS dummy loads, unused flop
+#: outputs) that the comparer cannot pair. Always ``severity: "warning"``;
+#: ``status`` is still the engine's own verdict.
+CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS = "topology.dangling_output_ambiguous"
 #: Issue #2021: a `reference.form: "gate-level-verilog"` reference declared a
 #: port whose only Verilog-level connection was a plain `assign <port> =
 #: ...;` alias (e.g. `assign dbg_uart_byte[i] = rx_byte[i];`, two port names
@@ -2672,6 +2678,8 @@ def run_lvs(
     mismatches.extend(_declared_pin_short_mismatches(layout_pin_renames))
 
     mismatches.extend(supply_findings)
+    # Issue #4200: explain a net.merged that is really a case-fold name collision.
+    _annotate_case_collision_merges(mismatches, layout_circuit, "file" in layout_spec)
     # Issue #2952: an unresolved reference subcircuit call is a pre-compare
     # determination (see `_unresolved_reference_subckt_calls`); unlike the
     # diagnostic-only errors above it *does* move `status` -- below, after

@@ -2982,6 +2982,287 @@ def test_cli_missing_request_arg_is_usage_error():
 
 
 # --------------------------------------------------------------------------- #
+# `request.macros` -- the shared hard-macro declaration (issue #2635)
+# --------------------------------------------------------------------------- #
+
+
+_MACRO_LEF = (
+    "VERSION 5.7 ;\n"
+    "MACRO sram_8x8\n"
+    "  CLASS BLOCK ;\n"
+    "  SIZE 20.0 BY 10.0 ;\n"
+    "  PIN D\n"
+    "    DIRECTION INPUT ;\n"
+    "    USE SIGNAL ;\n"
+    "    PORT\n"
+    "      LAYER met2 ;\n"
+    "        RECT 1.0 1.0 1.5 1.5 ;\n"
+    "    END\n"
+    "  END D\n"
+    "END sram_8x8\n"
+    "END LIBRARY\n"
+)
+
+_MACRO_LIB = (
+    "library (sram_8x8) {\n"
+    "  cell (sram_8x8) {\n"
+    "    area : 400.0 ;\n"
+    "    pin (D) { direction : input; }\n"
+    "  }\n"
+    "}\n"
+)
+
+
+def _write_macro_files(tmp_path, *corners: str) -> None:
+    _write(tmp_path / "sram_8x8.lef", _MACRO_LEF)
+    for corner in corners or ("tt",):
+        _write(tmp_path / f"sram_8x8_{corner}.lib", _MACRO_LIB)
+
+
+def test_macro_lef_is_read_before_read_def(tmp_path, monkeypatch):
+    """Issue #2635 AC3: the macro's LEF must be loaded before `read_def`,
+    which is exactly what turns `[ERROR ORD-2013] instance <inst> LEF
+    master <cell> not found` into a successful load."""
+    _write_macro_files(tmp_path, "tt")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[
+            {
+                "cell": "sram_8x8",
+                "lef": "sram_8x8.lef",
+                "lib": {"tt_025C_1v80": "sram_8x8_tt.lib"},
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    lines = _sta_script_text(tmp_path).splitlines()
+    macro_lef_index = next(
+        i for i, line in enumerate(lines) if line.endswith("sram_8x8.lef")
+    )
+    read_def_index = next(
+        i for i, line in enumerate(lines) if line.startswith("read_def ")
+    )
+    assert macro_lef_index < read_def_index
+    # ...and it comes *after* the two standard-cell LEFs, not instead of
+    # them.
+    assert lines[:2] == [lines[0], lines[1]]
+    assert lines[0].startswith("read_lef ") and lines[1].startswith("read_lef ")
+    assert macro_lef_index == 2
+
+    # The macro liberty follows the standard-cell liberty.
+    cell_liberty_index = next(
+        i
+        for i, line in enumerate(lines)
+        if line.startswith("read_liberty ") and "sky130_fd_sc_hd__" in line
+    )
+    macro_liberty_index = next(
+        i for i, line in enumerate(lines) if line.endswith("sram_8x8_tt.lib")
+    )
+    assert cell_liberty_index < macro_liberty_index
+
+    assert report["macros"][0]["cell"] == "sram_8x8"
+    assert report["macros"][0]["lef"].endswith("sram_8x8.lef")
+    assert report["macros"][0]["lib"]["tt_025C_1v80"].endswith("sram_8x8_tt.lib")
+
+
+def test_macro_lines_in_netlist_mode_precede_link_design(tmp_path, monkeypatch):
+    """`request.verilog` mode (issue #1825) loads the same macro views, in
+    the same relative order, before `read_verilog`/`link_design`."""
+    _write_macro_files(tmp_path, "tt")
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "top.v", "// fake gate-level netlist\n")
+    request = _base_request(
+        verilog="top.v",
+        hdl_toplevel="top",
+        macros=[{"lef": "sram_8x8.lef", "lib": {"tt_025C_1v80": "sram_8x8_tt.lib"}}],
+    )
+    del request["def"]
+    request_path = _write_request(tmp_path / "request.json", request)
+    _stub_openroad_success(monkeypatch)
+
+    run_sta(request_path)
+
+    lines = _sta_script_text(tmp_path, "sta_top.tcl").splitlines()
+    macro_lef_index = next(
+        i for i, line in enumerate(lines) if line.endswith("sram_8x8.lef")
+    )
+    macro_lib_index = next(
+        i for i, line in enumerate(lines) if line.endswith("sram_8x8_tt.lib")
+    )
+    link_index = next(
+        i for i, line in enumerate(lines) if line.startswith("link_design ")
+    )
+    read_verilog_index = next(
+        i for i, line in enumerate(lines) if line.startswith("read_verilog ")
+    )
+    assert macro_lib_index == 1  # right after the standard-cell liberty
+    assert macro_lef_index < read_verilog_index < link_index
+
+
+def test_macro_without_a_liberty_still_reads_its_lef(tmp_path, monkeypatch):
+    """A LEF-only macro is legal: the LEF alone fixes `ORD-2013`, and
+    OpenSTA then times the instance as an untimed blackbox."""
+    _write_macro_files(tmp_path)
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, macros=[{"lef": "sram_8x8.lef"}]
+    )
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    lines = _sta_script_text(tmp_path).splitlines()
+    assert any(line.endswith("sram_8x8.lef") for line in lines)
+    assert len([line for line in lines if line.startswith("read_liberty ")]) == 1
+    assert report["macros"][0]["lib"] is None
+
+
+def test_no_macros_field_emits_no_macro_lines(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert report["macros"] == []
+    lines = _sta_script_text(tmp_path).splitlines()
+    assert len([line for line in lines if line.startswith("read_lef ")]) == 2
+    assert len([line for line in lines if line.startswith("read_liberty ")]) == 1
+
+
+def test_macro_rejected_when_its_lef_is_missing(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, macros=[{"lef": "nope.lef"}]
+    )
+    with pytest.raises(PostRouteStaError, match=r"macros\[0\]\.lef not found"):
+        run_sta(request_path)
+
+
+def test_macro_rejected_when_the_field_is_malformed(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch, macros={"not": "a list"})
+    with pytest.raises(PostRouteStaError, match="request.macros must be a list"):
+        run_sta(request_path)
+
+
+def test_duplicate_macro_cells_rejected(tmp_path, monkeypatch):
+    _write_macro_files(tmp_path)
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef"}, {"lef": "sram_8x8.lef"}],
+    )
+    with pytest.raises(PostRouteStaError, match="cell values must be unique"):
+        run_sta(request_path)
+
+
+def test_multi_corner_loads_each_corners_own_macro_liberty(tmp_path, monkeypatch):
+    """One declaration, two corners: each corner's own session loads that
+    corner's macro liberty, never the other's."""
+    _write_macro_files(tmp_path, "tt", "ss")
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        macros=[
+            {
+                "lef": "sram_8x8.lef",
+                "lib": {
+                    "tt_025C_1v80": "sram_8x8_tt.lib",
+                    "ss_100C_1v60": "sram_8x8_ss.lib",
+                },
+            }
+        ],
+    )
+    _stub_openroad_multi_corner(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert [entry["corner"] for entry in report["corners"]] == [
+        "tt_025C_1v80",
+        "ss_100C_1v60",
+    ]
+    # `macros` is hoisted to the top level: the declaration is shared, only
+    # which liberty each corner loaded varies.
+    assert report["macros"][0]["cell"] == "sram_8x8"
+    tt_lines = _sta_script_text(tmp_path, "sta_top__tt_025C_1v80.tcl")
+    ss_lines = _sta_script_text(tmp_path, "sta_top__ss_100C_1v60.tcl")
+    assert "sram_8x8_tt.lib" in tt_lines and "sram_8x8_ss.lib" not in tt_lines
+    assert "sram_8x8_ss.lib" in ss_lines and "sram_8x8_tt.lib" not in ss_lines
+
+
+def test_multi_corner_macro_liberty_with_a_missing_corner_is_a_named_error(
+    tmp_path, monkeypatch
+):
+    """Issue #2635's named edge case: a macro liberty with no entry for one
+    of the requested corners must fail loudly, naming the macro and the
+    corner -- never silently characterize that corner against another
+    corner's macro timing."""
+    _write_macro_files(tmp_path, "tt")
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef", "lib": {"tt_025C_1v80": "sram_8x8_tt.lib"}}],
+    )
+    _stub_openroad_multi_corner(monkeypatch)
+
+    with pytest.raises(PostRouteStaError) as excinfo:
+        run_sta(request_path)
+    message = str(excinfo.value)
+    assert "sram_8x8" in message
+    assert "ss_100C_1v60" in message
+    assert "tt_025C_1v80" in message
+
+
+def test_macro_liberty_keyed_default_applies_to_every_corner(tmp_path, monkeypatch):
+    """The documented escape hatch for a macro shipped with one
+    corner-independent liberty -- keeps the field a plain `dict[str, str]`
+    rather than a union type."""
+    _write_macro_files(tmp_path, "any")
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef", "lib": {"default": "sram_8x8_any.lib"}}],
+    )
+    _stub_openroad_multi_corner(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert len(report["corners"]) == 2
+    for name in ("sta_top__tt_025C_1v80.tcl", "sta_top__ss_100C_1v60.tcl"):
+        assert "sram_8x8_any.lib" in _sta_script_text(tmp_path, name)
+
+
+def test_ord_2013_failure_names_request_macros(tmp_path, monkeypatch):
+    """A macro referenced by the DEF but absent from `request.macros` must
+    produce a clear, named error -- not a bare `ORD-2013` line that says
+    nothing about which request field supplies a LEF master."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="26Q3-771-gdeadbeef \n")
+        return fake_completed(
+            returncode=1,
+            stdout=(
+                "[ERROR ORD-2013] instance u_sram LEF master sram_8x8 not found.\n"
+            ),
+        )
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+
+    with pytest.raises(PostRouteStaError) as excinfo:
+        run_sta(request_path)
+    message = str(excinfo.value)
+    assert "ORD-2013" in message
+    assert "request.macros" in message
+    assert "sram_8x8" in message
+
+
+# --------------------------------------------------------------------------- #
 # Per-port min/max I/O delays + worst-path identity (issue #2740).
 #
 # `tests/fixtures/sta_worst_paths/boundary_captures.json` is real engine
@@ -7216,6 +7497,161 @@ def test_run_sta_power_basis_engine_default_and_global(tmp_path, monkeypatch):
     assert "set_power_activity -global -activity 0.2" in scripts[0]
 
 
+# -- constraints.clock_uncertainty_ns (issue #4240) ---------------------------#
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (None, None),
+        (0.1, {"setup_ns": 0.1, "hold_ns": 0.1}),
+        (0, {"setup_ns": 0.0, "hold_ns": 0.0}),
+        ({"setup_ns": 0.2}, {"setup_ns": 0.2, "hold_ns": None}),
+        ({"hold_ns": 0.05}, {"setup_ns": None, "hold_ns": 0.05}),
+        ({"setup_ns": 0, "hold_ns": 0.3}, {"setup_ns": 0.0, "hold_ns": 0.3}),
+    ],
+)
+def test_validate_clock_uncertainty_accepts(value, expected):
+    constraints = {} if value is None else {"clock_uncertainty_ns": value}
+    assert post_route_sta._validate_clock_uncertainty(constraints) == expected
+
+
+@pytest.mark.parametrize(
+    "value, match",
+    [
+        ({}, "at least one"),
+        ([], "must be a finite number"),
+        ("0.1", "must be a finite number"),
+        (True, "must be a finite number"),
+        (-0.1, "must be >= 0"),
+        (float("nan"), "must be a finite number"),
+        (float("inf"), "must be a finite number"),
+        ({"setup_ns": True}, "setup_ns must be a finite number"),
+        ({"hold_ns": -1}, "hold_ns must be >= 0"),
+        ({"setup_ns": "0.1"}, "setup_ns must be a finite number"),
+        ({"setup_ns": 0.1, "skew_ns": 1}, "unknown key"),
+    ],
+)
+def test_validate_clock_uncertainty_rejects(value, match):
+    with pytest.raises(PostRouteStaError, match=match):
+        post_route_sta._validate_clock_uncertainty({"clock_uncertainty_ns": value})
+
+
+def test_run_sta_clock_uncertainty_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(clock_uncertainty_ns=-1),
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        post_route_sta.subprocess, "run", lambda *a, **k: calls.append(a)
+    )
+    with pytest.raises(PostRouteStaError, match="clock_uncertainty_ns"):
+        run_sta(request_path)
+    assert calls == []
+
+
+def test_clock_uncertainty_lines_and_block():
+    assert post_route_sta._clock_uncertainty_lines("clk", None) == []
+    assert post_route_sta._clock_uncertainty_block(None) == {"applied": False}
+    both = {"setup_ns": 0.125, "hold_ns": 0.05}
+    assert post_route_sta._clock_uncertainty_lines("clk", both) == [
+        "set_clock_uncertainty -setup 0.125 [get_clocks clk]",
+        "set_clock_uncertainty -hold 0.05 [get_clocks clk]",
+    ]
+    hold_only = {"setup_ns": None, "hold_ns": 0.0}
+    assert post_route_sta._clock_uncertainty_lines("clk", hold_only) == [
+        "set_clock_uncertainty -hold 0.0 [get_clocks clk]"
+    ]
+    assert post_route_sta._clock_uncertainty_block(hold_only) == {
+        "applied": True,
+        "setup_ns": None,
+        "hold_ns": 0.0,
+    }
+
+
+def test_sta_script_lines_clock_uncertainty_after_clock_both_modes():
+    kwargs = dict(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk",
+        clock_period_ns=2.5,
+    )
+    cu = {"setup_ns": 0.1, "hold_ns": 0.02}
+    marker = "set_clock_uncertainty"
+
+    baseline = post_route_sta._sta_script_lines(def_path="/d/top.def", **kwargs)
+    assert not any(marker in line for line in baseline)
+    lines = post_route_sta._sta_script_lines(
+        def_path="/d/top.def", clock_uncertainty=cu, **kwargs
+    )
+    create = next(i for i, x in enumerate(lines) if x.startswith("create_clock"))
+    assert lines[create + 1] == "set_clock_uncertainty -setup 0.1 [get_clocks clk]"
+    assert lines[create + 2] == "set_clock_uncertainty -hold 0.02 [get_clocks clk]"
+    assert [x for x in lines if marker not in x] == baseline
+
+    # Orthogonal to propagation: both may be set, uncertainty after the clock.
+    both = post_route_sta._sta_script_lines(
+        def_path="/d/top.def", clock_uncertainty=cu, propagated_clock=True, **kwargs
+    )
+    assert "set_propagated_clock [get_clocks clk]" in both
+    assert sum(marker in x for x in both) == 2
+
+    net_kwargs = dict(verilog_path="/d/top.v", hdl_toplevel="top", **kwargs)
+    net_base = post_route_sta._sta_netlist_script_lines(**net_kwargs)
+    net = post_route_sta._sta_netlist_script_lines(clock_uncertainty=cu, **net_kwargs)
+    create = next(i for i, x in enumerate(net) if x.startswith("create_clock"))
+    assert net[create + 1].startswith("set_clock_uncertainty -setup")
+    assert [x for x in net if marker not in x] == net_base
+
+
+def test_run_sta_clock_uncertainty_response_and_script(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, constraints=_propagated_constraints()
+    )
+    scripts = _stub_openroad_clock_capture(monkeypatch, {None: "propagated_buffered"})
+    report = run_sta(request_path)
+    assert report["clock_uncertainty"] == {"applied": False}
+    assert "set_clock_uncertainty" not in scripts[0]
+
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(clock_uncertainty_ns={"setup_ns": 0.2}),
+    )
+    scripts = _stub_openroad_clock_capture(monkeypatch, {None: "propagated_buffered"})
+    report = run_sta(request_path)
+    assert report["clock_uncertainty"] == {
+        "applied": True,
+        "setup_ns": 0.2,
+        "hold_ns": None,
+    }
+    assert "set_clock_uncertainty -setup 0.2 [get_clocks" in scripts[0]
+    assert "-hold" not in "".join(
+        x for x in scripts[0].splitlines() if "set_clock_uncertainty" in x
+    )
+
+
+def test_run_sta_clock_uncertainty_every_corner(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(clock_uncertainty_ns=0.1),
+    )
+    scripts = _stub_openroad_clock_capture(
+        monkeypatch,
+        {None: "propagated_buffered", "ss_100C_1v60": "propagated_buffered"},
+    )
+    report = run_sta(request_path)
+    assert len(scripts) == 2
+    for s in scripts:
+        assert "set_clock_uncertainty -setup 0.1 [get_clocks" in s
+        assert "set_clock_uncertainty -hold 0.1 [get_clocks" in s
+    assert report["clock_uncertainty"]["applied"] is True
+
+
 def test_run_sta_power_basis_per_corner_entry(tmp_path, monkeypatch):
     request_path = _setup_multi_corner_env(
         tmp_path,
@@ -7232,3 +7668,39 @@ def test_run_sta_power_basis_per_corner_entry(tmp_path, monkeypatch):
     for entry in report["corners"]:
         assert entry["power_basis"]["activity_source"] == "global"
         assert entry["power_basis"]["activity"] == 0.1
+
+
+# --------------------------------------------------------------------------- #
+# cwd independence (issue #4276)
+# --------------------------------------------------------------------------- #
+
+
+def test_run_verilog_mode_is_cwd_independent(tmp_path, monkeypatch):
+    """A `verilog` request addressed request-dir-relative (`../layout/...`)
+    must generate byte-identical Tcl -- every `read_*` argument absolute --
+    whether the process cwd is the repo root or the request's own directory."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    repo = tmp_path / "repo"
+    (repo / "layout" / "x").mkdir(parents=True)
+    (repo / "flow").mkdir()
+    _write(repo / "layout" / "x" / "top.v", "module top(input clk); endmodule\n")
+    flow = repo / "flow"
+    request_path = _write_request(
+        flow / "req.json", _verilog_base_request(verilog="../layout/x/top.v")
+    )
+    _stub_openroad_success(monkeypatch)
+
+    scripts = []
+    for cwd, arg in ((repo, "flow/req.json"), (flow, "req.json")):
+        monkeypatch.chdir(cwd)
+        run_sta(arg)
+        scripts.append((flow / ".klt" / "sta" / "sta_top.tcl").read_text("utf-8"))
+
+    assert request_path  # request lives in `flow/`
+    assert scripts[0] == scripts[1]
+    for line in scripts[0].splitlines():
+        if line.startswith("read_"):
+            assert os.path.isabs(line.split(maxsplit=1)[1]), line

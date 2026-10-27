@@ -40,6 +40,7 @@ import re
 import subprocess  # noqa: F401 -- tests patch place_and_route.subprocess.run
 from typing import Any
 
+from . import macros as macro_spec
 from . import output_lock
 from ._openroad_engine import (
     _count_violations,
@@ -105,6 +106,7 @@ from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
 from .place_and_route_pins import (
     check_io_pin_constraints,
     netlist_top_ports,
+    read_def_instance_groups,
     read_def_pins,
     slot_shortage_hint,
 )
@@ -225,6 +227,9 @@ from .place_and_route_request import (
     _validate_floorplan as _validate_floorplan,
 )
 from .place_and_route_request import (
+    _validate_instance_groups as _validate_instance_groups,
+)
+from .place_and_route_request import (
     _validate_io as _validate_io,
 )
 from .place_and_route_request import (
@@ -280,6 +285,9 @@ from .place_and_route_script import (
     _antenna_check_lines as _antenna_check_lines,
 )
 from .place_and_route_script import (
+    _antenna_diode_absent as _antenna_diode_absent,
+)
+from .place_and_route_script import (
     _clock_lines as _clock_lines,
 )
 from .place_and_route_script import (
@@ -299,6 +307,12 @@ from .place_and_route_script import (
 )
 from .place_and_route_script import (
     _io_delay_lines as _io_delay_lines,
+)
+from .place_and_route_script import (
+    _macro_blockage_lines as _macro_blockage_lines,
+)
+from .place_and_route_script import (
+    _macro_pdn_grid_lines as _macro_pdn_grid_lines,
 )
 from .place_and_route_script import (
     _metrics_report_lines as _metrics_report_lines,
@@ -1170,6 +1184,19 @@ def _validate_pdn_core_fit(
         raise PlaceAndRouteError(message)
 
 
+def _antenna_repair_warnings(
+    target_stage: str, library: dict[str, Any] | None
+) -> list[str]:
+    """Warn when a ``route`` run skips antenna repair (``antenna_diode: null``)."""
+    if target_stage != "route" or not _antenna_diode_absent(library):
+        return []
+    return [
+        "antenna repair did not run: request.library.antenna_diode is "
+        "null (the library has no antenna diode), so repair_antennas "
+        "was not called; the antenna check still ran"
+    ]
+
+
 def _response_warnings(
     placed: dict[str, Any],
     *,
@@ -1610,6 +1637,7 @@ def _run_single_corner(
     # no-op.
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
+    instance_groups = _validate_instance_groups(request.get("instance_groups"))
     library = _validate_library(request.get("library"))
     power = _validate_power(request.get("power"), cell_library, library)
     (
@@ -1639,6 +1667,24 @@ def _run_single_corner(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
+    # Issue #2635: which of each macro's per-corner liberties applies to
+    # *this* run, resolvable only now that `_resolve_liberty` has named the
+    # corner. A macro that declared a `lib` map with no entry for this
+    # corner (and no `"default"`) is rejected here with a named error rather
+    # than silently timed at some other corner -- see
+    # `klayout_tools.macros.macro_lib_for_corner`.
+    macro_liberty_paths = [
+        path
+        for path in (
+            macro_spec.macro_lib_for_corner(
+                {**macro, "cell": macro["cell_name"]},
+                corner,
+                error_cls=PlaceAndRouteError,
+            )
+            for macro in macros
+        )
+        if path is not None
+    ]
     validate_tech_lef_track_offsets(floorplan, tech_lef)
 
     # Issue #2170: the joint floorplan/PDN pre-flight -- see
@@ -1712,6 +1758,7 @@ def _run_single_corner(
             output_dir=output_dir,
             route_critical_nets_percentage=route_critical_nets_percentage,
             max_antenna_repair_iterations=max_antenna_repair_iterations,
+            macro_liberty_paths=macro_liberty_paths,
             library=library,
         )
         _write_script(script_path, lines)
@@ -2034,6 +2081,7 @@ def _run_single_corner(
             "power_net": None,
             "ground_net": None,
             "tapcell_master": None,
+            "tapless": False,
             "endcap_master": None,
             "tapcell_distance_um": None,
             "filler_masters": [],
@@ -2053,6 +2101,7 @@ def _run_single_corner(
             "power_net": power["power_net"],
             "ground_net": power["ground_net"],
             "tapcell_master": tap_master,
+            "tapless": cell_library in _NO_TAPCELL_LIBRARIES,
             "endcap_master": endcap_master,
             "tapcell_distance_um": tapcell_distance_um,
             "filler_masters": (
@@ -2122,6 +2171,7 @@ def _run_single_corner(
         row_rail_emitted=row_rail_info["emitted"],
         row_rail_layer=row_rail_info["layer"],
     )
+    warnings.extend(_antenna_repair_warnings(target_stage, library))
 
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
@@ -2189,6 +2239,14 @@ def _run_single_corner(
                 "x_um": macro["x_um"],
                 "y_um": macro["y_um"],
                 "orientation": macro["orientation"],
+                # Additive per-entry fields (issue #2635): the macro's
+                # master name (shared with `klt synthesize`/`klt sta`'s own
+                # `macros[].cell`), the per-corner liberty map as resolved,
+                # and the halo actually honored -- `null` when the request
+                # declared no `halo`/`lib`.
+                "cell": macro["cell_name"],
+                "lib": macro["lib"],
+                "halo": macro["halo"],
             }
             for macro in macros
         ],
@@ -2196,6 +2254,14 @@ def _run_single_corner(
         # Additive field (issue #3885): final edge/coordinates of every
         # top-level pin, read from the DEF above (`null` at "floorplan").
         "pins": read_def_pins(audited_def_path) if audited_def_path else None,
+        # Additive field (issue #4344): placed-origin bbox of each requested
+        # `instance_groups` entry, read from the same DEF (`null` at
+        # "floorplan"; `[]` when none were requested).
+        "instance_groups": (
+            read_def_instance_groups(audited_def_path, instance_groups)
+            if audited_def_path
+            else None
+        ),
         # Additive field (issue #1826): see this function's own comment
         # above (right before `unrouted_def_path` is computed) for the
         # "when is this populated" contract.
@@ -2485,17 +2551,33 @@ def _engine_error_message(
             f"{completed.returncode}: {snippet}"
         )
 
-    hint = _mount_namespace_hint(completed, pdk_info)
-    if hint is not None:
-        message = f"{message} -- {hint}"
-    slot_hint = slot_shortage_hint(
-        f"{completed.stdout or ''}\n{completed.stderr or ''}",
-        pin_constraints,
-        top_ports,
+    # Each recognized-hint helper appends a further `--` clause. Issue
+    # #2635: `ORD-2013` is what a hard macro with no `request.macros` entry
+    # looks like, and the raw diagnostic says nothing about which request
+    # field would have supplied its physical view.
+    streams = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+    hints = (
+        _mount_namespace_hint(completed, pdk_info),
+        macro_spec.missing_lef_master_hint(streams),
+        slot_shortage_hint(streams, pin_constraints, top_ports),
     )
-    if slot_hint is not None:
-        message = f"{message} -- {slot_hint}"
+    message += "".join(f" -- {hint}" for hint in hints if hint is not None)
     return message
+
+
+def _outside_cwd_note(path: str) -> str:
+    """Issue #4191: the docker wrapper mounts only `$PWD`, `$PDK_ROOT` and
+    `$TMPDIR`, so a readable path outside the invocation directory is the
+    commonest trigger -- say the rule and the fix, not just the symptom."""
+    cwd = os.path.realpath(os.getcwd())
+    real = os.path.realpath(path)
+    if real == cwd or real.startswith(cwd.rstrip(os.sep) + os.sep):
+        return ""
+    return (
+        f"; '{path}' is outside the invocation directory '{cwd}', and the "
+        "container wrapper mounts only $PWD, $PDK_ROOT and $TMPDIR -- run "
+        "from a common ancestor of the request and its inputs"
+    )
 
 
 def _mount_namespace_hint(
@@ -2562,11 +2644,13 @@ def _mount_namespace_hint(
             f"{os.environ.get('PDK_ROOT') or '(unset)'})"
         )
 
+    mount_note = _outside_cwd_note(path)
+
     return (
         f"'openroad' could not read '{path}', but this process can read it"
         f"{pdk_note} -- if 'openroad' is a container/wrapper invocation, its "
         "mounts likely do not cover that path (see docs/cli/place-and-route.md's "
-        "'Installing OpenROAD' section)"
+        f"'Installing OpenROAD' section){mount_note}"
     )
 
 
