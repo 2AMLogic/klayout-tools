@@ -4,7 +4,7 @@ Run a headless DRC rule deck against a GDSII or OASIS layout stream and
 report violations as structured data.
 
 ```
-klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
+klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--pdk <variant> [--pdk-root <path>]] [--negative-control <layout> [--negative-control-categories <A,B>]] [--format text|json]
 klt drc --deck sky130|gf180mcu|sg13g2|sg13cmos5l --list-rules [--format text|json]
 klt drc <file> --engine both --deck <name> [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--format text|json]
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
@@ -65,9 +65,9 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   issue #2689; ignored for `--engine curated`). Omitted (the default), no
   version check runs. See "Engine" → `"klayout"` → "Declaring a minimum
   application version".
-- `--negative-control LAYOUT` — run the same native deck first against a
-  known-bad fixture and require findings (`--engine klayout` only, issue
-  #3076). See "Engine" → `"klayout"` → "Negative control".
+- `--negative-control LAYOUT` — run the same deck first against a
+  known-bad fixture and require findings (both engines; issues #3076,
+  #4320). See "Engine" → `"klayout"` → "Negative control".
 - `--negative-control-categories A,B` — rule categories the fixture must
   also produce (requires `--negative-control`).
 - `--expect-rule-categories N` — opt-in coverage assertion (`--engine
@@ -3962,3 +3962,9 @@ because a deck that flags nothing on known-bad input may not have executed.
 On success the report carries `negative_control`:
 `{"file", "status": "passed", "violation_count", "rules_found",
 "expected_categories"}`.
+
+The curated engine (`--deck`, issue #4320) behaves identically: the fixture
+is checked first with the same `--deck`, `--top`, `--rules` and `--pdk*`
+options, and the block has the same shape. `--waivers` is **not** applied to
+the fixture run, so a waiver cannot hide the control's violations. Without
+the flag the report carries no `negative_control` block.
