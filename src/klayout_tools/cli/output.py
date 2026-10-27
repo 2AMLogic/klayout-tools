@@ -200,6 +200,8 @@ def render_check_text(result: dict) -> None:
                         "--check resolves relative paths against the current "
                         "working directory -- re-run from there"
                     )
+    for skipped in result.get("skipped", ()):
+        print(f"  [SKIPPED] {skipped['field']}: {skipped['reason']}")
     # Issue #1373: engine-version drift is a non-fatal advisory, never folded
     # into the `[OK]`/`[DRIFTED]` hash-integrity list above -- it does not
     # affect `status`/exit code, so a scripted gate parsing that list alone

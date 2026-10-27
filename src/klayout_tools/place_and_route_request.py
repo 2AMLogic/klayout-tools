@@ -27,7 +27,8 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from .lef_header import read_lef_header
+from . import macros as macro_spec
+from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 
@@ -1125,7 +1126,38 @@ def _validate_macros(
     ``None`` (the default, used by this module's own direct unit tests below
     that exercise validation in isolation, with no netlist in hand) skips
     that cross-check entirely -- it is purely additive to the pre-existing
-    validation this function already performed."""
+    validation this function already performed.
+
+    Issue #2635 made the non-placement half of this entry shape a **shared**
+    concept across ``klt synthesize``/``klt sta``/``klt place-and-route``
+    (:mod:`klayout_tools.macros`), and this function now composes that
+    module's helpers for ``lef``/``cell``/``gds`` rather than keeping a
+    fourth private copy of the same checks -- every pre-existing error
+    message is preserved verbatim. It also adds the two fields that issue
+    identified as genuinely missing here:
+
+    ``halo``
+        A keep-out margin around the macro, in microns: either one
+        non-negative number (uniform on all four sides) or an object with
+        any of ``left``/``right``/``top``/``bottom`` (each defaulting to
+        ``0``). Honored in the ``"floorplan"`` stage as a ``create_blockage``
+        placement blockage over the macro's own footprint expanded by the
+        halo, and -- when ``request.power`` is also given -- as a
+        ``define_pdn_grid -macro ... -halo`` macro PDN grid. See
+        :func:`_macro_blockage_lines` / :func:`_macro_pdn_grid_lines`, and
+        this module's docstring "Power delivery" section (whose v1 exclusion
+        of macro PDN grids this closes).
+    ``lib`` (alias ``liberty``)
+        The macro's per-corner liberty map, exactly as ``klt synthesize``/
+        ``klt sta`` take it. Read alongside the standard-cell liberty in
+        every stage, so this verb's own timing-driven steps and ``-metrics``
+        report see the macro's real arcs instead of an untimed blackbox.
+        Omitted leaves every stage script byte-identical to before.
+
+    ``cell`` is also accepted (and cross-checked against the LEF's own
+    ``MACRO`` name) for shape-compatibility with the other two verbs;
+    ``instance`` remains required and is a different thing -- the instance
+    *path* to fix, versus ``cell``, the *master* name."""
     if macros is None:
         return []
     if not isinstance(macros, list):
@@ -1133,40 +1165,38 @@ def _validate_macros(
 
     validated: list[dict[str, Any]] = []
     for i, macro in enumerate(macros):
+        label = f"request.macros[{i}]"
         if not isinstance(macro, dict):
-            raise PlaceAndRouteError(f"request.macros[{i}] must be an object")
+            raise PlaceAndRouteError(f"{label} must be an object")
 
         instance = macro.get("instance")
         if not isinstance(instance, str) or not instance:
             raise PlaceAndRouteError(
-                f"request.macros[{i}].instance is required and must be a "
-                "non-empty string"
+                f"{label}.instance is required and must be a non-empty string"
             )
 
-        lef = macro.get("lef")
-        if not isinstance(lef, str) or not lef:
-            raise PlaceAndRouteError(
-                f"request.macros[{i}].lef is required and must be a non-empty string"
-            )
-        lef_path = lef if os.path.isabs(lef) else os.path.join(request_dir, lef)
-        if not os.path.isfile(lef_path):
-            raise PlaceAndRouteError(f"request.macros[{i}].lef not found: {lef}")
-        macro_cells = read_lef_header(lef_path)["macros"]
-        if len(macro_cells) != 1:
-            raise PlaceAndRouteError(
-                f"request.macros[{i}].lef '{lef}' must declare exactly one MACRO "
-                f"(found {len(macro_cells)})"
-            )
-        macro_cell_name = macro_cells[0]["name"]
+        lef = macro["lef"] if isinstance(macro.get("lef"), str) else None
+        lef_path, macro_record = macro_spec.resolve_macro_lef(
+            macro,
+            label=label,
+            request_dir=request_dir,
+            error_cls=PlaceAndRouteError,
+        )
+        macro_cell_name = macro_spec.resolve_macro_cell_name(
+            macro,
+            label=label,
+            lef_cell_name=macro_record["name"],
+            error_cls=PlaceAndRouteError,
+        )
 
         no_port_pin_names = sorted(
-            pin["name"] for pin in macro_cells[0]["pins"] if not pin["has_port"]
+            pin["name"] for pin in macro_record["pins"] if not pin["has_port"]
         )
         if no_port_pin_names and netlist_path is not None:
             _reject_wired_port_less_pins(
                 index=i,
                 instance=instance,
-                lef=lef,
+                lef=lef if lef is not None else lef_path,
                 macro_cell_name=macro_cell_name,
                 no_port_pin_names=no_port_pin_names,
                 netlist_path=netlist_path,
@@ -1177,36 +1207,44 @@ def _validate_macros(
                 macro.get(key), bool
             ):
                 raise PlaceAndRouteError(
-                    f"request.macros[{i}].{key} is required and must be a number"
+                    f"{label}.{key} is required and must be a number"
                 )
 
         orientation = macro.get("orientation", "R0")
         if orientation not in _MACRO_ORIENTATIONS:
             raise PlaceAndRouteError(
-                f"request.macros[{i}].orientation must be one of: "
+                f"{label}.orientation must be one of: "
                 + ", ".join(sorted(_MACRO_ORIENTATIONS))
             )
-
-        gds = macro.get("gds")
-        gds_path: str | None = None
-        if gds is not None:
-            if not isinstance(gds, str) or not gds:
-                raise PlaceAndRouteError(
-                    f"request.macros[{i}].gds must be a non-empty string when given"
-                )
-            gds_path = gds if os.path.isabs(gds) else os.path.join(request_dir, gds)
-            if not os.path.isfile(gds_path):
-                raise PlaceAndRouteError(f"request.macros[{i}].gds not found: {gds}")
 
         validated.append(
             {
                 "instance": instance,
-                "lef": os.path.abspath(lef_path),
+                "lef": lef_path,
                 "cell_name": macro_cell_name,
                 "x_um": float(macro["x_um"]),
                 "y_um": float(macro["y_um"]),
                 "orientation": orientation,
-                "gds": gds_path,
+                "gds": macro_spec.resolve_optional_macro_file(
+                    macro,
+                    "gds",
+                    label=label,
+                    request_dir=request_dir,
+                    error_cls=PlaceAndRouteError,
+                ),
+                # Issue #2635.
+                "lib": macro_spec.resolve_macro_lib(
+                    macro,
+                    label=label,
+                    request_dir=request_dir,
+                    error_cls=PlaceAndRouteError,
+                ),
+                "halo": _validate_macro_halo(macro.get("halo"), label=label),
+                "width_um": macro_record.get("width_um"),
+                "height_um": macro_record.get("height_um"),
+                "power_ground_layers": _macro_power_ground_layers(
+                    lef_path, macro_cell_name, macro_record["pins"]
+                ),
             }
         )
 
@@ -1215,6 +1253,127 @@ def _validate_macros(
         raise PlaceAndRouteError("request.macros[].instance values must be unique")
 
     return validated
+
+
+#: The four sides a ``request.macros[].halo`` object may name, in the order
+#: OpenROAD's own ``define_pdn_grid -halo`` list takes them (verified live
+#: against OpenROAD 26Q3: ``PDN-0008``'s own "reduce the halo to at most
+#: ``<left> <bottom> <right> <top>``" diagnostic restates a rejected halo in
+#: exactly this order).
+_MACRO_HALO_SIDES = ("left", "bottom", "right", "top")
+
+
+def _validate_macro_halo(halo: Any, *, label: str) -> dict[str, float] | None:
+    """Validate one ``request.macros[].halo`` value (issue #2635), returning
+    ``{"left": f, "bottom": f, "right": f, "top": f}`` or ``None`` when the
+    field is omitted.
+
+    Accepts a bare number (uniform on all four sides -- the overwhelmingly
+    common case, and the shape every ORFS platform config uses) or an object
+    naming any subset of :data:`_MACRO_HALO_SIDES`, each side defaulting to
+    ``0``. An empty object is rejected rather than silently treated as
+    "omitted": a caller who wrote ``"halo": {}`` meant something, and
+    guessing which is worse than asking.
+
+    Negative values are rejected -- a "negative halo" would mean letting
+    standard cells *overlap* the macro, which no caller means and which
+    ``create_blockage`` has no way to express anyway.
+    """
+    if halo is None:
+        return None
+    if isinstance(halo, bool):
+        raise PlaceAndRouteError(
+            f"{label}.halo must be a number or an object naming any of: "
+            + ", ".join(_MACRO_HALO_SIDES)
+        )
+    if isinstance(halo, (int, float)):
+        return _validate_uniform_macro_halo(halo, label=label)
+    if isinstance(halo, dict):
+        return _validate_per_side_macro_halo(halo, label=label)
+    raise PlaceAndRouteError(
+        f"{label}.halo must be a number (uniform, in um) or an object "
+        "naming any of: " + ", ".join(_MACRO_HALO_SIDES)
+    )
+
+
+def _validate_uniform_macro_halo(halo: float, *, label: str) -> dict[str, float]:
+    """The bare-number half of :func:`_validate_macro_halo`: one value applied
+    to all four sides of :data:`_MACRO_HALO_SIDES`.
+    """
+    if halo < 0:
+        raise PlaceAndRouteError(f"{label}.halo must not be negative")
+    return dict.fromkeys(_MACRO_HALO_SIDES, float(halo))
+
+
+def _validate_per_side_macro_halo(
+    halo: dict[str, Any], *, label: str
+) -> dict[str, float]:
+    """The object half of :func:`_validate_macro_halo`: any subset of
+    :data:`_MACRO_HALO_SIDES`, each unnamed side defaulting to ``0``.
+
+    An empty object is rejected rather than silently treated as "omitted",
+    and an unrecognized side name is named back to the caller rather than
+    ignored -- a misspelled side that validated would silently drop the halo
+    the caller asked for.
+    """
+    if not halo:
+        raise PlaceAndRouteError(
+            f"{label}.halo must name at least one of: " + ", ".join(_MACRO_HALO_SIDES)
+        )
+    unknown = sorted(set(halo) - set(_MACRO_HALO_SIDES))
+    if unknown:
+        raise PlaceAndRouteError(
+            f"{label}.halo has unknown side(s) {', '.join(unknown)} -- "
+            "valid sides are: " + ", ".join(_MACRO_HALO_SIDES)
+        )
+    resolved: dict[str, float] = {}
+    for side in _MACRO_HALO_SIDES:
+        value = halo.get(side, 0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise PlaceAndRouteError(f"{label}.halo.{side} must be a number")
+        if value < 0:
+            raise PlaceAndRouteError(f"{label}.halo.{side} must not be negative")
+        resolved[side] = float(value)
+    return resolved
+
+
+def _macro_power_ground_layers(
+    lef_path: str, macro_cell_name: str, pins: list[dict[str, Any]]
+) -> list[str]:
+    """Every routing layer the macro's ``USE POWER``/``USE GROUND`` pins
+    actually have ``PORT`` geometry on, in LEF declaration order (issue
+    #2635).
+
+    This is what :func:`_macro_pdn_grid_lines` needs to emit an
+    ``add_pdn_connect`` for a macro PDN grid: pdngen rejects a macro grid
+    that produces no shapes or vias at all (live-verified against OpenROAD
+    26Q3: ``[WARNING PDN-0232] The grid "..." does not contain any shapes or
+    vias`` followed by ``[ERROR PDN-0233] Failed to generate full power
+    grid``), and the connection's lower layer is by definition the layer the
+    macro exposes its own P/G pins on. Derived from the LEF rather than
+    asked for in the request because the LEF is the authority on it and a
+    caller restating it is a chance to restate it wrong.
+
+    ``[]`` when the macro declares no P/G pin with a ``PORT`` at all -- a
+    legitimate state (an analog block whose supplies are routed as ordinary
+    signals), handled by the caller rather than treated as an error here.
+    """
+    pg_pin_names = {
+        pin["name"]
+        for pin in pins
+        if (pin.get("use") or "").upper() in ("POWER", "GROUND")
+    }
+    if not pg_pin_names:
+        return []
+    ports = read_lef_macro_pin_ports(lef_path).get(macro_cell_name, {})
+    layers: list[str] = []
+    for pin_name, port_list in ports.items():
+        if pin_name not in pg_pin_names:
+            continue
+        for port in port_list:
+            if port["layer"] not in layers:
+                layers.append(port["layer"])
+    return layers
 
 
 #: A structural-Verilog module instantiation with **named** port
@@ -1676,8 +1835,13 @@ def _validate_library_route_layers(raw: Any) -> str:
     return f"{low}-{high}"
 
 
-def _validate_library_antenna_diode(raw: Any) -> tuple[str, str]:
+def _validate_library_antenna_diode(raw: Any) -> tuple[str, str] | None:
+    """``None`` (JSON ``null``) states the library has no antenna diode:
+    the ``route`` stage skips ``repair_antennas`` (issue #4274); an object
+    names the diode cell and pin."""
     where = "request.library.antenna_diode"
+    if raw is None:
+        return None
     obj = _library_object(raw, where, ("cell", "pin"))
     for key in ("cell", "pin"):
         if key not in obj:
@@ -1745,7 +1909,8 @@ def _validate_library(library: Any) -> dict[str, Any] | None:
     generated script byte-identical. Returns only the keys that were given:
     ``cts_buffer`` (str), ``power_pins`` (list of ``(net_role, pattern,
     primary)``), ``wire_rc`` (``(resistance, capacitance)``),
-    ``route_layers`` (``"low-high"``), ``antenna_diode`` (``(cell, pin)``),
+    ``route_layers`` (``"low-high"``), ``antenna_diode`` (``(cell, pin)``, or ``None`` =
+    the library has no antenna diode, so no antenna repair; issue #4274),
     ``tapcell`` (``(tap, endcap, distance_um)``, all ``None`` = the library
     has no tap cells) and ``filler`` (tuple of masters; issue #4127).
     """
