@@ -203,6 +203,7 @@ from .lvs_gate_level import (
     _supply_pin_universe,
 )
 from .lvs_mismatch import (
+    _annotate_case_collision_merges,
     _apply_tolerance_snaps,
     _body_net_warnings,
     _build_mismatches,
@@ -2672,6 +2673,8 @@ def run_lvs(
     mismatches.extend(_declared_pin_short_mismatches(layout_pin_renames))
 
     mismatches.extend(supply_findings)
+    # Issue #4200: explain a net.merged that is really a case-fold name collision.
+    _annotate_case_collision_merges(mismatches, layout_circuit, "file" in layout_spec)
     # Issue #2952: an unresolved reference subcircuit call is a pre-compare
     # determination (see `_unresolved_reference_subckt_calls`); unlike the
     # diagnostic-only errors above it *does* move `status` -- below, after

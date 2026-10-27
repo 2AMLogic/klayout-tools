@@ -549,6 +549,26 @@ def test_run_floorplan_utilization_requires_site(tmp_path):
         run_place_and_route(request_path)
 
 
+def test_run_floorplan_utilization_requires_core_margin(tmp_path):
+    """Issue #4191: OpenROAD needs `-core_space` (IFP-0034) for `-utilization`,
+    so reject before any engine run, naming the field."""
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            floorplan={
+                "method": "utilization",
+                "utilization_pct": 38,
+                "site": "unithd",
+            }
+        ),
+    )
+    with pytest.raises(
+        PlaceAndRouteError, match="floorplan.core_margin_um is required"
+    ):
+        run_place_and_route(request_path)
+
+
 def test_run_floorplan_explicit_requires_die_and_core_area(tmp_path):
     _write(tmp_path / "gcd_synth.v", "// netlist\n")
     request_path = _write_request(
@@ -6331,6 +6351,35 @@ def test_engine_error_message_flags_readable_file_openroad_cannot_read(tmp_path)
     assert "docs/cli/place-and-route.md" in message
 
 
+def test_engine_error_message_names_mount_rule_for_path_outside_cwd(
+    tmp_path, monkeypatch
+):
+    """Issue #4191: a readable path outside the invocation directory gets the
+    `$PWD`/`$PDK_ROOT`/`$TMPDIR` mount rule and the common-ancestor advice."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    outside = tmp_path / "elsewhere" / "macro.lef"
+    outside.parent.mkdir()
+    outside.write_text("# lef\n", encoding="utf-8")
+    monkeypatch.chdir(cwd)
+    completed = fake_completed(
+        returncode=1,
+        stderr=f"Error: pnr_top_floorplan.tcl, 1\ncannot read file {outside}.\n",
+    )
+
+    message = place_and_route._engine_error_message("floorplan", completed)
+
+    assert f"'{outside}' is outside the invocation directory" in message
+    assert "$PWD, $PDK_ROOT and $TMPDIR" in message
+    assert "common ancestor" in message
+
+    inside = cwd / "macro.lef"
+    inside.write_text("# lef\n", encoding="utf-8")
+    completed = fake_completed(returncode=1, stderr=f"cannot read file {inside}.\n")
+    message = place_and_route._engine_error_message("floorplan", completed)
+    assert "outside the invocation directory" not in message
+
+
 def test_engine_error_message_omits_pdk_note_when_path_outside_pdk_root(tmp_path):
     """The mount-namespace hint still fires for any readable, out-of-mount
     absolute path (issue #1868's own closing note: the same hazard applies
@@ -11808,6 +11857,7 @@ _TRACKS_FLOORPLAN = {
     "method": "utilization",
     "utilization_pct": 40,
     "site": "asap7sc7p5t",
+    "core_margin_um": 2.0,
 }
 _GOOD_TRACK = {
     "layer": "M2",

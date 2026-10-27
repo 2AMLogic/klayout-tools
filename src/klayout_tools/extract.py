@@ -272,6 +272,7 @@ from .extract_progress import StageTimer, active_timer, stage
 # internal helpers (`_describe_layers_in_set`, `_pin_index_by_net_id`,
 # `_each_pin_net`) have no caller here and are deliberately not imported.
 from .extract_report import (
+    _case_collision_warnings,
     _describe_device_recognition_only_layers,
     _describe_devices,
     _describe_ignored_layers,
@@ -3192,6 +3193,9 @@ def run_extract(
     # docs/cli/extract.md's "Split net labels" section.
     split_net_labels = _detect_split_net_labels(nets)
     warnings.extend(_split_net_label_warnings(split_net_labels))
+
+    # Issue #4200: nets differing only by case merge on `klt lvs` read-back.
+    warnings.extend(_case_collision_warnings(nets))
 
     # PMOS body terminals tied to an anonymous, unbiased net (issue #555):
     # a PMOS body extracts onto a KLayout-synthesized `$<n>` net with no DC
