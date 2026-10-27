@@ -2243,6 +2243,8 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
   "warnings": [],
   "provenance": {
     "klt_version": "0.1.0",
+    "klt_git_commit": null,
+    "klt_reinstall_spec": null,
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
     "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>", "path": { "path": null, "scope": "external" } },
@@ -3201,7 +3203,7 @@ committed one, reporting `status: "drifted"` with a `drift[]` list of
 `wirelength_um`, `setup_violation_count`, a `power.placed` count that stopped
 being reported, a changed `provenance.input.content_hash`.
 
-Excluded from the diff: `provenance.klt_version`/`klayout_version`/
+Excluded from the diff: `provenance.klt_version`/`klt_git_commit`/`klt_reinstall_spec`/`klayout_version`/
 `pdk.version` and `engine_version` (an OpenROAD upgrade that leaves the result
 untouched is tool churn, not evidence drift), plus the whole `engine_logs[]`
 block — every entry is keyed by a fresh `uuid4` `invocation_id` with its

@@ -10,6 +10,8 @@ this module builds:
 
     "provenance": {
         "klt_version": "0.4.2",
+        "klt_git_commit": "<full sha> | null",
+        "klt_reinstall_spec": "klayout-tools==0.4.2 | null",
         "klayout_version": "0.29.8",
         "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
         "deck": {"name": "sky130", "content_hash": "sha256:...", "released": true},
@@ -381,6 +383,16 @@ def _klt_version() -> str:
     """The same build identity as ``klt --version``, including ``+unknown``
     when no git provenance can be recovered."""
     return build_identity.build_version()
+
+
+def _klt_build_handle() -> tuple[str | None, str | None]:
+    """``(git_commit, reinstall_spec)`` for this build (issue #4412) -- the
+    values of ``klt version --format json``'s fields of the same names.
+    ``None`` for each when unrecoverable (dirty tree, tarball install); never
+    fabricated. Probes the build identity once for both."""
+    ident = build_identity.identity()
+    spec = build_identity.reinstall_spec(ident, build_identity.build_version())
+    return (ident.get("git_commit") or None, spec)
 
 
 def _klayout_version() -> str | None:
@@ -901,8 +913,13 @@ def build_provenance(
             f"(expected one of {', '.join(sorted(INPUT_ROLES))})"
         )
     actual_klayout_version = _klayout_version()
+    git_commit, reinstall_spec = _klt_build_handle()
     block: dict[str, Any] = {
         "klt_version": _klt_version(),
+        # Additive (issue #4412): the handle that re-obtains the build a
+        # dev-build `klt_version` (never published to an index) names.
+        "klt_git_commit": git_commit,
+        "klt_reinstall_spec": reinstall_spec,
         "klayout_version": actual_klayout_version,
         "pdk": _pdk_block(pdk, deck_path),
         "deck": _deck_block(

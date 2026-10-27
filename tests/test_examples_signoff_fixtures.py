@@ -76,6 +76,8 @@ def test_normalizer_nulls_exactly_the_host_identity_fields():
         "status": "clean",
         "provenance": {
             "klt_version": "0.5.0+gdeadbeefcafe.dirty",
+            "klt_git_commit": "deadbeefcafe0000000000000000000000000000",
+            "klt_reinstall_spec": "klayout-tools==0.5.0",
             "klayout_version": "0.30.10",
             "deck": {
                 "name": "sky130",
@@ -88,8 +90,15 @@ def test_normalizer_nulls_exactly_the_host_identity_fields():
 
     normalized = generate._normalize_volatile_provenance(doc)
 
-    assert normalized == ["provenance.klt_version", "provenance.deck.released"]
+    assert normalized == [
+        "provenance.klt_version",
+        "provenance.klt_git_commit",
+        "provenance.klt_reinstall_spec",
+        "provenance.deck.released",
+    ]
     assert doc["provenance"]["klt_version"] is None
+    assert doc["provenance"]["klt_git_commit"] is None
+    assert doc["provenance"]["klt_reinstall_spec"] is None
     assert doc["provenance"]["deck"]["released"] is None
     # Everything that describes the *block* survives untouched -- a
     # normalization that reached the content hashes would destroy the very
@@ -108,12 +117,28 @@ def test_normalizer_skips_a_null_deck_block():
     `provenance.deck` is legitimately `null` -- there is no `released` flag
     under it, and that is not an error."""
     generate = _load_generator()
-    doc = {"provenance": {"klt_version": "0.5.0+gdeadbeefcafe", "deck": None}}
+    doc = {
+        "provenance": {
+            "klt_version": "0.5.0+gdeadbeefcafe",
+            "klt_git_commit": "deadbeefcafe0000000000000000000000000000",
+            "klt_reinstall_spec": None,
+            "deck": None,
+        }
+    }
 
     normalized = generate._normalize_volatile_provenance(doc)
 
-    assert normalized == ["provenance.klt_version"]
-    assert doc["provenance"] == {"klt_version": None, "deck": None}
+    assert normalized == [
+        "provenance.klt_version",
+        "provenance.klt_git_commit",
+        "provenance.klt_reinstall_spec",
+    ]
+    assert doc["provenance"] == {
+        "klt_version": None,
+        "klt_git_commit": None,
+        "klt_reinstall_spec": None,
+        "deck": None,
+    }
 
 
 def test_normalizer_refuses_an_envelope_missing_a_targeted_field():
@@ -140,6 +165,8 @@ def test_normalized_paths_are_the_two_documented_host_identity_fields():
 
     assert generate._NORMALIZED_PROVENANCE_PATHS == (
         ("provenance", "klt_version"),
+        ("provenance", "klt_git_commit"),
+        ("provenance", "klt_reinstall_spec"),
         ("provenance", "deck", "released"),
     )
 
@@ -154,6 +181,8 @@ def test_committed_envelopes_are_normalized(name):
     provenance = _fixture(name)["provenance"]
 
     assert provenance["klt_version"] is None
+    assert provenance["klt_git_commit"] is None
+    assert provenance["klt_reinstall_spec"] is None
     deck = provenance["deck"]
     if deck is not None:
         assert deck["released"] is None
