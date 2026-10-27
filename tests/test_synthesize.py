@@ -2512,6 +2512,134 @@ def test_generated_script_reads_sv_sources_with_sv_front_end(tmp_path, monkeypat
     assert "read_verilog -sv c.sv" in script_text
 
 
+def _install_stub_sv2v(tmp_path, monkeypatch, *, exit_code=0):
+    """A stub `sv2v` on PATH that logs each invocation and writes `-w` output."""
+    bindir = tmp_path / "stubbin"
+    bindir.mkdir()
+    log = tmp_path / "sv2v.log"
+    stub = bindir / "sv2v"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "sv2v v9.9.9-stub"; exit 0; fi\n'
+        f'echo "$@" >> "{log}"\n'
+        f"[ {exit_code} -ne 0 ] && {{ echo 'stub failure' >&2; exit {exit_code}; }}\n"
+        'while [ $# -gt 0 ]; do [ "$1" = "-w" ] && { out="$2"; break; }; shift; done\n'
+        'echo "module converted(); endmodule" > "$out"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return log
+
+
+_REAL_SUBPROCESS_RUN = subprocess.run
+
+
+def _route_sv2v_to_real_subprocess(monkeypatch):
+    """Let the stub `sv2v` really execute while Yosys stays stubbed: call after
+    `_stub_yosys_success`, which replaces the shared `subprocess.run`."""
+    yosys_stub = synthesize.subprocess.run
+    real_run = _REAL_SUBPROCESS_RUN
+
+    def run(cmd, *args, **kwargs):
+        if os.path.basename(str(cmd[0])) == "sv2v":
+            return real_run(cmd, *args, **kwargs)
+        return yosys_stub(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(synthesize.subprocess, "run", run)
+
+
+def _sv2v_request(tmp_path, request_path):
+    _write(tmp_path / "c.sv", "module c(input logic clk); endmodule\n")
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["sources"] = ["gcd.v", "c.sv"]
+    request["sv_frontend"] = "sv2v"
+    _write_request(Path(request_path), request)
+
+
+def test_sv2v_frontend_converts_once_and_records_provenance(tmp_path, monkeypatch):
+    """Issue #4198: one sv2v call; the script reads the converted file; the
+    record names the route and sv2v version."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _sv2v_request(tmp_path, request_path)
+    log = _install_stub_sv2v(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    _route_sv2v_to_real_subprocess(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    script_text = Path(_abs_path(report["script_path"], tmp_path)).read_text(
+        encoding="utf-8"
+    )
+    assert "_sv2v.v" in script_text
+    assert "read_verilog -sv" not in script_text
+    assert "c.sv" not in script_text
+    assert report["provenance"]["sv_frontend"] == {
+        "route": "sv2v",
+        "sv2v_version": "sv2v v9.9.9-stub",
+    }
+
+
+def test_sv2v_frontend_passes_defines_to_sv2v(tmp_path, monkeypatch):
+    """Review fix: sv2v preprocesses, so request defines must reach it."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _sv2v_request(tmp_path, request_path)
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["defines"] = {"B": "2", "A": None}
+    _write_request(Path(request_path), request)
+    log = _install_stub_sv2v(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    _route_sv2v_to_real_subprocess(monkeypatch)
+
+    run_synthesize(request_path)
+
+    args = log.read_text(encoding="utf-8").split()
+    assert args.index("--define=A") < args.index("--define=B=2")
+
+
+def test_default_frontend_has_no_sv_frontend_provenance(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert "sv_frontend" not in report["provenance"]
+
+
+def test_sv2v_frontend_missing_tool_is_structured_error(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _sv2v_request(tmp_path, request_path)
+    empty = tmp_path / "emptybin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    _stub_yosys_success(monkeypatch)
+
+    with pytest.raises(SynthesizeError, match="sv2v.*not found on PATH"):
+        run_synthesize(request_path)
+
+
+def test_sv2v_frontend_conversion_failure_is_error(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _sv2v_request(tmp_path, request_path)
+    _install_stub_sv2v(tmp_path, monkeypatch, exit_code=3)
+    _stub_yosys_success(monkeypatch)
+    _route_sv2v_to_real_subprocess(monkeypatch)
+
+    with pytest.raises(SynthesizeError, match="sv2v conversion failed.*stub failure"):
+        run_synthesize(request_path)
+
+
+def test_sv_frontend_rejects_unknown_value(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["sv_frontend"] = "slang"
+    _write_request(Path(request_path), request)
+
+    with pytest.raises(SynthesizeError, match="sv_frontend"):
+        run_synthesize(request_path)
+
+
 def test_generated_script_passes_constr_and_dont_use(tmp_path, monkeypatch):
     """The default (no `clock_period_ns`) run passes `-constr` -- which is
     what unlocks ABC's `buffer`/`upsize`/`dnsize` sizing steps and its
@@ -5689,6 +5817,132 @@ def test_check_synthesize_report_detects_edited_netlist(tmp_path, monkeypatch):
     by_field = {c["field"]: c for c in drifted["checks"]}
     assert by_field["netlist_sha256"]["match"] is False
     assert by_field["provenance.input.content_hash"]["match"] is True
+
+
+def _no_pdk(monkeypatch):
+    """Make any liberty resolution fail loudly -- the PDK-less host."""
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.setattr(
+        synthesize,
+        "_resolve_liberty",
+        lambda *a, **k: pytest.fail("--skip-deck must not resolve the liberty"),
+    )
+
+
+def test_check_synthesize_report_skip_deck_matches_without_a_pdk(tmp_path, monkeypatch):
+    """Issue #4315: `skip_deck` runs with no resolvable PDK; the deck entry is
+    absent from `checks[]` and named in `skipped[]`."""
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    _no_pdk(monkeypatch)
+
+    result = synthesize.check_synthesize_report(
+        report_path, request_path, skip_deck=True
+    )
+
+    assert result["status"] == "match"
+    fields = [c["field"] for c in result["checks"]]
+    assert "provenance.deck.content_hash" not in fields
+    assert len(fields) == 4 and all(c["match"] for c in result["checks"])
+    assert result["skipped"] == [
+        {
+            "field": "provenance.deck.content_hash",
+            "reason": "--skip-deck: liberty not resolved",
+        }
+    ]
+
+
+def test_check_synthesize_report_without_skip_deck_has_no_skipped_key(
+    tmp_path, monkeypatch
+):
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    result = synthesize.check_synthesize_report(report_path, request_path)
+    assert "skipped" not in result
+    assert len(result["checks"]) == 5
+
+
+def test_check_synthesize_report_skip_deck_detects_rtl_edit(tmp_path, monkeypatch):
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    _no_pdk(monkeypatch)
+    _write(tmp_path / "gcd.v", _GCD_RTL + "\n// an edit after the fact\n")
+
+    result = synthesize.check_synthesize_report(
+        report_path, request_path, skip_deck=True
+    )
+
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["match"] is False
+
+
+def test_check_synthesize_report_skip_deck_does_not_see_a_changed_deck(
+    tmp_path, monkeypatch
+):
+    """A changed liberty is `drifted` without the flag and invisible with it
+    -- exactly why the response must say what was skipped."""
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    for lib in (tmp_path / "install").rglob("*.lib"):
+        lib.write_text(lib.read_text(encoding="utf-8") + "\n/* changed */\n")
+
+    full = synthesize.check_synthesize_report(report_path, request_path)
+    assert full["status"] == "drifted"
+    assert {c["field"] for c in full["checks"] if not c["match"]} == {
+        "provenance.deck.content_hash"
+    }
+
+    cheap = synthesize.check_synthesize_report(
+        report_path, request_path, skip_deck=True
+    )
+    assert cheap["status"] == "match"
+    assert cheap["skipped"][0]["field"] == "provenance.deck.content_hash"
+
+
+def test_cli_synthesize_skip_deck_exit_codes_and_text(tmp_path, monkeypatch, capsys):
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    _no_pdk(monkeypatch)
+    argv = ["synthesize", request_path, "--check", report_path, "--skip-deck"]
+
+    assert main([*argv, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["skipped"]
+
+    assert main([*argv, "--format", "text"]) == 0
+    assert "[SKIPPED] provenance.deck.content_hash" in capsys.readouterr().out
+
+    _write(tmp_path / "gcd.v", _GCD_RTL + "\n// edit\n")
+    assert main([*argv, "--format", "json"]) == 3
+
+
+def test_cli_synthesize_skip_deck_usage_errors(tmp_path, monkeypatch, capsys):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    assert main(["synthesize", request_path, "--skip-deck", "--format", "json"]) == 1
+    assert "requires --check" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+    assert (
+        main(
+            [
+                "synthesize",
+                request_path,
+                "--check",
+                str(tmp_path / "r.json"),
+                "--rerun",
+                "--skip-deck",
+                "--format",
+                "json",
+            ]
+        )
+        == 1
+    )
+    assert "cheap-mode only" in json.loads(capsys.readouterr().err)["error"]["message"]
 
 
 def test_check_synthesize_report_netlist_sha256_missing_baseline(tmp_path, monkeypatch):

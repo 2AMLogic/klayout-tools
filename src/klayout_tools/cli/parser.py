@@ -4517,6 +4517,19 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
             "is used when it is repo-scoped. See docs/cli/synthesize.md."
         ),
     )
+    synthesize_parser.add_argument(
+        "--skip-deck",
+        dest="skip_deck",
+        action="store_true",
+        help=(
+            "with --check (cheap mode only): do not resolve the standard-cell "
+            "liberty, so the check runs on a host with no PDK install. The "
+            "`provenance.deck.content_hash` check is omitted and listed in "
+            "the response's `skipped[]`; a `match` then proves RTL, "
+            "parameters, defines and netlist bytes, NOT the deck. Not valid "
+            "with --rerun. See docs/cli/synthesize.md."
+        ),
+    )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
 

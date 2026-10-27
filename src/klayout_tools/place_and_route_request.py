@@ -443,6 +443,17 @@ def _resolve_netlist(netlist: Any, request_dir: str) -> str:
     return os.path.abspath(path)
 
 
+def _require_utilization_core_margin(method: str, floorplan: dict[str, Any]) -> None:
+    # Issue #4191: `initialize_floorplan -utilization` needs `-core_space`
+    # (OpenROAD IFP-0034); reject here rather than after a full OpenROAD run.
+    if method == "utilization" and floorplan.get("core_margin_um") is None:
+        raise PlaceAndRouteError(
+            "request.floorplan.core_margin_um is required for method "
+            "'utilization' (OpenROAD's initialize_floorplan -utilization "
+            "needs -core_space)"
+        )
+
+
 def _validate_floorplan(floorplan: Any) -> dict[str, Any]:
     if not isinstance(floorplan, dict):
         raise PlaceAndRouteError("request.floorplan must be a JSON object")
@@ -479,6 +490,8 @@ def _validate_floorplan(floorplan: Any) -> dict[str, Any]:
         raise PlaceAndRouteError(
             f"request.floorplan.site is required for method '{method}'"
         )
+
+    _require_utilization_core_margin(method, floorplan)
 
     if method == "explicit":
         for field in ("die_area_um", "core_area_um"):
@@ -663,6 +676,60 @@ def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
     if pin_constraints:
         result["pin_constraints"] = pin_constraints
     return result
+
+
+def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
+    """Shape-validate ``request.instance_groups`` (issue #4344)."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise PlaceAndRouteError("request.instance_groups must be an array")
+    groups: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        groups.append(
+            _validate_instance_group(entry, f"request.instance_groups[{index}]", seen)
+        )
+    return groups
+
+
+def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        raise PlaceAndRouteError(f"{where} must be a JSON object")
+    unknown = sorted(set(entry) - {"name", "instances", "max_extent_um"})
+    if unknown:
+        raise PlaceAndRouteError(f"{where} has unknown key(s): {', '.join(unknown)}")
+    name = entry.get("name")
+    if not (isinstance(name, str) and name.strip()):
+        raise PlaceAndRouteError(f"{where}.name must be a non-empty string")
+    if name in seen:
+        raise PlaceAndRouteError(f"{where}.name '{name}' is not unique")
+    seen.add(name)
+    instances = entry.get("instances")
+    if not (
+        isinstance(instances, list)
+        and instances
+        and all(isinstance(i, str) and i.strip() for i in instances)
+    ):
+        raise PlaceAndRouteError(
+            f"{where}.instances must be a non-empty array of strings"
+        )
+    item: dict[str, Any] = {"name": name, "instances": list(instances)}
+    bound = entry.get("max_extent_um")
+    if bound is not None:
+        _check_max_extent_um(bound, where)
+        item["max_extent_um"] = bound
+    return item
+
+
+def _check_max_extent_um(bound: Any, where: str) -> None:
+    if (
+        isinstance(bound, bool)
+        or not isinstance(bound, (int, float))
+        or not math.isfinite(bound)
+        or bound <= 0
+    ):
+        raise PlaceAndRouteError(f"{where}.max_extent_um must be a number > 0")
 
 
 _PIN_EDGES = ("north", "east", "south", "west")

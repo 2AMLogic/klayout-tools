@@ -719,13 +719,15 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   base/collector geometry the fixed-geometry cell name does not encode, and
   they are *secondary* parameters — once the primary `AE`/`NE` agree the
   devices pair and the comparer never reports them.
-- `nf`/`m`/`mult` > 1 on a resistor/capacitor call (a multiplied device the
+- `nf`/`m`/`mult`/`mf` > 1 on a resistor call, or `nf`/`mult`/`mf` > 1 on a capacitor call (a multiplied device the
   curated plain-element form cannot represent) is **rejected** with a specific error naming the device —
   never silently dropped or misinterpreted. Flatten it (one device per
   drawn gate) in the schematic netlist first. Two exceptions: bipolar's
   `mult` is carried onto `NE`, not rejected, since
   `DeviceClassBJT3Transistor` can represent multiple parallel emitters that
-  way; and MOS's own `nf` and `m` are *expanded*, not rejected (see above).
+  way; MOS's own `nf` and `m` are *expanded*, not rejected (see above); and a
+  capacitor's `m=N` (positive integer) becomes `N` parallel plain `C` cards named
+  `<instance>_m0` ..., each with the per-copy `A`/`P` (issue #4318).
   MOS `m=N` (positive integer) becomes `N` parallel plain `M` cards named
   `<instance>_m0` ... (`nf*m` cards named `<instance>_m0_f0` ... when
   combined with `nf`), total width `m*W`; pair with `options.combine_devices`
@@ -3534,6 +3536,18 @@ excludes the resistor class, no `layout.deck` is given, the class has
 neither `fixed_offset_ohm` nor `end_term_ohm_um`, or N is 1. Covers `options.combine_devices` only, not
 `options.combine_devices_per_circuit`. The effect of `width_offset_um` is not
 disclosed.
+
+#### `net.merged` caused by case-colliding net names (issue #4200)
+
+On an inline-extraction layout (`layout.file`), a flat extraction can contain
+nets whose names differ only by case (`pb` / `PB`). The SPICE read-back is
+case-insensitive, so they merge and surface as `net.merged` / `device.unmatched`.
+When the extracted nets contain such a collision, each `net.merged` entry's
+`description` gains a note naming the cause; `status`, `severity` and counts
+are unchanged. Fix: extract the composed layout hierarchically with
+`klt extract --hierarchical-cells <block id>__<cell name>,...` (the placed-cell
+name `klt gen-compose` gives each cell) and compare that netlist with
+`options.flatten_layout: true`, so each cell keeps its own namespace.
 
 #### `topology.flattened`: `options.flatten_reference`/`options.flatten_layout` collapsed a side's hierarchy before comparing
 
