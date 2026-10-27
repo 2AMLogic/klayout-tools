@@ -3177,6 +3177,17 @@ sweeps, and the optional SPEF timing session. Retries allocate new IDs and
 never overwrite earlier transcripts. Other P&R artifacts keep their existing
 names; log retention does not isolate all outputs between retries.
 
+The transcripts are written **live**: the directory and both log files are
+created before `openroad` launches and the engine streams into them, so
+`tail -f .klt/place-and-route/openroad-logs/<invocation_id>/stdout.log` shows
+progress during a long stage, and an interrupted run keeps whatever OpenROAD
+had flushed. OpenROAD may block-buffer stdout when it is not on a TTY, so
+lines can lag the engine; this has not been measured. `invocation.json` is
+written when the process ends. As a single anecdotal sizing hint (not a
+model): a ~44k-instance IHP SG13G2 design took roughly 2 h+ in the `route`
+stage versus about 3 min for the other stages combined (klt 0.8.1.dev442,
+OpenROAD 26Q3-1510).
+
 Successful JSON responses add `engine_logs`, an array in invocation order.
 Each entry contains:
 

@@ -21,6 +21,7 @@ for the identical problem.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import uuid
@@ -235,46 +236,109 @@ def _write_log_artifact(
     return _log_path(path)
 
 
-def _retain_openroad_logs(
-    script_path: str,
-    metrics_path: str,
-    *,
-    invocation_id: str,
-    script_hash: str | None,
-    outcome: str,
-    returncode: int | None,
-    stdout: str | bytes | None,
-    stderr: str | bytes | None,
-) -> dict[str, Any]:
-    """Write only to a newly created directory; retries never overwrite it."""
-    directory = Path(script_path).absolute().parent / "openroad-logs" / invocation_id
-    record: dict[str, Any] = {
-        "invocation_id": invocation_id,
-        "script_name": Path(script_path).name,
-        "script_path": _log_path(Path(script_path)),
-        "script_sha256": script_hash,
-        "metrics_path": _log_path(Path(metrics_path)),
-        "outcome": outcome,
-        "returncode": returncode,
-        "directory": _log_path(None),
-        "stdout_path": _log_path(None),
-        "stderr_path": _log_path(None),
-        "metadata_path": _log_path(None),
-        "retention_errors": [],
-    }
-    try:
-        directory.mkdir(parents=True, exist_ok=False)
-    except OSError as exc:
-        _retention_error(record, "directory", exc)
-        return record
-    record["directory"] = _log_path(directory)
-    record["stdout_path"] = _write_log_artifact(directory, "stdout.log", stdout, record)
-    record["stderr_path"] = _write_log_artifact(directory, "stderr.log", stderr, record)
-    record["metadata_path"] = _log_path(directory / "invocation.json")
-    record["metadata_path"] = _write_log_artifact(
-        directory, "invocation.json", json.dumps(record, indent=2) + "\n", record
-    )
-    return record
+class _LiveLogs:
+    """Retained-log directory created *before* launch so the transcripts grow
+    on disk while OpenROAD runs. Never overwrites: the directory and both
+    stream files are created exclusively. A stream whose file cannot be
+    opened falls back to an in-memory pipe (``None`` handle) and the failure
+    is recorded in ``retention_errors``; the engine run itself proceeds."""
+
+    _STREAMS = ("stdout", "stderr")
+
+    def __init__(
+        self,
+        script_path: str,
+        metrics_path: str,
+        *,
+        invocation_id: str,
+        script_hash: str | None,
+    ) -> None:
+        self.directory = (
+            Path(script_path).absolute().parent / "openroad-logs" / invocation_id
+        )
+        self.record: dict[str, Any] = {
+            "invocation_id": invocation_id,
+            "script_name": Path(script_path).name,
+            "script_path": _log_path(Path(script_path)),
+            "script_sha256": script_hash,
+            "metrics_path": _log_path(Path(metrics_path)),
+            "outcome": None,
+            "returncode": None,
+            "directory": _log_path(None),
+            "stdout_path": _log_path(None),
+            "stderr_path": _log_path(None),
+            "metadata_path": _log_path(None),
+            "retention_errors": [],
+        }
+        self.handles: dict[str, Any] = dict.fromkeys(self._STREAMS)
+        try:
+            self.directory.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            _retention_error(self.record, "directory", exc)
+            self.directory = None  # type: ignore[assignment]
+            return
+        self.record["directory"] = _log_path(self.directory)
+        for stream in self._STREAMS:
+            try:
+                # Unbuffered: the child writes through the shared descriptor.
+                self.handles[stream] = (self.directory / f"{stream}.log").open(
+                    "xb", buffering=0
+                )
+            except OSError as exc:
+                _retention_error(self.record, f"{stream}.log", exc)
+
+    def popen_streams(self) -> dict[str, Any]:
+        return {
+            stream: handle if handle is not None else subprocess.PIPE
+            for stream, handle in self.handles.items()
+        }
+
+    def finish(
+        self,
+        outcome: str,
+        returncode: int | None,
+        captured: dict[str, str | bytes | None],
+    ) -> tuple[dict[str, bytes], dict[str, Any]]:
+        """Close the files, then return ``(stream bytes, final record)``.
+
+        ``captured`` holds data that did not arrive through the files (a pipe
+        fallback, or a runner that supplies partial output on timeout); it is
+        written into a still-empty log file so the retained bytes match."""
+        data: dict[str, bytes] = {}
+        for stream in self._STREAMS:
+            extra = captured.get(stream)
+            extra_bytes = (
+                extra.encode("utf-8") if isinstance(extra, str) else extra or b""
+            )
+            handle = self.handles[stream]
+            if handle is None:
+                data[stream] = extra_bytes
+                continue
+            try:
+                if extra_bytes and os.fstat(handle.fileno()).st_size == 0:
+                    handle.write(extra_bytes)
+            except OSError as exc:
+                _retention_error(self.record, f"{stream}.log", exc)
+            finally:
+                handle.close()
+            path = self.directory / f"{stream}.log"
+            self.record[f"{stream}_path"] = _log_path(path)
+            try:
+                data[stream] = path.read_bytes()
+            except OSError as exc:
+                _retention_error(self.record, f"{stream}.log", exc)
+                data[stream] = extra_bytes
+        self.record["outcome"] = outcome
+        self.record["returncode"] = returncode
+        if self.directory is not None:
+            self.record["metadata_path"] = _log_path(self.directory / "invocation.json")
+            self.record["metadata_path"] = _write_log_artifact(
+                self.directory,
+                "invocation.json",
+                json.dumps(self.record, indent=2) + "\n",
+                self.record,
+            )
+        return data, self.record
 
 
 def _run_openroad(
@@ -285,9 +349,11 @@ def _run_openroad(
     engine_logs: list[dict[str, Any]] | None = None,
 ) -> _OpenRoadResult:
     """Run ``openroad -no_init -exit -metrics <metrics_path> <script_path>``,
-    capturing raw stdout/stderr and retaining both streams separately. The
-    result exposes UTF-8 text (replacement decoding) for existing parsers;
-    an invalid output byte cannot mask the engine failure or lose its logs.
+    streaming raw stdout/stderr into separately retained log files *while the
+    process runs* (``tail -f`` shows progress; an interrupted run keeps
+    whatever OpenROAD had flushed). The result exposes UTF-8 text
+    (replacement decoding) for existing parsers; an invalid output byte
+    cannot mask the engine failure or lose its logs.
     Raises ``error_cls`` if the ``openroad``
     binary itself cannot be launched (e.g. not on ``PATH``); a non-zero exit
     from a successfully-launched run is left for the caller to inspect via
@@ -297,39 +363,38 @@ def _run_openroad(
     Logs are local debugging evidence, not a successful-stage signal."""
     invocation_id = uuid.uuid4().hex
     script_hash = sha256_file(script_path)
+    logs = _LiveLogs(
+        script_path,
+        metrics_path,
+        invocation_id=invocation_id,
+        script_hash=script_hash,
+    )
 
     def retain(outcome, returncode, stdout, stderr):
-        record = _retain_openroad_logs(
-            script_path,
-            metrics_path,
-            invocation_id=invocation_id,
-            script_hash=script_hash,
-            outcome=outcome,
-            returncode=returncode,
-            stdout=stdout,
-            stderr=stderr,
+        data, record = logs.finish(
+            outcome, returncode, {"stdout": stdout, "stderr": stderr}
         )
         if engine_logs is not None:
             engine_logs.append(record)
-        return record
+        return data, record
 
     try:
         completed = subprocess.run(
             ["openroad", "-no_init", "-exit", "-metrics", metrics_path, script_path],
-            capture_output=True,
+            **logs.popen_streams(),
         )
     except OSError as exc:
-        record = retain("launch_failed", None, None, None)
+        _, record = retain("launch_failed", None, None, None)
         raise error_cls(
             _log_error_context(f"could not launch openroad: {exc}", record)
         ) from exc
     except subprocess.TimeoutExpired as exc:
-        record = retain("timed_out", None, exc.stdout, exc.stderr)
+        _, record = retain("timed_out", None, exc.stdout, exc.stderr)
         raise error_cls(
             _log_error_context(f"openroad timed out: {exc}", record)
         ) from exc
     except KeyboardInterrupt as exc:
-        record = retain(
+        _, record = retain(
             "interrupted",
             None,
             getattr(exc, "stdout", None),
@@ -337,11 +402,13 @@ def _run_openroad(
         )
         exc.args = (*exc.args, _log_error_context("openroad interrupted", record))
         raise
-    record = retain("exited", completed.returncode, completed.stdout, completed.stderr)
+    data, record = retain(
+        "exited", completed.returncode, completed.stdout, completed.stderr
+    )
     return _OpenRoadResult(
         completed.returncode,
-        _captured_text(completed.stdout),
-        _captured_text(completed.stderr),
+        _captured_text(data["stdout"]),
+        _captured_text(data["stderr"]),
         record,
     )
 
