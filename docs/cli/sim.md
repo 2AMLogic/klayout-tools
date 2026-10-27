@@ -5472,7 +5472,7 @@ fails with `Unable to find definition of model …` and every corner errors.
   makes a host-default off-host backend step back to `local`. The worker's
   own `ngspice` decides whether the module loads, so a real OSDI ABI
   mismatch there still surfaces as the per-corner `osdi_abi_mismatch`
-  diagnostic; no client-side ABI check exists.
+  diagnostic (no client-side check is possible for an image-baked file).
   `environment.osdi_preload_runner_resolved`
   lists them as `{entry, reason}` (no sha256; additive, present only when
   such entries ran off-host). A mixed list keeps today's behavior for its
@@ -5481,6 +5481,25 @@ fails with `Unable to find definition of model …` and every corner errors.
   existence-checked on this host. No new runner-version row is needed: a
   runner that predates this loads the same image-baked file through
   `options.osdi_preload`'s existing 0.7.0 support.
+- **Client-side ABI preflight (local backends).** On `local`/`local-parallel`
+  with ngspice, klt reads each host-local `.osdi`'s exported
+  `OSDI_VERSION_MAJOR`/`OSDI_VERSION_MINOR` before any corner runs. A module
+  that targets an ABI newer than v0.3 (OpenVAF-Reloaded, e.g. IHP SG13G2
+  PSP103) with a local ngspice older than 44 exits 1 with `error.code`
+  `osdi_abi_mismatch`, naming the required (`>= 44`) and found ngspice and
+  pointing at `--backend batch`; no ngspice process is spawned. It fails
+  open: an unreadable module or an unparseable ngspice version adds no
+  error, and the per-corner log classifier remains the backstop.
+- **Single-corner sanity on the fleet.** A host default
+  (`$KLT_SIM_BACKEND=batch`) steps a one-corner run back to `local`, but an
+  explicit `--backend batch` (or `"backend": "batch"` in the request) is
+  never overridden, so one corner is submitted off-host (test:
+  `test_explicit_batch_flag_routes_a_single_corner_offhost`). Name the OSDI
+  entries as `$PDK_ROOT/<rel>` so the runner resolves them (see above) and
+  the host's old ngspice is never involved:
+  `klt sim request.json --backend batch -o report.json`. Verified by the
+  routing test and code trace only; a live batch submit was not run from the
+  authoring worktree.
 - **Xyce refuses it.** `pre_osdi` is an ngspice control command, and Xyce
   loads Verilog-A as its own compiled plugins (`-plugin`), not OSDI
   libraries — `engine: "xyce"` with `options.osdi_preload` is an application

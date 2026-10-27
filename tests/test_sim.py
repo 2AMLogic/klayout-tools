@@ -15744,3 +15744,101 @@ def test_ac_one_row_optional_measurement_stays_absent():
     results, diagnostics, _ = _grade_ac(log, _ac_meas_spec(optional=True))
     assert results[0]["status"] == "absent"
     assert diagnostics[0]["code"] == "measurement_absent"
+
+
+# --------------------------------------------------------------------------- #
+# Client-side OSDI ABI preflight + single-corner batch routing (issue #4438)
+# --------------------------------------------------------------------------- #
+
+
+def _abi_probe(monkeypatch, *, abi, banner):
+    """Pretend ``.osdi`` files declare ``abi`` and ngspice prints ``banner``;
+    any simulation attempt is recorded in the returned list."""
+    sims: list[list[str]] = []
+    monkeypatch.setattr(sim, "_read_osdi_abi", lambda path: abi)
+
+    def fake_run(cmd, **kwargs):
+        if "--version" in cmd:
+            return fake_completed(banner)
+        sims.append(list(cmd))
+        raise AssertionError("no simulation may run")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    return sims
+
+
+@pytest.mark.parametrize("backend", ["local", "local-parallel"])
+def test_osdi_v04_on_old_ngspice_fails_before_simulating(
+    tmp_path, monkeypatch, backend
+):
+    sims = _abi_probe(monkeypatch, abi=(0, 4), banner="** ngspice-42 : x\n")
+    _write_osdi(tmp_path)
+    request = _osdi_request(tmp_path, ["psp103.osdi"])
+    with pytest.raises(sim.SimError) as exc:
+        sim.run_sim(str(request), backend=backend)
+    assert exc.value.code == "osdi_abi_mismatch"
+    message = str(exc.value)
+    assert "ngspice >= 44" in message
+    assert "ngspice is 42" in message
+    assert "--backend batch" in message
+    assert sims == []
+
+
+@pytest.mark.parametrize(
+    ("abi", "banner"),
+    [
+        ((0, 4), "** ngspice-46 : x\n"),  # new enough
+        ((0, 3), "** ngspice-42 : x\n"),  # v0.3 loads everywhere
+        (None, "** ngspice-42 : x\n"),  # unreadable module
+        ((0, 4), "no version here\n"),  # unparseable ngspice version
+    ],
+)
+def test_osdi_abi_preflight_fails_open(tmp_path, monkeypatch, abi, banner):
+    monkeypatch.setattr(sim, "_read_osdi_abi", lambda path: abi)
+    osdi = _write_osdi(tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        return fake_completed(banner)
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    sim._check_local_osdi_abi((str(osdi),), "local", "ngspice", "ngspice")
+
+
+def test_osdi_abi_preflight_skips_offhost_and_unreadable_files(tmp_path, monkeypatch):
+    # A non-library file (the tests' fake `.osdi`) is unreadable -> None.
+    bogus = _write_osdi(tmp_path)
+    assert sim._read_osdi_abi(str(bogus)) is None
+    monkeypatch.setattr(
+        sim, "_read_osdi_abi", lambda path: pytest.fail("must not read")
+    )
+    sim._check_local_osdi_abi(("x.osdi",), "batch", "ngspice", "ngspice")
+    sim._check_local_osdi_abi((), "local", "ngspice", "ngspice")
+    sim._check_local_osdi_abi(("x.osdi",), "local", "xyce", "Xyce")
+
+
+def test_explicit_batch_flag_routes_a_single_corner_offhost(tmp_path, monkeypatch):
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+    _arm_fake_batch(monkeypatch)
+    request = _host_default_request(tmp_path, {"process": ["tt"]})
+    with pytest.raises(_BatchCalled):
+        sim.run_sim(str(request), backend="batch")
+
+
+def test_read_osdi_abi_reads_the_exported_version_symbols(tmp_path):
+    import shutil
+
+    cc = shutil.which("cc") or shutil.which("gcc")
+    if cc is None:
+        pytest.skip("no C compiler")
+    source = tmp_path / "m.c"
+    source.write_text(
+        "#include <stdint.h>\n"
+        "uint32_t OSDI_VERSION_MAJOR = 0;\nuint32_t OSDI_VERSION_MINOR = 4;\n"
+    )
+    lib = tmp_path / "m.osdi"
+    built = subprocess.run(
+        [cc, "-shared", "-fPIC", "-o", str(lib), str(source)], check=False
+    )
+    if built.returncode != 0:
+        pytest.skip("cannot build a shared library here")
+    assert sim._read_osdi_abi(str(lib)) == (0, 4)
