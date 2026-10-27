@@ -40,6 +40,7 @@ import re
 import subprocess  # noqa: F401 -- tests patch place_and_route.subprocess.run
 from typing import Any
 
+from . import macros as macro_spec
 from . import output_lock
 from ._openroad_engine import (
     _count_violations,
@@ -280,6 +281,9 @@ from .place_and_route_script import (
     _antenna_check_lines as _antenna_check_lines,
 )
 from .place_and_route_script import (
+    _antenna_diode_absent as _antenna_diode_absent,
+)
+from .place_and_route_script import (
     _clock_lines as _clock_lines,
 )
 from .place_and_route_script import (
@@ -299,6 +303,12 @@ from .place_and_route_script import (
 )
 from .place_and_route_script import (
     _io_delay_lines as _io_delay_lines,
+)
+from .place_and_route_script import (
+    _macro_blockage_lines as _macro_blockage_lines,
+)
+from .place_and_route_script import (
+    _macro_pdn_grid_lines as _macro_pdn_grid_lines,
 )
 from .place_and_route_script import (
     _metrics_report_lines as _metrics_report_lines,
@@ -1170,6 +1180,19 @@ def _validate_pdn_core_fit(
         raise PlaceAndRouteError(message)
 
 
+def _antenna_repair_warnings(
+    target_stage: str, library: dict[str, Any] | None
+) -> list[str]:
+    """Warn when a ``route`` run skips antenna repair (``antenna_diode: null``)."""
+    if target_stage != "route" or not _antenna_diode_absent(library):
+        return []
+    return [
+        "antenna repair did not run: request.library.antenna_diode is "
+        "null (the library has no antenna diode), so repair_antennas "
+        "was not called; the antenna check still ran"
+    ]
+
+
 def _response_warnings(
     placed: dict[str, Any],
     *,
@@ -1639,6 +1662,24 @@ def _run_single_corner(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
+    # Issue #2635: which of each macro's per-corner liberties applies to
+    # *this* run, resolvable only now that `_resolve_liberty` has named the
+    # corner. A macro that declared a `lib` map with no entry for this
+    # corner (and no `"default"`) is rejected here with a named error rather
+    # than silently timed at some other corner -- see
+    # `klayout_tools.macros.macro_lib_for_corner`.
+    macro_liberty_paths = [
+        path
+        for path in (
+            macro_spec.macro_lib_for_corner(
+                {**macro, "cell": macro["cell_name"]},
+                corner,
+                error_cls=PlaceAndRouteError,
+            )
+            for macro in macros
+        )
+        if path is not None
+    ]
     validate_tech_lef_track_offsets(floorplan, tech_lef)
 
     # Issue #2170: the joint floorplan/PDN pre-flight -- see
@@ -1712,6 +1753,7 @@ def _run_single_corner(
             output_dir=output_dir,
             route_critical_nets_percentage=route_critical_nets_percentage,
             max_antenna_repair_iterations=max_antenna_repair_iterations,
+            macro_liberty_paths=macro_liberty_paths,
             library=library,
         )
         _write_script(script_path, lines)
@@ -2124,6 +2166,7 @@ def _run_single_corner(
         row_rail_emitted=row_rail_info["emitted"],
         row_rail_layer=row_rail_info["layer"],
     )
+    warnings.extend(_antenna_repair_warnings(target_stage, library))
 
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
@@ -2191,6 +2234,14 @@ def _run_single_corner(
                 "x_um": macro["x_um"],
                 "y_um": macro["y_um"],
                 "orientation": macro["orientation"],
+                # Additive per-entry fields (issue #2635): the macro's
+                # master name (shared with `klt synthesize`/`klt sta`'s own
+                # `macros[].cell`), the per-corner liberty map as resolved,
+                # and the halo actually honored -- `null` when the request
+                # declared no `halo`/`lib`.
+                "cell": macro["cell_name"],
+                "lib": macro["lib"],
+                "halo": macro["halo"],
             }
             for macro in macros
         ],
@@ -2487,16 +2538,17 @@ def _engine_error_message(
             f"{completed.returncode}: {snippet}"
         )
 
-    hint = _mount_namespace_hint(completed, pdk_info)
-    if hint is not None:
-        message = f"{message} -- {hint}"
-    slot_hint = slot_shortage_hint(
-        f"{completed.stdout or ''}\n{completed.stderr or ''}",
-        pin_constraints,
-        top_ports,
+    # Each recognized-hint helper appends a further `--` clause. Issue
+    # #2635: `ORD-2013` is what a hard macro with no `request.macros` entry
+    # looks like, and the raw diagnostic says nothing about which request
+    # field would have supplied its physical view.
+    streams = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+    hints = (
+        _mount_namespace_hint(completed, pdk_info),
+        macro_spec.missing_lef_master_hint(streams),
+        slot_shortage_hint(streams, pin_constraints, top_ports),
     )
-    if slot_hint is not None:
-        message = f"{message} -- {slot_hint}"
+    message += "".join(f" -- {hint}" for hint in hints if hint is not None)
     return message
 
 

@@ -703,11 +703,14 @@ error otherwise.
 
 | `macros[]` field | Type | Description |
 | --- | --- | --- |
-| `instance` | string | The RTL/netlist instance name this macro placement applies to. Required, and must be unique across the array. |
+| `instance` | string | The RTL/netlist instance name this macro placement applies to. Required, and must be unique across the array — a different thing from `cell` below, the *master* name, since a design may place several instances of one master. |
 | `lef` | string | Path to the macro's LEF abstract (e.g. `klt lef-abstract`'s own `output`). Required; must declare exactly one `MACRO`. Resolved relative to the request file's own directory. |
 | `x_um` / `y_um` | number | The macro's lower-left corner, in micrometres, in `place_macro -location`'s own coordinate space. Both required. |
 | `orientation` | string | One of `R0` (default) `R90` `R180` `R270` `MX` `MY` `MXR90` `MYR90` — OpenROAD's own orientation vocabulary. |
 | `gds` | string \| omitted | The macro's own GDS view. When given, merged into the final `gds_path` alongside the standard-cell GDS view (same "0 missing/orphan cells" check). When omitted, this instance's cell is expected to stay empty in the merged GDS — not an error — for a caller only after this issue's own DEF-level placement/obstruction verification. |
+| `cell` | string \| omitted | Additive field (issue #2635), shared with `klt synthesize`/`klt sta`'s own `macros[].cell`. The macro's master name — derived from the LEF's own `MACRO` name when omitted; when given, must match it exactly. |
+| `lib` (alias `liberty`) | object\<string, string\> \| omitted | Additive field (issue #2635), the same per-corner liberty map `klt synthesize`/`klt sta` accept: `{"<corner>": "<path>"}`, with a reserved `"default"` fallback key. `read_liberty`'d alongside the standard-cell liberty in every stage (the floorplan stage's own load, and every later stage's post-`read_db` reload) at whichever corner each stage runs — a macro `lib` map with no entry for that corner (and no `"default"`) is a request error naming the macro, the corner, and the keys that are available. Omitted leaves every stage script byte-identical to before this field existed; the instance is still placed and merged into the GDS exactly as it was. |
+| `halo` | number \| object \| omitted | Additive field (issue #2635). A keep-out margin around the macro, in micrometres: either one non-negative number (uniform on all four sides) or an object naming any of `left`/`right`/`top`/`bottom` (each defaulting to `0`). Honored two ways during `"floorplan"` — see "Macro halos" below. Omitted emits neither and leaves the floorplan/PDN Tcl byte-identical. |
 
 **Macro-pin routability cross-check (#464).** A macro LEF pin that `klt
 lef-abstract` emitted with no `PORT` geometry at all (a pin whose declared
@@ -731,6 +734,34 @@ netlist), the cross-check is silently skipped for that macro rather than
 risk a false positive or negative — OpenROAD's own `link_design` remains
 the authority on whether the netlist and LEF actually agree structurally.
 Discovered during Epic #393 Phase 3 (#456); see #464 for the full repro.
+
+### Macro halos (`macros[].halo`, issue #2635)
+
+A declared `halo` is honored two ways in the `"floorplan"` stage, both after
+`place_macro` (a halo needs the macro's own placed footprint, which only
+exists once it has a location):
+
+1. **Placement** — a `create_blockage` over the macro's own footprint
+   (its LEF `SIZE`, swapped for a rotated `orientation`) expanded by the
+   halo on each side, keeping standard cells (and the detailed placer's own
+   legalization) out of the margin so the macro's pins stay reachable and
+   its edges are not abutted by logic.
+2. **Power delivery** — only when `request.power` is also given: a
+   `define_pdn_grid -macro -halo ... -grid_over_boundary` /
+   `add_pdn_connect` pair per halo'd macro, connecting the macro's own
+   `USE POWER`/`USE GROUND` LEF pins (whichever routing layer their `PORT`
+   geometry is actually on — read from the LEF, never asked for in the
+   request) up to the next strap layer above it in `power.straps`. This is
+   the `v1` exclusion `request.power`'s own docstring has flagged since
+   issue #1091 ("a design with hard macros needs a caller-supplied macro
+   halo/grid spec"), closed by this field.
+
+A `halo` with no `request.power` in the same request gets only the
+placement blockage — a geometry-only run has no PDN grid to extend a macro
+grid from in the first place. A `halo` whose macro LEF declares no `SIZE`,
+or no power/ground pin with `PORT` geometry (when `request.power` is also
+given), is a named request error — never a halo silently skipped, since
+that would honor it in the response and not in the actual run.
 
 ## Timing-driven/repair-iteration routing flags (`route_critical_nets_percentage`, `max_antenna_repair_iterations`)
 
@@ -1964,7 +1995,7 @@ live re-measurement above.
 | `target_stage` | string | One of `"floorplan"`, `"place"`, `"cts"`, `"route"` (default) — how far this run is asked to go. See "Partial completion" below. |
 | `route_critical_nets_percentage` | integer \| omitted | 0–100, default `0` (no flag emitted). Percentage of worst-slack nets `global_route` treats as timing-critical during congestion-removal iterations (`-critical_nets_percentage`, issue #939). `0` reproduces this command's prior behaviour exactly — the A/B disable path. Not evaluated with a real OpenROAD A/B run as of this field's introduction; see "Timing-driven/repair-iteration routing flags" for the audit methodology and its limitations. |
 | `max_antenna_repair_iterations` | integer \| omitted | 0–8, default `1`. Zero disables antenna repair/reroute passes; initial routing and the final antenna check still run. Repeats the `"route"` stage's `repair_antennas`/`detailed_route` reroute pair this many times (issue #939), a bounded flow-level generalisation of the single pass issue #759 shipped. No early exit on a zero-violation `check_antennas` result — every pass runs unconditionally. |
-| `library` | object \| omitted | Additive field (issue #4086): per-library inputs for a standard-cell library with no built-in table, or an override of a built-in entry. Unknown keys are rejected. All keys optional: `cts_buffer` (non-empty string, the `clock_tree_synthesis` buffer cell); `power_pins` (list of `{"net_role": "power"\|"ground", "pattern": str, "primary": bool}`, exactly one primary per role, emitted as the `add_global_connection` lines a table entry would produce); `wire_rc` (`{"resistance_ohm_per_um": >0, "capacitance_pf_per_um": >0}`, emitted as `set_wire_rc -signal`/`-clock -resistance … -capacitance …` in place of `set_wire_rc -layer <io.layer_v>` in the `place`, `cts` and post-route STA scripts; values are passed to OpenROAD verbatim. Capacitance is always pF/um: the scripts emit `set_cmd_units -time ns -capacitance pF` before `set_wire_rc`, independent of the Liberty `capacitive_load_unit`, so convert from fF first, e.g. ASAP7's 0.16579 fF/um is `0.00016579`. The resistance unit is not pinned: OpenROAD reads it in the first Liberty file's resistance unit (ASAP7 `report_units` prints `resistance 1kohm`), so convert if that is not what you supply). Omitted ⇒ scripts are byte-identical to before. Routing and power inputs (issue #4127): `route_layers` (`{"low": str, "high": str}`, emitted as `set_routing_layers`'s `low-high` range at `route`); `antenna_diode` (`{"cell": str, "pin": str}`, the `repair_antennas` diode); `tapcell` (`{"master": str, "endcap": str\|null, "distance_um": >0}` for the `request.power` `tapcell` call, or JSON `null` to state the library has no tap/endcap cells, which is distinct from omitting it, i.e. "unverified"); `filler` (non-empty list of filler master names for `filler_placement` and the power audit). Together with `cts_buffer`, `power_pins` and `wire_rc` these let a library with no built-in table reach `route` with a `power` block. A supplied key overrides a built-in entry. A request missing several per-library inputs is rejected up front with **one** error listing all of them, each naming the `library` field that supplies it (`[supply request.library.<key>]`). For a library with no built-in CTS/power table, a tech-LEF `io.layer_v` without `RESISTANCE RPERSQ` is also reported (it otherwise fails at `place` with OpenROAD `RSZ-0089`). |
+| `library` | object \| omitted | Additive field (issue #4086): per-library inputs for a standard-cell library with no built-in table, or an override of a built-in entry. Unknown keys are rejected. All keys optional: `cts_buffer` (non-empty string, the `clock_tree_synthesis` buffer cell); `power_pins` (list of `{"net_role": "power"\|"ground", "pattern": str, "primary": bool}`, exactly one primary per role, emitted as the `add_global_connection` lines a table entry would produce); `wire_rc` (`{"resistance_ohm_per_um": >0, "capacitance_pf_per_um": >0}`, emitted as `set_wire_rc -signal`/`-clock -resistance … -capacitance …` in place of `set_wire_rc -layer <io.layer_v>` in the `place`, `cts` and post-route STA scripts; values are passed to OpenROAD verbatim. Capacitance is always pF/um: the scripts emit `set_cmd_units -time ns -capacitance pF` before `set_wire_rc`, independent of the Liberty `capacitive_load_unit`, so convert from fF first, e.g. ASAP7's 0.16579 fF/um is `0.00016579`. The resistance unit is not pinned: OpenROAD reads it in the first Liberty file's resistance unit (ASAP7 `report_units` prints `resistance 1kohm`), so convert if that is not what you supply). Omitted ⇒ scripts are byte-identical to before. Routing and power inputs (issue #4127): `route_layers` (`{"low": str, "high": str}`, emitted as `set_routing_layers`'s `low-high` range at `route`); `antenna_diode` (`{"cell": str, "pin": str}`, the `repair_antennas` diode, or JSON `null` (issue #4274) to state the library has no antenna diode and no antenna rules, e.g. ASAP7: the `route` stage then emits no `repair_antennas` call and no reroute pass, exactly like `max_antenna_repair_iterations: 0`, while the initial `detailed_route`, `check_antennas` and routing-completeness still run, and the response `warnings` states that antenna repair did not run; distinct from omitting the key, i.e. "unverified", which is still rejected at `route` for a library with no built-in entry); `tapcell` (`{"master": str, "endcap": str\|null, "distance_um": >0}` for the `request.power` `tapcell` call, or JSON `null` to state the library has no tap/endcap cells, which is distinct from omitting it, i.e. "unverified"); `filler` (non-empty list of filler master names for `filler_placement` and the power audit). Together with `cts_buffer`, `power_pins` and `wire_rc` these let a library with no built-in table reach `route` with a `power` block. A supplied key overrides a built-in entry. A request missing several per-library inputs is rejected up front with **one** error listing all of them, each naming the `library` field that supplies it (`[supply request.library.<key>]`). For a library with no built-in CTS/power table, a tech-LEF `io.layer_v` without `RESISTANCE RPERSQ` is also reported (it otherwise fails at `place` with OpenROAD `RSZ-0089`). |
 | `post_route_spef` | boolean \| omitted | Default `false`. Opts in to the real-parasitics A/B pass described in "Post-route SPEF STA" above — populates the response's `spef_sta` field. Off by default (real added wall-clock cost); has no effect unless `target_stage` reaches `"route"` (issue #948). |
 | `post_route_sdf` | boolean \| omitted | Default `false`. **Requires `post_route_spef: true`** (exit 1 otherwise). Adds one `write_sdf` call to that same post-`read_spef` OpenSTA session and reports the written file as `spef_sta.sdf_path` — see "SDF export" above (issue #1002). |
 | `portable_paths` | boolean \| omitted | Additive field (issue #3820). Default `false`: the response is byte-identical to before this field existed (absolute paths, which `klt extract --def-pins` and `klt signoff` chain on). `true` rewrites every absolute host path in the response — `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path`, `stages[].def_path`, `power.placed.def_path`, `spef_sta.*_path`, `layer_map.path`, and paths embedded in messages — so it can be committed as evidence and passes `klt env-provenance lint-envelope`: inside the repo → `{"path": "<repo-relative>", "scope": "repo"}`; outside it (or no git root) → `{"path": null, "scope": "external"}`; under the PDK root → a `"$PDK_ROOT/<relative>"` string. Fields that are `null` stay `null`. An `external` path cannot be chained into `--def-pins`; keep `output_dir` inside the repo if you need both. No `schema_version` bump. |
@@ -2080,7 +2111,16 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
     { "name": "route", "...": "..." }
   ],
   "macros": [
-    { "instance": "u_analog", "lef": "/abs/path/analog_block.lef", "x_um": 12.5, "y_um": 3.0, "orientation": "R0" }
+    {
+      "instance": "u_analog",
+      "lef": "/abs/path/analog_block.lef",
+      "x_um": 12.5,
+      "y_um": 3.0,
+      "orientation": "R0",
+      "cell": "analog_block",
+      "lib": null,
+      "halo": null
+    }
   ],
   "def_path": "/abs/path/.klt/place-and-route/gcd.def",
   "unrouted_def_path": null,
@@ -2238,7 +2278,7 @@ plain string" for the full enumeration and rationale.
 | `estimated_power_mw` | number \| null | `null` before placement. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree TritonCTS built. `null` before the `"cts"` stage — no clock tree exists yet, so there is nothing to measure skew across (issue #783). |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |
-| `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path). `[]` when the request declared none. |
+| `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path), plus the additive `cell`/`lib`/`halo` fields (issue #2635) — `cell` is the resolved master name (shared with `klt synthesize`/`klt sta`'s own `macros[].cell`), `lib` is the per-corner liberty map resolved to absolute paths (`null` when omitted), `halo` is `{left, bottom, right, top}` in micrometres as actually honored (`null` when omitted). `[]` when the request declared none. |
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
 | `unrouted_def_path` | string \| null | Additive field (issue #1826). A pre-route DEF, populated only when `target_stage` itself is `"place"` or `"cts"` — the deterministic `<hdl_toplevel>.place.def`/`<hdl_toplevel>.cts.def` path each of those stages' own Tcl already writes unconditionally (the `"place"`-stage one existed on disk since issue #785 but was previously internal-only; the `"cts"`-stage one is new). `null` at `"floorplan"` (no DEF exists yet) and at `"route"` (`def_path` above is the routed artifact to use there instead — the two fields are never populated together). Feed this path into `klt sta`'s own `def` field (with `request.geometry_source: "placement_estimate"`, see `docs/cli/sta.md`) to get a real, SDC-driven setup/hold slack number before a full route — this stage's own parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so treat the result as an estimate, not a signoff number. See also issue #1825, which proposes a different (netlist-input) shape for the same underlying gap. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |
@@ -2740,11 +2780,12 @@ equivalent Tcl for *any* request, preset or explicit: their `global
 connections` / `voltage domains` sections (built instead from the
 per-library pin-pattern table plus the caller's own
 `power_net`/`ground_net` — which default to the same `VDD`/`VSS` all four
-configs use), `define_pdn_grid`'s `-pins {Metal5}`/`-pins {met5}` (see the
-row-rail fallback below for why PG nets are deliberately never promoted
-into the top-level DEF `PINS` / Verilog port list here), and `pdn.tcl`'s
-`macro grids` section (this command's already-documented v1 macro-PDN
-exclusion).
+configs use), and `define_pdn_grid`'s `-pins {Metal5}`/`-pins {met5}` (see
+the row-rail fallback below for why PG nets are deliberately never promoted
+into the top-level DEF `PINS` / Verilog port list here). `pdn.tcl`'s own
+`macro grids` section — the one piece of those four configs this command
+*does* now have an equivalent for — is emitted per macro only when that
+macro declares its own `macros[].halo`; see "Macro halos" above.
 
 **Live verification.** The three ORFS presets were run end to end against a
 real `openroad` (`26Q3-2056-g41a28926b9`, `openroad/orfs:latest`) and real
@@ -2764,10 +2805,11 @@ in `tests/test_place_and_route.py`, gated (skipped, never failed) on a
 machine without both halves of the toolchain, exactly like the existing
 worked-example integration tests.
 
-**Macro-specific PDN grids are out of scope for this v1.** `pdngen` here
-builds only the flat standard-cell grid (`define_pdn_grid` with no
-`-macro`) — a design with hard macros needs a caller-supplied macro
-halo/grid spec this field does not yet expose.
+**Macro-specific PDN grids** were out of scope for this section's own v1 —
+`pdngen` built only the flat standard-cell grid (`define_pdn_grid` with no
+`-macro`). Issue #2635 closed that gap additively: `define_pdn_grid -macro`
+Tcl is now emitted per macro that declares its own `macros[].halo` — see
+"Macro halos" above.
 
 **`write_verilog` strips the new physical-only cells.** When `request.power`
 is set, the `"route"` stage's `write_verilog` call (see "As-built netlist"
@@ -3264,10 +3306,9 @@ by
 - **Caller-supplied cell exclusion.** The built-in per-`cell_library`
   exclusions `klt synthesize` applies are emitted as `set_dont_use` in every
   post-floorplan stage script (issue #2378), with no request field.
-- **Macro-specific PDN grids.** `request.power`'s `pdngen` call builds only
-  the flat standard-cell grid (`define_pdn_grid` with no `-macro`) — a
-  design with hard macros needs a caller-supplied macro halo/grid spec this
-  field does not yet expose. See "Power delivery" below.
+- **Macro-specific PDN grids** were scoped out here too — closed by issue
+  #2635's `macros[].halo`; see "Macro halos" above and "Power delivery"
+  below.
 - **IO-ring/footprint floorplanning.** Out of scope for a core-only block,
   per the OpenROAD survey section 2.
 - **A second P&R engine.** `request.engine` exists from day one so a later
