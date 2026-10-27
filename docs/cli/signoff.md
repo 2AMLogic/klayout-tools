@@ -2743,6 +2743,13 @@ new. Outcomes:
   `partial_coverage`, with `detail.uncovered_rows`, `detail.failed_rows` and
   `detail.declared_gaps` (`[{id, gap}]`) reported separately -- a gap is never
   covered;
+- `spec_rows` declared but **no evidence entry** for the item (issue #4190)
+  -> graded as a zero-citation set: `unmet` / `partial_coverage` with the same
+  `detail` keys (every non-gap row in `uncovered_rows`, gaps in
+  `declared_gaps`, `failed_rows: []`) and no `citation`; it is never `met`,
+  even when every row is a declared gap. No `spec_rows` and no evidence is
+  still `unmet` / `no_evidence`, and malformed `spec_rows` still
+  `invalid_evidence`;
 - otherwise `met`; `citation` is the first citation, `citations` lists all,
   and `row_coverage` is present when `spec_rows` was declared;
 - a malformed list, an empty list, malformed `spec_rows`, duplicate row ids,
