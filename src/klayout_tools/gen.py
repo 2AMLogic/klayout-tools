@@ -3945,6 +3945,9 @@ def _produce(
     pcell_var = layout.add_pcell_variant(lib, decl.id(), pcell_values)
     top = layout.create_cell(cell_name)
     top.insert(kdb.CellInstArray(pcell_var, kdb.Trans()))
+    # The variant keeps KLayout's generator-named default (e.g. ``mos_array``),
+    # so two streams read into one Layout would merge their children (#4251).
+    layout.rename_cell(pcell_var, f"{cell_name}__core")
     return layout, top
 
 
