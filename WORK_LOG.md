@@ -4,6 +4,9 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-26
 
+- **PR #4180**: refactor: share one SPICE number parser across six modules
+- **Issue #4178** (closed): Consolidate six SPICE number-suffix parsers into one shared helper (parallel drift: 'mil' misparsed in 3)
+- **PR #4170**: chore(deps-dev): bump vitest from 5.0.3 to 5.0.4 in /site in the npm-minor-patch group across 1 directory
 - **PR #4177**: test(sta): pin report_unannotated listing format to a real OpenSTA capture
 - **Issue #3664** (closed): Live-verify klt sta floating-driver / unannotated-driver listing against real OpenSTA (follow-up to #3663)
 - **PR #4174**: feat(sim): add monte_carlo.seed_mode to pin rndseed to seed + sample_index
