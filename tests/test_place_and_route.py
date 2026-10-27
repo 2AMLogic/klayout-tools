@@ -427,10 +427,10 @@ def test_load_request_rejects_unknown_top_level_key(tmp_path, key):
 def test_load_request_accepts_comment_and_every_allowed_key(tmp_path):
     from klayout_tools.place_and_route import _ALLOWED_REQUEST_KEYS
 
-    assert len(_ALLOWED_REQUEST_KEYS) == 20
+    assert len(_ALLOWED_REQUEST_KEYS) == 22
     request = _base_request(_comment="note", schema="klt.place_and_route.request/1")
     for key in _ALLOWED_REQUEST_KEYS:
-        request.setdefault(key, {} if key in ("backend", "batch") else 1)
+        request.setdefault(key, {} if key in ("backend", "batch", "outputs") else 1)
     path = _write_request(tmp_path / "request.json", request)
     assert load_request(path)["_comment"] == "note"
 
