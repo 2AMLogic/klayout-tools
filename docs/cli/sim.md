@@ -1604,6 +1604,8 @@ but no tagged release contains it yet.
 | `measurements[].expr` | 0.7.0 |
 | `corners.process[].sections[]` (object form) | 0.7.0 |
 | `corners.params` | 0.8.0 |
+| `corners.units` | 0.8.0 |
+| `corners.temperature_param` | 0.8.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
