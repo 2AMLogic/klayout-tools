@@ -129,6 +129,15 @@ def _run_check(args: argparse.Namespace) -> int:
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
+def _print_excluded_pins(power: dict) -> None:
+    """Issue #4363: name each well-layer LEF pin the power check skipped."""
+    for excluded in power.get("excluded_pins") or []:
+        print(
+            f"  excluded_pin: {excluded['pin']} "
+            f"({excluded['instance_count']} instance(s)) -- {excluded['reason']}"
+        )
+
+
 def _print_text(report: dict) -> None:
     # `layout` is the `{path, scope}` object
     # `env_provenance.repo_relative_path` defines (issue #2659) -- rendered
@@ -188,6 +197,7 @@ def _print_text(report: dict) -> None:
                 "options.power_connectivity.expected_nets but never "
                 "observed on any layout-side instance)"
             )
+        _print_excluded_pins(power)
         for finding in power["findings"]:
             print(
                 f"  [{finding['severity']}] {finding['rule']}  {finding['description']}"
