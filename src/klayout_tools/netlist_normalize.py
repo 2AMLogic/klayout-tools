@@ -553,6 +553,127 @@ def _resolve_params(
     return out
 
 
+#: Parameters :func:`_resolve_params` resolves but no converter reads, so a
+#: call-site override of a header parameter they use is harmless.
+_UNREAD_PARAMS = frozenset({"ad", "as", "pd", "ps"})
+
+_SYMBOL_OR_NUMBER_RE = re.compile(
+    r"(?P<sym>[A-Za-z_][A-Za-z0-9_]*)|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?[a-zA-Z]*"
+)
+
+#: ``{<subckt>: {<header param>: (<calling card>, <call-site value>)}}``.
+CallOverrides = dict[str, dict[str, tuple[str, str]]]
+
+
+def _record_call_overrides(
+    card: str, current: str, scopes: ParamScopes, overrides: CallOverrides
+) -> None:
+    """Add to ``overrides`` each header parameter the ``X`` ``card`` (inside
+    subcircuit ``current``) passes with a value other than the callee's
+    default."""
+    tokens = _tokenize(card)
+    positional, params = _split_params(tokens[1:])
+    if not positional:
+        return
+    callee = positional[-1].lower()
+    callee_scope = scopes.get(callee)
+    if callee_scope is None:
+        return
+    for key, value in params.items():
+        if key not in callee_scope:
+            continue
+        try:
+            same = (
+                _resolve_value(value, [scopes.get(current, {}), scopes[""]])[0]
+                == _resolve_value(callee_scope[key], [callee_scope, scopes[""]])[0]
+            )
+        except _Unresolved:
+            same = value.strip().lower() == callee_scope[key].strip().lower()
+        if not same:
+            overrides.setdefault(callee, {}).setdefault(key, (tokens[0], value))
+
+
+def _collect_call_overrides(lines: list[str], scopes: ParamScopes) -> CallOverrides:
+    """Find every ``X`` call that passes a ``.subckt`` header parameter with a
+    value other than the header default (issue #4406). The converter rewrites
+    each device card once, in the definition, so such a value never reaches
+    it; :func:`_overridden_dependency` uses this to refuse loudly."""
+    overrides: CallOverrides = {}
+    current = ""
+    for line in lines:
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if lowered.startswith(".subckt"):
+            tokens = _tokenize(stripped)
+            current = tokens[1].lower() if len(tokens) >= 2 else ""
+            continue
+        if lowered.startswith(".ends"):
+            current = ""
+            continue
+        if not stripped or stripped[0] not in "Xx":
+            continue
+        _record_call_overrides(stripped, current, scopes, overrides)
+    return overrides
+
+
+def _overridden_dependency(
+    raw: str,
+    subckt_scope: str,
+    scopes: ParamScopes,
+    overrides: CallOverrides,
+    seen: frozenset[str] = frozenset(),
+) -> tuple[str, str, str] | None:
+    """The ``(header parameter, calling card, call-site value)`` that the
+    expression ``raw`` depends on and some call overrides, or ``None``."""
+    scope_overrides = overrides.get(subckt_scope, {})
+    for match in _SYMBOL_OR_NUMBER_RE.finditer(raw):
+        name = match.group("sym")
+        if name is None:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        if key in scope_overrides:
+            return (key, *scope_overrides[key])
+        for scope in (scopes.get(subckt_scope, {}), scopes[""]):
+            if key in scope:
+                hit = _overridden_dependency(
+                    scope[key], subckt_scope, scopes, overrides, seen | {key}
+                )
+                if hit is not None:
+                    return hit
+                break
+    return None
+
+
+def _reject_overridden_params(
+    name_token: str,
+    raw_params: dict[str, str],
+    subckt_scope: str,
+    scopes: ParamScopes | None,
+    overrides: CallOverrides | None,
+) -> None:
+    """Raise :class:`NormalizeError` if a read parameter of device
+    ``name_token`` depends on a header parameter some call overrides (a no-op
+    without ``scopes`` or ``overrides``)."""
+    if scopes is None or not overrides:
+        return
+    for key, raw in raw_params.items():
+        if key in _UNREAD_PARAMS:
+            continue
+        hit = _overridden_dependency(raw, subckt_scope, scopes, overrides)
+        if hit is not None:
+            param, caller, value = hit
+            raise NormalizeError(
+                f"device '{name_token}': {key.upper()}={raw} in subcircuit "
+                f"'{subckt_scope}' depends on header parameter "
+                f"{param.upper()}, which call '{caller}' overrides to "
+                f"{value}; call-site parameters are not propagated into "
+                "the definition -- write the device with the literal "
+                "value or give the subcircuit a single parameter value"
+            )
+
+
 def _split_params(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
     """Split an ``X`` card's tokens (after the instance name) into its
     leading positional tokens (nodes + subcircuit name) and its
@@ -590,6 +711,7 @@ def _convert_x_card(
     subckt_scope: str = "",
     resistor_values: Mapping[str, Callable[[float, float], float]] | None = None,
     mos_flavour_classes: bool = False,
+    call_overrides: CallOverrides | None = None,
 ) -> str:
     """Convert one ``X`` subcircuit-call line to a plain-element ``M``/``R``/
     ``C``/``Q`` line, or return it unchanged if it is not a recognised device
@@ -659,6 +781,7 @@ def _convert_x_card(
     positional, params = _split_params(rest)
     if not positional:
         return line
+    raw_params = params
     if param_scopes is not None:
         params = _resolve_params(params, subckt_scope, param_scopes)
 
@@ -669,6 +792,10 @@ def _convert_x_card(
         subckt_name, params, subckt_to_binding, custom_device_classes
     ):
         return line
+
+    _reject_overridden_params(
+        name_token, raw_params, subckt_scope, param_scopes, call_overrides
+    )
 
     lookup = _resolve_binding(subckt_name, subckt_to_binding)
     instance = _instance_name(name_token, lookup.kind)
@@ -1993,6 +2120,7 @@ def convert_reference_netlist(
     sim_model_classes = _sim_model_classes(deck)
     logical_lines = _fold_spice_continuations(text.splitlines())
     param_scopes = _collect_param_scopes(logical_lines)
+    call_overrides = _collect_call_overrides(logical_lines, param_scopes)
     subckt_scope = ""
 
     resistor_values = _deck_resistor_values(deck, resistor_value_classes, deck_options)
@@ -2025,6 +2153,7 @@ def convert_reference_netlist(
                         subckt_scope,
                         resistor_values,
                         mos_flavour_classes,
+                        call_overrides,
                     )
                 )
             except _UnknownSubcircuitError as exc:

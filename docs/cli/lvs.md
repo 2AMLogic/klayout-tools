@@ -891,6 +891,15 @@ resolved still fails with an error naming the parameter and the unresolved
 symbol — never a silent fallback. Already-literal values are untouched, and
 `ad`/`as`/`pd`/`ps` (never carried) can use any expression.
 
+Call-site parameters are **not** propagated into the definition: a device
+card is converted once, against the `.subckt` header defaults. If a
+geometry or multiplicity expression (`m={SCALE}`, `W`, `L`, `nf`, ...) depends
+on a header parameter that some `X` call overrides to a different value,
+`klt lvs` fails with a `NormalizeError` naming the card, the expression, the
+parameter and the calling card (issue #4406) rather than silently using the
+default. A call that passes the default value, or omits the parameter, is
+unaffected.
+
 **`form: "subckt-call"` resolves a bare literal per `reference.deck`
 (issue #1492).** A real xschem/ngspice schematic-flow netlist for a deck
 whose model library sets an ambient `.option scale=1.0u` (confirmed for
