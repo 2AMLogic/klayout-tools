@@ -3455,10 +3455,10 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "testbench re-run against it. Each delta[] row then also carries "
             "device_only_value, representation_delta_pct (device-only vs "
             "schematic) and parasitic_delta_pct (extracted vs device-only), "
-            "splitting device-representation effects from parasitics. Not "
-            "with --measure-command the command is run a third time on the "
-            "parasitic-free netlist ($KLT_PEX_SIDE=device-only). Off by default -- "
-            "byte-identical to today's behavior."
+            "splitting device-representation effects from parasitics. With "
+            "--measure-command the command is run a third time on the "
+            "parasitic-free netlist ($KLT_PEX_SIDE=device-only). Off by "
+            "default -- byte-identical to today's behavior."
         ),
     )
     pex_parser.add_argument(
