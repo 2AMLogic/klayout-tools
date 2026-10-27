@@ -247,6 +247,79 @@ def read_def_pins(def_path: str) -> list[dict[str, Any]] | None:
     return pins
 
 
+#: Facing edges and the coordinate their pins must share to abut (issue #4156).
+_FACING_AXIS = {
+    frozenset({"north", "south"}): "x_um",
+    frozenset({"east", "west"}): "y_um",
+}
+#: Largest coordinate difference (um) still reported as ``aligned``.
+ABUTMENT_TOLERANCE_UM = 0.01
+
+
+def pin_abutment(
+    constraints: list[dict[str, Any]] | None,
+    ports: list[str] | None,
+    pins: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Response-side abutment check over ``pins[]`` (issue #4156).
+
+    For each pair of ``io.pin_constraints`` entries on opposite edges, the
+    k-th matched port of one is compared with the k-th of the other (ports in
+    netlist order): north/south pairs must share ``x_um``, east/west pairs
+    ``y_um``. Measurement only -- a mismatch never fails the run. Entries with
+    different match counts, or a pin missing from ``pins[]``, are reported
+    with ``aligned: null`` and a ``reason`` rather than guessed at.
+    """
+    if not constraints or ports is None or pins is None:
+        return []
+    placed = {pin["name"]: pin for pin in pins}
+    members = [
+        [port for port in ports if any(match_pins(p, [port]) for p in entry["pins"])]
+        for entry in constraints
+    ]
+    results: list[dict[str, Any]] = []
+    for i, first in enumerate(constraints):
+        for j in range(i + 1, len(constraints)):
+            edges = frozenset({first["edge"], constraints[j]["edge"]})
+            coord = _FACING_AXIS.get(edges)
+            if coord is None:
+                continue
+            record: dict[str, Any] = {
+                "entries": [i, j],
+                "shared": coord[0],
+                "tolerance_um": ABUTMENT_TOLERANCE_UM,
+                "pairs": [],
+                "aligned": None,
+                "reason": None,
+            }
+            results.append(record)
+            if len(members[i]) != len(members[j]):
+                record["reason"] = (
+                    f"entries match {len(members[i])} and {len(members[j])} "
+                    "ports; cannot pair them"
+                )
+                continue
+            for a, b in zip(members[i], members[j]):
+                if a not in placed or b not in placed:
+                    record["reason"] = f"pin '{a if a not in placed else b}' not placed"
+                    record["pairs"] = []
+                    break
+                delta = round(placed[b][coord] - placed[a][coord], 4)
+                record["pairs"].append(
+                    {
+                        "a": a,
+                        "b": b,
+                        "a_um": placed[a][coord],
+                        "b_um": placed[b][coord],
+                        "delta_um": delta,
+                        "aligned": abs(delta) <= ABUTMENT_TOLERANCE_UM,
+                    }
+                )
+            else:
+                record["aligned"] = all(p["aligned"] for p in record["pairs"])
+    return results
+
+
 _COMPONENTS_STMT_RE = re.compile(r"-\s+(\S+)\s+\S+([^;]*);")
 
 
