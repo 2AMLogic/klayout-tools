@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-27
 
+- **PR #4370**: fix: declare macros in memory-evidence script and word macro_area_excluded per macro
+- **Issue #4368** (closed): Follow-on from PR #2645: macro-bearing designs and memory_mapping evidence
 - **PR #4433**: fix(ingest-canary): retry transient git clone/fetch failures in clone_repo
 - **PR #4429**: feat: print shadowed same-variant PDK roots in klt pdk find text output
 - **PR #4362**: feat: allow connects override with PDN preset; add tap_distance drc note
