@@ -1203,6 +1203,12 @@ _REASON_NEGATIVE_CONTROL_NOT_DETECTED = "negative_control_not_detected"
 #: "cite a different artifact" really is the more actionable answer.
 _REASON_PARTIAL_COVERAGE = "partial_coverage"
 
+# Most ``skipped`` records a ``coverage_qualification`` quotes verbatim
+# (issue #4286). A run with no antenna table emits one record per
+# (gate, level), so an uncapped quote made the committed tier report
+# O(gates x levels); beyond this the full list stays in the cited envelope.
+_PARTIAL_COVERAGE_SKIPPED_CAP = 20
+
 # --- Item 6 ``not_applicable`` outcome (issue #2865) ----------------------- #
 #: The T1 item whose "statistical claims" requirement a block with no
 #: statistical spec row can discharge by a recorded "not applicable".
@@ -3077,7 +3083,19 @@ def _partial_coverage_disclosure(envelope: dict[str, Any]) -> dict[str, Any] | N
     skipped = coverage_skipped_work(envelope)
     if not skipped:
         return None
-    return {"reason": _REASON_PARTIAL_COVERAGE, "skipped": skipped}
+    if len(skipped) <= _PARTIAL_COVERAGE_SKIPPED_CAP:
+        return {"reason": _REASON_PARTIAL_COVERAGE, "skipped": skipped}
+    by_reason: dict[str, int] = {}
+    for record in skipped:
+        reason = str(record.get("reason"))
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    return {
+        "reason": _REASON_PARTIAL_COVERAGE,
+        "skipped": skipped[:_PARTIAL_COVERAGE_SKIPPED_CAP],
+        "skipped_total": len(skipped),
+        "skipped_by_reason": dict(sorted(by_reason.items())),
+        "truncated": True,
+    }
 
 
 def _reports_partial_status(kind: str, envelope: dict[str, Any]) -> bool:
