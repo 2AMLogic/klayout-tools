@@ -313,7 +313,7 @@ def test_job_cmd_redirects_report_to_output_dir(tmp_path):
     assert '> "$EDA_OUTPUT_DIR/report.json"' in spec.cmd
     assert '"$EDA_INPUT_DIR/request.json"' in spec.cmd
     assert "--backend local-parallel --format json" in spec.cmd
-    assert "--outdir" not in spec.cmd
+    assert "--outdir" in spec.cmd  # engine logs always collected (#4369)
 
 
 def test_job_cmd_tees_stderr_into_outputs(tmp_path):
@@ -559,7 +559,7 @@ def test_job_cmd_physical_core_workers_expand_as_intended_in_a_shell(tmp_path):
         timeout_s=30.0,
         keep_artifacts=False,
     )
-    flag = spec.cmd.split("--format json", 1)[1].split(">", 1)[0].strip()
+    flag = spec.cmd.split("--format json", 1)[1].split("--outdir", 1)[0].strip()
     probe = f'printf "%s|" {flag}'
     with_cores = subprocess.run(
         ["sh", "-c", probe],
@@ -598,6 +598,18 @@ def test_job_cmd_points_outdir_into_output_dir_when_keeping_artifacts(tmp_path):
     assert spec.cmd.index("--outdir") < spec.cmd.index(
         '> "$EDA_OUTPUT_DIR/report.json"'
     )
+
+
+def test_job_cmd_collects_engine_logs_without_keep_artifacts(tmp_path):
+    """Issue #4369: the log must be collected so a deck abort is diagnosable."""
+    spec = sb._build_batch_job_spec(
+        {"models": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    assert '--outdir "$EDA_OUTPUT_DIR/artifacts"' in spec.cmd
 
 
 def test_job_json_omits_unset_optional_fields(tmp_path):
@@ -5900,6 +5912,46 @@ def test_exit_4_batch_job_surfaces_generic_fatal_from_retrieved_log(
     assert diagnostics[1]["message"].startswith("Error on line 7")
     assert diagnostics[1]["analysis_started"] is False
     assert "wall-clock" in diagnostics[1]["message"]
+
+
+def test_batch_job_surfaces_model_bin_range_without_keep_artifacts(
+    tmp_path, monkeypatch
+):
+    """Issue #4369: `could not find a valid modelname` reaches the errored
+    corner without `keep_artifacts`, and nothing is installed for the caller."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    remote_log = "/var/tmp/eda-job-1/outputs/artifacts/tt_1.800_27/ngspice.log"
+    runner.outputs = {
+        "report.json": _errored_report_without_include_code(remote_log),
+        "artifacts/tt_1.800_27/ngspice.log": (
+            "Circuit: * deck\n"
+            "Error on line 570 : m.x1.m0 d g s b nfet_03v3 w=1.28e-4 l=2.8e-7\n"
+            "Error: could not find a valid modelname\n"
+        ),
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    artifacts_dir = tmp_path / "caller-artifacts"
+
+    corners, _, _ = sb._run_batch_job(
+        config=_config(tmp_path),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(artifacts_dir),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+
+    diagnostics = corners[0]["diagnostics"]
+    assert [d["code"] for d in diagnostics] == ["measurement", "model_bin_range"]
+    assert "valid modelname" in diagnostics[1]["message"]
+    assert not list(artifacts_dir.rglob("*.log"))
 
 
 def test_report_already_carrying_missing_include_is_not_duplicated(

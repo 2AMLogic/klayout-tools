@@ -268,8 +268,9 @@ _BATCH_STDERR_TAIL_BYTES = 64 * 1024
 _BATCH_JOB_FAILURE_TAIL_BYTES = 1500
 
 #: ``$EDA_OUTPUT_DIR``-relative directory the job command points `klt sim`'s
-#: ``--outdir`` at when ``options.keep_artifacts`` is set, so per-corner
-#: logs/rawfiles land inside the one tree the harness collects.
+#: ``--outdir`` at, so per-corner logs/rawfiles land inside the one tree the
+#: harness collects (issue #4369: always, so a deck-abort log is readable;
+#: ``options.keep_artifacts`` only gates installing them for the caller).
 BATCH_ARTIFACTS_DIRNAME = "artifacts"
 
 #: ``job.json``'s ``tool`` field -- informational only (the harness echoes it
@@ -1603,8 +1604,10 @@ def _build_batch_job_spec(
     # An explicit `options.max_workers` in the request still wins.
     if not (remote_request.get("options") or {}).get("max_workers"):
         command += ' ${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}'
-    if keep_artifacts:
-        command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
+    # Always collect the per-corner engine logs: without them a deck abort
+    # (`could not find a valid modelname`) never reaches the report (#4369).
+    # Only `keep_artifacts` installs them into the caller's artifact dir.
+    command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
     # stdout -> report.json (the success channel); stderr was teed into
     # stderr.log from the job command's first line (see
     # _job_stderr_capture_prefix), so it also covers the preflight.
