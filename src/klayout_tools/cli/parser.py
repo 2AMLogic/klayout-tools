@@ -7329,6 +7329,18 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     netlist_parser.add_argument(
+        "--allow-unevaluated-expr",
+        action="store_true",
+        default=False,
+        help=(
+            "write the netlist even when literal expr(...) atoms remain (for "
+            "callers that evaluate expr() downstream); the condition is "
+            "reported as a stderr warning and a `warnings` entry, never "
+            "silent. Local backend only; unresolved symbols still fail "
+            "(issue #4305)"
+        ),
+    )
+    netlist_parser.add_argument(
         "--backend",
         choices=netlist_batch.SUPPORTED_BACKENDS,
         default=None,
