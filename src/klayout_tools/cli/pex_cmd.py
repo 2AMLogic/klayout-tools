@@ -33,7 +33,12 @@ import sys
 from ..env_provenance import render_path_field
 from ..output_lock import OutputLockError
 from ..pex import PexError, run_pex
-from ._parsing import parse_deck_options, parse_declared_pins, parse_label_layers
+from ._parsing import (
+    parse_deck_options,
+    parse_declared_pins,
+    parse_device_models,
+    parse_label_layers,
+)
 
 # Issue #2686: the same one-line `label_layers:` text rendering `klt extract`
 # prints for its own echo, reused rather than copied.
@@ -57,6 +62,8 @@ def run(args: argparse.Namespace) -> int:
         # --label-layer` uses (issue #2656), bound to `PexError`. Role names
         # are validated by the deck during extraction, not here.
         label_layers = parse_label_layers(args.label_layers, PexError)
+        # `--device-model` (issue #4234): shared parser, bound to `PexError`.
+        device_models = parse_device_models(args.device_models, PexError)
         # `--measure-command` (issue #2478): one shell-quoted string on the
         # command line, an argv *list* everywhere below -- `shlex.split`
         # here is the only place the string form exists. The command is
@@ -96,6 +103,9 @@ def run(args: argparse.Namespace) -> int:
             # was never given, unchanged from every call site that predates
             # it.
             label_layers=label_layers,
+            # `--device-model` (issue #4234): passed straight through to
+            # `klt extract --device-model`. `None` when never given.
+            device_models=device_models,
             # `--critical-net` (issue #976, Epic #709 Phase 2a): scopes the
             # lateral coupling pass onto these net names. `None` when the
             # flag was never given, unchanged from every call site that

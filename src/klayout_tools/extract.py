@@ -272,6 +272,7 @@ from .extract_progress import StageTimer, active_timer, stage
 # internal helpers (`_describe_layers_in_set`, `_pin_index_by_net_id`,
 # `_each_pin_net`) have no caller here and are deliberately not imported.
 from .extract_report import (
+    _case_collision_warnings,
     _describe_device_recognition_only_layers,
     _describe_devices,
     _describe_ignored_layers,
@@ -1244,6 +1245,23 @@ def _attach_resistance_paths(
     parasitics_report["resistance_paths"] = results
 
 
+def _require_pdk_for_device_models(
+    device_models: Mapping[str, str] | None,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+) -> None:
+    """``--device-model`` names a PDK subcircuit, so it needs a PDK (issue #4234)."""
+    if device_models and pdk_variant is None and pdk_root is None:
+        raise ExtractError("--device-model requires --pdk or --pdk-root")
+
+
+def _describe_device_models(
+    device_models: Mapping[str, str] | None,
+) -> dict[str, str] | None:
+    """Report echo of ``--device-model`` (issue #4234): sorted, ``None`` if unset."""
+    return dict(sorted(device_models.items())) if device_models else None
+
+
 def _describe_label_layers(
     label_layers: Mapping[str, tuple[int, int] | None] | None,
 ) -> dict[str, list[int] | None] | None:
@@ -1438,6 +1456,7 @@ def run_extract(
     apply_resistor_fixed_offset: bool = True,
     deck_options: Mapping[str, str] | None = None,
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
+    device_models: Mapping[str, str] | None = None,
     abstract_cell_patterns: tuple[str, ...] = (),
     abstract_cell_lef_paths: tuple[str, ...] = (),
     mom_net: str | None = None,
@@ -2779,6 +2798,7 @@ def run_extract(
     # see `klayout_tools.pdk_models`). Drives the `X`-card model-binding writer
     # below -- see the module docstring's "--pdk-triggered model binding" note.
     model_bindings: dict[str, DeviceBinding] | None = None
+    _require_pdk_for_device_models(device_models, pdk_variant, pdk_root)
     if pdk_variant is not None or pdk_root is not None:
         try:
             pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
@@ -2795,7 +2815,10 @@ def run_extract(
             raise ExtractError(str(exc)) from exc
         try:
             model_bindings = resolve_device_bindings(
-                deck_name, pdk_info["variant"], deck_for_models
+                deck_name,
+                pdk_info["variant"],
+                deck_for_models,
+                device_models=device_models,
             )
         except ModelBindingError as exc:
             raise ExtractError(str(exc)) from exc
@@ -3170,6 +3193,9 @@ def run_extract(
     # docs/cli/extract.md's "Split net labels" section.
     split_net_labels = _detect_split_net_labels(nets)
     warnings.extend(_split_net_label_warnings(split_net_labels))
+
+    # Issue #4200: nets differing only by case merge on `klt lvs` read-back.
+    warnings.extend(_case_collision_warnings(nets))
 
     # PMOS body terminals tied to an anonymous, unbiased net (issue #555):
     # a PMOS body extracts onto a KLayout-synthesized `$<n>` net with no DC
@@ -3999,6 +4025,12 @@ def run_extract(
         # report replays the same purposes instead of drifting on every net
         # name at once. See run_extract's `label_layers` docstring paragraph.
         "label_layers": _describe_label_layers(label_layers),
+        # Additive field (issue #4234): `null` unless `device_models`
+        # (--device-model) was given, otherwise the caller's own
+        # `{class: subckt}` binding for a device class with no curated PDK
+        # model (e.g. gf180mcu's `bjt`), echoed so a committed report records
+        # which model the bipolar card was written against.
+        "device_models": _describe_device_models(device_models),
         # Additive field (issue #2986): one entry per `--probe`, in request
         # order; always present, `[]` when none was given. `net`/`cluster_id`
         # are the final `nets[].name`/`nets[].net_id` of the net under the
@@ -6398,7 +6430,8 @@ def _pin_source_cell_net_names(
     A caller names the cell(s) a `gen-compose`d assembly's own hand-drawn
     interconnect script draws its top-level pin labels into (e.g. the
     ``f"{block_id}__{src_cell_name}"`` sub-cell `klt gen-compose` itself
-    creates for a composed-in block, or a hand-authored interconnect
+    creates for a composed-in block (or its ``blocks[].placed_cell_name``,
+    #4246, when set), or a hand-authored interconnect
     block's own top cell) -- unlike ``--top-cell-pins``, this deliberately
     *does not* require that cell to be ``top_cell`` itself, since a
     composed assembly's own interconnect labels necessarily live in an

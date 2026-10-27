@@ -4997,6 +4997,51 @@ def test_cli_pex_label_layer_reaches_run_pex(tmp_path, resistor_layout, monkeypa
     assert captured["label_layers"] == {"metal0": (67, 10), "poly": None}
 
 
+def test_cli_pex_device_model_reaches_run_pex(tmp_path, resistor_layout, monkeypatch):
+    """`--device-model` is repeatable and a later CLASS wins (issue #4234);
+    omitting it passes `None`."""
+    captured = _fake_run_pex_capturing(monkeypatch)
+    argv = [
+        "pex",
+        resistor_layout,
+        str(tmp_path / "request.json"),
+        "--deck",
+        "gf180mcu",
+        "--format",
+        "json",
+    ]
+    assert main(argv) == 0
+    assert captured["device_models"] is None
+
+    assert (
+        main(
+            argv + ["--device-model", "bjt=a", "--device-model", "bjt=pnp_05p00x05p00"]
+        )
+        == 0
+    )
+    assert captured["device_models"] == {"bjt": "pnp_05p00x05p00"}
+
+
+def test_cli_pex_malformed_device_model_is_a_clean_error(
+    tmp_path, resistor_layout, monkeypatch
+):
+    _fake_run_pex_capturing(monkeypatch)
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(tmp_path / "request.json"),
+            "--deck",
+            "gf180mcu",
+            "--device-model",
+            "bjt",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+
+
 def test_cli_pex_omitting_label_layer_passes_none(
     tmp_path, resistor_layout, monkeypatch
 ):
@@ -6098,47 +6143,115 @@ def test_run_pex_device_only_leg_failure_nulls_only_its_fields(
     assert report["status"] == "pass"
 
 
-def test_run_pex_device_only_leg_rejects_measure_command(tmp_path, resistor_layout):
-    reference = tmp_path / "ref.spice"
-    reference.write_text(".SUBCKT RES RA RB\nR1 RA RB 289.2\n.ENDS RES\n")
-    with pytest.raises(PexError, match="--device-only-leg is not supported"):
-        run_pex(
+_DEVICE_ONLY_HARNESS = """\
+import json, os, sys
+
+side = os.environ["KLT_PEX_SIDE"]
+assert sys.argv[-1] == os.environ["KLT_PEX_NETLIST"]
+assert os.environ["KLT_PEX_ARTIFACTS_DIR"].endswith(os.path.join("measure", side))
+with open(os.environ["KLT_PEX_LOG"], "a") as log:
+    log.write(side + "\\n")
+if side == "device-only" and os.environ.get("KLT_TEST_FAIL") == "1":
+    sys.exit(3)
+value = {"schematic": 1.0, "device-only": 1.2, "extracted": 1.5}[side]
+if side == "device-only" and os.environ.get("KLT_TEST_NULL") == "1":
+    value = None
+print(
+    json.dumps(
+        {
+            "corners": [
+                {
+                    "corner_id": "tt/1.800V/27C",
+                    "measurements": [
+                        {"name": "t_cross", "value": value, "status": "pass"}
+                    ],
+                }
+            ]
+        }
+    )
+)
+"""
+
+
+def _run_device_only_command(
+    tmp_path, resistor_layout, measure_reference, monkeypatch, **env
+):
+    log = tmp_path / "sides.log"
+    monkeypatch.setenv("KLT_PEX_LOG", str(log))
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        measure_command=_write_harness(tmp_path, _DEVICE_ONLY_HARNESS),
+        reference_netlist=str(measure_reference),
+        device_only_leg=True,
+    )
+    return report, log
+
+
+def test_run_pex_device_only_leg_with_measure_command_splits_delta(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    report, log = _run_device_only_command(
+        tmp_path, resistor_layout, measure_reference, monkeypatch
+    )
+
+    assert log.read_text().split() == ["schematic", "extracted", "device-only"]
+    assert set(report["measurement"]["sides"]) == {
+        "schematic",
+        "extracted",
+        "device_only",
+    }
+    (row,) = report["delta"]
+    assert row["device_only_value"] == 1.2
+    assert row["representation_delta_pct"] == pytest.approx(20.0)
+    assert row["parasitic_delta_pct"] == pytest.approx(25.0)
+    assert row["device_only_status"] == "pass"
+
+
+def test_run_pex_device_only_leg_command_null_value_is_error_row(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    report, _ = _run_device_only_command(
+        tmp_path, resistor_layout, measure_reference, monkeypatch, KLT_TEST_NULL="1"
+    )
+
+    (row,) = report["delta"]
+    assert row["device_only_value"] is None
+    assert row["representation_delta_pct"] is None
+    assert row["parasitic_delta_pct"] is None
+    assert row["device_only_status"] != "pass"
+    assert row["delta_pct"] == pytest.approx(50.0)
+
+
+def test_run_pex_device_only_leg_command_failure_is_pex_error(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    with pytest.raises(PexError):
+        _run_device_only_command(
+            tmp_path,
             resistor_layout,
-            [],
-            "sky130",
-            measure_command=[sys.executable, "-c", "pass"],
-            reference_netlist=str(reference),
-            device_only_leg=True,
+            measure_reference,
+            monkeypatch,
+            KLT_TEST_FAIL="1",
         )
 
 
-def test_cli_device_only_leg_with_measure_command_is_a_json_error(
-    tmp_path, resistor_layout, capsys
+def test_run_pex_measure_command_without_device_only_leg_has_no_third_side(
+    tmp_path, resistor_layout, measure_reference
 ):
-    reference = tmp_path / "ref.spice"
-    reference.write_text(".SUBCKT RES RA RB\nR1 RA RB 289.2\n.ENDS RES\n")
-    exit_code = main(
-        [
-            "pex",
-            resistor_layout,
-            "--deck",
-            "sky130",
-            "--measure-command",
-            f"{sys.executable} -c pass",
-            "--reference-netlist",
-            str(reference),
-            "--device-only-leg",
-            "--format",
-            "json",
-        ]
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=str(measure_reference),
     )
-    assert exit_code == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert (
-        "--device-only-leg is not supported"
-        in json.loads(captured.err)["error"]["message"]
-    )
+
+    assert set(report["measurement"]["sides"]) == {"schematic", "extracted"}
+    assert "device_only_value" not in report["delta"][0]
 
 
 # --- `--extract-only` (issue #3739) ----------------------------------------
