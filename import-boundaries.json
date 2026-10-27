@@ -1636,6 +1636,12 @@
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
+      "consumer": "klayout_tools.place_and_route",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Request-shape validation of the outputs object, mirroring klt synthesize (issue #4231); promote to a public name when _paths is next reworked."
+    },
+    {
       "consumer": "klayout_tools.synthesize",
       "exporter": "klayout_tools._paths",
       "symbol": "_reject_unknown_keys",
