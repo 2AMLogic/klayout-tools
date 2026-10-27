@@ -1720,7 +1720,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/klayout-debs
-          key: klayout-0.28.16-ubuntu24.04-v1-${{ hashFiles('scripts/ci-apt-install.sh') }}
+          key: klayout-0.28.16-ubuntu24.04-v1-${{ hashFiles('scripts/ci-apt-*.sh') }}
 
       - name: Install the klayout binary
         # Cache hit: install offline from the restored .debs; any failure
