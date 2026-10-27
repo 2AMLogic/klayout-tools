@@ -1884,28 +1884,36 @@ def _validate_clocks_list(constraints: dict[str, Any]) -> list[dict[str, Any]]:
     clocks: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, entry in enumerate(raw):
-        where = f"request.constraints.clocks[{index}]"
-        if not isinstance(entry, dict):
-            raise PostRouteStaError(f"{where} must be a {{port, period_ns}} object")
-        unknown = sorted(set(entry) - {"port", "period_ns"})
-        if unknown:
+        clock = _validate_clock_entry(entry, f"request.constraints.clocks[{index}]")
+        if clock["port"] in seen:
             raise PostRouteStaError(
-                f"{where} has unknown key(s): {', '.join(map(str, unknown))} "
-                "(allowed: port, period_ns)"
+                f"request.constraints.clocks[{index}].port "
+                f"'{clock['port']}' is listed more than once"
             )
-        port = entry.get("port")
-        if not isinstance(port, str) or not port.strip():
-            raise PostRouteStaError(f"{where}.port must be a non-empty string")
-        period = entry.get("period_ns")
-        if isinstance(period, bool) or not isinstance(period, (int, float)):
-            raise PostRouteStaError(f"{where}.period_ns must be a positive number")
-        if period <= 0:
-            raise PostRouteStaError(f"{where}.period_ns must be greater than zero")
-        if port in seen:
-            raise PostRouteStaError(f"{where}.port '{port}' is listed more than once")
-        seen.add(port)
-        clocks.append({"port": port, "period_ns": float(period)})
+        seen.add(clock["port"])
+        clocks.append(clock)
     return clocks
+
+
+def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
+    """One ``constraints.clocks`` entry as ``{port, period_ns}`` (issue #4241)."""
+    if not isinstance(entry, dict):
+        raise PostRouteStaError(f"{where} must be a {{port, period_ns}} object")
+    unknown = sorted(set(entry) - {"port", "period_ns"})
+    if unknown:
+        raise PostRouteStaError(
+            f"{where} has unknown key(s): {', '.join(map(str, unknown))} "
+            "(allowed: port, period_ns)"
+        )
+    port = entry.get("port")
+    if not isinstance(port, str) or not port.strip():
+        raise PostRouteStaError(f"{where}.port must be a non-empty string")
+    period = entry.get("period_ns")
+    if isinstance(period, bool) or not isinstance(period, (int, float)):
+        raise PostRouteStaError(f"{where}.period_ns must be a positive number")
+    if period <= 0:
+        raise PostRouteStaError(f"{where}.period_ns must be greater than zero")
+    return {"port": port, "period_ns": float(period)}
 
 
 def _validate_clock_extras(constraints: dict[str, Any]) -> dict[str, Any] | None:
@@ -1919,37 +1927,45 @@ def _validate_clock_extras(constraints: dict[str, Any]) -> dict[str, Any] | None
     groups_raw = constraints.get("clock_groups")
     groups: list[list[str]] = []
     if groups_raw is not None:
-        declared = {c["port"] for c in clocks}
-        if not clocks:
-            declared = {constraints.get("clock_port")}
-        if not isinstance(groups_raw, list) or not groups_raw:
-            raise PostRouteStaError(
-                "request.constraints.clock_groups must be a non-empty array "
-                "of non-empty port-name arrays"
-            )
-        for index, group in enumerate(groups_raw):
-            where = f"request.constraints.clock_groups[{index}]"
-            if not isinstance(group, list) or not group:
-                raise PostRouteStaError(f"{where} must be a non-empty array")
-            ports: list[str] = []
-            for port in group:
-                if not isinstance(port, str) or not port:
-                    raise PostRouteStaError(f"{where} entries must be port names")
-                if port not in declared:
-                    raise PostRouteStaError(
-                        f"{where} names '{port}', which is not a declared clock"
-                    )
-                if port not in ports:
-                    ports.append(port)
-            groups.append(ports)
-        if len(groups) < 2:
-            raise PostRouteStaError(
-                "request.constraints.clock_groups needs at least two groups "
-                "for an asynchronous relationship"
-            )
+        declared = (
+            {c["port"] for c in clocks} if clocks else {constraints.get("clock_port")}
+        )
+        groups = _validate_clock_groups(groups_raw, declared)
     if len(clocks) <= 1 and not groups:
         return None
     return {"clocks": clocks[1:], "groups": groups}
+
+
+def _validate_clock_groups(groups_raw: Any, declared: set[Any]) -> list[list[str]]:
+    """``constraints.clock_groups`` (issue #4241) as de-duplicated port lists,
+    each naming only ``declared`` clocks; at least two groups are required."""
+    if not isinstance(groups_raw, list) or not groups_raw:
+        raise PostRouteStaError(
+            "request.constraints.clock_groups must be a non-empty array "
+            "of non-empty port-name arrays"
+        )
+    groups: list[list[str]] = []
+    for index, group in enumerate(groups_raw):
+        where = f"request.constraints.clock_groups[{index}]"
+        if not isinstance(group, list) or not group:
+            raise PostRouteStaError(f"{where} must be a non-empty array")
+        ports: list[str] = []
+        for port in group:
+            if not isinstance(port, str) or not port:
+                raise PostRouteStaError(f"{where} entries must be port names")
+            if port not in declared:
+                raise PostRouteStaError(
+                    f"{where} names '{port}', which is not a declared clock"
+                )
+            if port not in ports:
+                ports.append(port)
+        groups.append(ports)
+    if len(groups) < 2:
+        raise PostRouteStaError(
+            "request.constraints.clock_groups needs at least two groups "
+            "for an asynchronous relationship"
+        )
+    return groups
 
 
 def _clock_targets(
