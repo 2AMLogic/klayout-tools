@@ -8346,6 +8346,51 @@ def test_deck_still_names_an_undeclared_metal_level(tmp_path):
     assert report["erc_status"] == "clean"
 
 
+def _gf180mcu_with_extra_shapes(tmp_path, draw, **kwargs):
+    gds = tmp_path / "gf_extra.gds"
+    spec = tmp_path / "gf_extra.erc.json"
+    _gf180mcu_resistor_divider_fixture(gds)
+    layout = kdb.Layout()
+    layout.read(str(gds))
+    draw(layout, layout.top_cell())
+    layout.write(str(gds))
+    _write_spec(spec, _gf180mcu_resistor_divider_spec())
+    return run_erc(str(gds), str(spec), deck="gf180mcu", **kwargs)
+
+
+def test_deck_names_an_undeclared_label_purpose_carrying_text(tmp_path):
+    """A text on a purpose the spec declares as no `label_layer` reads as
+    absent; under `--deck` it must still be named (issue #4376), while a
+    shape-only marker layer stays suppressed and the field stays
+    reporting-only."""
+
+    def draw(layout, top):
+        top.shapes(layout.layer(36, 5)).insert(
+            kdb.Text("VDD", kdb.Trans(_um(1), _um(0.5)))
+        )
+        top.shapes(layout.layer(200, 0)).insert(
+            kdb.Box.new(_um(0), _um(0), _um(1), _um(1))
+        )
+
+    report = _gf180mcu_with_extra_shapes(tmp_path, draw)
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == ["36/5"]
+    assert report["erc_status"] == "clean"
+
+
+def test_deck_undeclared_text_counts_in_child_cells_not_sibling_tops(tmp_path):
+    def draw(layout, top):
+        child = layout.create_cell("CHILD")
+        child.shapes(layout.layer(36, 5)).insert(kdb.Text("A", kdb.Trans(0, 0)))
+        top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans()))
+        sibling = layout.create_cell("SIBLING")
+        sibling.shapes(layout.layer(37, 5)).insert(kdb.Text("B", kdb.Trans(0, 0)))
+
+    report = _gf180mcu_with_extra_shapes(tmp_path, draw, top="TOP")
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == ["36/5"]
+
+
 def test_cli_json_carries_undeclared_stream_layers(tmp_path, capsys):
     """The field reaches the JSON envelope (the contract), not just the
     in-process return value."""

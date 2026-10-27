@@ -602,18 +602,28 @@ def _undeclared_stream_layers(
     ``deck``, when given, narrows the result to that curated deck's own
     conducting layers (:func:`_deck_conductor_layers`) -- without it there is
     no PDK-agnostic way to tell a conductor from an implant or marker, so the
-    unfiltered list is reported.
+    unfiltered list is reported. A layer carrying at least one text shape in
+    that scope survives the narrowing regardless (issue #4376): an undeclared
+    label purpose reads as absent labels, and the deck has no label purposes
+    of its own to keep it.
     """
     scope_cells = cells_in_hierarchy(layout, top_cell)
     drawn: set[tuple[int, int]] = set()
+    texted: set[tuple[int, int]] = set()
     for layer_index in layout.layer_indexes():
         if any(cell.shapes(layer_index).size() for cell in scope_cells):
             info = layout.get_info(layer_index)
             drawn.add((info.layer, info.datatype))
+            if any(
+                shape.is_text()
+                for cell in scope_cells
+                for shape in cell.shapes(layer_index).each()
+            ):
+                texted.add((info.layer, info.datatype))
 
     undeclared = drawn - declared
     if deck is not None:
-        undeclared &= _deck_conductor_layers(deck)
+        undeclared = (undeclared & _deck_conductor_layers(deck)) | (undeclared & texted)
     return [f"{layer}/{datatype}" for layer, datatype in sorted(undeclared)]
 
 

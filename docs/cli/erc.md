@@ -2938,7 +2938,9 @@ any other checked, non-degenerate tie:
   declared. Pure disclosure, mirroring `klt drc`'s
   `coverage.layers_in_stream_without_rules`: it is not an input to
   `erc_status` (nor `status`), emits no finding, and is narrowed to the
-  curated deck's conducting layers when `--deck` is given. See "Layers this
+  curated deck's conducting layers when `--deck` is given, except that an
+  undeclared layer carrying text shapes is always named (an undeclared label
+  purpose otherwise reads as absent labels). See "Layers this
   stream draws that the spec never declared" above.
 - `well_assertion_coverage` (array\<object\>, issue #2427) — one entry per
   non-degenerate tie that asserted its substrate region (`well_layer: null` +
