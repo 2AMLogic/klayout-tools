@@ -103,6 +103,9 @@ _NOM_PROCESS_RE = re.compile(r"nom_process\s*:\s*([0-9.eE+-]+)")
 _NOM_TEMPERATURE_RE = re.compile(r"nom_temperature\s*:\s*(-?[0-9.eE+-]+)")
 _NOM_VOLTAGE_RE = re.compile(r"nom_voltage\s*:\s*([0-9.eE+-]+)")
 _OPERATING_CONDITIONS_RE = re.compile(r'default_operating_conditions\s*:\s*"([^"]+)"')
+# open_pdks-style liberty corner name: ``<process>_<temp>C_<V>v<frac>`` with
+# ``n`` marking a negative temperature (``ss_n40C_3v00`` -> ss, -40 C, 3.00 V).
+_CORNER_NAME_RE = re.compile(r"^([a-z]{2})_(n?)(\d+)C_(\d+)v(\d+)$")
 
 
 def list_cell_libraries(
@@ -200,6 +203,11 @@ def list_cell_libraries(
                     "supplies_v": [float, ...],
                     "voltage_class": "core" | "io" | None,
                     "corners": [str, ...],   # shipped liberty corner names
+                    "corner_points": [       # one per corners entry
+                        {"name": str, "process": str | None,
+                         "temperature_c": int | None,
+                         "supply_v": float | None},
+                    ],
                     # "compatible": bool,   -- present only when supply= is given
                 },
                 ...
@@ -485,6 +493,31 @@ def _descriptor_liberty(
     return mapped, corner
 
 
+def parse_corner_name(name: str) -> dict[str, Any]:
+    """Split a liberty corner name into ``{name, process, temperature_c,
+    supply_v}``.
+
+    Only the open_pdks ``<process>_<n?><temp>C_<V>v<frac>`` shape is
+    recognised; any other name (e.g. IHP ``typ_1p20V_25C``) yields ``None``
+    for the three parsed fields rather than a guess.
+    """
+    match = _CORNER_NAME_RE.match(name)
+    if match is None:
+        return {
+            "name": name,
+            "process": None,
+            "temperature_c": None,
+            "supply_v": None,
+        }
+    process, neg, temp, volts, frac = match.groups()
+    return {
+        "name": name,
+        "process": process,
+        "temperature_c": -int(temp) if neg else int(temp),
+        "supply_v": float(f"{volts}.{frac}"),
+    }
+
+
 def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
     """Enumerate :data:`_STD_CELL_LIB_MARKERS`-named entries under
     ``libs_ref``, name-sorted."""
@@ -513,6 +546,7 @@ def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
                 "supplies_v": nominal["supplies_v"],
                 "voltage_class": _voltage_class(nominal["voltage"]),
                 "corners": corners,
+                "corner_points": [parse_corner_name(c) for c in corners],
             }
         )
     return libraries
