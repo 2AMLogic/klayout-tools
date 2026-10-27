@@ -523,6 +523,78 @@ def test_no_gds_yields_in_design_status(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# clone_repo transient-network retry (mocked)
+# --------------------------------------------------------------------------- #
+
+
+def _cp(returncode, stderr="", stdout=""):
+    return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=stderr)
+
+
+def test_clone_repo_retries_transient_clone_failure(tmp_path, monkeypatch):
+    clones = []
+    sleeps = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["git", "clone"]:
+            clones.append(cmd)
+            dest = Path(cmd[-1])
+            # A real failed clone can leave a partial dir; a retry must find it gone.
+            assert not dest.exists()
+            dest.mkdir(parents=True)
+            if len(clones) == 1:
+                return _cp(128, "fatal: Failure when receiving data from the peer")
+            return _cp(0)
+        if "rev-parse" in cmd:
+            return _cp(0, stdout="abc123\n")
+        return _cp(0)
+
+    monkeypatch.setattr(ic.subprocess, "run", fake_run)
+    monkeypatch.setattr(ic, "_sleep", sleeps.append)
+    repo_dir, sha = ic.clone_repo("2AMLogic/x", tmp_path / "cache", None)
+    assert repo_dir == tmp_path / "cache" / "x"
+    assert sha == "abc123"
+    assert len(clones) == 2
+    assert len(sleeps) == 1
+
+
+def test_clone_repo_raises_after_all_attempts_fail(tmp_path, monkeypatch):
+    clones = []
+
+    def fake_run(cmd, **kwargs):
+        clones.append(cmd)
+        return _cp(128, "fatal: repository not found")
+
+    monkeypatch.setattr(ic.subprocess, "run", fake_run)
+    monkeypatch.setattr(ic, "_sleep", lambda s: None)
+    with pytest.raises(
+        ic.IngestError,
+        match=r"git clone failed for 2AMLogic/x: fatal: repository not found",
+    ):
+        ic.clone_repo("2AMLogic/x", tmp_path / "cache", None)
+    assert len(clones) == ic.GIT_NETWORK_ATTEMPTS
+
+
+def test_clone_repo_retries_fetch_on_cached_path(tmp_path, monkeypatch):
+    (tmp_path / "cache" / "x").mkdir(parents=True)
+    fetches = []
+
+    def fake_run(cmd, **kwargs):
+        if "fetch" in cmd:
+            fetches.append(cmd)
+            return _cp(1, "transient") if len(fetches) == 1 else _cp(0)
+        if "rev-parse" in cmd:
+            return _cp(0, stdout="def456\n")
+        return _cp(0)
+
+    monkeypatch.setattr(ic.subprocess, "run", fake_run)
+    monkeypatch.setattr(ic, "_sleep", lambda s: None)
+    _, sha = ic.clone_repo("2AMLogic/x", tmp_path / "cache", None)
+    assert sha == "def456"
+    assert len(fetches) == 2
+
+
+# --------------------------------------------------------------------------- #
 # Integration: real network + gh CLI
 # --------------------------------------------------------------------------- #
 

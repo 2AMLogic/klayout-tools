@@ -95,6 +95,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -216,6 +217,36 @@ def repo_description(repo: str) -> str | None:
 # --------------------------------------------------------------------------- #
 
 
+GIT_NETWORK_ATTEMPTS = 3
+GIT_RETRY_BACKOFF_S = 2.0
+
+
+def _sleep(seconds: float) -> None:
+    """Indirection so tests can skip the real backoff."""
+    time.sleep(seconds)
+
+
+def _run_with_retry(
+    cmd: list[str], cleanup: Any = None
+) -> subprocess.CompletedProcess[str]:
+    """Run a networked git command, retrying transient failures.
+
+    Up to `GIT_NETWORK_ATTEMPTS` attempts with linear backoff; returns the last
+    result (success or failure) so the caller raises its own `IngestError`.
+    `cleanup` runs after each failed attempt that will be retried (e.g. to
+    remove a partial clone directory).
+    """
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    for attempt in range(1, GIT_NETWORK_ATTEMPTS):
+        if result.returncode == 0:
+            break
+        if cleanup is not None:
+            cleanup()
+        _sleep(GIT_RETRY_BACKOFF_S * attempt)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    return result
+
+
 def clone_repo(repo: str, cache_dir: Path, ref: str | None) -> tuple[Path, str]:
     """Clone (or fetch+checkout, if already cached) `repo` into `cache_dir`.
 
@@ -227,17 +258,16 @@ def clone_repo(repo: str, cache_dir: Path, ref: str | None) -> tuple[Path, str]:
     url = f"https://github.com/{repo}.git"
 
     if dest.is_dir():
-        fetch = subprocess.run(
-            ["git", "-C", str(dest), "fetch", "--quiet", "--tags", "origin"],
-            capture_output=True,
-            text=True,
+        fetch = _run_with_retry(
+            ["git", "-C", str(dest), "fetch", "--quiet", "--tags", "origin"]
         )
         if fetch.returncode != 0:
             raise IngestError(f"git fetch failed for {repo}: {fetch.stderr.strip()}")
     else:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        clone = subprocess.run(
-            ["git", "clone", "--quiet", url, str(dest)], capture_output=True, text=True
+        clone = _run_with_retry(
+            ["git", "clone", "--quiet", url, str(dest)],
+            cleanup=lambda: shutil.rmtree(dest, ignore_errors=True),
         )
         if clone.returncode != 0:
             raise IngestError(f"git clone failed for {repo}: {clone.stderr.strip()}")
