@@ -2885,7 +2885,6 @@ def _esd_device_describe(
         info["ring"] if ring_drawn else None, params["ring_gap_side"]
     )
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
-    voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
     if not params["add_guard_ring"]:
         notes.append(
             "no tap ring drawn (params.add_guard_ring is false) -- substrate "

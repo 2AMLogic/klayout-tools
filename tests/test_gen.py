@@ -11981,7 +11981,8 @@ def test_esd_device_voltage_flavor_hvi_draws_marker_and_extracts_g5v0d10v5(
 def test_esd_device_unknown_voltage_flavor_notes_not_drawn(tmp_path, pdk_root):
     output, report = _esd_gen(tmp_path, pdk_root, {"voltage_flavor": "bogus"})
     assert report["drc_hints"]["voltage_flavor_mark_present"] is False
-    assert any("voltage_flavor" in n for n in report["drc_hints"]["notes"])
+    flavor_notes = [n for n in report["drc_hints"]["notes"] if "voltage_flavor" in n]
+    assert len(flavor_notes) == 1
     assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER not in _gds_layers(output)
 
 
