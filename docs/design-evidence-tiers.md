@@ -282,8 +282,8 @@ written to every block.
    stay the route wherever they recognise every device in the block, and a
    block may not choose the runset to avoid a curated-deck finding. The
    allowlist (`signoff_runset.PINNED_RUNSETS`, listed by
-   `klt signoff --describe-grader` under `pinned_runsets`) holds the SG13G2 and
-   SG13CMOS5L `*.lvs` runsets as of 2026-10-27; gf180mcu is not yet pinned.
+   `klt signoff --describe-grader` under `pinned_runsets`) holds the SG13G2,
+   SG13CMOS5L and gf180mcu `*.lvs` runsets as of 2026-10-27.
    **Adding an entry** is a reviewed trust decision, never a copy of a hash
    from a report: fetch the PDK's runset file from its upstream repo at a
    named commit, `sha256` it (the same digest `_provenance.sha256_file`

@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`signoff_runset.PINNED_RUNSETS` pins the gf180mcu LVS runset** (issue #4395):
+  `klayout/lvs/gf180mcu.lvs` at `fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pv`
+  commit `1a4e4b5` (sha256 `09a4f1f1…fde9`, byte-identical in all four open_pdks
+  gf180mcuA-D trees), so a gf180mcu `klayout-runset` LVS report is no longer
+  refused `runset_not_pinned`. Allowlist data only; no schema change.
+
 - **`klt place-and-route` gains `instance_groups` (request) and `instance_groups[]`
   (response)** (issue #4344, documented in
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)): name sets of
