@@ -647,6 +647,8 @@ klt pex amp.gds tb.json --deck sky130 --tie-net '\$5=VDD'
 - Anonymous names (`\$5`) are synthesized by KLayout and can change when the
   layout changes, so a declared tie is **per extraction**: re-read
   `unbiased_nets` after re-laying-out.
+- `extraction.netlist_sha256` is the digest of the netlist as rewritten by the
+  tie, so it always matches the file `netlist.path` points at.
 - Without the flag the output is byte-identical to a run that never had it.
 
 The tie is disclosed, not hidden. `body_bias` gains an additive `tied[]`:

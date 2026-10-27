@@ -392,6 +392,45 @@ def test_run_pex_tie_net_on_layout_with_no_unbiased_nets_errors(
         )
 
 
+def test_run_pex_tie_net_reports_hash_of_rewritten_netlist(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    import klayout_tools.pex as pex_module
+    from klayout_tools._provenance import sha256_file
+
+    real = pex_module.run_extract
+
+    def _with_unbiased(*args, **kwargs):
+        rep = real(*args, **kwargs)
+        rep["unbiased_pmos_body_nets"] = [{"device": "M0", "net": "n_tie"}]
+        return rep
+
+    monkeypatch.setattr(pex_module, "run_extract", _with_unbiased)
+    monkeypatch.setattr(
+        pex_module,
+        "_validate_tie_nets",
+        lambda ties, rep: None,
+    )
+    out = tmp_path / "res.spice"
+
+    def _fake_apply(path, ties):
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("* tied\n")
+
+    monkeypatch.setattr(pex_module, "_apply_tie_nets", _fake_apply)
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(out),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=measure_reference,
+        tie_nets=[("n_tie", "VDD")],
+    )
+    assert report["extraction"]["netlist_sha256"] == sha256_file(str(out))
+
+
 # --------------------------------------------------------------------------- #
 # `_delta_pct` / `_row_status`
 # --------------------------------------------------------------------------- #

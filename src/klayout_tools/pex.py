@@ -3151,6 +3151,13 @@ def run_pex(
     _tie_nets_in_legs(
         tie_nets, extract_report, extracted_netlist_path, device_only_netlist_path
     )
+    # The tie rewrites `extracted_netlist_path` in place, so the extract-time
+    # hash no longer identifies the file the report points at: re-hash it.
+    extracted_netlist_sha256 = (
+        sha256_file(extracted_netlist_path)
+        if tie_nets
+        else extract_report["netlist_sha256"]
+    )
 
     work_dir = (
         os.path.abspath(artifacts_dir)
@@ -3600,7 +3607,7 @@ def run_pex(
             "deck": deck_name,
             "device_count": extract_report["device_count"],
             "net_count": extract_report["net_count"],
-            "netlist_sha256": extract_report["netlist_sha256"],
+            "netlist_sha256": extracted_netlist_sha256,
             "model": parasitics.get("model"),
             # Additive field (issue #976): echoes `--critical-net` back --
             # `[]` when the flag was never given, byte-identical to before
