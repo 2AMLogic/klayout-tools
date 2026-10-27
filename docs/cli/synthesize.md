@@ -267,7 +267,7 @@ retained directory next to that request.
 | `<top>_abc.constr` | The generated two-line ABC constraint file (`set_driving_cell` / `set_load`) — present only for a `cell_library` with a constraint-table entry (see below). |
 | `synth_<top>.run.log` | Captured stdout and stderr for the executed script, retained on success, nonzero exit, and timeout. Named `synth_<top>.log` when no rehydrated script is needed; trial/probe/baseline scripts have their own sibling logs. Abrupt process interruption preserves files already written. |
 | `<top>_abc.log` | The captured `abc` pass output, including ABC's own `stime -p` summary line this command parses into `timing` — same file, same `tee -q -o` discipline as the stats capture. |
-| `<top>_memory_evidence.ys` / `.log` | The side memory-evidence script (`memory_mapping.script_path`) and its captured log (issue #2745). Never the production script; see "`memory_mapping`" below. |
+| `<top>_memory_evidence.ys` / `.log` | The side memory-evidence script (`memory_mapping.script_path`) and its captured log (issue #2745). Never the production script; see "`memory_mapping`" below. **Commit-safe** when its sources and `outputs.dir` sit inside the repo: those paths are written repo-relative (anything outside the repo stays absolute). |
 | `<top>_blackboxes.txt` | The evidence script's `select -list =A:blackbox =A:whitebox` output, read for `blackbox_modules`. |
 | `<top>_memory_elaborated.json` / `<top>_memory_pre_lowering.json` | The evidence script's two `stat -json` captures — the `elaborated` and `pre_lowering` stages `memory_mapping` is derived from. |
 

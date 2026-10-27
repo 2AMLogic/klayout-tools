@@ -82,6 +82,7 @@ def memory_evidence_script_text(
     adder_techmap_path: str | None = None,
     parameters: dict[str, int | str] | None = None,
     defines: dict[str, str | None] | None = None,
+    repo_root: str | None = None,
 ) -> str:
     """The side invocation's ``.ys`` text.
 
@@ -95,8 +96,22 @@ def memory_evidence_script_text(
     run first anyway; ``proc`` is idempotent, and ``stat``/``select -list``
     never modify the design. No liberty is read -- nothing here is
     technology-mapped.
+
+    With ``repo_root`` set, every path that resolves inside it is written
+    repo-relative (the main script's ``_script_path_text`` rule), so the
+    retained file is commit-safe; the caller must then run it with
+    ``cwd=repo_root``. Paths outside ``repo_root``, or ``repo_root=None``,
+    stay absolute.
     """
-    lines = [read_verilog_line(path, defines) for path in sources]
+    from .synthesize import _script_path_text
+
+    def rel(path: str) -> str:
+        return _script_path_text(path, repo_root=repo_root)
+
+    blackbox_list_path = rel(blackbox_list_path)
+    elaborated_stats_path = rel(elaborated_stats_path)
+    pre_lowering_stats_path = rel(pre_lowering_stats_path)
+    lines = [read_verilog_line(rel(path), defines) for path in sources]
     lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     lines.append(f"tee -q -o {blackbox_list_path} select -list =A:blackbox =A:whitebox")
@@ -104,8 +119,8 @@ def memory_evidence_script_text(
     lines.append(f"tee -q -o {elaborated_stats_path} stat -json")
     if adder_techmap_path is not None:
         lines += ["opt_expr", "opt_clean"]
-        lines += [f"read_verilog {path}" for path in adder_sources]
-        lines.append(f"techmap -map {adder_techmap_path}")
+        lines += [f"read_verilog {rel(path)}" for path in adder_sources]
+        lines.append(f"techmap -map {rel(adder_techmap_path)}")
     lines.append(f"synth -top {hdl_toplevel} -run :fine")
     lines.append(f"tee -q -o {pre_lowering_stats_path} stat -json")
     return "\n".join(lines) + "\n"
@@ -355,9 +370,11 @@ def collect_memory_evidence(
     change nor pre-empt production errors. **Never raises**: a Yosys
     failure, timeout, or unreadable stage degrades ``memory_mapping`` to
     ``status: "indeterminate"`` with the failure in ``reason`` (and
-    ``blackbox_modules`` to ``None``). The evidence script embeds absolute
-    paths only, but the RTL may not (``$readmemh "reference/x.hex"``), so
-    the run uses ``cwd=repo_root`` -- the same cwd as the main Yosys run.
+    ``blackbox_modules`` to ``None``). The evidence script embeds
+    repo-relative paths for anything inside ``repo_root`` (absolute
+    otherwise), and the RTL may use relative paths too (``$readmemh
+    "reference/x.hex"``), so the run uses ``cwd=repo_root`` -- the same cwd
+    as the main Yosys run.
     """
     from .synthesize import (
         SynthesizeError,
@@ -392,6 +409,7 @@ def collect_memory_evidence(
                 adder_techmap_path=adder_techmap_path,
                 parameters=parameters,
                 defines=defines,
+                repo_root=repo_root,
             ),
         )
         _run_yosys(script_path, cwd=repo_root)

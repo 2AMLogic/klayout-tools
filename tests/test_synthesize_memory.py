@@ -65,6 +65,30 @@ def test_evidence_script_carries_arithmetic_techmap_before_synth():
     assert techmap < lines.index("synth -top top -run :fine")
 
 
+def test_evidence_script_repo_relative_paths_with_repo_root(tmp_path):
+    root = str(tmp_path)
+    out = f"{root}/.klt/run"
+    text = sm.memory_evidence_script_text(
+        sources=[f"{root}/rtl/x.v", "/ext/y.v"],
+        hdl_toplevel="top",
+        blackbox_list_path=f"{out}/bb.txt",
+        elaborated_stats_path=f"{out}/e.json",
+        pre_lowering_stats_path=f"{out}/p.json",
+        adder_sources=(f"{out}/add8.v",),
+        adder_techmap_path=f"{out}/map.v",
+        repo_root=root,
+    )
+    lines = text.splitlines()
+    assert "read_verilog rtl/x.v" in lines
+    assert "read_verilog /ext/y.v" in lines  # outside the repo stays absolute
+    assert "read_verilog .klt/run/add8.v" in lines
+    assert "techmap -map .klt/run/map.v" in lines
+    assert "tee -q -o .klt/run/bb.txt select -list =A:blackbox =A:whitebox" in lines
+    assert "tee -q -o .klt/run/e.json stat -json" in lines
+    assert "tee -q -o .klt/run/p.json stat -json" in lines
+    assert root not in text
+
+
 @pytest.mark.parametrize(
     ("counts", "status"),
     [
