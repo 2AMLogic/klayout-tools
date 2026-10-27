@@ -6300,16 +6300,21 @@ def test_macro_with_liberty_emits_read_liberty_lib_before_hierarchy(
     report = run_synthesize(request_path)
 
     lines = _script_lines(_main_script_path(request_path))
-    macro_line = next(line for line in lines if line.startswith("read_liberty -lib "))
-    assert macro_line.endswith("sram_8x8_tt.lib")
+    macro_line = next(
+        line
+        for line in lines
+        if line.startswith("read_liberty -lib ") and line.endswith("sram_8x8_tt.lib")
+    )
     hierarchy_index = next(
         i for i, line in enumerate(lines) if line.startswith("hierarchy ")
     )
     assert lines.index(macro_line) < hierarchy_index
-    # The standard-cell liberty is still loaded the way it always was --
-    # via `dfflibmap -liberty`/`abc -liberty`. The only `read_liberty` in
-    # the script is the macro's, and it always carries `-lib`.
-    assert [line for line in lines if line.startswith("read_liberty")] == [macro_line]
+    # Issue #4205: the standard-cell liberty is also read with `-lib` (as
+    # cell definitions), so the script carries exactly two `read_liberty`
+    # lines -- the std-cell one first, then the macro's.
+    read_liberty_lines = [line for line in lines if line.startswith("read_liberty")]
+    assert len(read_liberty_lines) == 2
+    assert read_liberty_lines[-1] == macro_line
 
     assert report["macros"][0]["cell"] == "sram_8x8"
     assert report["macros"][0]["blackbox_source"] == "liberty"
@@ -6384,7 +6389,12 @@ def test_no_macros_field_emits_no_macro_lines(tmp_path, monkeypatch):
     assert report["macro_instance_count"] == 0
     assert report["macro_instance_counts_by_type"] == {}
     lines = _script_lines(_main_script_path(request_path))
-    assert not any("-lib " in line for line in lines)
+    # Only the single std-cell `read_liberty -lib` (issue #4205) is present.
+    assert not any(line.startswith("read_verilog -lib") for line in lines)
+    assert [line for line in lines if "-lib " in line] == [
+        line for line in lines if line.startswith("read_liberty -lib ")
+    ]
+    assert len([line for line in lines if "-lib " in line]) == 1
 
 
 def test_macro_rejected_when_its_lef_is_missing(tmp_path, monkeypatch):
