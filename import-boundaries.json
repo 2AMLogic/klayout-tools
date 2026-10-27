@@ -1801,6 +1801,12 @@
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_status_exit_code",
       "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.lvs_power",
+      "exporter": "klayout_tools.extract_abstract",
+      "symbol": "_load_abstract_cell_lefs",
+      "reason": "Issue #4363: the well-pin exclusion must read LEF pin layers with the exact parser `klt extract` uses for abstract-cell probes; promote to a public name when extract_abstract is next reworked."
     }
   ],
   "legacy_exceptions": {

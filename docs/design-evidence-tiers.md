@@ -496,7 +496,10 @@ written to every block.
       `klt signoff` renders `lvs_did_not_pass` (not the plain
       `check_failed`) when the ERC supply evidence is complete and
       continuous and only the LVS half is unavailable, naming in
-      `detail.power_delivery` the supplies the ERC run did prove. Produce
+      `detail.power_delivery` the supplies the ERC run did prove. A set
+      citing only the `erc` or only the `lvs` part renders
+      `power_delivery_parts_missing` (not `wrong_kind`), naming the absent
+      part and crediting the supplies a resolved ERC spec proved. Produce
       the ERC supply spec anyway — it is the half that survives an unrelated
       LVS defect, and it is what makes the distinction visible.
       A `klayout-runset` report (item 4's PDK-runset path) can be this LVS

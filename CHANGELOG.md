@@ -19,13 +19,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   commit `1a4e4b5` (sha256 `09a4f1f1…fde9`, byte-identical in all four open_pdks
   gf180mcuA-D trees), so a gf180mcu `klayout-runset` LVS report is no longer
   refused `runset_not_pinned`. Allowlist data only; no schema change.
-
+- **`erc` `ties[].well_requires_cells` / `well_excludes_cells`** (issue #4373).
+  Select a drawn well class by the cell it is drawn in, evaluated in each
+  instance's transformed frame, instead of hand-generated per-placement
+  `*_boxes`. Unknown cell names are a spec error; a tie selected this way is not
+  listed in `erc_coverage.checked_by_well_assertion`. Additive: no
+  `schema_version` bump, byte-identical output when the keys are omitted.
+- **`klt signoff` item 11: a partial `erc`/`lvs` set renders
+  `power_delivery_parts_missing`** (issue #4193, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)). A cited set lacking the `erc`
+  and/or `lvs` part used to render `unmet`/`wrong_kind` with an empty detail;
+  it now renders `unmet`/`power_delivery_parts_missing` with
+  `detail.power_delivery.{missing_parts,cited_parts}` and, when the ERC spec
+  resolved, `supply_nets`. Value change on an existing field for that case
+  only; never `met`.
 - **`klt lvs` `subckt-call` converts sky130 junction diodes** (issue #4319,
   documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)): `X… sky130_fd_pr__diode_*
   area=… perim=…` now converts to a `D` card in the deck's diode class instead
   of raising `reference.unresolved_subckt_call`, for all 8 classes in the sky130
   deck's `diodes`. Additive; other decks unchanged.
-
 - **`klt place-and-route` gains `instance_groups` (request) and `instance_groups[]`
   (response)** (issue #4344, documented in
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)): name sets of
