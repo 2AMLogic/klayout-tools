@@ -14,6 +14,11 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt place-and-route` rejects unknown top-level request keys** (issue
+  #4230, documented in [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)):
+  a misspelt or foreign key now exits 1 naming the key instead of being
+  dropped silently, matching `klt synthesize` (#3466). Behaviour change for
+  requests carrying stray keys; response schema unchanged.
 - **`klt erc` `ties[]` gains `tap_excludes`** (issue #4194, documented in
   [`docs/cli/erc.md`](docs/cli/erc.md)): an optional `"<layer>/<datatype>"`
   array subtracted from the tap, so a tap defined by the absence of an

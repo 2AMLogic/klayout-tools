@@ -416,6 +416,35 @@ def test_load_request_missing_required_field(tmp_path, field):
         load_request(path)
 
 
+@pytest.mark.parametrize("key", ["bogus_field", "post_route_spf", "output_dir"])
+def test_load_request_rejects_unknown_top_level_key(tmp_path, key):
+    path = _write_request(tmp_path / "request.json", _base_request(**{key: 1}))
+    with pytest.raises(PlaceAndRouteError, match=rf"unknown field '{key}'") as exc:
+        load_request(path)
+    assert "request.json" in str(exc.value)
+
+
+def test_load_request_accepts_comment_and_every_allowed_key(tmp_path):
+    from klayout_tools.place_and_route import _ALLOWED_REQUEST_KEYS
+
+    assert len(_ALLOWED_REQUEST_KEYS) == 20
+    request = _base_request(_comment="note", schema="klt.place_and_route.request/1")
+    for key in _ALLOWED_REQUEST_KEYS:
+        request.setdefault(key, {} if key in ("backend", "batch") else 1)
+    path = _write_request(tmp_path / "request.json", request)
+    assert load_request(path)["_comment"] == "note"
+
+
+def test_cli_unknown_key_exits_one_and_writes_nothing(tmp_path, capsys):
+
+    path = _write_request(tmp_path / "request.json", _base_request(bogus_field=1))
+    report = _write(tmp_path / "report.json", "{}")
+    for extra in ([], ["--check", report]):
+        assert main(["place-and-route", path, "--format", "json", *extra]) == 1
+        assert "bogus_field" in capsys.readouterr().err
+    assert not (tmp_path / ".klt").exists()
+
+
 # --------------------------------------------------------------------------- #
 # `run_place_and_route` request validation (no PDK/OpenROAD involved)
 # --------------------------------------------------------------------------- #

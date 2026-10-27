@@ -1969,6 +1969,19 @@ live re-measurement above.
 | `post_route_sdf` | boolean \| omitted | Default `false`. **Requires `post_route_spef: true`** (exit 1 otherwise). Adds one `write_sdf` call to that same post-`read_spef` OpenSTA session and reports the written file as `spef_sta.sdf_path` — see "SDF export" above (issue #1002). |
 | `portable_paths` | boolean \| omitted | Additive field (issue #3820). Default `false`: the response is byte-identical to before this field existed (absolute paths, which `klt extract --def-pins` and `klt signoff` chain on). `true` rewrites every absolute host path in the response — `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path`, `stages[].def_path`, `power.placed.def_path`, `spef_sta.*_path`, `layer_map.path`, and paths embedded in messages — so it can be committed as evidence and passes `klt env-provenance lint-envelope`: inside the repo → `{"path": "<repo-relative>", "scope": "repo"}`; outside it (or no git root) → `{"path": null, "scope": "external"}`; under the PDK root → a `"$PDK_ROOT/<relative>"` string. Fields that are `null` stay `null`. An `external` path cannot be chained into `--def-pins`; keep `output_dir` inside the repo if you need both. No `schema_version` bump. |
 
+### Unknown request keys are errors (issue #4230)
+
+An unrecognised **top-level** request key is rejected with an error naming it
+and the request file (exit 1, nothing written), instead of being dropped in
+silence — a misspelt `post_route_spef` can no longer pass for a deliberate
+default. Recognised keys: `schema`, `engine`, `netlist`, `hdl_toplevel`, `pdk`,
+`floorplan`, `io`, `macros`, `power`, `constraints`, `seed`, `target_stage`,
+`route_critical_nets_percentage`, `max_antenna_repair_iterations`, `library`,
+`post_route_spef`, `post_route_sdf`, `portable_paths`, `backend`, `batch`; the
+`_comment` annotation is also accepted (its contents are never read). The same
+check applies to `--check` and `pdk.rebuild_corners`. Nested objects (`pdk`,
+`floorplan`, …) are not yet checked for unknown keys.
+
 ### IO pin layers must be inside the signal-routing range (#2473)
 
 `io.layer_h`/`io.layer_v` are rejected at **request time** — before any
