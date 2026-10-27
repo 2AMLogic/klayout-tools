@@ -229,6 +229,7 @@ _GENERATOR_TOPOLOGY_SUPPORT: dict[str, frozenset[str]] = {
     "diff_pair": frozenset({"common_centroid"}),
     "bjt_array": frozenset({"array", "common_centroid"}),
     "bond_pad": frozenset(),
+    "diode": frozenset(),
     "esd_device": frozenset(),
     "well_island": frozenset(),
 }

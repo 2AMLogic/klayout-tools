@@ -5105,6 +5105,85 @@ class _CapacityWatch:
         self._finished = 0
         self._last_emit: float | None = None
         self._last_waiting = 0
+        self._states: dict[int, str] = {}
+        self._launch_events = 0
+        self._first_launch_at: float | None = None
+        self._last_counts: tuple[int, int, int, int] = (0, 0, total, 0)
+        self._last_progress: float | None = None
+        self._final_emitted = False
+
+    def seed(self, index: int, state: str | None) -> None:
+        """Record the state a resumed shard starts in (no progress line)."""
+        if state in ("launching", "launched", "collected"):
+            with self._lock:
+                self._states[index] = str(state)
+
+    def phase(self, index: int, state: str) -> None:
+        """Fold one shard lifecycle event into the launch-progress line
+        (issue #4349): per-state counts and a launch-rate ETA on stderr,
+        printed when the counts change, at most once per
+        :data:`BATCH_HEARTBEAT_INTERVAL_S`, and once more when the last shard
+        has launched. Single-shard runs print nothing."""
+        with self._lock:
+            if state == "launch_refused":
+                state = "submitted"
+            if state == "launched":
+                self._launch_events += 1
+                if self._first_launch_at is None:
+                    self._first_launch_at = self._monotonic()
+            self._states[index] = state
+            self._progress_locked()
+
+    def _counts(self) -> tuple[int, int, int, int]:
+        values = list(self._states.values())
+        launching = values.count("launching")
+        launched = values.count("launched")
+        collected = values.count("collected")
+        pending = self._total - launching - launched - collected
+        return launched, launching, pending, collected
+
+    def _progress_locked(self) -> None:
+        if self._total <= 1:
+            return
+        counts = self._counts()
+        if counts == self._last_counts:
+            return
+        now = self._monotonic()
+        final = counts[1] == 0 and counts[2] == 0 and not self._final_emitted
+        if (
+            not final
+            and self._last_progress is not None
+            and now - self._last_progress < BATCH_HEARTBEAT_INTERVAL_S
+        ):
+            return
+        self._last_counts = counts
+        self._last_progress = now
+        self._final_emitted = self._final_emitted or final
+        launched, launching, pending, collected = counts
+        rate = self._rate_per_min(now)
+        rate_text = "unknown" if rate is None else f"{rate:.1f}/min"
+        self._emit(
+            f"klt sim: shards {launched + collected}/{self._total} launched, "
+            f"{launching} launching, {pending} pending, {collected} collected; "
+            f"launch rate {rate_text}, ETA {self._eta_text(rate, pending + launching)}"
+        )
+
+    def _rate_per_min(self, now: float) -> float | None:
+        if self._first_launch_at is None or self._launch_events < 2:
+            return None
+        elapsed = now - self._first_launch_at
+        if elapsed <= 0:
+            return None
+        return (self._launch_events - 1) / elapsed * 60.0
+
+    @staticmethod
+    def _eta_text(rate: float | None, remaining: int) -> str:
+        if remaining <= 0:
+            return "0m"
+        if not rate:
+            return "unknown"
+        hours, mins = divmod(max(1, round(remaining / rate)), 60)
+        return f"{hours}h {mins}m" if hours else f"{mins}m"
 
     def refused(self, index: int, exc: BatchError) -> None:
         with self._lock:
@@ -5134,6 +5213,9 @@ class _CapacityWatch:
         with self._lock:
             self._waiting.discard(index)
             self._finished += 1
+            if self._states.get(index) == "launched":
+                self._states[index] = "collected"
+                self._progress_locked()
 
 
 def _abortable_sleep(abort: threading.Event) -> Callable[[float], None]:
@@ -5213,6 +5295,10 @@ class _BatchFleetRun:
         self.abort = threading.Event()
         self.budget_spent = threading.Event()
         self.watch = _CapacityWatch(len(shard_indexes))
+        if manifest is not None:
+            for index in shard_indexes.values():
+                prior = manifest.prior.get(str(index))
+                self.watch.seed(index, None if prior is None else prior.get("state"))
         self.abortable_sleep = _abortable_sleep(self.abort)
 
     def shard_config(self) -> BatchConfig:
@@ -5225,7 +5311,10 @@ class _BatchFleetRun:
 
     def _phase_hook(self, index: int | None) -> Callable[[str], None]:
         def _on_phase(state: str) -> None:
-            if self.manifest is None or index is None:
+            if index is None:
+                return
+            self.watch.phase(index, state)
+            if self.manifest is None:
                 return
             if state == "launch_refused":
                 self.manifest.unlaunch(index)
