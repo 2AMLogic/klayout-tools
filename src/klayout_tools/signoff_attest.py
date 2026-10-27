@@ -415,6 +415,27 @@ def _validated_characterization(
             "characterization report file"
         )
     report = _normalize_repo_path(inventory["report"], "report", root)
+    rows = _validated_spec_rows(inventory)
+    citations = _validated_citations(inventory, rows, root)
+    cited = sorted({path for paths in citations.values() for path in paths})
+    if report in cited:
+        raise AttestationError(
+            f"report '{report}' is also cited as evidence -- the report "
+            "summarises the evidence, it is not itself evidence"
+        )
+    envelope_checks = _validated_envelope_checks(inventory, cited, root)
+    corners, metrics = _validated_metrics(inventory, root)
+    return {
+        "report": report,
+        "spec_rows": list(rows),
+        "citations": citations,
+        "envelope_checks": envelope_checks,
+        "corners": corners,
+        "metrics": metrics,
+    }
+
+
+def _validated_spec_rows(inventory: Mapping[str, Any]) -> list[str]:
     rows = inventory.get("spec_rows")
     if (
         not isinstance(rows, list)
@@ -427,6 +448,12 @@ def _validated_characterization(
         )
     if len(set(rows)) != len(rows):
         raise AttestationError("'spec_rows' lists a row more than once")
+    return rows
+
+
+def _validated_citations(
+    inventory: Mapping[str, Any], rows: list[str], root: str
+) -> dict[str, list[str]]:
     raw_citations = inventory.get("citations")
     if not isinstance(raw_citations, Mapping):
         raise AttestationError(
@@ -443,16 +470,15 @@ def _validated_characterization(
         listed = raw_citations.get(row, [])
         if not isinstance(listed, list):
             raise AttestationError(f"'citations.{row}' must be a list of paths")
-        paths = sorted(
+        citations[row] = sorted(
             {_normalize_repo_path(raw, f"citations.{row}", root) for raw in listed}
         )
-        citations[row] = paths
-    cited = sorted({path for paths in citations.values() for path in paths})
-    if report in cited:
-        raise AttestationError(
-            f"report '{report}' is also cited as evidence -- the report "
-            "summarises the evidence, it is not itself evidence"
-        )
+    return citations
+
+
+def _validated_envelope_checks(
+    inventory: Mapping[str, Any], cited: list[str], root: str
+) -> dict[str, dict[str, Any]]:
     raw_checks = inventory.get("envelope_checks")
     if cited and not isinstance(raw_checks, Mapping):
         raise AttestationError(
@@ -475,15 +501,7 @@ def _validated_characterization(
             "every cited envelope needs an 'envelope_checks' command that fails "
             f"when it is stale; missing: {', '.join(missing)}"
         )
-    corners, metrics = _validated_metrics(inventory, root)
-    return {
-        "report": report,
-        "spec_rows": list(rows),
-        "citations": citations,
-        "envelope_checks": envelope_checks,
-        "corners": corners,
-        "metrics": metrics,
-    }
+    return envelope_checks
 
 
 def _validated_metrics(
@@ -516,35 +534,41 @@ def _validated_metrics(
         raise AttestationError(
             f"'metrics' names corner(s) not in 'corners': {', '.join(unknown)}"
         )
-    metrics: dict[str, dict[str, dict[str, str]]] = {}
-    for corner in corners:
-        bound = raw.get(corner, {})
-        if not isinstance(bound, Mapping):
-            raise AttestationError(f"'metrics.{corner}' must be an object")
-        unknown = sorted(set(bound) - set(_REQUIRED_METRICS))
-        if unknown:
-            raise AttestationError(
-                f"'metrics.{corner}' has unknown metric(s): {', '.join(unknown)} "
-                f"(accepted: {', '.join(_REQUIRED_METRICS)})"
-            )
-        metrics[corner] = {}
-        for name, binding in bound.items():
-            field = f"metrics.{corner}.{name}"
-            if (
-                not isinstance(binding, Mapping)
-                or set(binding) != {"envelope", "field"}
-                or not isinstance(binding["field"], str)
-                or not binding["field"]
-            ):
-                raise AttestationError(
-                    f'\'{field}\' must be {{"envelope": path, "field": '
-                    '"dotted.path"}}'
-                )
-            metrics[corner][name] = {
-                "envelope": _normalize_repo_path(binding["envelope"], field, root),
-                "field": binding["field"],
-            }
+    metrics = {
+        corner: _validated_corner_metrics(corner, raw.get(corner, {}), root)
+        for corner in corners
+    }
     return list(corners), metrics
+
+
+def _validated_corner_metrics(
+    corner: str, bound: Any, root: str
+) -> dict[str, dict[str, str]]:
+    if not isinstance(bound, Mapping):
+        raise AttestationError(f"'metrics.{corner}' must be an object")
+    unknown = sorted(set(bound) - set(_REQUIRED_METRICS))
+    if unknown:
+        raise AttestationError(
+            f"'metrics.{corner}' has unknown metric(s): {', '.join(unknown)} "
+            f"(accepted: {', '.join(_REQUIRED_METRICS)})"
+        )
+    result: dict[str, dict[str, str]] = {}
+    for name, binding in bound.items():
+        field = f"metrics.{corner}.{name}"
+        if (
+            not isinstance(binding, Mapping)
+            or set(binding) != {"envelope", "field"}
+            or not isinstance(binding["field"], str)
+            or not binding["field"]
+        ):
+            raise AttestationError(
+                f'\'{field}\' must be {{"envelope": path, "field": "dotted.path"}}'
+            )
+        result[name] = {
+            "envelope": _normalize_repo_path(binding["envelope"], field, root),
+            "field": binding["field"],
+        }
+    return result
 
 
 def _validated_derived(

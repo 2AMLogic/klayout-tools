@@ -5649,8 +5649,7 @@ def _grade_evidence(
             None,
             {**_input_members_detail(resolution), **execution_detail},
         )
-    if check_kind == "generic" and item_id == _CHARACTERIZATION_ITEM:
-        citation["attestation"] = _characterization_attestation_disclosure(envelope)
+    _attach_characterization_attestation(check_kind, item_id, envelope, citation)
     _record_envelope(envelope_sink, envelope)
     return "met", None, citation, {}
 
@@ -6249,6 +6248,18 @@ def _generic_item_binding_refusal(
 #: generic envelope, so a met citation always discloses whether
 #: ``klt signoff --attest 8`` produced it (issue #4311).
 _CHARACTERIZATION_ITEM = 8
+
+
+def _attach_characterization_attestation(
+    check_kind: str,
+    item_id: int | None,
+    envelope: Mapping[str, Any],
+    citation: dict[str, Any],
+) -> None:
+    """Add ``citation["attestation"]`` for a met item-8 generic citation; a
+    no-op for every other kind/item."""
+    if check_kind == "generic" and item_id == _CHARACTERIZATION_ITEM:
+        citation["attestation"] = _characterization_attestation_disclosure(envelope)
 
 
 def _characterization_attestation_disclosure(
