@@ -292,11 +292,15 @@ def read_def_instance_groups(
         hits = {
             hit for pattern in group["instances"] for hit in match_pins(pattern, names)
         }
-        origins = [(x, y) for name, x, y in placed if name in hits and x is not None]
+        origins = [
+            (x, y)
+            for name, x, y in placed
+            if name in hits and x is not None and y is not None
+        ]
         bbox = None
         if origins:
-            xs = [x for x, _ in origins]
-            ys = [y for _, y in origins]
+            xs: list[int] = [x for x, _ in origins if x is not None]
+            ys: list[int] = [y for _, y in origins if y is not None]
             bbox = {
                 "x_min_um": round(min(xs) / scale, 4),
                 "x_max_um": round(max(xs) / scale, 4),
