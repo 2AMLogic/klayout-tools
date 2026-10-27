@@ -2734,6 +2734,44 @@ def test_partial_status_never_aggregates_as_a_passing_check(tmp_path):
     assert result["status"] == "fail"
 
 
+def _partial_envelope_with_skipped(count):
+    skipped = [
+        {
+            "id": f"antenna.g{i:05d}.{'met1' if i % 2 else 'met2'}",
+            "reason": "no_antenna_table",
+        }
+        for i in range(count)
+    ]
+    return {
+        **DRC_CLEAN_ENVELOPE,
+        "status": "clean_partial",
+        "coverage": build_check_coverage(checked=["poly.width.1"], skipped=skipped),
+    }
+
+
+@pytest.mark.parametrize("count", [20, 21, 1850])
+def test_partial_coverage_qualification_is_bounded(tmp_path, count):
+    """Issue #4286: the quoted ``skipped`` list is capped; the full list stays
+    in the cited envelope. At or below the cap the shape is unchanged."""
+    cap = signoff_module._PARTIAL_COVERAGE_SKIPPED_CAP
+    envelope = _partial_envelope_with_skipped(count)
+    qualification = signoff_module._partial_coverage_disclosure(envelope)
+
+    assert qualification["reason"] == "partial_coverage"
+    assert qualification["skipped"] == envelope["coverage"]["skipped"][:cap]
+    if count <= cap:
+        assert set(qualification) == {"reason", "skipped"}
+        return
+    assert qualification["truncated"] is True
+    assert qualification["skipped_total"] == count
+    assert qualification["skipped_by_reason"] == {"no_antenna_table": count}
+    assert len(json.dumps(qualification)) < 4000
+
+    path = _write(tmp_path, "drc.json", envelope)
+    check = build_signoff([path])["checks"][0]
+    assert check["detail"]["coverage_qualification"] == qualification
+
+
 def test_power_em_pass_partial_is_refused_as_partial_not_as_a_failure(tmp_path):
     """#1997's already-shipped partial verdict keeps working, and now reports
     the accurate reason: one checked EM edge alongside three unchecked ones
@@ -8570,8 +8608,13 @@ def test_describe_grader_shape():
         "opt_in_evidence_kinds",
         "opt_in_kinds_by_item",
         "not_applicable_items",
+        "pinned_runsets",
     }
     assert result["not_applicable_items"] == {"6": ["digital"]}
+    assert {p["pdk"] for p in result["pinned_runsets"].values()} == {
+        "ihp-sg13g2",
+        "ihp-sg13cmos5l",
+    }
     assert result["schema_version"] == signoff_module.DESCRIBE_GRADER_SCHEMA_VERSION
     assert result["grading_ruleset_id"].startswith("sha256:")
     assert result["source_doc"] == "docs/design-evidence-tiers.md"
@@ -10997,7 +11040,57 @@ def test_item_11_digital_unmet_when_no_tapcell_master_was_placed(tmp_path):
         )
     )
 
+    assert _item_11(result)["reason"] == "no_tapcell_master"
+
+
+def test_item_11_digital_unmet_no_pdn_wins_over_tapless(tmp_path):
+    par = {
+        **PLACE_AND_ROUTE_ENVELOPE,
+        "power": {
+            **PLACE_AND_ROUTE_ENVELOPE["power"],
+            "pdn": False,
+            "tapcell_master": None,
+            "tapless": True,
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", par_envelope=par
+                )
+            },
+        )
+    )
+
     assert _item_11(result)["reason"] == "no_pdn"
+
+
+def test_item_11_digital_met_for_tapless_library(tmp_path):
+    par = {
+        **PLACE_AND_ROUTE_ENVELOPE,
+        "power": {
+            **PLACE_AND_ROUTE_ENVELOPE["power"],
+            "tapcell_master": None,
+            "tapless": True,
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", par_envelope=par
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["tapless"] is True
+    assert item["citation"]["power_delivery"]["tapcell_master"] is None
 
 
 @pytest.mark.parametrize(

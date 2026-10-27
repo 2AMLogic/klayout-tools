@@ -142,12 +142,13 @@ from .signoff_power_delivery import (
     _strap_layers,
 )
 from .signoff_runset import (
-    REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
-)
-from .signoff_runset import (
+    PINNED_RUNSETS,
     runset_disclosure,
     runset_refusal,
     unrecognised_device_gaps,
+)
+from .signoff_runset import (
+    REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
 )
 
 __all__ = [
@@ -873,6 +874,10 @@ def describe_grader() -> dict[str, Any]:
         "not_applicable_items": {
             str(_STATISTICAL_CLAIMS_ITEM_ID): [_NOT_APPLICABLE_PARTITION]
         },
+        # Additive (issue #4309): the runset digests items 4/11 accept.
+        "pinned_runsets": {
+            digest: dict(pin) for digest, pin in sorted(PINNED_RUNSETS.items())
+        },
     }
 
 
@@ -1205,6 +1210,12 @@ _REASON_NEGATIVE_CONTROL_NOT_DETECTED = "negative_control_not_detected"
 #: refusals differ because they apply to an envelope that *passed*, where
 #: "cite a different artifact" really is the more actionable answer.
 _REASON_PARTIAL_COVERAGE = "partial_coverage"
+
+# Most ``skipped`` records a ``coverage_qualification`` quotes verbatim
+# (issue #4286). A run with no antenna table emits one record per
+# (gate, level), so an uncapped quote made the committed tier report
+# O(gates x levels); beyond this the full list stays in the cited envelope.
+_PARTIAL_COVERAGE_SKIPPED_CAP = 20
 
 # --- Item 6 ``not_applicable`` outcome (issue #2865) ----------------------- #
 #: The T1 item whose "statistical claims" requirement a block with no
@@ -3118,7 +3129,19 @@ def _partial_coverage_disclosure(envelope: dict[str, Any]) -> dict[str, Any] | N
     skipped = coverage_skipped_work(envelope)
     if not skipped:
         return None
-    return {"reason": _REASON_PARTIAL_COVERAGE, "skipped": skipped}
+    if len(skipped) <= _PARTIAL_COVERAGE_SKIPPED_CAP:
+        return {"reason": _REASON_PARTIAL_COVERAGE, "skipped": skipped}
+    by_reason: dict[str, int] = {}
+    for record in skipped:
+        reason = str(record.get("reason"))
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    return {
+        "reason": _REASON_PARTIAL_COVERAGE,
+        "skipped": skipped[:_PARTIAL_COVERAGE_SKIPPED_CAP],
+        "skipped_total": len(skipped),
+        "skipped_by_reason": dict(sorted(by_reason.items())),
+        "truncated": True,
+    }
 
 
 def _reports_partial_status(kind: str, envelope: dict[str, Any]) -> bool:
@@ -4423,8 +4446,12 @@ def build_tier_report(
       of it -- see :data:`_REASON_NEGATIVE_CONTROL_NOT_DETECTED`.
     - ``"no_pdn"`` (issue #2025, item 11 only) -- the cited `klt
       place-and-route` response says no power grid was built at all
-      (``power.pdn`` is not ``true``, or no ``power.tapcell_master`` was
-      placed). Re-run P&R with a ``request.power`` block.
+      (``power.pdn`` is not ``true``). Re-run P&R with a ``request.power``
+      block.
+    - ``"no_tapcell_master"`` (issue #4199, item 11 only) -- the grid was
+      built (``power.pdn: true``) but ``power.tapcell_master`` is null and
+      the response does not state ``power.tapless: true``. Re-run P&R on a
+      current ``klt``; a library documented tapless states it and grades.
     - ``"supply_spec_incomplete"`` (issue #2025, item 11 only) -- the cited
       `klt erc` run's own spec document does not ask the question item 11
       grades: unreadable, no ``"kind": "supply"`` net declared, no ``ties[]``
