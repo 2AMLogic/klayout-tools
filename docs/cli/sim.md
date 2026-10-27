@@ -1606,7 +1606,9 @@ Older fleet runners reject some newer request fields loudly (for example
 silently ignore others. The minimum `klt` release that understands each field
 is recorded in `klayout_tools.sim_batch.REQUEST_FEATURE_MIN_RUNNER_VERSION`;
 this table is tested against it. `unreleased` means the feature is on `main`
-but no tagged release contains it yet.
+but no tagged release contains it yet. `corners.params` and
+`options.ngspice_options` need a fleet image reporting `>= 0.8.0`; a `0.7.0`
+runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)).
 
 | Request feature | Minimum runner `klt` |
 | --- | --- |
@@ -1616,6 +1618,7 @@ but no tagged release contains it yet.
 | `corners.units` | 0.8.0 |
 | `corners.temperature_param` | 0.8.0 |
 | `options.ngspice_init` | 0.7.0 |
+| `options.ngspice_options` | 0.8.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
@@ -1730,10 +1733,11 @@ release segment:
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
 | `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
+| `options.ngspice_options` ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)) | `options.ngspice_options` is set and non-empty | `0.8.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
 
-The last five rows are the released entries of
+The last six rows are the released entries of
 `REQUEST_FEATURE_MIN_RUNNER_VERSION` ([#2877](https://github.com/2AMLogic/klayout-tools/issues/2877)),
 the same table the checks below read ([#2901](https://github.com/2AMLogic/klayout-tools/issues/2901)).
 An entry whose minimum is `unreleased` has no detector and never counts as
