@@ -1892,6 +1892,17 @@ informational and not graded, so a violation-free run stays `clean` and still
 passes `klt eval` / `klt signoff`; read `unmodeled_rules` to see what a `clean`
 does not cover.
 
+**eFuse (`EF.*`) rules (issue #4316).** `rule_decks/efuse.rb` defines 27
+rule ids; the deck transcribes the three families the existing check kinds
+express exactly, under scope `EF`: `EF.14` (`efuse_mk.enclosing.lvs_source.1`,
+EFUSE_MK must enclose LVS_SOURCE 100/8), `EF.17` (`efuse_mk.space.1`, 0.26 um)
+and `EF.20` (`plfuse.separation.{comp,nplus,esd,sab,resistor}.1`, PLFUSE to
+each layer, 2.73 um). The other 24 ids need the derived `cathode`/`anode` poly
+regions, `non_rectangles`, edge-length tests or polygon selectors; they are
+listed with a reason each in `_EFUSE_UNMODELED_RULES` and reported in
+`coverage.unmodeled_rules`, so a `clean` verdict on a fuse-bearing layout is
+not read as full eFuse coverage.
+
 The conductor *above* a cut is checked as well as the layers below it
 (issue #551). `Contact` previously had `CO.3` (Poly2) and `CO.4` (Comp) —
 both *below* the cut — and nothing above it, so a contact whose Metal1 strap
