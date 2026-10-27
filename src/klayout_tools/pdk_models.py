@@ -1646,7 +1646,10 @@ _CAPACITOR_PARAM_STYLE: dict[str, tuple[str, str]] = {
 
 
 def resolve_device_bindings(
-    deck_name: str, pdk_variant: str, deck: Any
+    deck_name: str,
+    pdk_variant: str,
+    deck: Any,
+    device_models: Mapping[str, str] | None = None,
 ) -> dict[str, DeviceBinding]:
     """Resolve the full ``{device-class-name -> DeviceBinding}`` map for
     ``deck`` against ``pdk_variant`` (issue #339): MOS, plus every resistor and
@@ -1754,7 +1757,48 @@ def resolve_device_bindings(
             geometry_style=geometry_style,
         )
 
+    # Caller-supplied bipolar model (`klt extract --device-model CLASS=SUBCKT`):
+    # fills in only a class with *no* curated binding above -- never overrides
+    # curated data (the gf180mcu carve-out exists because the tool cannot guess
+    # the cell name; the caller can state it).
+    if device_models:
+        _bind_caller_bipolar_models(
+            bindings, deck_name, deck, device_models, geometry_style
+        )
+
     return bindings
+
+
+def _bind_caller_bipolar_models(
+    bindings: dict[str, DeviceBinding],
+    deck_name: str,
+    deck: Any,
+    device_models: Mapping[str, str],
+    geometry_style: str,
+) -> None:
+    """Add the caller's ``--device-model CLASS=SUBCKT`` bipolar bindings to
+    ``bindings`` in place (issue #4234)."""
+    bipolar_classes = sorted(b.class_name for b in getattr(deck, "bipolars", ()))
+    for class_name, subckt in device_models.items():
+        if class_name not in bipolar_classes:
+            available = ", ".join(bipolar_classes) or "none"
+            raise ModelBindingError(
+                f"--device-model class {class_name!r} is not a bipolar "
+                f"class of deck {deck_name!r} (bindable classes: {available})"
+            )
+        if class_name in bindings:
+            raise ModelBindingError(
+                f"--device-model class {class_name!r} already has a curated "
+                f"PDK binding for deck {deck_name!r}; it cannot be overridden"
+            )
+        bindings[class_name] = DeviceBinding(
+            "bipolar",
+            "",
+            ("C", "B", "E"),
+            variants=((0.0, subckt),),
+            dropped_params=_BIPOLAR_DROPPED_PARAMS,
+            geometry_style=geometry_style,
+        )
 
 
 def _select_bipolar_variant(

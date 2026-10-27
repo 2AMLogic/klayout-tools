@@ -5858,6 +5858,67 @@ def _make_pdk_install(tmp_path, variant: str) -> str:
     return str(root)
 
 
+def test_device_model_binds_unbound_gf180mcu_bjt(tmp_path):
+    """Issue #4234: `device_models` binds gf180mcu's otherwise-unbound `bjt`
+    to a caller-named PDK subcircuit; without it the bare `Q` card is
+    unchanged."""
+    path = _write_gds(_make_gf180mcu_bjt_layout(), tmp_path / "bjt.gds")
+    root = _make_pdk_install(tmp_path, "gf180mcuA")
+    common = {"pdk_variant": "gf180mcuA", "pdk_root": root}
+
+    plain = run_extract(path, "gf180mcu", output=str(tmp_path / "a.spice"), **common)
+    plain_text = Path(plain["netlist_path"]).read_text()
+    assert any(line.startswith("Q") for line in plain_text.splitlines())
+    assert plain["device_models"] is None
+
+    bound = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / "b.spice"),
+        device_models={"bjt": "pnp_05p00x05p00"},
+        **common,
+    )
+    lines = Path(bound["netlist_path"]).read_text().splitlines()
+    cards = [
+        line for line in lines if line.startswith("X") and "pnp_05p00x05p00" in line
+    ]
+    assert len(cards) == 1
+    assert not any(line.startswith("Q") for line in lines)
+    assert bound["device_models"] == {"bjt": "pnp_05p00x05p00"}
+
+
+def test_device_model_rejects_unknown_curated_and_pdkless(tmp_path):
+    gf_path = _write_gds(_make_gf180mcu_bjt_layout(), tmp_path / "bjt.gds")
+    gf_root = _make_pdk_install(tmp_path, "gf180mcuA")
+    gf = {"pdk_variant": "gf180mcuA", "pdk_root": gf_root}
+    with pytest.raises(ExtractError, match="not a bipolar class"):
+        run_extract(
+            gf_path,
+            "gf180mcu",
+            output=str(tmp_path / "x.spice"),
+            device_models={"nfet": "foo"},
+            **gf,
+        )
+    with pytest.raises(ExtractError, match="requires --pdk"):
+        run_extract(
+            gf_path,
+            "gf180mcu",
+            output=str(tmp_path / "x.spice"),
+            device_models={"bjt": "foo"},
+        )
+    sky_path = _write_gds(_make_sky130_bjt_layout(), tmp_path / "sky.gds")
+    sky_root = _make_pdk_install(tmp_path, "sky130A")
+    with pytest.raises(ExtractError, match="already has a curated"):
+        run_extract(
+            sky_path,
+            "sky130",
+            output=str(tmp_path / "y.spice"),
+            device_models={"pnp": "foo"},
+            pdk_variant="sky130A",
+            pdk_root=sky_root,
+        )
+
+
 def test_pdk_omitted_writes_unchanged_m_card_form(tmp_path):
     """Regression: no --pdk/--pdk-root -> the written SPICE keeps today's
     bare `M`-card form, byte-identical in shape to before issue #209."""

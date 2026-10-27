@@ -226,6 +226,7 @@ from ._report_verify import (
     get_path,
     hash_check,
     load_committed_report,
+    resolve_committed_path,
     strip_keys,
 )
 from ._verilog_params import (
@@ -3757,12 +3758,38 @@ def _parameters_check(recorded: Any, current: dict[str, int | str]) -> dict[str,
     }
 
 
+def _netlist_sha256_check(
+    committed: dict[str, Any], report_path: str, netlist_override: str | None
+) -> dict[str, Any]:
+    """Cheap-mode ``netlist_sha256`` entry (issue #4313): does the committed
+    gate-level netlist re-hash to the ``netlist_sha256`` the report recorded?
+
+    The file is ``netlist_override`` when given (it always wins), otherwise
+    the report's own ``netlist_path`` resolved from this checkout
+    (``scope: "repo"`` only). A netlist that cannot be located here, or a file
+    that does not exist, yields ``actual: null`` -- ``match: false``, never a
+    silent skip. The hash is :func:`sha256_file` of the file as it sits on
+    disk; the report hashed it after signed-qualifier stripping, which is what
+    was written, so no re-stripping is applied.
+    """
+    path = resolve_committed_path(
+        get_path(committed, ("netlist_path",)),
+        report_path=report_path,
+        override=netlist_override,
+    )
+    actual = sha256_file(path) if path and os.path.isfile(path) else None
+    return hash_check(
+        "netlist_sha256", get_path(committed, ("netlist_sha256",)), actual
+    )
+
+
 def check_synthesize_report(
     report_path: str,
     request_path: str,
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    netlist_override: str | None = None,
 ) -> dict[str, Any]:
     """``klt synthesize <request> --check <report>`` (cheap mode, issue
     #2224): verify a previously committed ``klt synthesize --format json``
@@ -3786,6 +3813,12 @@ def check_synthesize_report(
     :data:`klayout_tools._report_verify.VOLATILE_FLOW_PATHS`: a Yosys upgrade
     that leaves the synthesis result untouched is not evidence drift, and
     reporting it as drift would train a consumer to ignore the verdict.
+
+    A fifth check, ``netlist_sha256`` (issue #4313), re-hashes the committed
+    gate-level netlist against the report's recorded ``netlist_sha256`` (see
+    :func:`_netlist_sha256_check`); ``netlist_override`` is the ``--netlist``
+    path. It proves the committed bytes are the ones the report recorded, not
+    that Yosys would still produce them -- that is ``--rerun``.
 
     Raises :class:`SynthesizeError` for a missing/unparseable committed
     report or an unresolvable request -- never a traceback.
@@ -3813,6 +3846,7 @@ def check_synthesize_report(
             get_path(committed, ("defines",)),
             _synthesize_request_defines(request_path),
         ),
+        _netlist_sha256_check(committed, report_path, netlist_override),
     ]
     return build_check_result(report_path=report_path, checks=checks)
 
