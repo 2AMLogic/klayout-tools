@@ -662,10 +662,11 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
                 "warning",
                 f"{nfet_count} NMOS device body terminal(s) were compared "
                 f"against the '{deck.substrate_net}' deck-synthesized "
-                "substrate net, not a real schematic net -- no drawn "
-                "substrate-tap geometry resolved these device(s)' body "
-                "terminal to a real net (see docs/cli/extract.md, "
-                '"Coverage")',
+                "substrate net, not a real schematic net -- either no "
+                "substrate-tap geometry is drawn, or the drawn tap's net "
+                "carries no name label (a body resolves only to a *named* "
+                "net; label the tap-connected conductor, e.g. VSS, to "
+                'resolve it; see docs/cli/extract.md, "Coverage")',
                 "layout",
                 device={"layout": None, "reference": None, "class": deck.nfet_class},
             )
@@ -679,9 +680,11 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
                 "warning",
                 f"{pfet_count} PMOS device body terminal(s) were "
                 "compared against an anonymous, KLayout-synthesized well "
-                "net, not a real schematic net -- no drawn or derived "
-                "well-tap geometry resolved these device(s)' body terminal "
-                'to a real net (see docs/cli/extract.md, "Coverage")',
+                "net, not a real schematic net -- either no drawn or "
+                "derived well-tap geometry exists, or the tap-connected net "
+                "carries no name label (a body resolves only to a *named* "
+                "net; label the tap-connected conductor, e.g. VDD, to "
+                'resolve it; see docs/cli/extract.md, "Coverage")',
                 "layout",
                 device={
                     "layout": None,
@@ -2372,6 +2375,40 @@ def _classify_net_mismatch_pool(
             )
 
     return entries
+
+
+def _annotate_case_collision_merges(
+    mismatches: list[dict[str, Any]], layout_circuit: Any, inline: bool
+) -> None:
+    """Explain ``net.merged`` entries caused by case-folded net-name collisions.
+
+    Issue #4200. On an inline-extraction layout whose extracted nets include
+    names differing only by case (``pb`` / ``PB``), the SPICE read-back is
+    case-insensitive and merges them, which surfaces as a ``net.merged`` with
+    no hint of the cause. Appends a note to each such entry's ``description``;
+    ``status``, ``severity`` and counts are untouched.
+    """
+    from .extract_report import detect_case_colliding_net_names
+
+    groups = (
+        detect_case_colliding_net_names(
+            n.expanded_name() for n in layout_circuit.each_net()
+        )
+        if inline
+        else []
+    )
+    if not groups:
+        return
+    names = "; ".join(", ".join(repr(n) for n in group) for group in groups)
+    note = (
+        f" (the layout extraction contains net names differing only by case "
+        f"({names}); the netlist is read back case-insensitively, so "
+        "same-named labels merge at read-back -- for a composed layout, "
+        "extract with --hierarchical-cells and use options.flatten_layout)"
+    )
+    for entry in mismatches:
+        if entry["category"] == "net.merged":
+            entry["description"] += note
 
 
 def _sort_key(mismatch: dict[str, Any]) -> tuple[str, str, str, str, str, str]:

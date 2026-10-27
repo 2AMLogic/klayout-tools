@@ -313,7 +313,7 @@ def test_job_cmd_redirects_report_to_output_dir(tmp_path):
     assert '> "$EDA_OUTPUT_DIR/report.json"' in spec.cmd
     assert '"$EDA_INPUT_DIR/request.json"' in spec.cmd
     assert "--backend local-parallel --format json" in spec.cmd
-    assert "--outdir" not in spec.cmd
+    assert "--outdir" in spec.cmd  # engine logs always collected (#4369)
 
 
 def test_job_cmd_tees_stderr_into_outputs(tmp_path):
@@ -559,7 +559,7 @@ def test_job_cmd_physical_core_workers_expand_as_intended_in_a_shell(tmp_path):
         timeout_s=30.0,
         keep_artifacts=False,
     )
-    flag = spec.cmd.split("--format json", 1)[1].split(">", 1)[0].strip()
+    flag = spec.cmd.split("--format json", 1)[1].split("--outdir", 1)[0].strip()
     probe = f'printf "%s|" {flag}'
     with_cores = subprocess.run(
         ["sh", "-c", probe],
@@ -598,6 +598,18 @@ def test_job_cmd_points_outdir_into_output_dir_when_keeping_artifacts(tmp_path):
     assert spec.cmd.index("--outdir") < spec.cmd.index(
         '> "$EDA_OUTPUT_DIR/report.json"'
     )
+
+
+def test_job_cmd_collects_engine_logs_without_keep_artifacts(tmp_path):
+    """Issue #4369: the log must be collected so a deck abort is diagnosable."""
+    spec = sb._build_batch_job_spec(
+        {"models": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    assert '--outdir "$EDA_OUTPUT_DIR/artifacts"' in spec.cmd
 
 
 def test_job_json_omits_unset_optional_fields(tmp_path):
@@ -5902,6 +5914,46 @@ def test_exit_4_batch_job_surfaces_generic_fatal_from_retrieved_log(
     assert "wall-clock" in diagnostics[1]["message"]
 
 
+def test_batch_job_surfaces_model_bin_range_without_keep_artifacts(
+    tmp_path, monkeypatch
+):
+    """Issue #4369: `could not find a valid modelname` reaches the errored
+    corner without `keep_artifacts`, and nothing is installed for the caller."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    remote_log = "/var/tmp/eda-job-1/outputs/artifacts/tt_1.800_27/ngspice.log"
+    runner.outputs = {
+        "report.json": _errored_report_without_include_code(remote_log),
+        "artifacts/tt_1.800_27/ngspice.log": (
+            "Circuit: * deck\n"
+            "Error on line 570 : m.x1.m0 d g s b nfet_03v3 w=1.28e-4 l=2.8e-7\n"
+            "Error: could not find a valid modelname\n"
+        ),
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    artifacts_dir = tmp_path / "caller-artifacts"
+
+    corners, _, _ = sb._run_batch_job(
+        config=_config(tmp_path),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(artifacts_dir),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+
+    diagnostics = corners[0]["diagnostics"]
+    assert [d["code"] for d in diagnostics] == ["measurement", "model_bin_range"]
+    assert "valid modelname" in diagnostics[1]["message"]
+    assert not list(artifacts_dir.rglob("*.log"))
+
+
 def test_report_already_carrying_missing_include_is_not_duplicated(
     tmp_path, monkeypatch
 ):
@@ -7992,6 +8044,67 @@ def test_corners_params_is_a_registry_feature():
         "corners.params"
     ]
     assert sb._missing_runner_features(["corners.params"], None) is None
+    assert sb._missing_runner_features(["corners.params"], "0.7.0") == [
+        "corners.params"
+    ]
+    assert sb._missing_runner_features(["corners.params"], "0.8.0") == []
+
+
+_CORNERS_PARAMS_REQUEST = {
+    "models": {"pdk": "sky130A"},
+    "options": {},
+    "corners": {"params": {"vdd": [1.6, 1.8]}},
+}
+
+
+def test_corners_params_is_a_mandatory_runner_feature():
+    assert sb._request_features(_CORNERS_PARAMS_REQUEST) == ["corners.params"]
+    assert "corners.params" in sb._MANDATORY_RUNNER_FEATURES
+
+
+@pytest.mark.parametrize("version_check", ["enforce", "warn"])
+@pytest.mark.parametrize("runner", ["klt 0.7.0", "klt dirty", "klt"])
+def test_corners_params_on_an_old_or_unknown_runner_is_rejected_even_under_warn(
+    tmp_path, runner, version_check
+):
+    spec = _feature_spec(tmp_path, _CORNERS_PARAMS_REQUEST, version_check=version_check)
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, spec, _fake_klt(runner)
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()  # klt sim never ran
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "corners.params" in error["message"]
+
+
+def test_corners_params_on_a_supporting_runner_runs(tmp_path):
+    spec = _feature_spec(
+        tmp_path, _CORNERS_PARAMS_REQUEST, client="0.8.0", version_check="enforce"
+    )
+    proc, _, marker = _run_job_cmd_with_fake_klt(tmp_path, spec, _fake_klt("klt 0.8.0"))
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_request_without_corners_params_runs_on_a_0_7_0_runner(tmp_path):
+    request = {"models": {"pdk": "sky130A"}, "options": {}}
+    spec = _feature_spec(tmp_path, request, version_check="warn")
+    proc, _, marker = _run_job_cmd_with_fake_klt(tmp_path, spec, _fake_klt("klt 0.7.0"))
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_corner_axis_fields_are_registry_features():
+    request = {"corners": {"units": {"vdd": "V"}, "temperature_param": "temp_c"}}
+    assert sorted(sb._request_features(request)) == [
+        "corners.temperature_param",
+        "corners.units",
+    ]
+    for name in ("corners.units", "corners.temperature_param"):
+        assert sb._missing_runner_features([name], "0.7.0") == [name]
+        assert sb._missing_runner_features([name], "0.8.0") == []
+        assert sb._missing_runner_features([name], None) is None
 
 
 def test_expr_no_value_offhost_carries_runner_hint():
@@ -8043,14 +8156,36 @@ def test_unrecovered_exit_87_with_unknown_runner_is_named_not_classified(
     assert "runner_code" not in diagnostic
 
 
-def test_unrecovered_non_preflight_exit_is_left_unannotated(tmp_path, monkeypatch):
+def test_unrecovered_non_preflight_exit_is_named(tmp_path, monkeypatch):
+    # Issue #4217: exit 2 with nothing collected used to read as a bare
+    # "job command exited 2".
     runner = _FakeRunner()
     runner.default = fake_completed(
-        _status("failed", exit_code="1", detail="job command exited 1")
+        _status("failed", exit_code="2", detail="job command exited 2")
     )
     runner.outputs = {"runner_identity.json": _identity("0.7.0")}
     corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner)
 
     diagnostic = corners[0]["diagnostics"][0]
+    assert diagnostic["code"] == "batch_job_failed"
+    assert "the runner exited 2" in diagnostic["message"]
+    assert "harness.log" in diagnostic["message"]
+    assert "bisect the request" in diagnostic["message"]
     assert "preflight reject" not in diagnostic["message"]
     assert "runner_code" not in diagnostic
+
+
+def test_recovered_envelope_is_not_given_the_unrecovered_note(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="2", detail="job command exited 2")
+    )
+    runner.outputs = {
+        "runner_identity.json": _identity("0.7.0"),
+        "report.json": _envelope("bad request", code="bad_request"),
+    }
+    corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner)
+
+    messages = [d["message"] for d in corners[0]["diagnostics"]]
+    assert messages
+    assert all("no report.json" not in m for m in messages)

@@ -262,6 +262,14 @@
         "klayout_tools.kb"
       ]
     },
+    "array_check": {
+      "kind": "verb",
+      "description": "`klt array_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.array_check",
+        "klayout_tools.cli.array_check_cmd"
+      ]
+    },
     "keepout_check": {
       "kind": "verb",
       "description": "`klt keepout_check` implementation: core modules plus CLI adapter.",
@@ -446,6 +454,14 @@
         "klayout_tools.ring_check"
       ]
     },
+    "seam_check": {
+      "kind": "verb",
+      "description": "`klt seam_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.seam_check_cmd",
+        "klayout_tools.seam_check"
+      ]
+    },
     "tap_distance": {
       "kind": "verb",
       "description": "`klt tap_distance` implementation: core modules plus CLI adapter.",
@@ -481,6 +497,7 @@
         "klayout_tools.design_evidence_tiers",
         "klayout_tools.evidence_record",
         "klayout_tools.lef_header",
+        "klayout_tools.macros",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
         "klayout_tools.output_lock",
@@ -524,6 +541,7 @@
         "klayout_tools.sim_decks",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_errors",
+        "klayout_tools.sim_eye",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
@@ -596,6 +614,7 @@
       "kind": "verb",
       "description": "`klt synthesize` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools._sv2v",
         "klayout_tools.cli.synthesize_cmd",
         "klayout_tools.restructure",
         "klayout_tools.sta",
@@ -697,6 +716,11 @@
       "consumer": "corner_matrix",
       "exporter": "sim",
       "reason": "Issue #4045: `klt corner-matrix` must check the grid exactly as `klt sim` expands it, so it calls sim's expander and catches SimError rather than duplicating the expansion."
+    },
+    {
+      "consumer": "array_check",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --layers parser, as every verb does."
     },
     {
       "consumer": "keepout_check",
@@ -1157,6 +1181,11 @@
       "consumer": "ring_check",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "seam_check",
+      "exporter": "cli-infra",
+      "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
     },
     {
       "consumer": "shared-core",

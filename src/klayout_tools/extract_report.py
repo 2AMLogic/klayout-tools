@@ -33,7 +33,7 @@ circular import evaluated mid-load.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from .decks import ExtractionDeck, ParasiticsDeck
@@ -540,6 +540,35 @@ def _detect_merged_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]
             continue
         merged.append({"net": name, "labels": labels})
     return merged
+
+
+def detect_case_colliding_net_names(names: Iterable[str]) -> list[list[str]]:
+    """Group net names that are equal after case-folding but differ as written.
+
+    ``klt lvs`` reads the written SPICE back case-insensitively, so two
+    extracted nets named ``pb`` and ``PB`` come back as one net and show up
+    downstream as a false ``net.merged``. Returns one sorted list of the
+    distinct spellings per colliding group, groups ordered by folded name.
+    Exact duplicates (the split-label case, :func:`_detect_split_net_labels`)
+    are not collisions. Always a list; empty when nothing collides.
+    """
+    spellings: dict[str, set[str]] = {}
+    for name in names:
+        spellings.setdefault(name.casefold(), set()).add(name)
+    return [sorted(group) for _, group in sorted(spellings.items()) if len(group) >= 2]
+
+
+def _case_collision_warnings(nets: list[dict[str, Any]]) -> list[str]:
+    """One warning string per case-fold net-name collision in ``nets[]``."""
+    return [
+        f"nets {', '.join(repr(n) for n in group)} differ only by case -- "
+        "`klt lvs` reads the written netlist back case-insensitively and "
+        "will merge them (a false net.merged); for a composed layout pass "
+        "--hierarchical-cells with the placed-cell names "
+        "(`<block id>__<cell name>`) to split the hierarchy -- see "
+        "docs/cli/extract.md's 'Hierarchical output' section."
+        for group in detect_case_colliding_net_names(n["name"] for n in nets)
+    ]
 
 
 def _detect_split_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]]:

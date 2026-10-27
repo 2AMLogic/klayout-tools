@@ -9,11 +9,13 @@ import argparse
 import sys
 
 from .. import arith_gen, artifact_store, netlist, netlist_batch, pdk_stackup, pex
+from ..equiv import SUPPORTED_ENGINES as SUPPORTED_EQUIV_ENGINES
 from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     arith_gen_cmd,
+    array_check_cmd,
     artifact_cmd,
     cells_cmd,
     characterize_cmd,
@@ -55,6 +57,7 @@ from . import (
     report_cmd,
     reset_coverage_cmd,
     ring_check_cmd,
+    seam_check_cmd,
     signoff_cmd,
     sim_cmd,
     sim_merge_cmd,
@@ -305,8 +308,10 @@ def create_parser() -> argparse.ArgumentParser:
     _add_lef_abstract_parser(subparsers)
 
     _add_ring_check_parser(subparsers)
+    _add_seam_check_parser(subparsers)
     _add_corner_matrix_parser(subparsers)
     _add_keepout_check_parser(subparsers)
+    _add_array_check_parser(subparsers)
     _add_tap_distance_parser(subparsers)
 
     _add_layout_metrics_parser(subparsers)
@@ -2870,6 +2875,26 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--device-model",
+        dest="device_models",
+        action="append",
+        default=None,
+        metavar="CLASS=SUBCKT",
+        help=(
+            "with --pdk/--pdk-root, write the bipolar device CLASS as an `X` "
+            "call to the named PDK subcircuit SUBCKT (issue #4234), "
+            "repeatable. For a bipolar class the deck recognises but has no "
+            "curated PDK binding for -- today gf180mcu's `bjt`, whose cell "
+            "name and polarity the tool cannot guess but the schematic "
+            "states. A CLASS the deck does not declare, or one that already "
+            "has a curated binding (sky130's `pnp`), is an error; curated "
+            "data is never overridden. Omitted by default -- output is "
+            "byte-identical to before this flag existed. The mapping is "
+            "echoed in the JSON response's `device_models` field. See "
+            "docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
         "--probe",
         dest="probes",
         action="append",
@@ -3451,9 +3476,10 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "testbench re-run against it. Each delta[] row then also carries "
             "device_only_value, representation_delta_pct (device-only vs "
             "schematic) and parasitic_delta_pct (extracted vs device-only), "
-            "splitting device-representation effects from parasitics. Not "
-            "supported with --measure-command. Off by default -- "
-            "byte-identical to today's behavior."
+            "splitting device-representation effects from parasitics. With "
+            "--measure-command the command is run a third time on the "
+            "parasitic-free netlist ($KLT_PEX_SIDE=device-only). Off by "
+            "default -- byte-identical to today's behavior."
         ),
     )
     pex_parser.add_argument(
@@ -3605,6 +3631,25 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "error. Omitted by default -- byte-identical to today's "
             "behavior. The applied mapping is echoed in the JSON response's "
             "`extraction.label_layers`. See docs/cli/pex.md."
+        ),
+    )
+    pex_parser.add_argument(
+        "--device-model",
+        dest="device_models",
+        action="append",
+        default=None,
+        metavar="CLASS=SUBCKT",
+        help=(
+            "write the bipolar device CLASS as an `X` call to the named PDK "
+            "subcircuit SUBCKT (issue #4234), repeatable, passed through to "
+            "`klt extract --device-model`. Needed under --pdk for a deck "
+            "whose recognised bipolar has no curated PDK binding (gf180mcu's "
+            "`bjt`), which otherwise stays a bare `Q` card ngspice cannot "
+            "load. A CLASS the deck does not declare, or that already has a "
+            "curated binding, is an error. Omitted by default -- "
+            "byte-identical to today's behavior. The applied mapping is "
+            "echoed in the JSON response's `extraction.device_models`. See "
+            "docs/cli/pex.md."
         ),
     )
     pex_parser.add_argument(
@@ -3930,14 +3975,17 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         "--attest",
         metavar="ITEM",
         type=int,
-        choices=[1, 9, 10],
+        choices=[1, 2, 9, 10],
         help=(
             "produce the artifact-anchored generic envelope for T1 item 1 "
             "(Design sources), 9 (Testbenches shipped) or 10 (Repo hygiene) "
             "from --inventory, by running the item-specific checks the "
-            "inventory declares (issue #2844). Status is derived from those "
-            "checks: exit 0 pass, 3 fail (nothing written), 1 malformed "
-            "inventory. Mutually exclusive with <file>/--manifest/--fleet/"
+            "inventory declares (issue #2844); or for item 2 (Layout) from "
+            "--input STREAM, by checking the committed layout stream "
+            "(readable, non-empty top cell, dbu on grid; issue #4188). "
+            "Status is derived from those checks: exit 0 pass, 3 fail "
+            "(nothing written), 1 malformed inventory. Mutually exclusive "
+            "with <file>/--manifest/--fleet/"
             "--describe-grader/--tiers-doc. See docs/cli/signoff.md's "
             "'Attesting items 1, 9 and 10' section."
         ),
@@ -3949,6 +3997,45 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "with --attest: path to the versioned attestation inventory "
             "(schema_version 1, kind 't1-attestation-inventory') inside a "
             "git repository; the envelope pins this file's raw-byte sha256."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--input",
+        dest="attest_input",
+        metavar="STREAM",
+        help=(
+            "with --attest 2: path to the committed GDS/OASIS layout stream "
+            "inside a git repository; the envelope pins its raw-byte sha256 "
+            "and the producing KLayout version (issue #4188). Refused with "
+            "items 1, 9 and 10, which take --inventory."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--generator",
+        metavar="CMD",
+        help=(
+            "with --attest 2: the command that regenerates the stream, "
+            "recorded as provenance.regeneration.generator. Echoed, never "
+            "run; requires --regenerated-hash."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--regenerated-hash",
+        metavar="sha256:HEX",
+        help=(
+            "with --attest 2: the hash your own CI got after re-running the "
+            "generator, recorded as provenance.regeneration.regenerated_hash; "
+            "the grader flags the item stale_artifact if it differs from the "
+            "committed stream. Requires --generator."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--hash-kind",
+        choices=["bytes", "geometry"],
+        help=(
+            "with --attest 2 --regenerated-hash: what the regenerated hash "
+            "digests -- raw bytes (default) or the decoded geometry, which "
+            "ignores GDS/OASIS write timestamps."
         ),
     )
     signoff_parser.add_argument(
@@ -4371,6 +4458,19 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     synthesize_parser.add_argument(
+        "--equiv-engine",
+        dest="equiv_engine",
+        choices=list(SUPPORTED_EQUIV_ENGINES),
+        default=None,
+        help=(
+            "`klt equiv` proof engine for the `--verify-equivalence` gate "
+            "(default: klt equiv's own default, `yosys`, combinational "
+            "only); pass `yosys-sequential` for designs with flip-flops. "
+            "Has no effect unless `--verify-equivalence` is given. Must be "
+            "re-passed with `--check --rerun`, like `--equiv-timeout-s`."
+        ),
+    )
+    synthesize_parser.add_argument(
         "--restructure-timing",
         dest="restructure_timing",
         action="store_true",
@@ -4405,6 +4505,30 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
         inputs="RTL sources and standard-cell liberty",
         engine="Yosys",
         docs="docs/cli/synthesize.md",
+    )
+    synthesize_parser.add_argument(
+        "--netlist",
+        metavar="FILE",
+        default=None,
+        help=(
+            "with --check (cheap mode): the committed gate-level netlist to "
+            "re-hash against the report's recorded `netlist_sha256`. Always "
+            "wins over the report's own `netlist_path`; without it that path "
+            "is used when it is repo-scoped. See docs/cli/synthesize.md."
+        ),
+    )
+    synthesize_parser.add_argument(
+        "--skip-deck",
+        dest="skip_deck",
+        action="store_true",
+        help=(
+            "with --check (cheap mode only): do not resolve the standard-cell "
+            "liberty, so the check runs on a host with no PDK install. The "
+            "`provenance.deck.content_hash` check is omitted and listed in "
+            "the response's `skipped[]`; a `match` then proves RTL, "
+            "parameters, defines and netlist bytes, NOT the deck. Not valid "
+            "with --rerun. See docs/cli/synthesize.md."
+        ),
     )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
@@ -6295,11 +6419,11 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         metavar="LAYOUT",
         default=None,
         help=(
-            "known-bad fixture layout the same native deck must flag "
-            "(--engine klayout only): run first with identical options; "
-            "zero violations fails the run (error.code "
-            "negative_control_failed), proving the deck executed. "
-            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+            "known-bad fixture layout the same deck must flag (curated "
+            "and klayout engines): run first with identical options "
+            "(waivers not applied); zero violations fails the run "
+            "(error.code negative_control_failed), proving the deck "
+            "executed. See docs/cli/drc.md, 'Negative control'."
         ),
     )
     drc_parser.add_argument(
@@ -6855,6 +6979,122 @@ def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(ring_check_parser)
     ring_check_parser.set_defaults(func=ring_check_cmd.run)
+
+
+def _add_seam_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``seam-check`` verb: tiling / rail continuity across seams."""
+    seam_parser = subparsers.add_parser(
+        "seam-check",
+        help="check abutting-cell tiling and conductor continuity across seams",
+        description=(
+            "Check the seams of a layout assembled from abutting cells. "
+            "--tiling asserts the named cells' placements tile with no gap "
+            "or overlap; --layer with --band asserts the layer's merged "
+            "shapes cover each band fully and form one connected piece. At "
+            "least one assertion is required. Empty geometry is a violation, "
+            "never a vacuous pass. Loop closure is `klt ring-check`'s job. "
+            "Headless, purely geometric. See docs/cli/seam-check.md."
+        ),
+    )
+    seam_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    seam_parser.add_argument(
+        "--tiling",
+        action="append",
+        default=None,
+        metavar="CELL",
+        help=(
+            "repeatable exact child-cell name whose placements must tile "
+            "with no gap or overlap"
+        ),
+    )
+    seam_parser.add_argument(
+        "--layer",
+        default=None,
+        metavar="L/D",
+        help="conductor layer/datatype to check inside each --band (e.g. 68/20)",
+    )
+    seam_parser.add_argument(
+        "--band",
+        action="append",
+        default=None,
+        metavar="x0,y0,x1,y1",
+        help=(
+            "repeatable band in micrometres that --layer must cover "
+            "completely as one connected piece; requires --layer"
+        ),
+    )
+    seam_parser.add_argument(
+        "--top",
+        default=None,
+        help="top cell to check when the stream has more than one; omit for all",
+    )
+    _add_format_arg(seam_parser)
+    seam_parser.set_defaults(func=seam_check_cmd.run)
+
+
+def _add_array_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``array-check`` verb: symmetry and abutment of a cell array."""
+    p = subparsers.add_parser(
+        "array-check",
+        help="assert mirror/translation symmetry and pitch abutment of a cell array",
+        description=(
+            "Assert structural regularity of a cell array: layer-by-layer "
+            "mirror or translation symmetry (XOR residual per layer) and/or "
+            "abutment of the unit-cell placements at a declared pitch and "
+            "count (no gap, no overlap, length == count x pitch). Purely "
+            "geometric; fully headless via KLayout's batch database API. "
+            "See docs/cli/array-check.md."
+        ),
+    )
+    p.add_argument("file", help="path to a GDSII or OASIS layout file")
+    p.add_argument(
+        "--cell",
+        default=None,
+        help=(
+            "symmetry: root cell to flatten (default: every top cell); "
+            "abutment: the unit cell whose placements are checked"
+        ),
+    )
+    p.add_argument(
+        "--layers",
+        default=None,
+        help=(
+            "symmetry layer set: a path to a JSON file or an inline JSON array "
+            "of [layer, datatype] pairs. Required with --mirror-axis/--translate."
+        ),
+    )
+    p.add_argument(
+        "--mirror-axis",
+        choices=("x", "y"),
+        default=None,
+        help="mirror about the line x = AT ('x') or y = AT ('y'); needs --at",
+    )
+    p.add_argument("--at", default=None, help="mirror line coordinate in um")
+    p.add_argument(
+        "--translate",
+        default=None,
+        help="translation symmetry vector 'dx,dy' in um (exclusive with --mirror-axis)",
+    )
+    p.add_argument(
+        "--tolerance",
+        default=None,
+        help="ignore deviations below this many um (default 0)",
+    )
+    p.add_argument("--pitch", default=None, help="abutment pitch in um (> 0)")
+    p.add_argument("--count", default=None, help="expected number of placements")
+    p.add_argument(
+        "--direction",
+        choices=("x", "y"),
+        default="x",
+        help="array direction for the abutment check (default x)",
+    )
+    p.add_argument(
+        "--top",
+        default=None,
+        help="top cell to check when the stream has more than one; omit for all",
+    )
+    _add_format_arg(p)
+    p.set_defaults(func=array_check_cmd.run)
 
 
 def _add_keepout_check_parser(subparsers: argparse._SubParsersAction) -> None:

@@ -1048,3 +1048,85 @@ def test_resolve_liberty_hint_failure_does_not_mask_error(tmp_path, monkeypatch)
         pdk_cells.resolve_liberty_for_cell_library(
             "sky130_fd_sc_hd", None, _LibErr, variant="sky130A"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4204 -- cell_library-aware default variant resolution.
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_liberty_defaults_to_variant_shipping_library(tmp_path, monkeypatch):
+    _two_variants(tmp_path, monkeypatch, lib_in="sky130B")
+    path, _corner, info = pdk_cells.resolve_liberty_for_cell_library(
+        "sky130_fd_sc_hd", None, _LibErr
+    )
+    assert info["variant"] == "sky130B"
+    assert "sky130B" in path
+
+
+def test_resolve_liberty_multiple_shippers_first_in_order(tmp_path, monkeypatch):
+    root = tmp_path / "pdks"
+    for name in ("sky130A", "sky130B", "sky130C"):
+        vd = _make_install(root, name, assets=("libs_ref",))
+        if name != "sky130A":
+            _make_cell_library(vd, "sky130_fd_sc_hd")
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [str(root)])
+    _p, _c, info = pdk_cells.resolve_liberty_for_cell_library(
+        "sky130_fd_sc_hd", None, _LibErr
+    )
+    assert info["variant"] == "sky130B"
+
+
+def test_resolve_liberty_defaults_to_descriptor_mapped_variant(tmp_path, monkeypatch):
+    root = tmp_path / "pdks"
+    _make_install(root, "sky130A", assets=("libs_ref",))
+    vd_b = _make_install(root, "sky130B", assets=("libs_ref",))
+    (vd_b / "mapped.lib").write_text("library (x) {}\n", encoding="utf-8")
+    (vd_b / "klt-pdk.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "liberty": {"custom_lib": {"tt": "mapped.lib"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [str(root)])
+    path, corner, info = pdk_cells.resolve_liberty_for_cell_library(
+        "custom_lib", None, _LibErr
+    )
+    assert info["variant"] == "sky130B"
+    assert corner == "tt"
+    assert path.endswith("mapped.lib")
+
+
+def test_resolve_liberty_explicit_variant_not_overridden(tmp_path, monkeypatch):
+    _two_variants(tmp_path, monkeypatch)
+    with pytest.raises(_LibErr, match="not found under"):
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", None, _LibErr, variant="sky130A"
+        )
+
+
+def test_resolve_liberty_env_pdk_not_overridden(tmp_path, monkeypatch):
+    _two_variants(tmp_path, monkeypatch)
+    monkeypatch.setenv("PDK", "sky130A")
+    with pytest.raises(_LibErr, match="not found under"):
+        pdk_cells.resolve_liberty_for_cell_library("sky130_fd_sc_hd", None, _LibErr)
+
+
+def test_resolve_liberty_default_none_ship_error_unchanged(tmp_path, monkeypatch):
+    _two_variants(tmp_path, monkeypatch, lib_in="none")
+    with pytest.raises(_LibErr) as excinfo:
+        pdk_cells.resolve_liberty_for_cell_library("sky130_fd_sc_hd", None, _LibErr)
+    assert str(excinfo.value).endswith("sky130A' at '" + str(tmp_path / "pdks") + "'")
+
+
+def test_resolve_liberty_default_fallback_honors_pinned_root(tmp_path, monkeypatch):
+    _two_variants(tmp_path, monkeypatch, lib_in="sky130B")
+    other = tmp_path / "other"
+    _make_install(other, "sky130A", assets=("libs_ref",))
+    with pytest.raises(_LibErr, match="not found under"):
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", None, _LibErr, root=str(other)
+        )

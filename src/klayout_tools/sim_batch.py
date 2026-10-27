@@ -107,6 +107,7 @@ from . import (
     _batch_common,
     _provenance,
     remote_transport,
+    sim_eye,
     sim_search,
     sim_snm_meas,
     sim_staging,
@@ -231,13 +232,22 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     "corners.process[].sections[] (object form)": "0.7.0",
     # 1b51954f options.ngspice_init (#2530); first in v0.7.0.
     "options.ngspice_init": "0.7.0",
-    # 7849a377c corners.params parameter axis (#3035); first in v0.8.0
-    # (`git tag --contains 7849a377c` -> v0.8.0 only; not an ancestor of
-    # v0.7.0, so a 0.7.0 runner silently drops the field, #4212).
-    "corners.params": "0.8.0",
     # 75f738422 options.ngspice_options (#3111); first in v0.8.0
     # (`git tag --contains 75f738422` -> v0.8.0 only, #4212).
     "options.ngspice_options": "0.8.0",
+    # 7849a377c corners.params parameter axis (#3035); first in v0.8.0
+    # (`git tag --contains 7849a377c` lists v0.8.0 only; `git describe` gives
+    # v0.7.0-709-g7849a377c). Post-tag dev builds render as `0.7.1.devN`, which
+    # compares below 0.8.0, so a 0.7.1.dev7xx+ runner that has the feature is
+    # refused; that fails safe.
+    "corners.params": "0.8.0",
+    # b24141ef9 corners.units (#2993), after v0.7.0; first in v0.8.0
+    # (`git tag --contains b24141ef9`). An older runner ignores the axis and
+    # runs one default corner.
+    "corners.units": "0.8.0",
+    # 0380f2a05 corners.temperature_param, after v0.7.0; first in v0.8.0
+    # (`git tag --contains 0380f2a05`).
+    "corners.temperature_param": "0.8.0",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
@@ -261,8 +271,9 @@ _BATCH_STDERR_TAIL_BYTES = 64 * 1024
 _BATCH_JOB_FAILURE_TAIL_BYTES = 1500
 
 #: ``$EDA_OUTPUT_DIR``-relative directory the job command points `klt sim`'s
-#: ``--outdir`` at when ``options.keep_artifacts`` is set, so per-corner
-#: logs/rawfiles land inside the one tree the harness collects.
+#: ``--outdir`` at, so per-corner logs/rawfiles land inside the one tree the
+#: harness collects (issue #4369: always, so a deck-abort log is readable;
+#: ``options.keep_artifacts`` only gates installing them for the caller).
 BATCH_ARTIFACTS_DIRNAME = "artifacts"
 
 #: ``job.json``'s ``tool`` field -- informational only (the harness echoes it
@@ -318,6 +329,12 @@ DEFAULT_POLL_INTERVAL_S = 30.0
 #: cloud-init, and the harness's own S3 round trips all happen before the
 #: job command starts. Overridable wholesale via ``request.batch.poll_timeout_s``.
 _BATCH_PROVISION_SLACK_S = 1800.0
+#: How long ``--attach`` waits with no ``status.json`` before saying on
+#: stderr that the job looks never to have been started (issue #4291). Far
+#: shorter than :data:`_BATCH_PROVISION_SLACK_S`: an attached job was
+#: submitted earlier, so an instance that has not published a status by now
+#: was most likely refused at launch (e.g. ``batch_concurrency_cap``).
+_ATTACH_UNSTARTED_GRACE_S = 120.0
 
 #: Fixed per-job slack :func:`_default_batch_job_timeout_s` adds to the
 #: fully-serial unit budget for `klt` startup on the job instance.
@@ -674,7 +691,8 @@ def _runner_gate_release(version: str) -> str | None:
 #: #3337), ``twoport`` (``analysis.kind: "twoport"``, #3338), and
 #: ``twoport_noise`` (``analysis.noise``, #3339), and ``snm``
 #: (``measurements[].snm``, #3895), and ``search`` (``measurements[].search``,
-#: #4121).
+#: #4121). ``eye`` (``measurements[].eye``, #4292) landed after ``v0.8.0``, so
+#: its first release segment is ``0.8.1``.
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
@@ -690,6 +708,12 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: bool(
             sim_snm_meas.snm_measurements(request.get("measurements") or [])
+        ),
+    ),
+    "eye": (
+        (0, 8, 1),
+        lambda request: bool(
+            sim_eye.eye_measurements(request.get("measurements") or [])
         ),
     ),
     "search": (
@@ -737,17 +761,21 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: unknown analysis kind or, worse, run it as a plain AC with no S-parameters
 #: (#3338). ``twoport_noise`` is mandatory because an older runner would reject
 #: ``analysis.noise`` as an unknown key or omit ``nf_db`` and the stability
-#: factors (#3339).
+#: factors (#3339). ``corners.params`` is mandatory because an older runner has
+#: no parser for the axis and ignores it, running one corner per process x
+#: temperature with ``status: pass`` (#4235).
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "transfer",
         "snm",
         "search",
+        "eye",
         "stimulus",
         "dual_injection",
         "complex_vectors",
         "twoport",
         "twoport_noise",
+        "corners.params",
     }
 )
 
@@ -793,6 +821,10 @@ _RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
     "corners.process[].sections[]": _uses_process_section_objects,
     "corners.params": lambda request: bool(
         (request.get("corners") or {}).get("params")
+    ),
+    "corners.units": lambda request: "units" in (request.get("corners") or {}),
+    "corners.temperature_param": lambda request: (
+        "temperature_param" in (request.get("corners") or {})
     ),
     "options.ngspice_init": _uses_option("ngspice_init"),
     "options.ngspice_options": _uses_option("ngspice_options"),
@@ -1576,8 +1608,10 @@ def _build_batch_job_spec(
     # An explicit `options.max_workers` in the request still wins.
     if not (remote_request.get("options") or {}).get("max_workers"):
         command += ' ${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}'
-    if keep_artifacts:
-        command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
+    # Always collect the per-corner engine logs: without them a deck abort
+    # (`could not find a valid modelname`) never reaches the report (#4369).
+    # Only `keep_artifacts` installs them into the caller's artifact dir.
+    command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
     # stdout -> report.json (the success channel); stderr was teed into
     # stderr.log from the job command's first line (see
     # _job_stderr_capture_prefix), so it also covers the preflight.
@@ -2976,6 +3010,17 @@ def _format_progress(
     )
 
 
+def _format_never_started(job_id: str, elapsed_s: float) -> str:
+    """The ``--attach`` diagnostic for a job with no ``status.json`` yet."""
+    return (
+        f"klt sim: batch job {job_id} was never started: it has a job.json "
+        f"but no status.json after {elapsed_s:.0f}s, so no instance has "
+        "booted for it. Its launch was probably refused (for example "
+        "batch_concurrency_cap while earlier jobs sit pending) or never "
+        "issued; still waiting, but it may never run"
+    )
+
+
 def _check_interrupted_grace(
     config: BatchConfig,
     job_id: str,
@@ -3026,6 +3071,31 @@ def _check_never_started(
         )
 
 
+def _report_if_unstarted(
+    grace_s: float | None,
+    *,
+    reported: bool,
+    last_state: str | None,
+    status: dict[str, Any] | None,
+    job_id: str,
+    elapsed: float,
+) -> bool:
+    """Print the never-started diagnostic once ``grace_s`` has passed with no
+    ``status.json`` ever observed (issue #4291); return the updated
+    ``reported`` flag. Kept out of :func:`poll_status` for its complexity
+    budget."""
+    due = (
+        grace_s is not None
+        and not reported
+        and last_state is None
+        and status is None
+        and elapsed >= grace_s
+    )
+    if due:
+        print(_format_never_started(job_id, elapsed), file=sys.stderr)
+    return reported or due
+
+
 def poll_status(
     config: BatchConfig,
     job_id: str,
@@ -3036,6 +3106,7 @@ def poll_status(
     heartbeat: bool = False,
     progress: bool = True,
     on_state: Callable[[str], None] | None = None,
+    unstarted_grace_s: float | None = None,
 ) -> dict[str, Any]:
     """Poll ``status.json`` until the job reaches a terminal state
     (:data:`BATCH_TERMINAL_STATES`) and return that status document.
@@ -3057,6 +3128,12 @@ def poll_status(
     ``on_state`` is called once per *change* of observed state (including a
     flip back, e.g. ``interrupted`` -> ``running``); unchanged and unreadable
     polls do not call it.
+
+    ``unstarted_grace_s`` (issue #4291; ``--attach`` sets it) prints one
+    stderr diagnostic once that many seconds pass with no ``status.json``
+    ever observed: the job has a ``job.json`` but looks never to have been
+    launched. It only reports -- polling continues, since a slow boot is
+    indistinguishable from a refused launch from here.
 
     Raises :class:`BatchPollTimeout` once ``config.poll_timeout_s`` elapses
     (the caller reports unrun corners rather than a failed sweep) -- or
@@ -3083,10 +3160,19 @@ def poll_status(
     reported_state: str | None = None
     interrupted_since: float | None = None
     polls = 0
+    unstarted_reported = False
     while True:
         polls += 1
         status = _read_status(config, job_id, run)
         now = monotonic()
+        unstarted_reported = _report_if_unstarted(
+            unstarted_grace_s,
+            reported=unstarted_reported,
+            last_state=last_state,
+            status=status,
+            job_id=job_id,
+            elapsed=now - started,
+        )
         if status is not None:
             new_state = str(status.get("state") or "")
             if on_state is not None and new_state != last_state:
@@ -4042,8 +4128,13 @@ def _annotate_unrecovered_preflight_reject(
     87``. Say what the exit means and, when the post-run runner identity
     shows a major.minor mismatch, classify the failure as a version mismatch
     (``runner_code`` :data:`BATCH_RUNNER_MISMATCH_CODE` plus both klt
-    identities). A no-op for any other exit code."""
-    if _status_exit_code(status) != _BATCH_PREFLIGHT_REJECT_EXIT:
+    identities). Any other non-zero exit code gets the generic
+    :func:`_annotate_unrecovered_failure` wording (issue #4217)."""
+    exit_code = _status_exit_code(status)
+    if exit_code is None or exit_code == 0:
+        return
+    if exit_code != _BATCH_PREFLIGHT_REJECT_EXIT:
+        _annotate_unrecovered_failure(corners, exit_code)
         return
     note = (
         f"exit {_BATCH_PREFLIGHT_REJECT_EXIT} is the runner preflight reject "
@@ -4066,6 +4157,27 @@ def _annotate_unrecovered_preflight_reject(
                 diagnostic["runner_code"] = BATCH_RUNNER_MISMATCH_CODE
                 diagnostic["runner_klt_version"] = identity["runner_klt_version"]
                 diagnostic["client_klt_version"] = identity["client_klt_version"]
+
+
+def _annotate_unrecovered_failure(
+    corners: list[dict[str, Any]], exit_code: int
+) -> None:
+    """Issue #4217: a job that exited non-zero (other than the preflight
+    reject) with nothing recovered -- no ``report.json``, no klt envelope in
+    ``stderr.log`` -- would otherwise read as the bare ``job command exited
+    N``. Name the exit code, say what did not come back, and point at the
+    places the cause can still be found. Additive: only the
+    ``batch_job_failed`` message is extended."""
+    note = (
+        f"the runner exited {exit_code} and no report.json, stderr.log "
+        "envelope or engine log came back; read harness.log under the job's "
+        "S3 prefix, or bisect the request (fewer corners/measurements, one "
+        "feature at a time) to find the cause"
+    )
+    for corner in corners:
+        for diagnostic in corner.get("diagnostics") or []:
+            if diagnostic.get("code") == "batch_job_failed":
+                diagnostic["message"] = f"{diagnostic['message']} [{note}]"
 
 
 def _poll_timeout_corners(
@@ -4366,6 +4478,7 @@ def _poll_status_interruptibly(
     heartbeat: bool = False,
     progress: bool = True,
     on_state: Callable[[str], None] | None = None,
+    unstarted_grace_s: float | None = None,
 ) -> dict[str, Any]:
     """:func:`poll_status`, with SIGINT/SIGTERM converted into
     :class:`BatchClientInterrupted` for the duration of the wait only
@@ -4381,6 +4494,7 @@ def _poll_status_interruptibly(
             heartbeat=heartbeat,
             progress=progress,
             on_state=on_state,
+            unstarted_grace_s=unstarted_grace_s,
         )
 
     def _handle(signum: int, _frame: Any) -> None:
@@ -4403,6 +4517,7 @@ def _poll_status_interruptibly(
             heartbeat=heartbeat,
             progress=progress,
             on_state=on_state,
+            unstarted_grace_s=unstarted_grace_s,
         )
     except BatchClientInterrupted as exc:
         print(f"klt sim: {exc}", file=sys.stderr)
@@ -4559,6 +4674,7 @@ def _run_batch_job(
             sleep=sleep,
             timestamps=attach_timestamps,
             now=now,
+            attach=True,
         )
     spec = _prepare_batch_job_spec(
         request,
@@ -4642,6 +4758,7 @@ def _poll_and_collect(
     now: Callable[[], str],
     receipt_path: str | None = None,
     receipt: dict[str, Any] | None = None,
+    attach: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The wait-and-collect tail shared by a fresh submit and ``--attach``.
 
@@ -4660,6 +4777,7 @@ def _poll_and_collect(
             heartbeat=True,
             progress=False,
             on_state=lambda state: _report_progress(job_id, state),
+            unstarted_grace_s=_ATTACH_UNSTARTED_GRACE_S if attach else None,
         )
     except BatchPollTimeout as exc:
         if receipt_path is not None and receipt is not None:
