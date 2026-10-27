@@ -546,6 +546,7 @@
         "klayout_tools.sim",
         "klayout_tools.sim_batch",
         "klayout_tools.sim_batch_async",
+        "klayout_tools.sim_commands",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_cycle_mean",
@@ -1404,6 +1405,11 @@
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
+      "consumer": "sim",
+      "exporter": "netlist",
+      "reason": "Issue #4443: `klt sim` command-list requests ship their unit trees through the Spot batch backend and enforce the same batch tree size cap and error code as netlist_batch rather than duplicating them."
+    },
+    {
       "consumer": "signoff",
       "exporter": "netlist",
       "reason": "Issue #3289: operator-approved generator execution reuses the existing Spot batch lifecycle (sim_batch submit/launch/poll/collect) and the netlist batch tree packaging rather than adding another runner."
@@ -1650,6 +1656,12 @@
     },
     {
       "consumer": "klayout_tools.sim_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.sim_commands",
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
