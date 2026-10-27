@@ -9,6 +9,7 @@ flow").
 ```
 klt synthesize <request> [--pdk VARIANT] [--pdk-root ROOT] \
     [--verify-equivalence] [--equiv-timeout-s SECONDS] \
+    [--equiv-engine yosys|yosys-sequential] \
     [--restructure-timing] [--restructure-max-iterations N] \
     [--format text|json]
 ```
@@ -45,6 +46,11 @@ flag line carries cleanly — not positional RTL file args.
   `--verify-equivalence` proof (default: `klt equiv`'s own `60`); no effect
   unless `--verify-equivalence` is given. Also bounds the `klt equiv` check
   `--restructure-timing` runs on any netlist it actually resizes.
+- `--equiv-engine` — `klt equiv` proof engine for the `--verify-equivalence`
+  gate: `yosys` (the default, combinational only) or `yosys-sequential`
+  (register-correspondence proof, for designs with flip-flops). No effect
+  unless `--verify-equivalence` is given. The `--restructure-timing` check
+  stays combinational. Must be re-passed with `--check --rerun`.
 - `--restructure-timing` — close (or reduce) a setup violation on the
   native `sta` critical path via a bounded cell-resizing loop, when it
   exceeds `constraints.clock_period_ns`. Requires
@@ -1191,12 +1197,14 @@ like every other file this command writes. The outcome:
   `"inconclusive"` verdict (timeout) is never treated as a pass, mirroring
   `klt equiv`'s own "timeout is never equivalent" discipline one level up.
 
-**Combinational designs only** — `klt equiv`'s Phase 0 MVP scope (#707) is
-combinational-only; a design containing flip-flops, latches, or memories
-(e.g. the GCD worked example below) makes the gate itself fail with a clear
-scope error, even though synthesis succeeded. `--verify-equivalence` is not
-yet usable on sequential designs — see `docs/cli/equiv.md`'s "Scope"
-section and Out of scope below.
+**Combinational by default; `--equiv-engine yosys-sequential` for sequential
+designs.** The default `yosys` engine is combinational-only; a design
+containing flip-flops, latches, or memories (e.g. the GCD worked example
+below) makes the gate fail with a clear scope error, even though synthesis
+succeeded. Pass `--equiv-engine yosys-sequential` to gate such a design
+through `klt equiv`'s register-correspondence engine instead; the engine that
+ran is echoed as `equivalence.engine`. See `docs/cli/equiv.md`'s "Scope"
+section.
 
 **`equivalence.artifacts` is not normalized (known gap, issue #1844).**
 Unlike `netlist_path`/`script_path` above, `equivalence.artifacts.
@@ -1677,7 +1685,10 @@ Actually re-synthesizes from the request and diffs the fresh report against
 the committed one, field by field, reporting `status: "drifted"` with a
 `drift[]` list of `{field, committed, fresh}` entries. A moved
 `instance_count`/`area_um2`/`timing`, a newly inferred latch under
-`structural`, a changed `provenance.input.content_hash` — all drift.
+`structural`, a changed `provenance.input.content_hash` — all drift. The
+optional flags are not echoed in the report, so re-pass them (including
+`--equiv-engine`, like `--equiv-timeout-s`); a different engine shows up as
+drift on `equivalence.engine`.
 
 Run-scoped bookkeeping is dropped from **both** sides before the diff:
 `run_id`, `netlist_path`, `script_path`, `run_script_path`,
@@ -1775,7 +1786,8 @@ cells — measured live on Yosys 0.67+post, CI's own pinned, from-source
 build (`scripts/install-yosys.sh`, run in CI's Linux/x86_64/gcc
 environment), against a volare `sky130A` install. Note this particular
 design is **sequential** (it has a clocked `always` block) — see
-"Equivalence gate" above, `--verify-equivalence` is not usable on it. GCD
+"Equivalence gate" above, `--verify-equivalence` needs
+`--equiv-engine yosys-sequential` on it. GCD
 carries no latches/comb loops/multi-driven nets, so `structural.has_critical`
 is `false` and the exit code is `0`.
 
@@ -1946,13 +1958,12 @@ the RTL `$readmemh`s its ROM tables relative to the synthesis cwd, which
   (issue #1626) are static leakage only. Dynamic power needs an activity
   factor — a testbench, vectors, or a toggle-rate estimate — this command
   has no way to know; that is a different, unaddressed ask.
-- **Sequential-design equivalence checking.** `--verify-equivalence` only
-  works on combinational designs today — `klt equiv`'s Phase 0 MVP scope
-  (#707). A future phase of #707 (temporal induction / BMC via SymbiYosys)
-  extends the gate to sequential designs; until then, running
-  `--verify-equivalence` against a design with flip-flops, latches, or
-  memories fails the gate with a clear scope error, not a misleadingly
-  confident verdict.
+- **Induction depth, resume and port-map plumbing for sequential
+  equivalence.** `--equiv-engine yosys-sequential` runs `klt equiv`'s
+  sequential engine with its defaults; `--restructure-timing`'s internal
+  equiv check and `klt techmap --verify-equivalence` stay combinational.
+  Running the default `yosys` engine against a design with flip-flops,
+  latches, or memories still fails the gate with a clear scope error.
 - **Signoff timing.** Neither delay this command reports is signoff STA.
   `timing` is ABC's pre-layout, wire-free, combinational-cone-only estimate
   (see "`timing`" above); `sta` walks the whole netlist and does report
