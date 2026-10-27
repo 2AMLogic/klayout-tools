@@ -1791,6 +1791,15 @@ versions. `--job-status` is a `status.json` passthrough only and never
 fetches outputs, so it can show just `job command exited 87`; read the full
 report for the cause.
 
+Any other non-zero exit with nothing recovered
+([#4217](https://github.com/2AMLogic/klayout-tools/issues/4217)) is named the
+same way: the `batch_job_failed` message states the runner exit code, that no
+`report.json`, `stderr.log` envelope or engine log came back, and points to
+`harness.log` under the job's S3 prefix and to bisecting the request (the
+client's submit-only credential cannot read `harness.log` itself). The change is
+additive -- only the message grows; no field is added or changed. A job whose
+envelope *was* recovered keeps its structured `runner_error` diagnostic.
+
 #### Pre-launch check from the AMI manifest ([#2851](https://github.com/2AMLogic/klayout-tools/issues/2851))
 
 The runner-side preflight only runs once a Spot instance has booted. To catch
