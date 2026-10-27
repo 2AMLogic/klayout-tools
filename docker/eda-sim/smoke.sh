@@ -232,7 +232,13 @@ cat > "${WORKDIR}/rtl/request.json" <<'REQ'
   "steps": [["iverilog", "-o", "sim.vvp", "tb.v"], ["vvp", "sim.vvp"]],
   "outputs": ["sim.vvp"], "timeout_s": 60}]}
 REQ
-if cmd_out="$(klt sim "${WORKDIR}/rtl/request.json" --backend local \
+# The image installs klayout-tools at the pdk-versions.json pin, which predates
+# `--command-approvals` until a release containing it is published and the pin
+# is bumped. Skip loudly rather than fail, so the skip can never read as a pass.
+if ! klt sim --help 2>&1 | grep -q -- '--command-approvals'; then
+    printf '  SKIP  klt sim commands request: klayout-tools %s has no --command-approvals;\n' "$WANT_KLT"
+    printf '        NOT VERIFIED until the pin in pdk-versions.json is bumped to a release with it\n'
+elif cmd_out="$(klt sim "${WORKDIR}/rtl/request.json" --backend local \
         --command-approvals "${WORKDIR}/rtl/approvals.json" --format json 2>&1)" \
     && printf '%s' "$cmd_out" | jq -e '.status == "pass" and (.units[0].stdout_tail | contains("klt-iverilog-smoke 42"))' >/dev/null 2>&1; then
     pass "klt sim ran the approved iverilog/vvp unit: klt-iverilog-smoke 42"

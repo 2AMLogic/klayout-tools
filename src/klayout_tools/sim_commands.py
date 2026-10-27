@@ -323,6 +323,84 @@ def _plan_steps(entry: dict[str, Any], where: str) -> list[list[str]]:
     return [list(argv) for argv in steps]
 
 
+_STRAY_REQUEST_FIELDS = (
+    "netlist",
+    "analysis",
+    "analysis_steps",
+    "corners",
+    "decks",
+    "monte_carlo",
+)
+
+
+def _validate_request_shape(request: dict[str, Any]) -> list[Any]:
+    """Return the command list after rejecting corner/deck fields and sharding."""
+    commands = request.get(COMMANDS_FIELD)
+    if not isinstance(commands, list) or not commands:
+        raise _error(
+            f"request.{COMMANDS_FIELD} must be a non-empty list of unit objects"
+        )
+    stray = sorted(field for field in _STRAY_REQUEST_FIELDS if field in request)
+    if stray:
+        raise _error(
+            f"a command-list request must not declare {stray[0]!r} -- it runs "
+            "declared commands and takes no corner matrix or deck list"
+        )
+    if (request.get("remote") or {}).get("hosts", 1) != 1:
+        raise _error("remote.hosts sharding is not supported for command-list requests")
+    return commands
+
+
+def _plan_unit(
+    entry: Any,
+    *,
+    where: str,
+    request_dir: str,
+    approvals: Sequence[CommandApproval],
+    seen_ids: set[str],
+    default_timeout: float,
+) -> dict[str, Any]:
+    """Validate one unit and check each of its steps against the approvals."""
+    if not isinstance(entry, dict):
+        raise _error(f"{where} must be a JSON object")
+    unit_id = entry.get("id")
+    if (
+        not isinstance(unit_id, str)
+        or not _ID_RE.match(unit_id)
+        or unit_id.startswith(".")
+    ):
+        raise _error(f"{where}.id must match [A-Za-z0-9._-]+ and not start with '.'")
+    if unit_id in seen_ids:
+        raise _error(f"{where}.id ({unit_id!r}) duplicates an earlier unit id")
+    seen_ids.add(unit_id)
+    steps = _plan_steps(entry, where)
+    inputs = _plan_inputs(entry, request_dir=request_dir, where=where)
+    outputs = entry.get("outputs", [])
+    if not isinstance(outputs, list):
+        raise _error(f"{where}.outputs must be a list of unit-relative paths")
+    outputs = [
+        _relative_name(item, f"{where}.outputs[{i}]") for i, item in enumerate(outputs)
+    ]
+    hashes = {item["name"]: item["sha256"] for item in inputs}
+    for step_index, argv in enumerate(steps):
+        if _match_step(approvals, argv, hashes) is None:
+            raise _error(
+                f"{where} step {step_index} ({shlex.join(argv)}) matches no "
+                "operator approval (interpreter, exact arguments and bound "
+                "input hashes must all match)",
+                CODE_NOT_APPROVED,
+            )
+    return {
+        "id": unit_id,
+        "steps": steps,
+        "inputs": inputs,
+        "outputs": outputs,
+        "timeout_s": _timeout(
+            entry.get("timeout_s"), f"{where}.timeout_s", default_timeout
+        ),
+    }
+
+
 def plan_command_units(
     request: dict[str, Any],
     *,
@@ -334,85 +412,25 @@ def plan_command_units(
     invalid or unapproved list fails before any upload or launch."""
     from .sim import DEFAULT_TIMEOUT_S
 
-    commands = request.get(COMMANDS_FIELD)
-    if not isinstance(commands, list) or not commands:
-        raise _error(
-            f"request.{COMMANDS_FIELD} must be a non-empty list of unit objects"
-        )
-    stray = sorted(
-        field
-        for field in (
-            "netlist",
-            "analysis",
-            "analysis_steps",
-            "corners",
-            "decks",
-            "monte_carlo",
-        )
-        if field in request
-    )
-    if stray:
-        raise _error(
-            f"a command-list request must not declare {stray[0]!r} -- it runs "
-            "declared commands and takes no corner matrix or deck list"
-        )
-    if (request.get("remote") or {}).get("hosts", 1) != 1:
-        raise _error("remote.hosts sharding is not supported for command-list requests")
+    commands = _validate_request_shape(request)
     options = request.get("options") or {}
     if not isinstance(options, dict):
         raise _error("request.options must be a JSON object")
     default_timeout = _timeout(
         options.get("timeout_s"), "request.options.timeout_s", DEFAULT_TIMEOUT_S
     )
-
-    units: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    for index, entry in enumerate(commands):
-        where = f"request.{COMMANDS_FIELD}[{index}]"
-        if not isinstance(entry, dict):
-            raise _error(f"{where} must be a JSON object")
-        unit_id = entry.get("id")
-        if (
-            not isinstance(unit_id, str)
-            or not _ID_RE.match(unit_id)
-            or unit_id.startswith(".")
-        ):
-            raise _error(
-                f"{where}.id must match [A-Za-z0-9._-]+ and not start with '.'"
-            )
-        if unit_id in seen_ids:
-            raise _error(f"{where}.id ({unit_id!r}) duplicates an earlier unit id")
-        seen_ids.add(unit_id)
-        steps = _plan_steps(entry, where)
-        inputs = _plan_inputs(entry, request_dir=request_dir, where=where)
-        outputs = entry.get("outputs", [])
-        if not isinstance(outputs, list):
-            raise _error(f"{where}.outputs must be a list of unit-relative paths")
-        outputs = [
-            _relative_name(item, f"{where}.outputs[{i}]")
-            for i, item in enumerate(outputs)
-        ]
-        hashes = {item["name"]: item["sha256"] for item in inputs}
-        for step_index, argv in enumerate(steps):
-            if _match_step(approvals, argv, hashes) is None:
-                raise _error(
-                    f"{where} step {step_index} ({shlex.join(argv)}) matches no "
-                    "operator approval (interpreter, exact arguments and bound "
-                    "input hashes must all match)",
-                    CODE_NOT_APPROVED,
-                )
-        units.append(
-            {
-                "id": unit_id,
-                "steps": steps,
-                "inputs": inputs,
-                "outputs": outputs,
-                "timeout_s": _timeout(
-                    entry.get("timeout_s"), f"{where}.timeout_s", default_timeout
-                ),
-            }
+    return [
+        _plan_unit(
+            entry,
+            where=f"request.{COMMANDS_FIELD}[{index}]",
+            request_dir=request_dir,
+            approvals=approvals,
+            seen_ids=seen_ids,
+            default_timeout=default_timeout,
         )
-    return units
+        for index, entry in enumerate(commands)
+    ]
 
 
 def _timeout(value: Any, where: str, default: float) -> float:

@@ -132,6 +132,21 @@ ARG DEBIAN_FRONTEND=noninteractive
 # libraries are xschem's link-time dependencies; it still netlists headlessly
 # (`xschem -q -n -x`), no display and no Xvfb required. zstd is what ciel
 # unpacks its `.tar.zst` PDK release assets with.
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends \
+        libcairo2 \
+        libx11-6 \
+        libxcb1 \
+        libxpm4 \
+        libxrender1 \
+        python3-venv \
+        tcl \
+        tk \
+        zstd \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Icarus Verilog for `klt sim` command-list requests (issue #4443).
 ARG IVERILOG_APT_PACKAGE
 ARG IVERILOG_MIN_MAJOR
 RUN set -euo pipefail; \
@@ -146,20 +161,6 @@ RUN set -euo pipefail; \
         echo "FAIL: iverilog >= ${IVERILOG_MIN_MAJOR} required, found: ${major:-unparseable}" >&2; exit 1; \
     fi; \
     command -v vvp >/dev/null
-
-RUN apt-get update -qq \
-    && apt-get install -y --no-install-recommends \
-        libcairo2 \
-        libx11-6 \
-        libxcb1 \
-        libxpm4 \
-        libxrender1 \
-        python3-venv \
-        tcl \
-        tk \
-        zstd \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=toolchain /opt/eda /opt/eda
 
