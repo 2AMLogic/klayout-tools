@@ -221,6 +221,26 @@ way. A deeper optimization (checkpointing the loaded LEF/DEF once via
 stage's own already-loaded design, so only the liberty deck differs per
 invocation) is tracked as follow-up work, not required for this field's
 initial scope.
+
+Hard macros (issue #2635)
+-------------------------
+
+``request.macros`` is the shared hard-macro declaration -- one shape,
+documented once in :mod:`klayout_tools.macros`, accepted identically by
+``klt synthesize`` and (plus its own placement fields) by ``klt
+place-and-route``. Each entry's ``lef`` is ``read_lef``'d alongside the
+tech/cell LEF before the ``def``/``verilog`` load, which is what makes a
+macro-bearing design analysable here at all: without it OpenROAD refuses
+the load outright with ``[ERROR ORD-2013] instance <inst> LEF master
+<cell> not found`` (live-reproduced, and live-confirmed fixed by the one
+extra ``read_lef``, against OpenROAD 26Q3 on sky130A). Each entry's
+optional ``lib`` -- a **per-corner** map -- is ``read_liberty``'d alongside
+the standard-cell library for whichever corner is being analysed, so the
+macro's real arcs participate in this verb's slack/``fmax``/power numbers
+rather than being blackboxed; a ``lib`` map with no entry for the corner
+being run is a named error, never a silent fallback to another corner's
+timing, which matters most in a ``request.pdk.corners`` sweep. See
+:func:`_macro_liberty_paths`.
 """
 
 from __future__ import annotations
@@ -235,6 +255,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from . import env_provenance
+from . import macros as macro_spec
 from ._openroad_engine import (
     _container_runtime_hint,
     _count_violations,
@@ -650,6 +671,12 @@ def run_sta(
             "multi-corner characterization (see docs/cli/sta.md)"
         )
 
+    # Issue #2635: the shared hard-macro declaration. Shape-validated here,
+    # before any PDK resolution or engine invocation; the corner-dependent
+    # half (which of a macro's per-corner liberties applies) is resolved
+    # per corner inside `_run_corner_session`.
+    macros = _validate_macros(request.get("macros"), request_dir)
+
     (
         clock_port,
         clock_period_ns,
@@ -759,6 +786,7 @@ def run_sta(
             spef_map=spef_map,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
+            macros=macros,
             propagated_clock=propagated_clock,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
@@ -923,6 +951,7 @@ def _dispatch_sta(
     spef_map: dict[str, str] | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
+    macros: list[dict[str, Any]],
     propagated_clock: bool,
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
@@ -967,6 +996,7 @@ def _dispatch_sta(
             spef_map=spef_map,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
+            macros=macros,
             propagated_clock=propagated_clock,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
@@ -1000,6 +1030,7 @@ def _dispatch_sta(
         spef_path=spef_path,
         wire_load_model=wire_load_model,
         wire_load_mode=wire_load_mode,
+        macros=macros,
         propagated_clock=propagated_clock,
         power_activity=power_activity,
         clock_uncertainty=clock_uncertainty,
@@ -1054,6 +1085,12 @@ def _dispatch_sta(
         # model.
         "wire_load_model": wire_load_model,
         "wire_load_mode": wire_load_mode,
+        # Additive field (issue #2635): echo of `request.macros`, resolved
+        # to absolute paths -- the identical shape `klt synthesize`'s own
+        # response carries (`klayout_tools.macros.macros_response`), so one
+        # declaration round-trips through both verbs' reports unchanged.
+        # `[]` when the request declared none.
+        "macros": macro_spec.macros_response(macros),
         # Additive field (issue #2739): which clock mode every analyzed
         # corner was timed with -- "ideal" (the default, this command's
         # pre-#2739 behaviour) or "propagated". Present on both response
@@ -1138,6 +1175,7 @@ def _run_corner_session(
     spef_path: str | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
+    macros: list[dict[str, Any]],
     propagated_clock: bool,
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
@@ -1180,6 +1218,13 @@ def _run_corner_session(
       response once (shared across every corner) while nesting only
       ``deck`` per corner (see :func:`_run_multi_corner`).
 
+    ``macros`` (issue #2635) adds one ``read_lef`` per declared hard macro
+    -- which is what makes a macro-bearing ``def``/``verilog`` load at all
+    instead of failing ``[ERROR ORD-2013] instance <inst> LEF master <cell>
+    not found`` -- plus one ``read_liberty`` per macro that declared a
+    liberty for *this* corner (:func:`_macro_liberty_paths`). ``[]`` (the
+    default for every pre-#2635 request) emits neither and leaves the
+    generated script byte-identical.
     ``sdf_stem`` (issue #2886) -- when given (only ever for a ``def``-mode
     request with a ``spef``; :func:`_validate_sdf` enforces both) -- makes
     this session write ``<output_dir>/<sdf_stem>.<corner>.sdf`` right after
@@ -1191,13 +1236,16 @@ def _run_corner_session(
     byte-identical to the pre-#2886 session, with ``sdf: None``.
 
     Raises :class:`PostRouteStaError` for an unresolvable
-    ``cell_library``/``corner_name``/LEF, or an OpenROAD engine failure --
-    identical to this command's pre-#1871 single-corner behaviour.
+    ``cell_library``/``corner_name``/LEF, a macro liberty with no entry for
+    this corner, or an OpenROAD engine failure -- otherwise identical to
+    this command's pre-#1871 single-corner behaviour.
     """
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, corner_name, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info)
+    macro_lefs = [macro["lef"] for macro in macros]
+    macro_liberty_paths = _macro_liberty_paths(macros, corner)
 
     script_path = os.path.join(output_dir, f"sta_{script_tag}.tcl")
     metrics_path = os.path.join(output_dir, f"{script_tag}_metrics.json")
@@ -1227,6 +1275,8 @@ def _run_corner_session(
             spef_net_names=spef_net_names,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            macro_lefs=macro_lefs,
+            macro_liberty_paths=macro_liberty_paths,
             input_delays=input_delays,
             output_delays=output_delays,
             input_transition_ns=input_transition_ns,
@@ -1254,6 +1304,8 @@ def _run_corner_session(
             wire_load_mode=wire_load_mode,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            macro_lefs=macro_lefs,
+            macro_liberty_paths=macro_liberty_paths,
             input_delays=input_delays,
             output_delays=output_delays,
             input_transition_ns=input_transition_ns,
@@ -1397,6 +1449,7 @@ def _run_multi_corner(
     spef_map: dict[str, str] | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
+    macros: list[dict[str, Any]],
     propagated_clock: bool,
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
@@ -1480,6 +1533,7 @@ def _run_multi_corner(
             spef_path=pair_spef,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
+            macros=macros,
             propagated_clock=propagated_clock,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
@@ -1549,6 +1603,12 @@ def _run_multi_corner(
         "geometry_source": geometry_source,
         "wire_load_model": wire_load_model,
         "wire_load_mode": wire_load_mode,
+        # Additive field (issue #2635): hoisted to the top level like every
+        # other request-level field that cannot vary across corners -- the
+        # *declaration* is shared, only which of each macro's per-corner
+        # liberties was loaded varies, and that is already determined by
+        # each corner's own name plus this one `macros` block.
+        "macros": macro_spec.macros_response(macros),
         # Additive field (issue #2739): one clock mode for the whole
         # characterization -- every per-corner session runs the same
         # request-level `constraints.propagated_clock`, so this is hoisted
@@ -2687,6 +2747,45 @@ def _validate_wire_load_estimate(
     return wire_load_model, wire_load_mode
 
 
+def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
+    """Validate the optional ``request.macros`` array (issue #2635) -- the
+    same shared hard-macro declaration ``klt synthesize`` accepts, field for
+    field, documented once in :mod:`klayout_tools.macros`.
+
+    Returns ``[]`` when the field is omitted, so every request written
+    before this field existed analyses exactly as it did. A thin wrapper
+    rather than a second validator: only the exception class differs per
+    verb.
+    """
+    return macro_spec.validate_macros(macros, request_dir, error_cls=PostRouteStaError)
+
+
+def _macro_liberty_paths(macros: list[dict[str, Any]], corner: str) -> list[str]:
+    """The macro liberties to ``read_liberty`` alongside the standard-cell
+    library for the corner actually being analysed (issue #2635).
+
+    A macro that declared no ``lib`` at all contributes nothing: its LEF is
+    what fixes ``ORD-2013``, and OpenSTA then times the instance as an
+    untimed blackbox (``[WARNING STA-0198] module <cell> not found.
+    Creating black box for <inst>``) -- a legitimate, explicit choice for a
+    caller doing a geometry-only run. A macro that *did* declare a ``lib``
+    map with no entry for this corner is a hard error naming the corner and
+    the keys that are available
+    (:func:`~klayout_tools.macros.macro_lib_for_corner`), never a silent
+    fallback to some other corner's timing -- which matters most in a
+    ``request.pdk.corners`` multi-corner run, where the right answer for
+    one corner is the wrong answer for the next.
+    """
+    paths: list[str] = []
+    for macro in macros:
+        lib_path = macro_spec.macro_lib_for_corner(
+            macro, corner, error_cls=PostRouteStaError
+        )
+        if lib_path is not None:
+            paths.append(lib_path)
+    return paths
+
+
 def _resolve_liberty(
     cell_library: str,
     requested_corner: str | None,
@@ -3523,6 +3622,8 @@ def _sta_script_lines(
     spef_net_names: list[str] | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    macro_lefs: list[str] | None = None,
+    macro_liberty_paths: list[str] | None = None,
     input_delays: dict[str, dict[str, float]] | None = None,
     output_delays: dict[str, dict[str, float]] | None = None,
     input_transition_ns: float | None = None,
@@ -3544,6 +3645,16 @@ def _sta_script_lines(
     design as the analysis target itself, the one and only geometry this
     session ever times), then ``read_liberty``/``create_clock`` and,
     optionally, a caller-supplied ``spef``.
+
+    ``macro_lefs``/``macro_liberty_paths`` (issue #2635,
+    ``request.macros``) are emitted **before** ``read_def`` and immediately
+    after the standard-cell ``read_liberty`` respectively. The LEF ordering
+    is load-bearing: ``read_def``'s own ``COMPONENTS`` records are resolved
+    against the already-loaded masters, so a macro LEF read afterwards is
+    too late -- that is precisely the ``[ERROR ORD-2013] instance <inst>
+    LEF master <cell> not found`` this field closes (live-reproduced against
+    OpenROAD 26Q3 on sky130A, and live-confirmed fixed by this one extra
+    ``read_lef``).
 
     When a ``spef`` is given, ``read_spef`` is wrapped in the annotation
     *evidence* scaffolding issue #1624 added: the pre-existing name-
@@ -3574,9 +3685,13 @@ def _sta_script_lines(
     lines = [
         f"read_lef {tech_lef}",
         f"read_lef {cell_lef}",
+    ]
+    lines += [f"read_lef {lef}" for lef in macro_lefs or []]
+    lines += [
         f"read_def {def_path}",
         f"read_liberty {liberty_path}",
     ]
+    lines += [f"read_liberty {lib}" for lib in macro_liberty_paths or []]
     lines += _clock_lines(clock_port, clock_period_ns)
     if propagated_clock:
         lines += _propagated_clock_lines(clock_port)
@@ -3640,6 +3755,8 @@ def _sta_netlist_script_lines(
     wire_load_mode: str | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    macro_lefs: list[str] | None = None,
+    macro_liberty_paths: list[str] | None = None,
     input_delays: dict[str, dict[str, float]] | None = None,
     output_delays: dict[str, dict[str, float]] | None = None,
     input_transition_ns: float | None = None,
@@ -3684,10 +3801,18 @@ def _sta_netlist_script_lines(
     shapes throughout, differing only in ``geometry_source``/the estimate
     provenance fields.
     """
-    lines = [
-        f"read_liberty {liberty_path}",
+    lines = [f"read_liberty {liberty_path}"]
+    # Issue #2635 (`request.macros`): each macro's corner-matching liberty
+    # right after the standard-cell one, each macro's LEF right after the
+    # cell LEF -- both necessarily before `read_verilog`/`link_design`,
+    # which is where an undeclared macro surfaces as `ORD-2013`.
+    lines += [f"read_liberty {lib}" for lib in macro_liberty_paths or []]
+    lines += [
         f"read_lef {tech_lef}",
         f"read_lef {cell_lef}",
+    ]
+    lines += [f"read_lef {lef}" for lef in macro_lefs or []]
+    lines += [
         f"read_verilog {verilog_path}",
         f"link_design {hdl_toplevel}",
     ]
@@ -3846,6 +3971,16 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
     hint = _container_runtime_hint(completed)
     if hint is not None:
         message = f"{message} -- {hint}"
+    # Issue #2635: `ORD-2013` names the instance and the LEF master but
+    # nothing about which request field would have supplied it -- the one
+    # failure mode a caller with a hard macro and no `request.macros` entry
+    # hits first. Appended as a further `--` clause, the same
+    # recognized-hint structure `_container_runtime_hint` above uses.
+    macro_hint = macro_spec.missing_lef_master_hint(
+        (completed.stdout or "") + "\n" + (completed.stderr or "")
+    )
+    if macro_hint is not None:
+        message = f"{message} -- {macro_hint}"
     return message
 
 

@@ -219,18 +219,29 @@ def hash_check(field: str, expected: str | None, actual: str | None) -> dict[str
 
 
 def build_check_result(
-    *, report_path: str, checks: list[dict[str, Any]]
+    *,
+    report_path: str,
+    checks: list[dict[str, Any]],
+    skipped: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the ``--check`` (cheap mode) JSON payload from a list of
-    :func:`hash_check` entries -- shared shape for ``klt drc``/``klt lvs``."""
+    :func:`hash_check` entries -- shared shape for ``klt drc``/``klt lvs``.
+
+    ``skipped`` (issue #4315) names checks the caller deliberately did not
+    run, as ``{"field", "reason"}`` entries, so a ``match`` over a partial
+    check is never mistaken for a full one. ``None`` (the default) omits the
+    key entirely, leaving every other caller's payload byte-identical."""
     status = "match" if all(check["match"] for check in checks) else "drifted"
-    return {
+    result: dict[str, Any] = {
         "schema_version": 1,
         "mode": "check",
         "report": report_path,
         "status": status,
         "checks": checks,
     }
+    if skipped is not None:
+        result["skipped"] = skipped
+    return result
 
 
 def build_rerun_result(

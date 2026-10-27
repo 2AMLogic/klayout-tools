@@ -3859,6 +3859,58 @@ def test_single_input_never_flags_provenance(tmp_path):
     assert result["provenance_consistency"]["ok"] is True
 
 
+def _drc_with_klt_version(version):
+    envelope = json.loads(json.dumps(DRC_CLEAN_ENVELOPE))
+    if version is None:
+        del envelope["provenance"]["klt_version"]
+    else:
+        envelope["provenance"]["klt_version"] = version
+    return envelope
+
+
+def test_build_drift_current_when_versions_match(tmp_path, monkeypatch):
+    monkeypatch.setattr(signoff_module, "build_version", lambda: "0.5.0+gabc")
+    path = _write(tmp_path, "drc.json", _drc_with_klt_version("0.5.0+gabc"))
+
+    drift = build_signoff([path])["checks"][0]["build_drift"]
+
+    assert drift == {
+        "state": "current",
+        "cited_klt_version": "0.5.0+gabc",
+        "running_klt_version": "0.5.0+gabc",
+    }
+
+
+def test_build_drift_stale_is_reported_but_does_not_demote_status(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(signoff_module, "build_version", lambda: "0.5.1+gdef")
+    path = _write(tmp_path, "drc.json", _drc_with_klt_version("0.5.0+gabc"))
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["build_drift"]["state"] == "stale"
+    assert result["checks"][0]["passed"] is True
+    assert result["status"] == "pass"
+
+
+def test_build_drift_unverifiable_without_klt_version(tmp_path, monkeypatch):
+    monkeypatch.setattr(signoff_module, "build_version", lambda: "0.5.1+gdef")
+    path = _write(tmp_path, "drc.json", _drc_with_klt_version(None))
+
+    drift = build_signoff([path])["checks"][0]["build_drift"]
+
+    assert drift["state"] == "unverifiable"
+    assert drift["cited_klt_version"] is None
+
+
+def test_build_drift_unverifiable_for_unknown_build(tmp_path, monkeypatch):
+    monkeypatch.setattr(signoff_module, "build_version", lambda: "0.5.1.dev0+unknown")
+    path = _write(tmp_path, "drc.json", _drc_with_klt_version("0.5.0+gabc"))
+
+    assert build_signoff([path])["checks"][0]["build_drift"]["state"] == "unverifiable"
+
+
 # --------------------------------------------------------------------------- #
 # Malformed / unrecognized envelopes
 # --------------------------------------------------------------------------- #
