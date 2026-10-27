@@ -1124,3 +1124,65 @@ def test_execute_propagates_phase_b_validation_errors_unchanged(
     request = _geometry_request(tmp_path, pdk_root, empty_netlist, groups, rows)
     with pytest.raises(LayoutPlanError):
         execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+
+# Issue #4202: row placement used to leave group origins off the PDK
+# manufacturing grid, so every shape in a downstream group failed *.ongrid.1.
+def test_resolved_group_origins_snap_up_onto_mfg_grid(
+    tmp_path, gf180mcu_pdk_root, empty_netlist
+):
+    groups = [
+        {
+            "id": "r1",
+            "devices": [],
+            "generator": "res_array",
+            "params": {"width_um": 4.0, "length_um": 0.343},
+        },
+        {"id": "m1", "devices": [], "generator": "mos_array"},
+    ]
+    request = _geometry_request(
+        tmp_path,
+        gf180mcu_pdk_root,
+        empty_netlist,
+        groups,
+        [{"order": ["r1", "m1"], "spacing_um": 2.003}],
+    )
+    request["pdk"] = _gf180mcu_pdk_spec(gf180mcu_pdk_root)
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+    assert exit_code_for(response) == 0
+    offsets = {g["id"]: g["offset_um"] for g in response["device_groups"]}
+    for offset in offsets.values():
+        for value in offset.values():
+            assert round(value / 0.005) * 0.005 == pytest.approx(value, abs=1e-9)
+    assert any("snapped up" in w and "'m1'" in w for w in response["warnings"])
+
+
+def test_on_grid_origins_are_left_unchanged_and_unwarned(
+    tmp_path, pdk_root, empty_netlist
+):
+    groups = [_strip_group("a", 2.0, 1.0), _strip_group("b", 2.0, 3.0)]
+    request = _geometry_request(
+        tmp_path,
+        pdk_root,
+        empty_netlist,
+        groups,
+        [{"order": ["a", "b"], "spacing_um": 1.0, "align": "bottom"}],
+    )
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+    offsets = {g["id"]: g["offset_um"] for g in response["device_groups"]}
+    assert offsets["b"] == pytest.approx({"x": 3.0, "y": 0.0})
+    assert not any("snapped up" in w for w in response["warnings"])
+
+
+def test_snap_offsets_keeps_spacing_a_lower_bound_and_skips_unknown_grid():
+    from klayout_tools.layout_plan_execute import _snap_offsets_to_grid
+
+    offsets = {"a": {"x": 0.0, "y": 0.0}, "b": {"x": 120.163, "y": 1.0}}
+    warnings = _snap_offsets_to_grid(offsets, 0.005)
+    assert offsets["b"] == pytest.approx({"x": 120.165, "y": 1.0})
+    assert offsets["a"] == {"x": 0.0, "y": 0.0}
+    assert len(warnings) == 1 and "'b'" in warnings[0]
+
+    unchanged = {"b": {"x": 120.163, "y": 1.0}}
+    assert _snap_offsets_to_grid(unchanged, 0.0) == []
+    assert unchanged["b"]["x"] == 120.163

@@ -262,6 +262,14 @@
         "klayout_tools.kb"
       ]
     },
+    "array_check": {
+      "kind": "verb",
+      "description": "`klt array_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.array_check",
+        "klayout_tools.cli.array_check_cmd"
+      ]
+    },
     "keepout_check": {
       "kind": "verb",
       "description": "`klt keepout_check` implementation: core modules plus CLI adapter.",
@@ -705,6 +713,11 @@
       "consumer": "corner_matrix",
       "exporter": "sim",
       "reason": "Issue #4045: `klt corner-matrix` must check the grid exactly as `klt sim` expands it, so it calls sim's expander and catches SimError rather than duplicating the expansion."
+    },
+    {
+      "consumer": "array_check",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --layers parser, as every verb does."
     },
     {
       "consumer": "keepout_check",

@@ -185,6 +185,7 @@ def find_pdk(
             },
             "broken_symlinks": [{"asset": <asset key>, "path": <abs path>}, ...],
             "has_pcell_library": <bool>,
+            "pcell_shim": <"present" | "missing" | "not_required">,
             "ambiguous_roots": [{"root": <abs root>, "resolved_via": <str>}, ...],
             "compatibility": {"status": <match|mismatch|unknown|not_declared>, ...},
         }
@@ -201,6 +202,14 @@ def find_pdk(
     routinely imports third-party modules klt does not depend on (verified:
     sky130A's ``cells`` needs ``gdsfactory``; ihp-sg13g2's needs ``cni``).
     Additive field; see ``docs/json-contract.md``.
+
+    ``pcell_shim`` (issue #4236) says whether the vendored compat shim a
+    shipped PyCell package imports (ihp-sg13g2's ``pycell4klayout-api``, a git
+    submodule the release tarball omits) is on disk: ``"present"``,
+    ``"missing"`` (absent or empty -- the package exists but cannot load), or
+    ``"not_required"`` (no shipped package needs one, e.g. sky130A). A cheap
+    filesystem check, so a repo can state PCell usability from ``pdk find``
+    alone. Additive field.
 
     ``broken_symlinks`` (issue #1406) reports every **dangling** symlink
     (:func:`_find_broken_symlinks`) found under any resolved ``assets``
@@ -287,6 +296,7 @@ def find_pdk(
             "assets": assets,
             "broken_symlinks": _broken_symlinks_in_assets(assets),
             "has_pcell_library": bool(_pcell_packages_for_assets(assets)),
+            "pcell_shim": _pcell_shim_status_for_assets(assets),
             "ambiguous_roots": _ambiguous_roots(
                 candidates[index + 1 :], chosen["name"], root_path
             ),
@@ -435,6 +445,9 @@ def list_pdks(root: str | None = None) -> dict[str, Any]:
                         "version": entry["version"],
                         "has_pcell_library": bool(
                             _pcell_packages_for_assets(_asset_dirs(entry["_dir"]))
+                        ),
+                        "pcell_shim": _pcell_shim_status_for_assets(
+                            _asset_dirs(entry["_dir"])
                         ),
                     }
                     for entry in variants
@@ -1172,6 +1185,46 @@ def _pcell_packages_for_assets(assets: dict[str, str | None]) -> list[str]:
     """:func:`_pcell_packages_in` for an already-resolved ``assets`` map."""
     lib_dir = _pcell_lib_dir_for_assets(assets)
     return [] if lib_dir is None else _pcell_packages_in(lib_dir)
+
+
+#: PyCell packages (by name) that import a PDK-bundled compat shim vendored as
+#: a git submodule next to them, mapped to the shim's directory (path segments
+#: relative to the PyCell ``lib_dir``). A release tarball omits submodules, so
+#: this directory is routinely empty (issue #4236). Pure path data so
+#: :func:`pcell_shim_status` stays a filesystem check; the import/``sys.path``
+#: details live in :mod:`klayout_tools.pdk_pcell`.
+_PCELL_SHIM_ROOTS: dict[str, tuple[str, ...]] = {
+    "sg13g2_pycell_lib": ("pycell4klayout-api",),
+}
+
+
+def _pcell_shim_status_for_assets(assets: dict[str, str | None]) -> str:
+    """``"present"`` | ``"missing"`` | ``"not_required"`` (issue #4236).
+
+    ``not_required`` when no PyCell package the variant ships needs a vendored
+    compat shim (sky130A, gf180mcuD, ...); otherwise ``missing`` when any such
+    shim directory is absent or empty -- the uninitialized-submodule shape --
+    and ``present`` when every required one has content. No imports, no pya.
+    """
+    lib_dir = _pcell_lib_dir_for_assets(assets)
+    if lib_dir is None:
+        return "not_required"
+    roots = [
+        _PCELL_SHIM_ROOTS[name]
+        for name in _pcell_packages_in(lib_dir)
+        if name in _PCELL_SHIM_ROOTS
+    ]
+    if not roots:
+        return "not_required"
+    for segments in roots:
+        shim_dir = os.path.join(lib_dir, *segments)
+        try:
+            populated = os.path.isdir(shim_dir) and bool(os.listdir(shim_dir))
+        except OSError:  # pragma: no cover - unreadable directory
+            populated = False
+        if not populated:
+            return "missing"
+    return "present"
 
 
 def pdk_pcell_lib_dir(

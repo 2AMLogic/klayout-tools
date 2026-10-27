@@ -7977,6 +7977,55 @@ def test_corners_params_is_a_registry_feature():
         "corners.params"
     ]
     assert sb._missing_runner_features(["corners.params"], None) is None
+    assert sb._missing_runner_features(["corners.params"], "0.7.0") == [
+        "corners.params"
+    ]
+    assert sb._missing_runner_features(["corners.params"], "0.8.0") == []
+
+
+_CORNERS_PARAMS_REQUEST = {
+    "models": {"pdk": "sky130A"},
+    "options": {},
+    "corners": {"params": {"vdd": [1.6, 1.8]}},
+}
+
+
+def test_corners_params_is_a_mandatory_runner_feature():
+    assert sb._request_features(_CORNERS_PARAMS_REQUEST) == ["corners.params"]
+    assert "corners.params" in sb._MANDATORY_RUNNER_FEATURES
+
+
+@pytest.mark.parametrize("version_check", ["enforce", "warn"])
+@pytest.mark.parametrize("runner", ["klt 0.7.0", "klt dirty", "klt"])
+def test_corners_params_on_an_old_or_unknown_runner_is_rejected_even_under_warn(
+    tmp_path, runner, version_check
+):
+    spec = _feature_spec(tmp_path, _CORNERS_PARAMS_REQUEST, version_check=version_check)
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, spec, _fake_klt(runner)
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()  # klt sim never ran
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "corners.params" in error["message"]
+
+
+def test_corners_params_on_a_supporting_runner_runs(tmp_path):
+    spec = _feature_spec(
+        tmp_path, _CORNERS_PARAMS_REQUEST, client="0.8.0", version_check="enforce"
+    )
+    proc, _, marker = _run_job_cmd_with_fake_klt(tmp_path, spec, _fake_klt("klt 0.8.0"))
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_request_without_corners_params_runs_on_a_0_7_0_runner(tmp_path):
+    request = {"models": {"pdk": "sky130A"}, "options": {}}
+    spec = _feature_spec(tmp_path, request, version_check="warn")
+    proc, _, marker = _run_job_cmd_with_fake_klt(tmp_path, spec, _fake_klt("klt 0.7.0"))
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
 
 
 def test_corner_axis_fields_are_registry_features():

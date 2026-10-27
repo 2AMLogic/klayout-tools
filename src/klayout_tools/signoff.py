@@ -5735,11 +5735,9 @@ def _bind_anchored_citation(
         _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE
     ):
         return None
-    input_verified = resolution.get("input_verified")
-    if input_verified is False:
-        return _REASON_STALE_EVIDENCE
-    if input_verified is not True:
-        return _REASON_UNVERIFIABLE_PROVENANCE
+    input_refusal = _anchored_input_refusal(resolution, repo_root, execution_detail)
+    if input_refusal is not None:
+        return input_refusal
     binding = _generic_artifact_binding(resolution["envelope"], resolution)
     if item_id in _ITEMS_ACCEPTING_REGENERATION_CLAIMS:
         regeneration, refusal = _regeneration_claim(
@@ -5767,6 +5765,85 @@ def _bind_anchored_citation(
             binding["regeneration"] = regeneration
     citation["artifact_binding"] = binding
     return None
+
+
+def _anchored_input_refusal(
+    resolution: Mapping[str, Any],
+    repo_root: str | Path | None,
+    detail: dict[str, Any] | None,
+) -> str | None:
+    """The refusing reason when an anchored citation's input did not re-hash
+    (stale or unverifiable) or an attested ``present`` file drifted (issue
+    #4197), else ``None``."""
+    input_verified = resolution.get("input_verified")
+    if input_verified is False:
+        return _REASON_STALE_EVIDENCE
+    if input_verified is not True:
+        return _REASON_UNVERIFIABLE_PROVENANCE
+    return _attested_checks_refusal(resolution, repo_root, detail)
+
+
+def _attested_check_members(
+    envelope: Mapping[str, Any],
+) -> list[tuple[Any, str]]:
+    """``({path, scope}, recorded_hash)`` for every ``present`` check of a
+    ``klt signoff --attest`` envelope that recorded a ``sha256:`` content
+    hash (issue #4197) -- the inventory's listed ``sources`` and ``derived``
+    files. ``[]`` for an envelope with no ``attestation.checks[]``."""
+    attestation = envelope.get("attestation")
+    checks = attestation.get("checks") if isinstance(attestation, Mapping) else None
+    if not isinstance(checks, list):
+        return []
+    members: list[tuple[Any, str]] = []
+    for check in checks:
+        if not isinstance(check, Mapping) or check.get("check") != "present":
+            continue
+        path = check.get("path")
+        recorded = check.get("content_hash")
+        if (
+            isinstance(path, str)
+            and path
+            and isinstance(recorded, str)
+            and recorded.startswith("sha256:")
+        ):
+            members.append(({"path": path, "scope": "repo"}, recorded))
+    return members
+
+
+def _attested_checks_refusal(
+    resolution: Mapping[str, Any],
+    repo_root: str | Path | None,
+    detail: dict[str, Any] | None,
+) -> str | None:
+    """Re-hash the files an attestation's ``present`` checks recorded (issue
+    #4197). The envelope's ``provenance.input`` pins only the inventory, so
+    without this an edit to a listed source or derived file stays ``met``
+    until re-attested. A drifted file is :data:`_REASON_STALE_EVIDENCE`; one
+    that cannot be read from the grading context is
+    :data:`_REASON_UNVERIFIABLE_PROVENANCE`. ``None`` -- and nothing added to
+    the citation -- when every file re-hashes or the envelope carries none."""
+    members = _attested_check_members(resolution["envelope"])
+    if not members:
+        return None
+    results = _verify_generic_input_set(
+        members, resolution["spec"], resolution.get("file"), repo_root
+    )
+    bad = [
+        {
+            "path": member["path"]["path"],
+            "content_hash": member["content_hash"],
+            "status": member["status"],
+        }
+        for member in results
+        if member["status"] != "verified"
+    ]
+    if not bad:
+        return None
+    if detail is not None:
+        detail["artifact_binding"] = {"members": bad}
+    if any(member["status"] == "stale" for member in bad):
+        return _REASON_STALE_EVIDENCE
+    return _REASON_UNVERIFIABLE_PROVENANCE
 
 
 def _bound_artifact(
@@ -6697,15 +6774,18 @@ def _build_tier_item(
             status, reason, not_applicable, failure_detail = _grade_not_applicable(
                 raw_entry["not_applicable"], partition_kind
             )
-    elif (
+    elif item_id in _ITEMS_ACCEPTING_MULTI_CITATION and (
         raw_entry is not None
-        and item_id in _ITEMS_ACCEPTING_MULTI_CITATION
         and (
             isinstance(raw_entry, list)
             or spec_rows is not None
             or spec_rows_invalid
             or required_kind_pair is not None
         )
+        # Issue #4190: declared ``spec_rows`` with no evidence entry at
+        # all grade as a zero-citation set (every row uncovered or a
+        # declared gap), not as ``no_evidence``.
+        or (raw_entry is None and (spec_rows is not None or spec_rows_invalid))
     ):
         # Issue #2959: item 5 may cite several envelopes (and declare the
         # spec rows they must cover) -- graded per citation, then aggregated.
@@ -6892,7 +6972,8 @@ def _grade_multi_citation(
     )
     if spec_rows_invalid:
         return invalid
-    members = _parse_multi_members(raw_entry)
+    # Issue #4190: no evidence entry -> zero members; only ``spec_rows`` grade.
+    members = [] if raw_entry is None else _parse_multi_members(raw_entry)
     if members is None or not _members_rows_declared(members, spec_rows):
         return invalid
 
@@ -6944,6 +7025,10 @@ def _grade_multi_citation(
                 )
     if row_info:
         extra["row_coverage"] = row_info
+    if not graded:
+        # Unreachable for a non-empty declared row set (every row is then
+        # uncovered or a gap); never grade a citation-less entry ``met``.
+        return "unmet", _REASON_NO_EVIDENCE, None, {}, extra
     extra["citations"] = [g[2] for _, _, g in graded]
     return "met", None, graded[0][2][2], {}, extra
 

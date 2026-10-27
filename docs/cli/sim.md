@@ -1596,7 +1596,7 @@ but no tagged release contains it yet.
 | --- | --- |
 | `measurements[].expr` | 0.7.0 |
 | `corners.process[].sections[]` (object form) | 0.7.0 |
-| `corners.params` | 0.7.0 |
+| `corners.params` | 0.8.0 |
 | `corners.units` | 0.8.0 |
 | `corners.temperature_param` | 0.8.0 |
 | `options.ngspice_init` | 0.7.0 |
@@ -1712,7 +1712,7 @@ release segment:
 | `twoport` ([#3338](https://github.com/2AMLogic/klayout-tools/issues/3338)) | `analysis.kind` is `"twoport"` | `0.7.1` (**mandatory**, see below) |
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
-| `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (warn-and-run like the other non-mandatory entries; the post-run `params_unsupported_worker` check stays) | `0.7.0` |
+| `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
@@ -1892,8 +1892,11 @@ the packaged `data/` copy. See
   existed passes it and ignores that field. For `corners.params` `klt sim`
   does not rely on the version: it requires every returned corner to echo
   the dispatched `corner_id` and `params`, and fails the request with
-  `params_unsupported_worker` otherwise (see "Corner axes"). Other newer
-  fields still depend on the version check above.
+  `params_unsupported_worker` otherwise (see "Corner axes"). `corners.params`
+  is also a **mandatory** runner feature (first in `0.8.0`, #4235): a runner
+  that predates it, or whose version is unreadable, is refused with
+  `batch_runner_feature_unsupported` even under `runner_version_check: warn`.
+  Other newer fields still depend on the version check above.
 
 **When the client is newer than the runner.** If the image is a different
 minor from your client, either:
