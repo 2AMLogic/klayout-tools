@@ -2628,6 +2628,31 @@ def _write_yosys_log(
     )
 
 
+_SV_SOURCE_ERROR_RE = re.compile(r"(?:^|[\s/\\])\S*\.svh?:\d+:\s*ERROR:")
+
+
+def _sv_frontend_hint_if_applicable(error_line: str) -> str:
+    """Hint appended when Yosys's native ``-sv`` front end rejects a
+    SystemVerilog construct (issue #4181).
+
+    Yosys prefixes a parse error with ``<file>:<line>:``, so the source
+    extension is read straight off the error line -- a ``.v`` source with
+    the same syntax error gets no hint. Conservative table: only the
+    unpacked-array-port class (``syntax error, unexpected '['`` while a
+    port list is expected) is recognised; anything else returns ``""``.
+    """
+    if not _SV_SOURCE_ERROR_RE.search(error_line):
+        return ""
+    if "syntax error, unexpected '['" not in error_line:
+        return ""
+    return (
+        " -- hint: this looks like an unpacked-array port (e.g. "
+        "`input logic [31:0] a_i[2]`), a SystemVerilog construct Yosys's "
+        "native `read_verilog -sv` front end does not support; rewrite it "
+        "as a packed/flattened port or pre-convert the source"
+    )
+
+
 def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
     """Build an actionable error message from a failed ``yosys -s`` run.
 
@@ -2651,6 +2676,7 @@ def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
         if error_lines:
             message = f"yosys synthesis failed: {error_lines[-1]}"
             message += wasi_sandbox_hint_if_applicable(error_lines[-1])
+            message += _sv_frontend_hint_if_applicable(error_lines[-1])
             return message
 
     tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
