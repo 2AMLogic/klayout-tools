@@ -487,6 +487,23 @@ def _apply_tie_nets(netlist_path: str, ties: Sequence[tuple[str, str]]) -> None:
         handle.write("".join(out))
 
 
+def _tie_nets_in_legs(
+    ties: Sequence[tuple[str, str]] | None,
+    extract_report: Mapping[str, Any],
+    extracted_netlist_path: str,
+    device_only_netlist_path: str | None,
+) -> None:
+    """Validate ``ties`` against the extraction, then apply them to every
+    netlist a simulated leg reads (issue #4245). A no-op when ``ties`` is empty.
+    """
+    if not ties:
+        return
+    _validate_tie_nets(ties, extract_report)
+    _apply_tie_nets(extracted_netlist_path, ties)
+    if device_only_netlist_path is not None:
+        _apply_tie_nets(device_only_netlist_path, ties)
+
+
 def _parasitic_integrity_report(
     parasitics: Mapping[str, Any],
 ) -> dict[str, Any] | None:
@@ -3131,11 +3148,9 @@ def run_pex(
     # schematic nets in the netlist every simulated leg below reads. Checked
     # against the extraction first, applied before any simulation; `None`
     # leaves the netlist (and the whole report) untouched.
-    if tie_nets:
-        _validate_tie_nets(tie_nets, extract_report)
-        _apply_tie_nets(extracted_netlist_path, tie_nets)
-        if device_only_netlist_path is not None:
-            _apply_tie_nets(device_only_netlist_path, tie_nets)
+    _tie_nets_in_legs(
+        tie_nets, extract_report, extracted_netlist_path, device_only_netlist_path
+    )
 
     work_dir = (
         os.path.abspath(artifacts_dir)
