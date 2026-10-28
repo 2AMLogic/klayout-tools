@@ -605,6 +605,16 @@ flag — passing it alongside `--engine curated` (the default) is silently
 ignored, not rejected, the same treatment `--deck-file`/`--timeout-s`
 already get for that engine mismatch.
 
+**Comparing `sky130A_mr.drc` with the curated sky130 deck (issue #4472).**
+`sky130A_mr.drc` defaults `beol`, `feol` and `offgrid` to `false`, so a bare
+`--deck-file .../sky130A_mr.drc` run executes no `m*` rule at all. Pass
+`--deck-var beol=true` (and `--deck-var feol=false --deck-var seal=false` to
+scope the run) to compare the metal rules. With those set, `m4.7` and the
+curated `met4.holes_area.1` both report 20 holes on the stock
+`sky130_ef_io__analog_noesd_pad`, and `met1`-`met3`/`met5` hole counts agree;
+`tests/test_sky130_stock_pad_holes_crosscheck.py` pins this when a sky130A
+install is present.
+
 **Discovering a deck's globals, and the `deck_globals_not_supplied` warning
 (issue #3816).** `klt pdk decks --pdk <variant>` lists the sibling decks a PDK
 ships and the `-rd` globals each reads. When the deck handed to the klayout
