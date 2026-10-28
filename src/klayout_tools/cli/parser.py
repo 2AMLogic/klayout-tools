@@ -6721,6 +6721,20 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     drc_parser.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        default=None,
+        metavar="PATH",
+        help=(
+            "also write the report envelope to PATH, byte-identical to "
+            "`--format json` stdout, whether the run is clean or exits 3 on "
+            "violations; gzip-compressed (deterministic) when PATH ends "
+            "`.gz`. Stdout and exit codes are unchanged (issue #4393). Not "
+            "supported with --check or --list-rules. See docs/cli/drc.md"
+        ),
+    )
+    drc_parser.add_argument(
         "--tile",
         dest="tile",
         metavar="COLSxROWS",

@@ -11549,3 +11549,112 @@ def test_curated_request_document_negative_control(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["negative_control"]["status"] == (
         "passed"
     )
+
+
+# ---------------------------------------------------------------------------
+# -o/--output: additive report file copy (#4393)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("make_layout", "expected_exit"),
+    [(_make_violation_layout, 3), (_make_clean_layout, 0)],
+)
+def test_output_file_equals_stdout(tmp_path, capsys, make_layout, expected_exit):
+    gds = tmp_path / "in.gds"
+    make_layout().write(str(gds))
+    out = tmp_path / "report.json"
+
+    rc = main(["drc", str(gds), "--deck", "sky130", "--format", "json", "-o", str(out)])
+
+    assert rc == expected_exit
+    assert out.read_text() == capsys.readouterr().out
+
+
+def test_output_text_format_still_writes_json(tmp_path, capsys):
+    gds = tmp_path / "in.gds"
+    _make_violation_layout().write(str(gds))
+    out = tmp_path / "report.json"
+
+    assert main(["drc", str(gds), "--deck", "sky130", "--output", str(out)]) == 3
+
+    assert json.loads(out.read_text())["status"] == "violations"
+    assert not capsys.readouterr().out.lstrip().startswith("{")
+
+
+def test_output_gz_is_gzipped_json(tmp_path, capsys):
+    import gzip
+
+    gds = tmp_path / "in.gds"
+    _make_violation_layout().write(str(gds))
+    out = tmp_path / "report.json.gz"
+
+    main(["drc", str(gds), "--deck", "sky130", "--format", "json", "-o", str(out)])
+
+    assert gzip.decompress(out.read_bytes()).decode() == capsys.readouterr().out
+
+
+def test_output_unwritable_path_is_error_envelope(tmp_path, capsys):
+    gds = tmp_path / "in.gds"
+    _make_violation_layout().write(str(gds))
+    out = tmp_path / "no-such-dir" / "report.json"
+
+    rc = main(["drc", str(gds), "--deck", "sky130", "--format", "json", "-o", str(out)])
+
+    assert rc == 1
+    assert (
+        "could not write report"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
+
+
+def test_output_rejected_with_list_rules(tmp_path, capsys):
+    rc = main(
+        [
+            "drc",
+            "--deck",
+            "sky130",
+            "--list-rules",
+            "-o",
+            str(tmp_path / "r.json"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert rc == 1
+    assert "--output" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_output_rejected_with_check(tmp_path, capsys):
+    report = tmp_path / "committed.json"
+    report.write_text("{}")
+
+    rc = main(
+        [
+            "drc",
+            "--check",
+            str(report),
+            "-o",
+            str(tmp_path / "r.json"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert rc == 1
+    assert "-o/--output" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_output_reachable_from_request_document(tmp_path, capsys):
+    gds = tmp_path / "in.gds"
+    _make_violation_layout().write(str(gds))
+    request = tmp_path / "drc.request.json"
+    request.write_text(
+        json.dumps({"file": "in.gds", "deck": "sky130", "output": "out.json"})
+    )
+
+    rc = main(["drc", str(request), "--format", "json"])
+
+    assert rc == 3
+    assert (tmp_path / "out.json").read_text() == capsys.readouterr().out

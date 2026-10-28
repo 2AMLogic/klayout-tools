@@ -14,6 +14,11 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt drc` gains `-o/--output PATH`** (issue #4393, documented in
+  [`docs/cli/drc.md`](docs/cli/drc.md)): an additive file copy of the report
+  envelope, byte-identical to `--format json` stdout and written for clean and
+  violating (exit `3`) runs alike; `.gz` paths are gzip-compressed. Stdout and
+  exit codes are unchanged; reachable from a request document as `output`.
 - **`place-and-route` `power.preset` accepts `power.connects`; `drc` tap_distance note**
   (issue #4348). An explicit `connects` replaces the preset's connect entries
   (`[]` = no via tuning); `power.straps` stays mutually exclusive. The response
