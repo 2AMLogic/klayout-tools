@@ -436,7 +436,7 @@ def test_load_request_rejects_unknown_top_level_key(tmp_path, key):
 def test_load_request_accepts_comment_and_every_allowed_key(tmp_path):
     from klayout_tools.place_and_route import _ALLOWED_REQUEST_KEYS
 
-    assert len(_ALLOWED_REQUEST_KEYS) == 22
+    assert len(_ALLOWED_REQUEST_KEYS) == 23
     request = _base_request(_comment="note", schema="klt.place_and_route.request/1")
     for key in _ALLOWED_REQUEST_KEYS:
         request.setdefault(key, {} if key in ("backend", "batch", "outputs") else 1)
@@ -2709,6 +2709,7 @@ def _stub_merge_def_to_gds(monkeypatch) -> list[dict]:
         calls.append(kwargs)
         Path(kwargs["out_path"]).write_text("fake gds\n")
         return {
+            "output_dbu_um": 0.001,
             "path": None,
             "resolution": "none",
             "def_net_names": {
@@ -8547,6 +8548,7 @@ def test_merge_def_to_gds_success(tmp_path):
     assert result.top_cell().name == "top"
     # `_fake_pdk_info`'s `assets.klayout` is `None` -- no map file to find.
     assert result_info == {
+        "output_dbu_um": 0.001,
         "path": None,
         "resolution": "none",
         # This DEF declares no `NETS` section at all, so the issue #1488
@@ -8665,6 +8667,7 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
 
     assert out_path.is_file()
     assert result_info == {
+        "output_dbu_um": 0.001,
         "path": str(map_path),
         "resolution": "family",
         "def_net_names": {"single_pin_markers": 0, "unresolved_single_pin_nets": []},
@@ -11870,6 +11873,7 @@ def _stub_merge_with_pdk_layer_map(monkeypatch) -> None:
     def fake_merge(**kwargs):
         Path(kwargs["out_path"]).write_text("fake gds\n")
         return {
+            "output_dbu_um": 0.001,
             "path": os.path.join(
                 os.environ["PDK_ROOT"], "sky130A", "libs.tech", "klayout", "m.map"
             ),

@@ -2148,6 +2148,20 @@ def _validate_portable_paths(value: Any) -> bool:
     return value
 
 
+def _validate_output_dbu_um(value: Any) -> float | None:
+    """Optional ``request.output_dbu_um`` (issue #4482): the dbu (um) of the
+    merged GDS. ``None``/omitted keeps the tech LEF's ``DATABASE MICRONS``
+    dbu. Whether it is a lossless refinement of that dbu is checked at merge
+    time, when the native dbu is known."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise PlaceAndRouteError("request.output_dbu_um must be a positive number")
+    if not 0 < value < float("inf"):
+        raise PlaceAndRouteError("request.output_dbu_um must be a positive number")
+    return float(value)
+
+
 def _validate_post_route_spef(value: Any) -> bool:
     """Optional ``request.post_route_spef`` (issue #948, Epic #700 Phase 3,
     ``docs/design/post-route-sta-survey.md`` §4.1) -- opts in to a real
