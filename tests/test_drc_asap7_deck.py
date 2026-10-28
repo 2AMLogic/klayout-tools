@@ -104,7 +104,7 @@ _DECK_LAYERS = {
     *(f"v{i}" for i in range(1, 10)),
 }  # fmt: skip
 #: Read by number from DRM Table 2.3.1: the pinned asap7.lyp has no PAD entry.
-_DECK_LAYERS_NOT_IN_LYP = {"pad": (96, 0)}
+_DECK_LAYERS_NOT_IN_LYP = {"pad": (96, 0), "thickox": (111, 0)}
 _CASES = fx.all_cases()
 #: The pinned shipped-cell libraries: (lambdapdk library, GDS / cell suffix).
 _LIBRARIES = (
@@ -869,7 +869,7 @@ def test_opt_in_grid_rules_are_declared_apart_from_the_default_ids():
     for var in OPT_IN_DECK_VARS:
         assert f"${var} = nil unless defined? ${var}" in text
     # The default contract is untouched: nothing opt-in leaked into RULES.
-    assert len(RULE_IDS) == 263
+    assert len(RULE_IDS) == 267
 
 
 def test_docs_list_opt_in_grid_rules_and_vars():

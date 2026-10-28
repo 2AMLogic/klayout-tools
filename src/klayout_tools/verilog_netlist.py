@@ -153,6 +153,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import cast
 
 #: Verilog block (`/* ... */`) and line (`// ...`) comments, stripped before
 #: any other parsing. `re.S` so a block comment can span newlines.
@@ -1300,6 +1301,103 @@ def convert_gate_level_verilog(
         out.append(f".SUBCKT {cell} {' '.join(pins)}")
         out.append(f".ENDS {cell}")
 
+    return "\n".join(out) + "\n"
+
+
+#: Pin names a transistor-level library cell declares for its supply rails
+#: (ASAP7 CDL: ``VDD``/``VSS``). A cell pin of this name that the Verilog
+#: instance does not connect is tied to the module-level rail of the same
+#: name by :func:`convert_gate_level_verilog_expanded`; every other
+#: unconnected pin gets its own unconnected net.
+_RAIL_PIN_NAMES = frozenset({"VDD", "VSS", "VNW", "VPW", "GND"})
+
+
+def parse_subckt_blocks(text: str) -> dict[str, str]:
+    """``{<name>: <full .SUBCKT .. .ENDS text>}`` for every subcircuit block
+    in a library ``.spice``/``.cdl`` ``text``, keyed by the name as written.
+    Continuation lines are kept verbatim inside the block text."""
+    blocks: dict[str, str] = {}
+    current: list[str] = []
+    name = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        upper = stripped.upper()
+        if not current:
+            if upper.startswith(".SUBCKT"):
+                parts = stripped.split()
+                if len(parts) < 2:
+                    continue
+                name = parts[1]
+                current = [line]
+        else:
+            current.append(line)
+            if upper.startswith(".ENDS"):
+                blocks[name] = "\n".join(current) + "\n"
+                current = []
+    return blocks
+
+
+def convert_gate_level_verilog_expanded(
+    text: str,
+    *,
+    pin_order_lookup,
+    cell_body_lookup,
+) -> str:
+    """Like :func:`convert_gate_level_verilog`, but every library cell is
+    written as its real transistor-level ``.SUBCKT`` block (``cell_body_lookup
+    (cell) -> str | None``, e.g. :func:`parse_subckt_blocks` over the PDK CDL)
+    instead of a pin-only stub, so a FinFET extraction (which compares ``nfin``
+    exactly on devices) has a device-level reference to match.
+
+    Each instance calls the cell with its *full* declared pin list: pins the
+    Verilog connects are bound as in the stub conversion; an unconnected rail
+    pin (:data:`_RAIL_PIN_NAMES`) is tied to the module-level net of the same
+    name; any other unconnected pin gets its own ``__NC_`` net. A cell with no
+    body is :class:`VerilogNetlistError` naming the cell -- never a silent
+    skip."""
+    modules = parse_gate_level_verilog(text)
+    real_orders = _library_pin_orders(modules, pin_order_lookup)
+    bound, _ = _bind_all_instances(modules, real_orders)
+
+    bodies: dict[str, str] = {}
+    for cell in real_orders:
+        body = cell_body_lookup(cell)
+        if body is None:
+            raise VerilogNetlistError(
+                f"library cell '{cell}' has a pin order but no transistor-level "
+                "'.subckt' body in the resolved PDK library, so it cannot be "
+                "expanded for a FinFET compare"
+            )
+        bodies[cell] = body
+
+    out: list[str] = []
+    for module, module_bound in zip(modules, bound, strict=True):
+        ports = cast("list[str]", module["ports"])
+        instances = cast("list[dict[str, str]]", module["instances"])
+        out.append(f".SUBCKT {module['name']} {' '.join(ports)}".rstrip())
+        for instance, connections in zip(instances, module_bound, strict=True):
+            cell = instance["cell"]
+            if cell in real_orders:
+                pins = real_orders[cell]
+                nets = [
+                    connections.get(
+                        pin,
+                        pin
+                        if pin.upper() in _RAIL_PIN_NAMES
+                        else f"__NC_{instance['name']}_{pin}__",
+                    )
+                    for pin in pins
+                ]
+            else:
+                pins = cast("list[str]", _sub_module_by_name(modules, cell)["ports"])
+                nets = [
+                    connections.get(pin, f"__NC_{instance['name']}_{pin}__")
+                    for pin in pins
+                ]
+            out.append(f"X{_sanitize(instance['name'])} {' '.join(nets)} {cell}")
+        out.append(f".ENDS {module['name']}")
+
+    out.extend(body.rstrip("\n") for body in bodies.values())
     return "\n".join(out) + "\n"
 
 
