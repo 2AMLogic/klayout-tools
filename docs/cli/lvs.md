@@ -253,6 +253,17 @@ absolute paths. On a non-zero exit that yields no usable verdict,
 application and pip module versions (a mismatch is a common cause), then
 carries the full runset log.
 
+**Unresolved `X` calls are reported, not dropped (issue #4519).** An `X`
+card in the reference naming a subcircuit that is neither defined in the
+reference file, nor converted into a device by the runset (its `DEVICE_LIST`
+under `convert_subckts`), nor a device class of the runset's compare, would
+otherwise vanish from the reference and merge its nets (e.g. an xschem
+`X... sky130_fd_pr__cap_mim_m3_1` MIM cap). The engine emits the same
+`reference.unresolved_subckt_call` error finding as the `"klayout"` engine
+(see that category's description) naming the instance and subcircuit, and the
+status is `mismatch`. `reference.device_map` remains unsupported for this
+engine; pairing such devices through the runset is not yet implemented.
+
 **The verdict is taken from the `.lvsdb`, not the process.** The database is
 read back with `klayout.db.LayoutVsSchematic.read()` + `xref()`. A PDK driver
 may exit `0` on a non-matching pair, and another (sky130's `sky130.lvs`) exits

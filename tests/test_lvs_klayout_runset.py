@@ -154,6 +154,41 @@ def test_driver_exit_zero_on_mismatch_is_a_mismatch(tmp_path, fake_klayout):
     assert report["device_census"]["reference"]["NMOS"] == 1
 
 
+def test_unresolved_x_call_in_reference_is_reported(tmp_path, fake_klayout):
+    request = json.loads(_request(tmp_path, 1))
+    sp = tmp_path / "ref.sp"
+    sp.write_text(
+        SPICE_ONE.replace(
+            ".ends", "XC1 a b sky130_fd_pr__cap_mim_m3_1 W=1u L=1u\n.ends"
+        )
+    )
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "mismatch"
+    found = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "reference.unresolved_subckt_call"
+    ]
+    assert len(found) == 1
+    assert found[0]["subcircuit"]["reference"] == "SKY130_FD_PR__CAP_MIM_M3_1"
+    assert found[0]["instance"]["reference"].upper() == "C1"
+
+
+def test_defined_x_call_in_reference_is_not_reported(tmp_path, fake_klayout):
+    request = json.loads(_request(tmp_path, 1))
+    sp = tmp_path / "ref.sp"
+    sp.write_text(
+        ".subckt CELL p q\nR1 p q 1k\n.ends\n"
+        ".subckt TOP\nM1 c b a d NMOS L=0.2u W=0.4u\nX1 a b CELL\n.ends\n"
+    )
+    report = run_lvs(json.dumps(request))
+    assert not [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "reference.unresolved_subckt_call"
+    ]
+
+
 def test_zero_devices_recognized_is_not_clean(tmp_path, fake_klayout):
     fake_klayout["extract"] = False
     sp = tmp_path / "empty.sp"

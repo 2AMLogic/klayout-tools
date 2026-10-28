@@ -847,6 +847,35 @@ def _error_lines(output: str) -> list[str]:
     return [ln.strip() for ln in output.splitlines() if _ERROR_LINE_RE.match(ln)]
 
 
+def _unresolved_reference_calls(
+    reference_path: str, top: str | None, converted_names: set[str]
+) -> list[dict[str, Any]]:
+    """Issue #4519: ``reference.unresolved_subckt_call`` findings for ``X``
+    calls the runset neither converted nor could resolve.
+
+    The reference is re-read with the plain SPICE reader (hierarchy intact).
+    A callee whose name is a device class the runset itself built
+    (``converted_names``, upper-cased -- the ``DEVICE_LIST`` conversions)
+    is not reported. ``[]`` when the reference cannot be re-read: the
+    runset's own verdict stands."""
+    import klayout.db as kdb
+
+    from .lvs import _unresolved_reference_subckt_calls
+
+    netlist = kdb.Netlist()
+    try:
+        netlist.read(reference_path, kdb.NetlistSpiceReader())
+    except Exception:
+        return []
+    return _unresolved_reference_subckt_calls(
+        netlist,
+        converted_names,
+        form="spice",
+        top=top,
+        reference_path=reference_path,
+    )
+
+
 def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[str, Any]:
     """Run ``request`` through the PDK runset and return the ``klt lvs``
     envelope. See this module's docstring; request fields are documented in
@@ -885,7 +914,15 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
 
         shutil.rmtree(work_dir, ignore_errors=True)
 
-    mismatches = verdict["mismatches"]
+    declared = verdict["coverage"]["declared_device_classes"]
+    unresolved = _unresolved_reference_calls(
+        reference,
+        request["reference"].get("top"),
+        {str(n).upper() for side in declared.values() for n in side or []},
+    )
+    mismatches = verdict["mismatches"] + unresolved
+    if unresolved:
+        verdict["status"] = STATUS_MISMATCH
     category_counts: dict[str, int] = {}
     category_error_counts: dict[str, int] = {}
     for m in mismatches:
