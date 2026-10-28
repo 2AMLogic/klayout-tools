@@ -1015,6 +1015,17 @@ def _print_not_applicable(item: dict) -> None:
         print(f"          {row['id']} [{row['class']}]: {row['reason']}")
 
 
+def _print_foundry_cell_exceptions(citation: dict) -> None:
+    for exception in citation.get("foundry_cell_exceptions") or []:
+        rules = ", ".join(
+            f"{rule}={count}" for rule, count in exception["rules"].items()
+        )
+        print(
+            f"        foundry-cell exception: {exception['cell']} "
+            f"({exception['cell_hash']}): {rules}"
+        )
+
+
 def _print_tier_report_text(result: dict, palette: Palette) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
@@ -1094,14 +1105,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
                 print(f"        coverage: {_format_coverage(coverage)}")
             # Issue #4530: item 3 graded `met` through disclosed foundry-cell
             # exceptions -- every one is listed beside the verdict it qualifies.
-            for exception in citation.get("foundry_cell_exceptions") or []:
-                rules = ", ".join(
-                    f"{rule}={count}" for rule, count in exception["rules"].items()
-                )
-                print(
-                    f"        foundry-cell exception: {exception['cell']} "
-                    f"({exception['cell_hash']}): {rules}"
-                )
+            _print_foundry_cell_exceptions(citation)
             # Issue #1983: a `pex` citation's own body-bias statement, shown
             # beside the post-layout numbers it qualifies -- an extracted
             # netlist with no DC bias path for its device bodies makes those
