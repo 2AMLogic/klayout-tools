@@ -8985,6 +8985,40 @@ def test_rerun_erc_report_replays_omit_antenna_tables(tmp_path):
     assert result["drift"] == []
 
 
+def test_rerun_erc_report_ignores_build_provenance_commit_fields(tmp_path):
+    # Issue #4542: a report from a dev build differs from a fresh rerun only in
+    # the commit/reinstall handle behind klt_version -- tool churn, not drift.
+    _, _, report_path = _committed_erc_report(tmp_path)
+    report = json.loads(report_path.read_text())
+    report["provenance"]["klt_git_commit"] = "deadbeef"
+    report["provenance"]["klt_reinstall_spec"] = (
+        "git+https://example.invalid/x@deadbeef"
+    )
+    report_path.write_text(json.dumps(report))
+
+    result = erc.rerun_erc_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_erc_report_coverage_inapplicable_is_not_excluded(tmp_path):
+    # Issue #4542: erc_coverage.inapplicable is verdict-adjacent disclosure and
+    # deliberately stays in the rerun diff.
+    _, _, report_path = _committed_erc_report(tmp_path)
+    report = json.loads(report_path.read_text())
+    report["erc_coverage"]["inapplicable"] = [
+        *report["erc_coverage"].get("inapplicable", []),
+        {"check": "erc.supply_short", "reason": "substrate_continuity_not_modelled"},
+    ]
+    report_path.write_text(json.dumps(report))
+
+    result = erc.rerun_erc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    assert "erc_coverage.inapplicable" in {d["field"] for d in result["drift"]}
+
+
 def test_rerun_erc_report_names_verdict_drift(tmp_path):
     _, _, report_path = _committed_erc_report(tmp_path)
     report = json.loads(report_path.read_text())

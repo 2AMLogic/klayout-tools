@@ -3099,10 +3099,22 @@ never affects `status` or the exit code.
 **Full mode (`--rerun`)** re-runs ERC from the report's echoed
 `file`/`spec`/`pdk`/`findings_only`/`antenna_tables_omitted` (and
 `provenance.deck.name`, when there is one) and diffs the fresh report against the committed one, excluding
-`provenance.klt_version`, `provenance.klayout_version` and
+`provenance.klt_version`, `provenance.klt_git_commit`,
+`provenance.klt_reinstall_spec`, `provenance.klayout_version` and
 `provenance.pdk.version`. The payload is `{"mode": "rerun", "status", "drift":
 [{"field", "committed", "fresh"}, …], "fresh": {…}}`; every drifted field is
 named.
+
+`erc_coverage.inapplicable` is build-dependent by design and is deliberately
+**not** excluded from the rerun diff: it is verdict-adjacent coverage
+disclosure (a newer build may disclose more, e.g. `erc.supply_short` with
+`substrate_continuity_not_modelled`), and excluding it would let a rerun hide a
+coverage regression. Grade a report with the same-or-newer build that produced
+it, or pin the producing version (`uvx --from "klayout-tools==X" klt erc
+--check … --rerun`). A cross-build exit `3` limited to
+`provenance.klt_git_commit`/`klt_reinstall_spec` (an older grader that predates
+their exclusion) or to a new `erc_coverage.inapplicable` entry is a tool-version
+signal, not layout drift.
 
 **Known limitation:** `--top` is not echoed in the ERC report, so `--rerun`
 cannot replay it and always runs with no top selected. A layout with more than
