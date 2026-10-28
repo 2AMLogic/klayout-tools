@@ -63,6 +63,7 @@ from typing import Any
 from ._layout import write_layout
 from .lef_header import read_lef_macro_pin_ports
 from .place_and_route_min_area import repair_min_area
+from .place_and_route_via_pad import trim_via_pads
 
 #: ``UNITS DISTANCE MICRONS <n> ;`` -- mirrors ``congestion.py``'s own
 #: ``_UNITS_RE`` (kept as a separate, module-local copy here rather than
@@ -500,7 +501,9 @@ def _merge_def_to_gds(
     drew, and what it could **not** repair safely -- surfaced as the sibling
     ``min_area_repair`` response field for the same reason: a caller has no
     other way to tell whether the merged GDS it just got back really clears
-    the PDK's own ``*.area.*`` rules.
+    the PDK's own ``*.area.*`` rules. ``via_pad_trim`` is
+    :func:`~klayout_tools.place_and_route_via_pad.trim_via_pads`'s report
+    (issue #4495), surfaced as the sibling ``via_pad_trim`` response field.
     """
     # Deferred import: `place_and_route.py` imports this function back at
     # module scope (to preserve `klayout_tools.place_and_route.
@@ -742,6 +745,19 @@ def _merge_def_to_gds(
         die_area_um=die_area_um,
     )
 
+    # Issue #4495: ASAP7-only trim of redundant VIA_* M1 landing pads (a
+    # documented no-op, GDS untouched, for every other PDK family). Runs
+    # after the min-area pass so that pass keeps judging the router's own
+    # geometry; the pads dropped are fully covered by wire, so no polygon
+    # area the repair measured changes.
+    via_pad_info = trim_via_pads(
+        kdb,
+        layout=top_only,
+        top_cell=top,
+        variant=pdk_info["variant"],
+        lef_to_gds=_lef_net_layer_gds_map(layer_map_path),
+    )
+
     # write_layout() (see _layout.py, #320) always disables KLayout's default
     # wall-clock GDS2 BGNLIB/BGNSTR timestamps, so re-running an identical
     # place-and-route request twice produces a byte-identical merged GDS --
@@ -755,4 +771,5 @@ def _merge_def_to_gds(
         "resolution": layer_map_resolution,
         "def_net_names": def_net_names_info,
         "min_area_repair": min_area_info,
+        "via_pad_trim": via_pad_info,
     }
