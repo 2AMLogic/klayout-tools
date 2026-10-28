@@ -1172,6 +1172,73 @@ def test_check_still_reports_drift_beside_layout_difference(
     assert report["drift"]["diff"]
 
 
+def test_check_diagnoses_subckt_port_order_only_drift(tmp_path, argv_log, monkeypatch):
+    """Issue #4524: a permuted ``.subckt`` card is still drifted, but named."""
+    monkeypatch.setenv(
+        "NETLIST_BODY",
+        ".subckt a A B C\nR1 A B 1k\n.ends\n.subckt b X Y\nR2 X Y 1k\n.ends\n.end",
+    )
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(
+        ".subckt a C A B\nR1 A B 1k\n.ends\n.subckt b X Y\nR2 X Y 1k\n.ends\n.end\n",
+        encoding="utf-8",
+    )
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "drifted"
+    assert report["drift"]["subckt_port_order"] == [
+        {"subckt": "a", "committed": ["C", "A", "B"], "regenerated": ["A", "B", "C"]}
+    ]
+    assert "port order" in report["drift"]["reason"]
+    assert "positional" in report["drift"]["reason"]
+    assert "xschem" in report["drift"]["reason"]
+
+
+def test_check_added_port_is_not_port_order_drift(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", ".subckt a A B C\nR1 A B 1k\n.ends\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(".subckt a A B\nR1 A B 1k\n.ends\n.end\n", encoding="utf-8")
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "drifted"
+    assert report["drift"]["subckt_port_order"] == []
+    assert "port order" not in report["drift"]["reason"]
+
+
+def test_check_permutation_beside_device_change_is_not_port_order_drift(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", ".subckt a A B\nR1 A B 1k\n.ends\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(".subckt a B A\nR1 A B 2k\n.ends\n.end\n", encoding="utf-8")
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "drifted"
+    assert report["drift"]["subckt_port_order"] == []
+
+
+def test_check_port_order_field_present_on_match_and_missing(tmp_path, argv_log):
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    missing = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+    assert missing["drift"]["subckt_port_order"] == []
+
+    output.write_text(_NETLIST_BODY + "\n", encoding="utf-8")
+    match = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+    assert match["status"] == "match"
+    assert match["drift"]["subckt_port_order"] == []
+
+
 def test_identical_netlist_does_not_flag_layout(tmp_path, argv_log):
     schematic = _write_schematic(tmp_path)
     binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)

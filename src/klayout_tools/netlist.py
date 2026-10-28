@@ -518,7 +518,62 @@ def _normalize_layout(data: bytes) -> bytes:
     return b"\n".join(lines)
 
 
-def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
+def _subckt_card(line: bytes) -> tuple[bytes, list[bytes], list[bytes]] | None:
+    """``(name, ports, params)`` of a normalized ``.subckt`` card, else ``None``.
+    ``name=value`` tokens are parameters, not ports."""
+    tokens = line.split()
+    if len(tokens) < 2 or tokens[0].lower() != b".subckt":
+        return None
+    rest = tokens[2:]
+    return (
+        tokens[1],
+        [t for t in rest if b"=" not in t],
+        [t for t in rest if b"=" in t],
+    )
+
+
+def _subckt_port_order_drift(committed: bytes, fresh: bytes) -> list[dict[str, Any]]:
+    """The ``.subckt`` cards whose port set matches but whose port order
+    differs, when that is the *only* difference between the two netlists
+    (issue #4524); ``[]`` for any other kind of drift.
+
+    Both sides are compared after :func:`_normalize_path_comments` and
+    :func:`_normalize_layout`. Port order is the positional contract of every
+    ``subckt-call`` and LVS reference, so this only *diagnoses* the change --
+    the status stays ``"drifted"``.
+    """
+    old = _normalize_layout(_normalize_path_comments(committed)).split(b"\n")
+    new = _normalize_layout(_normalize_path_comments(fresh)).split(b"\n")
+    if len(old) != len(new):
+        return []
+    entries: list[dict[str, Any]] = []
+    for a, b in zip(old, new, strict=True):
+        if a == b:
+            continue
+        card_a, card_b = _subckt_card(a), _subckt_card(b)
+        if card_a is None or card_b is None:
+            return []
+        name_a, ports_a, params_a = card_a
+        name_b, ports_b, params_b = card_b
+        if (
+            name_a != name_b
+            or params_a != params_b
+            or sorted(ports_a) != sorted(ports_b)
+        ):
+            return []
+        entries.append(
+            {
+                "subckt": name_a.decode("utf-8", "replace"),
+                "committed": [t.decode("utf-8", "replace") for t in ports_a],
+                "regenerated": [t.decode("utf-8", "replace") for t in ports_b],
+            }
+        )
+    return entries
+
+
+def _check_result(
+    output: str, fresh_data: bytes, xschem_version: str | None = None
+) -> tuple[str, dict[str, Any]]:
     """``check=True``'s verdict: does the committed netlist at ``output``
     still match what the schematics produce?
 
@@ -538,6 +593,11 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
     (:func:`_normalize_layout`, issue #3324); ``layout_differs`` is true when
     the files match only after that normalization -- which includes a
     different port order in the ``**.subckt`` comment line only.
+
+    When the only difference is the port order of one or more electrical
+    ``.subckt`` cards, ``subckt_port_order`` names them and ``reason`` says so
+    (issue #4524); the status stays ``"drifted"``. ``xschem_version`` is the
+    local xschem's version, quoted in that reason.
     """
     if not os.path.isfile(output):
         return STATUS_DRIFTED, {
@@ -546,6 +606,7 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
             "committed_content_hash": None,
             "path_comments_differ": False,
             "layout_differs": False,
+            "subckt_port_order": [],
             "diff": [],
             "diff_truncated": False,
             "reason": "no committed netlist at the output path",
@@ -563,24 +624,38 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
             "path_comments_differ": _normalize_layout(committed)
             != _normalize_layout(fresh_data),
             "layout_differs": committed_paths != fresh_paths,
+            "subckt_port_order": [],
             "diff": [],
             "diff_truncated": False,
             "reason": None,
         }
 
     diff, truncated = _unified_diff(committed, fresh_data, output)
+    port_order = _subckt_port_order_drift(committed, fresh_data)
+    if port_order:
+        names = ", ".join(entry["subckt"] for entry in port_order)
+        reason = (
+            f"the .subckt port order of {names} differs from the committed "
+            f"netlist (local xschem {xschem_version or 'version unknown'}); "
+            "different xschem builds order ports differently -- recheck "
+            "positional subckt-call callers and LVS references before "
+            "re-running without --check to refresh it"
+        )
+    else:
+        reason = (
+            "the committed netlist differs from the one the schematics "
+            "produce now -- re-run without --check to refresh it"
+        )
     return STATUS_DRIFTED, {
         "committed_present": True,
         "committed_bytes": len(committed),
         "committed_content_hash": _sha256_file_hash(committed),
         "path_comments_differ": False,
         "layout_differs": False,
+        "subckt_port_order": port_order,
         "diff": diff,
         "diff_truncated": truncated,
-        "reason": (
-            "the committed netlist differs from the one the schematics "
-            "produce now -- re-run without --check to refresh it"
-        ),
+        "reason": reason,
     }
 
 
@@ -1082,7 +1157,7 @@ def run_netlist(
             payload["warnings"] = warnings
 
         if check:
-            status, drift = _check_result(output, fresh_data)
+            status, drift = _check_result(output, fresh_data, version)
             payload["status"] = status
             payload["netlist"] = _netlist_block(None, fresh_data)
             payload["drift"] = drift
