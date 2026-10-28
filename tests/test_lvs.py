@@ -2951,13 +2951,17 @@ def test_flat_layout_against_hierarchical_reference_is_a_topology_mismatch(tmp_p
     assert report["status"] == "mismatch"
     assert report["category_counts"] == {
         "topology": 2,
+        lvs.CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH: 1,
         # Issue #2461: one per participating resistor class.
         lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
     }
     assert report["counts"]["devices"] == {"layout": 2, "reference": 0, "matched": 0}
-    assert all(
-        m["category"] == "topology" for m in _without_geometry_disclosure(report)
-    )
+    errors = [
+        m
+        for m in _without_geometry_disclosure(report)
+        if m["category"] != lvs.CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH
+    ]
+    assert all(m["category"] == "topology" for m in errors)
     assert "topology.flattened" not in report["category_counts"]
 
     # Issue #1132: `category_error_counts`/`error_count` split `error`
@@ -2972,13 +2976,11 @@ def test_flat_layout_against_hierarchical_reference_is_a_topology_mismatch(tmp_p
     # `topology` finding is attributable without a side-channel netlist
     # diff -- `instance`/`subcircuit` stay `null` (this is a whole-circuit
     # mismatch, not a subcircuit-instance one).
-    assert [m["circuit"] for m in _without_geometry_disclosure(report)] == [
+    assert [m["circuit"] for m in errors] == [
         {"layout": "TOP", "reference": "TOP"},
         {"layout": None, "reference": "LEAF"},
     ]
-    assert all(
-        m["instance"] is None and m["subcircuit"] is None for m in report["mismatches"]
-    )
+    assert all(m["instance"] is None and m["subcircuit"] is None for m in errors)
 
 
 def test_subcircuit_instance_mismatch_names_the_instance_and_its_type(tmp_path):
@@ -3123,6 +3125,86 @@ def test_flatten_reference_turns_the_topology_mismatch_into_a_match(tmp_path):
     assert "1 top-level circuit(s)" in flattened["description"]
 
 
+def _hierarchy_mismatch_entries(report):
+    return [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH
+    ]
+
+
+def _run_divider(tmp_path, layout_spice, reference_spice, options=None):
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", layout_spice),
+            "top": "top",
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", reference_spice),
+            "top": "top",
+        },
+    }
+    if options is not None:
+        request["options"] = options
+    return run_lvs(_write_request(tmp_path / "request.json", request))
+
+
+def test_hierarchy_mismatch_warning_names_flatten_reference(tmp_path):
+    """Issue #4548: flat layout + hierarchical reference, no flag -> advisory
+    warning naming the option; status stays `mismatch`."""
+    report = _run_divider(tmp_path, _FLAT_DIVIDER_SPICE, _HIERARCHICAL_DIVIDER_SPICE)
+
+    assert report["status"] == "mismatch"
+    [entry] = _hierarchy_mismatch_entries(report)
+    assert entry["severity"] == "warning"
+    assert entry["side"] == "reference"
+    assert "options.flatten_reference: true" in entry["description"]
+
+
+def test_hierarchy_mismatch_warning_absent_when_flatten_reference_set(tmp_path):
+    report = _run_divider(
+        tmp_path,
+        _FLAT_DIVIDER_SPICE,
+        _HIERARCHICAL_DIVIDER_SPICE,
+        {"flatten_reference": True},
+    )
+
+    assert report["status"] == "match"
+    assert _hierarchy_mismatch_entries(report) == []
+    assert report["category_counts"]["topology.flattened"] == 1
+
+
+def test_hierarchy_mismatch_warning_absent_when_both_flat(tmp_path):
+    report = _run_divider(tmp_path, _FLAT_DIVIDER_SPICE, _FLAT_DIVIDER_SPICE)
+
+    assert _hierarchy_mismatch_entries(report) == []
+
+
+def test_hierarchy_mismatch_warning_absent_when_both_hierarchical(tmp_path):
+    report = _run_divider(
+        tmp_path, _HIERARCHICAL_DIVIDER_SPICE, _HIERARCHICAL_DIVIDER_SPICE
+    )
+
+    assert _hierarchy_mismatch_entries(report) == []
+
+
+def test_hierarchy_mismatch_warning_ignores_unrelated_top_circuits(tmp_path):
+    """Extra unrelated top circuits in a flat reference are pruned before the
+    check, so they must not look like hierarchy."""
+    library = (
+        _FLAT_DIVIDER_SPICE
+        + """
+.subckt unrelated X Y
+R9 X Y 1k
+.ends
+"""
+    )
+    report = _run_divider(tmp_path, _FLAT_DIVIDER_SPICE, library)
+
+    assert report["status"] == "match"
+    assert _hierarchy_mismatch_entries(report) == []
+
+
 def test_flatten_layout_turns_a_hierarchical_layout_netlist_into_a_match(tmp_path):
     """Symmetric counterpart (issue #1085's item 2): a pre-extracted
     `layout.netlist` can itself be hierarchical -- `options.flatten_layout`
@@ -3172,6 +3254,7 @@ def test_flatten_options_default_false_leaves_status_unchanged(tmp_path):
     assert report["status"] == "mismatch"
     assert report["category_counts"] == {
         "topology": 2,
+        lvs.CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH: 1,
         # Issue #2461: one per participating resistor class.
         lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
     }

@@ -1530,6 +1530,46 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
     )
 
 
+def _hierarchy_mismatch_warnings(
+    layout_netlist: kdb.Netlist,
+    reference_netlist: kdb.Netlist,
+    flatten_reference: bool,
+) -> list[dict[str, Any]]:
+    """Issue #4548: advisory ``topology.hierarchy_mismatch`` warning.
+
+    A flat layout netlist (``klt extract`` is flat-only) against a
+    hierarchical reference reports only per-circuit ``topology`` "could not
+    be matched" errors, which read like a connectivity problem. When the
+    layout side is a single circuit, the reference still has more than one
+    circuit (call after ``_prune_extra_top_circuits`` on both sides) and
+    ``options.flatten_reference`` is not set, disclose that the cause is
+    structural and name the option that compares the two. Returns a
+    one-entry list, else an empty one. Warning-only: never changes ``status``.
+    """
+
+    from .lvs import CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH
+
+    if flatten_reference:
+        return []
+    layout_circuits = sum(1 for _ in layout_netlist.each_circuit())
+    reference_circuits = sum(1 for _ in reference_netlist.each_circuit())
+    if layout_circuits != 1 or reference_circuits <= 1:
+        return []
+    return [
+        _mismatch(
+            CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH,
+            "warning",
+            f"the layout netlist is flat (1 circuit) but the reference netlist is "
+            f"hierarchical ({reference_circuits} circuits); per-circuit topology "
+            "errors here may stem from that structural difference rather than a "
+            "connectivity defect -- retry with options.flatten_reference: true to "
+            "compare the flattened reference against the flat layout "
+            '(see docs/cli/lvs.md, "topology.hierarchy_mismatch")',
+            "reference",
+        )
+    ]
+
+
 def _purge_emptied_nets(netlist: kdb.Netlist) -> None:
     """Remove nets that ``combine_devices()`` emptied -- nets left with no
     terminals, no pins, and no subcircuit pins after matched device arrays
