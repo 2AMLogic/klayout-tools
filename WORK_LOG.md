@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-28
 
+- **PR #4460**: fix: reject verilog_blackbox that declares no module named the macro cell
+- **PR #4453**: fix: sim dry-run runs netlist .lib checks and refuses literal $PDK_ROOT body .lib
+- **Issue #4459** (closed): synthesize: macros[] reports macro_instance_count 0 when the verilog_blackbox module name differs from the LEF MACRO name
+- **Issue #4451** (closed): klt sim: batch .lib path check missing from --dry-run, $PDK_ROOT body form silently not loaded; artifact put 429 under light concurrency
 - **PR #4455**: fix: widen artifact 429 retry budget and jitter fallback backoff
 - **Issue #4452** (closed): klt artifact put: 429 retry budget too small for ~16 concurrent publishers (split from #4451)
 - **PR #4447**: feat: add operator-approved commands request kind to klt sim

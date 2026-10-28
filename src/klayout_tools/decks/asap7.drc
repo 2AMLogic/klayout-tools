@@ -5,7 +5,7 @@
 #
 #   klt drc <layout.gds> --engine klayout \
 #       --deck-file src/klayout_tools/decks/asap7.drc \
-#       --expect-rule-categories 263 --format json
+#       --expect-rule-categories 267 --format json
 #
 # or directly:
 #
@@ -101,6 +101,11 @@ slvt    = input(97, 0)
 lvt     = input(98, 0)
 sramdrc = input(99, 0)
 sramvt  = input(110, 0)
+# THICKOX is NOT a DRM layer: the pinned asap7.lyp / asap7.layermap / DRM 1p7
+# have no thick-oxide (I/O) marker. 111/0 is an assumed, unused stream number
+# (97/98/99/110 are SLVT/LVT/SRAMDRC/SRAMVT) and the THICKOX.* rules below are
+# predictive, not foundry rules (#4465).
+thickox = input(111, 0)
 
 # --------------------------------------------------------------------------
 # Derived layers and direction helpers
@@ -203,7 +208,7 @@ end
 # GEOMETRY.NONORTHOGONAL: non-orthogonal shapes are not allowed. Applied to
 # every drawing layer this deck reads, FEOL through V9 (SRAMDRC is a marker,
 # not a mask; PAD is read only by the V9 rules below).
-[well, fin, gate, gcut, active, nselect, pselect, slvt, lvt, sramvt,
+[well, fin, gate, gcut, active, nselect, pselect, slvt, lvt, sramvt, thickox,
  sdt, lisd, lig, v0, m1, v1, m2, v2, m3, v3, m4, v4, m5, v5, m6, v6,
  m7, v7, m8, v8, m9, v9].map { |l| l.non_rectilinear }.inject(:+)
   .output("GEOMETRY.NONORTHOGONAL", "Table 3.1.1: non-orthogonal shapes are not allowed")
@@ -341,6 +346,32 @@ end
 (nselect & pselect).output("NSELECT.PSELECT.AUX.1", "Table 3.7.1: NSELECT and PSELECT may not overlap")
 ((slvt & lvt) + (slvt & sramvt) + (lvt & sramvt))
   .output("VT.AUX.2", "Table 3.7.1: VT layers (LVT, SLVT, SRAMVT) may not overlap")
+
+# --------------------------------------------------------------------------
+# THICKOX -- thick-oxide (I/O) device marker. PREDICTIVE / ASSUMED: the DRM
+# has no thick-oxide layer or rule (#4465). The cited table is Table 3.7.1,
+# the select-layer table these rules are modelled on; every threshold below
+# is an assumption (basis stated per rule), never a foundry value.
+# --------------------------------------------------------------------------
+# A marked device is ACTIVE crossed by a GATE and interacting with THICKOX.
+thickox_active = active.interacting(thickox)
+thickox_channel = channel & thickox
+thickox_gate = gate.interacting(thickox_channel)
+thickox_device_active = thickox_active.interacting(gate)
+# Assumed: marker encloses ACTIVE by 27 nm (core NSELECT.ACTIVE.EN.2). Shrinking
+# the marker by 27 nm and requiring ACTIVE inside it (coincident edges allowed)
+# is that enclosure; ACTIVE only partly covered, or merely touching, fails too.
+thickox_active.not_inside(thickox.sized(-27.nm))
+  .output("THICKOX.ACTIVE.EN", "Table 3.7.1: min enclosure of ACTIVE by THICKOX 27 nm (assumed, not a DRM rule)")
+# Assumed: 54 nm (core NSELECT.W.2); abutting or overlapping markers merge.
+thickox.space(54.nm, projection)
+  .output("THICKOX.S", "Table 3.7.1: min THICKOX spacing 54 nm (assumed, not a DRM rule)")
+# Assumed: 30 nm minimum Lg on a marked gate (1.5x the 20 nm core GATE.W.1).
+hwidth(thickox_gate, 30.nm)
+  .output("THICKOX.GATE.L", "Table 3.7.1: min horizontal GATE width (Lg) on a THICKOX device 30 nm (assumed, not a DRM rule)")
+# Assumed: 54 nm minimum channel width (two 27 nm ACTIVE.W.2 steps).
+vwidth(thickox_device_active, 54.nm)
+  .output("THICKOX.ACTIVE.W", "Table 3.7.1: min vertical ACTIVE width on a THICKOX device 54 nm (assumed, not a DRM rule)")
 
 # --------------------------------------------------------------------------
 # Table 3.8.1 -- SDT
