@@ -929,6 +929,54 @@ def test_block_mode_rejoins_wrapped_header_continuations(
     assert report["block"]["warning"] is None
 
 
+def test_bus_ports_in_subckt_headers_are_space_separated(
+    tmp_path, argv_log, monkeypatch
+):
+    body = (
+        "* stub\n**.subckt top p[1],p[0] q\n*+ r[1],r[0]\n"
+        "x1 p[1],p[0] q inner\n* note a,b\n.param k=max(1,2)\n**.ends\n"
+        ".subckt inner a[1],a[0] y z[1],z[0] vdd params: w={a,b}\n"
+        "+ l=1\n.ends\n.end"
+    )
+    monkeypatch.setenv("NETLIST_BODY", body)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+
+    run_netlist(schematic, str(output), xschem_binary=binary, block=True)
+
+    written = output.read_text(encoding="utf-8")
+    assert ".subckt inner a[1] a[0] y z[1] z[0] vdd params: w={a,b}\n+ l=1\n" in written
+    assert ".subckt top p[1] p[0] q\n+ r[1] r[0]\n" in written
+    # Only header tokens change: device cards, comments, .param keep commas.
+    assert "x1 p[1],p[0] q inner\n* note a,b\n.param k=max(1,2)\n" in written
+
+
+def test_bus_ports_rewrite_applies_without_block_mode(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", ".subckt s a[1],a[0] y\n.ends\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "n.spice"
+
+    run_netlist(schematic, str(output), xschem_binary=binary)
+
+    assert ".subckt s a[1] a[0] y\n" in output.read_text(encoding="utf-8")
+
+
+def test_check_reports_drift_for_committed_comma_joined_ports(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", ".subckt s a[1],a[0] y\n.ends\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "n.spice"
+    output.write_text("* stub\n.subckt s a[1],a[0] y\n.ends\n.end", encoding="utf-8")
+
+    report = run_netlist(schematic, str(output), xschem_binary=binary, check=True)
+
+    assert report["status"] == "drifted"
+
+
 def test_block_mode_leaves_non_adjacent_continuation_comment_alone(
     tmp_path, argv_log, monkeypatch
 ):
