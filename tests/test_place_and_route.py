@@ -164,6 +164,15 @@ def _synth_netlist_path(synth_request_path: str, hdl_toplevel: str, run_id: str)
     )
 
 
+def _non_layer_map_warnings(report: dict) -> list[str]:
+    """``report["warnings"]`` minus the DEF->GDS layer-map caveat (issue #4481).
+
+    These fixtures resolve no KLayout layer map, so that warning rides along;
+    the tests below count only the power-delivery / row-rail warnings.
+    """
+    return [w for w in report["warnings"] if "KLayout LEF/DEF layer map" not in w]
+
+
 def _power_without_placed(report: dict) -> dict:
     """The response's `power` block minus issue #2086's additive `placed`
     audit, so an exact-dict assertion can still pin every other member.
@@ -3195,8 +3204,12 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
     # `request.power` whose result cannot be verified still earns a warning.
     assert report["power"]["placed"]["evidence"] == "unavailable"
     assert report["power"]["placed"]["status"] == "unknown"
-    assert len(report["warnings"]) == 1
-    assert "could not be verified" in report["warnings"][0]
+    assert len(_non_layer_map_warnings(report)) == 1
+    assert "could not be verified" in _non_layer_map_warnings(report)[0]
+    # Issue #4481: the merge resolved no layer map in this fixture, so the
+    # response carries the layer-map caveat alongside the power one.
+    assert len(report["warnings"]) == 2
+    assert "KLayout LEF/DEF layer map" in report["warnings"][1]
 
     floorplan_script = os.path.join(
         os.path.dirname(request_path),
@@ -5009,8 +5022,8 @@ def test_stubbed_route_without_power_reports_measured_zeros_and_warns(
         "pdn_vias",
     ]
 
-    assert len(report["warnings"]) == 1
-    warning = report["warnings"][0]
+    assert len(_non_layer_map_warnings(report)) == 1
+    warning = _non_layer_map_warnings(report)[0]
     assert "request.power was omitted" in warning
     assert "0 tapcell(s)" in warning
     assert "0 filler cell(s)" in warning
@@ -5055,8 +5068,8 @@ def test_stubbed_route_without_power_on_sky130_describes_the_row_rail_fallback(
 
     # Two entries now: the measured omitted-power warning (issue #2086),
     # then the row-rail caveat (issue #1985).
-    assert len(report["warnings"]) == 2
-    warning = report["warnings"][0]
+    assert len(_non_layer_map_warnings(report)) == 2
+    warning = _non_layer_map_warnings(report)[0]
     assert "request.power was omitted" in warning
     # Measured, and therefore true: what the fallback did *not* place.
     assert "tapcell instances" in warning
@@ -5153,8 +5166,8 @@ def test_stubbed_route_with_power_but_no_straps_reports_partial_and_warns(
     assert placed["tapcells"] == 3
     assert placed["missing"] == ["stripe_segments", "pdn_vias"]
 
-    assert len(report["warnings"]) == 1
-    warning = report["warnings"][0]
+    assert len(_non_layer_map_warnings(report)) == 1
+    warning = _non_layer_map_warnings(report)[0]
     assert "request.power was supplied" in warning
     assert "STRIPE strap segments" in warning
     assert "PDN vias" in warning
