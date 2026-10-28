@@ -415,6 +415,23 @@ the xschem invocation (`--block` adds no xschem flags). Under `--check`,
 the transform runs before the comparison, so a committed block artifact is
 diffed against the transformed (not the raw testbench-shaped) regeneration.
 
+## Port-list form and symbol references
+
+xschem writes a bus port as a comma-joined group (`a[1],a[0]`). ngspice
+silently mis-maps the ports of a subcircuit with two or more such groups (the
+trailing nodes are left unconnected, so the failure shows up only as a
+singular matrix or wrong results). `klt netlist` therefore rewrites every
+`.subckt` header — the `--block` top sheet and nested sub-block headers,
+including their `+` continuation lines — to a space-separated port list
+(`a[1] a[0]`). Text from `params:` onward, comments and device cards are not
+touched, and a bus-free netlist is unchanged. The rewrite runs before the
+write and before the `--check` comparison, so a committed netlist that still
+has comma-joined ports reports `"drifted"`: regenerate it.
+
+A symbol reference relative to the schematic (`../x/y.sym`) resolves only when
+that schematic is the netlisting top, because xschem resolves it against the
+working directory. Nested blocks need a library-path reference.
+
 ## PDK-root consistency
 
 `--pdk` / `--pdk-root` mirror [`klt sim`](sim.md)'s flags and resolve through

@@ -773,6 +773,42 @@ def _rejoin_header_continuations(text: str) -> str:
     return "\n".join(lines)
 
 
+_SUBCKT_HEADER_RE = re.compile(r"[ \t]*\.subckt\b", re.IGNORECASE)
+_PARAMS_RE = re.compile(r"\bparams:", re.IGNORECASE)
+
+
+def _space_separate_subckt_ports(data: bytes) -> bytes:
+    """Rewrite comma-joined bus ports in ``.subckt`` headers to spaces
+    (issue #4490).
+
+    xschem emits a bus port as ``a[1],a[0]``; ngspice mis-maps the ports of a
+    subcircuit with two or more such groups (trailing nodes silently left
+    unconnected). Only the port part of ``.subckt`` header lines and their
+    ``+`` continuations changes -- text from ``params:`` onward, comments and
+    device cards are left alone. A bus-free netlist is returned unchanged.
+    """
+    text = data.decode("utf-8", errors="replace")
+    lines = text.split("\n")
+    in_header = False
+    in_params = False
+    for i, line in enumerate(lines):
+        if _SUBCKT_HEADER_RE.match(line):
+            in_header, in_params = True, False
+        elif not (in_header and line.lstrip().startswith("+")):
+            in_header = False
+            continue
+        if in_params:
+            continue
+        match = _PARAMS_RE.search(line)
+        head, tail = (
+            (line[: match.start()], line[match.start() :]) if match else (line, "")
+        )
+        if match:
+            in_params = True
+        lines[i] = re.sub(r"[ \t]*,[ \t]*", " ", head) + tail
+    return "\n".join(lines).encode("utf-8")
+
+
 def _apply_block_mode(data: bytes) -> tuple[bytes, dict[str, Any]]:
     """Post-process a testbench-shaped xschem export into an includable block
     (issue #2680, edge 1).
@@ -1009,6 +1045,7 @@ def run_netlist(
         block_info: dict[str, Any] | None = None
         if block:
             fresh_data, block_info = _apply_block_mode(fresh_data)
+        fresh_data = _space_separate_subckt_ports(fresh_data)
 
         version = _probe_xschem_version(xschem_binary)
         warnings = _unevaluated_expr_warnings(
