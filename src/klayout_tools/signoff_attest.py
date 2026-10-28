@@ -61,7 +61,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from ._provenance import sha256_file
@@ -680,7 +680,7 @@ def _validated_derived(
                 "digests) -- presence alone does not prove a derived artifact "
                 "is current"
             )
-        entry = {"path": path, "generator": generator}
+        entry: dict[str, Any] = {"path": path, "generator": generator}
         if "check" in raw:
             entry["check"] = _command_spec(raw["check"], f"{field}.check", root)
         else:
@@ -970,6 +970,23 @@ def _characterization_checks(
     return checks
 
 
+def _derived_freshness_check(
+    root: str,
+    entry: Mapping[str, Any],
+    command: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    """The freshness check for one item-1 ``derived`` entry: the recorded
+    hash comparison, or the entry's ``check`` command."""
+    if "recorded" in entry:
+        return _recorded_hash_check(root, entry)
+    return command(
+        entry["check"],
+        "freshness",
+        target=entry["path"],
+        generator=entry["generator"],
+    )
+
+
 def _run_checks(
     item: int,
     root: str,
@@ -994,18 +1011,10 @@ def _run_checks(
     if item == 1:
         for entry in normalized["derived"]:
             checks.append(_file_check(root, entry["path"], "derived"))
-        for entry in normalized["derived"]:
-            if "recorded" in entry:
-                checks.append(_recorded_hash_check(root, entry))
-                continue
-            checks.append(
-                command(
-                    entry["check"],
-                    "freshness",
-                    target=entry["path"],
-                    generator=entry["generator"],
-                )
-            )
+        checks.extend(
+            _derived_freshness_check(root, entry, command)
+            for entry in normalized["derived"]
+        )
     elif item == CHARACTERIZATION_ITEM:
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
