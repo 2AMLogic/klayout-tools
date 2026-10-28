@@ -785,6 +785,18 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--command-approvals",
+        dest="command_approvals",
+        metavar="FILE",
+        default=None,
+        help=(
+            "trusted approvals file for a command-list request (`commands`; "
+            "default: $KLT_SIM_COMMAND_APPROVALS). Every step's argv must "
+            "match an approval or the request is refused before anything "
+            "runs or uploads. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--max-workers",
         dest="max_workers",
         type=int,

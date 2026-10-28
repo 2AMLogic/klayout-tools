@@ -2427,6 +2427,94 @@ used and diffs the returned `stdout.bin`/`outputs` against its own
 evidence — the artifact is the one its harness mints, not one klt
 re-composed.
 
+## Operator-approved commands (`commands` requests)
+
+A `commands` request ([#4443](https://github.com/2AMLogic/klayout-tools/issues/4443))
+is the simulator-agnostic sibling of `decks`: it runs declared commands in
+isolated unit directories and returns exit status, stream tails and declared
+output files. Nothing in it is SPICE-specific, so a digital RTL testbench
+(`iverilog` + `vvp`) can go to the batch fleet. `engine` stays `ngspice|xyce`
+for corner and deck requests; `engine: "iverilog"` is refused with a pointer
+here.
+
+```json
+{
+  "commands": [
+    {
+      "id": "voice",
+      "steps": [["iverilog", "-o", "sim.vvp", "tb.v"], ["vvp", "sim.vvp"]],
+      "inputs": ["tb.v"],
+      "outputs": ["dump.vcd"],
+      "timeout_s": 600
+    }
+  ]
+}
+```
+
+### Request fields
+
+| Field | Meaning |
+|---|---|
+| `commands[]` | Non-empty list of units; mutually exclusive with `netlist`, `analysis`, `corners`, `monte_carlo`, `decks`. |
+| `id` | Unit id, `[A-Za-z0-9._-]+`, unique; the unit directory name under `outdir`. |
+| `argv` **or** `steps` | One argv list, or a list of argv lists run in order in the same unit directory; the first non-zero step stops the unit. |
+| `inputs[]` | Files shipped into the unit directory: a path (relative to the request file, must stay inside its directory) or `{"path", "name"}`. |
+| `outputs[]` | Unit-relative files to return. A missing one makes the unit `error`. |
+| `timeout_s` | Per-step bound (default `options.timeout_s`, else the corner default). |
+
+`stdout.bin`, `stderr.bin` and `exit_code.txt` are runner-owned names no input
+or output may claim.
+
+### Approvals (the trust gate)
+
+Commands run only if **every step's argv** matches an entry of an
+operator-supplied approvals file (`--command-approvals FILE` or
+`$KLT_SIM_COMMAND_APPROVALS`) -- on every backend. The request cannot approve
+itself; without a trusted source the request is refused with
+`command_approvals_missing`.
+
+```json
+{"schema_version": 1, "approvals": [
+  {"id": "iverilog-voice", "interpreter": "iverilog",
+   "allowed_arguments": [["-o", "sim.vvp", "tb.v"]],
+   "bound_inputs": {"tb.v": "sha256:<64 hex>"}}
+]}
+```
+
+An entry matches when `argv[0]` is the `interpreter`, `argv[1:]` is exactly one
+of the `allowed_arguments` lists, and every `bound_inputs` name is a unit input
+whose bytes hash to the pinned digest (a testbench can run anything through
+`$system`, so its content is part of the approval). An interpreter name alone
+approves nothing. Refusals happen before anything runs or uploads, with exit 1
+and `error.code` `command_not_approved` (`command_input_escape` for an input or
+output path leaving the unit/request directory; `command_approvals_invalid`
+for a malformed file). The tree is capped like other batch inputs
+(`batch_input_too_large`).
+
+This is a **trusted-code policy, not isolation**: the approved command runs
+with the job's network and S3 role, and a Spot VM is not a sandbox.
+
+### Backends and response
+
+`local` and `local-parallel` run units in `outdir/<id>/`; a single unit may run
+locally under `KLT_SIM_BACKEND=batch`, while several units go to the fleet as
+one job (the `decks` rules). `remote` is refused. On `batch` the job id is in
+`environment.remote`; a submit, launch, poll or collect failure (or a failed
+job) marks every unit `error` with a diagnostic and **never** falls back to a
+local run. `--dry-run`, `--submit-only`, `--attach`, `--resume`,
+`--wait-for-capacity` and `--hosts` do not apply and are refused by name.
+
+The report has `mode: "commands"`, `status`, `unit_count`, `passed`,
+`errored`, `timed_out`, `outdir`, and per unit: `id`, `status`
+(`pass`/`error`/`timeout`), `exit_code`, `timed_out`, `duration_s` (local
+only), `steps`, `stdout`/`stderr` (paths under `outdir`),
+`stdout_tail`/`stderr_tail`, `outputs`, `missing_outputs`, `diagnostics`.
+Exit codes follow deck mode: `0` all units passed, `4` otherwise.
+
+The `eda-sim` image provides `iverilog` and `vvp` (`docker/eda-sim/smoke.sh`
+runs a trivial testbench through this kind). Rolling the image out to the fleet
+is a separate fleet-spec change.
+
 ## Sequential (adaptive) campaigns on the batch backend
 
 `corners`/`monte_carlo` batch a grid that is known up front. When each

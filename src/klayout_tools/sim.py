@@ -96,6 +96,7 @@ from . import _spice_number as spice_number
 from . import (
     env_provenance,
     output_lock,
+    sim_commands,
     sim_complex_vectors,
     sim_crossings,
     sim_cycle_mean,
@@ -1524,6 +1525,10 @@ def load_request(request_path: str) -> dict[str, Any]:
     # request's netlist/analysis; their shape is validated by the deck
     # subsystem (sim_decks.plan_deck_units), so the corner request's
     # required fields do not apply here.
+    if sim_commands.COMMANDS_FIELD in request:
+        # Command-list requests (issue #4443): shape is validated by
+        # sim_commands.plan_command_units.
+        return request
     if "decks" in request:
         if not isinstance(request.get("decks"), list) or not request["decks"]:
             raise SimError("request.decks must be a non-empty list of deck objects")
@@ -2317,9 +2322,16 @@ def run_sim(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
+    command_approvals: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the request at ``request_path`` and return its report.
+
+    A request carrying ``commands`` (issue #4443) is a command-list request:
+    operator-approved argv steps run in isolated unit directories, locally
+    or as one batch job -- see :mod:`klayout_tools.sim_commands`.
+    ``command_approvals`` is the trusted approvals file (else
+    ``$KLT_SIM_COMMAND_APPROVALS``).
 
     ``run_sim`` dispatches over two request kinds (docs/cli/sim.md):
 
@@ -2568,6 +2580,30 @@ def run_sim(
     # corner dir and ngspice would never find its deck. Absolutise once here.
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
+    if sim_commands.COMMANDS_FIELD in request:
+        return _dispatch_command_request(
+            request,
+            request_path=request_path,
+            backend=backend,
+            max_workers=max_workers,
+            hosts=hosts,
+            artifacts_dir=artifacts_dir,
+            resume=resume,
+            budget_s=budget_s,
+            plot_dir=plot_dir,
+            fail_fast_probe=fail_fast_probe,
+            fail_on_diagnostic=fail_on_diagnostic,
+            dry_run=dry_run,
+            submit_only=submit_only,
+            attach_job_id=attach_job_id,
+            capacity_wait_s=capacity_wait_s,
+            command_approvals=command_approvals,
+            _ownership=_ownership,
+        )
+    if command_approvals is not None:
+        raise SimError(
+            "--command-approvals only applies to command-list requests (`commands`)"
+        )
     if capacity_wait_s is not None and sim_decks.DECKS_FIELD in request:
         raise SimError("--wait-for-capacity does not apply to deck-list requests")
     if sim_decks.DECKS_FIELD in request:
@@ -2641,6 +2677,73 @@ def _refuse_corner_only_deck_flags(
             "--fail-on-diagnostic grades corner diagnostics, which "
             "deck-list requests do not produce"
         )
+
+
+def _dispatch_command_request(
+    request: dict[str, Any],
+    *,
+    request_path: str,
+    backend: str | None,
+    max_workers: int | None,
+    hosts: int | None,
+    artifacts_dir: str | None,
+    resume: bool | None,
+    budget_s: float | None,
+    plot_dir: str | None,
+    fail_fast_probe: bool | None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+    dry_run: bool,
+    submit_only: bool,
+    attach_job_id: str | None,
+    capacity_wait_s: float | None,
+    command_approvals: str | None,
+    _ownership: contextlib.ExitStack | None,
+) -> dict[str, Any]:
+    """Route a command-list request (issue #4443) to
+    :mod:`klayout_tools.sim_commands`: backend resolved as for deck lists
+    (a single unit stays local under a host default), and every flag with
+    no command-list meaning refused by name."""
+    for flag, given in (
+        ("--dry-run", dry_run),
+        ("--submit-only", submit_only),
+        ("--attach", attach_job_id is not None),
+        ("--wait-for-capacity", capacity_wait_s is not None),
+        ("--resume/options.resume", bool(resume)),
+        ("--hosts", hosts not in (None, 1)),
+    ):
+        if given:
+            raise SimError(f"{flag} does not apply to command-list requests")
+    _refuse_corner_only_deck_flags(
+        budget_s, plot_dir, fail_fast_probe, fail_on_diagnostic
+    )
+    resolved_backend, from_host_default = resolve_backend(backend, request)
+    if resolved_backend not in SUPPORTED_BACKENDS:
+        source = f" (from ${BACKEND_ENV})" if from_host_default else ""
+        raise SimError(
+            f"unsupported backend '{resolved_backend}'{source} "
+            f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
+        )
+    resolved_backend = _yield_host_default_backend(
+        resolved_backend,
+        from_host_default,
+        reason_ok=len(request.get(sim_commands.COMMANDS_FIELD) or ()) > 1,
+    )
+    request_dir = os.path.dirname(os.path.abspath(request_path))
+    if _ownership is not None:
+        _own_persistent_roots(
+            _ownership,
+            sim_commands.resolve_outdir(artifacts_dir, request_dir),
+            None,
+            persistent=True,
+        )
+    return sim_commands.run_command_request(
+        request,
+        request_dir=request_dir,
+        backend=resolved_backend,
+        approvals_path=command_approvals,
+        max_workers=max_workers,
+        artifacts_dir=artifacts_dir,
+    )
 
 
 def _dispatch_deck_request(
@@ -3044,7 +3147,10 @@ def _prepare_sim_request(
     engine = request.get("engine", "ngspice")
     if engine not in SUPPORTED_ENGINES:
         raise SimError(
-            f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
+            f"unsupported engine '{engine}' "
+            f"(supported: {', '.join(SUPPORTED_ENGINES)}); "
+            "to run a non-SPICE simulator (e.g. iverilog) use a `commands` request "
+            "(docs/cli/sim.md)"
         )
 
     backend_source = _backend_source(backend, request)
@@ -4692,6 +4798,7 @@ _KNOWN_REQUEST_KEYS = frozenset(
         "backend",
         "batch",
         "confidence",
+        "commands",
         "corners",
         "decks",
         "engine",
