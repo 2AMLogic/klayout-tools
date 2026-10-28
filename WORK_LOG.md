@@ -4,6 +4,28 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-28
 
+- **PR #4547**: docs: document same-layer via as via-less overlap contact in klt erc
+- **PR #4545**: feat(sim): deck-list --dry-run, --wait-for-capacity and engine_version
+- **PR #4540**: docs(signoff): document item-10 checks[] mint-time gating and ordering
+- **PR #4539**: test: pin keep_hierarchy slice idiom for replicated drivers and document it
+- **PR #4537**: feat: add recorded hash freshness record for signoff attest item 1 derived entries
+- **PR #4536**: feat: grade disclosed foundry-cell DRC exceptions for T1 item 3
+- **PR #4535**: fix(tests): skip ingest-canary tests when gh probe times out
+- **PR #4533**: feat: diagnose .subckt port-order drift in klt netlist --check
+- **PR #4529**: feat: declare negative control not_applicable per measurement in klt yield/signoff
+- **PR #4527**: feat: add options.sdf.scope, diagnose mis-scoped SDF, accept parameterised toplevel
+- **PR #4522**: fix(lvs): report unresolved X calls under the klayout-runset engine
+- **Issue #4543** (closed): klt sim decks: no dry-run validation, CLI capacity wait refused, engine_version null in unit reports
+- **Issue #4541** (closed): klt erc: no way to declare a via-less (direct-overlap) contact between stackup roles
+- **Issue #4538** (closed): klt synthesize: no way to keep intentionally duplicated logic from being merged (fan-out control)
+- **Issue #4532** (closed): signoff --attest: audit commands that depend on the attested baseline cannot be re-run while re-minting
+- **Issue #4531** (closed): signoff --attest 1: no generator-based freshness check for a synthesized (non-schematic) netlist
+- **Issue #4530** (closed): T1 item 3: disclosed exception for DRC violations inside unmodified foundry cells (operator ruling 2026-10-28)
+- **Issue #4528** (closed): test flake: test_ingest_canary collection gh api visibility probe times out (Tests py3.13)
+- **Issue #4524** (closed): klt netlist --block: .subckt port order and continuation wrapping differ across xschem versions, so --check drifts and regeneration silently reorders ports
+- **Issue #4523** (closed): Friction: no per-measurement 'control not applicable' for klt yield / signoff item 6 negative-control grading
+- **Issue #4521** (closed): functional-verification options.sdf: annotation scope is fixed to hdl_toplevel, and a mis-scoped SDF with INTERCONNECT entries aborts the simulator
+- **Issue #4519** (closed): klt lvs (klayout-runset): sky130 xschem cap_mim_m3_1 calls are dropped from the reference, nets merge, cascade of false mismatches
 - **PR #4534**: feat(netlist): add --ignore-comments to netlist --check
 - **PR #4526**: feat(drc): add source_cell_rollup and PDK runset correspondence notes
 - **PR #4516**: feat(lvs): apply finfet_bulk per circuit before layout flatten

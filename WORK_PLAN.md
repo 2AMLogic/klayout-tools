@@ -44,6 +44,7 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s)
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported
+- **#4548**: lvs: hierarchical reference vs flat extracted layout reports only 'circuit could not be matched', with no pointer to options.flatten_reference
 
 ## In Progress
 
@@ -52,16 +53,14 @@ Issues currently being built (`loom:building`).
 - **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests
 - **#4221**: signoff --attest: support T1 item 2 (Layout) anchored generic envelope
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
-- **#4513**: lvs: top-level pin names are not anchored, so a swap of two pin nets in a one-device circuit compares as match
-- **#4514**: lvs: multi-cell library stream vs hierarchical reference only compares after flattening both sides and relabelling rails at the top
+- **#4542**: klt erc --check --rerun reports drift across klt versions on provenance and inapplicable coverage
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
-- **#4515**: test: pin one-device LVS pin-swap limitation and document anchor opt-in
-- **#4516**: feat(lvs): apply finfet_bulk per circuit before layout flatten
+- **#4544**: docs: document erc --rerun exclusions and pin coverage drift
 
 ## Approved (Awaiting Merge)
 
@@ -116,8 +115,8 @@ Issues carrying `loom:curated`.
 - **#4424**: klt lvs: custom-class cap_cmomi/resistor LVS regresses from match to mismatch between daf06a51afaf and 0.8.0 (sg13cmos5l) *(curated)*
 - **#4440**: Friction: klt's OpenROAD steps need Docker, which fleet workers can't use; no fleet executor for OpenROAD regeneration *(curated)*
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
-- **#4513**: lvs: top-level pin names are not anchored, so a swap of two pin nets in a one-device circuit compares as match *(curated)*
-- **#4514**: lvs: multi-cell library stream vs hierarchical reference only compares after flattening both sides and relabelling rails at the top *(curated)*
+- **#4542**: klt erc --check --rerun reports drift across klt versions on provenance and inapplicable coverage *(curated)*
+- **#4548**: lvs: hierarchical reference vs flat extracted layout reports only 'circuit could not be matched', with no pointer to options.flatten_reference *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -142,9 +141,9 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 3 |
 | Very important | 1 |
 | Important | 1 |
-| Ready (`loom:issue`) | 17 |
-| In Progress (`loom:building`) | 5 |
-| PRs awaiting review | 3 |
+| Ready (`loom:issue`) | 18 |
+| In Progress (`loom:building`) | 4 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 3 |
 | Curated | 43 |
 | Architect / Hermit proposals | 9 |
