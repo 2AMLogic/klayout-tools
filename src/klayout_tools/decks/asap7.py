@@ -140,6 +140,9 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (97, 0): "SLVT.drawing",
     (98, 0): "LVT.drawing",
     (110, 0): "SRAMVT.drawing",
+    # Not in the pinned asap7.lyp/layermap or the DRM: an assumed, unused
+    # stream number for the thick-oxide marker (#4465).
+    (111, 0): "THICKOX.drawing",
 }
 
 _METALS = (
