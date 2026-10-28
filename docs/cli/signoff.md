@@ -1670,7 +1670,7 @@ an inventory the author did not write.
 | Item | Field | Required | Checks run |
 | ---- | ----- | -------- | ---------- |
 | **1** Design sources | `sources`: list of paths | yes, non-empty | each file exists (`present`, role `source`) |
-| | `derived`: list of `{path, generator, check}` | yes, non-empty | each file exists (`present`, role `derived`), **and** its `check` command exits `0` (`command`, role `freshness`). `generator` names what produced it (e.g. `"klt netlist"`). |
+| | `derived`: list of `{path, generator, check}` or `{path, generator, recorded}` | yes, non-empty | each file exists (`present`, role `derived`), **and** exactly one of: its `check` command exits `0` (`command`, role `freshness`), or its `recorded` digests match (`recorded_hash`, role `freshness`; see below). `generator` names what produced it (e.g. `"klt netlist"`). Both or neither of `check`/`recorded` is refused (exit `1`). |
 | **8** Characterization report | `report`: path | yes | the report file exists (`present`, role `report`) |
 | | `spec_rows`: list of row ids | yes, non-empty | each row has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) |
 | | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no entry fails its `citation` check |
@@ -1805,6 +1805,25 @@ decides (`attest/item1.json`):
 A netlist that exists but no longer matches its schematic fails the
 `freshness` check (`klt netlist --check` exits `3`), so the attestation
 fails rather than reporting a present-but-stale artifact as current.
+
+For a synthesized or routed gate-level netlist there is no `--check` command
+(re-synthesis is not byte-stable across tool versions). Declare a `recorded`
+freshness record instead of `check`; `klt` re-hashes the files and runs no
+command, so it works under `--check` without `local_only`:
+
+```json
+{"path": "netlist/top.v", "generator": "yosys synth.ys",
+ "recorded": {"derived_sha256": "<64 hex>",
+              "sources": {"rtl/top.v": "<64 hex>", "rtl/alu.v": "<64 hex>"}}}
+```
+
+`recorded.sources` must be non-empty, every key must also appear in the
+inventory's top-level `sources`, and every digest is 64-character **lowercase**
+hex (uppercase is refused). The `recorded_hash` check
+(`{"check": "recorded_hash", "role": "freshness", "target", "generator",
+"passed"}`) fails if the derived file or any recorded source differs or is
+missing, and then carries `mismatches: [{"path", "expected", "actual"}]`
+(`actual` is `null` for a missing file). Digests are of the raw bytes.
 
 Item 9: testbenches, a cold-start invocation and reproducibility pins
 (`attest/item9.json`):

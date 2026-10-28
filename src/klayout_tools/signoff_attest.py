@@ -58,6 +58,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -382,7 +383,9 @@ def _validated_inventory(
     for field, _role in _PATH_LISTS[item]:
         normalized[field] = _path_list(inventory, field, root, seen)
     if item == 1:
-        normalized["derived"] = _validated_derived(inventory, root, seen)
+        normalized["derived"] = _validated_derived(
+            inventory, root, seen, set(normalized["sources"])
+        )
     elif item == CHARACTERIZATION_ITEM:
         normalized.update(_validated_characterization(inventory, root))
     elif item == 9:
@@ -591,8 +594,54 @@ def _validated_corner_metrics(
     return result
 
 
+_HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def _hex_digest(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not _HEX_DIGEST.fullmatch(value):
+        raise AttestationError(
+            f"'{field}' must be a 64-character lowercase hex sha256 digest"
+        )
+    return value
+
+
+def _validated_recorded(
+    raw: Any, field: str, root: str, sources: set[str]
+) -> dict[str, Any]:
+    """Validate a ``derived[]`` entry's ``recorded`` freshness record: the
+    derived file's digest plus the digest of every source it was built from."""
+    if not isinstance(raw, Mapping):
+        raise AttestationError(f"'{field}' must be an object")
+    unknown = sorted(set(raw) - {"derived_sha256", "sources"})
+    if unknown:
+        raise AttestationError(f"'{field}' has unknown field(s): {', '.join(unknown)}")
+    derived_sha256 = _hex_digest(raw.get("derived_sha256"), f"{field}.derived_sha256")
+    recorded_sources = raw.get("sources")
+    if not isinstance(recorded_sources, Mapping) or not recorded_sources:
+        raise AttestationError(
+            f"'{field}.sources' must be a non-empty object mapping each source "
+            "path to its sha256 -- a hash of the artifact alone proves nothing "
+            "about the sources it was built from"
+        )
+    normalized: dict[str, str] = {}
+    for raw_path, digest in recorded_sources.items():
+        path = _normalize_repo_path(raw_path, f"{field}.sources", root)
+        if path not in sources:
+            raise AttestationError(
+                f"'{field}.sources' lists '{path}', which is not in the "
+                "inventory's top-level 'sources'"
+            )
+        if path in normalized:
+            raise AttestationError(f"'{field}.sources' lists '{path}' more than once")
+        normalized[path] = _hex_digest(digest, f"{field}.sources[{path}]")
+    return {"derived_sha256": derived_sha256, "sources": normalized}
+
+
 def _validated_derived(
-    inventory: Mapping[str, Any], root: str, seen: dict[str, str]
+    inventory: Mapping[str, Any],
+    root: str,
+    seen: dict[str, str],
+    sources: set[str],
 ) -> list[dict[str, Any]]:
     derived = inventory.get("derived")
     if not isinstance(derived, list) or not derived:
@@ -605,7 +654,7 @@ def _validated_derived(
         field = f"derived[{index}]"
         if not isinstance(raw, Mapping):
             raise AttestationError(f"'{field}' must be an object")
-        unknown = sorted(set(raw) - {"path", "generator", "check"})
+        unknown = sorted(set(raw) - {"path", "generator", "check", "recorded"})
         if unknown:
             raise AttestationError(
                 f"'{field}' has unknown field(s): {', '.join(unknown)}"
@@ -623,19 +672,22 @@ def _validated_derived(
                 f"'{field}.generator' must name what produced the artifact "
                 '(e.g. "klt netlist")'
             )
-        if "check" not in raw:
+        if ("check" in raw) == ("recorded" in raw):
             raise AttestationError(
-                f"'{field}' must declare a 'check' command that fails when the "
-                "artifact is stale (e.g. klt netlist ... --check) -- presence "
-                "alone does not prove a derived artifact is current"
+                f"'{field}' must declare exactly one of 'check' (a command that "
+                "fails when the artifact is stale, e.g. klt netlist ... --check) "
+                "or 'recorded' (the derived file's and its sources' sha256 "
+                "digests) -- presence alone does not prove a derived artifact "
+                "is current"
             )
-        entries.append(
-            {
-                "path": path,
-                "generator": generator,
-                "check": _command_spec(raw["check"], f"{field}.check", root),
-            }
-        )
+        entry = {"path": path, "generator": generator}
+        if "check" in raw:
+            entry["check"] = _command_spec(raw["check"], f"{field}.check", root)
+        else:
+            entry["recorded"] = _validated_recorded(
+                raw["recorded"], f"{field}.recorded", root, sources
+            )
+        entries.append(entry)
     return sorted(entries, key=lambda entry: entry["path"])
 
 
@@ -653,6 +705,31 @@ def _file_check(root: str, path: str, role: str) -> dict[str, Any]:
         "passed": digest is not None,
         "content_hash": f"sha256:{digest}" if digest is not None else None,
     }
+
+
+def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Compare the derived file and each recorded source against the digests
+    the inventory recorded; no command is run. ``mismatches`` names every
+    differing path with its expected and actual digest (``None`` = missing)."""
+    recorded = entry["recorded"]
+    expected = {entry["path"]: recorded["derived_sha256"], **recorded["sources"]}
+    mismatches = []
+    for path in sorted(expected):
+        actual = sha256_file(os.path.join(root, path))
+        if actual != expected[path]:
+            mismatches.append(
+                {"path": path, "expected": expected[path], "actual": actual}
+            )
+    check: dict[str, Any] = {
+        "check": "recorded_hash",
+        "role": "freshness",
+        "target": entry["path"],
+        "generator": entry["generator"],
+        "passed": not mismatches,
+    }
+    if mismatches:
+        check["mismatches"] = mismatches
+    return check
 
 
 # Bounded tail of a failing command's captured output, for the text renderer
@@ -918,6 +995,9 @@ def _run_checks(
         for entry in normalized["derived"]:
             checks.append(_file_check(root, entry["path"], "derived"))
         for entry in normalized["derived"]:
+            if "recorded" in entry:
+                checks.append(_recorded_hash_check(root, entry))
+                continue
             checks.append(
                 command(
                     entry["check"],
