@@ -1016,6 +1016,7 @@ _ALLOWED_REQUEST_KEYS = frozenset(
         "structural",
         "baseline",
         "arithmetic",
+        "latch_map",
         "run_id",
         "outputs",
         "parameters",
@@ -1228,6 +1229,7 @@ def run_synthesize(
     # resolved liberty, just below.
     dont_use_requested, dont_use_mode = _resolve_dont_use_request(constraints)
     expected_latches = _resolve_expected_latches(request)
+    latch_map_request = _resolve_latch_map(request)
     # Issue #2635: the shared hard-macro declaration. Shape-validated here,
     # with everything else that needs no PDK resolution; the one
     # corner-dependent half (which of a macro's per-corner liberties applies)
@@ -1342,6 +1344,10 @@ def run_synthesize(
         constr_inputs=constr_inputs,
     )
 
+    latch_map_report, latch_techmap_path = _prepare_latch_map(
+        latch_map_request, liberty_path, output_dir, hdl_toplevel
+    )
+
     arithmetic = None
     adder_sources: tuple[str, ...] = ()
     adder_techmap_path: str | None = None
@@ -1396,6 +1402,7 @@ def run_synthesize(
         tie_cells=_TIE_CELLS.get(cell_library),
         adder_sources=adder_sources,
         adder_techmap_path=adder_techmap_path,
+        latch_techmap_path=latch_techmap_path,
         macro_inputs=tuple(macro_inputs),
         repo_root=repo_root,
         pdk_root=pdk_info["root"],
@@ -1641,6 +1648,9 @@ def run_synthesize(
         "arithmetic": arithmetic,
         "baseline": None,
     }
+    _attach_latch_map_report(
+        response, latch_map_report, latch_techmap_path, repo_root=repo_root
+    )
     if arithmetic is not None:
         arithmetic["selected_measured"] = _candidate_measurement(
             instance_count=module_stats["num_cells"],
@@ -2757,6 +2767,7 @@ def _write_script(
     tie_cells: tuple[tuple[str, str], tuple[str, str]] | None = None,
     adder_sources: tuple[str, ...] = (),
     adder_techmap_path: str | None = None,
+    latch_techmap_path: str | None = None,
     macro_inputs: tuple[dict[str, str], ...] = (),
     repo_root: str | None = None,
     pdk_root: str | None = None,
@@ -2855,6 +2866,13 @@ def _write_script(
     Any ``$add`` the rule file declines (via ``_TECHMAP_FAIL_`` -- a width
     that was not generated) is left untouched for Yosys's own expansion, so
     this is always a subset substitution.
+
+    ``latch_techmap_path`` (issue #4458, the request's ``latch_map`` field)
+    inserts ``techmap -map <path>`` **after** ``synth`` and **before**
+    ``dfflibmap``: ``synth`` is what infers the ``$_DLATCH_P_``/
+    ``$_DLATCH_N_`` primitives the rule file matches, and ``dfflibmap``/``abc``
+    would otherwise leave them unmapped. ``None`` emits nothing, so every
+    pre-#4458 script is byte-identical.
 
     Commit-safety vs. cwd-independence (issue #1844): every path embedded in
     the script used to be absolute unconditionally, so the script ran
@@ -2971,8 +2989,12 @@ def _write_script(
         lines.append(
             f"techmap -map {_script_path_text(adder_techmap_path, repo_root=repo_root)}"
         )
+    lines.append(f"synth -top {hdl_toplevel}")
+    if latch_techmap_path is not None:
+        lines.append(
+            f"techmap -map {_script_path_text(latch_techmap_path, repo_root=repo_root)}"
+        )
     lines += [
-        f"synth -top {hdl_toplevel}",
         f"dfflibmap -liberty {liberty_text}",
         abc_command,
         "clean",
@@ -3741,6 +3763,136 @@ def _compute_leakage(
     if not leakage_by_type:
         return None, None
     return total_nw, dict(sorted(leakage_by_type.items()))
+
+
+#: Latch polarities ``request.latch_map`` may map, to the Yosys internal
+#: primitive each one rewrites (issue #4458). ``$_DLATCH_N_`` is transparent
+#: while its enable is low, ``$_DLATCH_P_`` while high.
+_LATCH_MAP_POLARITIES = {"positive": "$_DLATCH_P_", "negative": "$_DLATCH_N_"}
+_LATCH_MAP_PIN_KEYS = ("enable", "data", "q")
+_LATCH_MAP_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+
+
+def _resolve_latch_map(request: dict[str, Any]) -> dict[str, dict[str, str]] | None:
+    """``request.latch_map`` (issue #4458) shape-validated, or ``None`` when
+    absent. ``{"positive"|"negative": {"cell", "enable", "data", "q"}}``: the
+    library latch each inferred ``$_DLATCH_*_`` is mapped onto. An omitted
+    polarity stays unmapped. Raises :class:`SynthesizeError` on any other
+    shape (unknown key, missing pin, non-identifier name, empty object)."""
+    if "latch_map" not in request:
+        return None
+    latch_map = request["latch_map"]
+    if not isinstance(latch_map, dict) or not latch_map:
+        raise SynthesizeError(
+            "request.latch_map must be a non-empty object keyed by "
+            f"{' and/or '.join(repr(k) for k in _LATCH_MAP_POLARITIES)}"
+        )
+    _reject_unknown_keys(
+        latch_map,
+        frozenset(_LATCH_MAP_POLARITIES),
+        "request",
+        "latch_map",
+        SynthesizeError,
+    )
+    resolved: dict[str, dict[str, str]] = {}
+    for polarity in _LATCH_MAP_POLARITIES:
+        if polarity not in latch_map:
+            continue
+        entry = latch_map[polarity]
+        where = f"request.latch_map.{polarity}"
+        if not isinstance(entry, dict):
+            raise SynthesizeError(f"{where} must be an object")
+        _reject_unknown_keys(
+            entry,
+            frozenset(("cell", *_LATCH_MAP_PIN_KEYS)),
+            "request",
+            f"latch_map.{polarity}",
+            SynthesizeError,
+        )
+        resolved_entry: dict[str, str] = {}
+        for key in ("cell", *_LATCH_MAP_PIN_KEYS):
+            value = entry.get(key)
+            if not isinstance(value, str) or not _LATCH_MAP_NAME.fullmatch(value):
+                raise SynthesizeError(
+                    f"{where}.{key} must be a string naming a Verilog "
+                    "identifier (letters, digits, '_', '$')"
+                )
+            resolved_entry[key] = value
+        if len(set(resolved_entry[k] for k in _LATCH_MAP_PIN_KEYS)) != 3:
+            raise SynthesizeError(f"{where} enable, data and q must be distinct pins")
+        resolved[polarity] = resolved_entry
+    return resolved
+
+
+def _prepare_latch_map(
+    latch_map: dict[str, dict[str, str]] | None,
+    liberty_path: str,
+    output_dir: str,
+    hdl_toplevel: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate ``latch_map`` against the liberty and write its techmap file
+    (issue #4458); ``(report, techmap_path)``, both ``None`` without one."""
+    if latch_map is None:
+        return None, None
+    report = _validate_latch_map_against_liberty(latch_map, liberty_path)
+    techmap_path = os.path.join(output_dir, f"{hdl_toplevel}_latch_map.v")
+    _write_script_text(techmap_path, _latch_techmap_text(latch_map))
+    return report, techmap_path
+
+
+def _attach_latch_map_report(
+    response: dict[str, Any],
+    report: dict[str, Any] | None,
+    techmap_path: str | None,
+    *,
+    repo_root: str | None,
+) -> None:
+    """Add the ``latch_map`` block to ``response`` when a map was requested."""
+    if report is None:
+        return
+    report["techmap_path"] = _report_path(techmap_path, repo_root=repo_root)
+    response["latch_map"] = report
+
+
+def _validate_latch_map_against_liberty(
+    latch_map: dict[str, dict[str, str]], liberty_path: str
+) -> dict[str, Any]:
+    """Reject a ``latch_map`` cell absent from the resolved liberty (issue
+    #4458) and return the response's ``latch_map`` block. When the cell list
+    cannot be established the check is skipped (``validated: false``), the
+    same posture as :func:`_validate_dont_use_against_liberty`."""
+    cell_names = _liberty_cell_names(liberty_path)
+    if cell_names is not None:
+        for polarity, entry in latch_map.items():
+            if entry["cell"] not in cell_names:
+                raise SynthesizeError(
+                    f"request.latch_map.{polarity}.cell '{entry['cell']}' is "
+                    f"not a cell in the resolved liberty "
+                    f"'{os.path.basename(liberty_path)}'"
+                )
+    return {
+        "mapped": {polarity: dict(entry) for polarity, entry in latch_map.items()},
+        "validated": cell_names is not None,
+        "techmap_path": None,
+    }
+
+
+def _latch_techmap_text(latch_map: dict[str, dict[str, str]]) -> str:
+    """The Yosys ``techmap`` rule file for ``latch_map`` (issue #4458): one
+    module per mapped polarity, instantiating the library latch in place of
+    the ``$_DLATCH_*_`` primitive (ports ``E``/``D``/``Q``)."""
+    chunks = ["// Generated by klt synthesize from request.latch_map (issue #4458)\n"]
+    for polarity, primitive in _LATCH_MAP_POLARITIES.items():
+        entry = latch_map.get(polarity)
+        if entry is None:
+            continue
+        chunks.append(
+            f"module \\{primitive} (input E, input D, output Q);\n"
+            f"  {entry['cell']} _TECHMAP_REPLACE_ "
+            f"(.{entry['enable']}(E), .{entry['data']}(D), .{entry['q']}(Q));\n"
+            "endmodule\n"
+        )
+    return "\n".join(chunks)
 
 
 def _resolve_expected_latches(request: dict[str, Any]) -> int:
