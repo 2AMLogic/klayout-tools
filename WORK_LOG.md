@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-28
 
+- **PR #4491**: fix: space-separate bus ports in klt netlist .subckt headers
+- **PR #4484**: feat: add output_dbu_um to refine merged P&R GDS dbu
+- **Issue #4490** (closed): klt netlist --block: comma-joined bus ports in .subckt are mis-parsed by ngspice; host paths in output
+- **Issue #4482** (closed): place-and-route: no output-dbu control; decks that need a finer dbu cannot check the routed stream
 - **PR #4488**: feat: warn when route merge resolves no KLayout layer map
 - **PR #4487**: feat: recognise M1 resistors and MOM capacitors on the ASAP7 deck
 - **PR #4486**: feat: add klt power-intent check for power-gated netlists
