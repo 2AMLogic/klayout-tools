@@ -1961,6 +1961,25 @@ visible, never a pass; `skipped_checks` is `[]` when nothing was skipped.
 Run a plain `--attest --check` (no `local_only` commands) on a runner that
 has the toolchain to re-verify them.
 
+**Item 10 ordering: `checks[]` gate the envelope at mint time.** Every item-10
+`checks[]` command runs under `--attest` against the working tree as it is at
+that moment, and any failure gives `status: "fail"`, exit `3`, and no envelope
+(see "Exit codes"). `local_only` does not exempt a check from this: it only
+skips the command under `--attest --check`, and the command still runs, and
+gates, at mint time.
+
+This makes one case circular. A check that also verifies committed evidence
+*downstream* of the item-10 envelope (a lint for record freshness, or for
+envelope-to-manifest pins) fails whenever a record citing that envelope is
+stale, and such a record cannot be re-minted until the envelope exists. There
+are two ways out:
+
+1. Keep the downstream-verifying lint out of the item-10 `checks[]` inventory
+   and run it in CI instead.
+2. Keep it in the inventory and follow the required order: mint item 10 first,
+   on a tree whose baseline still holds, then re-mint the downstream records
+   that cite the new envelope.
+
 #### Exit codes
 
 | Mode | `0` | `1` | `2` | `3` |
