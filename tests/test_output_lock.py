@@ -464,9 +464,21 @@ def test_run_sim_deck_list_flag_errors_take_no_lock_and_create_nothing(
 ):
     request = _deck_request_path(tmp_path)
     holder_factory(tmp_path / ".klt" / "sim")
-    with pytest.raises(sim.SimError, match="--dry-run"):
-        sim.run_sim(str(request), dry_run=True)
+    with pytest.raises(sim.SimError, match="--budget-s"):
+        sim.run_sim(str(request), budget_s=5.0)
     assert not (tmp_path / ".klt" / "sim" / "tt_27c").exists()
+
+
+def test_run_sim_deck_list_dry_run_takes_no_lock_and_creates_nothing(
+    tmp_path, holder_factory
+):
+    request = _deck_request_path(tmp_path)
+    outdir = tmp_path / ".klt" / "sim"
+    holder_factory(outdir)  # held by another process: a real run would contend
+    report = sim.run_sim(str(request), dry_run=True)
+    assert report["dry_run"] is True
+    assert report["status"] == "valid"
+    assert not (outdir / "tt_27c").exists()
 
 
 def test_run_pex_default_and_explicit_roots_are_owned(tmp_path, holder_factory):
