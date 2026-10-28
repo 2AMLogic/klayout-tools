@@ -95,19 +95,61 @@ class PowerIntentError(Exception):
 # -------------------------------------------------------------------- intent
 
 
+def _str_list(container: dict, key: str, path: str) -> list[str]:
+    value = container.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise PowerIntentError(
+            f"intent file {path!r}: {key!r} must be a list of strings"
+        )
+    return value
+
+
+def _parse_clamps(doc: dict, path: str) -> dict[str, int]:
+    clamps = doc.get("clamp_values", {})
+    if not isinstance(clamps, dict) or not all(v in (0, 1) for v in clamps.values()):
+        raise PowerIntentError(
+            f"intent file {path!r}: 'clamp_values' must map net -> 0 or 1"
+        )
+    return {k: int(v) for k, v in clamps.items()}
+
+
+def _parse_sequence(doc: dict, path: str) -> list[str] | None:
+    sequence = doc.get("sequence")
+    if sequence is None:
+        return None
+    if not isinstance(sequence, list) or not all(isinstance(e, str) for e in sequence):
+        raise PowerIntentError(
+            f"intent file {path!r}: 'sequence' must be a list of event names"
+        )
+    unknown = sorted(set(sequence) - set(EVENTS))
+    if unknown:
+        raise PowerIntentError(
+            f"intent file {path!r}: unknown sequence event(s) {unknown}; "
+            f"expected {list(EVENTS)}"
+        )
+    if len(set(sequence)) != len(sequence):
+        raise PowerIntentError(f"intent file {path!r}: 'sequence' repeats an event")
+    return sequence
+
+
+def _parse_power_up_order(doc: dict, path: str) -> list[str]:
+    order = doc.get("power_up_order", list(DEFAULT_POWER_UP_ORDER))
+    if (
+        not isinstance(order, list)
+        or not order
+        or not set(order) <= {"iso_release", "reset_release", "clk_restart"}
+        or len(set(order)) != len(order)
+    ):
+        raise PowerIntentError(
+            f"intent file {path!r}: 'power_up_order' must be a permutation of a "
+            "subset of iso_release, reset_release, clk_restart"
+        )
+    return order
+
+
 class _Intent:
     def __init__(self, doc: dict, path: str) -> None:
-        def strs(key: str, container: dict = doc) -> list[str]:
-            value = container.get(key, [])
-            if not isinstance(value, list) or not all(
-                isinstance(v, str) for v in value
-            ):
-                raise PowerIntentError(
-                    f"intent file {path!r}: {key!r} must be a list of strings"
-                )
-            return value
-
-        self.gated = strs("gated_instances")
+        self.gated = _str_list(doc, "gated_instances", path)
         if not self.gated:
             raise PowerIntentError(
                 f"intent file {path!r}: 'gated_instances' must name an instance"
@@ -117,55 +159,19 @@ class _Intent:
             raise PowerIntentError(
                 f"intent file {path!r}: 'always_on' must be an object"
             )
-        self.always_on_ports = strs("ports", always_on)
-        self.always_on_instances = strs("instances", always_on)
-        self.retained = strs("retained")
-        self.stopped_clocks = strs("stopped_clock_nets")
-        clamps = doc.get("clamp_values", {})
-        if not isinstance(clamps, dict) or not all(
-            v in (0, 1) for v in clamps.values()
-        ):
-            raise PowerIntentError(
-                f"intent file {path!r}: 'clamp_values' must map net -> 0 or 1"
-            )
-        self.clamp_values: dict[str, int] = {k: int(v) for k, v in clamps.items()}
+        self.always_on_ports = _str_list(always_on, "ports", path)
+        self.always_on_instances = _str_list(always_on, "instances", path)
+        self.retained = _str_list(doc, "retained", path)
+        self.stopped_clocks = _str_list(doc, "stopped_clock_nets", path)
+        self.clamp_values = _parse_clamps(doc, path)
         default = doc.get("default_clamp")
         if default not in (None, 0, 1):
             raise PowerIntentError(
                 f"intent file {path!r}: 'default_clamp' must be 0 or 1"
             )
         self.default_clamp = default
-        sequence = doc.get("sequence")
-        if sequence is not None:
-            if not isinstance(sequence, list) or not all(
-                isinstance(e, str) for e in sequence
-            ):
-                raise PowerIntentError(
-                    f"intent file {path!r}: 'sequence' must be a list of event names"
-                )
-            unknown = sorted(set(sequence) - set(EVENTS))
-            if unknown:
-                raise PowerIntentError(
-                    f"intent file {path!r}: unknown sequence event(s) {unknown}; "
-                    f"expected {list(EVENTS)}"
-                )
-            if len(set(sequence)) != len(sequence):
-                raise PowerIntentError(
-                    f"intent file {path!r}: 'sequence' repeats an event"
-                )
-        self.sequence: list[str] | None = sequence
-        order = doc.get("power_up_order", list(DEFAULT_POWER_UP_ORDER))
-        if (
-            not isinstance(order, list)
-            or not order
-            or not set(order) <= {"iso_release", "reset_release", "clk_restart"}
-            or len(set(order)) != len(order)
-        ):
-            raise PowerIntentError(
-                f"intent file {path!r}: 'power_up_order' must be a permutation of a "
-                "subset of iso_release, reset_release, clk_restart"
-            )
-        self.power_up_order: list[str] = order
+        self.sequence = _parse_sequence(doc, path)
+        self.power_up_order = _parse_power_up_order(doc, path)
         both = sorted(set(self.gated) & set(self.retained))
         if both:
             raise PowerIntentError(
@@ -227,6 +233,17 @@ class _Design:
         self.models = models
         self.intent = intent
         self.insts = {i["name"]: i for i in module["instances"]}
+        self._check_intent_names()
+        self.gated = set(intent.gated)
+        #: net -> driving instance (modelled outputs only)
+        self.driver: dict[str, dict] = {}
+        #: net -> [(instance, pin)] reading it
+        self.readers: dict[str, list[tuple[dict, str]]] = {}
+        for inst in module["instances"]:
+            self._index_instance(inst)
+
+    def _check_intent_names(self) -> None:
+        module, intent = self.module, self.intent
         for name in (*intent.gated, *intent.retained, *intent.always_on_instances):
             if name not in self.insts:
                 raise PowerIntentError(
@@ -239,29 +256,25 @@ class _Design:
                     f"intent names always-on port {port!r} which is not a port of "
                     f"module {module['name']!r}"
                 )
-        self.gated = set(intent.gated)
-        #: net -> driving instance (modelled outputs only)
-        self.driver: dict[str, dict] = {}
-        #: net -> [(instance, pin)] reading it
-        self.readers: dict[str, list[tuple[dict, str]]] = {}
-        for inst in module["instances"]:
-            model = models.get(inst["cell"])
-            if model is None:
-                if inst["name"] in self.gated:
-                    raise PowerIntentError(
-                        f"gated instance {inst['name']!r} has no cell model "
-                        f"({inst['cell']!r}); its outputs cannot be determined"
-                    )
-                for pin, value in inst["connections"].items():
-                    for net in _nets(value):
-                        self.readers.setdefault(net, []).append((inst, pin))
-                continue
+
+    def _index_instance(self, inst: dict) -> None:
+        model = self.models.get(inst["cell"])
+        if model is None:
+            if inst["name"] in self.gated:
+                raise PowerIntentError(
+                    f"gated instance {inst['name']!r} has no cell model "
+                    f"({inst['cell']!r}); its outputs cannot be determined"
+                )
             for pin, value in inst["connections"].items():
                 for net in _nets(value):
-                    if pin in model.outputs:
-                        self.driver[net] = inst
-                    elif pin not in _POWER_PINS:
-                        self.readers.setdefault(net, []).append((inst, pin))
+                    self.readers.setdefault(net, []).append((inst, pin))
+            return
+        for pin, value in inst["connections"].items():
+            for net in _nets(value):
+                if pin in model.outputs:
+                    self.driver[net] = inst
+                elif pin not in _POWER_PINS:
+                    self.readers.setdefault(net, []).append((inst, pin))
 
     def passthrough(self, inst: dict) -> bool:
         model = self.models.get(inst["cell"])
@@ -482,6 +495,49 @@ def _check_sequence(intent: _Intent) -> tuple[str, list[dict[str, Any]]]:
     return ("fail" if findings else "pass"), findings
 
 
+def _select_module(
+    modules: list[dict], models: dict[str, _CellModel], top: str | None
+) -> dict:
+    by_name = {str(m["name"]): m for m in modules}
+    if top is None:
+        if len(modules) != 1:
+            raise PowerIntentError(
+                f"netlist has {len(modules)} modules; name the top with --top "
+                f"(one of {sorted(by_name)})"
+            )
+        module = modules[0]
+    elif top in by_name:
+        module = by_name[top]
+    else:
+        raise PowerIntentError(
+            f"top module {top!r} not in netlist (have {sorted(by_name)})"
+        )
+    for inst in module["instances"]:
+        if inst["cell"] not in models and inst["cell"] in by_name:
+            raise PowerIntentError(
+                f"instance {inst['name']!r} is of module {inst['cell']!r} defined in "
+                "the netlist; hierarchical netlists are not supported -- flatten first"
+            )
+    return module
+
+
+def _collect_violations(
+    isolation: list[dict[str, Any]],
+    state: list[dict[str, Any]],
+    seq_findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    violations: list[dict[str, Any]] = []
+    for item in isolation:
+        for f in item["findings"]:
+            violations.append({"check": "isolation", "net": item["net"], **f})
+    for el in state:
+        for f in el["findings"]:
+            violations.append({"check": "state", "instance": el["instance"], **f})
+    for f in seq_findings:
+        violations.append({"check": "sequencing", **f})
+    return violations
+
+
 def run_power_intent(
     netlist_path: str,
     cell_model_paths: list[str],
@@ -498,41 +554,14 @@ def run_power_intent(
         raise PowerIntentError(str(exc)) from exc
     except VerilogNetlistError as exc:
         raise PowerIntentError(f"cannot parse netlist {netlist_path!r}: {exc}") from exc
-    by_name = {str(m["name"]): m for m in modules}
-    if top is None:
-        if len(modules) != 1:
-            raise PowerIntentError(
-                f"netlist has {len(modules)} modules; name the top with --top "
-                f"(one of {sorted(by_name)})"
-            )
-        module = modules[0]
-    elif top in by_name:
-        module = by_name[top]
-    else:
-        raise PowerIntentError(
-            f"top module {top!r} not in netlist (have {sorted(by_name)})"
-        )
-    for inst in module["instances"]:  # type: ignore[attr-defined]
-        if inst["cell"] not in models and inst["cell"] in by_name:
-            raise PowerIntentError(
-                f"instance {inst['name']!r} is of module {inst['cell']!r} defined in "
-                "the netlist; hierarchical netlists are not supported -- flatten first"
-            )
+    module = _select_module(modules, models, top)  # type: ignore[arg-type]
 
     design = _Design(module, models, intent)  # type: ignore[arg-type]
     isolation = _check_isolation(design)
     state = _check_state(design)
     seq_status, seq_findings = _check_sequence(intent)
 
-    violations: list[dict[str, Any]] = []
-    for item in isolation:
-        for f in item["findings"]:
-            violations.append({"check": "isolation", "net": item["net"], **f})
-    for el in state:
-        for f in el["findings"]:
-            violations.append({"check": "state", "instance": el["instance"], **f})
-    for f in seq_findings:
-        violations.append({"check": "sequencing", **f})
+    violations = _collect_violations(isolation, state, seq_findings)
 
     def status(items: list[dict[str, Any]]) -> str:
         return "fail" if any(i["status"] == "fail" for i in items) else "pass"
