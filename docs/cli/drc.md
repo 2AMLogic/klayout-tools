@@ -1359,6 +1359,16 @@ net_spec=NetSpaceSpec(tap_and=..., chain=...))`. sg13cmos5l's `nwell.space.2`
   may be *over*-flagged, not passed): connections through layers outside the
   chain (Metal2+/Via*, TopMetal*, poly/Activ jumpers), `NWell.pin` labels and
   substrate connectivity. Each deck states its own list next to the rule.
+- **Different nets inside hierarchical vendor cells** (issue #4520): the check
+  runs on flattened geometry and takes nets only from the modelled chain above;
+  labels and connectivity inside a macro are not read. Two wells inside an
+  unlabeled hard macro that are tied only above Metal1 therefore read as
+  different nets and are flagged. This is deliberate: treating nets in an
+  unlabeled macro as "unknown" would silently pass real violations. A report on
+  a layout instancing a foundry SRAM macro can show many `nwell.space.2`
+  findings that the PDK's own `NW.b1` does not; the cause for a specific macro
+  is *unverified* (the PDK rule uses its own net derivation and intersects with
+  PWell). Use `source_cell_rollup` and `--waivers` to make the policy call.
 - **Reporting**: ordinary edge-pair violations (`check: "net_space"`, real
   `bbox` and `polygon`, rule id, provenance), identical in shape to `"space"`.
   Evaluated flat per top cell. Corner-to-corner gaps use Euclidean distance;
@@ -3218,6 +3228,8 @@ the `violations[]` entry shape plus `waiver_justification` — alongside:
 | `waived` | array\<object\> | The waived markers. |
 | `unused_waivers` | array\<object\> | Waivers that matched no marker (informational, not an error), so stale waivers are visible. |
 
+See also `source_cell_rollup` below, which counts waived markers per cell.
+
 All four fields, and `provenance.waivers` (`{"file", "content_hash"}`), are
 absent without `--waivers`, so a default report is unchanged and
 `schema_version` is not bumped. `--check` re-hashes the waiver file along
@@ -3387,6 +3399,8 @@ On a run with findings:
 | `violations`      | array\<object\>          | One entry per violating geometry, see below.                             |
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
 | `waived_count`, `waived_rule_counts`, `waived`, `unused_waivers` | integer, object\<string, int\>, array\<object\>, array\<object\> | Present only on a `--waivers` run (issue #3483): the markers a reviewed waiver file moved out of `violations`, with their justification; see "Waivers". Absent otherwise, so a default run's report is byte-identical. |
+| `source_cell_rollup` | array\<object\> | Issue #4520. Sorted `{source_cell, rule, count, waived_count}` rows (`source_cell: null` last = unattributed): kept markers in `count`, waived ones in `waived_count`. Present only when some finding has a `source_cell` or on a `--waivers` run; absent for a flat layout, so a default report is unchanged. |
+| `runset_correspondence` | array\<object\> | Issue #4520. For each rule that produced a finding and carries a note (sg13cmos5l `nwell.space.2`, `nwell.enclosing.pactiv*.1`): `{rule, implemented_by_pdk_runset, runset_file, pdk_revision, note}`. `pdk_revision` is the `ihp-sg13cmos5l` commit the deck was read against. The PDK's NWell table (`5_1_nwell.drc`) runs only NW.b, NW.b1, NW.f1, NW.f1.digibnd; NW.c/c1 live in the optional `sg13cmos5l_maximal.drc`. Absent when no noted rule fired. |
 | `rule_selection`  | object                   | Present only on a `--rules` run (issue #2768): `{"selectors", "selected", "omitted", "deck_rule_count", "subset"}`, relative to the full registered deck — see "Rule listing and selection" above. Absent otherwise, so a default run's report is unchanged. |
 | `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. A deck hash is stable only per package version; to re-run under a previously pinned deck see [`deck.md`](deck.md#reproducing-a-run-under-a-pinned-deck). A `--waivers` run additionally carries `waivers` (issue #3483): `{"file", "content_hash"}` pinning the waiver file by `sha256:` hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
 

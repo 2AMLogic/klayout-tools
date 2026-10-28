@@ -443,7 +443,33 @@ replayed by `--check --rerun`. Every applied polarity adds one
 `"match"` reached under the policy is never silent. Its `details` carries
 `polarity`, `net` (the requested name), `bulk_net` (the layout net that was
 tied), `device_count`, `device_classes` and `status` (`joined`,
-`already_connected` or `no_devices`).
+`already_connected` or `no_devices`) and `circuit` (the layout circuit it
+was applied in).
+
+##### Multi-cell library streams
+
+The policy is applied per layout circuit, to the selected top and every
+circuit beneath it, **before** `options.flatten_layout` runs. Each circuit
+resolves the named net inside itself, so `VDD`/`VSS` text labels drawn only in
+the unit cells are enough; no rail labels are needed at the top. Recipe for a
+stream of several unit cells placed in one top, against a hierarchical
+reference (one `.SUBCKT` per unit cell plus a top that instantiates them):
+
+```json
+{"options": {"finfet_bulk": {"nmos": "VSS", "pmos": "VDD"},
+             "flatten_layout": true, "flatten_reference": true}}
+```
+
+One `device.finfet_bulk_tied` warning is emitted per circuit and polarity that
+has devices (a polarity with no devices anywhere is disclosed once as
+`no_devices`). A circuit with devices of a named polarity but no matching
+label is a request error naming that circuit. A `match` reached this way also
+carries `topology.flattened` warnings; both sets of warnings are the
+disclosure a `klt signoff` T1 item 4 reviewer should acknowledge. Measured on
+a two-cell fixture: without `flatten_layout`/`flatten_reference` the
+hierarchical compare still does not match (sub-cell circuits are not paired
+with differently-named reference `.SUBCKT`s), so the flattened recipe is the
+supported path.
 
 #### Pinned ASAP7 RVT corpus
 
@@ -532,6 +558,18 @@ pre-#2692 behaviour). `"engine": "klayout"` only: an explicit `true` on the
 netgen engine is rejected (exit 1), the same boundary `request.hints` has, so
 a caller who asked for the stronger compare is never silently handed the
 weaker one.
+
+**One-device cells (issue #4513).** The same limit applies to a small
+`plain-element`/`subckt-call` cell, not only to a macro bus. When every net
+is a top-level pin and the connectivity has a pin-relabelling automorphism —
+e.g. one PMOS with gate `B`, drain `A`, source and bulk `C` — a reference with
+two pin nets exchanged (`gate=A`, `drain=B`) still compares as `match`, and
+`net_correspondence` pairs differently named nets. A "swap two nets" negative
+control on such a cell is therefore invisible by default. Set
+`options.anchor_top_level_pins: true`: the swap is then reported as `mismatch`
+with `hints.rejected` entries carrying `details.anchored_top_level_pin`.
+(Exchanging gate and source is already a mismatch, because the bulk tie breaks
+that symmetry.)
 
 **What it does not reach.** Anchoring is licensed by a pin name present on
 both sides, so it constrains exactly the nets that are top-level pins. An

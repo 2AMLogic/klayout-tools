@@ -284,6 +284,7 @@ def apply_finfet_bulk(
             and device.device_class().has_terminal("B")
         ]
         record: dict[str, Any] = {
+            "circuit": circuit.name,
             "polarity": polarity,
             "net": target_name,
             "device_count": len(devices),
@@ -343,6 +344,42 @@ def apply_finfet_bulk(
                 record["status"] = "joined"
         records.append(record)
     return records
+
+
+def apply_finfet_bulk_hierarchy(
+    top: kdb.Circuit, spec: Mapping[str, str] | None
+) -> list[dict[str, Any]]:
+    """Apply ``options.finfet_bulk`` to ``top`` and every circuit beneath it.
+
+    Each circuit resolves the named net inside itself, so rail labels drawn in
+    a sub-cell are enough. A circuit without devices of a polarity is skipped;
+    a polarity with no devices anywhere is disclosed once as ``no_devices``
+    on ``top``. Must run before ``flatten_layout`` (flattening merges sub-cell
+    nets by connectivity, so the tie made here survives it).
+    """
+    if not spec:
+        return []
+    circuits: list[kdb.Circuit] = []
+    seen: set[str] = set()
+    pending = [top]
+    while pending:
+        circuit = pending.pop(0)
+        if circuit.name in seen:
+            continue
+        seen.add(circuit.name)
+        circuits.append(circuit)
+        pending.extend(sub.circuit_ref() for sub in circuit.each_subcircuit())
+    records: list[dict[str, Any]] = []
+    empty: dict[str, dict[str, Any]] = {}
+    for circuit in circuits:
+        for record in apply_finfet_bulk(circuit, spec):
+            if record["status"] == "no_devices":
+                empty.setdefault(record["polarity"], record)
+            else:
+                records.append(record)
+    tied = {record["polarity"] for record in records}
+    top_records = [r for p, r in empty.items() if p not in tied]
+    return top_records + records
 
 
 def bulk_disclosures(
@@ -454,20 +491,16 @@ def prepare_finfet_request(
 def prepare_finfet_comparison(
     finfet: bool,
     layout_netlist: kdb.Netlist,
-    layout_circuit: kdb.Circuit,
     reference_netlist: kdb.Netlist,
-    bulk: Mapping[str, str] | None,
-) -> list[dict[str, Any]]:
-    """Comparison-time FinFET setup (a no-op returning ``[]`` for a planar
-    deck): merge reference fingers with the extractor's combiner, apply the
-    opt-in bulk policy to the layout circuit, and configure exact ``NFIN``
-    on both sides. Returns the bulk-policy disclosure records."""
+) -> None:
+    """Comparison-time FinFET setup (a no-op for a planar deck): merge
+    reference fingers with the extractor's combiner and configure exact
+    ``NFIN`` on both sides. The opt-in bulk policy is applied earlier, before
+    ``flatten_layout`` (see :func:`apply_finfet_bulk_hierarchy`)."""
     if not finfet:
-        return []
+        return
     combine_reference_fingers(reference_netlist)
-    records = apply_finfet_bulk(layout_circuit, bulk)
     configure_finfet_comparison(layout_netlist, reference_netlist)
-    return records
 
 
 def sliced_reference_file(

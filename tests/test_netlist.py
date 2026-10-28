@@ -1634,3 +1634,117 @@ def test_unresolved_symbol_message_reports_inherited_env(
     message = str(excinfo.value)
     assert "--rcfile none" in message
     assert "PDK_ROOT=not set PDK=not set (inherited, not set by klt)" in message
+
+
+# --------------------------------------------------------------------------- #
+# --ignore-comments (issue #4525)
+# --------------------------------------------------------------------------- #
+
+_COMMENT_BODY = "** sch_path: /a/block.sch\nM1 d g s b nfet w=1 l=2\nR1 a b 1k\n.end"
+
+
+def _check_with_committed(tmp_path, monkeypatch, committed: bytes, **kwargs):
+    monkeypatch.setenv("NETLIST_BODY", _COMMENT_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_bytes(committed)
+    return run_netlist(
+        schematic, str(output), check=True, xschem_binary=binary, **kwargs
+    )
+
+
+def test_ignore_comments_matches_header_only_difference(
+    tmp_path, argv_log, monkeypatch
+):
+    committed = b"* project header\n\n" + _COMMENT_BODY.encode() + b"\n"
+    default = _check_with_committed(tmp_path, monkeypatch, committed)
+    assert default["status"] == "drifted"
+
+    report = _check_with_committed(
+        tmp_path, monkeypatch, committed, ignore_comments=True
+    )
+    assert report["status"] == "match"
+    assert report["drift"]["comments_differ"] is True
+
+
+def test_ignore_comments_matches_rewritten_sch_path_and_wrapping(
+    tmp_path, argv_log, monkeypatch
+):
+    committed = (
+        b"** sch_path: ../other/renamed.sch\nM1 d g s b nfet\r\n+ w=1 l=2\r\n"
+        b"R1 a b 1k\r\n.end\r\n"
+    )
+    default = _check_with_committed(tmp_path, monkeypatch, committed)
+    assert default["status"] == "drifted"
+    report = _check_with_committed(
+        tmp_path, monkeypatch, committed, ignore_comments=True
+    )
+    assert report["status"] == "match"
+
+
+def test_ignore_comments_still_drifts_on_device_change(tmp_path, argv_log, monkeypatch):
+    committed = b"* header\nM1 d g s b nfet w=1 l=3\nR1 a b 1k\n.end\n"
+    report = _check_with_committed(
+        tmp_path, monkeypatch, committed, ignore_comments=True
+    )
+    assert report["status"] == "drifted"
+    assert report["drift"]["comments_differ"] is False
+
+
+def test_ignore_comments_plain_match_does_not_flag_comments(
+    tmp_path, argv_log, monkeypatch
+):
+    report = _check_with_committed(
+        tmp_path, monkeypatch, (_COMMENT_BODY + "\n").encode(), ignore_comments=True
+    )
+    assert report["status"] == "match"
+    assert report["drift"]["comments_differ"] is False
+
+
+def test_ignore_comments_missing_committed_still_drifts(tmp_path, argv_log):
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    report = run_netlist(
+        schematic,
+        str(tmp_path / "absent.spice"),
+        check=True,
+        xschem_binary=binary,
+        ignore_comments=True,
+    )
+    assert report["status"] == "drifted"
+
+
+def test_ignore_comments_without_check_is_a_usage_error(tmp_path, argv_log, capsys):
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "netlist",
+                schematic,
+                "-o",
+                str(tmp_path / "o.spice"),
+                "--ignore-comments",
+                "--xschem-binary",
+                binary,
+            ]
+        )
+    assert exc.value.code == 2
+    assert not (tmp_path / "o.spice").exists()
+
+
+def test_cli_ignore_comments_exit_codes(tmp_path, argv_log, capsys, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", _COMMENT_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text("* hdr\n" + _COMMENT_BODY + "\n", encoding="utf-8")
+    argv = [
+        "netlist", schematic, "-o", str(output), "--check",
+        "--xschem-binary", binary, "--format", "json",
+    ]  # fmt: skip
+    assert main(argv) == 3
+    capsys.readouterr()
+    assert main([*argv, "--ignore-comments"]) == 0
+    assert json.loads(capsys.readouterr().out)["drift"]["comments_differ"] is True

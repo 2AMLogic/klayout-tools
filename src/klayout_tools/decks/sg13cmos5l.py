@@ -332,6 +332,8 @@ device classes below carry golden layout->netlist pair tests in
 
 from __future__ import annotations
 
+import dataclasses
+
 from . import (
     DerivedLayer,
     DrcRule,
@@ -1310,6 +1312,51 @@ DECK: list[DrcRule] = [
             "NW.f1.dig",
         ),
     ),
+]
+
+
+# Issue #4520: per-rule correspondence with the PDK's own KLayout runset, read
+# from the pinned `ihp-sg13cmos5l` checkout (`run_drc.py` + `rule_decks/`).
+# Surfaced as `runset_correspondence` in a report only for rules that fired.
+_NWELL_TABLE = "libs.tech/klayout/tech/drc/rule_decks/feol/5_1_nwell.drc"
+_MAXIMAL_DECK = "libs.tech/klayout/tech/drc/rule_decks/sg13cmos5l_maximal.drc"
+_RUNSET_NOTES: dict[str, dict[str, object]] = {
+    "nwell.space.2": {
+        "implemented_by_pdk_runset": True,
+        "runset_file": _NWELL_TABLE,
+        "note": (
+            "PDK rule NW.b1 builds nets with its own connectivity and "
+            "intersects the result with PWell; this deck's nets follow only "
+            "tap -> Cont -> Metal1, so wells tied above Metal1 inside a "
+            "hierarchical macro read as different nets here (over-flag, never "
+            "silently passed). Cause for a given macro is not traced."
+        ),
+    },
+}
+for _rule_id in (
+    "nwell.enclosing.pactiv.1",
+    "nwell.enclosing.pactiv.hv.1",
+    "nwell.enclosing.pactiv.dig.1",
+):
+    _RUNSET_NOTES[_rule_id] = {
+        "implemented_by_pdk_runset": True,
+        "runset_file": _MAXIMAL_DECK,
+        "note": (
+            "Not in the PDK's NWell table (5_1_nwell.drc runs only NW.b, "
+            "NW.b1, NW.f1, NW.f1.digibnd). NW.c/NW.c1 are implemented in the "
+            "optional sg13cmos5l_maximal.drc, which excludes SRAM-marked "
+            "NWell (NWell_Nsram); this deck does not, so SRAM-macro findings "
+            "may be stricter than the foundry runset."
+        ),
+    }
+DECK = [
+    dataclasses.replace(
+        _rule,
+        runset_note={**_RUNSET_NOTES[_rule.id], "pdk_revision": _IHP_SG13CMOS5L_COMMIT},
+    )
+    if _rule.id in _RUNSET_NOTES
+    else _rule
+    for _rule in DECK
 ]
 
 # Foundry rules this curated deck knows about but cannot evaluate (issue
