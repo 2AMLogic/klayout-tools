@@ -110,6 +110,14 @@ def _print_remote(report: dict) -> None:
     )
 
 
+def _print_port_order_drift(drift: dict) -> None:
+    for entry in drift.get("subckt_port_order", []):
+        print(
+            f"drift: .subckt {entry['subckt']} ports "
+            f"{' '.join(entry['committed'])} -> {' '.join(entry['regenerated'])}"
+        )
+
+
 def _print_text(report: dict) -> None:
     print(f"schematic: {report['schematic']}")
     print(f"output: {report['output']}")
@@ -163,11 +171,7 @@ def _print_text(report: dict) -> None:
 
     if drift["reason"] is not None:
         print(f"drift: {drift['reason']}")
-    for entry in drift.get("subckt_port_order", []):
-        print(
-            f"drift: .subckt {entry['subckt']} ports "
-            f"{' '.join(entry['committed'])} -> {' '.join(entry['regenerated'])}"
-        )
+    _print_port_order_drift(drift)
     for line in drift["diff"]:
         print(f"  {line}")
     if drift["diff_truncated"]:
