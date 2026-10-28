@@ -9,6 +9,11 @@ when every placed instance of its via cell has that polygon fully covered by
 routed/cell M1 *outside* any ``VIA_*`` cell, so connectivity is preserved by
 construction (overlap is same-net or already a short). It is a documented
 no-op for every other PDK family -- the GDS is not touched at all.
+
+Limit: removing a polygon wholly inside other M1 leaves the merged M1 region
+unchanged, so this pass cannot clear ``M1.S.2``-``M1.S.5`` (those tips come
+from pads that protrude past the wire, which are kept). Clearing them is
+follow-up work on #4495.
 """
 
 from __future__ import annotations
