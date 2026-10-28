@@ -10995,6 +10995,61 @@ def test_waivers_never_waive_unattributed_marker(tmp_path):
     assert report["waived_count"] == 0
 
 
+def test_source_cell_rollup_counts_kept_and_waived_per_cell(tmp_path):
+    """Issue #4520: rule x source_cell roll-up, waived counted separately."""
+    gds = _hier_gds(tmp_path)
+
+    plain = run_drc(gds, "sky130")
+    assert plain["source_cell_rollup"] == [
+        {
+            "source_cell": _WAIVED_CELL,
+            "rule": "poly.width.1",
+            "count": 3,
+            "waived_count": 0,
+        }
+    ]
+
+    waived = run_drc(gds, "sky130", waivers_file=_waivers_file(tmp_path, [_waiver()]))
+    assert waived["source_cell_rollup"] == [
+        {
+            "source_cell": _WAIVED_CELL,
+            "rule": "poly.width.1",
+            "count": 0,
+            "waived_count": 3,
+        }
+    ]
+
+
+def test_source_cell_rollup_absent_on_flat_layout_unattributed_with_waivers(tmp_path):
+    path = tmp_path / "flat.gds"
+    _make_violation_layout().write(str(path))
+
+    assert "source_cell_rollup" not in run_drc(str(path), "sky130")
+
+    report = run_drc(
+        str(path), "sky130", waivers_file=_waivers_file(tmp_path, [_waiver()])
+    )
+    assert report["source_cell_rollup"]
+    assert all(row["source_cell"] is None for row in report["source_cell_rollup"])
+    assert all(row["waived_count"] == 0 for row in report["source_cell_rollup"])
+
+
+def test_runset_correspondence_only_for_firing_rules_with_a_note():
+    from klayout_tools.decks import get_deck
+    from klayout_tools.drc import _runset_correspondence
+
+    deck = get_deck("sg13cmos5l")
+    fired = [{"rule": "nwell.space.2"}, {"rule": "poly.width.1"}]
+    notes = _runset_correspondence(deck, fired, [])
+
+    assert [n["rule"] for n in notes] == ["nwell.space.2"]
+    assert notes[0]["implemented_by_pdk_runset"] is True
+    assert notes[0]["runset_file"].endswith("5_1_nwell.drc")
+    assert len(notes[0]["pdk_revision"]) == 40
+    assert _runset_correspondence(deck, [], []) == []
+    assert _runset_correspondence(get_deck("sky130"), fired, []) == []
+
+
 def test_without_waivers_report_has_no_waiver_fields(tmp_path):
     report = run_drc(_hier_gds(tmp_path), "sky130")
 

@@ -1260,6 +1260,41 @@ def _apply_waivers(
     return kept, rule_counts, fields
 
 
+def _source_cell_rollup(
+    violations: list[dict[str, Any]], waived: list[dict[str, Any]] | None
+) -> list[dict[str, Any]]:
+    """Per-``source_cell`` x rule counts (issue #4520), sorted by cell (the
+    unattributed ``None`` cell last) then rule. ``waived`` entries are counted
+    in a separate ``waived_count`` so a policy decision on waiving a third-party
+    macro can be made from the report alone."""
+    counts: dict[tuple[str | None, str], list[int]] = {}
+    for index, group in enumerate((violations, waived or [])):
+        for entry in group:
+            slot = counts.setdefault((entry.get("source_cell"), entry["rule"]), [0, 0])
+            slot[index] += 1
+    ordered = sorted(
+        counts.items(), key=lambda kv: (kv[0][0] is None, kv[0][0] or "", kv[0][1])
+    )
+    return [
+        {"source_cell": cell, "rule": rule, "count": kept, "waived_count": waived_n}
+        for (cell, rule), (kept, waived_n) in ordered
+    ]
+
+
+def _runset_correspondence(
+    deck: list[DrcRule], violations: list[dict[str, Any]], waived: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The deck's ``runset_note`` for each rule that produced a finding
+    (kept or waived), sorted by rule id (issue #4520). Empty for decks that
+    declare no notes, so their reports are unchanged."""
+    fired = {entry["rule"] for entry in (*violations, *waived)}
+    return [
+        {"rule": rule.id, **rule.runset_note}
+        for rule in sorted(deck, key=lambda r: r.id)
+        if rule.runset_note and rule.id in fired
+    ]
+
+
 @dataclass
 class _DrcSetup:
     """Run-wide inputs :func:`run_drc` resolves once before any rule runs."""
@@ -2150,6 +2185,19 @@ def _assemble_report(
         violations, rule_counts, waiver_fields = _apply_waivers(
             violations, setup.waivers
         )
+    waived_entries = waiver_fields.get("waived", [])
+    # Issue #4520: additive and report-only. Present only when a finding is
+    # attributed to a sub-cell or a waiver run happened, so a flat layout's
+    # report (and every committed one) is byte-identical to before.
+    if setup.waivers is not None or any(
+        v.get("source_cell") is not None for v in (*violations, *waived_entries)
+    ):
+        waiver_fields["source_cell_rollup"] = _source_cell_rollup(
+            violations, waived_entries
+        )
+    runset_notes = _runset_correspondence(setup.deck, violations, waived_entries)
+    if runset_notes:
+        waiver_fields["runset_correspondence"] = runset_notes
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,

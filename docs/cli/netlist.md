@@ -204,7 +204,8 @@ and CI need no schematic-capture tool installed. The risk is that it drifts:
 simulation results to a schematic that no longer exists.**
 
 `klt netlist <schematic> -o <committed netlist> --check` regenerates into a
-temp directory and compares byte-for-byte against the committed file:
+temp directory and compares against the committed file, after the
+normalizations described below (checkout paths, `+` layout):
 
 | Outcome | `status` | Exit | Notes |
 | --- | --- | --- | --- |
@@ -240,6 +241,24 @@ When the files match only because of this, `drift.layout_differs` is `true`. Thi
 `.subckt`/`.ends` wrapper difference — for a committed netlist wrapped as a
 real `.subckt`, pass `--block`, which `--check` applies before comparing
 ([Block mode](#block-mode-an-includable-subckt)).
+
+**Post-processed committed netlists: `--ignore-comments`** (issue #4525).
+When a project lightly post-processes the export (an added header comment, a
+rewritten `** sch_path:` line), pass `--ignore-comments` with `--check`: every
+SPICE comment line (first non-blank character `*`) and blank line is ignored
+on both sides, so the files compare equal if only comments differ. Any
+change to a non-comment line (device card, parameter, node or pin order) still
+reports `"drifted"`; without the flag a comment-only difference still does.
+When the match relied on this, `drift.comments_differ` is `true`
+(`drift.comments_differ` is `false` otherwise). The flag only affects the
+comparison, so it is a usage error (exit `2`) without `--check`; it works
+under `--backend batch` too. Note a `*` line inside a `.control` block counts
+as a comment, as in SPICE.
+
+```bash
+klt netlist design/block.sch -o design/netlist/block.spice \
+    --block --check --ignore-comments
+```
 
 The `0`/`3` split is deliberately the same one `klt drc --check` and `klt lvs
 --check` use for `"match"`/`"drifted"`, so a CI gate treats a stale committed

@@ -23,6 +23,7 @@ re-exports every public name below so existing
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -849,6 +850,10 @@ class DrcRule:
     region_spec: CompCoverageSpec | TapDistanceSpec | None = None
     net_spec: NetSpaceSpec | None = None
     report_escapes: bool = True
+    # Issue #4520: how the PDK's own runset treats this rule, surfaced as
+    # `runset_correspondence` in a report only when the rule fires. Keys:
+    # `implemented_by_pdk_runset` (bool), `runset_file`, `pdk_revision`, `note`.
+    runset_note: dict[str, Any] | None = None
 
 
 class UnknownDeckError(Exception):

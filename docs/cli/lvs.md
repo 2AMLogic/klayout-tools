@@ -544,6 +544,18 @@ netgen engine is rejected (exit 1), the same boundary `request.hints` has, so
 a caller who asked for the stronger compare is never silently handed the
 weaker one.
 
+**One-device cells (issue #4513).** The same limit applies to a small
+`plain-element`/`subckt-call` cell, not only to a macro bus. When every net
+is a top-level pin and the connectivity has a pin-relabelling automorphism —
+e.g. one PMOS with gate `B`, drain `A`, source and bulk `C` — a reference with
+two pin nets exchanged (`gate=A`, `drain=B`) still compares as `match`, and
+`net_correspondence` pairs differently named nets. A "swap two nets" negative
+control on such a cell is therefore invisible by default. Set
+`options.anchor_top_level_pins: true`: the swap is then reported as `mismatch`
+with `hints.rejected` entries carrying `details.anchored_top_level_pin`.
+(Exchanging gate and source is already a mismatch, because the bulk tie breaks
+that symmetry.)
+
 **What it does not reach.** Anchoring is licensed by a pin name present on
 both sides, so it constrains exactly the nets that are top-level pins. An
 **interior** node stays topology-only — including a bit tied to a Verilog

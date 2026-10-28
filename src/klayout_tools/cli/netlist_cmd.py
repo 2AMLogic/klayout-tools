@@ -42,11 +42,16 @@ def _warn(message: str) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    if getattr(args, "ignore_comments", False) and not args.check:
+        # argparse-style usage failure (stderr message, SystemExit(2)).
+        sys.stderr.write("klt netlist: error: --ignore-comments requires --check\n")
+        raise SystemExit(2)
     try:
         # `--backend` > $KLT_NETLIST_BACKEND > local. `batch` never falls
         # back to a local xschem run: every batch failure is exit 1.
         backend = resolve_backend(getattr(args, "backend", None))
         allow_expr = bool(getattr(args, "allow_unevaluated_expr", False))
+        ignore_comments = bool(getattr(args, "ignore_comments", False))
         if backend == "batch":
             if allow_expr:
                 raise NetlistError(
@@ -67,6 +72,7 @@ def run(args: argparse.Namespace) -> int:
                 batch_include=getattr(args, "batch_include", None) or (),
                 batch_exclude=getattr(args, "batch_exclude", None) or (),
                 xschem_binary=args.xschem_binary,
+                ignore_comments=ignore_comments,
                 warn=_warn,
             )
         else:
@@ -81,6 +87,7 @@ def run(args: argparse.Namespace) -> int:
                 pdk_root=args.pdk_root,
                 block=args.block,
                 allow_unevaluated_expr=allow_expr,
+                ignore_comments=ignore_comments,
             )
     except NetlistError as exc:
         return emit_error(
