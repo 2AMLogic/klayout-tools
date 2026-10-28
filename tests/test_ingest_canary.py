@@ -56,12 +56,15 @@ def _have_gh_network() -> bool:
     binary that is at least unauthenticated-usable for public repo reads)."""
     if shutil.which("gh") is None:
         return False
-    result = subprocess.run(
-        ["gh", "api", "repos/2AMLogic/klayout-tools", "--jq", ".visibility"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    try:
+        result = subprocess.run(
+            ["gh", "api", "repos/2AMLogic/klayout-tools", "--jq", ".visibility"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
     return result.returncode == 0 and result.stdout.strip() == "public"
 
 
@@ -70,6 +73,40 @@ _SKIP_NO_NETWORK = pytest.mark.skipif(
     not HAVE_GH_NETWORK,
     reason="gh CLI + network access to GitHub not available in this environment",
 )
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [subprocess.TimeoutExpired(cmd="gh", timeout=15), OSError("spawn failed")],
+)
+def test_have_gh_network_false_on_probe_failure(monkeypatch, exc):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/gh")
+
+    def _raise(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert _have_gh_network() is False
+
+
+def test_have_gh_network_true_on_public(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="public\n", stderr=""),
+    )
+    assert _have_gh_network() is True
+
+
+def test_have_gh_network_false_on_nonzero_exit(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="err"),
+    )
+    assert _have_gh_network() is False
 
 
 # --------------------------------------------------------------------------- #
