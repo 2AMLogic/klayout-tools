@@ -10,10 +10,12 @@ routed/cell M1 *outside* any ``VIA_*`` cell, so connectivity is preserved by
 construction (overlap is same-net or already a short). It is a documented
 no-op for every other PDK family -- the GDS is not touched at all.
 
-Limit: removing a polygon wholly inside other M1 leaves the merged M1 region
-unchanged, so this pass cannot clear ``M1.S.2``-``M1.S.5`` (those tips come
-from pads that protrude past the wire, which are kept). Clearing them is
-follow-up work on #4495.
+A pad that protrudes past the wire is shrunk to the V1 cut(s) it lands plus
+``_V1_ENCLOSURE_UM`` on every side (the deck's ``V1.M1.EN.1`` 5 nm side
+bound, applied conservatively to all four sides), which is what changes the
+merged M1 region. A shrink is kept only when, in every placement, the shrunk
+pad still touches the wire wherever the original pad did; otherwise the pad is
+left alone. Without a ``V1`` layer or a cut under the pad nothing is shrunk.
 """
 
 from __future__ import annotations
@@ -24,6 +26,8 @@ from .pdk_families import pdk_variant_family
 
 _ASAP7_FAMILY = "asap7"
 _M1_LEF_LAYER = "M1"
+_V1_LEF_LAYER = "V1"
+_V1_ENCLOSURE_UM = 0.005
 _VIA_PREFIX = "VIA_"
 
 
@@ -33,6 +37,7 @@ def _report(status: str, reason: str | None = None) -> dict[str, Any]:
         "reason": reason,
         "cells_touched": 0,
         "pads_trimmed": 0,
+        "pads_shrunk": 0,
         "pads_left": 0,
     }
 
@@ -57,20 +62,54 @@ def _top_level_placements(top_cell: Any, via: Any) -> list[Any]:
     return placements
 
 
+def _shrunk_pad(
+    kdb: Any, pad: Any, cuts: Any, enclosure: int, placements: list[Any], wire: Any
+) -> Any:
+    """``pad`` cut back to its V1 cut(s) grown by ``enclosure``, or ``None``
+    when that is not a strict, connectivity-preserving reduction."""
+    if cuts is None:
+        return None
+    single = kdb.Region(pad)
+    landed = cuts.interacting(single)
+    if landed.is_empty():
+        return None
+    shrunk = single & landed.sized(enclosure)
+    if shrunk.is_empty() or (single - shrunk).is_empty():
+        return None
+    for t in placements:
+        if not single.transformed(t).interacting(wire).is_empty() and (
+            shrunk.transformed(t).interacting(wire).is_empty()
+        ):
+            return None
+    return shrunk
+
+
 def _split_pads(
-    kdb: Any, pads: Any, placements: list[Any], wire: Any
-) -> tuple[Any, int]:
-    """Return ``(kept pads, trimmed count)``: a pad is dropped only when wire
-    fully covers it in every placement."""
+    kdb: Any,
+    pads: Any,
+    placements: list[Any],
+    wire: Any,
+    cuts: Any = None,
+    enclosure: int = 0,
+) -> tuple[Any, int, int]:
+    """Return ``(kept pads, dropped count, shrunk count)``: a pad is dropped
+    only when wire fully covers it in every placement, else shrunk to its V1
+    enclosure zone when that keeps it connected to the wire."""
     keep = kdb.Region()
     trimmed = 0
+    shrunk_count = 0
     for pad in pads.each():
         single = kdb.Region(pad)
         if all((single.transformed(t) - wire).is_empty() for t in placements):
             trimmed += 1
-        else:
+            continue
+        shrunk = _shrunk_pad(kdb, pad, cuts, enclosure, placements, wire)
+        if shrunk is None:
             keep.insert(pad)
-    return keep, trimmed
+        else:
+            keep.insert(shrunk)
+            shrunk_count += 1
+    return keep, trimmed, shrunk_count
 
 
 def trim_via_pads(
@@ -81,13 +120,15 @@ def trim_via_pads(
     variant: str,
     lef_to_gds: dict[str, tuple[int, int]],
 ) -> dict[str, Any]:
-    """Trim ASAP7 ``VIA_*`` M1 pads that are redundant with routed M1 wire.
+    """Trim ASAP7 ``VIA_*`` M1 pads: drop those redundant with routed M1 wire
+    and shrink protruding ones to their V1 enclosure.
 
-    Returns ``status`` (``"trimmed"``: at least one pad dropped; ``"clean"``:
+    Returns ``status`` (``"trimmed"``: at least one pad dropped or shrunk; ``"clean"``:
     ran, nothing to drop; ``"skipped"``: could not run, ``reason`` says why --
     non-ASAP7 PDKs report ``"skipped"`` and leave the layout untouched),
-    ``reason``, ``cells_touched``, ``pads_trimmed`` and ``pads_left`` (pad
-    polygons not fully covered by wire in every instance, left in place).
+    ``reason``, ``cells_touched``, ``pads_trimmed``, ``pads_shrunk``
+    (protruding pads cut back to the V1 enclosure) and ``pads_left`` (pad
+    polygons left unchanged).
     Never raises for absent input.
     """
     if pdk_variant_family(variant) != _ASAP7_FAMILY:
@@ -106,6 +147,9 @@ def trim_via_pads(
     ]
     if not via_cells:
         return _report("clean")
+    v1 = lef_to_gds.get(_V1_LEF_LAYER)
+    v1_index = layout.find_layer(*v1) if v1 is not None else None
+    enclosure = round(_V1_ENCLOSURE_UM / layout.dbu)
     wire = _wire_region(kdb, top_cell, m1_index, {c.cell_index() for c in via_cells})
 
     report = _report("clean")
@@ -117,13 +161,19 @@ def trim_via_pads(
         if not placements:
             report["pads_left"] += pads.count()
             continue
-        keep, trimmed = _split_pads(kdb, pads, placements, wire)
+        cuts = (
+            kdb.Region(via.shapes(v1_index)).merged() if v1_index is not None else None
+        )
+        keep, trimmed, shrunk = _split_pads(
+            kdb, pads, placements, wire, cuts, enclosure
+        )
         report["pads_trimmed"] += trimmed
-        report["pads_left"] += pads.count() - trimmed
-        if trimmed:
+        report["pads_shrunk"] += shrunk
+        report["pads_left"] += pads.count() - trimmed - shrunk
+        if trimmed or shrunk:
             via.shapes(m1_index).clear()
             via.shapes(m1_index).insert(keep)
             report["cells_touched"] += 1
-    if report["pads_trimmed"]:
+    if report["pads_trimmed"] or report["pads_shrunk"]:
         report["status"] = "trimmed"
     return report

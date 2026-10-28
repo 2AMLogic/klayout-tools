@@ -8626,6 +8626,7 @@ def test_merge_def_to_gds_success(tmp_path):
             "reason": "PDK family of 'sky130A' is not ASAP7; no-op",
             "cells_touched": 0,
             "pads_trimmed": 0,
+            "pads_shrunk": 0,
             "pads_left": 0,
         },
     }
@@ -8749,6 +8750,7 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
             "reason": "PDK family of 'gf180mcuC' is not ASAP7; no-op",
             "cells_touched": 0,
             "pads_trimmed": 0,
+            "pads_shrunk": 0,
             "pads_left": 0,
         },
     }
