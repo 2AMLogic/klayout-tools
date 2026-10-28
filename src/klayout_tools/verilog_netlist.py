@@ -153,6 +153,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import cast
 
 #: Verilog block (`/* ... */`) and line (`// ...`) comments, stripped before
 #: any other parsing. `re.S` so a block comment can span newlines.
@@ -1371,10 +1372,10 @@ def convert_gate_level_verilog_expanded(
 
     out: list[str] = []
     for module, module_bound in zip(modules, bound, strict=True):
-        out.append(f".SUBCKT {module['name']} {' '.join(module['ports'])}".rstrip())
-        for instance, connections in zip(
-            module["instances"], module_bound, strict=True
-        ):
+        ports = cast("list[str]", module["ports"])
+        instances = cast("list[dict[str, str]]", module["instances"])
+        out.append(f".SUBCKT {module['name']} {' '.join(ports)}".rstrip())
+        for instance, connections in zip(instances, module_bound, strict=True):
             cell = instance["cell"]
             if cell in real_orders:
                 pins = real_orders[cell]
@@ -1388,7 +1389,7 @@ def convert_gate_level_verilog_expanded(
                     for pin in pins
                 ]
             else:
-                pins = _sub_module_by_name(modules, cell)["ports"]
+                pins = cast("list[str]", _sub_module_by_name(modules, cell)["ports"])
                 nets = [
                     connections.get(pin, f"__NC_{instance['name']}_{pin}__")
                     for pin in pins

@@ -1691,24 +1691,14 @@ def run_lvs(
         # docstring for why that order is load-bearing (the prune removes
         # exactly the filler/tap instances whose power connectivity is the
         # only thing about them any check could verify).
-        if power_connectivity_enabled:
-            power_connectivity = _power_connectivity_report(
-                layout_netlist,
-                reference_netlist,
-                reference_pin_orders,
-                expected_nets=power_connectivity_expected_nets,
-                # Issue #4363: LEF pins drawn on a pwell/nwell layer are
-                # disclosed in `excluded_pins`, not cross-checked.
-                well_layer_pins=_well_layer_lef_pins(
-                    layout_abstraction.lef_paths
-                    if layout_abstraction is not None
-                    else ()
-                ),
-            )
-        else:
-            power_connectivity = _power_connectivity_unchecked(
-                "disabled by options.power_connectivity: false"
-            )
+        power_connectivity = _stub_gate_level_power_connectivity(
+            power_connectivity_enabled,
+            layout_netlist,
+            reference_netlist,
+            reference_pin_orders,
+            expected_nets=power_connectivity_expected_nets,
+            layout_abstraction=layout_abstraction,
+        )
         # Issue #1622 (layout side) / #2244 (reference side, symmetric): a
         # `klt place-and-route` `verilog_path` reference never instantiates a
         # power-only cell (filler/tap) at all -- but a DEF-derived reference
@@ -4741,18 +4731,7 @@ def _read_reference_netlist(
                 library, pdk_variant, pdk_root, pin_order_files=pin_order_files
             ).pin_orders
         try:
-            if finfet:
-                # Issue #4462: a FinFET deck extracts transistors with exact
-                # `nfin`, so each library cell is expanded to its CDL body.
-                converted = convert_gate_level_verilog_expanded(
-                    text,
-                    pin_order_lookup=pin_orders.get,
-                    cell_body_lookup=_library_cell_body_lookup(pin_orders),
-                )
-            else:
-                converted = convert_gate_level_verilog(
-                    text, pin_order_lookup=pin_orders.get
-                )
+            converted = _convert_gate_level_reference(text, pin_orders, finfet)
         except VerilogNetlistError as exc:
             raise LvsError(
                 f"could not convert gate-level-verilog reference netlist "
@@ -4841,6 +4820,49 @@ def _read_reference_netlist(
             except OSError:
                 pass
     return netlist
+
+
+def _convert_gate_level_reference(
+    text: str, pin_orders: Mapping[str, Any], finfet: bool
+) -> str:
+    """Gate-level Verilog -> SPICE: pin-only stubs, or (issue #4462, FinFET
+    deck extracting transistors with exact `nfin`) each library cell expanded
+    to its CDL body."""
+    if finfet:
+        return convert_gate_level_verilog_expanded(
+            text,
+            pin_order_lookup=pin_orders.get,
+            cell_body_lookup=_library_cell_body_lookup(pin_orders),
+        )
+    return convert_gate_level_verilog(text, pin_order_lookup=pin_orders.get)
+
+
+def _stub_gate_level_power_connectivity(
+    enabled: bool,
+    layout_netlist: Any,
+    reference_netlist: Any,
+    reference_pin_orders: Any,
+    *,
+    expected_nets: Any,
+    layout_abstraction: Any,
+) -> Any:
+    """Issue #1952 power/ground report for a stub-form gate-level reference
+    (or the "disabled" disclosure)."""
+    if not enabled:
+        return _power_connectivity_unchecked(
+            "disabled by options.power_connectivity: false"
+        )
+    return _power_connectivity_report(
+        layout_netlist,
+        reference_netlist,
+        reference_pin_orders,
+        expected_nets=expected_nets,
+        # Issue #4363: LEF pins drawn on a pwell/nwell layer are
+        # disclosed in `excluded_pins`, not cross-checked.
+        well_layer_pins=_well_layer_lef_pins(
+            layout_abstraction.lef_paths if layout_abstraction is not None else ()
+        ),
+    )
 
 
 def _library_cell_body_lookup(pin_orders: Mapping[str, Any]):
