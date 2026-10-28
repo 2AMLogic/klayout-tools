@@ -221,6 +221,28 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         raise YieldError(
             f"{where}: measurement '{name}' has a non-object negative_control"
         )
+    if raw.get("not_applicable") is not None:
+        # Issue #4523: a declared "control not applicable" disposition -- the
+        # seeded defect cannot degrade this measurement by construction. It
+        # carries a required reason and no samples; it never reaches the
+        # native core (see `analyze_yield`).
+        if raw["not_applicable"] is not True:
+            raise YieldError(
+                f"{where}: measurement '{name}' negative_control.not_applicable "
+                "must be true"
+            )
+        reason = raw.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise YieldError(
+                f"{where}: measurement '{name}' negative_control declares "
+                "not_applicable but no non-empty string 'reason'"
+            )
+        if "samples" in raw:
+            raise YieldError(
+                f"{where}: measurement '{name}' negative_control cannot declare "
+                "both not_applicable and samples"
+            )
+        return {"not_applicable": True, "reason": reason.strip()}
     raw_samples = raw.get("samples")
     if not isinstance(raw_samples, list):
         raise YieldError(
@@ -744,6 +766,9 @@ def run_yield(
     run_target_yield = spec_defaults.get("target_yield")
     warnings: list[str] = []
     request_measurements: list[dict[str, Any]] = []
+    # Issue #4523: measurements that declared "negative control not
+    # applicable" -- carried around the native core and patched into the report.
+    not_applicable: dict[str, str] = {}
     for entry in selected:
         name = entry["name"]
         limits = dict(entry["limits"])
@@ -765,6 +790,10 @@ def run_yield(
                 "supply limits via --limits to include it"
             )
             continue
+        control = entry.get("negative_control")
+        if control is not None and control.get("not_applicable"):
+            not_applicable[name] = control["reason"]
+            entry = {**entry, "negative_control": None}
         request_measurements.append({**entry, "limits": limits})
 
     if not request_measurements:
@@ -795,6 +824,12 @@ def run_yield(
     except ValueError as exc:
         raise YieldError(str(exc)) from exc
     response = json.loads(response_json)
+    for m in response.get("measurements") or []:
+        if m.get("name") in not_applicable:
+            m["negative_control"] = {
+                "verdict": "not_applicable",
+                "reason": not_applicable[m["name"]],
+            }
 
     payload: dict[str, Any] = {
         "samples": samples_path,

@@ -730,6 +730,26 @@ point estimate:
 | `detected` | The negative control's empirical yield is lower **and** its exact (Clopper-Pearson) confidence interval does not overlap the nominal measurement's — a difference too large to be sampling noise. |
 | `not_detected` | The point estimates may differ, but the intervals overlap (or the control isn't even lower) — the deliberate defect did not show up as a statistically distinguishable degradation. |
 
+| `not_applicable` | Not computed: the measurement **declared** that the seeded defect cannot degrade it by construction (see below). |
+
+**Declaring "control not applicable"** ([#4523](https://github.com/2AMLogic/klayout-tools/issues/4523)):
+a measurement the seeded defect can only *improve* (a one-sided defect applied
+to a measurement it pushes the other way) can say so instead of carrying a
+control that reads `not_detected`:
+
+```json
+"negative_control": {"not_applicable": true, "reason": "defect is one-sided; it can only improve this measurement"}
+```
+
+`reason` is required and must be a non-empty string, and `samples` cannot be
+given alongside `not_applicable` — either is a `YieldError` (exit 1). The
+report's `negative_control` for that measurement is then
+`{"verdict": "not_applicable", "reason": "..."}` (no `yield`, `n` or
+`nominal_empirical_estimate` keys — consumers that only match `detected` /
+`not_detected` must handle this third value). `klt yield` does not judge
+whether the reason is valid; `klt signoff` discloses it (see
+[signoff.md](signoff.md)).
+
 To build this block from a second `klt sim` campaign rather than by hand, see
 ["Deriving a sample set from two `klt sim` reports"](#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples).
 

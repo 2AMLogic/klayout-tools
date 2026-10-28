@@ -192,6 +192,8 @@ def _print_text(report: dict) -> None:
         nc = m.get("negative_control")
         if nc is None:
             print("  negative control: none declared")
+        elif nc["verdict"] == "not_applicable":
+            print(f"  negative control: not_applicable -- {nc['reason']}")
         else:
             nc_emp = nc["yield"]["empirical"]
             nc_ci = nc_emp["confidence_interval"]
