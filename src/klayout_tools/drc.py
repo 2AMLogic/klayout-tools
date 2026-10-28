@@ -81,7 +81,7 @@ from .decks import (
 )
 from .layers import layers_report
 from .metrics import is_registered
-from .pdk import PdkNotFoundError, find_pdk
+from .pdk import PdkNotFoundError, find_pdk_for_deck
 
 # Check kinds that operate on a single region (no other_layer).
 # "isolated" (issue #1654) dispatches to `Region.isolated_check`, which
@@ -1458,7 +1458,7 @@ def _prepare_drc(
     pdk_info: dict[str, Any] | None = None
     if pdk_variant is not None or pdk_root is not None:
         try:
-            pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
+            pdk_info = find_pdk_for_deck(deck_name, variant=pdk_variant, root=pdk_root)
         except PdkNotFoundError as exc:
             raise DrcError(str(exc)) from exc
 

@@ -3291,3 +3291,28 @@ def test_klayout_engine_no_warning_for_self_contained_deck(tmp_path, monkeypatch
     )
 
     assert "warnings" not in run_drc_klayout_engine(gds, deck_file)
+
+
+def test_klayout_engine_provenance_pdk_follows_deck_family(tmp_path, monkeypatch):
+    """Issue #4474: the deck's family picks the variant recorded in
+    `provenance.pdk`; a contradictory `--pdk` is refused."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+    root = tmp_path / "multi_pdk"
+    for variant in ("gf180mcuA", "sky130A"):
+        (root / variant / "libs.tech").mkdir(parents=True)
+
+    report = run_drc_klayout_engine(
+        gds, deck_file, pdk_root=str(root), deck_name="sky130"
+    )
+    assert report["provenance"]["pdk"]["name"] == "sky130A"
+
+    with pytest.raises(DrcError, match="gf180mcu"):
+        run_drc_klayout_engine(
+            gds,
+            deck_file,
+            pdk_variant="gf180mcuA",
+            pdk_root=str(root),
+            deck_name="sky130",
+        )

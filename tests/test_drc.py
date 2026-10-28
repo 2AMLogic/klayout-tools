@@ -11658,3 +11658,40 @@ def test_output_reachable_from_request_document(tmp_path, capsys):
 
     assert rc == 3
     assert (tmp_path / "out.json").read_text() == capsys.readouterr().out
+
+
+def _make_multi_family_root(tmp_path, variants) -> str:
+    root = tmp_path / "multi_pdk"
+    for variant in variants:
+        (root / variant / "libs.tech").mkdir(parents=True)
+    return str(root)
+
+
+def test_run_drc_provenance_pdk_follows_deck_family(tmp_path):
+    """Issue #4474: a root holding gf180mcu and sky130 variants records the
+    sky130 variant for a sky130 deck, not the root's lowest variant."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    root = _make_multi_family_root(tmp_path, ["gf180mcuA", "gf180mcuB", "sky130A"])
+
+    report = run_drc(str(path), "sky130", pdk_root=root)
+
+    assert report["provenance"]["pdk"]["name"] == "sky130A"
+
+
+def test_run_drc_explicit_pdk_of_other_family_errors(tmp_path):
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    root = _make_multi_family_root(tmp_path, ["gf180mcuA", "sky130A"])
+
+    with pytest.raises(DrcError, match="gf180mcu.*sky130|sky130.*gf180mcu"):
+        run_drc(str(path), "sky130", pdk_variant="gf180mcuA", pdk_root=root)
+
+
+def test_run_drc_root_without_deck_family_errors(tmp_path):
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    root = _make_multi_family_root(tmp_path, ["gf180mcuA"])
+
+    with pytest.raises(DrcError, match="sky130"):
+        run_drc(str(path), "sky130", pdk_root=root)
