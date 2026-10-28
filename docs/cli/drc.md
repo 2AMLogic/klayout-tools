@@ -2431,6 +2431,15 @@ so the deck checks none (see "Density" below), and the pinned shipped cells
 are the acceptance gate for every implemented rule (#2811, see "Shipped
 standard cells" below).
 
+**The pinned library is not fully clean against this deck.** Ten shipped
+cells trip `SDT.ACTIVE.AUX.2` by design (SDT drawn taller than ACTIVE, so an
+SDT horizontal edge is not on an ACTIVE edge); the list and rationale are in
+"Retained deviations" under "Shipped standard cells" below. In a routed block,
+an `SDT.ACTIVE.AUX.2` hit that lies on an instance of one of those cells is
+expected library content, not a router error. The deck does not waive these
+hits, so they stay in the report; recognise them by the cell name, not by
+filtering the rule.
+
 **Source.** Every rule is transcribed from the ASAP7 PDK Design Rule Manual,
 PDK Release 1p7 (`asap7_drm_201207a.pdf`, under
 `lambdapdk/asap7/base/docs/` after `scripts/fetch-pdks.sh`; BSD-3-Clause,
