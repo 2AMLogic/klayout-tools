@@ -1528,7 +1528,7 @@ core shipped as LEF + liberty + GDS.
 | `cell` | string \| omitted | The macro's cell/master name. Derived from the LEF's own `MACRO` name when omitted; when given, must match it exactly — a `cell` that disagrees with its own `lef` is always a mistake and is rejected rather than silently reconciled. |
 | `lib` (alias `liberty`) | object\<string, string\> \| omitted | A **per-corner** liberty map, `{"<corner>": "<path>"}`, keyed the same way `pdk.corner` names a corner. The reserved key `"default"` applies to any corner with no exact entry. Give at most one of `lib`/`liberty` — they are two spellings of the same field, never two independent values. Omitted means a LEF-only macro: legal, and handled as an untimed blackbox. |
 | `gds` | string \| omitted | The macro's GDS view. Unused by `klt synthesize` itself (no layout step here); accepted so one declaration serves all three verbs without per-verb pruning. |
-| `verilog_blackbox` | string \| omitted | A hand-written `(* blackbox *)` Verilog module declaration. Only `klt synthesize` consumes this field — see "Making the macro visible to Yosys" below. |
+| `verilog_blackbox` | string \| omitted | A hand-written `(* blackbox *)` Verilog module declaration. Must declare a module named exactly the macro's `cell` (other modules may sit beside it); otherwise the request is rejected naming both, since `macro_instance_count*` is keyed on the cell. Only `klt synthesize` consumes this field — see "Making the macro visible to Yosys" below. |
 
 **Making the macro visible to Yosys.** Before `hierarchy -check -top`, this
 command emits one line per declared macro, in precedence order:

@@ -104,6 +104,7 @@ _INCLUDE_RE = re.compile(
 #: one token is a section *definition* (``.lib tt`` ... ``.endl``), left
 #: verbatim; two tokens are a file-bearing ``.lib <file> <section>``
 #: reference, staged and rewritten; anything else is refused by name.
+_PDK_ROOT_VAR_RE = re.compile(r"\$\{?PDK_ROOT\b")
 _LIB_RE = re.compile(r"^(?P<prefix>\s*\.lib)(?P<rest>(?:\s.*)?)$", re.IGNORECASE)
 
 #: Characters allowed in a staged job-relative filename. Everything else in
@@ -1067,6 +1068,16 @@ class _Stager:
             self.host_resolved.append(env_form)
             self.host_resolved_detail.append((env_form, "env_var"))
             return f'{lib_match.group("prefix")} "{env_form}" {section}'
+        if _PDK_ROOT_VAR_RE.search(target):
+            raise IncludeStagingError(
+                f"netlist '{item.local_path}' line {index}: `.lib` target "
+                f"{target!r} names `$PDK_ROOT` literally, which the runner "
+                "does not expand in a netlist body (every corner would end "
+                "`unknown subckt`). Write the absolute path under the "
+                "submitting host's `$PDK_ROOT` (with PDK_ROOT exported for "
+                "klt) and klt rewrites it for the runner, or add the section "
+                "via corners.process[].sections[]"
+            )
         expanded = os.path.expanduser(target)
         if "$" in target or not os.path.isabs(expanded):
             return None
@@ -1076,9 +1087,9 @@ class _Stager:
             f"netlist '{item.local_path}' line {index}: `.lib` target "
             f"{target!r} is an absolute path on this host that is not under "
             "$PDK_ROOT, so the runner cannot read it (the job would die with "
-            "`Could not find library file`). Name it under the PDK root or "
-            "through an environment variable (e.g. `$PDK_ROOT/...`), or add "
-            "the section via corners.process[].sections[]"
+            "`Could not find library file`). Name it by an absolute path under "
+            "this host's `$PDK_ROOT` (exported for klt, which rewrites it for "
+            "the runner), or add the section via corners.process[].sections[]"
         )
 
     @staticmethod
