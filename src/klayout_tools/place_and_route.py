@@ -249,6 +249,9 @@ from .place_and_route_request import (
     _validate_max_antenna_repair_iterations as _validate_max_antenna_repair_iterations,
 )
 from .place_and_route_request import (
+    _validate_output_dbu_um as _validate_output_dbu_um,
+)
+from .place_and_route_request import (
     _validate_portable_paths as _validate_portable_paths,
 )
 from .place_and_route_request import (
@@ -1149,6 +1152,7 @@ _ALLOWED_REQUEST_KEYS = (
     "post_route_spef",
     "post_route_sdf",
     "portable_paths",
+    "output_dbu_um",
     "backend",
     "batch",
     "outputs",
@@ -1802,6 +1806,7 @@ def _run_single_corner(
     )
     post_route_spef = _validate_post_route_spef(request.get("post_route_spef"))
     portable_paths = _validate_portable_paths(request.get("portable_paths"))
+    output_dbu_um = _validate_output_dbu_um(request.get("output_dbu_um"))
     post_route_sdf = _validate_post_route_sdf(
         request.get("post_route_sdf"), post_route_spef=post_route_spef
     )
@@ -2083,6 +2088,7 @@ def _run_single_corner(
     layer_map_info: dict[str, Any] | None = None
     def_net_names_info: dict[str, Any] | None = None
     min_area_repair_info: dict[str, Any] | None = None
+    gds_dbu_um: float | None = None
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
         gds_path = os.path.join(output_dir, f"{hdl_toplevel}.gds")
@@ -2100,7 +2106,9 @@ def _run_single_corner(
             hdl_toplevel=hdl_toplevel,
             macros=macros,
             out_path=gds_path,
+            output_dbu_um=output_dbu_um,
         )
+        gds_dbu_um = merge_info["output_dbu_um"]
         layer_map_info = {
             "path": merge_info["path"],
             "resolution": merge_info["resolution"],
@@ -2481,6 +2489,10 @@ def _run_single_corner(
         # answers. `null` unless `stage_reached` is `"route"`, mirroring
         # `layer_map`.
         "min_area_repair": min_area_repair_info,
+        # Additive field (issue #4482): the dbu (um) of the merged `gds_path`
+        # -- the tech LEF's native dbu unless `request.output_dbu_um` refined
+        # it. `null` unless `stage_reached` is `"route"`, mirroring `gds_path`.
+        "gds_dbu_um": gds_dbu_um,
         # Additive field (issue #996): the `write_verilog`-produced,
         # *as-built* gate-level netlist -- the design as CTS/timing repair/
         # antenna repair actually left it, i.e. the netlist the routed
