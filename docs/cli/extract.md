@@ -2874,7 +2874,7 @@ reference CDL writes every transistor as
 
 | Field | Meaning |
 | --- | --- |
-| `devices[].class` | The compact-model name: `nmos_rvt`/`pmos_rvt` by default; `*_lvt`, `*_slvt` or `*_sram` where the channel touches the LVT (98/0), SLVT (97/0) or SRAMVT (110/0) marker. A different VT is a different class, so a model mismatch is a class mismatch. |
+| `devices[].class` | The compact-model name: `nmos_rvt`/`pmos_rvt` by default; `*_lvt`, `*_slvt` or `*_sram` where the channel touches the LVT (98/0), SLVT (97/0) or SRAMVT (110/0) marker; `nmos_io`/`pmos_io` under the predictive THICKOX (111/0) marker (declared gap: the card names are unconfirmed against 2AMLogic/pdks; VT + THICKOX is malformed geometry). A different VT is a different class, so a model mismatch is a class mismatch. |
 | `params.nfin` | The fin count **counted from drawn fin geometry**: the fin (2/0) pieces crossing each gate finger, summed over merged fingers. Never derived from `w_um`. |
 | `params.fingers` | How many gate fingers were merged into this device. |
 | `params.l_um` | Channel area over half its source/drain edge length (20 nm for every ASAP7 cell). |
