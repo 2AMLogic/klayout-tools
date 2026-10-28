@@ -1344,14 +1344,9 @@ def run_synthesize(
         constr_inputs=constr_inputs,
     )
 
-    latch_map_report: dict[str, Any] | None = None
-    latch_techmap_path: str | None = None
-    if latch_map_request is not None:
-        latch_map_report = _validate_latch_map_against_liberty(
-            latch_map_request, liberty_path
-        )
-        latch_techmap_path = os.path.join(output_dir, f"{hdl_toplevel}_latch_map.v")
-        _write_script_text(latch_techmap_path, _latch_techmap_text(latch_map_request))
+    latch_map_report, latch_techmap_path = _prepare_latch_map(
+        latch_map_request, liberty_path, output_dir, hdl_toplevel
+    )
 
     arithmetic = None
     adder_sources: tuple[str, ...] = ()
@@ -1653,11 +1648,9 @@ def run_synthesize(
         "arithmetic": arithmetic,
         "baseline": None,
     }
-    if latch_map_report is not None:
-        latch_map_report["techmap_path"] = _report_path(
-            latch_techmap_path, repo_root=repo_root
-        )
-        response["latch_map"] = latch_map_report
+    _attach_latch_map_report(
+        response, latch_map_report, latch_techmap_path, repo_root=repo_root
+    )
     if arithmetic is not None:
         arithmetic["selected_measured"] = _candidate_measurement(
             instance_count=module_stats["num_cells"],
@@ -3829,6 +3822,36 @@ def _resolve_latch_map(request: dict[str, Any]) -> dict[str, dict[str, str]] | N
             raise SynthesizeError(f"{where} enable, data and q must be distinct pins")
         resolved[polarity] = resolved_entry
     return resolved
+
+
+def _prepare_latch_map(
+    latch_map: dict[str, dict[str, str]] | None,
+    liberty_path: str,
+    output_dir: str,
+    hdl_toplevel: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate ``latch_map`` against the liberty and write its techmap file
+    (issue #4458); ``(report, techmap_path)``, both ``None`` without one."""
+    if latch_map is None:
+        return None, None
+    report = _validate_latch_map_against_liberty(latch_map, liberty_path)
+    techmap_path = os.path.join(output_dir, f"{hdl_toplevel}_latch_map.v")
+    _write_script_text(techmap_path, _latch_techmap_text(latch_map))
+    return report, techmap_path
+
+
+def _attach_latch_map_report(
+    response: dict[str, Any],
+    report: dict[str, Any] | None,
+    techmap_path: str | None,
+    *,
+    repo_root: str | None,
+) -> None:
+    """Add the ``latch_map`` block to ``response`` when a map was requested."""
+    if report is None:
+        return
+    report["techmap_path"] = _report_path(techmap_path, repo_root=repo_root)
+    response["latch_map"] = report
 
 
 def _validate_latch_map_against_liberty(
