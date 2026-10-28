@@ -54,6 +54,11 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   fields" below; omitted entirely (the default), `provenance.pdk` stays
   `null`. An unresolvable variant/root exits `1` the same as any other
   application error.
+  When `--deck` names a PDK family, `provenance.pdk` is resolved within that
+  family (issue #4474): with no `--pdk`/`$PDK`, the lowest variant of the
+  deck's family in the root is recorded (never an unrelated family's), and a
+  `--pdk`/`$PDK` of a different family, or a root with no variant of the
+  deck's family, fails with a `DrcError` naming both families.
 - `--timeout-s` — wall-clock budget in seconds for the `klayout` subprocess
   (`--engine klayout` only; default `300`).
 - `--allow-deck-errors` — accept a *partial* report from a deck run

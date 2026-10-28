@@ -101,6 +101,7 @@ from .pdk_compat import (
 )
 from .pdk_descriptor import DescriptorError, has_descriptor, load_descriptor
 from .pdk_families import (
+    KNOWN_PDK_FAMILIES,
     family_subset,
     pdk_variant_family,
     pdk_variant_install_names,
@@ -391,6 +392,52 @@ def alternative_variants_warning(report: dict[str, Any]) -> str | None:
         f"{', '.join(others)}. Set $PDK or pass --pdk to choose "
         "deliberately."
     )
+
+
+def find_pdk_for_deck(
+    deck_name: str | None,
+    variant: str | None = None,
+    root: str | None = None,
+) -> dict[str, Any]:
+    """:func:`find_pdk`, constrained to the PDK family of ``deck_name``
+    (issue #4474), so ``provenance.pdk`` never contradicts ``deck.name``.
+
+    With no pinned variant (no ``variant`` and no ``$PDK``), the lowest
+    variant *of the deck's family* is chosen instead of the root's lowest
+    variant overall. A pinned variant of a different family, or a root with
+    no variant of the deck's family, raises :class:`PdkNotFoundError` naming
+    both families. A ``deck_name`` that is not a known PDK family (or
+    ``None``) imposes no constraint -- exactly :func:`find_pdk`.
+    """
+    if deck_name not in KNOWN_PDK_FAMILIES:
+        return find_pdk(variant=variant, root=root)
+    effective = variant if variant is not None else os.environ.get("PDK")
+    if effective is not None:
+        pdk_family = pdk_variant_family(effective)
+        if pdk_family != deck_name:
+            raise PdkNotFoundError(
+                f"PDK variant {effective!r} (family {pdk_family!r}) does not match "
+                f"the deck's family {deck_name!r}"
+            )
+        return find_pdk(variant=variant, root=root)
+    names = sorted(
+        {
+            entry["name"]
+            for install in list_pdks(root)["installs"]
+            for entry in install["variants"]
+            if pdk_variant_family(entry["name"]) == deck_name
+        }
+    )
+    if not names:
+        # No variant of any kind: find_pdk's own not-found message is the
+        # right one; otherwise the root holds only other families.
+        resolved = find_pdk(variant=variant, root=root)
+        raise PdkNotFoundError(
+            f"no PDK variant of the deck's family {deck_name!r} found "
+            f"(resolved {resolved['variant']!r}, family "
+            f"{pdk_variant_family(resolved['variant'])!r})"
+        )
+    return find_pdk(variant=names[0], root=root)
 
 
 def list_pdks(root: str | None = None) -> dict[str, Any]:

@@ -233,6 +233,7 @@ def run_drc_crosscheck(
                 top=top,
                 pdk_variant=pdk_variant,
                 pdk_root=pdk_root,
+                deck_name=deck_name,
                 **(native_kwargs or {}),
             )
         except DrcError as exc:
