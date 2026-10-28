@@ -240,6 +240,62 @@ def _canonical_instance_token(inst: Any) -> str:
     return token
 
 
+def cell_geometry_digest(path: str | None, cell_name: str) -> str | None:
+    """A ``sha256:``-prefixed digest of one cell's decoded geometry, or
+    ``None`` when it cannot be computed (issue #4530).
+
+    Same canonical tokens as :func:`layout_geometry_digest`, restricted to
+    ``cell_name`` and every cell beneath it, so the identical stock cell
+    hashes identically whether it is checked alone or placed inside a
+    block's layout. Cells outside that subtree never contribute. ``None``
+    for an unreadable stream or a cell the stream does not contain.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        import klayout.db as kdb
+
+        layout = kdb.Layout()
+        layout.read(path)
+        top = layout.cell(cell_name)
+        if top is None:
+            return None
+        subtree = {top.cell_index(), *top.called_cells()}
+
+        digest = hashlib.sha256()
+
+        def feed(line: str) -> None:
+            digest.update(line.encode("utf-8", errors="backslashreplace"))
+            digest.update(b"\n")
+
+        feed(_LAYOUT_GEOMETRY_DIGEST_VERSION + " cell")
+        feed(f"dbu {layout.dbu:.12g}")
+        layer_keys = [
+            (index, _canonical_layer_key(layout.get_info(index)))
+            for index in layout.layer_indexes()
+        ]
+        cells = [layout.cell(i) for i in subtree]
+        for cell in sorted(cells, key=lambda c: c.name):
+            tokens: list[str] = []
+            for index, layer_key in layer_keys:
+                for shape in cell.shapes(index).each():
+                    tokens.append(
+                        f"shape {layer_key} {_canonical_shape_token(shape)}"
+                        f"{_canonical_properties(layout, shape.prop_id)}"
+                    )
+            for inst in cell.each_inst():
+                tokens.append(
+                    f"{_canonical_instance_token(inst)}"
+                    f"{_canonical_properties(layout, inst.prop_id)}"
+                )
+            feed(f"cell {cell.name}")
+            for token in sorted(tokens):
+                feed(f"  {token}")
+    except Exception:
+        return None
+    return f"sha256:{digest.hexdigest()}"
+
+
 def layout_geometry_digest(path: str | None) -> str | None:
     """A ``sha256:``-prefixed digest of a GDS/OASIS stream's *decoded
     geometry*, or ``None`` when it cannot be computed (issue #2065).

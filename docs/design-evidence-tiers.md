@@ -226,6 +226,18 @@ written to every block.
    `met` verdict from `klt signoff` is still not evidence that the gaps were
    disclosed. A reviewer must read the reported `coverage` against the claim
    themselves.
+   **Disclosed exception for unmodified foundry cells** (operator ruling
+   2026-10-28): DRC violations inside an unmodified foundry-library cell
+   (a stock I/O pad, a foundry SRAM macro) do not block `met`, provided all
+   three of these hold: (1) the same violations — same rules, same counts —
+   reproduce when the unmodified PDK cell is checked alone, with none of the
+   block's own geometry; (2) the exception is pinned to the stock cell by
+   content hash and names its rules and counts, and lapses if the cell or the
+   counts change; (3) the T1 claim lists every such exception, and says
+   nothing about the internals of those cells. `klt signoff` grades this from
+   a `foundry_cell_exceptions` list on the item 3 evidence entry
+   (`docs/cli/signoff.md` → "Foundry-cell DRC exceptions") and lists each
+   applied exception in item 3's citation.
 4. **LVS clean** — latest LVS report (or, per cell, a list of reports — all must
    pass) `status: match`, fresh, engine named,
    checked against the netlist from item 1 (schematic netlist for analog,

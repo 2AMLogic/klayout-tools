@@ -50,6 +50,7 @@ from typing import (
     get_type_hints,
 )
 
+from . import signoff_foundry_cell as foundry_cell
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
 from ._report_verify import (
     LIST_ITEM,
@@ -4947,6 +4948,13 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     if not isinstance(require_annotation, bool):
         return None
 
+    # Issue #4530: opt-in disclosed foundry-cell DRC exceptions (item 3).
+    cell_exceptions = foundry_cell.normalize_exceptions(
+        raw.get("foundry_cell_exceptions")
+    )
+    if cell_exceptions is None:
+        return None
+
     command = raw.get("command")
     if (
         isinstance(command, list)
@@ -4966,6 +4974,7 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
             "content_hash": expected_hash,
             "pointer": pointer,
             "require_annotation_complete": require_annotation,
+            "foundry_cell_exceptions": cell_exceptions,
         }
 
     file = raw.get("file")
@@ -4980,6 +4989,7 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
         "content_hash": expected_hash,
         "pointer": pointer,
         "require_annotation_complete": require_annotation,
+        "foundry_cell_exceptions": cell_exceptions,
     }
 
 
@@ -5658,13 +5668,24 @@ def _grade_evidence(
     if check_kind == "error":
         return "unmet", _REASON_CHECK_ERRORED, None, {}
 
+    applied_exceptions: list[dict[str, Any]] | None = None
     if not _check_passed(check_kind, checked):
-        return (
-            "unmet",
-            _non_passing_reason(check_kind, envelope),
-            None,
-            _critical_metric_detail(envelope),
-        )
+        failure_detail = _critical_metric_detail(envelope)
+        exceptions = spec.get("foundry_cell_exceptions")
+        if exceptions and _foundry_cell_exception_eligible(check_kind, envelope):
+            applied_exceptions, lapsed = foundry_cell.evaluate(envelope, exceptions)
+            if applied_exceptions is None:
+                failure_detail = {
+                    **failure_detail,
+                    "foundry_cell_exceptions": {"applied": False, "lapsed": lapsed},
+                }
+        if applied_exceptions is None:
+            return (
+                "unmet",
+                _non_passing_reason(check_kind, envelope),
+                None,
+                failure_detail,
+            )
 
     annotation_refusal = _sta_annotation_refusal(check_kind, spec, envelope)
     if annotation_refusal is not None:
@@ -5718,6 +5739,8 @@ def _grade_evidence(
         return "unmet", _REASON_STALE_EVIDENCE, None, {}
 
     citation = _citation(resolution)
+    if applied_exceptions is not None:
+        citation["foundry_cell_exceptions"] = applied_exceptions
     execution_detail: dict[str, Any] = {}
     anchored_refusal = _bind_anchored_citation(
         check_kind,
@@ -5738,6 +5761,21 @@ def _grade_evidence(
     _attach_characterization_attestation(check_kind, item_id, envelope, citation)
     _record_envelope(envelope_sink, envelope)
     return "met", None, citation, {}
+
+
+def _foundry_cell_exception_eligible(kind: str, envelope: dict[str, Any]) -> bool:
+    """Whether a non-passing envelope may still be offered a foundry-cell
+    exception (issue #4530): a full-deck ``klt drc`` ``violations`` report
+    whose only blocking critical metric is its own error count."""
+    return (
+        kind == "drc"
+        and envelope.get("status") == "violations"
+        and not _drc_rule_subset(envelope)
+        and all(
+            blocker.get("metric") == "drc__error__count"
+            for blocker in _critical_metric_blockers(envelope)
+        )
+    )
 
 
 def _kind_gated_failure_detail(

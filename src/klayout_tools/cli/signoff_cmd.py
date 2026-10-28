@@ -1092,6 +1092,16 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             coverage = citation.get("coverage")
             if coverage:
                 print(f"        coverage: {_format_coverage(coverage)}")
+            # Issue #4530: item 3 graded `met` through disclosed foundry-cell
+            # exceptions -- every one is listed beside the verdict it qualifies.
+            for exception in citation.get("foundry_cell_exceptions") or []:
+                rules = ", ".join(
+                    f"{rule}={count}" for rule, count in exception["rules"].items()
+                )
+                print(
+                    f"        foundry-cell exception: {exception['cell']} "
+                    f"({exception['cell_hash']}): {rules}"
+                )
             # Issue #1983: a `pex` citation's own body-bias statement, shown
             # beside the post-layout numbers it qualifies -- an extracted
             # netlist with no DC bias path for its device bodies makes those
