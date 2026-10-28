@@ -2,8 +2,20 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-28
+
+- **PR #4447**: feat: add operator-approved commands request kind to klt sim
+- **PR #4396**: feat: add -o/--output report file copy to klt drc
+- **Issue #4443** (closed): klt sim: no request kind can run a non-SPICE simulator (e.g. iverilog) on batch/remote backends
+- **Issue #4393** (closed): klt drc: no -o/--output flag to write the report to a file
+
 ### 2026-10-27
 
+- **PR #4446**: feat: report facing-pin abutment in place-and-route response
+- **PR #4445**: feat(sim): refuse OSDI v0.4 modules up front on ngspice < 44
+- **PR #4442**: feat: name the cause when OpenROAD cannot run (missing binary, docker, image, socket)
+- **Issue #4156** (closed): place-and-route io.pin_constraints: fixed pin positions and/or abutment check over pins[]
+- **Issue #4438** (closed): Friction: klt sim local backend can't load OSDI v0.4 on host ngspice 42, and there's no supported sanity-corner path
 - **PR #4444**: feat: stream OpenROAD stdout/stderr to retained logs while it runs
 - **Issue #4436** (closed): Friction: place-and-route route stage is one non-resumable process of 2 h or more, with no progress output
 - **Issue #4439** (closed): env_provenance records a host-absolute PDK path, tripping chip repos' evidence host-path ratchets
