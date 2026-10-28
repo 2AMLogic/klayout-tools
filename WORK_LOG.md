@@ -4,6 +4,7 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-28
 
+- **PR #4505**: feat: trim redundant ASAP7 VIA_* M1 landing pads in DEF->GDS merge
 - **PR #4503**: docs: document ASAP7 router M4 stub-end track-alignment residual
 - **PR #4499**: feat: add asap7sc7p5t PDN preset with wide-V4 M5 strap and on-grid stubs
 - **PR #4498**: docs: note ASAP7 library cells are expected to trip SDT.ACTIVE.AUX.2
