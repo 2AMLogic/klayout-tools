@@ -4,6 +4,7 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-28
 
+- **PR #4488**: feat: warn when route merge resolves no KLayout layer map
 - **PR #4487**: feat: recognise M1 resistors and MOM capacitors on the ASAP7 deck
 - **PR #4486**: feat: add klt power-intent check for power-gated netlists
 - **PR #4485**: feat: extract and LVS-match ASAP7 thick-oxide devices as nmos_io/pmos_io
@@ -15,6 +16,7 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **PR #4471**: feat: add predictive THICKOX marker layer and rules to the ASAP7 DRC deck
 - **PR #4470**: feat: add klt drc --max-violations and emit coverage before violations
 - **PR #4463**: feat: expand library cells to CDL bodies for gate-level Verilog on FinFET LVS
+- **Issue #4481** (closed): place-and-route: DEF->GDS merge silently falls back to sequential layer numbers when no layer map resolves
 - **Issue #4479** (closed): Netlist-level power-intent check for power-gated domains (isolation coverage and wake sequencing)
 - **Issue #4474** (closed): DRC report provenance records the wrong PDK (gf180mcuA on a sky130 run)
 - **Issue #4473** (closed): functional-verification: no way to declare or provision external toolchains (Sail, Ruby gems, newer RISC-V GCC)
