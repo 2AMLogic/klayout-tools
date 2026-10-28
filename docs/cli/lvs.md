@@ -371,6 +371,11 @@ A `layout.deck` naming a FinFET extraction deck (today `asap7`) compares
   for a FinFET and is not compared. A different model class
   (`nmos_lvt` vs `nmos_rvt`) is a `device.class` error; a different fin
   count is a `device.property` error with `property.name: "nfin"`.
+- **Passives (issue #4469).** Reference `R`/`C` cards compare against the
+  klt-convention `RES`/`CAP` devices the extractor builds from the private
+  marker layers 112/0 and 113/0 (convention, assumed coefficients and refused
+  markers: [`extract.md`](extract.md#asap7-passives-resistors-and-capacitors-issue-4469)).
+  A wrong `R` or `C` value is a `mismatch`.
 - **Refused options** (application error, exit 1) because they could relax
   or remove the exact `NFIN` compare: `options.parameter_tolerance`,
   `options.compare_parameters`, `options.combine_devices` and

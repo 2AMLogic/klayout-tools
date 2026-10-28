@@ -79,7 +79,8 @@ CDL.
 
 from __future__ import annotations
 
-from .finfet import FinFETExtractionDeck, FinFETFlavour
+from .extraction import ResistorDevice
+from .finfet import FinFETExtractionDeck, FinFETFlavour, FinFETPassiveCapacitor
 from .rules import RuleProvenance
 
 _LAMBDAPDK_REPO = "siliconcompiler/lambdapdk"
@@ -147,6 +148,12 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     # Not in the pinned asap7.lyp/layermap or the DRM: an assumed, unused
     # stream number for the thick-oxide marker (#4465).
     (111, 0): "THICKOX.drawing",
+    # klt-private passive-recognition markers (issue #4469): not PDK layers.
+    # Absent from the pinned asap7.lyp, so no PDK layout uses them; a layout
+    # drawn for another flow that happens to use 112/0 or 113/0 would be
+    # reinterpreted, hence the explicit klt-private naming.
+    (112, 0): "KLT_RES_MK.assumed",
+    (113, 0): "KLT_CAP_MK.assumed",
 }
 
 _METALS = (
@@ -161,6 +168,13 @@ _METALS = (
     (90, 0),
 )
 _VIAS = ((21, 0), (25, 0), (35, 0), (45, 0), (55, 0), (65, 0), (75, 0), (85, 0))
+
+#: ASSUMED (predictive) M1 sheet resistance, ohm/sq. Neither value below is
+#: read from the pinned lambdapdk files (they publish no sheet resistance);
+#: both are klt placeholders for a predictive PDK, labelled as such.
+ASSUMED_M1_SHEET_RHO_OHM_SQ = 131.0
+#: ASSUMED MOM capacitance per um^2 of marker footprint, farads.
+ASSUMED_MOM_AREA_CAP_F_UM2 = 2.0e-16
 
 EXTRACTION_DECK = FinFETExtractionDeck(
     active=(11, 0),
@@ -227,4 +241,23 @@ EXTRACTION_DECK = FinFETExtractionDeck(
     fin_provenance=_lyp("fin drawing - 2/0"),
     lig_lisd_connected=True,
     sd_contact=(88, 0),
+    # Passives (issue #4469): ASAP7 defines no resistor/MIM layers, so these
+    # are klt conventions with ASSUMED predictive coefficients (see
+    # docs/cli/extract.md, "ASAP7 passives").
+    resistors=(
+        ResistorDevice(
+            name="RES",
+            body=(19, 0),
+            marker=(112, 0),
+            sheet_rho_ohm_sq=ASSUMED_M1_SHEET_RHO_OHM_SQ,
+        ),
+    ),
+    passive_capacitors=(
+        FinFETPassiveCapacitor(
+            name="CAP",
+            marker=(113, 0),
+            metal=(19, 0),
+            area_cap_f_um2=ASSUMED_MOM_AREA_CAP_F_UM2,
+        ),
+    ),
 )
