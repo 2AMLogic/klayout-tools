@@ -189,6 +189,46 @@ def test_defined_x_call_in_reference_is_not_reported(tmp_path, fake_klayout):
     ]
 
 
+def _unresolved(report):
+    return [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "reference.unresolved_subckt_call"
+    ]
+
+
+def test_x_call_to_declared_device_class_is_not_reported(tmp_path, fake_klayout):
+    request = json.loads(_request(tmp_path, 1))
+    sp = tmp_path / "ref.sp"
+    sp.write_text(SPICE_ONE.replace(".ends", "X2 a b c d nmos W=1u L=1u\n.ends"))
+    assert not _unresolved(run_lvs(json.dumps(request)))
+
+
+def test_x_call_in_deck_device_list_is_not_reported(tmp_path, fake_klayout):
+    """The runset renames some DEVICE_LIST callees (sky130 special_nfet_01v8
+    -> nfet_01v8), so no declared class carries the called name."""
+    request = json.loads(_request(tmp_path, 1))
+    (tmp_path / "pdk.lvs").write_text(
+        'DEVICE_LIST = [\n  "foo_special_dev".upcase,  # renamed\n'
+        '  "other_dev".upcase,\n]\n'
+    )
+    sp = tmp_path / "ref.sp"
+    sp.write_text(
+        SPICE_ONE.replace(
+            ".ends", "X2 a b c d foo_special_dev W=1u\nX3 a b unlisted_dev\n.ends"
+        )
+    )
+    found = _unresolved(run_lvs(json.dumps(request)))
+    assert [m["subcircuit"]["reference"] for m in found] == ["UNLISTED_DEV"]
+
+
+def test_deck_device_list_parsing(tmp_path):
+    deck = tmp_path / "d.lvs"
+    deck.write_text('X = 1\nDEVICE_LIST = [\n "a_b".upcase, # c "z"\n "c".upcase\n]\n')
+    assert lvs_runset._deck_device_list(str(deck)) == {"A_B", "C"}
+    assert lvs_runset._deck_device_list(str(tmp_path / "missing")) == set()
+
+
 def test_zero_devices_recognized_is_not_clean(tmp_path, fake_klayout):
     fake_klayout["extract"] = False
     sp = tmp_path / "empty.sp"
