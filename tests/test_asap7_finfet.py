@@ -782,6 +782,64 @@ def test_lvs_bulk_policy_enabled_ties_discloses_and_echoes(tmp_path):
     assert report["category_counts"]["device.finfet_bulk_tied"] == 1
 
 
+def _two_cell_library(tmp_path: Path, *, with_labels: bool = True) -> str:
+    """Two placed unit cells (``U1``/``U2``) in one ``TOP``; the ``S``/``G``/``D``
+    labels live only in the sub-cells, never at the top."""
+    out = kdb.Layout()
+    out.dbu = DBU
+    top = out.create_cell("TOP")
+    for k, name in enumerate(("U1", "U2")):
+        src = _draw_device()
+        cell = out.create_cell(name)
+        cell.copy_tree(src.top_cell())
+        if not with_labels:
+            for layer in out.layer_indexes():
+                for shape in list(cell.shapes(layer).each(kdb.Shapes.STexts)):
+                    cell.shapes(layer).erase(shape)
+        top.insert(kdb.CellInstArray(cell.cell_index(), kdb.Trans(k * 2000, 0)))
+    return _write(out, tmp_path, "lib.gds")
+
+
+_LIB_REF = (
+    ".SUBCKT U S G D\nM0 D G S S nmos_rvt w=81n l=20n nfin=3\n.ENDS\n"
+    ".SUBCKT TOP\nX1 vss b c U\nX2 vss e f U\n.ENDS\n"
+)
+
+
+def _lib_request(tmp_path: Path, layout: str, options: dict) -> str:
+    ref = tmp_path / "lib.cdl"
+    ref.write_text(_LIB_REF)
+    return json.dumps(
+        {
+            "layout": {"file": layout, "deck": "asap7", "top": "TOP"},
+            "reference": {"netlist": str(ref), "top": "TOP"},
+            "options": options,
+        }
+    )
+
+
+def test_lvs_bulk_policy_resolves_sub_cell_rail_labels(tmp_path):
+    layout = _two_cell_library(tmp_path)
+    options = {
+        "finfet_bulk": {"nmos": "S"},
+        "flatten_layout": True,
+        "flatten_reference": True,
+    }
+    report = run_lvs(_lib_request(tmp_path, layout, options))
+    assert report["status"] == "match", _errors(report)
+    tied = [
+        m for m in report["mismatches"] if m["category"] == "device.finfet_bulk_tied"
+    ]
+    assert sorted(m["details"]["circuit"] for m in tied) == ["U1", "U2"]
+
+
+def test_lvs_bulk_policy_missing_sub_cell_label_names_the_circuit(tmp_path):
+    layout = _two_cell_library(tmp_path, with_labels=False)
+    options = {"finfet_bulk": {"nmos": "S"}, "flatten_layout": True}
+    with pytest.raises(LvsError, match=r"not found in circuit 'U[12]'"):
+        run_lvs(_lib_request(tmp_path, layout, options))
+
+
 def test_lvs_bulk_policy_round_trips_through_rerun_reconstruction(tmp_path):
     from klayout_tools.lvs import _reconstruct_lvs_request
 

@@ -176,6 +176,7 @@ from .lvs_combine import (
     _validate_combine_device_classes,
 )
 from .lvs_finfet import (
+    apply_finfet_bulk_hierarchy,
     bulk_disclosures,
     finfet_bulk_replay_options,
     prepare_finfet_comparison,
@@ -1510,6 +1511,14 @@ def run_lvs(
     layout_circuit_names = {
         circuit.name.upper() for circuit in layout_netlist.each_circuit()
     }
+    # Issue #4514: the FinFET bulk policy runs per circuit *before* the layout
+    # flatten, so rail labels drawn in sub-cells resolve inside their own cell.
+    finfet_bulk_records: list[dict[str, Any]] = []
+    if finfet_layout and finfet_bulk:
+        finfet_bulk_records = apply_finfet_bulk_hierarchy(
+            _select_circuit(layout_netlist, layout_spec.get("top"), "layout"),
+            finfet_bulk,
+        )
     if flatten_layout:
         layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
         if layout_flatten_warning is not None:
@@ -1794,9 +1803,7 @@ def run_lvs(
     # Issue #2813: FinFET comparison setup -- reference fingers merged with the
     # extractor's combiner, the opt-in bulk policy applied (and disclosed),
     # NFIN compared exactly on both sides.
-    finfet_bulk_records = prepare_finfet_comparison(
-        finfet_layout, layout_netlist, layout_circuit, reference_netlist, finfet_bulk
-    )
+    prepare_finfet_comparison(finfet_layout, layout_netlist, reference_netlist)
 
     # Issue #2853 (option (b)): resolved here, after both sides' optional
     # flatten, because a flattened side no longer carries the stub instances
