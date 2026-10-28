@@ -4,6 +4,13 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-28
 
+- **PR #4503**: docs: document ASAP7 router M4 stub-end track-alignment residual
+- **PR #4499**: feat: add asap7sc7p5t PDN preset with wide-V4 M5 strap and on-grid stubs
+- **PR #4498**: docs: note ASAP7 library cells are expected to trip SDT.ACTIVE.AUX.2
+- **Issue #4504** (closed): test flake: CI wall-clock budget fails on Lint (ruff) compute breach (PR #4500, docs-only diff)
+- **Issue #4501** (closed): place-and-route (asap7): router M4 stub ends land off the deck's track grid, no request control
+- **Issue #4496** (closed): asap7 deck: SDT.ACTIVE.AUX.2 fires inside reference standard-cell GDS
+- **Issue #4494** (closed): place-and-route (asap7): M5/M6 PDN straps produce via stacks that fail the packaged deck, no request control
 - **PR #4491**: fix: space-separate bus ports in klt netlist .subckt headers
 - **PR #4484**: feat: add output_dbu_um to refine merged P&R GDS dbu
 - **Issue #4490** (closed): klt netlist --block: comma-joined bus ports in .subckt are mis-parsed by ngspice; host paths in output
