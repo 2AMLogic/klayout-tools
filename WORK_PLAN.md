@@ -43,6 +43,7 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#4161**: klt sim batch: all jobs exit 87 within seconds on the current fleet image; no runner stderr surfaced
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s)
+- **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported
 
 ## In Progress
 
@@ -51,16 +52,16 @@ Issues currently being built (`loom:building`).
 - **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests
 - **#4221**: signoff --attest: support T1 item 2 (Layout) anchored generic envelope
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
-- **#4482**: place-and-route: no output-dbu control; decks that need a finer dbu cannot check the routed stream
-- **#4490**: klt netlist --block: comma-joined bus ports in .subckt are mis-parsed by ngspice; host paths in output
+- **#4493**: place-and-route (asap7): no track offsets matching the DRC deck's M4-M7 grid origin
+- **#4494**: place-and-route (asap7): M5/M6 PDN straps produce via stacks that fail the packaged deck, no request control
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
-- **#4484**: feat: add output_dbu_um to refine merged P&R GDS dbu
-- **#4491**: fix: space-separate bus ports in klt netlist .subckt headers
+- **#4499**: feat: add asap7sc7p5t PDN preset with wide-V4 M5 strap and on-grid stubs
+- **#4500**: docs: add ASAP7 RVT floorplan.tracks example for M4-M7 deck grid
 
 ## Approved (Awaiting Merge)
 
@@ -114,8 +115,9 @@ Issues carrying `loom:curated`.
 - **#4410**: lvs gate-level-verilog + abstract-cell netlist: dangling-output instances still error after #4323 *(curated)*
 - **#4424**: klt lvs: custom-class cap_cmomi/resistor LVS regresses from match to mismatch between daf06a51afaf and 0.8.0 (sg13cmos5l) *(curated)*
 - **#4440**: Friction: klt's OpenROAD steps need Docker, which fleet workers can't use; no fleet executor for OpenROAD regeneration *(curated)*
-- **#4482**: place-and-route: no output-dbu control; decks that need a finer dbu cannot check the routed stream *(curated)*
-- **#4490**: klt netlist --block: comma-joined bus ports in .subckt are mis-parsed by ngspice; host paths in output *(curated)*
+- **#4493**: place-and-route (asap7): no track offsets matching the DRC deck's M4-M7 grid origin *(curated)*
+- **#4494**: place-and-route (asap7): M5/M6 PDN straps produce via stacks that fail the packaged deck, no request control *(curated)*
+- **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -140,11 +142,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 3 |
 | Very important | 1 |
 | Important | 1 |
-| Ready (`loom:issue`) | 16 |
+| Ready (`loom:issue`) | 17 |
 | In Progress (`loom:building`) | 5 |
 | PRs awaiting review | 3 |
 | Approved PRs awaiting merge | 3 |
-| Curated | 42 |
+| Curated | 43 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
