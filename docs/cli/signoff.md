@@ -451,6 +451,45 @@ should mean the same thing `klt lvs` itself and `docs/cli/lvs.md` already
 tell callers it means, and a default that stays silently weaker than the
 evidence it aggregates would perpetuate exactly the gap this issue closes.
 
+### Foundry-cell DRC exceptions
+
+T1 item 3 normally needs `status: "clean"`. An item 3 evidence entry may also
+carry `foundry_cell_exceptions` (issue #4530, operator ruling 2026-10-28; see
+`docs/design-evidence-tiers.md` item 3). Each record is:
+
+```json
+{"cell": "sky130_ef_io__analog_noesd_pad",
+ "cell_hash": "sha256:...",
+ "rules": {"met4.2": 120, "met5.1": 366},
+ "bare_cell_layout": "pdk/analog_noesd_pad.gds",
+ "bare_cell_report": "verification/bare-pad-drc.json",
+ "layout": "block.gds"}
+```
+
+`layout` is optional (default: the DRC envelope's `file`). `cell_hash` is
+`klayout_tools._provenance.cell_geometry_digest` of the cell and everything
+beneath it. A `violations` report is graded `met` only if, for every
+exception, the cell hashes to `cell_hash` in the block layout **and** in
+`bare_cell_layout`; `bare_cell_report` is a `klt drc` report of
+`bare_cell_layout` whose input hash is current and whose `rule_counts` equal
+`rules`; and the block's own `rule_counts` equal the sum of all exceptions'
+`rules`. Any other violation, a count that moves, or a changed hash leaves
+item 3 `unmet` (`check_failed`), with
+`detail.foundry_cell_exceptions = {"applied": false, "lapsed": [...]}`.
+A `--rules` subset report never qualifies. Paths resolve against the working
+directory.
+
+**Attribution limit.** The RDB/external-script engine reports
+`source_cell: null` (`drc.md`), so grading is by per-rule counts; where a
+violation does carry a `source_cell` (curated engine), it must be an excepted
+cell. A clean report grades as before and ignores the list.
+
+Applied exceptions appear in item 3's `citation.foundry_cell_exceptions`
+(JSON; each with `cell`, `cell_hash`, `rules`, `bare_cell_report`) and as
+`foundry-cell exception:` lines under `cite:` in `--format text`. The key is
+additive and present only when an exception was applied, so no
+`schema_version` bump.
+
 ### DRC coverage is reported, not graded
 
 [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3 requires a

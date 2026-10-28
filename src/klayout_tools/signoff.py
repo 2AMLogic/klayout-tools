@@ -50,6 +50,7 @@ from typing import (
     get_type_hints,
 )
 
+from . import signoff_foundry_cell as foundry_cell
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
 from ._report_verify import (
     LIST_ITEM,
@@ -4915,6 +4916,28 @@ def _normalize_evidence_pointer(raw: Any) -> tuple[str | None, bool]:
     return pointer, True
 
 
+def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """The opt-in, additive keys of an evidence entry, or ``None`` if any is
+    malformed (degrading this one item to ``invalid_evidence``) rather than
+    silently reading as "off" -- an opt-in requirement must never fail open.
+
+    ``require_annotation_complete`` is issue #3258; ``foundry_cell_exceptions``
+    (disclosed foundry-cell DRC exceptions for item 3) is issue #4530.
+    """
+    require_annotation = raw.get("require_annotation_complete", False)
+    if not isinstance(require_annotation, bool):
+        return None
+    cell_exceptions = foundry_cell.normalize_exceptions(
+        raw.get("foundry_cell_exceptions")
+    )
+    if cell_exceptions is None:
+        return None
+    return {
+        "require_annotation_complete": require_annotation,
+        "foundry_cell_exceptions": cell_exceptions,
+    }
+
+
 def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     """Normalize a manifest ``evidence[]`` entry into one of two shapes, or
     ``None`` if it matches neither -- a malformed *single* entry degrades
@@ -4958,11 +4981,8 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     if not pointer_ok:
         return None
 
-    # Issue #3258: opt-in, additive. A non-boolean value is a malformed entry
-    # (degrades this one item to `invalid_evidence`) rather than silently
-    # reading as "off" -- an opt-in requirement must never fail open.
-    require_annotation = raw.get("require_annotation_complete", False)
-    if not isinstance(require_annotation, bool):
+    options = _normalize_evidence_options(raw)
+    if options is None:
         return None
 
     command = raw.get("command")
@@ -4983,7 +5003,7 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
             "cwd": cwd,
             "content_hash": expected_hash,
             "pointer": pointer,
-            "require_annotation_complete": require_annotation,
+            **options,
         }
 
     file = raw.get("file")
@@ -4997,7 +5017,7 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
         "file": file,
         "content_hash": expected_hash,
         "pointer": pointer,
-        "require_annotation_complete": require_annotation,
+        **options,
     }
 
 
@@ -5676,13 +5696,9 @@ def _grade_evidence(
     if check_kind == "error":
         return "unmet", _REASON_CHECK_ERRORED, None, {}
 
-    if not _check_passed(check_kind, checked):
-        return (
-            "unmet",
-            _non_passing_reason(check_kind, envelope),
-            None,
-            _critical_metric_detail(envelope),
-        )
+    citation_extra, unmet = _grade_check_outcome(check_kind, checked, spec, envelope)
+    if unmet is not None:
+        return unmet
 
     annotation_refusal = _sta_annotation_refusal(check_kind, spec, envelope)
     if annotation_refusal is not None:
@@ -5735,7 +5751,7 @@ def _grade_evidence(
     if pin_state == _PIN_STALE:
         return "unmet", _REASON_STALE_EVIDENCE, None, {}
 
-    citation = _citation(resolution)
+    citation = {**_citation(resolution), **citation_extra}
     execution_detail: dict[str, Any] = {}
     anchored_refusal = _bind_anchored_citation(
         check_kind,
@@ -5756,6 +5772,50 @@ def _grade_evidence(
     _attach_characterization_attestation(check_kind, item_id, envelope, citation)
     _record_envelope(envelope_sink, envelope)
     return "met", None, citation, {}
+
+
+def _grade_check_outcome(
+    kind: str, checked: Any, spec: dict[str, Any], envelope: dict[str, Any]
+) -> tuple[dict[str, Any], tuple[Any, ...] | None]:
+    """Grade the envelope's own pass/fail. Returns ``(citation_extra, unmet)``:
+    ``unmet`` is the full ``_grade_evidence`` result when the check did not
+    pass, else ``None``. A non-passing envelope is first offered its disclosed
+    foundry-cell exceptions (issue #4530); when they cover every violation the
+    item proceeds and ``citation_extra`` carries them for the citation."""
+    if _check_passed(kind, checked):
+        return {}, None
+    failure_detail = _critical_metric_detail(envelope)
+    exceptions = spec.get("foundry_cell_exceptions")
+    if exceptions and _foundry_cell_exception_eligible(kind, envelope):
+        applied, lapsed = foundry_cell.evaluate(envelope, exceptions)
+        if applied is not None:
+            return {"foundry_cell_exceptions": applied}, None
+        failure_detail = {
+            **failure_detail,
+            "foundry_cell_exceptions": {"applied": False, "lapsed": lapsed},
+        }
+    unmet = (
+        "unmet",
+        _non_passing_reason(kind, envelope),
+        None,
+        failure_detail,
+    )
+    return {}, unmet
+
+
+def _foundry_cell_exception_eligible(kind: str, envelope: dict[str, Any]) -> bool:
+    """Whether a non-passing envelope may still be offered a foundry-cell
+    exception (issue #4530): a full-deck ``klt drc`` ``violations`` report
+    whose only blocking critical metric is its own error count."""
+    return (
+        kind == "drc"
+        and envelope.get("status") == "violations"
+        and not _drc_rule_subset(envelope)
+        and all(
+            blocker.get("metric") == "drc__error__count"
+            for blocker in _critical_metric_blockers(envelope)
+        )
+    )
 
 
 def _kind_gated_failure_detail(
