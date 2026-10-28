@@ -229,6 +229,41 @@ def test_deck_device_list_parsing(tmp_path):
     assert lvs_runset._deck_device_list(str(tmp_path / "missing")) == set()
 
 
+def test_deck_device_list_parses_real_sky130_block():
+    """Verbatim excerpt of the real sky130B ``sky130.lvs`` (see the fixture
+    header for the PDK version) -- not a hand-written deck."""
+    deck = os.path.join(
+        os.path.dirname(__file__),
+        "fixtures",
+        "sky130_lvs_deck",
+        "device_list_excerpt.lvs",
+    )
+    names = lvs_runset._deck_device_list(deck)
+    assert {
+        "SKY130_FD_PR__NFET_01V8",
+        "SKY130_FD_PR__PFET_01V8_HVT",
+        "SKY130_FD_PR__SPECIAL_NFET_01V8",
+        "SKY130_FD_PR__SPECIAL_PFET_01V8_HVT",
+        "SKY130_FD_PR__NPN_05V5_W1P00L1P00",
+    } <= names
+    assert "SKY130_FD_PR__CAP_MIM_M3_1" not in names
+
+
+def test_deck_device_list_parses_installed_sky130_deck():
+    import glob
+
+    decks = glob.glob(
+        os.path.expanduser(
+            "~/.ciel/ciel/sky130/versions/*/sky130B/libs.tech/klayout/lvs/sky130.lvs"
+        )
+    )
+    if not decks:
+        pytest.skip("no installed sky130 klayout LVS runset")
+    names = lvs_runset._deck_device_list(decks[0])
+    assert "SKY130_FD_PR__SPECIAL_NFET_01V8" in names
+    assert len(names) > 50
+
+
 def test_zero_devices_recognized_is_not_clean(tmp_path, fake_klayout):
     fake_klayout["extract"] = False
     sp = tmp_path / "empty.sp"
