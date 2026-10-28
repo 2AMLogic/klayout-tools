@@ -2159,6 +2159,57 @@ def _run_decks_batch_pending(
     return _run_decks_batch(pending_request, files, worker_request, outdir=outdir)
 
 
+def _run_decks_offhost(
+    request: dict[str, Any],
+    units: list[dict[str, Any]],
+    pending: list[dict[str, Any]],
+    resumed: dict[int, Any],
+    *,
+    request_dir: str,
+    backend: str,
+    outdir: str,
+    ngspice_binary: str,
+    artifacts_dir: str | None,
+    resume: bool,
+    submit_only: bool,
+    attach_job_id: str | None,
+) -> dict[str, Any]:
+    """The ``remote`` / ``batch`` leg of :func:`run_deck_request`."""
+    from .sim import apply_engine_host
+
+    # Validate the whole staged closure before anything billable: an
+    # unstageable include or missing file is a submit-time SimError,
+    # never a launched job that cannot run.
+    files, worker_request = stage_deck_job(request, request_dir=request_dir)
+    if backend == "remote":
+        report = _run_decks_remote(request, files, worker_request, outdir=outdir)
+    elif submit_only:
+        return _submit_decks_batch_only(
+            request, files, worker_request, artifacts_dir=artifacts_dir
+        )
+    elif attach_job_id is not None:
+        report = _attach_decks_batch(
+            request, worker_request, attach_job_id, outdir=outdir
+        )
+    else:
+        report = _run_decks_batch_pending(
+            request,
+            pending,
+            request_dir=request_dir,
+            backend=backend,
+            outdir=outdir,
+            ngspice_binary=ngspice_binary,
+        )
+    if resume:
+        _apply_resume(report, units, resumed)
+    apply_engine_host(
+        report.setdefault("environment", {}),
+        backend=backend,
+        client_ngspice_binary=ngspice_binary,
+    )
+    return report
+
+
 def run_deck_request(
     request: dict[str, Any],
     *,
@@ -2242,37 +2293,20 @@ def run_deck_request(
     pending = [unit for index, unit in enumerate(units) if index not in resumed]
 
     if backend == "remote" or backend == "batch":
-        # Validate the whole staged closure before anything billable: an
-        # unstageable include or missing file is a submit-time SimError,
-        # never a launched job that cannot run.
-        files, worker_request = stage_deck_job(request, request_dir=request_dir)
-        if backend == "remote":
-            report = _run_decks_remote(request, files, worker_request, outdir=outdir)
-        elif submit_only:
-            return _submit_decks_batch_only(
-                request, files, worker_request, artifacts_dir=artifacts_dir
-            )
-        elif attach_job_id is not None:
-            report = _attach_decks_batch(
-                request, worker_request, attach_job_id, outdir=outdir
-            )
-        else:
-            report = _run_decks_batch_pending(
-                request,
-                pending,
-                request_dir=request_dir,
-                backend=backend,
-                outdir=outdir,
-                ngspice_binary=ngspice_binary,
-            )
-        if resume:
-            _apply_resume(report, units, resumed)
-        apply_engine_host(
-            report.setdefault("environment", {}),
+        return _run_decks_offhost(
+            request,
+            units,
+            pending,
+            resumed,
+            request_dir=request_dir,
             backend=backend,
-            client_ngspice_binary=ngspice_binary,
+            outdir=outdir,
+            ngspice_binary=ngspice_binary,
+            artifacts_dir=artifacts_dir,
+            resume=resume,
+            submit_only=submit_only,
+            attach_job_id=attach_job_id,
         )
-        return report
 
     if backend == "local":
         workers = 1
