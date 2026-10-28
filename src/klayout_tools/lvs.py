@@ -1513,12 +1513,9 @@ def run_lvs(
     }
     # Issue #4514: the FinFET bulk policy runs per circuit *before* the layout
     # flatten, so rail labels drawn in sub-cells resolve inside their own cell.
-    finfet_bulk_records: list[dict[str, Any]] = []
-    if finfet_layout and finfet_bulk:
-        finfet_bulk_records = apply_finfet_bulk_hierarchy(
-            _select_circuit(layout_netlist, layout_spec.get("top"), "layout"),
-            finfet_bulk,
-        )
+    finfet_bulk_records = _apply_finfet_bulk_policy(
+        layout_netlist, layout_spec, finfet_layout, finfet_bulk
+    )
     if flatten_layout:
         layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
         if layout_flatten_warning is not None:
@@ -5244,6 +5241,22 @@ def _resolve_gate_level_pin_orders(
 
     pin_orders, sources = _merge_pin_order_sources(plan)
     return _GateLevelPinOrders(pin_orders, pdk_info, sources)
+
+
+def _apply_finfet_bulk_policy(
+    layout_netlist: kdb.Netlist,
+    layout_spec: Mapping[str, Any],
+    finfet_layout: bool,
+    finfet_bulk: Mapping[str, str] | None,
+) -> list[dict[str, Any]]:
+    """Run ``options.finfet_bulk`` per circuit; a no-op (no top lookup) unless
+    the layout is FinFET and the policy is set."""
+    if not (finfet_layout and finfet_bulk):
+        return []
+    return apply_finfet_bulk_hierarchy(
+        _select_circuit(layout_netlist, layout_spec.get("top"), "layout"),
+        finfet_bulk,
+    )
 
 
 def _select_circuit(netlist: kdb.Netlist, top: str | None, side: str) -> kdb.Circuit:
