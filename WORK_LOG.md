@@ -4,6 +4,28 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-28
 
+- **PR #4487**: feat: recognise M1 resistors and MOM capacitors on the ASAP7 deck
+- **PR #4486**: feat: add klt power-intent check for power-gated netlists
+- **PR #4485**: feat: extract and LVS-match ASAP7 thick-oxide devices as nmos_io/pmos_io
+- **PR #4480**: fix: reject post_route_spef for libraries without an extract deck at validation
+- **PR #4478**: test: cross-check sky130 holes_area vs foundry m*.7 on stock pad geometry
+- **PR #4477**: fix: constrain DRC provenance.pdk to the deck's PDK family
+- **PR #4476**: feat: add requires_tools pre-build tool check to klt functional-verification
+- **PR #4475**: docs: document analog-partition discharge path for T1 item 6
+- **PR #4471**: feat: add predictive THICKOX marker layer and rules to the ASAP7 DRC deck
+- **PR #4470**: feat: add klt drc --max-violations and emit coverage before violations
+- **PR #4463**: feat: expand library cells to CDL bodies for gate-level Verilog on FinFET LVS
+- **Issue #4479** (closed): Netlist-level power-intent check for power-gated domains (isolation coverage and wake sequencing)
+- **Issue #4474** (closed): DRC report provenance records the wrong PDK (gf180mcuA on a sky130 run)
+- **Issue #4473** (closed): functional-verification: no way to declare or provision external toolchains (Sail, Ruby gems, newer RISC-V GCC)
+- **Issue #4472** (closed): sky130 DRC: met4.holes_area.1 flags stock sky130_ef_io pad cells that the foundry deck passes
+- **Issue #4469** (closed): ASAP7 LVS/extraction: no resistor or capacitor device class, so netlists with passives can't match
+- **Issue #4468** (closed): place-and-route: post_route_spef/post_route_sdf unsupported for asap7sc7p5t_rvt, and refused only after routing complete
+- **Issue #4466** (closed): ASAP7 LVS and extraction: recognise thick-oxide I/O devices
+- **Issue #4465** (closed): ASAP7 decks: thick-oxide marker layer and DRC rules
+- **Issue #4464** (closed): klt drc --engine klayout: JSON envelope is unbounded on a dense layout; no violation cap or summary-only mode
+- **Issue #4462** (closed): klt lvs: FinFET deck cannot take a gate-level-verilog reference, so a routed standard-cell block has no LVS or power-con
+- **Issue #4183** (closed): klt signoff: T1 item 6 not_applicable declaration is digital-partition-only, so a mixed-signal block with no statistical
 - **PR #4461**: feat: add latch_map request field to klt synthesize
 - **Issue #4458** (closed): synthesize: inferred latches are never mapped, so a latch-bearing design leaves a non-library cell in the netlist
 - **PR #4460**: fix: reject verilog_blackbox that declares no module named the macro cell
