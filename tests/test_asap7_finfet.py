@@ -1338,3 +1338,69 @@ def test_corpus_full_rvt_library_via_klt_lvs_in_a_checked_subprocess(tmp_path):
     for cell in _FOLDED_STACK_CELLS | _SERIES_ORDER_CELLS:
         assert results[cell] == "mismatch", cell
     assert results["TAPCELL_ASAP7_75t_R"].startswith("error: ")
+
+
+# --------------------------------------------------------------------------- #
+# klt lvs: gate-level-verilog reference on a FinFET deck (issue #4462)
+# --------------------------------------------------------------------------- #
+
+_CELL_CDL = ".SUBCKT MYN G D S VSS\nM0 D G S VSS nmos_rvt w=81n l=20n nfin={n}\n.ENDS\n"
+_TOP_V = (
+    "module TOP (S, G, D);\n input S, G; output D;\n"
+    " MYN u0 (.G(G), .D(D), .S(S));\nendmodule\n"
+)
+
+
+def _lvs_gate_level(
+    tmp_path: Path,
+    *,
+    cdl_fins=3,
+    layout_fins=3,
+    verilog=_TOP_V,
+    options=None,
+    extra=None,
+):
+    layout = _write(_draw_device(polarity="n", fins=layout_fins), tmp_path)
+    cdl = tmp_path / "lib.cdl"
+    cdl.write_text(_CELL_CDL.format(n=cdl_fins))
+    ref = tmp_path / "ref.v"
+    ref.write_text(verilog)
+    request = {
+        "layout": {"file": layout, "deck": "asap7", "top": "TOP"},
+        "reference": {
+            "netlist": str(ref),
+            "top": "TOP",
+            "form": "gate-level-verilog",
+            "pin_order_files": [str(cdl)],
+            **(extra or {}),
+        },
+    }
+    if options is not None:
+        request["options"] = options
+    return run_lvs(json.dumps(request))
+
+
+def test_lvs_gate_level_verilog_expands_cells_and_matches(tmp_path):
+    report = _lvs_gate_level(tmp_path)
+    assert report["status"] == "match"
+    assert report["power_connectivity"]["status"] == "unchecked"
+    assert "transistor-level" in report["power_connectivity"]["reason"]
+
+
+def test_lvs_gate_level_verilog_changed_library_nfin_is_a_mismatch(tmp_path):
+    report = _lvs_gate_level(tmp_path, cdl_fins=2)
+    assert report["status"] != "match"
+    props = [m for m in _errors(report) if m.get("category") == "device.property"]
+    assert props
+    assert props[0]["property"]["name"].lower() == "nfin"
+
+
+def test_lvs_gate_level_verilog_missing_cell_body_is_an_error(tmp_path):
+    verilog = _TOP_V.replace("MYN u0", "NOPE u0")
+    with pytest.raises(LvsError, match="NOPE"):
+        _lvs_gate_level(tmp_path, verilog=verilog)
+
+
+def test_lvs_gate_level_verilog_still_refuses_device_map(tmp_path):
+    with pytest.raises(LvsError, match="device_map"):
+        _lvs_gate_level(tmp_path, extra={"device_map": {"a": "b"}})
