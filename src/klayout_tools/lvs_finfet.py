@@ -116,11 +116,12 @@ def validate_finfet_request(
             "would drop NFIN"
         )
     form = reference_spec.get("form", "plain-element")
-    if form != "plain-element":
+    if form not in ("plain-element", "gate-level-verilog"):
         raise _error(
             f"layout.deck '{deck}' is a FinFET extraction deck; "
             f"reference.form {form!r} is not supported (use 'plain-element' "
-            "CDL/SPICE M cards carrying nfin=)"
+            "CDL/SPICE M cards carrying nfin=, or 'gate-level-verilog' with "
+            "reference.library to expand library cells from the PDK CDL)"
         )
     for key in ("device_map", "device_bulk"):
         if reference_spec.get(key):

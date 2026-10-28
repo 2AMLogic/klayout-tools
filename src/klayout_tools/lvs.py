@@ -259,6 +259,8 @@ from .verilog_netlist import (
     VerilogNetlistError,
     collect_gate_level_port_aliases,
     convert_gate_level_verilog,
+    convert_gate_level_verilog_expanded,
+    parse_subckt_blocks,
     parse_subckt_pin_orders,
 )
 
@@ -1351,7 +1353,14 @@ def run_lvs(
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
     # extract` is always flat, so a hierarchical reference/pre-extracted
     # layout netlist otherwise can never structurally match it).
-    flatten_reference = bool(options.get("flatten_reference", False))
+    # Issue #4462: a FinFET layout is extracted flat at the transistor level,
+    # so a gate-level reference (expanded to cell bodies) defaults to flat too.
+    flatten_reference = bool(
+        options.get(
+            "flatten_reference",
+            finfet_layout and reference_spec.get("form") == "gate-level-verilog",
+        )
+    )
     # Issue #4165: opt-in deadline for the `klayout` engine's compare.
     compare_timeout_s = parse_compare_timeout(options, engine)
     flatten_layout = bool(options.get("flatten_layout", False))
@@ -1640,7 +1649,23 @@ def run_lvs(
         reference_path=reference_netlist_path,
     )
 
-    if reference_form == "gate-level-verilog":
+    if reference_form == "gate-level-verilog" and finfet_layout:
+        # Issue #4462: the expanded reference carries the cells' own rails, so
+        # only the port-alias join applies (no stub power report / prune).
+        gate_level_port_alias_warnings.extend(
+            _apply_gate_level_port_aliases(
+                reference_gate_level_port_aliases, reference_netlist
+            )
+        )
+        power_connectivity = _power_connectivity_unchecked(
+            "reference.form is 'gate-level-verilog' on a FinFET layout.deck: "
+            "each library cell was expanded to its transistor-level CDL body "
+            "with its own power/ground pins, so supply connectivity takes part "
+            "in the ordinary compare (a 'match' evidences it) and the "
+            "stub-form power-pin check does not apply"
+        )
+
+    if reference_form == "gate-level-verilog" and not finfet_layout:
         # Issue #2021: joins every `assign`-aliased reference port's net onto
         # its canonical target's net -- run first, before anything else below
         # reads `reference_netlist`'s topology (the power connectivity report,
@@ -4716,9 +4741,18 @@ def _read_reference_netlist(
                 library, pdk_variant, pdk_root, pin_order_files=pin_order_files
             ).pin_orders
         try:
-            converted = convert_gate_level_verilog(
-                text, pin_order_lookup=pin_orders.get
-            )
+            if finfet:
+                # Issue #4462: a FinFET deck extracts transistors with exact
+                # `nfin`, so each library cell is expanded to its CDL body.
+                converted = convert_gate_level_verilog_expanded(
+                    text,
+                    pin_order_lookup=pin_orders.get,
+                    cell_body_lookup=_library_cell_body_lookup(pin_orders),
+                )
+            else:
+                converted = convert_gate_level_verilog(
+                    text, pin_order_lookup=pin_orders.get
+                )
         except VerilogNetlistError as exc:
             raise LvsError(
                 f"could not convert gate-level-verilog reference netlist "
@@ -4809,6 +4843,29 @@ def _read_reference_netlist(
     return netlist
 
 
+def _library_cell_body_lookup(pin_orders: Mapping[str, Any]):
+    """``cell -> '.SUBCKT .. .ENDS' text`` read from the file that declared
+    the cell (issue #4462); each source file is parsed once."""
+    sources: Mapping[str, str] = getattr(pin_orders, "cell_sources", {})
+    parsed: dict[str, dict[str, str]] = {}
+
+    def lookup(cell: str) -> str | None:
+        path = sources.get(cell)
+        if path is None:
+            return None
+        if path not in parsed:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    parsed[path] = parse_subckt_blocks(handle.read())
+            except OSError as exc:
+                raise LvsError(
+                    f"could not read library cell source '{path}': {exc}"
+                ) from exc
+        return parsed[path].get(cell)
+
+    return lookup
+
+
 #: `<library>`'s pin-order source, in resolution order (issue #1336) --
 #: mirrors the real open_pdks/volare/ciel layout `klt pdk`'s own `libs_ref`
 #: resolution already assumes (see `klayout_tools.pdk`'s module docstring).
@@ -4835,10 +4892,15 @@ class _AttributedPinOrders(dict):
     """
 
     cell_libraries: dict[str, str | None]
+    #: cell name -> the pin-order source file that declared it (issue #4462:
+    #: the FinFET gate-level route copies the cell's transistor-level body
+    #: from that same file).
+    cell_sources: dict[str, str]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.cell_libraries = {}
+        self.cell_sources = {}
 
 
 class _GateLevelPinOrders(NamedTuple):
@@ -5070,6 +5132,7 @@ def _merge_pin_order_sources(
                 )
             merged[cell] = pins
             origin[cell] = path
+            merged.cell_sources[cell] = path
             merged.cell_libraries[cell.upper()] = library
         records.append({"library": library, "path": path, "cells": len(parsed)})
     return merged, records
