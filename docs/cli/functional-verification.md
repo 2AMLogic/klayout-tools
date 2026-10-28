@@ -564,6 +564,33 @@ together with a non-empty `parameters` is therefore rejected at
 request-validation time (exit 1) rather than risking an override that looks
 applied but was not.
 
+**Annotation scope: `options.sdf.scope` (issue #4521).** By default the SDF
+is annotated at `hdl_toplevel` itself, which is right when `hdl_toplevel` *is*
+the netlist. A bench that wraps the netlist (clock delay, loopback, stimulus
+conditioning) makes the netlist a child, and a P&R-written SDF is rooted at the
+netlist module (empty `(INSTANCE)`). Set `options.sdf.scope` to the child's
+hierarchical instance path **relative to `hdl_toplevel`** (e.g. `"dut"` or
+`"core.u_net"`; `.`-separated identifiers, escaped identifiers allowed) and
+the SDF is annotated there. The SDF itself is passed through unmodified. The
+value is echoed as `environment.sdf.scope` (absent when not set). Cocotb path
+only: with `testbench.verilog_top` the scope is `testbench.dut_instance`, and
+`options.sdf.scope` is rejected.
+
+**Mis-scoped SDF is diagnosed before `vvp` runs.** If the SDF's top `CELLTYPE`
+(with empty `INSTANCE`) names a module that the scope's module instantiates
+as a child, the run fails with an error naming that instance and suggesting
+`options.sdf.scope`. Icarus 13.0 otherwise aborts `vvp` (`NULL handle passed
+to vpi_scan.`, SIGABRT) when the SDF has `INTERCONNECT` entries. The
+unresolvable-`INTERCONNECT`-instance check resolves against the scoped
+module, not `hdl_toplevel`.
+
+**Parameterised toplevel.** `module tb #(parameter N = 20) (...)` is accepted:
+the generated wrapper re-declares the parameter list verbatim (so port widths
+like `[N-1:0]` stay valid) and forwards each `parameter` to the DUT instance
+(a `localparam` is declared but not forwarded). `request.parameters` together
+with `options.sdf` is still rejected, as above: the defaults in the
+declaration are what the run uses.
+
 **Corner selection is a compile-time flag.** `options.sdf.corner`
 (`"min"`/`"typ"`/`"max"`, default `"typ"`) maps to `iverilog -T`, which picks
 one member of each SDF `min:typ:max` triplet. It is *not* an `$sdf_annotate`
