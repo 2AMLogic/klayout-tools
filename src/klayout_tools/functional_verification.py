@@ -236,12 +236,15 @@ from .functional_verification_sdf import (
     _drop_sdf_zero_delay_bus_port_source_interconnects,
     _drop_sdf_zero_delay_physical_only_interconnects,
     _normalize_sdf_header_triples,
+    _parse_toplevel_parameters,
     _parse_toplevel_ports,
     _reject_sdf_escaped_divider_interconnects,
+    _reject_sdf_mis_scoped_top_cell,
     _reject_sdf_unresolvable_interconnect_instances,
     _reject_sdf_with_functional_models,
     _resolve_sdf_option,
     _scan_sdf_diagnostics,
+    _sdf_scope_reference,
     _split_sdf_bus_port_interconnects,
     _write_sdf_annotate_shim,
     _write_sdf_dut_wrapper,
@@ -3144,10 +3147,14 @@ def _resolve_testbench_target(
     return top, request_dir, None
 
 
-def _sdf_annotate_scope(verilog_tb: dict[str, str | None] | None) -> str:
-    """Hierarchical scope the generated ``$sdf_annotate`` shim targets."""
+def _sdf_annotate_scope(
+    verilog_tb: dict[str, str | None] | None, sdf_scope: str | None = None
+) -> str:
+    """Hierarchical scope the generated ``$sdf_annotate`` shim targets;
+    ``options.sdf.scope`` (issue #4521) descends further below the DUT."""
     if verilog_tb is None:
-        return f"{SDF_WRAPPER_MODULE}.{SDF_WRAPPER_DUT_INSTANCE}"
+        base = f"{SDF_WRAPPER_MODULE}.{SDF_WRAPPER_DUT_INSTANCE}"
+        return f"{base}.{_sdf_scope_reference(sdf_scope)}" if sdf_scope else base
     dut_instance = verilog_tb["dut_instance"]
     assert dut_instance is not None
     return dut_instance
@@ -3161,6 +3168,7 @@ def _sdf_extend_sources(
     shim_path: str,
     hdl_toplevel: str,
     ports: Any,
+    wrapper_parameters: tuple[str, list[str]] = ("", []),
 ) -> tuple[list[str], str]:
     """Add the SDF scaffolding to ``sources``; return it with the build top.
 
@@ -3172,7 +3180,12 @@ def _sdf_extend_sources(
         top = verilog_tb["verilog_top"]
         assert top is not None
         return [*sources, shim_path], top
-    _write_sdf_dut_wrapper(wrapper_path, hdl_toplevel=hdl_toplevel, ports=ports)
+    _write_sdf_dut_wrapper(
+        wrapper_path,
+        hdl_toplevel=hdl_toplevel,
+        ports=ports,
+        parameters=wrapper_parameters,
+    )
     return [*sources, wrapper_path, shim_path], SDF_WRAPPER_MODULE
 
 
@@ -3188,6 +3201,11 @@ def _check_verilog_top_sdf(
     if parameters:
         raise FunctionalVerificationError(
             "request.parameters cannot be combined with testbench.verilog_top"
+        )
+    if sdf is not None and sdf.get("scope"):
+        raise FunctionalVerificationError(
+            "options.sdf.scope only applies to the cocotb path; with "
+            "testbench.verilog_top the scope is testbench.dut_instance"
         )
     if sdf is not None and not verilog_tb["dut_instance"]:
         raise FunctionalVerificationError(
@@ -3361,6 +3379,7 @@ def _run_verilog_top(
                         "file": sdf["file"],
                         "corner": sdf["corner"],
                         "entries": sdf["entries"],
+                        **({"scope": sdf["scope"]} if "scope" in sdf else {}),
                         "annotated": True,
                         "partial": bool(sdf_dropped_counts),
                         "dropped": _sdf_dropped_report(
@@ -3548,10 +3567,15 @@ def run_functional_verification(
         # by issue #2897 to a *pin/port* of that shape: an *instance* of
         # that shape is renamed below instead.
         _reject_sdf_escaped_divider_interconnects(sdf["file"])
+        # Issue #4521: an SDF rooted at a child of the annotation scope
+        # (a bench wrapping the netlist) also aborts vvp -- named here.
+        _reject_sdf_mis_scoped_top_cell(
+            sdf["file"], sources, hdl_toplevel, sdf.get("scope")
+        )
         # Issue #3740: an INTERCONNECT endpoint naming an instance the
         # netlist does not have aborts vvp the same way -- caught here too.
         _reject_sdf_unresolvable_interconnect_instances(
-            sdf["file"], sources, hdl_toplevel
+            sdf["file"], sources, hdl_toplevel, sdf.get("scope")
         )
         if parameters:
             # cocotb's own Icarus parameter-override syntax is always
@@ -3579,6 +3603,7 @@ def run_functional_verification(
         # (a compile-time flag, not an `$sdf_annotate` argument; see
         # `SDF_CORNERS`).
         ports = _parse_toplevel_ports(sources, hdl_toplevel)
+        wrapper_parameters = _parse_toplevel_parameters(sources, hdl_toplevel)
         wrapper_path = os.path.join(output_dir, f"{SDF_WRAPPER_MODULE}.v")
 
         # Issue #2364: `options.sdf.entries: "interconnect"` -- net-delay
@@ -3721,7 +3746,7 @@ def run_functional_verification(
         _write_sdf_annotate_shim(
             shim_path,
             sdf_paths=sdf_paths,
-            scope=_sdf_annotate_scope(verilog_tb),
+            scope=_sdf_annotate_scope(verilog_tb, sdf.get("scope")),
         )
         sources, build_hdl_toplevel = _sdf_extend_sources(
             verilog_tb,
@@ -3730,6 +3755,7 @@ def run_functional_verification(
             shim_path=shim_path,
             hdl_toplevel=hdl_toplevel,
             ports=ports,
+            wrapper_parameters=wrapper_parameters,
         )
         build_args += [*SDF_BUILD_ARGS, "-T", sdf["corner"]]
     initial_state_info: dict[str, Any] = {}
@@ -3936,6 +3962,7 @@ def run_functional_verification(
                         # consumer that ignores unknown keys (the JSON contract's
                         # additive rule) is unaffected.
                         "entries": sdf["entries"],
+                        **({"scope": sdf["scope"]} if "scope" in sdf else {}),
                         "annotated": True,
                         "partial": bool(sdf_dropped_counts),
                         "dropped": _sdf_dropped_report(
