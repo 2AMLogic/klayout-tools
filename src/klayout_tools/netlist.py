@@ -488,7 +488,7 @@ def _sort_subckt_comment_ports(line: bytes) -> bytes:
     return line
 
 
-def _normalize_layout(data: bytes) -> bytes:
+def _normalize_layout(data: bytes, ignore_comments: bool = False) -> bytes:
     """``data`` with ``+`` continuation lines joined onto their predecessor and
     whitespace runs collapsed, so a netlist re-wrapped by a post-processor
     compares equal to the original (issue #3324).
@@ -500,10 +500,17 @@ def _normalize_layout(data: bytes) -> bytes:
     compares unequal. The one comment-token normalization is the port order of
     xschem's ``**.subckt <name> <ports...>`` comment, which varies across
     xschem versions (:func:`_sort_subckt_comment_ports`).
+
+    ``ignore_comments=True`` (issue #4525) drops every comment line and every
+    blank line instead, so a project-added header or a rewritten
+    ``** sch_path:`` comment cannot cause drift; non-comment lines are still
+    compared token for token.
     """
     lines: list[bytes] = []
     prev_joinable = False
     for raw in data.split(b"\n"):
+        if ignore_comments and (not raw.strip() or raw.lstrip().startswith(b"*")):
+            continue
         if raw.lstrip().startswith(b"*"):
             lines.append(_sort_subckt_comment_ports(raw.rstrip()))
             prev_joinable = False
@@ -518,7 +525,9 @@ def _normalize_layout(data: bytes) -> bytes:
     return b"\n".join(lines)
 
 
-def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
+def _check_result(
+    output: str, fresh_data: bytes, ignore_comments: bool = False
+) -> tuple[str, dict[str, Any]]:
     """``check=True``'s verdict: does the committed netlist at ``output``
     still match what the schematics produce?
 
@@ -538,6 +547,10 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
     (:func:`_normalize_layout`, issue #3324); ``layout_differs`` is true when
     the files match only after that normalization -- which includes a
     different port order in the ``**.subckt`` comment line only.
+
+    ``ignore_comments=True`` (issue #4525) additionally ignores every SPICE
+    comment line (and blank line) on both sides; ``comments_differ`` is true
+    when the files match only because of that.
     """
     if not os.path.isfile(output):
         return STATUS_DRIFTED, {
@@ -546,6 +559,7 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
             "committed_content_hash": None,
             "path_comments_differ": False,
             "layout_differs": False,
+            "comments_differ": False,
             "diff": [],
             "diff_truncated": False,
             "reason": "no committed netlist at the output path",
@@ -563,6 +577,22 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
             "path_comments_differ": _normalize_layout(committed)
             != _normalize_layout(fresh_data),
             "layout_differs": committed_paths != fresh_paths,
+            "comments_differ": False,
+            "diff": [],
+            "diff_truncated": False,
+            "reason": None,
+        }
+
+    if ignore_comments and _normalize_layout(committed, True) == _normalize_layout(
+        fresh_data, True
+    ):
+        return STATUS_MATCH, {
+            "committed_present": True,
+            "committed_bytes": len(committed),
+            "committed_content_hash": _sha256_file_hash(committed),
+            "path_comments_differ": False,
+            "layout_differs": False,
+            "comments_differ": True,
             "diff": [],
             "diff_truncated": False,
             "reason": None,
@@ -575,6 +605,7 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
         "committed_content_hash": _sha256_file_hash(committed),
         "path_comments_differ": False,
         "layout_differs": False,
+        "comments_differ": False,
         "diff": diff,
         "diff_truncated": truncated,
         "reason": (
@@ -977,6 +1008,7 @@ def run_netlist(
     pdk_root: str | None = None,
     block: bool = False,
     allow_unevaluated_expr: bool = False,
+    ignore_comments: bool = False,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -994,12 +1026,18 @@ def run_netlist(
     (issue #4305) to a ``warnings`` entry in the payload, for callers that
     evaluate ``expr()`` downstream; ``unresolved_symbol`` stays a failure.
 
+    ``ignore_comments=True`` (issue #4525; ``check=True`` only) makes the
+    comparison ignore every comment line, for a committed netlist a project
+    post-processes (header, rewritten ``sch_path``). Never affects a write.
+
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
     missing/unlaunchable xschem, the timeout (after SIGTERM->SIGKILL
     escalation), no fresh output file, or an unwritable ``output``.
     """
     _validate_schematic(schematic)
+    if ignore_comments and not check:
+        raise NetlistError("--ignore-comments only applies with --check")
     if timeout_s <= 0:
         raise NetlistError(f"--timeout-s must be positive (got {timeout_s})")
     if rcfile is not None and not os.path.isfile(rcfile):
@@ -1082,7 +1120,7 @@ def run_netlist(
             payload["warnings"] = warnings
 
         if check:
-            status, drift = _check_result(output, fresh_data)
+            status, drift = _check_result(output, fresh_data, ignore_comments)
             payload["status"] = status
             payload["netlist"] = _netlist_block(None, fresh_data)
             payload["drift"] = drift

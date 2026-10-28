@@ -784,6 +784,7 @@ def _payload(
     report: dict[str, Any],
     data: bytes,
     remote: dict[str, Any],
+    ignore_comments: bool = False,
 ) -> dict[str, Any]:
     """The ``schema_version: 1`` payload a local run returns, from the
     runner's report, plus ``environment.remote``; writes ``output`` unless
@@ -801,7 +802,7 @@ def _payload(
     payload["environment"] = {"remote": remote}
 
     if check:
-        status_value, drift = _check_result(output, data)
+        status_value, drift = _check_result(output, data, ignore_comments)
         payload["status"] = status_value
         payload["netlist"] = _netlist_block(None, data)
         payload["drift"] = drift
@@ -827,6 +828,7 @@ def run_netlist_batch(
     batch_include: Sequence[str] = (),
     batch_exclude: Sequence[str] = (),
     xschem_binary: str = DEFAULT_XSCHEM_BINARY,
+    ignore_comments: bool = False,
     runner: remote_transport.CommandRunner | None = None,
     sleep: Callable[[float], None] = time.sleep,
     warn: Callable[[str], None] | None = None,
@@ -839,6 +841,8 @@ def run_netlist_batch(
     Raises :class:`NetlistError` for every failure, before any upload when
     the cause is local, and never runs xschem on this host.
     """
+    if ignore_comments and not check:
+        raise NetlistError("--ignore-comments only applies with --check")
     variant = _validate_batch_args(
         schematic, pdk=pdk, timeout_s=timeout_s, xschem_binary=xschem_binary
     )
@@ -896,6 +900,7 @@ def run_netlist_batch(
         report=report,
         data=data,
         remote=remote,
+        ignore_comments=ignore_comments,
     )
 
 

@@ -7489,6 +7489,18 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     netlist_parser.add_argument(
+        "--ignore-comments",
+        action="store_true",
+        default=False,
+        help=(
+            "with --check: ignore every SPICE comment line (first non-blank "
+            "character '*') and blank line on both sides, for a committed "
+            "netlist a project post-processes (added header, rewritten "
+            "'** sch_path:'). Non-comment lines are still compared; the "
+            "written export is never altered (issue #4525)"
+        ),
+    )
+    netlist_parser.add_argument(
         "--allow-unevaluated-expr",
         action="store_true",
         default=False,
