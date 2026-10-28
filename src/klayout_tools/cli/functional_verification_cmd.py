@@ -67,6 +67,7 @@ def run(args: argparse.Namespace) -> int:
             str(exc),
             args.format,
             code=getattr(exc, "code", None),
+            details=getattr(exc, "details", None),
         )
 
     emit_success(report, args.format, _print_text)
