@@ -4,6 +4,11 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-28
 
+- **PR #4511**: refactor: read liberty cell area via parse_liberty_text
+- **Issue #4506** (closed): Replace regex cell-area scan in synthesize.py with parse_liberty_text
+- **PR #4500**: docs: add ASAP7 RVT floorplan.tracks example for M4-M7 deck grid
+- **Issue #4493** (closed): place-and-route (asap7): no track offsets matching the DRC deck's M4-M7 grid origin
+- **PR #4510**: feat: shrink protruding ASAP7 VIA_* M1 pads to V1 enclosure
 - **PR #4505**: feat: trim redundant ASAP7 VIA_* M1 landing pads in DEF->GDS merge
 - **PR #4503**: docs: document ASAP7 router M4 stub-end track-alignment residual
 - **PR #4499**: feat: add asap7sc7p5t PDN preset with wide-V4 M5 strap and on-grid stubs
