@@ -942,6 +942,25 @@ _EXTRACT_DECK_FOR_CELL_LIBRARY: dict[str, str] = {
     "sg13g2_stdcell": "sg13g2",
 }
 
+
+def _require_extract_deck_for_cell_library(cell_library: str) -> str:
+    """Return the ``klt extract`` deck for ``cell_library`` or fail loudly.
+
+    Shared by request validation (so an unsupported library is refused in
+    milliseconds, before any engine runs) and by
+    :func:`_post_route_spef_metrics` (the late guard).
+    """
+    extract_deck = _EXTRACT_DECK_FOR_CELL_LIBRARY.get(cell_library)
+    if extract_deck is None:
+        raise PlaceAndRouteError(
+            "request.post_route_spef requires a known klt extract deck for "
+            f"cell_library '{cell_library}' (supported: "
+            + ", ".join(sorted(_EXTRACT_DECK_FOR_CELL_LIBRARY))
+            + ")"
+        )
+    return extract_deck
+
+
 #: Fixed internal `global_placement -density` target -- not an exposed
 #: request field (the contract's `floorplan` block sizes the die/core, not
 #: placement density); verified live at this value against the worked
@@ -1805,6 +1824,8 @@ def _run_single_corner(
     post_route_sdf = _validate_post_route_sdf(
         request.get("post_route_sdf"), post_route_spef=post_route_spef
     )
+    if post_route_spef:
+        _require_extract_deck_for_cell_library(cell_library)
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root

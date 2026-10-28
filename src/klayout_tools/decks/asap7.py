@@ -55,6 +55,10 @@ fact. Threshold voltage is geometry: the LVT (98/0), SLVT (97/0) and SRAMVT
 (110/0) markers select ``*_lvt``/``*_slvt``/``*_sram``; no marker is
 regular VT (``*_rvt``) -- the RVT library draws none of the three, the LVT
 and SLVT libraries draw 98/0 and 97/0 respectively.
+The predictive THICKOX marker (111/0, #4465) selects the thick-oxide I/O
+classes ``nmos_io``/``pmos_io`` (#4466); those model-card names are not
+confirmed against 2AMLogic/pdks, and a finger under both a VT marker and
+THICKOX is malformed geometry (the I/O classes have no VT axis).
 
 **Connectivity.** ``LISD`` (17/0) lands on source/drain, ``LIG`` (16/0) on
 the gate, ``V0`` (18/0) joins either to ``M1`` (19/0); ``V1``..``V8``
@@ -140,6 +144,9 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (97, 0): "SLVT.drawing",
     (98, 0): "LVT.drawing",
     (110, 0): "SRAMVT.drawing",
+    # Not in the pinned asap7.lyp/layermap or the DRM: an assumed, unused
+    # stream number for the thick-oxide marker (#4465).
+    (111, 0): "THICKOX.drawing",
 }
 
 _METALS = (
@@ -197,6 +204,19 @@ EXTRACTION_DECK = FinFETExtractionDeck(
             nfet_class="nmos_sram",
             pfet_class="pmos_sram",
             provenance=_lyp("SRAMVT drawing - 110/0"),
+        ),
+        # Thick-oxide I/O device (#4466). The THICKOX marker (111/0) is the
+        # assumed, predictive stream number from #4465 -- not in the pinned
+        # lyp/DRM -- so this flavour carries the lyp citation of the VT
+        # markers' sibling layer only as a pointer, and the nmos_io/pmos_io
+        # card names are unconfirmed against 2AMLogic/pdks (declared gap).
+        # A finger under a VT marker *and* THICKOX stays malformed geometry.
+        FinFETFlavour(
+            name="io",
+            marker=(111, 0),
+            nfet_class="nmos_io",
+            pfet_class="pmos_io",
+            provenance=_lyp("THICKOX drawing - 111/0 (predictive, #4465)"),
         ),
     ),
     nominal_dbu_um=0.00025,

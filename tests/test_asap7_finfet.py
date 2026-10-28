@@ -56,6 +56,7 @@ NSEL, PSEL, LIG, LISD, V0, M1, SDT = (
 )
 M1_PIN, WELL_PIN, GATE_PIN = (19, 251), (1, 251), (7, 251)
 LVT, SLVT = (98, 0), (97, 0)
+THICKOX = (111, 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -205,6 +206,7 @@ def test_asap7_deck_layers_match_pinned_lyp_roles():
         (98, 0): "nmos_lvt",
         (97, 0): "nmos_slvt",
         (110, 0): "nmos_sram",
+        (111, 0): "nmos_io",
     }
 
 
@@ -264,7 +266,11 @@ def test_three_fingers_merge(tmp_path):
 
 @pytest.mark.parametrize(
     ("marker", "nclass", "pclass"),
-    [(LVT, "nmos_lvt", "pmos_lvt"), (SLVT, "nmos_slvt", "pmos_slvt")],
+    [
+        (LVT, "nmos_lvt", "pmos_lvt"),
+        (SLVT, "nmos_slvt", "pmos_slvt"),
+        (THICKOX, "nmos_io", "pmos_io"),
+    ],
 )
 def test_vt_marker_selects_model_class(tmp_path, marker, nclass, pclass):
     assert _only_device(_extract(tmp_path, vt=marker))["class"] == nclass
@@ -408,6 +414,7 @@ def test_device_class_contract_compares_nfin_exactly():
         ({"polarity": "p", "well": False}, "PMOS channel not inside the well"),
         ({"well": True}, "NMOS channel inside the well"),
         ({"vt": (LVT, SLVT)}, "channel touches two VT markers"),
+        ({"vt": (LVT, THICKOX)}, "channel touches two VT markers"),
     ],
 )
 def test_malformed_geometry_is_refused_with_location(tmp_path, kwargs, fragment):
@@ -588,6 +595,61 @@ def test_lvs_different_model_class_is_a_mismatch(tmp_path):
     report = _lvs(tmp_path, "M0 D G S vsubs nmos_lvt w=81n l=20n nfin=3")
     assert report["status"] == "mismatch"
     assert _errors(report)
+
+
+def _lvs_io(tmp_path, card, *, polarity="n", top_line=".SUBCKT TOP S G D"):
+    layout = _write(_draw_device(polarity=polarity, vt=THICKOX), tmp_path)
+    ref = tmp_path / "ref.cdl"
+    ref.write_text(f"{top_line}\n{card}\n.ENDS\n")
+    return run_lvs(
+        json.dumps(
+            {
+                "layout": {"file": layout, "deck": "asap7", "top": "TOP"},
+                "reference": {"netlist": str(ref), "top": "TOP"},
+            }
+        )
+    )
+
+
+def test_lvs_io_nfet_matches_nmos_io_reference(tmp_path):
+    report = _lvs_io(tmp_path, "M0 D G S vsubs nmos_io w=81n l=20n nfin=3")
+    assert report["status"] == "match"
+
+
+def test_lvs_io_pfet_matches_pmos_io_reference(tmp_path):
+    report = _lvs_io(
+        tmp_path,
+        "M0 D G S VB pmos_io w=81n l=20n nfin=3",
+        polarity="p",
+        top_line=".SUBCKT TOP S G D VB",
+    )
+    assert report["status"] == "match"
+
+
+def test_lvs_io_device_against_core_reference_is_a_mismatch(tmp_path):
+    report = _lvs_io(tmp_path, "M0 D G S vsubs nmos_rvt w=81n l=20n nfin=3")
+    assert report["status"] == "mismatch"
+    assert _errors(report)
+
+
+def test_lvs_core_device_against_io_reference_is_a_mismatch(tmp_path):
+    report = _lvs(tmp_path, "M0 D G S vsubs nmos_io w=81n l=20n nfin=3")
+    assert report["status"] == "mismatch"
+    assert _errors(report)
+
+
+def test_core_and_io_devices_in_one_cell_keep_their_own_classes(tmp_path):
+    c = _Canvas(DBU)
+    for dx, vt in ((0, None), (3000, THICKOX)):
+        sub = _draw_device(vt=vt)
+        for li in sub.layer_indexes():
+            info = sub.get_info(li)
+            dst = c.layout.layer(info.layer, info.datatype)
+            for sh in sub.top_cell().shapes(li).each():
+                c.top.shapes(dst).insert(sh).transform(kdb.Trans(dx, 0))
+    path = _write(c.layout, tmp_path)
+    report = run_extract(path, "asap7", output=str(tmp_path / "dev.spice"))
+    assert sorted(d["class"] for d in report["devices"]) == ["nmos_io", "nmos_rvt"]
 
 
 def test_lvs_changed_gate_length_is_a_mismatch(tmp_path):
@@ -1338,3 +1400,69 @@ def test_corpus_full_rvt_library_via_klt_lvs_in_a_checked_subprocess(tmp_path):
     for cell in _FOLDED_STACK_CELLS | _SERIES_ORDER_CELLS:
         assert results[cell] == "mismatch", cell
     assert results["TAPCELL_ASAP7_75t_R"].startswith("error: ")
+
+
+# --------------------------------------------------------------------------- #
+# klt lvs: gate-level-verilog reference on a FinFET deck (issue #4462)
+# --------------------------------------------------------------------------- #
+
+_CELL_CDL = ".SUBCKT MYN G D S VSS\nM0 D G S VSS nmos_rvt w=81n l=20n nfin={n}\n.ENDS\n"
+_TOP_V = (
+    "module TOP (S, G, D);\n input S, G; output D;\n"
+    " MYN u0 (.G(G), .D(D), .S(S));\nendmodule\n"
+)
+
+
+def _lvs_gate_level(
+    tmp_path: Path,
+    *,
+    cdl_fins=3,
+    layout_fins=3,
+    verilog=_TOP_V,
+    options=None,
+    extra=None,
+):
+    layout = _write(_draw_device(polarity="n", fins=layout_fins), tmp_path)
+    cdl = tmp_path / "lib.cdl"
+    cdl.write_text(_CELL_CDL.format(n=cdl_fins))
+    ref = tmp_path / "ref.v"
+    ref.write_text(verilog)
+    request = {
+        "layout": {"file": layout, "deck": "asap7", "top": "TOP"},
+        "reference": {
+            "netlist": str(ref),
+            "top": "TOP",
+            "form": "gate-level-verilog",
+            "pin_order_files": [str(cdl)],
+            **(extra or {}),
+        },
+    }
+    if options is not None:
+        request["options"] = options
+    return run_lvs(json.dumps(request))
+
+
+def test_lvs_gate_level_verilog_expands_cells_and_matches(tmp_path):
+    report = _lvs_gate_level(tmp_path)
+    assert report["status"] == "match"
+    assert report["power_connectivity"]["status"] == "unchecked"
+    assert "transistor-level" in report["power_connectivity"]["reason"]
+
+
+def test_lvs_gate_level_verilog_changed_library_nfin_is_a_mismatch(tmp_path):
+    report = _lvs_gate_level(tmp_path, cdl_fins=2)
+    assert report["status"] != "match"
+    props = [m for m in _errors(report) if m.get("category") == "device.property"]
+    assert props
+    assert props[0]["property"]["name"].lower() == "nfin"
+
+
+def test_lvs_gate_level_verilog_missing_cell_body_is_an_error(tmp_path):
+    verilog = _TOP_V.replace("MYN u0", "NOPE u0")
+    with pytest.raises(LvsError, match="NOPE"):
+        _lvs_gate_level(tmp_path, verilog=verilog)
+
+
+def test_lvs_gate_level_verilog_still_refuses_device_map(tmp_path):
+    with pytest.raises(LvsError, match="device_map"):
+        _lvs_gate_level(tmp_path, extra={"device_map": {"a": "b"}})

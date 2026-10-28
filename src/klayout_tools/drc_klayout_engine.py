@@ -1390,6 +1390,7 @@ def run_drc_klayout_engine(
     negative_control: str | None = None,
     negative_control_categories: list[str] | None = None,
     deck_name: str | None = None,
+    max_violations: int | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -1737,6 +1738,12 @@ def run_drc_klayout_engine(
         )
     )
 
+    # Issue #4464: cap what is serialized, never what is counted.
+    violation_count = len(violations)
+    truncated = max_violations is not None and violation_count > max_violations
+    if truncated:
+        violations = violations[:max_violations]
+
     coverage = _klayout_engine_coverage(
         rule_counts,
         rule_categories,
@@ -1746,7 +1753,7 @@ def run_drc_klayout_engine(
         _packaged_asap7_isolation_only_rules(deck_file, layout),
     )
     deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
-    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
+    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violation_count))
     return {
         "schema_version": SCHEMA_VERSION,
         # Issue #2659: same `{path, scope}` normalization the curated engine's
@@ -1770,10 +1777,20 @@ def run_drc_klayout_engine(
         ),
         "dbu_um": dbu,
         "status": rollup_status(rollup, success="clean", failure="violations"),
-        "violation_count": len(violations),
+        "violation_count": violation_count,
         "rule_counts": dict(sorted(rule_counts.items())),
-        "violations": violations,
+        # Issue #4464: `coverage` precedes the (possibly huge) violation list
+        # so an interrupted write still carries it.
         "coverage": coverage,
+        **(
+            {
+                "violations_truncated": True,
+                "violations_serialized": len(violations),
+            }
+            if truncated
+            else {}
+        ),
+        "violations": violations,
         # Additive (issue #3816): only present when the deck reads globals a
         # caller must supply and the run supplied none. Never alters status.
         **({"warnings": deck_global_warnings} if deck_global_warnings else {}),

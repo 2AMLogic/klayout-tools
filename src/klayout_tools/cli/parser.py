@@ -6748,6 +6748,20 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "See docs/cli/drc.md, 'Abutment context'"
         ),
     )
+    drc_parser.add_argument(
+        "--max-violations",
+        dest="max_violations",
+        metavar="N",
+        type=int,
+        default=None,
+        help=(
+            "issue #4464, --engine klayout only: serialize at most N entries "
+            "in `violations[]` (first N in the report's sort order); 0 = "
+            "summary-only. `violation_count`, `rule_counts` and `status` "
+            "keep the true totals and `violations_truncated` marks a capped "
+            "report. Default: unlimited. See docs/cli/drc.md"
+        ),
+    )
     _add_format_arg(drc_parser)
     _record_request_argv_flags(
         drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")

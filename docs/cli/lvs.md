@@ -375,8 +375,38 @@ A `layout.deck` naming a FinFET extraction deck (today `asap7`) compares
   or remove the exact `NFIN` compare: `options.parameter_tolerance`,
   `options.compare_parameters`, `options.combine_devices` and
   `options.combine_devices_per_circuit` (fingers are always merged by the
-  extractor), `reference.form` other than `plain-element`,
-  `reference.device_map`/`device_bulk`, and `"engine": "netgen"`.
+  extractor), `reference.form` other than `plain-element` or
+  `gate-level-verilog`, `reference.device_map`/`device_bulk`, and `"engine": "netgen"`.
+
+#### Gate-level Verilog references on a FinFET deck (issue #4462)
+
+`reference.form: "gate-level-verilog"` is accepted with a FinFET
+`layout.deck`, with `reference.library` (and `reference.pdk`/`pdk_root`) or
+`reference.pin_order_files` naming the cell library as for a planar compare.
+Instead of the pin-only stubs the planar path writes, each instantiated
+library cell is **expanded to its transistor-level `.subckt` body** copied
+from the library CDL/SPICE file that declared it (M cards with `nfin=`), and
+the result goes through the `nfin`-preserving reader and exact-`NFIN`
+compare above. A changed `nfin` in a library cell is a `device.property`
+error with `property.name: "nfin"`; a cell type with no resolvable body is an
+application error naming the instance and cell, never a silent skip.
+
+- Instances call the cell with its full pin list. A rail pin the Verilog does
+  not connect (`VDD`, `VSS`, `VNW`, `VPW`, `GND`) is tied to the
+  module-level net of that name; any other unconnected pin gets its own
+  unconnected net.
+- `options.flatten_reference` defaults to **true** on this route (the
+  FinFET layout is extracted flat); it is echoed and can be set `false`.
+- **`power_connectivity` is `unchecked`** with a reason saying so: the
+  stub-form pin-to-net audit does not apply because the expanded cells carry
+  their own power pins, so supply connectivity takes part in the ordinary
+  compare and a `match` is the evidence. There is no separate FinFET
+  evaluator.
+- **Tap-less blocks.** ASAP7 cells draw no taps, so the CDL bulk (`VSS` /
+  `VDD`) has no counterpart in the layout and the compare mismatches on the
+  bulk nets. Grade such a block with `options.finfet_bulk` (see below); the
+  tie is a disclosed `device.finfet_bulk_tied` warning, so a `match` reached
+  that way is explicit about the assumption.
 
 #### Bulk policy (`options.finfet_bulk`): opt-in and disclosed
 

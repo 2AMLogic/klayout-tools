@@ -198,12 +198,14 @@ support, the marker is gone, and CI now covers 3.10 through 3.14.)
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import json
 import multiprocessing
 import os
 import queue as _queue_module
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -1501,6 +1503,168 @@ def _resolve_env(env: Any, *, verilog_top: bool = False) -> dict[str, str]:
             "the Verilog-bench path has no cocotb test process to apply it to"
         )
     return env
+
+
+_REQUIRES_TOOLS_KEYS = frozenset({"name", "version", "sha256"})
+
+
+def _resolve_requires_tools(
+    requires_tools: Any, env: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Validate the optional ``request.requires_tools`` array and resolve each
+    tool before any build starts (issue #4473).
+
+    Each entry is ``{"name": str, "version": str|null, "sha256": str|null}``.
+    ``name`` is looked up with ``shutil.which`` on ``request.env["PATH"]`` when
+    that is set (else the ambient ``PATH``); ``version`` is a substring match on
+    the tool's ``--version`` output; ``sha256`` is compared with the resolved
+    binary's digest. Every unmet tool is listed in one ``missing_tool`` error.
+    Returns the ``environment.tools`` echo (``[]`` when omitted).
+    """
+    if requires_tools is None:
+        return []
+    if not isinstance(requires_tools, list):
+        raise FunctionalVerificationError(
+            "request.requires_tools must be a JSON array of "
+            '{"name": ..., "version": ..., "sha256": ...} objects'
+        )
+
+    entries = [
+        _parse_requires_tool_entry(index, entry)
+        for index, entry in enumerate(requires_tools)
+    ]
+
+    search_path = env.get("PATH")
+    run_env = {**os.environ, **env}
+    tools: list[dict[str, Any]] = []
+    unmet: list[dict[str, Any]] = []
+    for name, want_version, want_sha256 in entries:
+        tool, shortfall = _check_required_tool(
+            name, want_version, want_sha256, search_path, run_env
+        )
+        if shortfall is not None:
+            unmet.append(shortfall)
+        if tool is not None:
+            tools.append(tool)
+
+    if unmet:
+        raise _MissingToolError(unmet)
+    return tools
+
+
+def _parse_requires_tool_entry(
+    index: int, entry: Any
+) -> tuple[str, str | None, str | None]:
+    """Validate one ``request.requires_tools`` entry and return
+    ``(name, version, sha256)``."""
+    where = f"request.requires_tools[{index}]"
+    if not isinstance(entry, dict):
+        raise FunctionalVerificationError(f"{where} must be a JSON object")
+    unknown = sorted(set(entry) - _REQUIRES_TOOLS_KEYS)
+    if unknown:
+        raise FunctionalVerificationError(
+            f"{where} has unknown field(s) {unknown} (allowed: name, version, sha256)"
+        )
+    name = entry.get("name")
+    if not isinstance(name, str) or not name:
+        raise FunctionalVerificationError(
+            f"{where}.name is required and must be a non-empty string"
+        )
+    for field in ("version", "sha256"):
+        value = entry.get(field)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise FunctionalVerificationError(
+                f"{where}.{field} must be a non-empty string or null"
+            )
+    return name, entry.get("version"), entry.get("sha256")
+
+
+def _check_required_tool(
+    name: str,
+    want_version: str | None,
+    want_sha256: str | None,
+    search_path: str | None,
+    run_env: dict[str, str],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve one tool; return ``(tool_echo, unmet)``. ``tool_echo`` is
+    ``None`` when the binary was not found; ``unmet`` is ``None`` when every
+    requested constraint holds."""
+    resolved = shutil.which(name, path=search_path)
+    if resolved is None:
+        missing: dict[str, Any] = {
+            "name": name,
+            "wanted": "on PATH",
+            "found": None,
+            "reason": "not found",
+        }
+        return None, missing
+    observed = _tool_version_output(resolved, run_env)
+    digest = _file_sha256(resolved)
+    tool: dict[str, Any] = {
+        "name": name,
+        "path": resolved,
+        "version": observed,
+        "sha256": digest,
+    }
+    problems = []
+    if want_version is not None and (observed is None or want_version not in observed):
+        problems.append(f"version {want_version!r} not in --version output")
+    if want_sha256 is not None and digest != want_sha256.lower():
+        problems.append(f"sha256 {want_sha256} != {digest}")
+    if not problems:
+        return tool, None
+    unmet: dict[str, Any] = {
+        "name": name,
+        "wanted": {"version": want_version, "sha256": want_sha256},
+        "found": {"path": resolved, "version": observed, "sha256": digest},
+        "reason": "; ".join(problems),
+    }
+    return tool, unmet
+
+
+def _file_sha256(path: str) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _tool_version_output(path: str, env: dict[str, str]) -> str | None:
+    """First non-empty line of ``<path> --version`` (stdout, else stderr);
+    ``None`` if it cannot run. A non-zero exit still counts when it printed."""
+    try:
+        proc = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for stream in (proc.stdout, proc.stderr):
+        for line in (stream or "").splitlines():
+            if line.strip():
+                return line.strip()
+    return None
+
+
+class _MissingToolError(FunctionalVerificationError):
+    """``missing_tool``: one or more ``request.requires_tools`` unmet. The CLI
+    surfaces ``details`` as ``error.details``."""
+
+    def __init__(self, unmet: list[dict[str, Any]]) -> None:
+        listing = "; ".join(f"{u['name']} ({u['reason']})" for u in unmet)
+        super().__init__(
+            f"{len(unmet)} required tool(s) unmet before build: {listing}",
+            code="missing_tool",
+        )
+        self.details = {"unmet_tools": unmet}
 
 
 # ---------------------------------------------------------------------------
@@ -3094,6 +3258,7 @@ def _run_verilog_top(
     sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]],
     sdf_renamed: list[dict[str, str]],
     source_defines: dict[str, Any],
+    tools: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Build the bench with ``iverilog``, run it with ``vvp`` and assemble the
     ordinary report (issue #4083). No cocotb is involved.
@@ -3181,6 +3346,7 @@ def _run_verilog_top(
             "environment": {
                 "engine": engine,
                 "engine_version": _engine_version(engine),
+                "tools": tools,
                 "cocotb_version": None,
                 "results_xml": _path_envelope(None),
                 "test_log": _path_envelope(test_log),
@@ -3306,6 +3472,7 @@ def run_functional_verification(
         )
     parameters = _resolve_parameters(request_doc.get("parameters"))
     env = _resolve_env(request_doc.get("env"), verilog_top=verilog_tb is not None)
+    tools = _resolve_requires_tools(request_doc.get("requires_tools"), env)
     source_defines = _resolve_source_defines(
         request_doc.get("options"), sources, request_dir
     )
@@ -3600,6 +3767,7 @@ def run_functional_verification(
             sdf_pre_dropped_arcs=sdf_pre_dropped_arcs,
             sdf_renamed=sdf_renamed,
             source_defines=source_defines,
+            tools=tools,
         )
 
     runner_module = _import_runner()
@@ -3714,6 +3882,7 @@ def run_functional_verification(
             "environment": {
                 "engine": engine,
                 "engine_version": _engine_version(engine),
+                "tools": tools,
                 "cocotb_version": _cocotb_version(),
                 "results_xml": _path_envelope(results_xml),
                 # Additive (issue #3013): the simulator/cocotb console transcript
@@ -3959,6 +4128,7 @@ def run_functional_verification_with_mutations(
     )
     parameters = _resolve_parameters(request_doc.get("parameters"))
     env = _resolve_env(request_doc.get("env"))
+    _resolve_requires_tools(request_doc.get("requires_tools"), env)
     build_args = list(user_build_args)
     source_defines = _resolve_source_defines(
         request_doc.get("options"), sources, request_dir
