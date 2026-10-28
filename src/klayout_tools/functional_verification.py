@@ -1529,71 +1529,97 @@ def _resolve_requires_tools(
             '{"name": ..., "version": ..., "sha256": ...} objects'
         )
 
-    entries: list[tuple[str, str | None, str | None]] = []
-    for index, entry in enumerate(requires_tools):
-        where = f"request.requires_tools[{index}]"
-        if not isinstance(entry, dict):
-            raise FunctionalVerificationError(f"{where} must be a JSON object")
-        unknown = sorted(set(entry) - _REQUIRES_TOOLS_KEYS)
-        if unknown:
-            raise FunctionalVerificationError(
-                f"{where} has unknown field(s) {unknown} "
-                "(allowed: name, version, sha256)"
-            )
-        name = entry.get("name")
-        if not isinstance(name, str) or not name:
-            raise FunctionalVerificationError(
-                f"{where}.name is required and must be a non-empty string"
-            )
-        for field in ("version", "sha256"):
-            value = entry.get(field)
-            if value is not None and (not isinstance(value, str) or not value):
-                raise FunctionalVerificationError(
-                    f"{where}.{field} must be a non-empty string or null"
-                )
-        entries.append((name, entry.get("version"), entry.get("sha256")))
+    entries = [
+        _parse_requires_tool_entry(index, entry)
+        for index, entry in enumerate(requires_tools)
+    ]
 
     search_path = env.get("PATH")
     run_env = {**os.environ, **env}
     tools: list[dict[str, Any]] = []
     unmet: list[dict[str, Any]] = []
     for name, want_version, want_sha256 in entries:
-        resolved = shutil.which(name, path=search_path)
-        if resolved is None:
-            unmet.append(
-                {
-                    "name": name,
-                    "wanted": "on PATH",
-                    "found": None,
-                    "reason": "not found",
-                }
-            )
-            continue
-        observed = _tool_version_output(resolved, run_env)
-        digest = _file_sha256(resolved)
-        problems = []
-        if want_version is not None and (
-            observed is None or want_version not in observed
-        ):
-            problems.append(f"version {want_version!r} not in --version output")
-        if want_sha256 is not None and digest != want_sha256.lower():
-            problems.append(f"sha256 {want_sha256} != {digest}")
-        if problems:
-            unmet.append(
-                {
-                    "name": name,
-                    "wanted": {"version": want_version, "sha256": want_sha256},
-                    "found": {"path": resolved, "version": observed, "sha256": digest},
-                    "reason": "; ".join(problems),
-                }
-            )
-        tools.append(
-            {"name": name, "path": resolved, "version": observed, "sha256": digest}
+        tool, shortfall = _check_required_tool(
+            name, want_version, want_sha256, search_path, run_env
         )
+        if shortfall is not None:
+            unmet.append(shortfall)
+        if tool is not None:
+            tools.append(tool)
 
     if unmet:
         raise _MissingToolError(unmet)
     return tools
+
+
+def _parse_requires_tool_entry(
+    index: int, entry: Any
+) -> tuple[str, str | None, str | None]:
+    """Validate one ``request.requires_tools`` entry and return
+    ``(name, version, sha256)``."""
+    where = f"request.requires_tools[{index}]"
+    if not isinstance(entry, dict):
+        raise FunctionalVerificationError(f"{where} must be a JSON object")
+    unknown = sorted(set(entry) - _REQUIRES_TOOLS_KEYS)
+    if unknown:
+        raise FunctionalVerificationError(
+            f"{where} has unknown field(s) {unknown} (allowed: name, version, sha256)"
+        )
+    name = entry.get("name")
+    if not isinstance(name, str) or not name:
+        raise FunctionalVerificationError(
+            f"{where}.name is required and must be a non-empty string"
+        )
+    for field in ("version", "sha256"):
+        value = entry.get(field)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise FunctionalVerificationError(
+                f"{where}.{field} must be a non-empty string or null"
+            )
+    return name, entry.get("version"), entry.get("sha256")
+
+
+def _check_required_tool(
+    name: str,
+    want_version: str | None,
+    want_sha256: str | None,
+    search_path: str | None,
+    run_env: dict[str, str],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve one tool; return ``(tool_echo, unmet)``. ``tool_echo`` is
+    ``None`` when the binary was not found; ``unmet`` is ``None`` when every
+    requested constraint holds."""
+    resolved = shutil.which(name, path=search_path)
+    if resolved is None:
+        missing: dict[str, Any] = {
+            "name": name,
+            "wanted": "on PATH",
+            "found": None,
+            "reason": "not found",
+        }
+        return None, missing
+    observed = _tool_version_output(resolved, run_env)
+    digest = _file_sha256(resolved)
+    tool: dict[str, Any] = {
+        "name": name,
+        "path": resolved,
+        "version": observed,
+        "sha256": digest,
+    }
+    problems = []
+    if want_version is not None and (observed is None or want_version not in observed):
+        problems.append(f"version {want_version!r} not in --version output")
+    if want_sha256 is not None and digest != want_sha256.lower():
+        problems.append(f"sha256 {want_sha256} != {digest}")
+    if not problems:
+        return tool, None
+    unmet: dict[str, Any] = {
+        "name": name,
+        "wanted": {"version": want_version, "sha256": want_sha256},
+        "found": {"path": resolved, "version": observed, "sha256": digest},
+        "reason": "; ".join(problems),
+    }
+    return tool, unmet
 
 
 def _file_sha256(path: str) -> str | None:
