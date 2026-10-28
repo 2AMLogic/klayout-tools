@@ -1095,3 +1095,25 @@ def test_unresolved_symbol_in_collected_netlist_fails_on_batch(
     assert main(_argv(repo, output, "--backend", "batch")) == 1
     assert _error(capsys)["code"] == "unresolved_symbol"
     assert not output.exists()
+
+
+def test_check_ignore_comments_passes_through_on_batch(repo, fake, tmp_path, capsys):
+    """Issue #4525: the batch path compares with the same comment-ignoring
+    `_check_result`."""
+    fake.statuses = [_status("done")]
+    fake.outputs = _runner_outputs(_BODY.format(sch=f"{RUNNER_TREE}/design/block.sch"))
+    committed = tmp_path / "block.spice"
+    committed.write_text(
+        "* project header\n"
+        + _BODY.format(sch="/home/someone/elsewhere/design/block.sch"),
+        encoding="utf-8",
+    )
+
+    assert main(_argv(repo, committed, "--backend", "batch", "--check")) == 3
+    capsys.readouterr()
+    fake.statuses = [_status("done")]
+    args = _argv(repo, committed, "--backend", "batch", "--check", "--ignore-comments")
+    assert main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "match"
+    assert payload["drift"]["comments_differ"] is True

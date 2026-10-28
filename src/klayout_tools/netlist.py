@@ -488,7 +488,7 @@ def _sort_subckt_comment_ports(line: bytes) -> bytes:
     return line
 
 
-def _normalize_layout(data: bytes) -> bytes:
+def _normalize_layout(data: bytes, ignore_comments: bool = False) -> bytes:
     """``data`` with ``+`` continuation lines joined onto their predecessor and
     whitespace runs collapsed, so a netlist re-wrapped by a post-processor
     compares equal to the original (issue #3324).
@@ -500,10 +500,17 @@ def _normalize_layout(data: bytes) -> bytes:
     compares unequal. The one comment-token normalization is the port order of
     xschem's ``**.subckt <name> <ports...>`` comment, which varies across
     xschem versions (:func:`_sort_subckt_comment_ports`).
+
+    ``ignore_comments=True`` (issue #4525) drops every comment line and every
+    blank line instead, so a project-added header or a rewritten
+    ``** sch_path:`` comment cannot cause drift; non-comment lines are still
+    compared token for token.
     """
     lines: list[bytes] = []
     prev_joinable = False
     for raw in data.split(b"\n"):
+        if ignore_comments and (not raw.strip() or raw.lstrip().startswith(b"*")):
+            continue
         if raw.lstrip().startswith(b"*"):
             lines.append(_sort_subckt_comment_ports(raw.rstrip()))
             prev_joinable = False
@@ -532,18 +539,26 @@ def _subckt_card(line: bytes) -> tuple[bytes, list[bytes], list[bytes]] | None:
     )
 
 
-def _subckt_port_order_drift(committed: bytes, fresh: bytes) -> list[dict[str, Any]]:
+def _subckt_port_order_drift(
+    committed: bytes, fresh: bytes, ignore_comments: bool = False
+) -> list[dict[str, Any]]:
     """The ``.subckt`` cards whose port set matches but whose port order
     differs, when that is the *only* difference between the two netlists
     (issue #4524); ``[]`` for any other kind of drift.
 
     Both sides are compared after :func:`_normalize_path_comments` and
-    :func:`_normalize_layout`. Port order is the positional contract of every
+    :func:`_normalize_layout` (with ``ignore_comments`` as in
+    :func:`_check_result`, so comment lines never count as a difference
+    beyond the port-order one). Port order is the positional contract of every
     ``subckt-call`` and LVS reference, so this only *diagnoses* the change --
     the status stays ``"drifted"``.
     """
-    old = _normalize_layout(_normalize_path_comments(committed)).split(b"\n")
-    new = _normalize_layout(_normalize_path_comments(fresh)).split(b"\n")
+    old = _normalize_layout(_normalize_path_comments(committed), ignore_comments).split(
+        b"\n"
+    )
+    new = _normalize_layout(_normalize_path_comments(fresh), ignore_comments).split(
+        b"\n"
+    )
     if len(old) != len(new):
         return []
     entries: list[dict[str, Any]] = []
@@ -572,7 +587,10 @@ def _subckt_port_order_drift(committed: bytes, fresh: bytes) -> list[dict[str, A
 
 
 def _check_result(
-    output: str, fresh_data: bytes, xschem_version: str | None = None
+    output: str,
+    fresh_data: bytes,
+    ignore_comments: bool = False,
+    xschem_version: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """``check=True``'s verdict: does the committed netlist at ``output``
     still match what the schematics produce?
@@ -594,6 +612,10 @@ def _check_result(
     the files match only after that normalization -- which includes a
     different port order in the ``**.subckt`` comment line only.
 
+    ``ignore_comments=True`` (issue #4525) additionally ignores every SPICE
+    comment line (and blank line) on both sides; ``comments_differ`` is true
+    when the files match only because of that.
+
     When the only difference is the port order of one or more electrical
     ``.subckt`` cards, ``subckt_port_order`` names them and ``reason`` says so
     (issue #4524); the status stays ``"drifted"``. ``xschem_version`` is the
@@ -606,6 +628,7 @@ def _check_result(
             "committed_content_hash": None,
             "path_comments_differ": False,
             "layout_differs": False,
+            "comments_differ": False,
             "subckt_port_order": [],
             "diff": [],
             "diff_truncated": False,
@@ -624,6 +647,23 @@ def _check_result(
             "path_comments_differ": _normalize_layout(committed)
             != _normalize_layout(fresh_data),
             "layout_differs": committed_paths != fresh_paths,
+            "comments_differ": False,
+            "subckt_port_order": [],
+            "diff": [],
+            "diff_truncated": False,
+            "reason": None,
+        }
+
+    if ignore_comments and _normalize_layout(committed, True) == _normalize_layout(
+        fresh_data, True
+    ):
+        return STATUS_MATCH, {
+            "committed_present": True,
+            "committed_bytes": len(committed),
+            "committed_content_hash": _sha256_file_hash(committed),
+            "path_comments_differ": False,
+            "layout_differs": False,
+            "comments_differ": True,
             "subckt_port_order": [],
             "diff": [],
             "diff_truncated": False,
@@ -631,7 +671,7 @@ def _check_result(
         }
 
     diff, truncated = _unified_diff(committed, fresh_data, output)
-    port_order = _subckt_port_order_drift(committed, fresh_data)
+    port_order = _subckt_port_order_drift(committed, fresh_data, ignore_comments)
     if port_order:
         names = ", ".join(entry["subckt"] for entry in port_order)
         reason = (
@@ -652,6 +692,7 @@ def _check_result(
         "committed_content_hash": _sha256_file_hash(committed),
         "path_comments_differ": False,
         "layout_differs": False,
+        "comments_differ": False,
         "subckt_port_order": port_order,
         "diff": diff,
         "diff_truncated": truncated,
@@ -1052,6 +1093,7 @@ def run_netlist(
     pdk_root: str | None = None,
     block: bool = False,
     allow_unevaluated_expr: bool = False,
+    ignore_comments: bool = False,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -1069,12 +1111,18 @@ def run_netlist(
     (issue #4305) to a ``warnings`` entry in the payload, for callers that
     evaluate ``expr()`` downstream; ``unresolved_symbol`` stays a failure.
 
+    ``ignore_comments=True`` (issue #4525; ``check=True`` only) makes the
+    comparison ignore every comment line, for a committed netlist a project
+    post-processes (header, rewritten ``sch_path``). Never affects a write.
+
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
     missing/unlaunchable xschem, the timeout (after SIGTERM->SIGKILL
     escalation), no fresh output file, or an unwritable ``output``.
     """
     _validate_schematic(schematic)
+    if ignore_comments and not check:
+        raise NetlistError("--ignore-comments only applies with --check")
     if timeout_s <= 0:
         raise NetlistError(f"--timeout-s must be positive (got {timeout_s})")
     if rcfile is not None and not os.path.isfile(rcfile):
@@ -1157,7 +1205,9 @@ def run_netlist(
             payload["warnings"] = warnings
 
         if check:
-            status, drift = _check_result(output, fresh_data, version)
+            status, drift = _check_result(
+                output, fresh_data, ignore_comments, xschem_version=version
+            )
             payload["status"] = status
             payload["netlist"] = _netlist_block(None, fresh_data)
             payload["drift"] = drift
