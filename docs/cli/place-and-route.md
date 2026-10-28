@@ -558,6 +558,28 @@ finite numbers `x_offset_um`, `x_pitch_um`, `y_offset_um`, `y_pitch_um`
 (pitches `> 0`, offsets `>= 0`). Layers not listed get no tracks, so list every
 layer routing needs. Omitted, the script is byte-identical to before.
 
+#### ASAP7 track-alignment residual (router M4 stub ends)
+
+Setting `floorplan.tracks` offsets to the packaged ASAP7 deck's grid (#4493)
+aligns the router's *track* positions, not its *wire ends*. The detailed router
+chooses where a short M4 stub ends (e.g. a stub running from a via landing to a
+coordinate 61 nm from the via centre), and that choice is not checked against
+the deck's track-alignment rules. The request has no control for it, and
+`klt place-and-route` does not snap routed geometry after the fact.
+
+Expect a small residual of `M4.AUX.2` (minimum-width M4 off a routing track) and
+`M4.W.3` (vertical M4 width an even multiple of 24 nm) point markers from
+`klt drc` on the merged GDS. As observed by the issue author on the 2026-10
+ASAP7 reproducer, with the `floorplan.tracks` offsets above and the PDN straps
+disabled (#4494), this was about 7 markers per block (4 `M4.AUX.2`, 3
+`M4.W.3`) against several thousand router shapes. This is a dated observation,
+not a guarantee or a pass/fail threshold.
+
+These markers carry no `source_cell` / `source_path` (both `null`), so they
+cannot be traced to a net or router shape. That is a `klt drc` attribution
+limit, not a place-and-route field. Rule definitions are in
+[`drc.md`](drc.md).
+
 ## PDK / LEF / liberty resolution
 
 `request.pdk.cell_library`/`corner` resolve a liberty exactly as `klt
