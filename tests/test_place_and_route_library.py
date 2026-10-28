@@ -374,3 +374,16 @@ def test_null_antenna_diode_warns_on_route_target_only():
     assert place_and_route._antenna_repair_warnings("route", None) == []
     diode = _validate_library({"antenna_diode": {"cell": "D", "pin": "I"}})
     assert place_and_route._antenna_repair_warnings("route", diode) == []
+
+
+def test_layer_map_warning_only_when_resolution_is_none():
+    (warning,) = place_and_route._layer_map_warnings(
+        {"path": None, "resolution": "none"}
+    )
+    assert "sequential" in warning
+    assert "tech/<variant>.map" in warning
+    assert "/home" not in warning
+    for resolution in ("exact", "family"):
+        info = {"path": "x.map", "resolution": resolution}
+        assert place_and_route._layer_map_warnings(info) == []
+    assert place_and_route._layer_map_warnings(None) == []
