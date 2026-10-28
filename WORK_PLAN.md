@@ -52,16 +52,16 @@ Issues currently being built (`loom:building`).
 - **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests
 - **#4221**: signoff --attest: support T1 item 2 (Layout) anchored generic envelope
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
-- **#4493**: place-and-route (asap7): no track offsets matching the DRC deck's M4-M7 grid origin
-- **#4494**: place-and-route (asap7): M5/M6 PDN straps produce via stacks that fail the packaged deck, no request control
+- **#4513**: lvs: top-level pin names are not anchored, so a swap of two pin nets in a one-device circuit compares as match
+- **#4514**: lvs: multi-cell library stream vs hierarchical reference only compares after flattening both sides and relabelling rails at the top
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
-- **#4499**: feat: add asap7sc7p5t PDN preset with wide-V4 M5 strap and on-grid stubs
-- **#4500**: docs: add ASAP7 RVT floorplan.tracks example for M4-M7 deck grid
+- **#4515**: test: pin one-device LVS pin-swap limitation and document anchor opt-in
+- **#4516**: feat(lvs): apply finfet_bulk per circuit before layout flatten
 
 ## Approved (Awaiting Merge)
 
@@ -115,9 +115,9 @@ Issues carrying `loom:curated`.
 - **#4410**: lvs gate-level-verilog + abstract-cell netlist: dangling-output instances still error after #4323 *(curated)*
 - **#4424**: klt lvs: custom-class cap_cmomi/resistor LVS regresses from match to mismatch between daf06a51afaf and 0.8.0 (sg13cmos5l) *(curated)*
 - **#4440**: Friction: klt's OpenROAD steps need Docker, which fleet workers can't use; no fleet executor for OpenROAD regeneration *(curated)*
-- **#4493**: place-and-route (asap7): no track offsets matching the DRC deck's M4-M7 grid origin *(curated)*
-- **#4494**: place-and-route (asap7): M5/M6 PDN straps produce via stacks that fail the packaged deck, no request control *(curated)*
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
+- **#4513**: lvs: top-level pin names are not anchored, so a swap of two pin nets in a one-device circuit compares as match *(curated)*
+- **#4514**: lvs: multi-cell library stream vs hierarchical reference only compares after flattening both sides and relabelling rails at the top *(curated)*
 
 ## Proposed (Architect / Hermit)
 
