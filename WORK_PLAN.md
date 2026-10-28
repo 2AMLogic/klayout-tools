@@ -51,14 +51,16 @@ Issues currently being built (`loom:building`).
 - **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests
 - **#4221**: signoff --attest: support T1 item 2 (Layout) anchored generic envelope
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
-- **#4451**: klt sim: batch .lib path check missing from --dry-run, $PDK_ROOT body form silently not loaded; artifact put 429 under light concurrency
-- **#4452**: klt artifact put: 429 retry budget too small for ~16 concurrent publishers (split from #4451)
+- **#4482**: place-and-route: no output-dbu control; decks that need a finer dbu cannot check the routed stream
+- **#4490**: klt netlist --block: comma-joined bus ports in .subckt are mis-parsed by ngspice; host paths in output
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
+- **#4484**: feat: add output_dbu_um to refine merged P&R GDS dbu
+- **#4491**: fix: space-separate bus ports in klt netlist .subckt headers
 
 ## Approved (Awaiting Merge)
 
@@ -112,8 +114,8 @@ Issues carrying `loom:curated`.
 - **#4410**: lvs gate-level-verilog + abstract-cell netlist: dangling-output instances still error after #4323 *(curated)*
 - **#4424**: klt lvs: custom-class cap_cmomi/resistor LVS regresses from match to mismatch between daf06a51afaf and 0.8.0 (sg13cmos5l) *(curated)*
 - **#4440**: Friction: klt's OpenROAD steps need Docker, which fleet workers can't use; no fleet executor for OpenROAD regeneration *(curated)*
-- **#4451**: klt sim: batch .lib path check missing from --dry-run, $PDK_ROOT body form silently not loaded; artifact put 429 under light concurrency *(curated)*
-- **#4452**: klt artifact put: 429 retry budget too small for ~16 concurrent publishers (split from #4451) *(curated)*
+- **#4482**: place-and-route: no output-dbu control; decks that need a finer dbu cannot check the routed stream *(curated)*
+- **#4490**: klt netlist --block: comma-joined bus ports in .subckt are mis-parsed by ngspice; host paths in output *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -140,7 +142,7 @@ Issues carrying `loom:curated`.
 | Important | 1 |
 | Ready (`loom:issue`) | 16 |
 | In Progress (`loom:building`) | 5 |
-| PRs awaiting review | 1 |
+| PRs awaiting review | 3 |
 | Approved PRs awaiting merge | 3 |
 | Curated | 42 |
 | Architect / Hermit proposals | 9 |
