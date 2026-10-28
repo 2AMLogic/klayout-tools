@@ -4022,6 +4022,7 @@ def _run_sim_corners(
         request_dir=request_dir,
         backend=backend,
         enabled=stage_model_inputs,
+        dry_run=dry_run,
     )
 
     if dry_run:
@@ -4884,6 +4885,7 @@ def _preflight_staged_model_inputs(
     request_dir: str,
     backend: str,
     enabled: bool,
+    dry_run: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
     """Stage the complete off-host job closure once, before any backend runs
     (issue #2668), so a missing model input, unresolvable dependency or
@@ -4897,8 +4899,12 @@ def _preflight_staged_model_inputs(
     worker actually reads (a library whose ``.include``/``.lib`` targets were
     rewritten hashes differently from its source; an ``.osdi`` never does)
     -- or ``{}`` when the option is off or the backend runs locally.
+
+    A dry run stages the netlist closure even with the option off, so it
+    reports the same netlist refusals (an unreadable ``.lib``/``.include``
+    target) the real submit would, before any run directory exists.
     """
-    if not enabled or backend not in _OFFHOST_BACKENDS:
+    if backend not in _OFFHOST_BACKENDS or not (enabled or dry_run):
         return {}
     staged_job = sim_staging.stage_sim_job(
         request,
@@ -4908,6 +4914,8 @@ def _preflight_staged_model_inputs(
         reserved_names=(remote_transport.REMOTE_REQUEST_FILENAME,),
         backend=backend,
     )
+    if not enabled:
+        return {}
     return {
         "staged_model_inputs": [asset.to_json() for asset in staged_job.model_assets]
     }
