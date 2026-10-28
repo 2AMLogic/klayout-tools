@@ -1468,6 +1468,38 @@ heuristic and Yosys's own optimization already resolve these structurally
 runs) — `structural` only *reports* that the design carried the condition,
 it does not gate netlist production.
 
+## Fan-out control: replicated drivers (`keep_hierarchy`)
+
+To cap fan-out by duplicating a driver (a flop or gate) in RTL, the copies
+must survive synthesis. The generated script runs `synth -top` without
+`flatten`, then `dfflibmap` and `abc`, and Yosys's `opt_merge` folds
+identical drivers back into one unless they sit in separate modules.
+
+- **Does not work:** `(* keep *)` on the registers or wires. Two flops with
+  the same `d` still map to **one** flop.
+- **Works:** put the driver and its loads in a small slice module marked
+  `(* keep_hierarchy *)` and instantiate it once per copy. Each instance
+  keeps its own driver, and the mapped netlist stays hierarchical:
+
+  ```verilog
+  (* keep_hierarchy *)
+  module slice (input clk, input d, input [3:0] a, output [3:0] y);
+    reg q;
+    always @(posedge clk) q <= d;
+    assign y = a & {4{q}};
+  endmodule
+  ```
+
+Both cases are pinned by `tests/test_synthesize_fanout_keep.py`, which runs
+them through `klt synthesize` against sky130 and skips without `yosys` and a
+liberty. There is no request field for this; the RTL attribute is the
+control.
+
+Scope: this covers the `klt synthesize` netlist only. The test checks that
+the mapped netlist keeps one `slice` instance per copy. It does not trace
+the netlist through later P&R steps, so a flatten there could still merge
+the copies; that is out of scope here.
+
 ## `latch_map`: map inferred latches onto a library cell
 
 [Issue #4458](https://github.com/2AMLogic/klayout-tools/issues/4458).
