@@ -211,6 +211,35 @@ def _count_from(raw: Any, field: str, name: str, where: str) -> int:
     return raw
 
 
+def _not_applicable_control_from(
+    raw: dict[str, Any], name: str, where: str
+) -> dict[str, Any]:
+    """Validate a ``negative_control`` that declares ``not_applicable``.
+
+    Issue #4523: a declared "control not applicable" disposition -- the
+    seeded defect cannot degrade this measurement by construction. It
+    carries a required reason and no samples; it never reaches the native
+    core (see ``run_yield``).
+    """
+    if raw["not_applicable"] is not True:
+        raise YieldError(
+            f"{where}: measurement '{name}' negative_control.not_applicable "
+            "must be true"
+        )
+    reason = raw.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise YieldError(
+            f"{where}: measurement '{name}' negative_control declares "
+            "not_applicable but no non-empty string 'reason'"
+        )
+    if "samples" in raw:
+        raise YieldError(
+            f"{where}: measurement '{name}' negative_control cannot declare "
+            "both not_applicable and samples"
+        )
+    return {"not_applicable": True, "reason": reason.strip()}
+
+
 def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
     """Normalise one measurement's ``negative_control`` object (issue #817's
     seeded, known-bad-variant self-check), or ``None`` when absent.
@@ -221,6 +250,8 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         raise YieldError(
             f"{where}: measurement '{name}' has a non-object negative_control"
         )
+    if raw.get("not_applicable") is not None:
+        return _not_applicable_control_from(raw, name, where)
     raw_samples = raw.get("samples")
     if not isinstance(raw_samples, list):
         raise YieldError(
@@ -702,6 +733,30 @@ def _read_spec(path: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 
 
+def _strip_not_applicable(
+    entry: dict[str, Any], not_applicable: dict[str, str]
+) -> dict[str, Any]:
+    """Record and drop a ``not_applicable`` negative control (issue #4523) so
+    the native core never sees it; other entries pass through unchanged."""
+    control = entry.get("negative_control")
+    if control is not None and control.get("not_applicable"):
+        not_applicable[entry["name"]] = control["reason"]
+        return {**entry, "negative_control": None}
+    return entry
+
+
+def _patch_not_applicable(
+    response: dict[str, Any], not_applicable: dict[str, str]
+) -> None:
+    """Write the declared ``not_applicable`` verdicts into the core response."""
+    for m in response.get("measurements") or []:
+        if m.get("name") in not_applicable:
+            m["negative_control"] = {
+                "verdict": "not_applicable",
+                "reason": not_applicable[m["name"]],
+            }
+
+
 def run_yield(
     samples_path: str,
     *,
@@ -744,6 +799,9 @@ def run_yield(
     run_target_yield = spec_defaults.get("target_yield")
     warnings: list[str] = []
     request_measurements: list[dict[str, Any]] = []
+    # Issue #4523: measurements that declared "negative control not
+    # applicable" -- carried around the native core and patched into the report.
+    not_applicable: dict[str, str] = {}
     for entry in selected:
         name = entry["name"]
         limits = dict(entry["limits"])
@@ -765,6 +823,7 @@ def run_yield(
                 "supply limits via --limits to include it"
             )
             continue
+        entry = _strip_not_applicable(entry, not_applicable)
         request_measurements.append({**entry, "limits": limits})
 
     if not request_measurements:
@@ -795,6 +854,7 @@ def run_yield(
     except ValueError as exc:
         raise YieldError(str(exc)) from exc
     response = json.loads(response_json)
+    _patch_not_applicable(response, not_applicable)
 
     payload: dict[str, Any] = {
         "samples": samples_path,

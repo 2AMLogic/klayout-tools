@@ -3385,15 +3385,19 @@ def _yield_campaign_disclosure(
         return None
 
     sample_size_verdict, undersized = _yield_sample_size_rollup(measurements)
-    control_verdict, without_control, undetected = _yield_negative_control_rollup(
-        measurements
-    )
+    (
+        control_verdict,
+        without_control,
+        undetected,
+        not_applicable,
+    ) = _yield_negative_control_rollup(measurements)
     return {
         "sample_size": sample_size_verdict,
         "undersized_measurements": undersized,
         "negative_control": control_verdict,
         "measurements_without_negative_control": without_control,
         "undetected_negative_controls": undetected,
+        "not_applicable_negative_controls": not_applicable,
     }
 
 
@@ -3427,7 +3431,7 @@ def _yield_sample_size_rollup(
 
 def _yield_negative_control_rollup(
     measurements: list[dict[str, Any]],
-) -> tuple[str, list[Any], list[Any]]:
+) -> tuple[str, list[Any], list[Any], list[dict[str, Any]]]:
     """:func:`_yield_campaign_disclosure`'s ``negative_control`` /
     ``measurements_without_negative_control`` /
     ``undetected_negative_controls`` triple (issue #2467) -- see that
@@ -3438,9 +3442,15 @@ def _yield_negative_control_rollup(
     ``"detected"`` (``"not_detected"`` today) did not show the seeded
     degradation. A declared-but-unrecognised verdict is counted with the
     latter deliberately: an unknown self-check result is not a passing one.
+
+    A ``"not_applicable"`` verdict with a non-empty ``reason`` (issue #4523)
+    is a declared disposition: it is listed in the fourth element, excluded
+    from the other lists, and can never itself make the rollup ``detected``.
+    Without a reason it fails closed, like an unrecognised verdict.
     """
     without_control: list[Any] = []
     undetected: list[Any] = []
+    not_applicable: list[dict[str, Any]] = []
     detected = False
     for measurement in measurements:
         control = measurement.get("negative_control")
@@ -3448,13 +3458,21 @@ def _yield_negative_control_rollup(
             without_control.append(measurement.get("name"))
         elif control.get("verdict") == "detected":
             detected = True
+        elif (
+            control.get("verdict") == "not_applicable"
+            and isinstance(control.get("reason"), str)
+            and control["reason"].strip()
+        ):
+            not_applicable.append(
+                {"name": measurement.get("name"), "reason": control["reason"]}
+            )
         else:
             undetected.append(measurement.get("name"))
     if undetected:
-        return "not_detected", without_control, undetected
+        return "not_detected", without_control, undetected, not_applicable
     if detected:
-        return "detected", without_control, undetected
-    return "not_declared", without_control, undetected
+        return "detected", without_control, undetected, not_applicable
+    return "not_declared", without_control, undetected, not_applicable
 
 
 def _yield_campaign_refusal(kind: str, envelope: dict[str, Any]) -> str | None:

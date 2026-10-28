@@ -421,6 +421,77 @@ def test_negative_control_without_samples_is_an_error(tmp_path):
         _read_samples(path)
 
 
+def _na_entry(nc):
+    return {
+        "name": "m",
+        "samples": [1.0, 2.0, 3.0],
+        "limits": {"max": 5.0},
+        "negative_control": nc,
+    }
+
+
+def test_not_applicable_negative_control_is_parsed(tmp_path):
+    path = _sample_set_doc(
+        tmp_path, _na_entry({"not_applicable": True, "reason": " one-sided "})
+    )
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["negative_control"] == {
+        "not_applicable": True,
+        "reason": "one-sided",
+    }
+
+
+@pytest.mark.parametrize(
+    "nc, match",
+    [
+        ({"not_applicable": True}, "non-empty string 'reason'"),
+        ({"not_applicable": True, "reason": "  "}, "non-empty string 'reason'"),
+        (
+            {"not_applicable": True, "reason": "r", "samples": [1.0]},
+            "both not_applicable and samples",
+        ),
+        ({"not_applicable": "yes", "reason": "r"}, "must be true"),
+    ],
+)
+def test_malformed_not_applicable_negative_control_is_an_error(tmp_path, nc, match):
+    path = _sample_set_doc(tmp_path, _na_entry(nc))
+    with pytest.raises(YieldError, match=match):
+        _read_samples(path)
+
+
+@requires_native
+def test_not_applicable_negative_control_is_carried_into_the_report(tmp_path):
+    samples = _normal_grid(300, 0.0, 0.05)
+    doc = {
+        "measurements": [
+            {
+                "name": "vos",
+                "samples": samples,
+                "limits": {"min": -0.5, "max": 0.5},
+                "negative_control": {"samples": _normal_grid(300, 0.6, 0.05)},
+            },
+            {
+                "name": "psrr",
+                "samples": samples,
+                "limits": {"min": -0.5, "max": 0.5},
+                "negative_control": {
+                    "not_applicable": True,
+                    "reason": "defect can only improve it",
+                },
+            },
+        ]
+    }
+    path = tmp_path / "samples.json"
+    path.write_text(json.dumps(doc))
+    report = run_yield(str(path))
+    by_name = {m["name"]: m for m in report["measurements"]}
+    assert by_name["vos"]["negative_control"]["verdict"] == "detected"
+    assert by_name["psrr"]["negative_control"] == {
+        "verdict": "not_applicable",
+        "reason": "defect can only improve it",
+    }
+
+
 # --------------------------------------------------------------------------- #
 # `failed_unmeasurable` parsing (issue #1095, no native extension needed --
 # these are input-reader-tier checks across all three normalizers).

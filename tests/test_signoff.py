@@ -4992,6 +4992,64 @@ def test_yield_negative_control_not_detected_renders_unmet(tmp_path):
     assert campaign["undetected_negative_controls"] == ["vref"]
 
 
+def _na_measurement(name, reason="one-sided defect can only improve it"):
+    m = _yield_measurement(name=name, negative_control="detected")
+    m["negative_control"] = {"verdict": "not_applicable", "reason": reason}
+    return m
+
+
+def _item_6(tmp_path, *measurements):
+    yield_path = _write(tmp_path, "yield.json", _yield_envelope(*measurements))
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+    return next(item for item in result["items"] if item["id"] == 6)
+
+
+def test_yield_not_applicable_control_is_disclosed_not_refused(tmp_path):
+    """Issue #4523: one detected control plus a declared N/A measurement."""
+    item = _item_6(
+        tmp_path,
+        _yield_measurement(name="vos", negative_control="detected"),
+        _na_measurement("psrr"),
+    )
+    assert item["reason"] != "negative_control_not_detected"
+    campaign = item["citation"]["yield_campaign"]
+    assert campaign["negative_control"] == "detected"
+    assert campaign["undetected_negative_controls"] == []
+    assert campaign["measurements_without_negative_control"] == []
+    assert campaign["not_applicable_negative_controls"] == [
+        {"name": "psrr", "reason": "one-sided defect can only improve it"}
+    ]
+
+
+def test_yield_all_not_applicable_controls_roll_up_to_not_declared(tmp_path):
+    item = _item_6(tmp_path, _na_measurement("a"), _na_measurement("b"))
+    campaign = item["citation"]["yield_campaign"]
+    assert campaign["negative_control"] == "not_declared"
+
+
+def test_yield_not_applicable_mixed_with_not_detected_names_only_the_latter(tmp_path):
+    item = _item_6(
+        tmp_path,
+        _yield_measurement(name="vos", negative_control="not_detected"),
+        _na_measurement("psrr"),
+    )
+    assert item["status"] == "unmet"
+    assert item["reason"] == "negative_control_not_detected"
+    campaign = item["detail"]["yield_campaign"]
+    assert campaign["undetected_negative_controls"] == ["vos"]
+    assert [e["name"] for e in campaign["not_applicable_negative_controls"]] == ["psrr"]
+
+
+def test_yield_not_applicable_without_a_reason_fails_closed(tmp_path):
+    item = _item_6(
+        tmp_path,
+        _yield_measurement(name="vos", negative_control="detected"),
+        _na_measurement("psrr", reason="  "),
+    )
+    assert item["reason"] == "negative_control_not_detected"
+    assert item["detail"]["yield_campaign"]["undetected_negative_controls"] == ["psrr"]
+
+
 def test_yield_undersized_sample_outranks_an_undetected_negative_control(tmp_path):
     """Both defects on one report: the sample-size verdict is reported, since
     an unsized estimate is the more fundamental of the two."""
