@@ -447,6 +447,14 @@ def _output_dbu_factor(current_dbu_um: float, output_dbu_um: float | None) -> in
     return factor
 
 
+def _refine_dbu(layout: Any, top: Any, factor: int, base_dbu: float) -> None:
+    """Lossless integer dbu refinement: every coordinate scales by ``factor``
+    and the dbu shrinks by the same factor, so micron geometry is unchanged."""
+    if factor > 1:
+        layout.scale_and_snap(top, 1, factor, 1)
+        layout.dbu = base_dbu / factor
+
+
 def _merge_def_to_gds(
     *,
     def_path: str,
@@ -738,12 +746,7 @@ def _merge_def_to_gds(
     # wall-clock GDS2 BGNLIB/BGNSTR timestamps, so re-running an identical
     # place-and-route request twice produces a byte-identical merged GDS --
     # not just a byte-identical DEF (#1367).
-    if dbu_factor > 1:
-        # Lossless integer refinement: every coordinate scales by the factor
-        # and the dbu shrinks by the same factor, so micron geometry is
-        # unchanged.
-        top_only.scale_and_snap(top, 1, dbu_factor, 1)
-        top_only.dbu = main_layout.dbu / dbu_factor
+    _refine_dbu(top_only, top, dbu_factor, main_layout.dbu)
     write_layout(top_only, out_path, PlaceAndRouteError)
 
     return {

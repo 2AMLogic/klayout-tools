@@ -2700,6 +2700,7 @@ def _stub_merge_def_to_gds(monkeypatch) -> list[dict]:
         calls.append(kwargs)
         Path(kwargs["out_path"]).write_text("fake gds\n")
         return {
+            "output_dbu_um": 0.001,
             "path": None,
             "resolution": "none",
             "def_net_names": {
@@ -11817,6 +11818,7 @@ def _stub_merge_with_pdk_layer_map(monkeypatch) -> None:
     def fake_merge(**kwargs):
         Path(kwargs["out_path"]).write_text("fake gds\n")
         return {
+            "output_dbu_um": 0.001,
             "path": os.path.join(
                 os.environ["PDK_ROOT"], "sky130A", "libs.tech", "klayout", "m.map"
             ),
