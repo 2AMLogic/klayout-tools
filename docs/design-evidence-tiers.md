@@ -374,6 +374,20 @@ written to every block.
    partition only; an analog partition (including the analog half of a
    mixed-signal block) always requires Monte Carlo evidence. `klt signoff`
    reports it as `not_applicable`, never as `met`.
+   **Analog partitions** (issue #4183, operator ruling 2026-10-28): this
+   restriction is intentional. Analog performance is inherently statistical
+   (offset, mismatch, bias spread), so an analog spec with no statistical row
+   is a gap in the spec, not a block with no variation; the grader is not
+   relaxed and there is no analog-keyed `not_applicable` form. A
+   mixed-signal block's analog partition that uses `not_applicable` renders
+   `unmet` with `reason: not_applicable_wrong_partition`, even when the
+   statement covers every spec row. It discharges item 6 one of two ways:
+   - **Add the missing statistical row(s)** to the block's spec through a
+     decision record the operator ratifies, then supply Monte Carlo evidence
+     (`klt yield`) for them. Where the PDK has no mismatch models, assumed
+     mismatch is acceptable, labelled as such in the evidence.
+   - **Declare item 6 a gap** for the analog partition.
+   The digital partition of the same block may still use `not_applicable`.
    **Several statistical rows, only some evidenced** (issue #2908): item 6
    is a claim about *every* statistical row, so a manifest may declare the
    row set under `spec_rows."6"` and cite one `klt yield` report per row set
