@@ -139,25 +139,7 @@ def _resolve_sdf_option(
             + " (supported: file, corner, entries, scope)"
         )
 
-    file_value = sdf.get("file")
-    if not isinstance(file_value, str) or not file_value:
-        raise FunctionalVerificationError(
-            "request.options.sdf.file must be a non-empty string"
-        )
-    path = (
-        file_value
-        if os.path.isabs(file_value)
-        else os.path.join(request_dir, file_value)
-    )
-    if not os.path.isfile(path):
-        raise FunctionalVerificationError(f"SDF file not found: {file_value}")
-    try:
-        with open(path, "rb"):
-            pass
-    except OSError as exc:
-        raise FunctionalVerificationError(
-            f"could not read SDF file '{file_value}': {exc}"
-        ) from exc
+    path = _resolve_sdf_file(sdf.get("file"), request_dir)
 
     corner = sdf.get("corner", DEFAULT_SDF_CORNER)
     if corner not in SDF_CORNERS:
@@ -177,6 +159,32 @@ def _resolve_sdf_option(
     if scope is not None:
         resolved["scope"] = _validate_sdf_scope(scope)
     return resolved
+
+
+def _resolve_sdf_file(file_value: Any, request_dir: str) -> str:
+    """Validate ``options.sdf.file`` and return its path (absolute or
+    ``request_dir``-relative); the file must exist and be readable."""
+    from .functional_verification import FunctionalVerificationError
+
+    if not isinstance(file_value, str) or not file_value:
+        raise FunctionalVerificationError(
+            "request.options.sdf.file must be a non-empty string"
+        )
+    path = (
+        file_value
+        if os.path.isabs(file_value)
+        else os.path.join(request_dir, file_value)
+    )
+    if not os.path.isfile(path):
+        raise FunctionalVerificationError(f"SDF file not found: {file_value}")
+    try:
+        with open(path, "rb"):
+            pass
+    except OSError as exc:
+        raise FunctionalVerificationError(
+            f"could not read SDF file '{file_value}': {exc}"
+        ) from exc
+    return path
 
 
 #: One component of ``options.sdf.scope``: a plain identifier or an escaped
