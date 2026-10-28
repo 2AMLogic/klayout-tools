@@ -1887,6 +1887,63 @@ def test_parameter_tolerance_passive_cell_anchored_out_of_tolerance_still_mismat
     assert report["status"] == "mismatch"
 
 
+_ONE_PMOS_PIN_SWAP_LAYOUT_SPICE = """
+.subckt pcell A B C
+M1 A B C C pfet W=1U L=1U
+.ends
+"""
+
+# Gate and drain nets exchanged; every net is a pin and the bulk is tied to C.
+_ONE_PMOS_PIN_SWAP_REFERENCE_SPICE = _ONE_PMOS_PIN_SWAP_LAYOUT_SPICE.replace(
+    "M1 A B C C", "M1 B A C C"
+)
+
+
+def test_one_device_pin_swap_matches_by_default(tmp_path):
+    """Issue #4513: a one-device cell whose nets are all pins has a
+    pin-relabelling automorphism, so a gate/drain pin-name swap compares as
+    `match` with the plain-element default (anchoring off). Documents the
+    limitation; the opt-in below closes it."""
+    report = _tolerance_report(
+        tmp_path,
+        _ONE_PMOS_PIN_SWAP_LAYOUT_SPICE,
+        _ONE_PMOS_PIN_SWAP_REFERENCE_SPICE,
+        top="pcell",
+    )
+
+    assert report["status"] == "match"
+
+
+def test_one_device_pin_swap_is_rejected_with_anchor_top_level_pins(tmp_path):
+    """Issue #4513: `options.anchor_top_level_pins` (issue #2692) pairs the
+    same-named pins and so catches the swap the default misses."""
+    report = _tolerance_report(
+        tmp_path,
+        _ONE_PMOS_PIN_SWAP_LAYOUT_SPICE,
+        _ONE_PMOS_PIN_SWAP_REFERENCE_SPICE,
+        top="pcell",
+        options={"anchor_top_level_pins": True},
+    )
+
+    assert report["status"] == "mismatch"
+    rejected = [m for m in report["mismatches"] if m["category"] == "hints.rejected"]
+    assert rejected
+    assert all(m["details"].get("anchored_top_level_pin") for m in rejected)
+
+
+def test_one_device_gate_source_swap_stays_a_mismatch_by_default(tmp_path):
+    """Control (issue #4513): exchanging gate and source is broken by the bulk
+    tie, so it is reported even with anchoring off."""
+    report = _tolerance_report(
+        tmp_path,
+        _ONE_PMOS_PIN_SWAP_LAYOUT_SPICE,
+        _ONE_PMOS_PIN_SWAP_LAYOUT_SPICE.replace("M1 A B C C", "M1 A C B C"),
+        top="pcell",
+    )
+
+    assert report["status"] == "mismatch"
+
+
 def test_parameter_tolerance_never_masks_a_connectivity_defect(tmp_path):
     """The one genuinely harmful outcome: a rewired device (no parameter
     change at all) must stay a hard connectivity finding with the tolerance
