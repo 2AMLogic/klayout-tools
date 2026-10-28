@@ -4,6 +4,15 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-28
 
+- **PR #4534**: feat(netlist): add --ignore-comments to netlist --check
+- **PR #4526**: feat(drc): add source_cell_rollup and PDK runset correspondence notes
+- **PR #4516**: feat(lvs): apply finfet_bulk per circuit before layout flatten
+- **PR #4515**: test: pin one-device LVS pin-swap limitation and document anchor opt-in
+- **Issue #4525** (closed): klt netlist --check cannot gate a committed netlist that a project post-processes after export
+- **Issue #4520** (closed): drc: net-aware NWell spacing and P+ Activ enclosure flag vendor macro cells the PDK runset does not
+- **Issue #4518** (closed): klt signoff --attest: support T1 item 8 (characterization report) like items 1, 9, 10
+- **Issue #4514** (closed): lvs: multi-cell library stream vs hierarchical reference only compares after flattening both sides and relabelling rails at the top
+- **Issue #4513** (closed): lvs: top-level pin names are not anchored, so a swap of two pin nets in a one-device circuit compares as match
 - **PR #4511**: refactor: read liberty cell area via parse_liberty_text
 - **Issue #4506** (closed): Replace regex cell-area scan in synthesize.py with parse_liberty_text
 - **PR #4500**: docs: add ASAP7 RVT floorplan.tracks example for M4-M7 deck grid
