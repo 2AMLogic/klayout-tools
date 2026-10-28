@@ -12126,6 +12126,33 @@ def test_valid_tracks_pass_floorplan_validation():
     assert out["tracks"] == [_GOOD_TRACK]
 
 
+def test_documented_asap7_tracks_example_validates_and_emits_issue_4493():
+    from klayout_tools.place_and_route_script import _make_tracks_lines
+
+    tracks = [
+        {
+            "layer": layer,
+            "x_offset_um": offset,
+            "x_pitch_um": pitch,
+            "y_offset_um": offset,
+            "y_pitch_um": pitch,
+        }
+        for layer, pitch, offset in (
+            ("M4", 0.048, 0.012),
+            ("M5", 0.048, 0.012),
+            ("M6", 0.064, 0.016),
+            ("M7", 0.064, 0.016),
+        )
+    ]
+    floorplan = place_and_route._validate_floorplan(
+        {**_TRACKS_FLOORPLAN, "tracks": tracks}
+    )
+    lines = _make_tracks_lines(floorplan)
+    assert len(lines) == 4
+    assert "make_tracks M4 -x_offset 0.012 -x_pitch 0.048" in lines[0]
+    assert "make_tracks M7 -x_offset 0.016 -x_pitch 0.064" in lines[3]
+
+
 def test_place_and_route_clock_lines_pin_units_issue_4089():
     assert place_and_route._clock_lines("clk", 1.0) == [
         "set_cmd_units -time ns -capacitance pF",
