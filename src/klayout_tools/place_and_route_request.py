@@ -335,6 +335,69 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
             },
         ),
     },
+    "asap7sc7p5t": {
+        "cell_library": "asap7sc7p5t_28",
+        "source": (
+            "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
+            "flow/platforms/asap7/openRoad/pdn/grid_strategy-M1-M2-M5-M6.tcl "
+            "(M1/M2 followpins rails verbatim; M5/M6 deliberately deviate, "
+            "issue #4494)"
+        ),
+        "straps": (
+            {
+                "layer": "M1",
+                "width_um": 0.018,
+                "pitch_um": 0.54,
+                "offset_um": 0.0,
+                "followpins": True,
+            },
+            {
+                "layer": "M2",
+                "width_um": 0.018,
+                "pitch_um": 0.54,
+                "offset_um": 0.0,
+                "followpins": True,
+            },
+            # ORFS: M5 w 0.12 / p 5.4 / off 0.300, M6 w 0.288 / p 5.4 / off
+            # 0.513. The packaged deck's V4.M5.AUX.2 wants a V4 exactly as
+            # wide as M5, and the tech LEF only ships a wide V4 bar for an M5
+            # strap of width 0.216 (VIARULE M5_M4widePWR0p864), so M5 is 0.216
+            # wide. Widths + spacings, pitches and offsets are multiples of
+            # the deck's 24 nm (M5) / 32 nm (M6) edge grids; the M6 offset is
+            # measured against a core whose origin is a multiple of 0.96 um.
+            {
+                "layer": "M5",
+                "width_um": 0.216,
+                "pitch_um": 5.4,
+                "offset_um": 0.312,
+                "spacing_um": 0.312,
+            },
+            {
+                "layer": "M6",
+                "width_um": 0.288,
+                "pitch_um": 5.376,
+                "offset_um": 0.344,
+                "spacing_um": 0.096,
+            },
+        ),
+        "connects": (
+            {
+                # Snaps the M3/M4 stub of the M2 -> M5 stack onto the tracks
+                # (clears M4.AUX.1 / M4.AUX.2 / M4.W.3); one column keeps the
+                # M5 -> M6 cuts inside the straps (V5.M5.EN.1 / V5.M6.EN.2).
+                "layers": ["M2", "M5"],
+                "max_columns": 1,
+                "ongrid": ["M3", "M4"],
+                "split_cuts": None,
+            },
+            {
+                "layers": ["M5", "M6"],
+                "max_columns": 1,
+                "ongrid": None,
+                "split_cuts": None,
+            },
+        ),
+    },
     "sg13g2": {
         "cell_library": "sg13g2_stdcell",
         "source": (

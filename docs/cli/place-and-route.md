@@ -2032,7 +2032,7 @@ live re-measurement above.
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
 | `power` | object \| omitted | Power delivery (tapcell/PDN/fillers) — see "Power delivery" below. Omitted (the default) preserves prior behavior exactly for this full PDN: no tapcells/fillers. `sky130_fd_sc_hd` runs still emit a small, separate row-rail obstruction regardless (issue #1442) — see "Row-rail fallback" below. |
 | `power.power_net` / `.ground_net` | string \| omitted | Power/ground net names. Default `"VDD"`/`"VSS"`. Must differ from each other. |
-| `power.preset` | string \| omitted | Additive field (issue #2123). Names a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`, `"gf180mcu_9t_6M"`, `"sg13g2"` (issue #2447), `"sky130hd"` — supplying `power.straps`/`power.connects` in place of hand-transcribed ones. **Mutually exclusive with explicit `power.straps`** (supplying both is a validation error, not a per-field override). An explicit `power.connects` (issue #4348) is allowed and *replaces* the preset's connect entries wholesale (`[]` = no via tuning); the response then sets `power.connects_overridden: true`. The preset's own standard-cell library must match `pdk.cell_library`. An unknown name is a validation error listing the supported set. Resolved before any other validation runs, so the recipe is checked and emitted exactly as an equivalent hand-written block would be — and echoed back in `power.straps[]`/`power.connects[]`, plus `power.preset`. See "Platform PDN presets" below for each recipe's upstream provenance and exact geometry. |
+| `power.preset` | string \| omitted | Additive field (issue #2123). Names a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`, `"gf180mcu_9t_6M"`, `"sg13g2"` (issue #2447), `"sky130hd"`, `"asap7sc7p5t"` (issue #4494) — supplying `power.straps`/`power.connects` in place of hand-transcribed ones. **Mutually exclusive with explicit `power.straps`** (supplying both is a validation error, not a per-field override). An explicit `power.connects` (issue #4348) is allowed and *replaces* the preset's connect entries wholesale (`[]` = no via tuning); the response then sets `power.connects_overridden: true`. The preset's own standard-cell library must match `pdk.cell_library`. An unknown name is a validation error listing the supported set. Resolved before any other validation runs, so the recipe is checked and emitted exactly as an equivalent hand-written block would be — and echoed back in `power.straps[]`/`power.connects[]`, plus `power.preset`. See "Platform PDN presets" below for each recipe's upstream provenance and exact geometry. |
 | `power.straps` | array\<object\> | Required when `power` is given **unless** `power.preset` supplies it (issue #2123), non-empty. Each entry: `layer` (string, required), `width_um`/`pitch_um` (positive numbers, required), `offset_um` (number, default `0`), `spacing_um` (positive number, omitted by default — issue #1133), `followpins` (boolean, default `false`). Listed bottom-to-top; each consecutive pair is connected by an `add_pdn_connect` call. |
 | `power.tapcell` | object \| omitted | Additive field (issue #3051). Only key: `distance_um` — positive, finite number (µm) → `tapcell -distance`. Omitted, the per-library default applies and the Tcl is byte-identical to before. Zero, negative, boolean, string, a non-object `tapcell` or an unknown key is rejected; so is any override on a library that places no tapcells (`sg13g2_stdcell`), rather than being silently ignored. The pitch is a **placement input, not evidence of any diffusion-to-tap boundary distance** — measure the resulting stream. The effective value is echoed as `power.tapcell_distance_um`. |
 | `power.straps[].spacing_um` | number \| omitted | Additive field (issue #1133) → `add_pdn_stripe -spacing`. The paired power/ground stripe spacing on this strap's own layer (used when a grid draws power and ground as an adjacent pair on one layer rather than on a single pitch). Omitted (the default) emits no `-spacing` flag, byte-identical to before this field existed. Not tied to having a second strap — describes this stripe alone. |
@@ -2800,6 +2800,7 @@ platform at all:
 | `"gf180mcu_7t_6M"` | `gf180mcu_fd_sc_mcu7t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg` | `Metal1` w 0.600 / p 3.92 / off 0, followpins · `Metal4` w 4.480 / sp 0.56 / p 44.8 / off 22.4 · `Metal5` w 4.480 / p 89.6 / off 44.8 | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`; **no** `split_cuts` — a deliberate deviation from the ORFS cfg (issue #4301: its `-split_cuts {Metal3 0.128}` produced DRC-dirty vias under `klt drc --deck gf180mcu`). `Metal4↔Metal5`: none. |
 | `"gf180mcu_9t_6M"` | `gf180mcu_fd_sc_mcu9t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` | `Metal1` w 0.900 / p 5.040 / off 0, followpins · `Metal4`/`Metal5` identical to the 7t row above | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`, **no** `split_cuts` — the same deliberate deviation from the ORFS cfg as the 7t row, measured DRC-dirty on this preset too (issue #4301). `Metal4↔Metal5`: none. |
 | `"sg13g2"` | `sg13g2_stdcell` | IHP-Open-PDK v0.3.0 `libs.tech/librelane/config.tcl` (+ `libs.tech/librelane/sg13g2_stdcell/config.tcl` for `PDN_RAIL_WIDTH`) | `Metal1` w 0.44 / **p 7.56 (derived — see below)** / off 0, followpins · `TopMetal1` w 2.2 / sp 4.0 / p 75.6 / off 13.6 · `TopMetal2` w 2.2 / sp 4.0 / p 75.6 / off 13.6 | none — that config names no via-stack tuning |
+| `"asap7sc7p5t"` | `asap7sc7p5t_28` | ORFS `flow/platforms/asap7/openRoad/pdn/grid_strategy-M1-M2-M5-M6.tcl` (M1/M2 rails verbatim; M5/M6 deviate, see below) | `M1`/`M2` w 0.018 / p 0.54 / off 0, followpins · `M5` w 0.216 / sp 0.312 / p 5.4 / off 0.312 · `M6` w 0.288 / sp 0.096 / p 5.376 / off 0.344 | `M2↔M5`: `max_columns 1`, `ongrid {M3 M4}`. `M5↔M6`: `max_columns 1`. |
 | `"sky130hd"` | `sky130_fd_sc_hd` | ORFS `flow/platforms/sky130hd/pdn.tcl` | `met1` w 0.48 / p 5.44 / off 0, followpins · `met4` w 1.600 / p 27.140 / off 13.570 · `met5` w 1.600 / p 27.200 / off 13.600 | none — that config's two `add_pdn_connect` lines carry no flags |
 
 (The two gf180mcu configs differ in exactly one place: the taller 9-track
@@ -2825,6 +2826,8 @@ this check.
 | | `Metal5` (horizontal) | 94.08 µm (height) | height ≥ 94.08 µm |
 | `"sg13g2"` | `TopMetal1` (vertical) | 22.0 µm (width) | |
 | | `TopMetal2` (horizontal) | 22.0 µm (height) | width and height ≥ 22.0 µm |
+| `"asap7sc7p5t"` | `M5` (vertical) | 1.056 µm (width) | |
+| | `M6` (horizontal) | 1.016 µm (height) | width ≥ 1.056 µm, height ≥ 1.016 µm |
 | `"sky130hd"` | `met4` (vertical) | 28.74 µm (width) | |
 | | `met5` (horizontal) | 28.8 µm (height) | width ≥ 28.74 µm, height ≥ 28.8 µm |
 
@@ -2850,6 +2853,26 @@ rows themselves. 7.56 is this repo's own derivation — 2× the 3.78 µm
 in it. (This is the same geometry the `sg13g2_stdcell` PDN section above
 documents as an explicit `power.straps` block under issue #2441; the preset
 is that block, shipped so no caller has to retype it.)
+
+**`"asap7sc7p5t"` deviates from the ORFS config on purpose (issue #4494).**
+ORFS uses `M5` w 0.12 / p 5.4 / off 0.300 and `M6` w 0.288 / p 5.4 / off
+0.513. Measured with the packaged `asap7.drc` (`klt drc --engine klayout`,
+tiny routed block, `output_dbu_um` 0.00025, M4/M5 track offsets 0.012 and
+M6/M7 0.016 per #4493): the ORFS-width `M5` strap lands a 24 nm `V4` cut in
+a 120 nm strap, so `V4.M5.AUX.2` fired 1,332 times, with `M4.AUX.1`/`M4.AUX.2`
+from the off-grid `M3`/`M4` stub and `M5.AUX.1`/`M6.AUX.1` from strap edges.
+The shipped recipe clears those families: `M5` is 0.216 um wide, the only
+width for which the tech LEF has a wide `V4` bar (`VIARULE
+M5_M4widePWR0p864`); `ongrid {M3 M4}` snaps the stub onto the tracks;
+`max_columns 1` clears the `V5.M5.EN.1`/`V5.M6.EN.2` hits; widths plus
+spacings, pitches and offsets sit on the deck's 24 nm (`M5`) / 32 nm (`M6`)
+edge grids. Measured result: zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`,
+`M4.W.3`, `M5.AUX.1`, `M6.AUX.1`. **Not deck-clean:** the tech LEF's wide
+`V4` bar has zero `M4` enclosure, so `V4.M4.EN.1` (~370) and `V4.M5.EN.2`
+(~13) remain, plus 1-2 `M5.W.3`; no existing request field changes that.
+`pdngen` offsets are core-origin relative: the edge-grid result was measured
+with core origin 0.96 um, and other origins can leave `M5.AUX.1`/`M6.AUX.1`
+hits (adjust `power.straps` explicitly in that case).
 
 **`preset` and explicit `straps` are mutually exclusive.**
 Supplying both is a validation error — deliberately, rather than a

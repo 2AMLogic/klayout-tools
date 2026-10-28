@@ -1674,6 +1674,43 @@ def test_power_connects_entry_omitting_all_tuning_normalizes_to_none_fields():
 #: by preset name -- transcribed here a second time, straight from the cited
 #: config, so a typo in `_PDN_PRESETS` fails rather than round-trips.
 _EXPECTED_PRESET_STRAPS: dict[str, list[dict[str, object]]] = {
+    # Issue #4494: ORFS `grid_strategy-M1-M2-M5-M6.tcl` M1/M2 rails verbatim;
+    # M5/M6 deviate (M5 0.216 wide for the tech LEF's wide-V4 rule; pitches,
+    # offsets and spacings on the deck's 24/32 nm edge grids).
+    "asap7sc7p5t": [
+        {
+            "layer": "M1",
+            "width_um": 0.018,
+            "pitch_um": 0.54,
+            "offset_um": 0.0,
+            "spacing_um": None,
+            "followpins": True,
+        },
+        {
+            "layer": "M2",
+            "width_um": 0.018,
+            "pitch_um": 0.54,
+            "offset_um": 0.0,
+            "spacing_um": None,
+            "followpins": True,
+        },
+        {
+            "layer": "M5",
+            "width_um": 0.216,
+            "pitch_um": 5.4,
+            "offset_um": 0.312,
+            "spacing_um": 0.312,
+            "followpins": False,
+        },
+        {
+            "layer": "M6",
+            "width_um": 0.288,
+            "pitch_um": 5.376,
+            "offset_um": 0.344,
+            "spacing_um": 0.096,
+            "followpins": False,
+        },
+    ],
     "gf180mcu_7t_6M": [
         # add_pdn_stripe -grid {block} -layer {Metal1} -width {0.600}
         #     -pitch {3.92} -offset {0} -followpins
@@ -1821,6 +1858,15 @@ _GF180MCU_9T_PRESET_CONNECTS = [
 ]
 _GF180MCU_7T_PRESET_CONNECTS = _GF180MCU_9T_PRESET_CONNECTS
 _EXPECTED_PRESET_CONNECTS: dict[str, list[dict[str, object]]] = {
+    "asap7sc7p5t": [
+        {
+            "layers": ["M2", "M5"],
+            "max_columns": 1,
+            "ongrid": ["M3", "M4"],
+            "split_cuts": None,
+        },
+        {"layers": ["M5", "M6"], "max_columns": 1, "ongrid": None, "split_cuts": None},
+    ],
     "gf180mcu_7t_6M": _GF180MCU_7T_PRESET_CONNECTS,
     "gf180mcu_9t_6M": _GF180MCU_9T_PRESET_CONNECTS,
     "sg13g2": [],
@@ -1829,6 +1875,7 @@ _EXPECTED_PRESET_CONNECTS: dict[str, list[dict[str, object]]] = {
 
 #: Every preset's own target standard-cell library.
 _PRESET_CELL_LIBRARIES = {
+    "asap7sc7p5t": "asap7sc7p5t_28",
     "gf180mcu_7t_6M": "gf180mcu_fd_sc_mcu7t5v0",
     "gf180mcu_9t_6M": "gf180mcu_fd_sc_mcu9t5v0",
     "sg13g2": "sg13g2_stdcell",
@@ -1839,6 +1886,7 @@ _PRESET_CELL_LIBRARIES = {
 #: commit the three ORFS-derived recipes were read at, and IHP-Open-PDK's
 #: own release tag for the one that has no ORFS platform to read.
 _PRESET_SOURCE_PREFIXES = {
+    "asap7sc7p5t": "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:",
     "gf180mcu_7t_6M": "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:",
     "gf180mcu_9t_6M": "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:",
     "sg13g2": "IHP-Open-PDK@v0.3.0:",
@@ -1919,7 +1967,7 @@ def test_power_preset_unknown_name_lists_the_supported_set():
         PlaceAndRouteError,
         match=(
             r"unknown request\.power\.preset 'gf180mcu_5t_6M' \(supported: "
-            r"gf180mcu_7t_6M, gf180mcu_9t_6M, sg13g2, sky130hd\)"
+            r"asap7sc7p5t, gf180mcu_7t_6M, gf180mcu_9t_6M, sg13g2, sky130hd\)"
         ),
     ):
         place_and_route._validate_power({"preset": "gf180mcu_5t_6M"})
