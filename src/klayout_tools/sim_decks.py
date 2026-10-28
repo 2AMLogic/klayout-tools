@@ -882,7 +882,7 @@ def run_deck_unit(
     for anything the *engine* did -- only evidence, statuses, and
     diagnostics.
     """
-    from .sim import _extract_engine_version
+    from .sim import _extract_engine_version, _probe_engine_version
 
     shutil.rmtree(unit_dir, ignore_errors=True)
     os.makedirs(unit_dir, exist_ok=True)
@@ -912,9 +912,14 @@ def run_deck_unit(
         with open(os.path.join(unit_dir, name), "wb") as handle:
             handle.write(payload)
 
+    # `ngspice -b <deck>` prints no version banner, so the stdout extraction
+    # finds nothing; ask the binary itself (issue #4543). A unit whose engine
+    # never spawned has no engine to attribute and keeps `null`.
     engine_version = _extract_engine_version(
         spawn.stdout.decode("utf-8", errors="replace")
     )
+    if engine_version is None and spawn.exit_code is not None:
+        engine_version = _probe_engine_version("ngspice", ngspice_binary)
     status = _unit_status(spawn, diagnostics)
     outputs, missing_outputs = _resolve_declared_outputs(unit, unit_dir=unit_dir)
     result = {
@@ -2078,6 +2083,51 @@ def _resolve_resumed(
     )
 
 
+def _deck_dry_run_report(
+    request: dict[str, Any],
+    units: list[dict[str, Any]],
+    *,
+    request_dir: str,
+    backend: str,
+) -> dict[str, Any]:
+    """``--dry-run`` for a deck list (issue #4543): the staging and batch
+    config checks a real off-host run makes before anything billable, then
+    a report of the planned units. Nothing is spawned, submitted or
+    written. ``plan_deck_units`` (already run by the caller) covers deck,
+    input and include existence on every backend."""
+    from .sim import SCHEMA_VERSION, SimError
+
+    staged: list[sim_staging.StagedFile] = []
+    if backend in ("remote", "batch"):
+        staged, worker_request = stage_deck_job(request, request_dir=request_dir)
+        if backend == "batch":
+            try:
+                _prepare_decks_batch(request, staged, worker_request)
+            except sim_batch.BatchError as exc:
+                raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "mode": DECK_MODE,
+        "dry_run": True,
+        "status": "valid",
+        "engine": "ngspice",
+        "backend": backend,
+        "unit_count": len(units),
+        "units": [
+            {
+                "id": unit["id"],
+                "deck": unit["deck"]["name"],
+                "outputs": list(unit.get("outputs", ())),
+            }
+            for unit in units
+        ],
+        "staged_files": [
+            {"name": item.staged_name, "kind": item.label} for item in staged
+        ],
+        "warnings": [],
+    }
+
+
 def _run_decks_batch_pending(
     request: dict[str, Any],
     pending: list[dict[str, Any]],
@@ -2119,6 +2169,7 @@ def run_deck_request(
     resume: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Run a validated-in-shape deck-list request on ``backend`` and return
     the deck-list report (the dict ``klt sim`` emits through the shared
@@ -2171,6 +2222,11 @@ def run_deck_request(
     options = request.get("options") or {}
     ngspice_binary = _resolve_ngspice_binary(options, request_dir)
     outdir = resolve_deck_outdir(artifacts_dir, request_dir)
+
+    if dry_run:
+        return _deck_dry_run_report(
+            request, units, request_dir=request_dir, backend=backend
+        )
 
     resumed = (
         _resolve_resumed(

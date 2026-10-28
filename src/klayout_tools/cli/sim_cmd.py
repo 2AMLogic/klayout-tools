@@ -67,7 +67,7 @@ def _print_dry_run_text(report: dict[str, Any]) -> None:
             for key in ("rndseed", "process_seed", "mismatch_seed")
             if key in unit
         )
-        print(f"  {unit['corner_id']}{seeds}")
+        print(f"  {unit.get('corner_id') or unit['id']}{seeds}")
     for staged in report["staged_files"]:
         print(f"  stage: {staged['name']} ({staged['kind']})")
     for warning in report["warnings"]:
