@@ -1804,7 +1804,10 @@ decides (`attest/item1.json`):
 
 A netlist that exists but no longer matches its schematic fails the
 `freshness` check (`klt netlist --check` exits `3`), so the attestation
-fails rather than reporting a present-but-stale artifact as current.
+fails rather than reporting a present-but-stale artifact as current. If the
+project post-processes the committed netlist (e.g. adds a header comment), add
+`"--block", "--ignore-comments"` to the `argv`; see
+[`klt netlist`](netlist.md) ("Post-processed committed netlists").
 
 For a synthesized or routed gate-level netlist there is no `--check` command
 (re-synthesis is not byte-stable across tool versions). Declare a `recorded`
