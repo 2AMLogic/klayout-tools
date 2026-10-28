@@ -115,6 +115,10 @@ follow.
 
 `.klt/` is scratch, regenerable output: add it to your `.gitignore`.
 
+When `script_path` and `netlist_path` read `{"path": null, "scope": "external"}`
+the files still exist; see "Artifacts written to `.klt/synthesize/<run_id>/`"
+below for when that happens and how to locate them from `run_id`.
+
 The generated script is the Yosys survey's own verified pass sequence, with
 the `abc` line carrying the constraint/exclusion flags described below:
 
@@ -229,6 +233,22 @@ A pipeline that must prepare a downstream request in advance may supply its own
 letter or digit. An existing directory is an error, even after failure; retry
 with a new ID. Exclusive directory creation also rejects concurrent callers
 that supply the same ID, while automatically allocated runs remain isolated.
+
+#### When paths are reported as `scope: "external"`
+
+`netlist_path`, `script_path`, and the other `{path, scope}` fields report
+`{"path": null, "scope": "external"}` when the path cannot be expressed
+relative to a repository: either no ancestor of the request file's directory
+holds a `.git` entry (an exported or copied tree, a scratch directory), or the
+path lies outside that repository (e.g. an absolute `outputs.dir` elsewhere).
+A `.git` *file*, as in a git worktree, counts. The redaction affects only the
+reported path, never where the files are written, and `netlist_sha256` is
+still computed from the real file.
+
+To find the artifacts when paths are redacted, use the response's `run_id`:
+they are in `<request dir>/.klt/synthesize/<run_id>/`, where `<request dir>`
+is the directory containing the request file you passed. Set `outputs.dir`
+(below) to choose a stable location instead.
 
 A request may instead choose the directory with `outputs.dir` (a non-empty
 string, relative to the request file's directory unless absolute). It *is* the

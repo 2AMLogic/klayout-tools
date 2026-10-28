@@ -37,6 +37,7 @@ Three tiers:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -947,6 +948,62 @@ def test_repo_relative_paths_resolve_absent_outside_any_repo(
     # `run_script_path`, being another path outside any repo, degrades to the
     # same `external` shape rather than leaking the absolute path.
     assert report["run_script_path"] == {"path": None, "scope": "external"}
+
+
+def test_external_scope_still_writes_artifacts_under_request_dir_run_id(
+    tmp_path_factory, monkeypatch
+):
+    """Issue #4550: `external` only redacts the reported path. The netlist
+    still lands in `<request dir>/.klt/synthesize/<run_id>/`, which a caller
+    can reconstruct from the response's `run_id`."""
+    no_repo_dir = tmp_path_factory.mktemp("no-repo-artifacts")
+    assert env_provenance.find_repo_root(str(no_repo_dir)) is None
+
+    _isolate_pdk(monkeypatch, no_repo_dir)
+    install_root = no_repo_dir / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(no_repo_dir / "gcd.v", _GCD_RTL)
+    request_path = _write_request(no_repo_dir / "request.json", _base_request())
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["netlist_path"] == {"path": None, "scope": "external"}
+    run_dir = no_repo_dir / ".klt" / "synthesize" / report["run_id"]
+    assert run_dir.is_dir()
+    netlist = run_dir / "gcd_synth.v"
+    assert netlist.is_file() and netlist.stat().st_size > 0
+    digest = hashlib.sha256(netlist.read_bytes()).hexdigest()
+    assert report["netlist_sha256"] == digest
+
+
+@pytest.mark.parametrize("marker", ["dir", "file"])
+def test_git_marker_in_request_dir_gives_repo_scope(
+    tmp_path_factory, monkeypatch, marker
+):
+    """Issue #4550: a `.git` directory or a `.git` file (git worktree) in the
+    request's directory makes the reported paths `scope: "repo"`."""
+    repo_dir = tmp_path_factory.mktemp("marked-repo")
+    if marker == "dir":
+        (repo_dir / ".git").mkdir()
+    else:
+        (repo_dir / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+
+    _isolate_pdk(monkeypatch, repo_dir)
+    install_root = repo_dir / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(repo_dir / "gcd.v", _GCD_RTL)
+    request_path = _write_request(repo_dir / "request.json", _base_request())
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["netlist_path"]["scope"] == "repo"
+    assert report["netlist_path"]["path"] == (
+        f".klt/synthesize/{report['run_id']}/gcd_synth.v"
+    )
 
 
 def test_json_response_and_generated_script_are_leak_free_inside_a_repo(
