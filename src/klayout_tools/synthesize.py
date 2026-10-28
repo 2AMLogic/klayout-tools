@@ -751,30 +751,6 @@ _MAX_WARNING_REPRESENTATIVES = 10
 #: this scalar attribute and leaves a cell with no such entry absent from its
 #: result, rather than guessing from the conditional groups.
 
-#: A Liberty ``cell ("<name>") {`` group header. Each cell's body runs from
-#: its header to the next header -- enough to read a cell's scalar ``area``
-#: attribute without :func:`parse_liberty_text`'s full parse. The cell name's
-#: quotes are optional: a real volare `sky130_fd_sc_hd` liberty quotes it, a
-#: synthetic/other-vendor liberty may not (verified live against both, issue
-#: #1626).
-_LIBERTY_CELL_HEADER_RE = re.compile(
-    r'\bcell\s*\(\s*"?(?P<name>[A-Za-z0-9_]+)"?\s*\)\s*\{'
-)
-
-#: The scalar ``area : <value>;`` attribute Liberty defines for a cell's
-#: footprint -- the number Yosys's own ``stat -liberty`` sums into
-#: ``area_um2``. Read here (issue #2635) only to answer the *inverse*
-#: question: which of the cell types this run actually instantiated have
-#: **no** such number in the resolved liberty, and therefore contributed a
-#: silent ``0`` to ``area_um2``. A blackboxed hard macro is the motivating
-#: case -- its area lives in its own macro liberty, never in the
-#: standard-cell liberty ``stat -liberty`` was handed -- but a
-#: ``-dont_use``d or otherwise unmapped cell type lands in the same bucket,
-#: which is exactly why the response field is a cell list rather than a
-#: macro list. Deliberately minimal, the same scope discipline
-#: :func:`_parse_liberty_leakage_nw` states for itself.
-_CELL_AREA_RE = re.compile(r"\barea\s*:\s*(?P<value>[-+0-9.eE]+)\s*;")
-
 #: The value of a library's ``leakage_power_unit`` attribute --
 #: ``"1nW"`` (sky130_fd_sc_hd) / ``1uW`` (gf180mcu_fd_sc_mcu9t5v0, unquoted) --
 #: the multiplier a bare ``cell_leakage_power`` number in this liberty is
@@ -2138,31 +2114,6 @@ def _macro_blackbox_inputs(
     return inputs
 
 
-def _liberty_cell_areas(liberty_text: str) -> dict[str, float]:
-    """Every ``cell (name) { ... area : <value>; ... }`` scalar in
-    ``liberty_text`` (issue #2635). Deliberately minimal, and the exact
-    block-scanning structure :func:`_parse_liberty_leakage_nw` already uses
-    -- a cell with no ``area`` line is simply absent from the result, never
-    assigned a guessed value, which is the whole point here."""
-    headers = list(_LIBERTY_CELL_HEADER_RE.finditer(liberty_text))
-    areas: dict[str, float] = {}
-    for index, header in enumerate(headers):
-        body_start = header.end()
-        body_end = (
-            headers[index + 1].start()
-            if index + 1 < len(headers)
-            else len(liberty_text)
-        )
-        match = _CELL_AREA_RE.search(liberty_text, body_start, body_end)
-        if match is None:
-            continue
-        try:
-            areas[header.group("name")] = float(match.group("value"))
-        except ValueError:  # pragma: no cover - regex only matches numbers
-            continue
-    return areas
-
-
 def _cells_without_area(
     liberty_path: str, instance_counts_by_type: dict[str, int]
 ) -> list[str] | None:
@@ -2181,8 +2132,8 @@ def _cells_without_area(
     ``[]`` -- a real, not-fabricated empty answer -- when the design
     instantiates nothing at all, or when every instantiated type does have
     an area. ``None`` -- "not establishable", never a fabricated empty list
-    -- when the liberty cannot be read or this deliberately-partial parser
-    can see no ``cell (...)`` group in it at all (a liberty whose cells all
+    -- when the liberty cannot be read or parsed, or
+    has no ``cell (...)`` group at all (a liberty whose cells all
     lack ``area`` is *not* that case: its cells are parseable, so every
     instantiated type is reported missing), exactly the posture
     :func:`_liberty_cell_names` takes for the same two cases.
@@ -2192,11 +2143,19 @@ def _cells_without_area(
     try:
         with open(liberty_path, encoding="utf-8") as handle:
             liberty_text = handle.read()
-    except (OSError, UnicodeDecodeError):
+        library = parse_liberty_text(liberty_text, source=liberty_path)
+    except (OSError, UnicodeDecodeError, LibertyCompareError):
         return None
-    if _LIBERTY_CELL_HEADER_RE.search(liberty_text) is None:
+    cells = [cell for cell in library.children("cell") if cell.args]
+    if not cells:
         return None
-    areas = _liberty_cell_areas(liberty_text)
+    areas: set[str] = set()
+    for cell in cells:
+        try:
+            float(cell.attributes.get("area", ""))
+        except (TypeError, ValueError):
+            continue
+        areas.add(cell.args[0])
     return sorted(
         cell_type for cell_type in instance_counts_by_type if cell_type not in areas
     )

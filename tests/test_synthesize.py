@@ -6260,9 +6260,7 @@ def _macro_success_env(tmp_path, monkeypatch, *, macros, liberty_cells=None) -> 
             + "  }\n"
             for cell, area in liberty_cells.items()
         )
-        liberty_path.write_text(
-            liberty_path.read_text(encoding="utf-8") + blocks, encoding="utf-8"
-        )
+        _append_to_library(liberty_path, blocks)
     return _write_request(tmp_path / "request.json", _base_request(macros=macros))
 
 
