@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-28
 
+- **PR #4461**: feat: add latch_map request field to klt synthesize
+- **Issue #4458** (closed): synthesize: inferred latches are never mapped, so a latch-bearing design leaves a non-library cell in the netlist
 - **PR #4460**: fix: reject verilog_blackbox that declares no module named the macro cell
 - **PR #4453**: fix: sim dry-run runs netlist .lib checks and refuses literal $PDK_ROOT body .lib
 - **Issue #4459** (closed): synthesize: macros[] reports macro_instance_count 0 when the verilog_blackbox module name differs from the LEF MACRO name
