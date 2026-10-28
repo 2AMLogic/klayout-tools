@@ -1268,6 +1268,19 @@ def _antenna_repair_warnings(
     ]
 
 
+def _layer_map_warnings(layer_map_info: dict[str, Any] | None) -> list[str]:
+    """Warn when the DEF->GDS merge resolved no KLayout LEF/DEF layer map."""
+    if layer_map_info is None or layer_map_info.get("resolution") != "none":
+        return []
+    return [
+        "no KLayout LEF/DEF layer map was resolved: routing layers and vias "
+        "were written with KLayout's sequential default layer numbers and may "
+        "overlap the PDK's device layers, so DRC results on the GDS are "
+        "unreliable; supply one at <assets.klayout>/tech/<variant>.map (or "
+        "family-level <family>.map) for the PDK's klt-pdk.json"
+    ]
+
+
 def _response_warnings(
     placed: dict[str, Any],
     *,
@@ -2344,6 +2357,7 @@ def _run_single_corner(
         row_rail_layer=row_rail_info["layer"],
     )
     warnings.extend(_antenna_repair_warnings(target_stage, library))
+    warnings.extend(_layer_map_warnings(layer_map_info))
 
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
