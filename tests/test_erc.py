@@ -1438,6 +1438,54 @@ def test_floating_gate_does_not_flag_fully_strapped_gate(tmp_path):
     assert "GATE_A" not in floating_nets
 
 
+def _overlap_contact_fixture(path) -> None:
+    """A gate poly with a ``lig`` strap landing directly on it (no via
+    geometry at all), the strap labelled ``GATE_NET``."""
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    poly = layout.layer(1, 0)
+    lig = layout.layer(8, 0)
+    label = layout.layer(8, 5)
+    top.shapes(poly).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+    top.shapes(lig).insert(kdb.Box.new(_um(0), _um(0), _um(2), _um(1)))
+    top.shapes(label).insert(kdb.Text("GATE_NET", kdb.Trans(_um(1.5), _um(0.5))))
+    layout.write(str(path))
+
+
+def _overlap_contact_spec(path, vias) -> None:
+    _write_spec(
+        path,
+        {
+            "stackup": [
+                {"name": "gate", "layer": "1/0", "role": "gate"},
+                {"name": "lig", "layer": "8/0", "label_layer": "8/5"},
+            ],
+            "vias": vias,
+        },
+    )
+
+
+def test_same_layer_via_expresses_via_less_overlap_contact(tmp_path):
+    """A `vias[]` entry whose `layer` is the upper role's own layer is the
+    supported form for a contact that is a plain overlap of two drawn layers
+    (issue #4541). Without it the gate floats; with it, it is connected."""
+    gds = tmp_path / "overlap.gds"
+    _overlap_contact_fixture(gds)
+
+    bare = tmp_path / "bare.erc.json"
+    _overlap_contact_spec(bare, [])
+    report = run_erc(str(gds), str(bare))
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.floating_gate"]
+
+    strapped = tmp_path / "strapped.erc.json"
+    _overlap_contact_spec(
+        strapped, [{"name": "gate_lig", "layer": "8/0", "between": ["gate", "lig"]}]
+    )
+    report = run_erc(str(gds), str(strapped))
+    assert not [f for f in report["erc_findings"] if f["rule"] == "erc.floating_gate"]
+
+
 # --- erc_findings: unconnected / multiply-driven net (issue #861) ------------
 
 

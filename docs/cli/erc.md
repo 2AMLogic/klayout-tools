@@ -305,6 +305,13 @@ denominator from `klt erc`.
   - `between` (array of exactly two distinct `stackup` names, required) —
     which two roles this via connects.
 
+  A contact that is a plain overlap of two drawn layers (no separate via
+  layer, e.g. a local-interconnect strap landing directly on gate poly) is
+  declared as a **same-layer via**: set `layer` to the upper role's own
+  layer, e.g. `{"name": "gate_lig", "layer": "<LIG layer>", "between":
+  ["gate", "lig"]}`. Wherever the two roles overlap the entry bridges them.
+  The via `name` must still be unique across `stackup` and `vias` names.
+
 A `stackup`/`vias` entry naming a layer absent from the given layout is not
 itself an error (a shared spec can list layers a particular fixture doesn't
 use) — matching `klt power`'s own convention. **The inverse direction is
