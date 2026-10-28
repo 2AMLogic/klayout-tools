@@ -102,6 +102,8 @@ class _CellModel:
         self.async_pins: dict[str, tuple[str, int]] = {}
         #: inversion parity (0/1) when this is a pure buffer/inverter cell.
         self.passthrough_parity: int | None = None
+        #: Verilog primitive / sub-module types the model instantiates.
+        self.primitives: list[str] = []
 
 
 def _read(path: str, what: str) -> str:
@@ -134,6 +136,7 @@ def _build_model(name: str, body: str) -> _CellModel:
         (inputs if direction == "input" else outputs).extend(_names(decl))
     model = _CellModel(name, inputs, outputs)
     instances = [(t, n) for t, n in _STMT_RE.findall(body) if t not in _KEYWORDS]
+    model.primitives = [t for t, _ in instances]
     model.sequential = any(_SEQ_UDP_RE.search(t) for t, _ in instances)
     if model.sequential:
         for pin in inputs:

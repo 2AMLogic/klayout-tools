@@ -64,6 +64,7 @@ docs/
     pex.md
     place-and-route.md
     power.md
+    power-intent.md
     precheck.md
     render.md
     report.md
