@@ -39,7 +39,7 @@ from .drc import (
     _report_path,
     _report_repo_root,
 )
-from .pdk import PdkNotFoundError, find_pdk
+from .pdk import PdkNotFoundError, find_pdk_for_deck
 
 # --------------------------------------------------------------------------- #
 # "klayout" engine (issue #565): opt-in subprocess wrapper around the
@@ -1361,7 +1361,7 @@ def _rerun_assertion_kwargs(committed: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_provenance_pdk(
-    pdk_variant: str | None, pdk_root: str | None
+    pdk_variant: str | None, pdk_root: str | None, deck_name: str | None = None
 ) -> dict[str, Any] | None:
     """The :func:`klayout_tools.pdk.find_pdk` record for ``provenance.pdk``
     when ``--pdk``/``--pdk-root`` was given, else ``None``. A missing PDK
@@ -1369,7 +1369,7 @@ def _resolve_provenance_pdk(
     if pdk_variant is None and pdk_root is None:
         return None
     try:
-        return find_pdk(variant=pdk_variant, root=pdk_root)
+        return find_pdk_for_deck(deck_name, variant=pdk_variant, root=pdk_root)
     except PdkNotFoundError as exc:
         raise DrcError(str(exc)) from exc
 
@@ -1389,6 +1389,8 @@ def run_drc_klayout_engine(
     expected_rule_category_names: list[str] | None = None,
     negative_control: str | None = None,
     negative_control_categories: list[str] | None = None,
+    deck_name: str | None = None,
+    max_violations: int | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -1596,7 +1598,9 @@ def run_drc_klayout_engine(
     ``cli/drc_cmd.py`` to resolve ``deck_file`` itself via
     :func:`klayout_tools.pdk.drc_deck_file` when ``--deck-file`` is omitted.
     Omitting both leaves ``provenance.pdk`` ``None``, matching every prior
-    release's behaviour.
+    release's behaviour. ``deck_name`` (the ``--deck`` family, issue #4474),
+    when given, constrains that resolution to the deck's PDK family and
+    refuses a contradictory ``--pdk``.
 
     Raises :class:`DrcError` for every failure mode above, plus a missing/
     unreadable ``path`` or ``deck_file`` (checked before the subprocess is
@@ -1613,7 +1617,7 @@ def run_drc_klayout_engine(
     # layer up in `cli/drc_cmd.py`'s `drc_deck_file` call). Mirrors
     # `run_drc`'s identical guard so an omitted `--pdk` still yields
     # `provenance.pdk: null`.
-    pdk_info = _resolve_provenance_pdk(pdk_variant, pdk_root)
+    pdk_info = _resolve_provenance_pdk(pdk_variant, pdk_root, deck_name)
 
     if not os.path.isfile(deck_file):
         raise DrcError(f"deck file not found: {deck_file}")
@@ -1734,6 +1738,12 @@ def run_drc_klayout_engine(
         )
     )
 
+    # Issue #4464: cap what is serialized, never what is counted.
+    violation_count = len(violations)
+    truncated = max_violations is not None and violation_count > max_violations
+    if truncated:
+        violations = violations[:max_violations]
+
     coverage = _klayout_engine_coverage(
         rule_counts,
         rule_categories,
@@ -1743,7 +1753,7 @@ def run_drc_klayout_engine(
         _packaged_asap7_isolation_only_rules(deck_file, layout),
     )
     deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
-    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
+    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violation_count))
     return {
         "schema_version": SCHEMA_VERSION,
         # Issue #2659: same `{path, scope}` normalization the curated engine's
@@ -1767,10 +1777,20 @@ def run_drc_klayout_engine(
         ),
         "dbu_um": dbu,
         "status": rollup_status(rollup, success="clean", failure="violations"),
-        "violation_count": len(violations),
+        "violation_count": violation_count,
         "rule_counts": dict(sorted(rule_counts.items())),
-        "violations": violations,
+        # Issue #4464: `coverage` precedes the (possibly huge) violation list
+        # so an interrupted write still carries it.
         "coverage": coverage,
+        **(
+            {
+                "violations_truncated": True,
+                "violations_serialized": len(violations),
+            }
+            if truncated
+            else {}
+        ),
+        "violations": violations,
         # Additive (issue #3816): only present when the deck reads globals a
         # caller must supply and the run supplied none. Never alters status.
         **({"warnings": deck_global_warnings} if deck_global_warnings else {}),

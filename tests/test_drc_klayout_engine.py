@@ -408,6 +408,77 @@ def test_klayout_engine_multiple_violations_same_rule_counted(tmp_path, monkeypa
     assert lefts == sorted(lefts)
 
 
+def test_klayout_engine_max_violations_caps_serialized_list(tmp_path, monkeypatch):
+    """Issue #4464: the cap trims `violations[]` only; totals and status stay
+    true, and `coverage` is emitted ahead of `violations`."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_TWO_VIOLATIONS_SAME_RULE_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    full = run_drc_klayout_engine(gds, deck_file)
+    capped = run_drc_klayout_engine(gds, deck_file, max_violations=1)
+
+    assert capped["violations"] == full["violations"][:1]
+    assert capped["violation_count"] == 2
+    assert capped["rule_counts"] == {"W.1": 2}
+    assert capped["status"] == "violations"
+    assert capped["violations_truncated"] is True
+    assert capped["violations_serialized"] == 1
+    keys = list(capped)
+    assert keys.index("coverage") < keys.index("violations")
+    assert "violations_truncated" not in full
+    assert "violations_serialized" not in full
+
+
+def test_klayout_engine_max_violations_zero_is_summary_only(tmp_path, monkeypatch):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_TWO_VIOLATIONS_SAME_RULE_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file, max_violations=0)
+
+    assert report["violations"] == []
+    assert report["violations_serialized"] == 0
+    assert report["violation_count"] == 2
+    assert report["status"] == "violations"
+    assert "coverage" in report
+
+
+def test_klayout_engine_max_violations_not_exceeded_is_not_truncated(
+    tmp_path, monkeypatch
+):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_TWO_VIOLATIONS_SAME_RULE_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file, max_violations=2)
+
+    assert len(report["violations"]) == 2
+    assert "violations_truncated" not in report
+
+
+def test_klayout_engine_max_violations_cli(tmp_path, monkeypatch, capsys):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_TWO_VIOLATIONS_SAME_RULE_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+    base = ["drc", gds, "--engine", "klayout", "--deck-file", deck_file]
+
+    rc = main([*base, "--max-violations", "1", "--format", "json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 3
+    assert out["violations_truncated"] is True
+    assert len(out["violations"]) == 1
+
+    rc = main([*base, "--max-violations", "-1", "--format", "json"])
+    assert rc == 1
+    capsys.readouterr()
+
+    rc = main(
+        ["drc", gds, "--deck", "sky130", "--max-violations", "1", "--format", "json"]
+    )
+    assert rc == 1
+
+
 def test_klayout_engine_invokes_expected_command_shape(tmp_path, monkeypatch):
     captured: list = []
     _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured)
@@ -3220,3 +3291,28 @@ def test_klayout_engine_no_warning_for_self_contained_deck(tmp_path, monkeypatch
     )
 
     assert "warnings" not in run_drc_klayout_engine(gds, deck_file)
+
+
+def test_klayout_engine_provenance_pdk_follows_deck_family(tmp_path, monkeypatch):
+    """Issue #4474: the deck's family picks the variant recorded in
+    `provenance.pdk`; a contradictory `--pdk` is refused."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+    root = tmp_path / "multi_pdk"
+    for variant in ("gf180mcuA", "sky130A"):
+        (root / variant / "libs.tech").mkdir(parents=True)
+
+    report = run_drc_klayout_engine(
+        gds, deck_file, pdk_root=str(root), deck_name="sky130"
+    )
+    assert report["provenance"]["pdk"]["name"] == "sky130A"
+
+    with pytest.raises(DrcError, match="gf180mcu"):
+        run_drc_klayout_engine(
+            gds,
+            deck_file,
+            pdk_variant="gf180mcuA",
+            pdk_root=str(root),
+            deck_name="sky130",
+        )

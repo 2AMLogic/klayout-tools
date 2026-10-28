@@ -1259,6 +1259,7 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
     assert report["environment"] == {
         "engine": "icarus",
         "engine_version": "13.0",
+        "tools": [],
         "cocotb_version": "2.0.1",
         # Committable `{path, scope}` envelope (#4279): tmp_path is outside
         # the invoking repo, so no absolute host path may appear here.

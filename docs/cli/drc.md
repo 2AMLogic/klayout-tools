@@ -29,6 +29,17 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   is the standard error envelope (exit `1`). Rejected with `--check` and
   `--list-rules`, which emit no run report. Mirrors `klt sim --report-out`
   (issue #4393).
+- `--max-violations N` — `--engine klayout` only (issue #4464): serialize at
+  most `N` entries in `violations[]`, the first `N` in the report's
+  deterministic sort order; `0` is summary-only (no polygons, `coverage`
+  kept). `violation_count`, `rule_counts` and `status` always carry the true
+  totals, so a capped run with violations is still `violations` (exit `3`).
+  When the cap bites the report gains `violations_truncated: true` and
+  `violations_serialized`; both are absent otherwise. Default unlimited
+  (output unchanged). Negative `N`, the curated engine and `--engine both`
+  are rejected. Request field: `max_violations`. The envelope emits
+  `coverage` before `violations`, so an interrupted write on a dense layout
+  still carries it.
 - `--deck` — the DRC deck to run for `--engine curated` (the default);
   required in that case, ignored for `--engine klayout`. Currently: `sky130`,
   `gf180mcu`, `sg13g2`, `sg13cmos5l`. Adding a new family's curated deck (registry wiring,
@@ -54,6 +65,11 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   fields" below; omitted entirely (the default), `provenance.pdk` stays
   `null`. An unresolvable variant/root exits `1` the same as any other
   application error.
+  When `--deck` names a PDK family, `provenance.pdk` is resolved within that
+  family (issue #4474): with no `--pdk`/`$PDK`, the lowest variant of the
+  deck's family in the root is recorded (never an unrelated family's), and a
+  `--pdk`/`$PDK` of a different family, or a root with no variant of the
+  deck's family, fails with a `DrcError` naming both families.
 - `--timeout-s` — wall-clock budget in seconds for the `klayout` subprocess
   (`--engine klayout` only; default `300`).
 - `--allow-deck-errors` — accept a *partial* report from a deck run
@@ -593,6 +609,16 @@ separator is a clean error (exit 1). `--deck-var` is a klayout-engine-only
 flag — passing it alongside `--engine curated` (the default) is silently
 ignored, not rejected, the same treatment `--deck-file`/`--timeout-s`
 already get for that engine mismatch.
+
+**Comparing `sky130A_mr.drc` with the curated sky130 deck (issue #4472).**
+`sky130A_mr.drc` defaults `beol`, `feol` and `offgrid` to `false`, so a bare
+`--deck-file .../sky130A_mr.drc` run executes no `m*` rule at all. Pass
+`--deck-var beol=true` (and `--deck-var feol=false --deck-var seal=false` to
+scope the run) to compare the metal rules. With those set, `m4.7` and the
+curated `met4.holes_area.1` both report 20 holes on the stock
+`sky130_ef_io__analog_noesd_pad`, and `met1`-`met3`/`met5` hole counts agree;
+`tests/test_sky130_stock_pad_holes_crosscheck.py` pins this when a sky130A
+install is present.
 
 **Discovering a deck's globals, and the `deck_globals_not_supplied` warning
 (issue #3816).** `klt pdk decks --pdk <variant>` lists the sibling decks a PDK
@@ -3345,9 +3371,10 @@ On a run with findings:
 | `engine_deck_errors` | object                | Present only on an `--engine klayout` run that tolerated a failed deck run via `--allow-deck-errors` (issue #1941): `{"exit_status": <int>, "error_lines": [<klayout's own `ERROR` lines>]}`. Omitted entirely otherwise (including on every run that predates the flag being passed), so an ordinary payload is unchanged. Its presence means the deck may have aborted part-way through and the `status`/`violation_count` below cover only the rules that ran before the abort — see "Engine" → `"klayout"`. |
 | `dbu_um`          | number (float)           | The input layout's database unit in micrometres, same semantics as `klt layers`. See "Database units (dbu)" above — rule thresholds are rescaled to this value automatically, so it need not match any deck's nominal dbu. |
 | `status`          | `"clean"` \| `"clean_partial"` \| `"violations"` \| `"not_checked"` \| `"coverage_unknown"` | Derived by the common rollup table in [`../coverage-contract.md`](../coverage-contract.md), never by a per-verb mapping (issue #2110). `"clean_partial"` is the curated engine's partial row: every rule that ran passed, and a rule the deck asked for did not run (exit `0`, but **not** this verb's unconditional success — see "`coverage.skipped` vs. `coverage.inapplicable`" below). Never `"error"` — a failed run does not emit this envelope at all (see Exit codes). |
-| `violation_count` | integer                  | `len(violations)`.                                                       |
+| `violation_count` | integer                  | `len(violations)`, or the true total when `violations_truncated`.        |
 | `rule_counts`     | object\<string, int\>    | Per-rule-id violation counts; keys sorted for determinism.               |
 | `metrics`         | object                   | Declared-namespace re-keying of `violation_count` (issue #1847). See below. |
+| `violations_truncated`, `violations_serialized` | boolean, integer | Present only on an `--engine klayout --max-violations N` run where more than `N` violations were found (issue #4464): `violations` holds the first `N`, `violations_serialized` is its length. Absent otherwise. |
 | `violations`      | array\<object\>          | One entry per violating geometry, see below.                             |
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
 | `waived_count`, `waived_rule_counts`, `waived`, `unused_waivers` | integer, object\<string, int\>, array\<object\>, array\<object\> | Present only on a `--waivers` run (issue #3483): the markers a reviewed waiver file moved out of `violations`, with their justification; see "Waivers". Absent otherwise, so a default run's report is byte-identical. |
