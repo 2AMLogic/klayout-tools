@@ -2362,8 +2362,8 @@ Pick a pin from this table, not from the unreleased examples in this page.
 | `0.7.0` | 106 rule categories, FEOL + MOL only (no M1-M9 / V1-V9) | refused: `klt lvs` with `layout.deck: asap7` errors "does not yet compare FinFET devices" (#2813) | `asap7` FinFET extraction deck |
 | `0.8.0` | 263 rule categories, FEOL + MOL + BEOL M1-M9 / V0-V9 | supported (`options.finfet_bulk`) | `asap7` FinFET extraction deck |
 
-`--expect-rule-categories 263` in the example below, and FinFET LVS, need
-`0.8.0` or later; on `0.7.0` use the 106-category deck and expect `klt lvs`
+`--expect-rule-categories` in the example below (267 on the current deck; 263
+on `0.8.0`), and FinFET LVS, need `0.8.0` or later; on `0.7.0` use the 106-category deck and expect `klt lvs`
 to refuse FinFET devices.
 
 `klt deck info --deck asap7` reports the extraction deck module and the
@@ -2373,7 +2373,7 @@ packaged `asap7.drc` as separate artifacts (`content_hash` vs
 ```bash
 klt drc layout.gds --engine klayout \
     --deck-file "$(klt deck path --deck asap7 --format json | jq -r .path)" \
-    --expect-rule-categories 263 --format json
+    --expect-rule-categories 267 --format json
 ```
 
 `klt deck path --deck asap7` ([`docs/cli/deck.md`](deck.md)) prints the
@@ -2492,7 +2492,7 @@ placements are the consumer's to own.
 
 `FIN.S.1` and `GATE.S.1` judge neighbour spacing only, so a cell whose shapes
 all moved by the same off-grid offset is still reported `clean`. Two opt-in
-rules check the absolute origin. They are not among the 263 default ids; they
+rules check the absolute origin. They are not among the 267 default ids; they
 run only when a `--deck-var` declares the origin (nanometres, the drawn 1x
 scale), and with neither set the deck output, categories and coverage are
 unchanged:
@@ -2512,7 +2512,7 @@ declare (a cell drawn like the shipped `INVx1`, with gates at x = 17 + 54k nm
 and fins at y = 10 + 27k nm, passes with `17` / `10`; the same cell with `0` /
 `0` fails). Only the FIN lower edge and GATE left edge are held to the grid,
 so a fin or gate whose width is wrong is `FIN.W.1` / `GATE.W.1`, not a second
-grid report. `--expect-rule-categories` stays `263` for the default run;
+grid report. `--expect-rule-categories` stays `267` for the default run;
 add the opt-in ids to the count when you set the vars.
 
 ### Rule ids (the contract)
@@ -2521,12 +2521,21 @@ Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
 DRM says a rule "applies to the layers PSELECT, SLVT, LVT, and SRAMVT as
 well" (section 3.7), or that the M1 / V1 / M4 / V4 / M6 / V6 / M8 / V8
 rules apply to the layers above them (sections 3.12-3.19), the mirrored rule
-substitutes the layer name. These 263 ids are declared once, in
+substitutes the layer name. These 267 ids are declared once, in
 `asap7_rules.RULES`; renaming or dropping one is a breaking change, and a
 test fails if the deck, that list, the fixtures or this table drift apart.
-Pass `--expect-rule-categories 263` so that a deck
+Pass `--expect-rule-categories 267` so that a deck
 which silently drops a category fails the run (exit 1) instead of reporting
 `clean`.
+
+**THICKOX (`111/0`) is predictive.** The DRM has no thick-oxide (I/O) layer or
+rule, so the `THICKOX.*` ids are not DRM rules: the 111/0 stream number, the
+27 nm marker enclosure, 54 nm marker spacing, 30 nm minimum Lg and 54 nm
+minimum channel width are all assumptions (basis per rule in Approximations
+below), not foundry values. They are checked only on ACTIVE/GATE interacting
+with the marker; a core device is unaffected. `Table 3.7.1` in the table is the
+select-layer table they are modelled on. LVS/extraction of marked devices is
+not covered.
 
 **SRAMDRC scoping.** Per DRM 1.2.2 note 7 a plain rule applies to geometry that
 does not interact with SRAMDRC (overlap *or* touch), and its `SRAM.*` variant
@@ -2548,7 +2557,7 @@ the generated fixtures do, each with a no-SRAMDRC control.
 | Table 3.5.1 | `ACTIVE.FIN.EX.1`, `ACTIVE.W.1`, `ACTIVE.W.2`, `ACTIVE.W.3`, `ACTIVE.S.1`, `ACTIVE.S.2A`, `ACTIVE.S.2B`, `ACTIVE.WELL.S.4`, `ACTIVE.WELL.EN.1`, `SRAM.ACTIVE.WELL.S.5`, `SRAM.ACTIVE.WELL.EN.2` |
 | Table 3.5.2 | `ACTIVE.A.1A`, `ACTIVE.A.1B`, `SRAM.ACTIVE.A.2A`, `SRAM.ACTIVE.A.2B`, `ACTIVE.AUX.1`, `SRAM.ACTIVE.AUX.2` |
 | Table 3.6.1 | `GCUT.W.1`, `GCUT.ACTIVE.S.1`, `GCUT.GATE.EX.1`, `GCUT.GATE.S.2`, `GCUT.S.3`, `GCUT.AUX.1`, `GCUT.AUX.2`, `GCUT.AUX.3` |
-| Table 3.7.1 | `NSELECT.W.1`, `NSELECT.W.2`, `NSELECT.ACTIVE.EN.1`, `NSELECT.ACTIVE.EN.2`, `SRAM.NSELECT.ACTIVE.EN.3`, `SRAM.NSELECT.ACTIVE.EN.4`, `NSELECT.GATE.EX.1`, `NSELECT.GATE.EX.2`, `PSELECT.W.1`, `PSELECT.W.2`, `PSELECT.ACTIVE.EN.1`, `PSELECT.ACTIVE.EN.2`, `SRAM.PSELECT.ACTIVE.EN.3`, `SRAM.PSELECT.ACTIVE.EN.4`, `PSELECT.GATE.EX.1`, `PSELECT.GATE.EX.2`, `SLVT.W.1`, `SLVT.W.2`, `SLVT.ACTIVE.EN.1`, `SLVT.ACTIVE.EN.2`, `SRAM.SLVT.ACTIVE.EN.3`, `SRAM.SLVT.ACTIVE.EN.4`, `SLVT.GATE.EX.1`, `SLVT.GATE.EX.2`, `LVT.W.1`, `LVT.W.2`, `LVT.ACTIVE.EN.1`, `LVT.ACTIVE.EN.2`, `SRAM.LVT.ACTIVE.EN.3`, `SRAM.LVT.ACTIVE.EN.4`, `LVT.GATE.EX.1`, `LVT.GATE.EX.2`, `SRAMVT.W.1`, `SRAMVT.W.2`, `SRAMVT.ACTIVE.EN.1`, `SRAMVT.ACTIVE.EN.2`, `SRAM.SRAMVT.ACTIVE.EN.3`, `SRAM.SRAMVT.ACTIVE.EN.4`, `SRAMVT.GATE.EX.1`, `SRAMVT.GATE.EX.2`, `NSELECT.PSELECT.AUX.1`, `VT.AUX.2` |
+| Table 3.7.1 | `NSELECT.W.1`, `NSELECT.W.2`, `NSELECT.ACTIVE.EN.1`, `NSELECT.ACTIVE.EN.2`, `SRAM.NSELECT.ACTIVE.EN.3`, `SRAM.NSELECT.ACTIVE.EN.4`, `NSELECT.GATE.EX.1`, `NSELECT.GATE.EX.2`, `PSELECT.W.1`, `PSELECT.W.2`, `PSELECT.ACTIVE.EN.1`, `PSELECT.ACTIVE.EN.2`, `SRAM.PSELECT.ACTIVE.EN.3`, `SRAM.PSELECT.ACTIVE.EN.4`, `PSELECT.GATE.EX.1`, `PSELECT.GATE.EX.2`, `SLVT.W.1`, `SLVT.W.2`, `SLVT.ACTIVE.EN.1`, `SLVT.ACTIVE.EN.2`, `SRAM.SLVT.ACTIVE.EN.3`, `SRAM.SLVT.ACTIVE.EN.4`, `SLVT.GATE.EX.1`, `SLVT.GATE.EX.2`, `LVT.W.1`, `LVT.W.2`, `LVT.ACTIVE.EN.1`, `LVT.ACTIVE.EN.2`, `SRAM.LVT.ACTIVE.EN.3`, `SRAM.LVT.ACTIVE.EN.4`, `LVT.GATE.EX.1`, `LVT.GATE.EX.2`, `SRAMVT.W.1`, `SRAMVT.W.2`, `SRAMVT.ACTIVE.EN.1`, `SRAMVT.ACTIVE.EN.2`, `SRAM.SRAMVT.ACTIVE.EN.3`, `SRAM.SRAMVT.ACTIVE.EN.4`, `SRAMVT.GATE.EX.1`, `SRAMVT.GATE.EX.2`, `NSELECT.PSELECT.AUX.1`, `VT.AUX.2`, `THICKOX.ACTIVE.EN`, `THICKOX.S`, `THICKOX.GATE.L`, `THICKOX.ACTIVE.W` |
 | Table 3.8.1 | `SDT.W.1`, `SDT.W.2`, `SDT.W.3`, `SDT.S.1`, `SDT.GATE.S.2`, `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2`, `SDT.GATE.AUX.1`, `SDT.ACTIVE.AUX.2`, `SDT.ACTIVE.AUX.3`, `SDT.LISD.AUX.4`, `SRAM.SDT.W.4`, `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4` |
 | Table 3.9.1 | `LISD.W.1`, `LISD.S.1`, `LISD.S.2`, `LISD.S.3`, `LISD.A.1`, `SRAM.LISD.S.4`, `SRAM.LISD.AUX.1` |
 | Table 3.10.1 | `LIG.W.1`, `LIG.S.1`, `LIG.S.2`, `LIG.S.3`, `LIG.S.4`, `LIG.S.5`, `LIG.LISD.S.6`, `LIG.LISD.S.7`, `LIG.SDT.S.8` |
@@ -2577,6 +2586,10 @@ the generated fixtures do, each with a no-SRAMDRC control.
 | `GATE.S.1` | Table 3.4.1 | exact pitch checked edge-to-edge for minimum-width shapes: neighbours closer than two pitches must sit exactly one pitch apart; alignment of shapes two or more pitches apart is not checked |
 | `GATE.S.3` | Table 3.4.1 | centre-to-centre distance checked as edge-to-edge spacing <= 34 nm, exact for 20 nm GATE (GATE.W.1) |
 | `SRAM.ACTIVE.AUX.2` | Table 3.5.2 | 'do not intersect' read as sharing no area with SRAMDRC; the DRM's 'completely outside' and 'may not touch' are both covered by reporting ACTIVE that touches SRAMDRC without overlapping it |
+| `THICKOX.ACTIVE.EN` | Table 3.7.1 | PREDICTIVE, not a DRM or foundry rule (THICKOX 111/0 is an assumed number): marker encloses ACTIVE of a marked device by 27 nm, the core NSELECT.ACTIVE.EN.2 value; ACTIVE only partly covered or touching the marker is also reported |
+| `THICKOX.S` | Table 3.7.1 | PREDICTIVE, not a DRM or foundry rule (THICKOX 111/0 is an assumed number): marker-to-marker spacing 54 nm, the core NSELECT.W.2 value; abutting or overlapping markers merge and are not reported |
+| `THICKOX.GATE.L` | Table 3.7.1 | PREDICTIVE, not a DRM or foundry rule (THICKOX 111/0 is an assumed number): minimum horizontal GATE width (Lg) 30 nm on a gate crossing ACTIVE under the marker, 1.5x the core 20 nm; GATE.W.1 still requires exactly 20 nm, so a conforming marked gate also trips it |
+| `THICKOX.ACTIVE.W` | Table 3.7.1 | PREDICTIVE, not a DRM or foundry rule (THICKOX 111/0 is an assumed number): minimum vertical ACTIVE width (channel width) 54 nm, two ACTIVE.W.2 steps, on ACTIVE crossed by a GATE under the marker |
 | `SRAM.PSELECT.ACTIVE.EN.3` | Table 3.7.1 | mirror of SRAM.NSELECT.ACTIVE.EN.3 / .4 (section 3.7 applies the table to this layer as well; the DRM lists no separate id) |
 | `SRAM.PSELECT.ACTIVE.EN.4` | Table 3.7.1 | mirror of SRAM.NSELECT.ACTIVE.EN.3 / .4 (section 3.7 applies the table to this layer as well; the DRM lists no separate id) |
 | `SRAM.SLVT.ACTIVE.EN.3` | Table 3.7.1 | mirror of SRAM.NSELECT.ACTIVE.EN.3 / .4 (section 3.7 applies the table to this layer as well; the DRM lists no separate id) |
@@ -3000,7 +3013,7 @@ The gate has two parts, run for each library:
    ```bash
    klt drc <cells.gds> --engine klayout \
        --deck-file src/klayout_tools/decks/asap7.drc \
-       --expect-rule-categories 263 --format json
+       --expect-rule-categories 267 --format json
    ```
 
    and requires exit 0, `status: "clean"`, no violations, a satisfied
