@@ -65,6 +65,11 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   fields" below; omitted entirely (the default), `provenance.pdk` stays
   `null`. An unresolvable variant/root exits `1` the same as any other
   application error.
+  When `--deck` names a PDK family, `provenance.pdk` is resolved within that
+  family (issue #4474): with no `--pdk`/`$PDK`, the lowest variant of the
+  deck's family in the root is recorded (never an unrelated family's), and a
+  `--pdk`/`$PDK` of a different family, or a root with no variant of the
+  deck's family, fails with a `DrcError` naming both families.
 - `--timeout-s` — wall-clock budget in seconds for the `klayout` subprocess
   (`--engine klayout` only; default `300`).
 - `--allow-deck-errors` — accept a *partial* report from a deck run
@@ -604,6 +609,16 @@ separator is a clean error (exit 1). `--deck-var` is a klayout-engine-only
 flag — passing it alongside `--engine curated` (the default) is silently
 ignored, not rejected, the same treatment `--deck-file`/`--timeout-s`
 already get for that engine mismatch.
+
+**Comparing `sky130A_mr.drc` with the curated sky130 deck (issue #4472).**
+`sky130A_mr.drc` defaults `beol`, `feol` and `offgrid` to `false`, so a bare
+`--deck-file .../sky130A_mr.drc` run executes no `m*` rule at all. Pass
+`--deck-var beol=true` (and `--deck-var feol=false --deck-var seal=false` to
+scope the run) to compare the metal rules. With those set, `m4.7` and the
+curated `met4.holes_area.1` both report 20 holes on the stock
+`sky130_ef_io__analog_noesd_pad`, and `met1`-`met3`/`met5` hole counts agree;
+`tests/test_sky130_stock_pad_holes_crosscheck.py` pins this when a sky130A
+install is present.
 
 **Discovering a deck's globals, and the `deck_globals_not_supplied` warning
 (issue #3816).** `klt pdk decks --pdk <variant>` lists the sibling decks a PDK

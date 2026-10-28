@@ -475,6 +475,7 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
         deck_vars=_parse_deck_vars(args.deck_var),
         pdk_variant=args.pdk,
         pdk_root=args.pdk_root,
+        deck_name=args.deck or None,
         allow_deck_errors=args.allow_deck_errors,
         allow_missing_host_tools=args.allow_missing_host_tools,
         expected_rule_categories=args.expect_rule_categories,

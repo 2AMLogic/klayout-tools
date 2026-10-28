@@ -2966,6 +2966,36 @@ DRC-DSL deck `src/klayout_tools/decks/asap7.drc` (issue #2760; see
   the ASAP7 `level = 72` BSIM-CMG cards, and no OSDI BSIM-CMG module is
   available. Simulating extracted ASAP7 netlists is tracked in #2814.
 
+### ASAP7 passives: resistors and capacitors (issue #4469)
+
+ASAP7 defines **no resistor-ID, capacitor-ID or MIM layer** (the pinned
+`asap7.lyp` carries none), so passives on `--deck asap7` are a **klt
+convention**, not PDK data. Without it a schematic `R`/`C` can never match,
+because the layout side has nothing to extract them into.
+
+| Role | Convention | Value |
+| --- | --- | --- |
+| Resistor (`RES`) | A segment of **M1** (19/0) covered by the klt-private marker `KLT_RES_MK` **112/0**; the terminals are the M1 beyond the marker. The body is cut out of M1 connectivity, so a resistor is never a silent short. | `R = rho * L / W` of the drawn segment, `rho = 131 ohm/sq` (**assumed**) |
+| Capacitor (`CAP`) | A MOM drawn as **two separate M1 pieces** (plates or combs) under the klt-private marker `KLT_CAP_MK` **113/0**. The metal stays connected; each piece is one terminal. | `C = 2e-16 F/um^2 * marker area` (**assumed**) |
+
+Both coefficients are **predictive/assumed placeholders** (the pinned
+lambdapdk files publish no sheet resistance or capacitance density), exposed
+as `ASSUMED_M1_SHEET_RHO_OHM_SQ` / `ASSUMED_MOM_AREA_CAP_F_UM2` in
+`src/klayout_tools/decks/asap7.py`. Treat extracted values as model-relative,
+not silicon-accurate. Layers 112/0 and 113/0 are **klt-private**: a layout
+drawn for another flow that uses them would be reinterpreted. No cell in the
+191-cell ASAP7 corpus draws them, so existing results are unchanged.
+
+`devices[].params` reuses the existing shapes (`r_ohm`, `l_um`, `w_um` for
+`RES`; `c_f` for `CAP`) and the SPICE output carries ordinary `R`/`C` cards;
+no JSON field is added. A marker the deck cannot interpret is refused with a
+named finding (`finfet_malformed_geometry`, location in um): a resistor body
+that does not have exactly two terminals, a capacitor marker that does not
+touch exactly two metal pieces, or a marker straddling two metal levels.
+`klt lvs` compares `R`/`C` through the usual planar parameter handling (see
+[`lvs.md`](lvs.md#finfet-decks-asap7-issues-2761-2813)).
+Out of scope: poly/active resistors, MIM capacitors and `--parasitics`.
+
 ## Device rule provenance (issues #868, #867)
 
 `klt drc`'s deck rules gained a machine-readable, per-rule provenance

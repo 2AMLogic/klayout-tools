@@ -53,6 +53,7 @@ from . import (
     pex_cmd,
     place_and_route_cmd,
     power_cmd,
+    power_intent_cmd,
     precheck_cmd,
     render_cmd,
     report_cmd,
@@ -305,6 +306,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_interface_check_parser(subparsers)
 
     _add_reset_coverage_parser(subparsers)
+    _add_power_intent_parser(subparsers)
 
     _add_lef_abstract_parser(subparsers)
 
@@ -6831,6 +6833,39 @@ def _add_precheck_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(precheck_parser)
     precheck_parser.set_defaults(func=precheck_cmd.run)
+
+
+def _add_power_intent_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``power-intent`` verb: power-gating checks on a netlist."""
+    parser = subparsers.add_parser(
+        "power-intent",
+        help="check isolation, state and sequencing of a power-gated netlist",
+        description=(
+            "Check the power intent of a flat gate-level Verilog netlist with a "
+            "power-gated domain against a JSON intent file: every gated-domain "
+            "output passes a clamp cell with the declared value, every state "
+            "element is retained or gated (and a retained one is not fed by the "
+            "gated domain un-isolated), and the declared control-event sequence "
+            "is correctly ordered. Any violation fails (exit 3). Read-only, "
+            "headless. See docs/cli/power-intent.md."
+        ),
+    )
+    parser.add_argument("netlist", help="path to a flat gate-level Verilog netlist")
+    parser.add_argument(
+        "--intent", required=True, metavar="FILE", help="JSON power-intent file"
+    )
+    parser.add_argument(
+        "--cell-models",
+        required=True,
+        action="append",
+        metavar="FILE",
+        help="PDK functional Verilog cell-model file (repeatable)",
+    )
+    parser.add_argument(
+        "--top", default=None, help="top module (required when the netlist has several)"
+    )
+    _add_format_arg(parser)
+    parser.set_defaults(func=power_intent_cmd.run)
 
 
 def _add_reset_coverage_parser(subparsers: argparse._SubParsersAction) -> None:

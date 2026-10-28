@@ -61,7 +61,7 @@ from .extraction import (
     UnmodelledDeviceFamily,
     UnsupportedDeviceMarker,
 )
-from .finfet import FinFETExtractionDeck, FinFETFlavour
+from .finfet import FinFETExtractionDeck, FinFETFlavour, FinFETPassiveCapacitor
 from .parasitics import (
     HIGH_CORNER,
     LOW_CORNER,
@@ -98,6 +98,7 @@ __all__ = [
     "ExtractionDeck",
     "FinFETExtractionDeck",
     "FinFETFlavour",
+    "FinFETPassiveCapacitor",
     "HIGH_CORNER",
     "InvalidDeckOptionError",
     "InvalidLabelLayerError",

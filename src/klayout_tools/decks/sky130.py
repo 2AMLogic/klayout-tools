@@ -307,6 +307,12 @@ negative-control case. Density (``"density"`` check kind) remains out of
 scope entirely, per ``docs/cli/drc.md``'s own floorplan-boundary limitation
 on this engine's windowed density implementation.
 
+Cross-check against the foundry deck on stock geometry (issue #4472): on the
+stock ``sky130_ef_io__analog_noesd_pad`` the curated ``met4.holes_area.1`` and
+``sky130A_mr.drc``'s ``m4.7`` both count 20 voids (formed by abutting drawn
+rectangles; merged semantics in both). ``sky130A_mr.drc`` only runs its
+``m*`` rules with ``-rd beol=true`` -- see ``docs/cli/drc.md``.
+
 nwell (well-layer) rule coverage (issue #1420): before this, ``DECK`` had
 *zero* rules referencing ``nwell`` (64/20), even though ``EXTRACTION_DECK``
 below has always used that exact layer to derive PMOS device recognition and

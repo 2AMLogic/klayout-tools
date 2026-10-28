@@ -590,6 +590,14 @@
         "klayout_tools.size_topology"
       ]
     },
+    "power_intent": {
+      "kind": "verb",
+      "description": "`klt power_intent` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.power_intent_cmd",
+        "klayout_tools.power_intent"
+      ]
+    },
     "reset_coverage": {
       "kind": "verb",
       "description": "`klt reset_coverage` implementation: core modules plus CLI adapter.",
@@ -1195,6 +1203,16 @@
       "reason": "Shared report rendering resolves echoed {path, scope} path fields via env_provenance (issue #2659)."
     },
     {
+      "consumer": "power_intent",
+      "exporter": "cli-infra",
+      "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
+    },
+    {
+      "consumer": "power_intent",
+      "exporter": "reset_coverage",
+      "reason": "Reuses reset_coverage's cell-model loader and netlist conventions instead of re-parsing (issue #4479)."
+    },
+    {
       "consumer": "reset_coverage",
       "exporter": "cli-infra",
       "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
@@ -1426,6 +1444,36 @@
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.power_intent",
+      "exporter": "klayout_tools.reset_coverage",
+      "symbol": "_CAPTURE_PINS",
+      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
+    },
+    {
+      "consumer": "klayout_tools.power_intent",
+      "exporter": "klayout_tools.reset_coverage",
+      "symbol": "_CONST_NETS",
+      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
+    },
+    {
+      "consumer": "klayout_tools.power_intent",
+      "exporter": "klayout_tools.reset_coverage",
+      "symbol": "_CellModel",
+      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
+    },
+    {
+      "consumer": "klayout_tools.power_intent",
+      "exporter": "klayout_tools.reset_coverage",
+      "symbol": "_POWER_PINS",
+      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
+    },
+    {
+      "consumer": "klayout_tools.power_intent",
+      "exporter": "klayout_tools.reset_coverage",
+      "symbol": "_read",
+      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
+    },
     {
       "consumer": "klayout_tools.evidence_lint",
       "exporter": "klayout_tools.evidence_record",
