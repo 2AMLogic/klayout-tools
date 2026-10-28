@@ -847,6 +847,57 @@ def _error_lines(output: str) -> list[str]:
     return [ln.strip() for ln in output.splitlines() if _ERROR_LINE_RE.match(ln)]
 
 
+_DEVICE_LIST_RE = re.compile(r"^\s*DEVICE_LIST\s*=\s*\[(.*?)\]", re.S | re.M)
+_DEVICE_LIST_ITEM_RE = re.compile(r"""["']([^"']+)["']""")
+
+
+def _deck_device_list(deck_file: str) -> set[str]:
+    """Upper-cased names in the runset's ``DEVICE_LIST = [...]`` -- the
+    subcircuits its SPICE reader delegate converts to devices, including ones
+    it renames (sky130 ``special_nfet_01v8`` -> ``nfet_01v8``) so that no
+    declared device class carries the called name. ``set()`` when the deck
+    has no such list or cannot be read."""
+    try:
+        with open(deck_file, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return set()
+    match = _DEVICE_LIST_RE.search(text)
+    if match is None:
+        return set()
+    body = re.sub(r"#[^\n]*", "", match.group(1))
+    return {n.upper() for n in _DEVICE_LIST_ITEM_RE.findall(body)}
+
+
+def _unresolved_reference_calls(
+    reference_path: str, top: str | None, converted_names: set[str]
+) -> list[dict[str, Any]]:
+    """Issue #4519: ``reference.unresolved_subckt_call`` findings for ``X``
+    calls the runset neither converted nor could resolve.
+
+    The reference is re-read with the plain SPICE reader (hierarchy intact).
+    A callee the runset itself converts (``converted_names``, upper-cased:
+    its declared device classes plus the deck's ``DEVICE_LIST``) is not
+    reported. ``[]`` when the reference cannot be re-read: the
+    runset's own verdict stands."""
+    import klayout.db as kdb
+
+    from .lvs import _unresolved_reference_subckt_calls
+
+    netlist = kdb.Netlist()
+    try:
+        netlist.read(reference_path, kdb.NetlistSpiceReader())
+    except Exception:
+        return []
+    return _unresolved_reference_subckt_calls(
+        netlist,
+        converted_names,
+        form="spice",
+        top=top,
+        reference_path=reference_path,
+    )
+
+
 def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[str, Any]:
     """Run ``request`` through the PDK runset and return the ``klt lvs``
     envelope. See this module's docstring; request fields are documented in
@@ -885,7 +936,16 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
 
         shutil.rmtree(work_dir, ignore_errors=True)
 
-    mismatches = verdict["mismatches"]
+    declared = verdict["coverage"]["declared_device_classes"]
+    unresolved = _unresolved_reference_calls(
+        reference,
+        request["reference"].get("top"),
+        {str(n).upper() for side in declared.values() for n in side or []}
+        | _deck_device_list(deck_file),
+    )
+    mismatches = verdict["mismatches"] + unresolved
+    if unresolved:
+        verdict["status"] = STATUS_MISMATCH
     category_counts: dict[str, int] = {}
     category_error_counts: dict[str, int] = {}
     for m in mismatches:
