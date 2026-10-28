@@ -882,7 +882,7 @@ def run_deck_unit(
     for anything the *engine* did -- only evidence, statuses, and
     diagnostics.
     """
-    from .sim import _extract_engine_version
+    from .sim import _extract_engine_version, _probe_engine_version
 
     shutil.rmtree(unit_dir, ignore_errors=True)
     os.makedirs(unit_dir, exist_ok=True)
@@ -912,9 +912,14 @@ def run_deck_unit(
         with open(os.path.join(unit_dir, name), "wb") as handle:
             handle.write(payload)
 
+    # `ngspice -b <deck>` prints no version banner, so the stdout extraction
+    # finds nothing; ask the binary itself (issue #4543). A unit whose engine
+    # never spawned has no engine to attribute and keeps `null`.
     engine_version = _extract_engine_version(
         spawn.stdout.decode("utf-8", errors="replace")
     )
+    if engine_version is None and spawn.exit_code is not None:
+        engine_version = _probe_engine_version("ngspice", ngspice_binary)
     status = _unit_status(spawn, diagnostics)
     outputs, missing_outputs = _resolve_declared_outputs(unit, unit_dir=unit_dir)
     result = {
@@ -2078,6 +2083,51 @@ def _resolve_resumed(
     )
 
 
+def _deck_dry_run_report(
+    request: dict[str, Any],
+    units: list[dict[str, Any]],
+    *,
+    request_dir: str,
+    backend: str,
+) -> dict[str, Any]:
+    """``--dry-run`` for a deck list (issue #4543): the staging and batch
+    config checks a real off-host run makes before anything billable, then
+    a report of the planned units. Nothing is spawned, submitted or
+    written. ``plan_deck_units`` (already run by the caller) covers deck,
+    input and include existence on every backend."""
+    from .sim import SCHEMA_VERSION, SimError
+
+    staged: list[sim_staging.StagedFile] = []
+    if backend in ("remote", "batch"):
+        staged, worker_request = stage_deck_job(request, request_dir=request_dir)
+        if backend == "batch":
+            try:
+                _prepare_decks_batch(request, staged, worker_request)
+            except sim_batch.BatchError as exc:
+                raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "mode": DECK_MODE,
+        "dry_run": True,
+        "status": "valid",
+        "engine": "ngspice",
+        "backend": backend,
+        "unit_count": len(units),
+        "units": [
+            {
+                "id": unit["id"],
+                "deck": unit["deck"]["name"],
+                "outputs": list(unit.get("outputs", ())),
+            }
+            for unit in units
+        ],
+        "staged_files": [
+            {"name": item.staged_name, "kind": item.label} for item in staged
+        ],
+        "warnings": [],
+    }
+
+
 def _run_decks_batch_pending(
     request: dict[str, Any],
     pending: list[dict[str, Any]],
@@ -2109,6 +2159,57 @@ def _run_decks_batch_pending(
     return _run_decks_batch(pending_request, files, worker_request, outdir=outdir)
 
 
+def _run_decks_offhost(
+    request: dict[str, Any],
+    units: list[dict[str, Any]],
+    pending: list[dict[str, Any]],
+    resumed: dict[int, Any],
+    *,
+    request_dir: str,
+    backend: str,
+    outdir: str,
+    ngspice_binary: str,
+    artifacts_dir: str | None,
+    resume: bool,
+    submit_only: bool,
+    attach_job_id: str | None,
+) -> dict[str, Any]:
+    """The ``remote`` / ``batch`` leg of :func:`run_deck_request`."""
+    from .sim import apply_engine_host
+
+    # Validate the whole staged closure before anything billable: an
+    # unstageable include or missing file is a submit-time SimError,
+    # never a launched job that cannot run.
+    files, worker_request = stage_deck_job(request, request_dir=request_dir)
+    if backend == "remote":
+        report = _run_decks_remote(request, files, worker_request, outdir=outdir)
+    elif submit_only:
+        return _submit_decks_batch_only(
+            request, files, worker_request, artifacts_dir=artifacts_dir
+        )
+    elif attach_job_id is not None:
+        report = _attach_decks_batch(
+            request, worker_request, attach_job_id, outdir=outdir
+        )
+    else:
+        report = _run_decks_batch_pending(
+            request,
+            pending,
+            request_dir=request_dir,
+            backend=backend,
+            outdir=outdir,
+            ngspice_binary=ngspice_binary,
+        )
+    if resume:
+        _apply_resume(report, units, resumed)
+    apply_engine_host(
+        report.setdefault("environment", {}),
+        backend=backend,
+        client_ngspice_binary=ngspice_binary,
+    )
+    return report
+
+
 def run_deck_request(
     request: dict[str, Any],
     *,
@@ -2119,6 +2220,7 @@ def run_deck_request(
     resume: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Run a validated-in-shape deck-list request on ``backend`` and return
     the deck-list report (the dict ``klt sim`` emits through the shared
@@ -2172,6 +2274,11 @@ def run_deck_request(
     ngspice_binary = _resolve_ngspice_binary(options, request_dir)
     outdir = resolve_deck_outdir(artifacts_dir, request_dir)
 
+    if dry_run:
+        return _deck_dry_run_report(
+            request, units, request_dir=request_dir, backend=backend
+        )
+
     resumed = (
         _resolve_resumed(
             units,
@@ -2186,37 +2293,20 @@ def run_deck_request(
     pending = [unit for index, unit in enumerate(units) if index not in resumed]
 
     if backend == "remote" or backend == "batch":
-        # Validate the whole staged closure before anything billable: an
-        # unstageable include or missing file is a submit-time SimError,
-        # never a launched job that cannot run.
-        files, worker_request = stage_deck_job(request, request_dir=request_dir)
-        if backend == "remote":
-            report = _run_decks_remote(request, files, worker_request, outdir=outdir)
-        elif submit_only:
-            return _submit_decks_batch_only(
-                request, files, worker_request, artifacts_dir=artifacts_dir
-            )
-        elif attach_job_id is not None:
-            report = _attach_decks_batch(
-                request, worker_request, attach_job_id, outdir=outdir
-            )
-        else:
-            report = _run_decks_batch_pending(
-                request,
-                pending,
-                request_dir=request_dir,
-                backend=backend,
-                outdir=outdir,
-                ngspice_binary=ngspice_binary,
-            )
-        if resume:
-            _apply_resume(report, units, resumed)
-        apply_engine_host(
-            report.setdefault("environment", {}),
+        return _run_decks_offhost(
+            request,
+            units,
+            pending,
+            resumed,
+            request_dir=request_dir,
             backend=backend,
-            client_ngspice_binary=ngspice_binary,
+            outdir=outdir,
+            ngspice_binary=ngspice_binary,
+            artifacts_dir=artifacts_dir,
+            resume=resume,
+            submit_only=submit_only,
+            attach_job_id=attach_job_id,
         )
-        return report
 
     if backend == "local":
         workers = 1

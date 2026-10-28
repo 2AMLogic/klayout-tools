@@ -14759,9 +14759,13 @@ def test_run_sim_dry_run_batch_refuses_out_of_pdk_root_netlist_lib(
         sim.run_sim(str(request), backend="batch", dry_run=True)
 
 
-def test_run_sim_dry_run_refuses_deck_requests(tmp_path):
-    request = _write_request(tmp_path, {"decks": [{"name": "a", "deck": "x"}]})
-    with pytest.raises(sim.SimError, match="--dry-run"):
+def test_run_sim_dry_run_validates_deck_requests(tmp_path):
+    # Issue #4543: a deck list is pre-flighted like any request, so a missing
+    # deck is the same error a real run gives rather than a flag refusal.
+    request = _write_request(
+        tmp_path, {"decks": [{"id": "a", "deck": "missing.spice", "outputs": []}]}
+    )
+    with pytest.raises(sim.SimError, match="missing.spice"):
         sim.run_sim(str(request), dry_run=True)
 
 

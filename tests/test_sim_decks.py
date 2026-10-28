@@ -2139,3 +2139,104 @@ class TestDecksRequestFeatureReport:
     def test_request_without_decks_is_unchanged(self, tmp_path, monkeypatch):
         fields = self._identity(tmp_path, monkeypatch, "0.7.0", {"decks": []})
         assert "runner_request_features" not in fields
+
+
+# --------------------------------------------------------------------------- #
+# --dry-run, --wait-for-capacity and engine_version (issue #4543)
+# --------------------------------------------------------------------------- #
+
+
+class TestDeckPreflightAndProvenance:
+    def test_dry_run_reports_units_and_spawns_nothing(self, tmp_path, monkeypatch):
+        request = deck_request(tmp_path)
+        write_request(tmp_path, request)
+
+        def explode(*args, **kwargs):
+            raise AssertionError("dry-run must not spawn an engine")
+
+        monkeypatch.setattr(sd.subprocess, "run", explode)
+        monkeypatch.setattr(sd.subprocess, "Popen", explode)
+        report = sim.run_sim(
+            str(tmp_path / "request.json"),
+            dry_run=True,
+            artifacts_dir=str(tmp_path / "out"),
+        )
+        assert report["dry_run"] is True
+        assert report["status"] == "valid"
+        assert report["mode"] == "decks"
+        assert report["unit_count"] == len(request["decks"])
+        assert [u["id"] for u in report["units"]] == [d["id"] for d in request["decks"]]
+        assert not (tmp_path / "out").exists()
+
+    def test_dry_run_gives_the_real_staging_error(self, tmp_path):
+        request = deck_request(tmp_path)
+        (tmp_path / "deck.spice").unlink()
+        write_request(tmp_path, request)
+        with pytest.raises(SimError, match="deck.spice"):
+            sim.run_sim(str(tmp_path / "request.json"), dry_run=True)
+
+    def test_batch_dry_run_launches_nothing(self, tmp_path, monkeypatch):
+        calls: list[str] = []
+        for name in ("submit_job", "launch_job", "poll_status", "collect_outputs"):
+            monkeypatch.setattr(sb, name, lambda *a, _n=name, **k: calls.append(_n))
+        write_request(tmp_path, batch_deck_request(tmp_path))
+        report = sim.run_sim(
+            str(tmp_path / "request.json"), backend="batch", dry_run=True
+        )
+        assert report["dry_run"] is True
+        assert report["backend"] == "batch"
+        assert report["staged_files"]
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        ("cli_value", "request_value", "expected"),
+        [(120.0, None, 120.0), (0.0, 600, 0.0), (None, 45, 45.0)],
+    )
+    def test_wait_for_capacity_overrides_request_field(
+        self, tmp_path, monkeypatch, cli_value, request_value, expected
+    ):
+        seen: list[float] = []
+        fleet = _FakeFleet({"state": "done", "exit_code": "0"})
+
+        def launch(config, job_id):
+            seen.append(config.capacity_wait_s)
+            return fleet.launch(config, job_id)
+
+        install_fake_batch(monkeypatch, fleet)
+        monkeypatch.setattr(sb, "launch_job", launch)
+        request = batch_deck_request(tmp_path)
+        if request_value is not None:
+            request["batch"]["capacity_wait_s"] = request_value
+        write_request(tmp_path, request)
+        sim.run_sim(
+            str(tmp_path / "request.json"),
+            backend="batch",
+            capacity_wait_s=cli_value,
+            artifacts_dir=str(tmp_path / "out"),
+        )
+        assert seen == [expected]
+
+    def test_wait_for_capacity_refused_off_batch(self, tmp_path):
+        write_request(tmp_path, deck_request(tmp_path))
+        with pytest.raises(SimError, match="requires backend 'batch'"):
+            sim.run_sim(
+                str(tmp_path / "request.json"),
+                backend="local",
+                capacity_wait_s=30.0,
+            )
+
+    def test_engine_version_from_version_probe_when_no_banner(self, tmp_path):
+        request = deck_request(tmp_path)
+        stub = tmp_path / "stub-ngspice"
+        # Banner only for --version, as a real `ngspice -b` behaves.
+        stub.write_text(
+            stub.read_text(encoding="utf-8").replace(
+                '    print("ngspice-46 stub banner")\n    sys.stdout.flush()\n', ""
+            ),
+            encoding="utf-8",
+        )
+        report = run_local(tmp_path, request)
+        assert all(u["engine_version"] == "46" for u in report["units"])
+        assert report["environment"]["engine_version"] == "46"
+        record = json.loads((tmp_path / "out" / "tt_27c" / "unit.json").read_text())
+        assert record["key"]["engine_version"] == "46"

@@ -896,7 +896,8 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "backend/engine, corner ids, per-sample Monte Carlo seeds, "
             "staged model files, unknown-key warnings) without running "
             "ngspice or touching SSH/S3/EC2; exits 1 on any validation "
-            "failure. Corner/Monte Carlo requests only. See docs/cli/sim.md."
+            "failure. Corner/Monte Carlo and deck-list requests (staging "
+            "check, planned units). See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(

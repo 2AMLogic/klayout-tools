@@ -65,8 +65,13 @@ this document (and the code) win.
   `stage_model_inputs` closure and the off-host PDK check), and a failure
   exits 1 with the same message a real run gives. It then returns before
   the fail-fast probe, the output-directory lock and any backend, so no
-  ngspice, SSH, S3 or EC2 is touched. Corner/Monte Carlo requests only;
-  `decks` requests are refused. The JSON response is the shared envelope
+  ngspice, SSH, S3 or EC2 is touched. A `decks` request is validated the same
+  way ([#4543](https://github.com/2AMLogic/klayout-tools/issues/4543)): deck,
+  input and include resolution, the off-host staging closure, and (on `batch`)
+  the batch config and runner-support checks; its response has `mode: "decks"`,
+  `dry_run: true`, `status: "valid"`, `engine`, `backend`, `unit_count`,
+  `units[]` (`id`, `deck`, `outputs`), `staged_files[]` and `warnings[]`, and it
+  is refused with `--submit-only` / `--attach`. The corner JSON response is the shared envelope
   with: `dry_run: true`, `status: "valid"`, `engine`, `backend` (resolved),
   `hosts`, `netlist`, `models_lib`, `unit_count`, `units[]` (`corner_id`
   and, for Monte Carlo, `sample_index`, `rndseed`, `process_seed`,
@@ -1073,8 +1078,8 @@ made. Things worth knowing:
   if the request asks for a wait). It applies to the blocking path and to
   `--submit-only`; an invalid value is refused before any S3 write, like the
   request field. It requires the `batch` backend and is refused with `--attach`,
-  `--job-status`, `--batch-set` (use `--capacity-retries`) and deck-list
-  requests. On expiry the run fails with the existing `batch_no_capacity` /
+  `--job-status` and `--batch-set` (use `--capacity-retries`); it applies to
+  deck-list requests too. On expiry the run fails with the existing `batch_no_capacity` /
   `batch_concurrency_cap` code. `--submit-only`'s reported `request_sha256`
   covers the request with this override folded in.
 
@@ -2259,7 +2264,9 @@ should run, so it is rejected by name.
 
 The corner-only CLI knobs are likewise refused for deck requests:
 `--hosts`, `--budget-s`, `--plot`, `--fail-fast-probe`, and
-`--fail-on-diagnostic`. `--resume` (`options.resume`) is **accepted** on
+`--fail-on-diagnostic`. `--dry-run` (validates staging, launches nothing) and
+`--wait-for-capacity SECONDS` (overrides `batch.capacity_wait_s`; `batch` only)
+are accepted. `--resume` (`options.resume`) is **accepted** on
 `local`, `local-parallel` and `batch` with deck-specific semantics — see
 "Resuming a deck run" below — and refused on `remote`. `--submit-only` and
 `--attach <job_id>` apply to a deck list on the `batch` backend (one job, one
@@ -2333,7 +2340,7 @@ directory of the request is left alone.
 | `mode` | `"decks"` |
 | `status` | `"pass"` when every unit exited 0 within its timeout; `"error"` otherwise. klt never grades the deck's electrical result. |
 | `unit_count` / `passed` / `errored` / `timed_out` | Counts over `units[]`. |
-| `units[]` | One entry per deck, in request order: `id`, `status` (`"pass"` / `"error"` / `"timeout"`), `exit_code` (`null` when the engine never launched), `timed_out`, `duration_s`, `engine_version` (best-effort from the engine's own stdout banner — recorded per unit and top-level as engine identity), `deck` (unit-relative name as run), `deck_sha256`, `stdout`, `stderr`, `outputs`, `missing_outputs`, `host_resolved` (include targets left to the executing host), `diagnostics[]` (`timeout`, `engine_exit`, `engine_not_found`; off-host job failures carry `batch_job_failed` / `batch_job_timeout` / `batch_poll_timeout`, with the job's own klt error envelope attached where one was recoverable, or `remote_job_failed` when the `remote` backend's SSH run fails — the unit trees already written on the instance are pulled back before teardown, so `stdout`/`stderr`/`outputs` point at whatever evidence was recovered and the message says which streams came back). |
+| `units[]` | One entry per deck, in request order: `id`, `status` (`"pass"` / `"error"` / `"timeout"`), `exit_code` (`null` when the engine never launched), `timed_out`, `duration_s`, `engine_version` (the ngspice version, taken from the engine's stdout banner when present, else from `ngspice --version`; `null` only for a unit whose engine never launched — recorded per unit and top-level as engine identity), `deck` (unit-relative name as run), `deck_sha256`, `stdout`, `stderr`, `outputs`, `missing_outputs`, `host_resolved` (include targets left to the executing host), `diagnostics[]` (`timeout`, `engine_exit`, `engine_not_found`; off-host job failures carry `batch_job_failed` / `batch_job_timeout` / `batch_poll_timeout`, with the job's own klt error envelope attached where one was recoverable, or `remote_job_failed` when the `remote` backend's SSH run fails — the unit trees already written on the instance are pulled back before teardown, so `stdout`/`stderr`/`outputs` point at whatever evidence was recovered and the message says which streams came back). |
 | `units[].resumed` | Present only under `--resume` (additive): `true` for a unit skipped because a valid earlier result was found (its other fields are that earlier run's, verbatim), `false` for a unit that ran. |
 | `outdir` | Absolute path of the artifacts directory on the reporting host. |
 | `environment.resume` | Present only under `--resume` (additive): `{"resumed_units": <count skipped>, "resumed_ids": [...]}`. |

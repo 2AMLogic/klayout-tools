@@ -2604,14 +2604,7 @@ def run_sim(
         raise SimError(
             "--command-approvals only applies to command-list requests (`commands`)"
         )
-    if capacity_wait_s is not None and sim_decks.DECKS_FIELD in request:
-        raise SimError("--wait-for-capacity does not apply to deck-list requests")
     if sim_decks.DECKS_FIELD in request:
-        if dry_run:
-            raise SimError(
-                "--dry-run does not apply to deck-list requests (`decks`); "
-                "it validates corner/Monte Carlo requests only"
-            )
         return _dispatch_deck_request(
             request,
             request_path=request_path,
@@ -2624,8 +2617,10 @@ def run_sim(
             plot_dir=plot_dir,
             fail_fast_probe=fail_fast_probe,
             fail_on_diagnostic=fail_on_diagnostic,
+            dry_run=dry_run,
             submit_only=submit_only,
             attach_job_id=attach_job_id,
+            capacity_wait_s=capacity_wait_s,
             _ownership=_ownership,
         )
     return _run_sim_corners(
@@ -2759,8 +2754,10 @@ def _dispatch_deck_request(
     plot_dir: str | None,
     fail_fast_probe: bool | None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+    dry_run: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
+    capacity_wait_s: float | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
@@ -2795,6 +2792,12 @@ def _dispatch_deck_request(
     _apply_attach(
         {}, attach_job_id, resolved_backend, 1 if hosts is None else hosts, submit_only
     )
+    _check_capacity_wait_applies(capacity_wait_s, resolved_backend, attach_job_id)
+    # Issue #4543: the CLI value wins over `batch.capacity_wait_s`, and is
+    # validated before any S3 write.
+    request = _with_capacity_wait_override(request, capacity_wait_s)
+    if dry_run and (submit_only or attach_job_id is not None):
+        raise SimError("--dry-run cannot be combined with --submit-only or --attach")
     if hosts is not None and hosts != 1:
         raise SimError(
             "--hosts/remote.hosts sharding is not supported for "
@@ -2817,7 +2820,7 @@ def _dispatch_deck_request(
     # unit trees under its outdir, so it owns that root unconditionally --
     # after the flag checks above, which must fail without locking anything.
     # A submit-only run collects nothing, so it owns no unit trees.
-    if _ownership is not None and not submit_only:
+    if _ownership is not None and not submit_only and not dry_run:
         _own_persistent_roots(
             _ownership,
             sim_decks.resolve_deck_outdir(artifacts_dir, request_dir),
@@ -2833,6 +2836,7 @@ def _dispatch_deck_request(
         resume=bool(resume),
         submit_only=submit_only,
         attach_job_id=attach_job_id,
+        dry_run=dry_run,
     )
 
 
