@@ -448,6 +448,41 @@ class _Layers:
             (flavour, self.polygons(flavour.marker, f"vt_{flavour.name}"))
             for flavour in deck.vt_flavours
         ]
+        self._build_passives(deck)
+
+    def _metal_index(self, deck: FinFETExtractionDeck, ld: tuple[int, int]) -> int:
+        if ld not in deck.metals:
+            raise ExtractError(
+                f"FinFET passive layer {ld} is not one of the deck's metals"
+            )
+        return deck.metals.index(ld)
+
+    def _build_passives(self, deck: FinFETExtractionDeck) -> None:
+        """Resistor bodies are cut out of their metal's connectivity (the
+        terminals are the metal beyond the marker); capacitor markers leave
+        the metal intact. ``self.resistors`` / ``self.capacitors`` hold
+        ``(entry, marker, metal_index, ...)`` tuples used by the findings and
+        the device extractors."""
+        self.raw_metals = list(self.metals)
+        self.resistors: list[tuple[Any, kdb.Region, kdb.Region, int]] = []
+        self.capacitors: list[tuple[Any, kdb.Region, int]] = []
+        for res in deck.resistors:
+            index = self._metal_index(deck, res.body)
+            marker = self.polygons(res.marker, f"{res.name}_marker")
+            body = self.metals[index] & marker
+            for ld in res.requires:
+                body &= self.polygons(ld, f"{res.name}_requires")
+            for ld in res.excludes:
+                body -= self.polygons(ld, f"{res.name}_excludes")
+            body = self.register(body.merged(), f"{res.name}_body")
+            self.metals[index] = self.register(
+                self.metals[index] - body, f"metal{index + 1}_terminals"
+            )
+            self.resistors.append((res, marker, body, index))
+        for cap in deck.passive_capacitors:
+            index = self._metal_index(deck, cap.metal)
+            marker = self.polygons(cap.marker, f"{cap.name}_marker")
+            self.capacitors.append((cap, marker, index))
 
     def polygons(self, ld: tuple[int, int], name: str) -> kdb.Region:
         return self._l2n.make_polygon_layer(self._layout.layer(*ld), name)
@@ -485,6 +520,70 @@ def _layer_findings(layers: _Layers, dbu: float) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for region, problem in checks:
         findings.extend(_region_findings(region, problem, dbu))
+    findings.extend(_passive_findings(layers, dbu))
+    return findings
+
+
+def _passive_findings(layers: _Layers, dbu: float) -> list[dict[str, Any]]:
+    """Markers the extractor cannot turn into a two-terminal device are
+    named findings, never a silent short or a silent drop (issue #4469)."""
+    import klayout.db as kdb
+
+    findings: list[dict[str, Any]] = []
+
+    def straddles(marker: kdb.Region, own: int) -> kdb.Region:
+        other = kdb.Region()
+        for i, metal in enumerate(layers.raw_metals):
+            if i != own:
+                other += marker.interacting(metal)
+        return other
+
+    for res, marker, body, index in layers.resistors:
+        name = res.name
+        findings.extend(
+            _region_findings(
+                marker.not_interacting(layers.raw_metals[index]),
+                f"{name} marker is not over its metal",
+                dbu,
+            )
+        )
+        findings.extend(
+            _region_findings(
+                straddles(marker, index),
+                f"{name} marker straddles more than one metal level",
+                dbu,
+            )
+        )
+        terminals = layers.metals[index].merged()
+        for polygon in body.each():
+            count = terminals.interacting(kdb.Region(polygon)).count()
+            if count != 2:
+                findings.append(
+                    {
+                        "problem": f"{name} body has {count} terminal(s) (expected 2)",
+                        "bbox_um": _bbox_um(polygon.bbox(), dbu),
+                    }
+                )
+    for cap, marker, index in layers.capacitors:
+        metal = layers.metals[index].merged()
+        findings.extend(
+            _region_findings(
+                straddles(marker, index),
+                f"{cap.name} marker straddles more than one metal level",
+                dbu,
+            )
+        )
+        for polygon in marker.merged().each():
+            count = metal.interacting(kdb.Region(polygon)).count()
+            if count != 2:
+                findings.append(
+                    {
+                        "problem": (
+                            f"{cap.name} marker has {count} port(s) (expected 2)"
+                        ),
+                        "bbox_um": _bbox_um(polygon.bbox(), dbu),
+                    }
+                )
     return findings
 
 
@@ -533,6 +632,70 @@ def _extract_devices(
                 _make_extractor(classes[polarity], deck, findings),
                 {"SD": sd, "G": part, "P": layers.gate, "W": body, "FIN": layers.fin},
             )
+
+
+def _make_capacitor_extractor(name: str, coefficient_f_um2: float) -> Any:
+    import klayout.db as kdb
+
+    class _PassiveCapacitorExtractor(kdb.GenericDeviceExtractor):
+        """Layers: marker (0), the metal carrying both ports (1)."""
+
+        def __init__(self) -> None:
+            self.name = name
+
+        def setup(self) -> None:
+            self.define_layer("K", "Capacitor marker")
+            self.define_layer("M", "Port metal")
+            device_class = kdb.DeviceClassCapacitor()
+            device_class.name = name
+            self.register_device_class(device_class)
+
+        def get_connectivity(self, _layout: kdb.Layout, layers: list[int]) -> Any:
+            conn = kdb.Connectivity()
+            conn.connect(layers[0], layers[1])
+            return conn
+
+        def extract_devices(self, layer_geometry: list[kdb.Region]) -> None:
+            marker, metal = layer_geometry
+            dbu = self.dbu()
+            merged = metal.merged()
+            for polygon in marker.merged().each():
+                ports = list(merged.interacting(kdb.Region(polygon)).each())
+                if len(ports) != 2:
+                    continue  # already a named finding
+                first, second = sorted(
+                    ports,
+                    key=lambda p: (
+                        p.bbox().left,
+                        p.bbox().bottom,
+                        p.bbox().right,
+                        p.bbox().top,
+                    ),
+                )
+                device = self.create_device()
+                cls = device.device_class()
+                device.set_parameter(
+                    "C", coefficient_f_um2 * polygon.area() * dbu * dbu
+                )
+                self.define_terminal(device, cls.terminal_id("A"), 1, first)
+                self.define_terminal(device, cls.terminal_id("B"), 1, second)
+
+    return _PassiveCapacitorExtractor()
+
+
+def _extract_passives(l2n: kdb.LayoutToNetlist, layers: _Layers) -> None:
+    import klayout.db as kdb
+
+    for res, _marker, body, index in layers.resistors:
+        if body.is_empty():
+            continue
+        extractor = kdb.DeviceExtractorResistor(res.name, res.sheet_rho_ohm_sq)
+        l2n.extract_devices(extractor, {"R": body, "C": layers.metals[index]})
+    for cap, marker, index in layers.capacitors:
+        if marker.is_empty():
+            continue
+        extractor = _make_capacitor_extractor(cap.name, cap.area_cap_f_um2)
+        l2n.extract_devices(extractor, {"K": marker, "M": layers.metals[index]})
 
 
 def _connect_feol(
@@ -603,6 +766,7 @@ def extract_finfet_netlist(
     _raise_findings(findings, deck_name)
     _extract_devices(l2n, layers, deck, findings)
     _raise_findings(findings, deck_name)
+    _extract_passives(l2n, layers)
 
     _connect_feol(l2n, layers, deck)
     _connect_beol(l2n, layers, deck)
