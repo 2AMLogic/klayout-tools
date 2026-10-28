@@ -436,59 +436,63 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
     )
 
 
+def _run_klayout_engine(args: argparse.Namespace) -> dict:
+    if args.tile is not None:
+        raise DrcError(
+            "--tile is not supported with --engine klayout: the abutment "
+            "context is built by the curated engine (see docs/cli/drc.md, "
+            "'Abutment context')"
+        )
+    if args.waivers is not None:
+        raise DrcError(
+            "--waivers is not supported with --engine klayout: waivers "
+            "match a marker's source_cell, which only the curated engine "
+            "attributes (see docs/cli/drc.md, 'Waivers')"
+        )
+    if args.rules is not None:
+        # Issue #2768: a native runset's rules are not the curated
+        # registry `--rules` resolves against (#2806 tracks native
+        # category discovery), so the selection is refused, not ignored.
+        raise DrcError(
+            "--rules is not supported with --engine klayout: a PDK-native "
+            "runset does not share the curated rule registry (see "
+            "docs/cli/drc.md, 'Rule listing and selection')"
+        )
+    deck_file = args.deck_file
+    if deck_file is None:
+        deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
+    if deck_file is None:
+        raise DrcError(
+            "no PDK-native klayout DRC deck script found for this PDK "
+            "variant -- pass --deck-file to point at one directly (see "
+            "docs/cli/drc.md, 'Engine' -> 'klayout')"
+        )
+    return run_drc_klayout_engine(
+        args.file,
+        deck_file,
+        top=args.top,
+        timeout_s=args.timeout_s,
+        deck_vars=_parse_deck_vars(args.deck_var),
+        pdk_variant=args.pdk,
+        pdk_root=args.pdk_root,
+        allow_deck_errors=args.allow_deck_errors,
+        allow_missing_host_tools=args.allow_missing_host_tools,
+        expected_rule_categories=args.expect_rule_categories,
+        min_klayout_version=args.min_klayout_version,
+        expected_rule_category_names=_expected_rule_category_names(args),
+        negative_control=args.negative_control,
+        negative_control_categories=_negative_control_categories(args),
+        max_violations=args.max_violations,
+    )
+
+
 def _run(args: argparse.Namespace) -> dict:
     if args.engine == "both":
         return _run_crosscheck(args)
     if args.max_violations is not None and args.max_violations < 0:
         raise DrcError(f"--max-violations must be >= 0 (got {args.max_violations})")
     if args.engine == "klayout":
-        if args.tile is not None:
-            raise DrcError(
-                "--tile is not supported with --engine klayout: the abutment "
-                "context is built by the curated engine (see docs/cli/drc.md, "
-                "'Abutment context')"
-            )
-        if args.waivers is not None:
-            raise DrcError(
-                "--waivers is not supported with --engine klayout: waivers "
-                "match a marker's source_cell, which only the curated engine "
-                "attributes (see docs/cli/drc.md, 'Waivers')"
-            )
-        if args.rules is not None:
-            # Issue #2768: a native runset's rules are not the curated
-            # registry `--rules` resolves against (#2806 tracks native
-            # category discovery), so the selection is refused, not ignored.
-            raise DrcError(
-                "--rules is not supported with --engine klayout: a PDK-native "
-                "runset does not share the curated rule registry (see "
-                "docs/cli/drc.md, 'Rule listing and selection')"
-            )
-        deck_file = args.deck_file
-        if deck_file is None:
-            deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
-        if deck_file is None:
-            raise DrcError(
-                "no PDK-native klayout DRC deck script found for this PDK "
-                "variant -- pass --deck-file to point at one directly (see "
-                "docs/cli/drc.md, 'Engine' -> 'klayout')"
-            )
-        return run_drc_klayout_engine(
-            args.file,
-            deck_file,
-            top=args.top,
-            timeout_s=args.timeout_s,
-            deck_vars=_parse_deck_vars(args.deck_var),
-            pdk_variant=args.pdk,
-            pdk_root=args.pdk_root,
-            allow_deck_errors=args.allow_deck_errors,
-            allow_missing_host_tools=args.allow_missing_host_tools,
-            expected_rule_categories=args.expect_rule_categories,
-            min_klayout_version=args.min_klayout_version,
-            expected_rule_category_names=_expected_rule_category_names(args),
-            negative_control=args.negative_control,
-            negative_control_categories=_negative_control_categories(args),
-            max_violations=args.max_violations,
-        )
+        return _run_klayout_engine(args)
 
     if args.max_violations is not None:
         raise DrcError(
