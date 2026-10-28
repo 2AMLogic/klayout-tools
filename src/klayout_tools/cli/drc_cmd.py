@@ -279,6 +279,7 @@ _REQUEST_FIELD_DESTS = {
     "waivers_file": "waivers",
     "output": "output",
     "tile": "tile",
+    "max_violations": "max_violations",
 }
 
 
@@ -356,6 +357,9 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             # Issue #4393: resolved against the request document's directory.
             "output": _path("output"),
             "tile": _str("tile"),
+            "max_violations": reqdoc.get_int(
+                request, "max_violations", verb="drc", error_cls=DrcError
+            ),
         }
     )
 
@@ -398,6 +402,7 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
         ("--rules", args.rules),
         ("--waivers", args.waivers),
         ("--tile", args.tile),
+        ("--max-violations", args.max_violations),
     ):
         if value is not None:
             raise DrcError(
@@ -434,6 +439,8 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
 def _run(args: argparse.Namespace) -> dict:
     if args.engine == "both":
         return _run_crosscheck(args)
+    if args.max_violations is not None and args.max_violations < 0:
+        raise DrcError(f"--max-violations must be >= 0 (got {args.max_violations})")
     if args.engine == "klayout":
         if args.tile is not None:
             raise DrcError(
@@ -480,8 +487,14 @@ def _run(args: argparse.Namespace) -> dict:
             expected_rule_category_names=_expected_rule_category_names(args),
             negative_control=args.negative_control,
             negative_control_categories=_negative_control_categories(args),
+            max_violations=args.max_violations,
         )
 
+    if args.max_violations is not None:
+        raise DrcError(
+            "--max-violations is only supported with --engine klayout: the "
+            "curated report is bounded by its rule set (see docs/cli/drc.md)"
+        )
     if not args.deck:
         raise DrcError("argument --deck is required for --engine curated")
     # Token syntax (empty tokens) is checked here, before any file is read;

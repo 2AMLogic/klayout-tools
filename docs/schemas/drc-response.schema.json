@@ -38,7 +38,7 @@
         "violation_count": {"type": "integer", "minimum": 0},
         "rule_counts": {
           "type": "object",
-          "description": "Violations per rule id (or RDB category); sums to `violation_count`.",
+          "description": "Violations per rule id (or RDB category); sums to `violation_count` (the true totals, even when `violations_truncated`).",
           "additionalProperties": {"type": "integer", "minimum": 0}
         },
         "metrics": {
@@ -48,7 +48,9 @@
           "properties": {"drc__error__count": {"type": "integer", "minimum": 0}},
           "additionalProperties": true
         },
-        "violations": {"type": "array", "items": {"$ref": "#/$defs/violation"}},
+        "violations_truncated": {"const": true, "description": "`--engine klayout` with `--max-violations N` only (issue #4464): present, `true`, when more than N violations were found so `violations` holds just the first N. Absent on an uncapped or not-exceeded run."},
+        "violations_serialized": {"type": "integer", "minimum": 0, "description": "Present with `violations_truncated`: `len(violations)`. `violation_count` stays the true total."},
+        "violations": {"type": "array", "description": "Equals `violation_count` entries unless `violations_truncated`.", "items": {"$ref": "#/$defs/violation"}},
         "coverage": {
           "description": "The shared checked-work records (coverage.schema.json) plus this verb's layer/rule-level fields.",
           "allOf": [
@@ -76,7 +78,9 @@
         "required": ["metrics"],
         "properties": {
           "engine_deck_errors": false,
-          "coverage_assertion": false
+          "coverage_assertion": false,
+          "violations_truncated": false,
+          "violations_serialized": false
         }
       },
       "additionalProperties": true
