@@ -269,6 +269,7 @@ retained directory next to that request.
 | `synth_<top>.ys` | The generated Yosys script (`script_path` in the response) — the **commit-safe** form, with the liberty written as `$PDK_ROOT/…` (issue #1870). |
 | `synth_<top>.run.ys` | The rehydrated, **runnable** sibling (`run_script_path` in the response) — identical apart from its header block and the substituted absolute liberty path. This is the script Yosys is invoked on; it is machine-specific, so commit `synth_<top>.ys` instead. Absent (and `run_script_path` equal to `script_path`) when the liberty resolved outside the PDK install root and no token was written. |
 | `<top>_synth.v` | The mapped gate-level netlist (`netlist_path`). |
+| `<top>_latch_map.v` | The generated `techmap` rule file for `request.latch_map` (`latch_map.techmap_path`) — present only when the request sets `latch_map`. Commit-safe. |
 | `<top>_stats.json` | The captured `stat -liberty … -json` output this command parses for `instance_count`/`area_um2`. |
 | `<top>_abc.constr` | The generated two-line ABC constraint file (`set_driving_cell` / `set_load`) — present only for a `cell_library` with a constraint-table entry (see below). |
 | `synth_<top>.run.log` | Captured stdout and stderr for the executed script, retained on success, nonzero exit, and timeout. Named `synth_<top>.log` when no rehydrated script is needed; trial/probe/baseline scripts have their own sibling logs. Abrupt process interruption preserves files already written. |
@@ -1255,6 +1256,7 @@ separately if it turns out to matter for evidence-record committing.
 | `constraints.dont_use` | array\<string\> \| omitted | Standard cells this run must not map to, as ABC `-dont_use` cell names/globs (issue #2382) — **merged with** the built-in per-library exclusion table by default, see "ABC constraints, delay target, and cell exclusions" above for the merge semantics and `constraints.dont_use_mode`. Each entry must be a non-empty string of cell-name/glob characters (`[A-Za-z0-9_.*?!\[\]-]`) and must match **at least one** cell in the resolved liberty — a pattern matching nothing is an error, never a silent no-op. The fully-resolved list is echoed back as the response's `cell_exclusions.effective`. |
 | `constraints.dont_use_mode` | string \| omitted | How `constraints.dont_use` combines with the built-in per-library table: `"additive"` (default — both), `"replace"` (only the request's, requires a non-empty `dont_use`), `"none"` (no exclusion at all, rejects a non-empty `dont_use`). An unknown value is an error. |
 | `structural.expected_latches` | integer \| omitted | The number of latches this design intentionally infers (default `0`). Subtracted from the response's `structural.latches` to produce `structural.unexpected_latches` — see "`structural`" below. Must be a non-negative integer when given. |
+| `latch_map.positive` \| `latch_map.negative` | object \| omitted | Map inferred latches onto a library latch cell (issue #4458) — see "`latch_map`" below. Each is `{cell, enable, data, q}`: the library cell and the names of its enable, data and output pins. `positive` rewrites `$_DLATCH_P_` (transparent while enable is high), `negative` rewrites `$_DLATCH_N_`; an omitted polarity stays unmapped. `cell` must exist in the resolved liberty; unknown keys, missing or non-identifier names, and an empty object are errors. Omitted entirely, the script and outputs are unchanged. |
 | `baseline.response_path` \| `baseline.netlist_path` | string | Optional; names a prior run to compare this one against — see "`baseline`" below. Set **exactly one**, resolved relative to the request file's own directory (like `sources`). |
 | `baseline.ref` | string \| omitted | A label identifying the baseline (e.g. a git ref or `"main"`), echoed verbatim into the response's `baseline.ref`. Defaults, when omitted, to the resolved `response_path`/`netlist_path`'s repo-relative form — or `<outside repo>` when it resolves outside the invocation's repo (issue #1844); never the literal, potentially-absolute request string. |
 | `arithmetic.adders` | string \| omitted | `"auto"`, `"default"`, or a prefix-adder architecture name — substitute a generated parallel-prefix adder for Yosys's own `$add` expansion, and (with `"auto"`) pick the architecture by measured synthesis. Omitted entirely leaves every pre-#1722 request unaffected. See "Arithmetic architecture" above. |
@@ -1280,7 +1282,7 @@ An unrecognised **top-level** request key is rejected with an error naming it
 (`unknown field 'paramters'`), instead of being dropped in silence — a misspelt
 or unsupported field can no longer produce a plausible default-configuration
 result. Recognised keys: `schema`, `engine`, `sources`, `hdl_toplevel`, `pdk`,
-`constraints`, `structural`, `baseline`, `arithmetic`, `run_id`, `parameters`, `defines`;
+`constraints`, `structural`, `baseline`, `arithmetic`, `latch_map`, `run_id`, `parameters`, `defines`;
 the `_comment` annotation is also accepted (its contents are never read). The
 same check applies to `--check` and `--rerun`. Nested objects (`pdk`,
 `constraints`, …) are not yet checked for unknown keys.
@@ -1441,6 +1443,7 @@ script:
   at `0`, to produce `structural.unexpected_latches` — a design that
   deliberately infers `N` latches sets `expected_latches: N` so they do not
   trip `has_critical`.
+  A latch mapped onto a library cell by `request.latch_map` (see "`latch_map`" below) is no longer counted here.
 - **Combinational loops** and **multiply-driven nets** — parsed from the
   captured Yosys run log. `synth -top <top>`'s own internal `check`
   sub-stages (`yosys -p 'help synth'`'s documented `coarse`/`check` stages)
@@ -1464,6 +1467,50 @@ heuristic and Yosys's own optimization already resolve these structurally
 (the loop no longer exists in the mapped netlist by the time `write_verilog`
 runs) — `structural` only *reports* that the design carried the condition,
 it does not gate netlist production.
+
+## `latch_map`: map inferred latches onto a library cell
+
+[Issue #4458](https://github.com/2AMLogic/klayout-tools/issues/4458).
+`dfflibmap` maps flip-flops only, so an inferred latch survives as an internal
+`$_DLATCH_P_`/`$_DLATCH_N_` primitive that place-and-route cannot place, and
+`structural.expected_latches` merely silences the verdict. `latch_map` names
+the library latch to use instead. It works on unmodified RTL, so a vendored
+core's behavioural latch-plus-AND clock gate needs no ICG substitution: the
+latch maps to a library latch and the AND maps through `abc`.
+
+The run writes `<top>_latch_map.v`, a `techmap` rule file, and inserts one
+line into the script between `synth` and `dfflibmap`:
+
+```
+synth -top clk_gate
+techmap -map clk_gate_latch_map.v
+dfflibmap -liberty ...
+```
+
+Worked example (sky130; a transparent-low latch plus AND, the usual clock gate):
+
+```json
+{
+  "sources": ["clk_gate.v"],
+  "hdl_toplevel": "clk_gate",
+  "pdk": {"cell_library": "sky130_fd_sc_hd"},
+  "latch_map": {
+    "negative": {"cell": "sky130_fd_sc_hd__dlxtn_1", "enable": "GATE_N", "data": "D", "q": "Q"}
+  }
+}
+```
+
+The result has `sky130_fd_sc_hd__dlxtn_1` ×1 in `instance_counts_by_type`, no
+`dlatch`-named cell type, `structural.latches == 0`, and exit `0` without
+`expected_latches`. A design using both polarities sets both keys; a latch of a
+polarity you did not map still counts in `structural.latches`.
+
+The response gains an additive `latch_map` object **only when the request sets
+it**: `{mapped, validated, techmap_path}`. `mapped` echoes the resolved
+entries; `validated` is `false` when the liberty's cell list could not be read
+(the cell-existence check was skipped); `techmap_path` is the rule file.
+Out of scope: set/reset latches (`$_DLATCHSR_*`), ICG-cell substitution, and
+replacing a named module with a cell.
 
 ## Hard macros (`request.macros`)
 
