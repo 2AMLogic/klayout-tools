@@ -1429,6 +1429,7 @@ exactly.
 | `options.random_seed` | integer \| null | Optional. Pinned to `Runner.test()`'s own `seed` parameter (`COCOTB_RANDOM_SEED`) when given; omitted/`null` lets cocotb generate its own. Either way the seed actually used is echoed in `environment.random_seed` (see "Reproducibility: `random_seed`"). |
 | `options.defines` | object | Optional. String key -> string \| null value, forwarded unchanged to `Runner.build(defines=...)`. A `null` value defines the macro with no value (e.g. `` `define USE_POWER_PINS ``); it is passed to the simulator as a `-DNAME` build arg, because cocotb 2.x cannot serialise a `null` define value itself (issue #2884). Defaults to `{}` (see "Compile-time defines, build args, and includes"). |
 | `env` | object | Optional (issue #4338). String key -> string value, forwarded to `Runner.test(extra_env=...)` so each entry is visible in `os.environ` inside the cocotb test process (the test step only, not the build). Keys must be non-empty and contain no `=`; any non-string value is exit 1 naming `request.env`. Echoed verbatim as `environment.env` (`{}` when absent), so **never put credentials in it**. Applied to `--mutations` runs and `options.initial_state` runs too. Non-empty together with `testbench.verilog_top` is exit 1 (no cocotb process to apply it to). A key that collides with a `COCOTB_*` variable is not special-cased; cocotb's own `Runner` decides which wins. The ambient host environment is not filtered or allow-listed. |
+| `requires_tools` | array | Optional (issue #4473), default `[]`. Build-time tools the suite needs beyond cocotb and the simulator, each `{"name": str, "version": str\|null, "sha256": str\|null}`. Before any build, each `name` is resolved with `shutil.which` on `request.env["PATH"]` when set (else the ambient `PATH`). `version` (optional) is a substring match on the tool's `--version` output; `sha256` (optional) is compared with the resolved binary's digest. A bad shape (non-array, entry without `name`, non-string fields, unknown fields) is exit 1 naming `request.requires_tools`; any unmet tool is exit 1 with `error.code: "missing_tool"` (see "Exit codes"). Applied to `--mutations` runs too. See "External toolchains". |
 | `options.source_defines` | object | Optional (issue #3290). Key = an entry of `request.sources` (matched after the same path resolution; an unknown key is exit 1), value = a defines object with the same `string -> string \| null` rules as `options.defines`. For each named source a wrapper is generated under the output directory (`` `define K [V] `` / `` `include "<abs path>" `` / `` `undef K ``) and substituted for that source in the same list position, so the defines reach that one file and cannot leak into later sources; the source's own directory is added to the include path for nested relative `` `include ``s. If a name is also in `options.defines`, the scoped value wins inside that source. Echoed as `environment.source_defines` (keyed by absolute source path; `{}` when absent). Works with `--mutations`. Defaults to `{}`. |
 | `options.build_args` | array\<string\> | Optional. Extra Icarus/Verilator build args, appended **after** the fixed `--coverage --trace` args a coverage run already adds and after any SDF back-annotation args (composed, not replaced — see "Coverage" and "SDF back-annotation"). Defaults to `[]`. |
 | `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
@@ -1469,6 +1470,7 @@ exactly.
   "environment": {
     "engine": "icarus",
     "engine_version": "13.0",
+    "tools": [],
     "cocotb_version": "2.1.0",
     "results_xml": {"path": ".klt/functional-verification/results_icarus.xml", "scope": "repo"},
     "test_log": {"path": ".klt/functional-verification/test_icarus.log", "scope": "repo"},
@@ -1504,7 +1506,7 @@ set `options.trace: true`; on such a run it looks like this — the identical
 | `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `sim_time_ns` is read from whichever shape the installed cocotb writes into `results.xml` — the `<testcase sim_time_ns="...">` attribute cocotb 2.0.x emitted, or the `<properties>` block (`sim_time_duration` scaled by the reported `sim_time_unit`, never assumed to be `ns`) cocotb 2.1.0 replaced it with (issue #2592) — so the field carries the same nanosecond value either way. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the `{path, scope}` envelope of the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the envelopes of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; see [`docs/json-contract.md`](../json-contract.md); `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363; `zero_delay_bus_port_source_interconnect`, issue #2984) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`; plus `renamed` (issue #2897, additive, present only when non-empty) — `[{from, to}]`, each escaped-divider instance renamed to a plain identifier for annotation. See "SDF back-annotation" for the full shape. | See "SDF back-annotation" for the full shape. |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `tools` (issue #4473; additive) — one `{name, path, version, sha256}` per `request.requires_tools` entry as resolved (`version` is the first line of `--version`, `null` if it printed nothing; `[]` when the field is omitted), `cocotb_version`, `results_xml` — the `{path, scope}` envelope of the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the envelopes of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; see [`docs/json-contract.md`](../json-contract.md); `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363; `zero_delay_bus_port_source_interconnect`, issue #2984) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`; plus `renamed` (issue #2897, additive, present only when non-empty) — `[{from, to}]`, each escaped-divider instance renamed to a plain identifier for annotation. See "SDF back-annotation" for the full shape. | See "SDF back-annotation" for the full shape. |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
 and no rule deck (see `docs/json-contract.md` → "Shared `provenance`
@@ -1515,7 +1517,7 @@ block"), and `environment` is the contract's own reproducibility surface.
 | Code | Meaning |
 | --- | --- |
 | `0` | At least one test executed and every executed test passed (`status: "pass"`); skipped tests are allowed. |
-| `1` | Failed to run — bad request, unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript), `options.trace` requested but the run produced no waveform file, a bad `options.initial_state` (bad shape, `verilator`, a state element it cannot drive, an ambiguous clock), missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests or skipped every test. |
+| `1` | Failed to run — bad request, a `request.requires_tools` entry that is unmet (`error.code` `missing_tool`; `error.details.unmet_tools` lists every unmet tool with what was wanted and what was found, and no build starts), unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript), `options.trace` requested but the run produced no waveform file, a bad `options.initial_state` (bad shape, `verilator`, a state element it cannot drive, an ambiguous clock), missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests or skipped every test. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3` | Ran successfully; at least one test failed (`status: "fail"`). |
 
@@ -1653,6 +1655,52 @@ around `klt`:
 The bench reads `os.environ["EXPECTED_SUM"]`; the report's
 `environment.env` records `{"EXPECTED_SUM": "5"}`. Values are echoed
 verbatim, so keep credentials out of `env`.
+
+### External toolchains: `requires_tools`
+
+A suite that builds firmware or generates stimulus first (Sail, Ruby with
+`riscv-unified-db`, a newer RISC-V GCC) can declare those tools so a missing
+one is a structured verdict, not an opaque build error:
+
+```json
+{
+  "sources": ["core.v"],
+  "hdl_toplevel": "core",
+  "testbench": { "module": "test_fw" },
+  "env": { "PATH": "toolchain/bin:/usr/bin:/bin" },
+  "requires_tools": [
+    { "name": "sail", "version": "0.19" },
+    { "name": "riscv64-unknown-elf-gcc", "version": "14.", "sha256": "<digest>" }
+  ]
+}
+```
+
+Every unmet tool is reported at once (`error.code: "missing_tool"`, exit 1,
+before any simulator build), and the resolved tools are echoed as
+`environment.tools`. `klt` never downloads or installs anything.
+
+- **A tool missing on the dispatch worker is a worker-spec issue**, filed
+  against 2AMLogic/2am `infra/aws/loom-worker/` — do not install it on the
+  host (`uv tool install`, `pip install --user`, `apt`, writes under
+  `~/.local`).
+- **The supported pattern for a pinned toolchain** is to unpack it into a
+  directory inside the worktree (or a venv) and put that directory first in
+  `request.env.PATH`; `requires_tools` with `sha256` is the pin that proves the
+  binary you resolved is the one you meant. Python toolchains can come from
+  `uvx --from "<pkg>==X.Y.Z" ...`. Sail, `riscv-unified-db` (Ruby) and a
+  RISC-V GCC at the versions a suite needs are the worked example. Note that
+  `request.env` reaches the cocotb test process only, not the build step, so a
+  build that needs the toolchain `PATH` must be driven from the testbench.
+  Resolution against `request.env.PATH` is what `requires_tools` checks.
+
+#### Firmware self-check suites: one test per image
+
+When pass/fail is "the core halted" (a `tohost` write), not a signature
+compare, generate **one `@cocotb.test()` per firmware image** with cocotb's
+`TestFactory` / parametrization. Each test builds or loads its image, runs to
+the halt, and asserts the halt code. Each image is then one entry in `tests[]`,
+and its `error_message` names the failing image and code. This needs no new
+request field.
 
 ### `testbench.search_path`: one testbench, several views of the same design
 

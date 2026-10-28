@@ -4259,6 +4259,42 @@ def test_post_route_spef_unsupported_cell_library_raises(tmp_path, monkeypatch):
         run_place_and_route(request_path)
 
 
+@pytest.mark.parametrize("flag", ["post_route_spef", "post_route_sdf"])
+def test_post_route_spef_unsupported_cell_library_fails_before_engine(
+    tmp_path, monkeypatch, flag
+):
+    """The refusal is raised at request validation, before any engine runs."""
+    monkeypatch.delitem(
+        place_and_route._EXTRACT_DECK_FOR_CELL_LIBRARY, "sky130_fd_sc_hd"
+    )
+    overrides = {"post_route_spef": True}
+    overrides[flag] = True
+    request_path = _setup_success_env(tmp_path, monkeypatch, **overrides)
+
+    def engine_must_not_run(*args, **kwargs):
+        raise AssertionError("engine invoked before request validation finished")
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", engine_must_not_run)
+
+    with pytest.raises(
+        PlaceAndRouteError, match="post_route_spef requires a known klt extract deck"
+    ):
+        run_place_and_route(request_path)
+
+
+def test_unsupported_cell_library_without_post_route_spef_is_accepted(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delitem(
+        place_and_route._EXTRACT_DECK_FOR_CELL_LIBRARY, "sky130_fd_sc_hd"
+    )
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+
 # --------------------------------------------------------------------------- #
 # `_def_pin_net_names` (issue #961 defect 1): the routed DEF's own `PINS`
 # section, parsed for the design's genuine top-level port net names -- fed
