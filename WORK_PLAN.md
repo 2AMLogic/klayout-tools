@@ -43,7 +43,6 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#4161**: klt sim batch: all jobs exit 87 within seconds on the current fleet image; no runner stderr surfaced
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s)
-- **#4438**: Friction: klt sim local backend can't load OSDI v0.4 on host ngspice 42, and there's no supported sanity-corner path
 
 ## In Progress
 
@@ -52,16 +51,14 @@ Issues currently being built (`loom:building`).
 - **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests
 - **#4221**: signoff --attest: support T1 item 2 (Layout) anchored generic envelope
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
-- **#4393**: klt drc: no -o/--output flag to write the report to a file
-- **#4436**: Friction: place-and-route route stage is one non-resumable process of 2 h or more, with no progress output
-- **#4440**: Friction: klt's OpenROAD steps need Docker, which fleet workers can't use; no fleet executor for OpenROAD regeneration
+- **#4451**: klt sim: batch .lib path check missing from --dry-run, $PDK_ROOT body form silently not loaded; artifact put 429 under light concurrency
+- **#4452**: klt artifact put: 429 retry budget too small for ~16 concurrent publishers (split from #4451)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
-- **#4396**: feat: add -o/--output report file copy to klt drc
 
 ## Approved (Awaiting Merge)
 
@@ -112,12 +109,11 @@ Issues carrying `loom:curated`.
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267) *(curated)*
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck *(curated)*
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s) *(curated)*
-- **#4393**: klt drc: no -o/--output flag to write the report to a file *(curated)*
 - **#4410**: lvs gate-level-verilog + abstract-cell netlist: dangling-output instances still error after #4323 *(curated)*
 - **#4424**: klt lvs: custom-class cap_cmomi/resistor LVS regresses from match to mismatch between daf06a51afaf and 0.8.0 (sg13cmos5l) *(curated)*
-- **#4436**: Friction: place-and-route route stage is one non-resumable process of 2 h or more, with no progress output *(curated)*
-- **#4438**: Friction: klt sim local backend can't load OSDI v0.4 on host ngspice 42, and there's no supported sanity-corner path *(curated)*
 - **#4440**: Friction: klt's OpenROAD steps need Docker, which fleet workers can't use; no fleet executor for OpenROAD regeneration *(curated)*
+- **#4451**: klt sim: batch .lib path check missing from --dry-run, $PDK_ROOT body form silently not loaded; artifact put 429 under light concurrency *(curated)*
+- **#4452**: klt artifact put: 429 retry budget too small for ~16 concurrent publishers (split from #4451) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -142,11 +138,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 3 |
 | Very important | 1 |
 | Important | 1 |
-| Ready (`loom:issue`) | 17 |
-| In Progress (`loom:building`) | 6 |
-| PRs awaiting review | 2 |
+| Ready (`loom:issue`) | 16 |
+| In Progress (`loom:building`) | 5 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 3 |
-| Curated | 43 |
+| Curated | 42 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
