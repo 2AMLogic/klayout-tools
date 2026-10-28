@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-28
 
+- **PR #4455**: fix: widen artifact 429 retry budget and jitter fallback backoff
+- **Issue #4452** (closed): klt artifact put: 429 retry budget too small for ~16 concurrent publishers (split from #4451)
 - **PR #4447**: feat: add operator-approved commands request kind to klt sim
 - **PR #4396**: feat: add -o/--output report file copy to klt drc
 - **Issue #4443** (closed): klt sim: no request kind can run a non-SPICE simulator (e.g. iverilog) on batch/remote backends
