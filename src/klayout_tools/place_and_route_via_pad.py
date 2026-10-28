@@ -32,6 +32,42 @@ def _report(status: str, reason: str | None = None) -> dict[str, Any]:
     }
 
 
+def _wire_region(kdb: Any, top_cell: Any, m1_index: int, via_indices: set[int]) -> Any:
+    """M1 wire = every M1 shape reachable from the top cell except through a
+    ``VIA_*`` cell (router wires, PDN, standard-cell pin/obstruction metal)."""
+    it = top_cell.begin_shapes_rec(m1_index)
+    it.unselect_cells(sorted(via_indices))
+    return kdb.Region(it).merged()
+
+
+def _top_level_placements(top_cell: Any, via: Any) -> list[Any]:
+    """Placements of ``via`` in the top cell; empty when it is also nested in
+    another cell (conservative: the caller then leaves its pads alone)."""
+    if any(p != top_cell.cell_index() for p in via.each_parent_cell()):
+        return []
+    placements: list[Any] = []
+    for inst in top_cell.each_inst():
+        if inst.cell_index == via.cell_index():
+            placements.extend(inst.cell_inst.each_cplx_trans())
+    return placements
+
+
+def _split_pads(
+    kdb: Any, pads: Any, placements: list[Any], wire: Any
+) -> tuple[Any, int]:
+    """Return ``(kept pads, trimmed count)``: a pad is dropped only when wire
+    fully covers it in every placement."""
+    keep = kdb.Region()
+    trimmed = 0
+    for pad in pads.each():
+        single = kdb.Region(pad)
+        if all((single.transformed(t) - wire).is_empty() for t in placements):
+            trimmed += 1
+        else:
+            keep.insert(pad)
+    return keep, trimmed
+
+
 def trim_via_pads(
     kdb: Any,
     *,
@@ -65,36 +101,21 @@ def trim_via_pads(
     ]
     if not via_cells:
         return _report("clean")
-    via_indices = {c.cell_index() for c in via_cells}
-
-    # M1 wire = every M1 shape reachable from the top cell except through a
-    # VIA_* cell (router wires, PDN, standard-cell pin/obstruction metal).
-    it = top_cell.begin_shapes_rec(m1_index)
-    it.unselect_cells(sorted(via_indices))
-    wire = kdb.Region(it).merged()
+    wire = _wire_region(kdb, top_cell, m1_index, {c.cell_index() for c in via_cells})
 
     report = _report("clean")
     for via in via_cells:
         pads = kdb.Region(via.shapes(m1_index)).merged()
         if pads.is_empty():
             continue
-        placements = []
-        nested = any(p not in (top_cell.cell_index(),) for p in via.each_parent_cell())
-        for inst in top_cell.each_inst():
-            if inst.cell_index == via.cell_index():
-                placements.extend(inst.cell_inst.each_cplx_trans())
-        if nested or not placements:
+        placements = _top_level_placements(top_cell, via)
+        if not placements:
             report["pads_left"] += pads.count()
             continue
-        keep = kdb.Region()
-        for pad in pads.each():
-            single = kdb.Region(pad)
-            if all((single.transformed(t) - wire).is_empty() for t in placements):
-                report["pads_trimmed"] += 1
-            else:
-                keep.insert(pad)
-                report["pads_left"] += 1
-        if keep.count() != pads.count():
+        keep, trimmed = _split_pads(kdb, pads, placements, wire)
+        report["pads_trimmed"] += trimmed
+        report["pads_left"] += pads.count() - trimmed
+        if trimmed:
             via.shapes(m1_index).clear()
             via.shapes(m1_index).insert(keep)
             report["cells_touched"] += 1

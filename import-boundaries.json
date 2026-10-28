@@ -421,7 +421,8 @@
         "klayout_tools.place_and_route_request",
         "klayout_tools.place_and_route_resume",
         "klayout_tools.place_and_route_script",
-        "klayout_tools.place_and_route_sta"
+        "klayout_tools.place_and_route_sta",
+        "klayout_tools.place_and_route_via_pad"
       ]
     },
     "power": {
