@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-28
 
+- **PR #4551**: docs: explain klt synthesize external scope and run_id artifact lookup
+- **Issue #4550** (closed): klt synthesize: netlist_path/script_path report scope "external" with path null, so callers cannot locate artifacts
+- **PR #4544**: docs: document erc --rerun exclusions and pin coverage drift
+- **Issue #4542** (closed): klt erc --check --rerun reports drift across klt versions on provenance and inapplicable coverage
 - **PR #4547**: docs: document same-layer via as via-less overlap contact in klt erc
 - **PR #4545**: feat(sim): deck-list --dry-run, --wait-for-capacity and engine_version
 - **PR #4540**: docs(signoff): document item-10 checks[] mint-time gating and ordering
