@@ -2282,7 +2282,12 @@ job id; see "Asynchronous submit and status"); they cannot be combined with
   listed in the unit's `host_resolved`; the executing host expands `$VAR`/`~`
   in them before running the engine). Staged files are followed
   recursively, bounded by the same 64-file / 32 MiB caps as corner
-  staging. A one-token `.lib <section>` … `.endl` *definition* names no
+  staging. A two-token `.lib` whose target names `$PDK_ROOT` literally is
+  refused (the runner does not expand it in a netlist body); write the
+  absolute path under the submitting host's `$PDK_ROOT` and klt rewrites it.
+  `--dry-run` on an off-host backend stages the netlist the same way, so it
+  reports these refusals before any run directory exists. A one-token
+  `.lib <section>` … `.endl` *definition* names no
   file and is left alone; any other `.lib` shape (no arguments, more than
   two, unbalanced quotes) is rejected by name.
 - **Units are isolated.** Each unit runs in its own directory

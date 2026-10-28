@@ -14743,6 +14743,22 @@ def test_run_sim_dry_run_batch_refuses_unresolved_pdk_var(tmp_path, monkeypatch)
     assert excinfo.value.code == "models_lib_pdk_unresolved"
 
 
+def test_run_sim_dry_run_batch_refuses_out_of_pdk_root_netlist_lib(
+    tmp_path, monkeypatch
+):
+    """Issue #4451: the dry-run stages the netlist like a real batch submit."""
+    monkeypatch.delenv(sim.BACKEND_ENV, raising=False)
+    monkeypatch.setenv("PDK_ROOT", str(tmp_path / "pdks"))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "m.lib").write_text("* models\n")
+    request = _dry_run_mc_request(tmp_path)
+    body = tmp_path / "body.spice"
+    body.write_text(f'.lib "{elsewhere / "m.lib"}" tt\n' + body.read_text())
+    with pytest.raises(sim.SimError, match="`.lib` target"):
+        sim.run_sim(str(request), backend="batch", dry_run=True)
+
+
 def test_run_sim_dry_run_refuses_deck_requests(tmp_path):
     request = _write_request(tmp_path, {"decks": [{"name": "a", "deck": "x"}]})
     with pytest.raises(sim.SimError, match="--dry-run"):
