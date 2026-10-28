@@ -85,6 +85,22 @@ def _print_qualification(m: dict) -> None:
         )
 
 
+def _print_negative_control(nc: dict | None) -> None:
+    if nc is None:
+        print("  negative control: none declared")
+    elif nc["verdict"] == "not_applicable":
+        print(f"  negative control: not_applicable -- {nc['reason']}")
+    else:
+        nc_emp = nc["yield"]["empirical"]
+        nc_ci = nc_emp["confidence_interval"]
+        desc = f" ({nc['description']})" if nc.get("description") else ""
+        print(
+            f"  negative control{desc}: {nc['verdict']} -- yield "
+            f"{nc_emp['estimate']:.6f} [{nc_ci['low']:.6f}, {nc_ci['high']:.6f}] "
+            f"vs nominal {nc['nominal_empirical_estimate']:.6f}, N={nc['n']}"
+        )
+
+
 def _print_text(report: dict) -> None:
     print(f"samples: {report['samples']}")
     if report.get("limits"):
@@ -189,20 +205,7 @@ def _print_text(report: dict) -> None:
                 f"(observed +/-{vr_ss['observed_ci_halfwidth']:.6f} vs target "
                 f"+/-{vr_ss['target_ci_halfwidth']})"
             )
-        nc = m.get("negative_control")
-        if nc is None:
-            print("  negative control: none declared")
-        elif nc["verdict"] == "not_applicable":
-            print(f"  negative control: not_applicable -- {nc['reason']}")
-        else:
-            nc_emp = nc["yield"]["empirical"]
-            nc_ci = nc_emp["confidence_interval"]
-            desc = f" ({nc['description']})" if nc.get("description") else ""
-            print(
-                f"  negative control{desc}: {nc['verdict']} -- yield "
-                f"{nc_emp['estimate']:.6f} [{nc_ci['low']:.6f}, {nc_ci['high']:.6f}] "
-                f"vs nominal {nc['nominal_empirical_estimate']:.6f}, N={nc['n']}"
-            )
+        _print_negative_control(m.get("negative_control"))
         check = m.get("analytic_cross_check")
         if check is not None:
             print(
