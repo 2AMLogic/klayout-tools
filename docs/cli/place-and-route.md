@@ -558,6 +558,34 @@ finite numbers `x_offset_um`, `x_pitch_um`, `y_offset_um`, `y_pitch_um`
 (pitches `> 0`, offsets `>= 0`). Layers not listed get no tracks, so list every
 layer routing needs. Omitted, the script is byte-identical to before.
 
+#### ASAP7 RVT example (M4-M7 on the DRC deck's grid)
+
+The packaged ASAP7 deck's `M4.AUX.*` rules assume wire centres sit at a 0 nm
+origin plus a fixed offset per pitch class. For `asap7sc7p5t_rvt`, give M4/M5
+(0.048 um pitch) a 0.012 um offset and M6/M7 (0.064 um pitch) a 0.016 um
+offset, so wire centres land at `48k + 12` nm and `64k + 16` nm and
+minimum-width edges fall on that grid:
+
+```json
+"tracks": [
+  {"layer": "M4", "x_offset_um": 0.012, "x_pitch_um": 0.048,
+   "y_offset_um": 0.012, "y_pitch_um": 0.048},
+  {"layer": "M5", "x_offset_um": 0.012, "x_pitch_um": 0.048,
+   "y_offset_um": 0.012, "y_pitch_um": 0.048},
+  {"layer": "M6", "x_offset_um": 0.016, "x_pitch_um": 0.064,
+   "y_offset_um": 0.016, "y_pitch_um": 0.064},
+  {"layer": "M7", "x_offset_um": 0.016, "x_pitch_um": 0.064,
+   "y_offset_um": 0.016, "y_pitch_um": 0.064}
+]
+```
+
+Remember to also list the lower layers (M1-M3) your routing uses, since
+unlisted layers get no tracks. This is a documented preset, not a default:
+no offsets are applied unless you set `floorplan.tracks`. The offsets come from
+the reporter of issue #4493; the `M4.AUX.1`/`M4.AUX.2` improvement versus
+offset 0 (~9.6k violations each on ~1,000 um^2) has not been re-measured in
+this repo, so check it with `klt drc --engine klayout` on your own block.
+
 ## PDK / LEF / liberty resolution
 
 `request.pdk.cell_library`/`corner` resolve a liberty exactly as `klt
