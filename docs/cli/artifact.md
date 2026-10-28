@@ -140,8 +140,10 @@ run as `broker_rate_limited`, not as an unverified or mismatched entry.
 ### Rate limiting
 
 Every broker call (`put`, `get`, `stat`, so `verify` too) retries HTTP 429 up to
-4 attempts. It sleeps for the broker's `Retry-After` (seconds form) when sent,
-else 1s, 2s, 4s, capped at 30s per sleep and 60s in total. Retries are silent on
+8 attempts. It sleeps for the broker's `Retry-After` (seconds form) when sent,
+else a random time in `[0, 1s]`, `[0, 2s]`, `[0, 4s]`, … (full jitter, so
+concurrent publishers do not retry in lockstep), capped at 30s per sleep and
+180s in total. Retries are silent on
 success and no other status is retried. When they run out the error has
 `code: "broker_rate_limited"` and `details` with `broker_status: 429`,
 `attempts` and, if sent, `retry_after_s`. The exit code stays `1`.

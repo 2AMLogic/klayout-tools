@@ -73,6 +73,7 @@ import http.client
 import json
 import mimetypes
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -111,12 +112,17 @@ _MAX_BROKER_BODY = 1 << 20
 _MAX_ERROR_BODY = 64 << 10
 
 #: A throttled (HTTP 429) broker call is attempted this many times in all.
-RATE_LIMIT_ATTEMPTS = 4
+RATE_LIMIT_ATTEMPTS = 8
 #: Longest single sleep, and the most time spent sleeping across one call.
 RATE_LIMIT_MAX_SLEEP_S = 30.0
-RATE_LIMIT_TOTAL_WAIT_S = 60.0
+RATE_LIMIT_TOTAL_WAIT_S = 180.0
 _RATE_LIMIT_BASE_S = 1.0
 _sleep: Callable[[float], None] = time.sleep
+
+
+def _jitter(cap: float) -> float:
+    return random.uniform(0, cap)
+
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
@@ -204,9 +210,9 @@ class BrokerClient:
         """One broker call; returns the parsed success body or raises.
 
         HTTP 429 is retried (``Retry-After`` seconds when the broker sends
-        them, else exponential backoff) within :data:`RATE_LIMIT_ATTEMPTS` and
-        :data:`RATE_LIMIT_TOTAL_WAIT_S`; exhausted retries raise
-        ``broker_rate_limited``. No other status is retried."""
+        them, else exponential backoff with full jitter) within
+        :data:`RATE_LIMIT_ATTEMPTS` and :data:`RATE_LIMIT_TOTAL_WAIT_S`; exhausted
+        retries raise ``broker_rate_limited``. No other status is retried."""
         waited = 0.0
         attempt = 0
         while True:
@@ -214,9 +220,11 @@ class BrokerClient:
             status, raw, retry_after = self._once(op, body)
             if status != 429:
                 break
-            delay = _RATE_LIMIT_BASE_S * (2 ** (attempt - 1))
             if retry_after is not None:
                 delay = retry_after
+            else:
+                # Full jitter so concurrent clients do not retry in lockstep.
+                delay = _jitter(_RATE_LIMIT_BASE_S * (2 ** (attempt - 1)))
             delay = min(delay, RATE_LIMIT_MAX_SLEEP_S)
             if (
                 attempt >= RATE_LIMIT_ATTEMPTS
