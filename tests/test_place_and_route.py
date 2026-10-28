@@ -5162,7 +5162,7 @@ def test_stubbed_route_with_complete_power_reports_complete_and_no_warnings(
     # fallback (`emitted` is `False` whenever `power is not None`), so the
     # caveat is absent and the complete audit's warnings stay empty.
     assert report["power"]["row_rail"]["emitted"] is False
-    assert report["warnings"] == []
+    assert _non_layer_map_warnings(report) == []
     assert not any("row_rail" in w for w in report["warnings"])
 
 
@@ -5293,7 +5293,7 @@ def test_cli_json_keeps_stdout_clean_and_warns_on_stderr(tmp_path, monkeypatch, 
     assert exit_code == 0
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-    assert len(payload["warnings"]) == 2
+    assert len(_non_layer_map_warnings(payload)) == 2
     stderr_warnings = [
         line.removeprefix("klt place-and-route: warning: ")
         for line in captured.err.splitlines()
@@ -5327,7 +5327,11 @@ def test_cli_text_reports_placed_power_counts_regardless(tmp_path, monkeypatch, 
     assert "  tapcells: 3" in captured.out
     assert "  fillers: 7" in captured.out
     assert "    VPWR: 6 followpin, 4 stripe, 2 via" in captured.out
-    assert captured.err == ""
+    # Only the layer-map caveat (issue #4481) may reach stderr: this fixture
+    # resolves no KLayout layer map, and the power audit is complete.
+    assert all(
+        "KLayout LEF/DEF layer map" in line for line in captured.err.splitlines()
+    )
 
 
 # --------------------------------------------------------------------------- #
