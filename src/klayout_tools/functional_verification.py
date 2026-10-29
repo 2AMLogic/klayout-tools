@@ -198,7 +198,6 @@ support, the marker is gone, and CI now covers 3.10 through 3.14.)
 
 from __future__ import annotations
 
-import hashlib
 import importlib.metadata
 import json
 import multiprocessing
@@ -217,6 +216,7 @@ from typing import Any
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
+from ._provenance import sha256_file
 from ._vendor import mutation_variants as _mutation_variants
 from .env_provenance import find_repo_root, repo_relative_path
 from .functional_verification_initial_state import (
@@ -1602,7 +1602,10 @@ def _check_required_tool(
         }
         return None, missing
     observed = _tool_version_output(resolved, run_env)
-    digest = _file_sha256(resolved)
+    try:
+        digest = sha256_file(resolved)
+    except OSError:
+        digest = None
     tool: dict[str, Any] = {
         "name": name,
         "path": resolved,
@@ -1623,17 +1626,6 @@ def _check_required_tool(
         "reason": "; ".join(problems),
     }
     return tool, unmet
-
-
-def _file_sha256(path: str) -> str | None:
-    digest = hashlib.sha256()
-    try:
-        with open(path, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1 << 20), b""):
-                digest.update(chunk)
-    except OSError:
-        return None
-    return digest.hexdigest()
 
 
 def _tool_version_output(path: str, env: dict[str, str]) -> str | None:

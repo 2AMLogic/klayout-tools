@@ -90,6 +90,8 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ._provenance import sha256_file
+
 #: A ``.include``/``.inc`` directive line -- ngspice's two spellings, target
 #: either quoted or bare. Deliberately the same shape ``pex.py``'s own
 #: ``_INCLUDE_RE`` matches (the directive `klt pex` re-points for its
@@ -405,7 +407,6 @@ def netlist_closure(
     Raises :class:`IncludeStagingError` when the closure cannot be resolved.
     """
     from . import env_provenance
-    from ._provenance import sha256_file
 
     staged = stage_netlist(
         netlist_path,
@@ -798,11 +799,10 @@ def _staged_sha256(staged: StagedFile) -> str:
 
 
 def _file_sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    digest = sha256_file(path)
+    if digest is None:
+        raise FileNotFoundError(path)
+    return digest
 
 
 # --------------------------------------------------------------------------- #
