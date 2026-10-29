@@ -2292,6 +2292,18 @@ result `--list-pdk-pcells` computes below) directly from `klt pdk`, so
 checking whether a PDK's own PyCell library actually *imports* here never
 requires invoking `klt gen` at all.
 
+### gf180mcu 10 V drain-extended devices
+
+`mos_array`/`diff_pair`/`esd_device` draw only symmetric COMP + Poly2 devices.
+The gf180mcu 10 V module's drain-extended (LDMOS) transistors are drawn with
+the PDK's own PCells instead:
+`klt gen --pdk-pcell gf180mcu_klayoutapi/nfet_10v0_asym` (or `pfet_10v0_asym`).
+The result has no ports (`ports: []`, as for every `--pdk-pcell` result), and
+the curated gf180mcu deck neither checks nor recognises it: `klt drc` lists
+`226/0` and `210/0` under `coverage.layers_in_stream_without_rules`, and
+`klt extract` reports the 226/0 marker in `unsupported_devices[]`
+(`kind: "ldmos"`).
+
 ### Phase 1 scope: packages that import with no extra compat layer
 
 A PDK's PyCell package routinely imports third-party modules klt has no

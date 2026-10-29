@@ -3661,6 +3661,15 @@ EXTRACTION_DECK = ExtractionDeck(
             kind="mos_capacitor",
             description="MOS capacitor (MOS_CAP_MK 166/5)",
         ),
+        # Issue #4568: the 10 V module's drain-extended devices
+        # (`nfet_10v0_asym`/`pfet_10v0_asym`) carry `LDMOS_XTOR` (226/0). The
+        # curated deck has no LDMOS extraction class, so without this entry
+        # they vanish from the netlist with a clean `extracted` status.
+        UnsupportedDeviceMarker(
+            marker=(226, 0),  # LDMOS_XTOR
+            kind="ldmos",
+            description="LDMOS drain-extended transistor (LDMOS_XTOR 226/0)",
+        ),
     ),
 )
 
