@@ -4,6 +4,15 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-29
 
+- **PR #4593**: feat(sim): add measurements[].stress for windowed worst node-pair voltage
+- **PR #4589**: fix(extract): stop reporting recognised gf180mcu LDMOS as unsupported
+- **PR #4588**: refactor: share _provenance.sha256_file across five modules
+- **PR #4578**: docs(drc): name SRAM marker 25/0 in sg13cmos5l NW.c/NW.d runset notes
+- **Issue #4592** (closed): klt sim: no built-in per-pair voltage-rating check across a corner grid
+- **Issue #4590** (closed): main CI red: test_extract_gf180mcu_ldmos stable_source_and_drain fails (4 cases)
+- **Issue #4587** (closed): main red: tests/test_extract_gf180mcu_ldmos.py reports ldmos as unsupported_devices
+- **Issue #4586** (closed): Consolidate 6 private file-SHA-256 helpers onto _provenance.sha256_file
+- **Issue #4574** (closed): drc(sg13cmos5l): deck does not apply the PDK runset's SRAM-marker scoping to NW.c/NW.d-family rules
 - **PR #4584**: fix: accept DRC violations beneath an excepted foundry cell
 - **PR #4583**: feat: add stack=2 stacked two-level MiM mode to sky130 cap_array
 - **PR #4579**: fix(extract): bind sub-0.42um sky130 nFETs to special_nfet_01v8
