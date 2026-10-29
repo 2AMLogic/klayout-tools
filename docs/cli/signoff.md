@@ -482,7 +482,7 @@ directory.
 **Attribution limit.** The RDB/external-script engine reports
 `source_cell: null` (`drc.md`), so grading is by per-rule counts; where a
 violation does carry a `source_cell` (curated engine), it must be an excepted
-cell. A clean report grades as before and ignores the list.
+cell or lie beneath one (an excepted cell appears in its `source_path`). A clean report grades as before and ignores the list.
 
 Applied exceptions appear in item 3's `citation.foundry_cell_exceptions`
 (JSON; each with `cell`, `cell_hash`, `rules`, `bare_cell_report`) and as
@@ -2935,7 +2935,7 @@ only `sim` for item 5 and declaring no margin row now grades `unmet`.
 Every list-form item also carries `citations_graded` (per-citation status).
 Without `spec_rows`, several passing citations grade `met` as the union of
 their verdicts. A single string/dict entry with no `spec_rows` renders
-exactly as before. The list form applies to items 5 and 6 (item 6:
+exactly as before. The `spec_rows` list form applies to items 5 and 6 (item 6:
 #2908, below).
 
 Item 4 (LVS clean) also accepts a list (issue #4354): one `klt lvs` report per
@@ -2946,6 +2946,22 @@ non-`lvs` member is `wrong_kind`, and a malformed member or empty list is
 `invalid_evidence`. `spec_rows` has no meaning for LVS and is ignored for
 item 4. The manifest is the record of which cells were cited; `klt signoff`
 does not check they cover the partition.
+
+Item 7 (post-layout verification) accepts a list the same way (issue #4562):
+one `klt pex` report per cell of a hierarchical design (objects or bare
+paths). It grades `met` only if every member is `pass`, of an accepted kind
+for the partition (see "Item 7 is kind-restricted, per block kind") and fresh;
+a failing or stale member makes it `unmet` with that member's reason and
+`detail.failed_citations` naming it, a wrong-kind member is `wrong_kind`, an
+unannotated digital `functional-verification` member is `not_post_layout`, and
+a malformed member or empty list is `invalid_evidence`. `spec_rows` is ignored
+for item 7. The manifest is the record of which cells were cited; `klt
+signoff` does not check they cover the hierarchy. A single string/object
+entry renders exactly as before.
+
+`invalid_evidence` on the list-accepting items (4, 5, 6, 7) carries a
+`detail.problem` string naming the cause, e.g. `member 2 is not a string or
+an object with 'file'/'command'`.
 
 #### Partition-qualified `spec_rows` keys (issue #3768)
 
@@ -3013,18 +3029,19 @@ and `partial_coverage` is an existing reason.
 #### Item 6's evidence needs a from-source toolchain (issue #2466)
 
 Item 6 accepts only a `yield` envelope, and `klt yield` requires the
-`klt_yield_native` Rust extension — published as the prebuilt
-`klt-yield-native` wheel (Linux x86_64, macOS arm64) and reached by
-`pip install 'klayout-tools[yield]'`. A bare `pip install klayout-tools`
-and the git-pinned (`@git+…`) form do not include it, and a release that
-predates the first `klt-yield-native` publication (or another platform)
-needs a full repo checkout with a Rust toolchain (see
+`klt_yield_native` Rust extension. Today that means a full repo checkout
+with a Rust toolchain: the prebuilt `klt-yield-native` wheel behind
+`pip install 'klayout-tools[yield]'` is not yet on PyPI, so the extra does
+not resolve for any release to date (0.6.0 and 0.7.0 included) and will only
+resolve for releases published after the wheel is. A bare
+`pip install klayout-tools` and the git-pinned (`@git+…`) form do not
+include it either (see
 [`yield.md`](yield.md)'s "What the extra does and does not reach"
 callout for the full statement and the build steps). Every *other* T1
 item's evidence verb — `drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
 `functional-verification`, `erc`, `place-and-route` — is reachable from a
 published release, so item 6 is the one row that additionally needs the
-`[yield]` extra (or a from-source build) to produce evidence for, or to
+from-source build (the `[yield]` extra once published) to produce evidence for, or to
 re-derive an already-committed report for, from a pinned release. Worth knowing *before* planning a T1
 campaign around it.
 

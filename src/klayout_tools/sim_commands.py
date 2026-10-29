@@ -31,7 +31,6 @@ Trust model (the one :mod:`klayout_tools.signoff_generator_batch` settled for
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -237,11 +236,10 @@ def resolve_approvals(approvals_path: str | None) -> tuple[CommandApproval, ...]
 
 
 def _sha256_file(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    digest = _provenance.sha256_file(path)
+    if digest is None:
+        raise FileNotFoundError(path)
+    return "sha256:" + digest
 
 
 def _match_step(

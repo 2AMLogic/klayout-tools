@@ -14,6 +14,21 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --deck gf180mcu` extracts the drain-extended LDMOS devices**
+  (issue #4570, documented in [`docs/cli/extract.md`](docs/cli/extract.md)):
+  `nfet_10v0_asym` (`MVSD` 210/0 + `LDMOS_XTOR` 226/0) and `pfet_10v0_asym`
+  (`MVPSD` 11/39 in `DNWELL`) were silently absent from the netlist; they now
+  extract as `nfet`/`pfet` with distinct, marker-oriented source/drain and bind
+  their own models under `--pdk`. Additive: `MOSFlavour` gains optional
+  `drain_marker`/`pfet_only`/`body` fields; existing 3.3 V/5 V/6 V results are
+  unchanged.
+- **`klt gen cap_array` `connect: "parallel"`** (issue #3022): new `connect`
+  (`"independent"` default, output unchanged) and `top_via_pitch_um` params draw
+  one shared bottom plate under all units, a via grid over each top plate and a
+  strap, reported as two ports (`C_BOT`/`C_TOP`), `device_count: 1` and a new
+  optional top-level `expected` object (`capacitance_f`, ...). sky130 only;
+  other families and unit sides outside 2-30 um are rejected. Additive; no
+  `schema_version` bump.
 - **`klt drc` gains `-o/--output PATH`** (issue #4393, documented in
   [`docs/cli/drc.md`](docs/cli/drc.md)): an additive file copy of the report
   envelope, byte-identical to `--format json` stdout and written for clean and
@@ -976,6 +991,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   nets. Reports a proven `lower_bound_um`/`measured_max_distance_um` bracket;
   exits `0` pass, `3` fail, `4` `unsupported` (rule not evaluable, never a
   pass). See `docs/cli/tap-distance.md`.
+
+- **Honest `[yield]` install guidance and a pre-publish guard** (issue #2900,
+  refs): `klayout-tools[yield]` does not resolve for 0.6.0/0.7.0 because
+  `klt-yield-native` was never published. `klt yield`/`yield-sensitivity`
+  `--help`, the README and the yield/signoff/evidence-tier docs now lead with
+  the from-source build as the supported route and state the extra resolves
+  only for releases cut after the wheel is on PyPI. New
+  `scripts/check_native_extras.py`, run by `publish.yml` before `uv publish`,
+  fails a release whose `klt-*-native` extra pin is not published (exit 1
+  unpublished, exit 2 PyPI unreachable). Help/doc text only; no JSON field or
+  `schema_version` changes. The PyPI project, trusted publisher and
+  `klt-yield-native-v0.1.0` tag remain operator steps.
 
 - **Flat post-route SDFs with escaped-divider instance names now annotate**
   (issue #2897, following #1890): `klt functional-verification

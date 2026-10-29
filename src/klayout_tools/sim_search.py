@@ -75,6 +75,7 @@ _FORMS = (
     "crossings",
     "cycle_mean",
     "energy",
+    "stress",
     "noise",
     "transfer",
     "tian",

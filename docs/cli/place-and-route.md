@@ -169,7 +169,7 @@ wrapper falls back to `klt pdk find --format json | jq -r .root` so the
 mount always matches whatever root `klt place-and-route` itself resolves,
 rather than mounting nothing (issue #1868 — see the "Gotcha" note above).
 It fetches a full open_pdks-layout sky130A PDK via the pinned
-`volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b`
+`ciel enable --pdk-family sky130 -l sky130_fd_pr -l sky130_fd_sc_hd f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`
 (matching `scripts/aws/build-remote-sim-ami.sh`'s own pin) — the full
 LEF/tech-LEF/liberty tree this command's PDK resolution needs, not the
 liberty-only subset `.github/workflows/ci.yml`'s `test` job already caches

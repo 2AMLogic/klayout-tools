@@ -4,6 +4,41 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-29
 
+- **PR #4593**: feat(sim): add measurements[].stress for windowed worst node-pair voltage
+- **PR #4589**: fix(extract): stop reporting recognised gf180mcu LDMOS as unsupported
+- **PR #4588**: refactor: share _provenance.sha256_file across five modules
+- **PR #4578**: docs(drc): name SRAM marker 25/0 in sg13cmos5l NW.c/NW.d runset notes
+- **Issue #4592** (closed): klt sim: no built-in per-pair voltage-rating check across a corner grid
+- **Issue #4590** (closed): main CI red: test_extract_gf180mcu_ldmos stable_source_and_drain fails (4 cases)
+- **Issue #4587** (closed): main red: tests/test_extract_gf180mcu_ldmos.py reports ldmos as unsupported_devices
+- **Issue #4586** (closed): Consolidate 6 private file-SHA-256 helpers onto _provenance.sha256_file
+- **Issue #4574** (closed): drc(sg13cmos5l): deck does not apply the PDK runset's SRAM-marker scoping to NW.c/NW.d-family rules
+- **PR #4584**: fix: accept DRC violations beneath an excepted foundry cell
+- **PR #4583**: feat: add stack=2 stacked two-level MiM mode to sky130 cap_array
+- **PR #4579**: fix(extract): bind sub-0.42um sky130 nFETs to special_nfet_01v8
+- **PR #4577**: feat(extract): extract gf180mcu drain-extended LDMOS devices
+- **PR #4576**: feat(drc): add gf180mcu 10V LDMOS layers and exact MDN/MDP rules, disclose the rest
+- **PR #4573**: fix(extract): bind LEF-merged substrate pins to the substrate net without probing
+- **PR #4572**: feat(extract): report gf180mcu LDMOS_XTOR (226/0) as an unsupported device
+- **Issue #4582** (closed): signoff foundry-cell exceptions lapse for violations in sub-cells of the excepted cell
+- **Issue #4575** (closed): extract --pdk: MOS cards narrower than the scalable model's smallest bin are written with a subckt that has no bin
+- **Issue #4571** (closed): extract --abstract-cells: LEF substrate pin binds to an arbitrary signal net via box-centre probe
+- **Issue #4570** (closed): extract: gf180mcu deck does not recognise nfet_10v0_asym / pfet_10v0_asym LDMOS devices
+- **Issue #4569** (closed): drc: curated gf180mcu deck has no rules for the 10 V LDMOS module (ldnmos/ldpmos)
+- **Issue #4568** (closed): gen: no generator for gf180mcu drain-extended 10 V (LDMOS) devices; PDK pcell library not loaded
+- **Issue #3332** (closed): gen cap_array: stacked two-level MiM option (sky130 cap_mim_m3_1 + cap_mim_m3_2)
+- **Issue #3022** (closed): gen cap_array: no parallel-connected multi-unit capacitor and no stacked (two-level) MiM option
+- **PR #3489**: feat: add cap_array connect=parallel mode for one large MiM capacitor
+- **Issue #3625** (closed): klt sim: engine_version pin is silently ignored on deck-list (decks) requests
+- **PR #3643**: fix: enforce engine_version pin on deck-list sim requests
+- **Issue #3055** (closed): klt sim: no way to center a DC sweep window on a value measured in the same corner, and no ungraded named vector intermediates in measurements[].expr
+- **PR #3335**: feat(sim): derive step sweep windows from earlier results; add unreported intermediates
+- **Issue #4562** (closed): signoff: item 7 accepts only one pex citation; hierarchical designs verified per cell cannot cite all reports
+- **PR #4563**: feat(signoff): accept a list of klt pex reports for item 7
+- **Issue #4559** (closed): place-and-route: enable post_route_spef/post_route_sdf for asap7sc7p5t_rvt (part of #4557)
+- **PR #4564**: feat(place-and-route): support post_route_spef/sdf for ASAP7 FinFET extraction
+- **Issue #4558** (closed): extract: ASAP7 first-order parasitics deck and FinFET --parasitics (part of #4557)
+- **PR #4561**: feat: support --parasitics for the ASAP7 FinFET extraction deck
 - **PR #4556**: feat(pex): carry measurement-document message into delta error rows
 - **Issue #4555** (closed): klt pex --measure-command: let a measurement carry a diagnostic message that surfaces on its errored delta[] row
 - **Issue #4221** (closed): signoff --attest: support T1 item 2 (Layout) anchored generic envelope

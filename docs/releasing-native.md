@@ -46,6 +46,18 @@ fails with "no matching distribution" (a bare install is unaffected).
 Until the first `klt-yield-native` tag has been published, the `[yield]` extra
 resolves to nothing on PyPI and the from-source path remains the only one.
 
+**Guard (issue #2900).** `publish.yml` runs `scripts/check_native_extras.py`
+before `uv publish`: every `klt-*-native` pin in `pyproject.toml`'s extras must
+resolve at `https://pypi.org/pypi/<pkg>/<version>/json`, otherwise the release
+fails (exit 1 for an unpublished pin, exit 2 when PyPI cannot be queried).
+
+**Ordering miss on record.** v0.6.0 and v0.7.0 shipped the `[yield]` extra
+pinning `klt-yield-native>=0.1.0,<0.2` before that package was ever published
+(the one-time setup above and the `klt-yield-native-v0.1.0` tag were never
+done), so `pip install 'klayout-tools[yield]'` is unresolvable for both. It
+becomes resolvable only for a klayout-tools release cut after the first native
+publication.
+
 ## From-source development is unchanged
 
 `[tool.uv.sources]` still maps `klt-yield-native` to `native/yield`, and the

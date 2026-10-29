@@ -5165,7 +5165,15 @@ def test_cap_array_hidden_geometry_params_are_not_request_facing():
     report = list_generators()
     cap_array = next(g for g in report["generators"] if g["name"] == "cap_array")
     param_names = {p["name"] for p in cap_array["params"]}
-    assert param_names == {"plate_w_um", "plate_h_um", "spacing_um", "num"}
+    assert param_names == {
+        "plate_w_um",
+        "plate_h_um",
+        "spacing_um",
+        "num",
+        "connect",
+        "top_via_pitch_um",
+        "stack",
+    }
 
 
 def test_cap_array_extracts_as_capacitor_device(tmp_path, pdk_root):
@@ -5205,6 +5213,185 @@ def test_cap_array_drc_clean_on_sky130(tmp_path, pdk_root):
     report = run_drc(str(gds_path), "sky130")
 
     assert report["status"] == "clean", report["violations"]
+
+
+def _gen_parallel_cap(tmp_path, pdk_root, **params):
+    gds_path = tmp_path / "cap_parallel.gds"
+    report = generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"connect": "parallel", **params},
+            "options": {"output": str(gds_path)},
+        }
+    )
+    return gds_path, report
+
+
+def test_cap_array_parallel_reports_two_ports_one_device(tmp_path, pdk_root):
+    _, report = _gen_parallel_cap(tmp_path, pdk_root, num=3)
+    assert report["device_count"] == 1
+    assert [p["name"] for p in report["ports"]] == ["C_BOT", "C_TOP"]
+    assert report["drc_hints"]["matched_group_id"] == "cap_array:3"
+
+
+def test_cap_array_parallel_reports_expected_capacitance(tmp_path, pdk_root):
+    _, report = _gen_parallel_cap(tmp_path, pdk_root, num=3, plate_w_um=5, plate_h_um=4)
+    unit = 2.0e-15 * 5 * 4 + 1.9e-16 * 2 * (5 + 4)
+    assert report["expected"]["unit_capacitance_f"] == pytest.approx(unit)
+    assert report["expected"]["capacitance_f"] == pytest.approx(3 * unit)
+
+
+@pytest.mark.parametrize("num,w,h", [(1, 5.0, 5.0), (3, 2.0, 2.0), (2, 30.0, 30.0)])
+def test_cap_array_parallel_drc_clean_and_extracts_expected_c(
+    tmp_path, pdk_root, num, w, h
+):
+    gds_path, report = _gen_parallel_cap(
+        tmp_path, pdk_root, num=num, plate_w_um=w, plate_h_um=h
+    )
+
+    drc = run_drc(str(gds_path), "sky130")
+    assert drc["status"] == "clean", drc["violations"]
+
+    extracted = run_extract(str(gds_path), "sky130")
+    caps = [
+        d for d in extracted["devices"] if d["class"] == "sky130_fd_pr__model__cap_mim"
+    ]
+    # One recognised MiM device per unit top plate, all across the same two
+    # nets (the shared bottom plate and the strapped top plate) -- i.e. `num`
+    # parallel capacitors, which `klt lvs`'s `combine_devices` folds into one.
+    assert len(caps) == num, extracted["devices"]
+    assert len({tuple(sorted(d["nets"].values())) for d in caps}) == 1
+    c_f = sum(d["params"]["c_f"] for d in caps)
+    assert c_f == pytest.approx(report["expected"]["capacitance_f"], rel=0.02)
+
+
+def test_cap_array_parallel_top_via_pitch_sets_via_count(tmp_path, pdk_root):
+    from klayout_tools.gen import _cap_array_layout
+
+    dense = _cap_array_layout(5.0, 5.0, 0.5, 1, connect="parallel")["parallel"]
+    sparse = _cap_array_layout(
+        5.0, 5.0, 0.5, 1, connect="parallel", top_via_pitch_um=1.0
+    )["parallel"]
+    assert sparse["vias_per_unit"] < dense["vias_per_unit"]
+    assert dense["vias_per_unit"] > 1
+
+
+def test_cap_array_default_connect_is_unchanged(tmp_path, pdk_root):
+    from klayout_tools.gen import _cap_array_layout
+
+    assert "parallel" not in _cap_array_layout(5.0, 5.0, 0.5, 3)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"plate_w_um": 1.9},
+        {"plate_h_um": 30.1},
+        {"connect": "series"},
+        {"top_via_pitch_um": 0.1},
+        {"top_via_pitch_um": -1.0},
+    ],
+)
+def test_cap_array_parallel_invalid_params_rejected(tmp_path, pdk_root, params):
+    with pytest.raises(GenError):
+        _gen_parallel_cap(tmp_path, pdk_root, **params)
+
+
+def test_cap_array_pitch_without_parallel_rejected(tmp_path, pdk_root):
+    with pytest.raises(GenError):
+        generate(
+            {
+                "generator": "cap_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"top_via_pitch_um": 1.0},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_cap_array_parallel_rejected_on_unverified_family(tmp_path, both_pdk_root):
+    with pytest.raises(GenError, match="only verified"):
+        generate(
+            {
+                "generator": "cap_array",
+                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "params": {"connect": "parallel"},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def _gen_stacked_cap(tmp_path, pdk_root, **params):
+    return _gen_parallel_cap(tmp_path, pdk_root, stack=2, **params)
+
+
+def test_cap_array_stack_reports_outer_and_middle_ports(tmp_path, pdk_root):
+    _, report = _gen_stacked_cap(tmp_path, pdk_root, num=2)
+    assert [p["name"] for p in report["ports"]] == ["C_OUTER", "C_MID"]
+    assert report["ports"][0]["layer"]["layer"] == 72  # met5
+    assert report["ports"][1]["layer"]["layer"] == 71  # met4
+    assert report["device_count"] == 2
+
+
+@pytest.mark.parametrize("num,w,h", [(1, 5.0, 5.0), (3, 2.0, 2.0), (2, 30.0, 30.0)])
+def test_cap_array_stack_drc_clean_and_extracts_two_levels_on_two_nets(
+    tmp_path, pdk_root, num, w, h
+):
+    gds_path, report = _gen_stacked_cap(
+        tmp_path, pdk_root, num=num, plate_w_um=w, plate_h_um=h
+    )
+
+    drc = run_drc(str(gds_path), "sky130")
+    assert drc["status"] == "clean", drc["violations"]
+
+    devices = run_extract(str(gds_path), "sky130")["devices"]
+    low = [d for d in devices if d["class"] == "sky130_fd_pr__model__cap_mim"]
+    high = [d for d in devices if d["class"] == "sky130_fd_pr__model__cap_mim_m4"]
+    assert len(low) == len(high) == num, devices
+    # Both levels resolve to the same two nets (outer met3+met5, middle met4).
+    assert len({tuple(sorted(d["nets"].values())) for d in low + high}) == 1
+    c_f = sum(d["params"]["c_f"] for d in low + high)
+    assert c_f == pytest.approx(report["expected"]["capacitance_f"], rel=0.02)
+    # ~2x a single level.
+    assert report["expected"]["capacitance_f"] == pytest.approx(
+        2 * report["expected"]["levels"][0]["unit_capacitance_f"] * num, rel=0.01
+    )
+
+
+def test_cap_array_default_stack_is_unchanged(tmp_path, pdk_root):
+    from klayout_tools.gen import _cap_array_layout
+
+    assert "stack" not in _cap_array_layout(5.0, 5.0, 0.5, 2, connect="parallel")
+
+
+def test_cap_array_stack_requires_parallel(tmp_path, pdk_root):
+    with pytest.raises(GenError, match="connect='parallel'"):
+        generate(
+            {
+                "generator": "cap_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"stack": 2},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_cap_array_invalid_stack_rejected(tmp_path, pdk_root):
+    with pytest.raises(GenError, match="stack must be 1 or 2"):
+        _gen_parallel_cap(tmp_path, pdk_root, stack=3)
+
+
+def test_cap_array_stack_rejected_on_other_families(tmp_path, both_pdk_root):
+    with pytest.raises(GenError, match="stack=2 is only supported"):
+        generate(
+            {
+                "generator": "cap_array",
+                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "params": {"connect": "parallel", "stack": 2},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
 
 
 # --- guard_ring --------------------------------------------------------------- #

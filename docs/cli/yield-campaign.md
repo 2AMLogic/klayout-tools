@@ -52,7 +52,7 @@ The command is headless and safe in CI, **except** that — like `klt yield` —
 it requires the `klt_yield_native` Rust extension to be built and importable;
 see [`docs/cli/yield.md`'s "Building the native
 extension"](yield.md#building-the-native-extension) (same crate, same
-`pip install 'klayout-tools[yield]'` extra, same from-source fallback).
+from-source build as the supported route today; the `[yield]` extra does not resolve for any release to date).
 
 ## Campaign spec
 

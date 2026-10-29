@@ -53,6 +53,7 @@ from .gen_layer_params import (
     _DEFAULT_RES_FLAVOR,
     _MAX_METAL_RES_LEVEL,
     _METAL_RES_GEOMETRY_MIN_KEYS,
+    _PDK_CAP_STACK_GEOMETRY_UM,
     _PDK_ROLE_LAYERS,
     CONTACT_GAP_SAFE_UM,
     ESD_FINGER_WIDTH_MAX_UM,
@@ -66,6 +67,7 @@ from .gen_layer_params import (
     UNIT_MIN_W_UM,
     _cap_family_layers,
     _cap_geometry_min_um,
+    _check_cap_stack_supported,
     _contact_gate_extra_offset_um,
     _cut_fixed_size_um,
     _deck_min_width_um,
@@ -1221,6 +1223,27 @@ def _cap_array_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'cap_array': params.spacing_um must be >= 0")
     if params["num"] < 1:
         raise GenError("generator 'cap_array': params.num must be >= 1")
+    from .gen import CONTACT_SIZE_UM
+
+    if params["connect"] not in ("independent", "parallel"):
+        raise GenError(
+            "generator 'cap_array': params.connect must be 'independent' or 'parallel'"
+        )
+    if params["stack"] not in (1, 2):
+        raise GenError("generator 'cap_array': params.stack must be 1 or 2")
+    pitch = params["top_via_pitch_um"]
+    if pitch < 0:
+        raise GenError("generator 'cap_array': params.top_via_pitch_um must be >= 0")
+    if pitch > 0 and params["connect"] != "parallel":
+        raise GenError(
+            "generator 'cap_array': params.top_via_pitch_um only applies to "
+            "connect='parallel'"
+        )
+    if 0 < pitch < 2 * CONTACT_SIZE_UM:
+        raise GenError(
+            "generator 'cap_array': params.top_via_pitch_um must be >= "
+            f"{2 * CONTACT_SIZE_UM} (twice the via side) or 0 for the default"
+        )
 
 
 def _cap_array_describe(
@@ -1235,6 +1258,7 @@ def _cap_array_describe(
 
     family = _pdk_family(pdk_info["variant"])
     layers = _cap_family_layers(family)
+    _check_cap_stack_supported(family, params)
     floors = _cap_geometry_min_um(family)
     top_via_metal_min_w_um = floors["cap_top_via_metal_min_w_um"]
     info = _cap_array_layout(
@@ -1246,6 +1270,10 @@ def _cap_array_describe(
         floors["cap_top_via_min_w_um"],
         floors["cap_bottom_plate_margin_min_um"],
         floors["cap_min_spacing_um"],
+        params["connect"],
+        params["top_via_pitch_um"],
+        params["stack"],
+        _PDK_CAP_STACK_GEOMETRY_UM.get(family),
     )
     unit = info["unit"]
     bottom_pair = layers["cap_bottom_plate"]
@@ -1273,7 +1301,76 @@ def _cap_array_describe(
 
     notes = []
     ports = []
-    for c in info["cells"]:
+    parallel = info.get("parallel")
+    stack = info.get("stack")
+    if stack is not None:
+        # Stacked bank (issue #3332): the outer plates (met3 + met5, tied
+        # outside the footprint) and the shared met4 middle plate.
+        outer_pair = _PDK_ROLE_LAYERS[family]["cap2_top_via_metal"]
+        assert outer_pair is not None  # guaranteed by _check_cap_stack_supported
+        ports.append(
+            {
+                "name": "C_OUTER",
+                "net": None,
+                "layer": {
+                    "layer": outer_pair[0],
+                    "datatype": outer_pair[1],
+                    "name": None,
+                },
+                "x_um": stack["outer_xy"][0],
+                "y_um": stack["outer_xy"][1],
+                "width_um": stack["outer_pad_w_um"],
+                "direction_deg": RING_SIDE_DIRECTIONS["S"],
+            }
+        )
+        ports.append(
+            {
+                "name": "C_MID",
+                "net": None,
+                "layer": top_layer,
+                "x_um": stack["mid_xy"][0],
+                "y_um": stack["mid_xy"][1],
+                "width_um": stack["mid_pad_w_um"],
+                "direction_deg": RING_SIDE_DIRECTIONS["N"],
+            }
+        )
+        notes.append(
+            f"stack=2: {params['num']} unit(s) with the met3/capm and "
+            "met4/capm2 MiM levels over one footprint; the outer plates "
+            "(met3 + met5) are strapped outside the footprint (port C_OUTER) "
+            "and met4 is the shared middle plate (port C_MID)"
+        )
+    elif parallel is not None:
+        # One bank, one device: exactly two terminals (issue #3022).
+        ports.append(
+            {
+                "name": "C_BOT",
+                "net": None,
+                "layer": bottom_layer,
+                "x_um": parallel["bot_xy"][0],
+                "y_um": parallel["bot_xy"][1],
+                "width_um": parallel["total_h_um"],
+                "direction_deg": 180,
+            }
+        )
+        ports.append(
+            {
+                "name": "C_TOP",
+                "net": None,
+                "layer": top_layer,
+                "x_um": parallel["top_escape_xy"][0],
+                "y_um": parallel["top_escape_xy"][1],
+                "width_um": parallel["top_pad_w_um"],
+                "direction_deg": RING_SIDE_DIRECTIONS["N"],
+            }
+        )
+        notes.append(
+            f"connect='parallel': {params['num']} unit(s) share one bottom "
+            f"plate, each top plate carries {parallel['vias_per_unit']} "
+            "top-plate via(s), and all are strapped into one capacitor "
+            "(ports C_BOT/C_TOP)"
+        )
+    for c in [] if parallel is not None else info["cells"]:
         idx = c["idx"]
         bot_xy = unit["bot_xy"]
         ports.append(
@@ -1362,8 +1459,10 @@ def _cap_array_describe(
     # same-layer margin every other generator reports.
     foreign_clearance_um = max(MIN_SAME_LAYER_SPACING_UM, floors["cap_min_spacing_um"])
 
-    return {
-        "device_count": params["num"],
+    described: dict[str, Any] = {
+        "device_count": (
+            2 if stack is not None else 1 if parallel is not None else params["num"]
+        ),
         "ports": ports,
         "drc_hints": {
             "min_spacing_um": effective_spacing_um,
@@ -1377,6 +1476,44 @@ def _cap_array_describe(
             if snapped
             else []
         ),
+    }
+    if parallel is not None:
+        described["expected"] = _cap_parallel_expected(family, params)
+    return described
+
+
+def _cap_parallel_expected(family: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Expected extracted capacitance (issue #3022) of a ``connect='parallel'``
+    bank: ``num x (area_cap * W * H + perim_cap * 2 * (W + H))`` from the
+    family's extraction-deck :class:`~klayout_tools.decks.CapacitorDevice`
+    -- the same two-term law ``klt extract`` applies to each top plate."""
+    from .decks import get_extraction_deck
+
+    caps = get_extraction_deck(family).capacitors
+    cap = caps[0]
+    w, h = params["plate_w_um"], params["plate_h_um"]
+    unit_f = cap.area_cap_f_um2 * w * h + cap.perim_cap_f_um * 2.0 * (w + h)
+    if params["stack"] == 2:
+        # Both MiM levels, each `num` units, between the same two nets.
+        cap2 = caps[1]
+        unit2_f = cap2.area_cap_f_um2 * w * h + cap2.perim_cap_f_um * 2.0 * (w + h)
+        return {
+            "capacitance_f": (unit_f + unit2_f) * params["num"],
+            "unit_capacitance_f": unit_f + unit2_f,
+            "device_class": cap.name,
+            "area_cap_f_um2": cap.area_cap_f_um2,
+            "perim_cap_f_um": cap.perim_cap_f_um,
+            "levels": [
+                {"device_class": c.name, "unit_capacitance_f": u}
+                for c, u in ((cap, unit_f), (cap2, unit2_f))
+            ],
+        }
+    return {
+        "capacitance_f": unit_f * params["num"],
+        "unit_capacitance_f": unit_f,
+        "device_class": cap.name,
+        "area_cap_f_um2": cap.area_cap_f_um2,
+        "perim_cap_f_um": cap.perim_cap_f_um,
     }
 
 

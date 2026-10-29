@@ -430,6 +430,23 @@ class MOSFlavour:
     flavour removes what it claims before the next runs, so a combination
     flavour must be declared *before* any flavour whose ``marker`` it
     refines (or that flavour must list the refining layer in ``not_markers``).
+
+    ``drain_marker``/``pfet_only``/``body`` (issue #4570) express an
+    *asymmetric* device -- gf180mcu's drain-extended LDMOS
+    (``nfet_10v0_asym``/``pfet_10v0_asym``), whose source and drain are
+    distinct terminals. All default to off, leaving every other flavour
+    unchanged:
+
+    - ``drain_marker``: a layer (``mvsd``/``mvpsd``) marking the drain side.
+      The gate is cut back by it, the diffusion it covers becomes the drain
+      terminal (``tD``) and the rest the source terminal (``tS``), so the
+      extracted ``D``/``S`` terminals are stable rather than interchangeable.
+    - ``pfet_only``: the claimed island is a PMOS regardless of ``nwell``
+      (the LDPMOS sits in ``DNWELL`` with no ``Nwell`` over it); the mirror of
+      ``nfet_only``.
+    - ``body``: the layer used as the PMOS body ("W") terminal instead of
+      ``nwell`` (``DNWELL`` for the LDPMOS); it is joined to ``nwell`` so a
+      drawn ``Nwell`` tap ring ties it to its supply.
     """
 
     marker: tuple[int, int]
@@ -440,6 +457,9 @@ class MOSFlavour:
     and_markers: tuple[tuple[int, int], ...] = ()
     not_markers: tuple[tuple[int, int], ...] = ()
     nfet_only: bool = False
+    drain_marker: tuple[int, int] | None = None
+    pfet_only: bool = False
+    body: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)

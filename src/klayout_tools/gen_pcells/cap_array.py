@@ -10,10 +10,148 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+
+def _top_requires_layers(pcell: Any) -> list:
+    """Layer params of every present ``cap_top_requires_<i>`` mask."""
+    from klayout_tools.gen import _MAX_CAP_TOP_PLATE_REQUIRES
+
+    return [
+        getattr(pcell, f"cap_top_requires_{i}_layer")
+        for i in range(_MAX_CAP_TOP_PLATE_REQUIRES)
+        if getattr(pcell, f"cap_top_requires_{i}_present")
+    ]
+
+
+def _clamp_top_via(pcell: Any) -> None:
+    """Issue #2585: clamp every top-plate cut on a fixed-size cut/via layer
+    down to that size (no-op when the family has no such layer)."""
+    from klayout_tools.gen import _clamp_cut_boxes
+
+    if pcell.cap_top_via_present and pcell.cap_top_via_fixed_size_um > 0.0:
+        _clamp_cut_boxes(
+            pcell.cell,
+            pcell.layout.layer(pcell.cap_top_via_layer),
+            pcell.layout.dbu,
+            pcell.cap_top_via_fixed_size_um,
+        )
+
+
+def _produce_parallel(
+    pcell: Any, boxes: dict[str, list], top_requires_layers: list
+) -> None:
+    """``connect='parallel'`` (issue #3022): the shared bottom plate,
+    every unit's top plate (+ requires masks), the top-plate via
+    grids and the strap/escape metal, all in absolute coordinates.
+
+    Module-level (not a PCell method) so it stays out of
+    ``_build_cap_array_pcell``'s cyclomatic-complexity budget."""
+    from klayout_tools.gen import _insert_boxes
+
+    dbu = pcell.layout.dbu
+    cell = pcell.cell
+    _insert_boxes(
+        cell,
+        pcell.layout.layer(pcell.cap_bottom_plate_layer),
+        dbu,
+        boxes["bottom_plate"],
+        0.0,
+        0.0,
+    )
+    plate_layers = [
+        pcell.layout.layer(pcell.cap_top_plate_layer),
+        *(pcell.layout.layer(lp) for lp in top_requires_layers),
+    ]
+    for li in plate_layers:
+        _insert_boxes(cell, li, dbu, boxes["top_plate"], 0.0, 0.0)
+    if pcell.cap_top_via_present:
+        li_via = pcell.layout.layer(pcell.cap_top_via_layer)
+        _insert_boxes(cell, li_via, dbu, boxes["top_via"], 0.0, 0.0)
+        _clamp_top_via(pcell)
+    if pcell.cap_top_via_metal_present:
+        _insert_boxes(
+            cell,
+            pcell.layout.layer(pcell.cap_top_via_metal_layer),
+            dbu,
+            boxes["top_via_metal"],
+            0.0,
+            0.0,
+        )
+
+
+def _produce_stack(
+    pcell: Any, boxes: dict[str, list], top_requires_layers: list
+) -> None:
+    """``stack=2`` (issue #3332): the ``connect='parallel'`` bank plus the
+    second MiM level (capm2 on the met4 middle plate, via4, met5) and the
+    outer-plate strap. Drawn on top of :func:`_produce_parallel`'s layers, so
+    the met3/capm/via3/met4 boxes in ``boxes`` replace its own."""
+    from klayout_tools.gen import _insert_boxes
+
+    _produce_parallel(pcell, boxes, top_requires_layers)
+    dbu = pcell.layout.dbu
+    for layer, key in (
+        (pcell.cap2_top_plate_layer, "cap2_top_plate"),
+        (pcell.cap2_top_via_layer, "cap2_top_via"),
+        (pcell.cap2_top_via_metal_layer, "cap2_top_via_metal"),
+    ):
+        _insert_boxes(pcell.cell, pcell.layout.layer(layer), dbu, boxes[key], 0.0, 0.0)
+
+
+def _produce_bank(pcell: Any, info: dict[str, Any], top_requires_layers: list) -> bool:
+    """Draw the shared-plate bank for ``stack=2`` / ``connect='parallel'``;
+    ``False`` (nothing drawn) for the independent per-unit layout."""
+    if pcell.stack == 2:
+        _produce_stack(pcell, info["stack"]["boxes_um"], top_requires_layers)
+    elif pcell.connect == "parallel":
+        _produce_parallel(pcell, info["parallel"]["boxes_um"], top_requires_layers)
+    else:
+        return False
+    return True
+
+
+def _declare_cap2_params(pcell: Any) -> None:
+    """Declare the hidden second-level (``stack=2``) layer/geometry params
+    (issue #3332) -- module-level to keep ``_build_cap_array_pcell`` inside
+    the complexity budget."""
+    import klayout.db as kdb
+
+    for name, desc in (
+        ("cap2_top_plate_layer", "Second-level MiM top-plate layer"),
+        ("cap2_top_via_layer", "Second-level top-plate via layer"),
+        ("cap2_top_via_metal_layer", "Second-level landing-metal layer"),
+    ):
+        pcell.param(name, pcell.TypeLayer, desc, default=kdb.LayerInfo(0, 0))
+    pcell.param(
+        "cap2_present",
+        pcell.TypeBoolean,
+        "Whether the resolved PDK family has a verified second level",
+        default=False,
+    )
+    for name, desc in (
+        ("cap2_via_side_um", "Second-level via side (um)"),
+        ("cap2_metal_min_w_um", "Second-level landing-metal min width (um)"),
+        (
+            "cap2_metal_via_enclosure_um",
+            "Second-level landing-metal enclosure of its via (um)",
+        ),
+    ):
+        pcell.param(name, pcell.TypeDouble, desc, default=0.0)
+
+
+def _stack_geometry(pcell: Any) -> dict[str, float] | None:
+    """The second level's geometry floors when ``stack=2``, else ``None``."""
+    if pcell.stack != 2:
+        return None
+    return {
+        "cap2_via_side_um": pcell.cap2_via_side_um,
+        "cap2_metal_min_w_um": pcell.cap2_metal_min_w_um,
+        "cap2_metal_via_enclosure_um": pcell.cap2_metal_via_enclosure_um,
+    }
 
 
 def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -31,7 +169,6 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     from klayout_tools.gen import (
         _MAX_CAP_TOP_PLATE_REQUIRES,
         _cap_array_layout,
-        _clamp_cut_boxes,
         _insert_boxes,
     )
 
@@ -65,6 +202,31 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             self.param(
                 "num", self.TypeInt, "Number of matched unit capacitors", default=4
             )
+            p: Any = self
+            self.param(
+                "connect",
+                p.TypeString,
+                "'independent' draws num separate capacitors; 'parallel' "
+                "draws one shared bottom plate with the top plates strapped "
+                "into a single two-terminal capacitor of num x C_unit",
+                default="independent",
+            )
+            self.param(
+                "top_via_pitch_um",
+                p.TypeDouble,
+                "connect='parallel' only: pitch (um) of the top-plate via "
+                "grid over each unit (0 = twice the drawn via side)",
+                default=0.0,
+            )
+            self.param(
+                "stack",
+                p.TypeInt,
+                "1 draws one MiM level; 2 (sky130, needs connect='parallel') "
+                "stacks the met4/capm2 level over the met3/capm one with the "
+                "outer plates strapped (ports C_OUTER/C_MID)",
+                default=1,
+            )
+            _declare_cap2_params(self)
             self.param(
                 "cap_top_plate_layer",
                 self.TypeLayer,
@@ -178,6 +340,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             return f"cap_array(w={self.plate_w_um},h={self.plate_h_um},n={self.num})"
 
         def produce_impl(self) -> None:
+            p: Any = self  # new params aren't in the PCell stubs
             dbu = self.layout.dbu
             li_top = self.layout.layer(self.cap_top_plate_layer)
             li_bottom = self.layout.layer(self.cap_bottom_plate_layer)
@@ -190,6 +353,10 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.cap_top_via_min_w_um,
                 self.cap_bottom_plate_margin_min_um,
                 self.cap_min_spacing_um,
+                p.connect,
+                p.top_via_pitch_um,
+                p.stack,
+                _stack_geometry(p),
             )
             unit_boxes = info["unit"]["boxes_um"]
             # Every extra mask this family's own MiM device class requires
@@ -198,11 +365,9 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # (`_capacitor_plate_regions`) and any shortfall would narrow the
             # recognised plate. Empty on sky130/sg13g2, whose curated decks
             # set no `top_plate_requires`; `CAP_MK`/`MIM_L_MK` on gf180mcu.
-            top_requires_layers = [
-                getattr(self, f"cap_top_requires_{i}_layer")
-                for i in range(_MAX_CAP_TOP_PLATE_REQUIRES)
-                if getattr(self, f"cap_top_requires_{i}_present")
-            ]
+            top_requires_layers = _top_requires_layers(self)
+            if _produce_bank(self, info, top_requires_layers):
+                return
             for c in info["cells"]:
                 _insert_boxes(
                     self.cell,
@@ -252,12 +417,6 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
             # to that size, inside the unchanged generic-budget layout.
-            if self.cap_top_via_present and self.cap_top_via_fixed_size_um > 0.0:
-                _clamp_cut_boxes(
-                    self.cell,
-                    self.layout.layer(self.cap_top_via_layer),
-                    dbu,
-                    self.cap_top_via_fixed_size_um,
-                )
+            _clamp_top_via(self)
 
     return {"cap_array": _CapArrayPCell}

@@ -22,6 +22,7 @@ from . import (
     sim_noise,
     sim_search,
     sim_snm_meas,
+    sim_stress,
     sim_tian,
     sim_transfer_meas,
 )
@@ -151,7 +152,7 @@ def _validate_noise_measurement(
             f"measurement '{name}' declares 'noise' together with "
             "another form (or has no name): declare a 'name' and "
             "exactly one of 'spice', 'expr', 'crossings', 'cycle_mean', "
-            "'energy' or 'noise'"
+            "'energy', 'stress' or 'noise'"
         )
     sim_noise.validate_noise_spec(name, spec["noise"])
     if not _EXPR_MEAS_NAME_RE.match(str(name)):
@@ -257,11 +258,11 @@ def _validate_crossings_form(
 def _validate_rawfile_form(
     name: Any, spec: dict[str, Any], present: dict[str, bool]
 ) -> bool:
-    """Issues #2947, #3033: ``cycle_mean`` and ``energy`` are mutually
-    exclusive with every other form. Validates the one declared (``present``
-    maps each form name to whether ``spec`` declares it) and returns True, or
-    returns False when neither is declared."""
-    for form in ("cycle_mean", "energy"):
+    """Issues #2947, #3033, #4592: ``cycle_mean``, ``energy`` and ``stress``
+    are mutually exclusive with every other form. Validates the one declared
+    (``present`` maps each form name to whether ``spec`` declares it) and
+    returns True, or returns False when none is declared."""
+    for form in ("cycle_mean", "energy", "stress"):
         if not present[form]:
             continue
         others = [other for other, on in present.items() if on and other != form]
@@ -274,8 +275,10 @@ def _validate_rawfile_form(
             )
         if form == "cycle_mean":
             sim_cycle_mean.validate_cycle_mean_spec(name, spec["cycle_mean"])
-        else:
+        elif form == "energy":
             sim_energy.validate_energy_spec(name, spec["energy"])
+        else:
+            sim_stress.validate_stress_spec(name, spec["stress"])
         return True
     return False
 
@@ -290,6 +293,7 @@ def _require_measurement_form(name: Any, has_form: bool) -> None:
             "'crossings' (a threshold-crossing time series), "
             "'cycle_mean' (a mean over whole reference cycles), "
             "'energy' (a source's energy over a transient window), "
+            "'stress' (a node pair's worst |V| over a transient window), "
             "'noise' (a spot/band-integrated noise-spectrum value) or "
             "'transfer' (an AC return-ratio metric), "
             "'tian' (a dual-injection AC stability metric) or "
@@ -323,14 +327,26 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     _validate_optional_flag(name, spec)
     has_cycle_mean = sim_cycle_mean.is_cycle_mean(spec)
     has_energy = sim_energy.is_energy(spec)
+    has_stress = sim_stress.is_stress(spec)
     if sim_noise.is_noise(spec):
         has_other = (
-            has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
+            has_spice
+            or has_expr
+            or has_crossings
+            or has_cycle_mean
+            or has_energy
+            or has_stress
         )
         _validate_noise_measurement(name, spec, has_other)
         return
     _require_measurement_form(
-        name, has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
+        name,
+        has_spice
+        or has_expr
+        or has_crossings
+        or has_cycle_mean
+        or has_energy
+        or has_stress,
     )
     _validate_on_unreached(name, spec, has_spice=has_spice)
     if _validate_rawfile_form(
@@ -342,6 +358,7 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
             "crossings": has_crossings,
             "cycle_mean": has_cycle_mean,
             "energy": has_energy,
+            "stress": has_stress,
         },
     ):
         return

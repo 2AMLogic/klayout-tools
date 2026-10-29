@@ -112,6 +112,7 @@ from . import (
     sim_snm_meas,
     sim_steps,
     sim_stimulus,
+    sim_stress,
     sim_subckt_override,
     sim_supply_waveform,
     sim_tian,
@@ -1651,10 +1652,13 @@ def _resolve_analysis_and_measurements(
                 '"expr": "v(out)"})'
             )
     _validate_no_dependent_meas_cards(measurements_spec)
+    sim_steps.refuse_scalar_intermediate(measurements_spec)
     # Issue #2868: a crossings series is a transient-time quantity.
     sim_crossings.validate_crossings_context(measurements_spec, analysis)
     # Issue #3033: an energy window is a transient-time quantity too.
     sim_energy.validate_energy_context(measurements_spec, analysis)
+    # Issue #4592: likewise a stress window.
+    sim_stress.validate_stress_context(measurements_spec, analysis)
     # Issue #2947: so is a cycle-aligned mean.
     sim_cycle_mean.validate_cycle_mean_context(measurements_spec, analysis)
     # Issue #2923: and a transfer metric is an AC-sweep quantity.
@@ -2816,6 +2820,17 @@ def _dispatch_deck_request(
         budget_s, plot_dir, fail_fast_probe, fail_on_diagnostic
     )
     request_dir = os.path.dirname(os.path.abspath(request_path))
+    # Issue #3625: the `engine_version` pin (issue #3041) applies to decks too
+    # -- they run on ngspice just like corners. Local backends are probed
+    # before anything runs; off-host ones are checked against the report below.
+    engine_version_pin = _validate_engine_version_pin(request)
+    if engine_version_pin is not None and resolved_backend not in _OFFHOST_BACKENDS:
+        _check_local_engine_version_pin(
+            engine_version_pin,
+            resolved_backend,
+            "ngspice",
+            _resolve_ngspice_binary(request.get("options") or {}, request_dir),
+        )
     # Issue #3168: a deck run always writes (and a remote/batch pull replaces)
     # unit trees under its outdir, so it owns that root unconditionally --
     # after the flag checks above, which must fail without locking anything.
@@ -2827,7 +2842,7 @@ def _dispatch_deck_request(
             None,
             persistent=True,
         )
-    return run_deck_request(
+    report = run_deck_request(
         request,
         request_dir=request_dir,
         backend=resolved_backend,
@@ -2838,6 +2853,13 @@ def _dispatch_deck_request(
         attach_job_id=attach_job_id,
         dry_run=dry_run,
     )
+    _check_offhost_engine_version_pin(
+        engine_version_pin,
+        resolved_backend,
+        "ngspice",
+        (report.get("environment") or {}).get("engine_version"),
+    )
+    return report
 
 
 #: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
@@ -3486,6 +3508,7 @@ def _prepare_sim_request(
             sim_crossings.crossings_measurements(measurements_spec)
         ),
         energy_declared=bool(sim_energy.energy_measurements(measurements_spec)),
+        stress_declared=bool(sim_stress.stress_measurements(measurements_spec)),
         cycle_mean_declared=bool(
             sim_cycle_mean.cycle_mean_measurements(measurements_spec)
         ),
@@ -7911,6 +7934,7 @@ def _refuse_xyce_control_block_measurements(
     crossings_declared: bool,
     cycle_mean_declared: bool,
     energy_declared: bool,
+    stress_declared: bool = False,
     transfer_declared: bool = False,
     snm_declared: bool = False,
     search_declared: bool = False,
@@ -7963,6 +7987,16 @@ def _refuse_xyce_control_block_measurements(
             "source current and voltage are dumped by ngspice `let`/`write` "
             "commands inside a `.control` block, and the Xyce deck has none; "
             "use engine 'ngspice'"
+        )
+    if stress_declared:
+        # Issue #4592: the node-pair voltage is dumped by ngspice
+        # `let`/`write` commands in the generated `.control` block -- same
+        # boundary as `energy`.
+        raise SimError(
+            "measurements[].stress is not supported for engine 'xyce': the "
+            "node voltages are dumped by ngspice `let`/`write` commands "
+            "inside a `.control` block, and the Xyce deck has none; use "
+            "engine 'ngspice'"
         )
     if transfer_declared:
         # Issue #2923: same `.control` let/write boundary as `cycle_mean`.
@@ -8088,6 +8122,7 @@ def _enforce_xyce_support_boundary(
     crossings_declared: bool = False,
     cycle_mean_declared: bool = False,
     energy_declared: bool = False,
+    stress_declared: bool = False,
     transfer_declared: bool = False,
     snm_declared: bool = False,
     search_declared: bool = False,
@@ -8158,6 +8193,7 @@ def _enforce_xyce_support_boundary(
         crossings_declared=crossings_declared,
         cycle_mean_declared=cycle_mean_declared,
         energy_declared=energy_declared,
+        stress_declared=stress_declared,
         transfer_declared=transfer_declared,
         snm_declared=snm_declared,
         search_declared=search_declared,
@@ -10054,6 +10090,8 @@ def _run_corner(
     )
     # Issue #3033: same for the energy reduction.
     energy = sim_energy.extract_corner_energy(measurements_spec, corner_dir)
+    # Issue #4592: and for the windowed stress reduction.
+    stress = sim_stress.extract_corner_stress(measurements_spec, corner_dir)
     cycle_means = sim_cycle_mean.extract_corner_cycle_means(
         measurements_spec, corner_dir
     )
@@ -10081,6 +10119,7 @@ def _run_corner(
             save_mode=_effective_save_mode(save_mode, diagnostics),
             crossings=crossings,
             energy=energy,
+            stress=stress,
             cycle_means=cycle_means,
             transfers=transfers,
             snms=snms,
@@ -10428,6 +10467,7 @@ def _corner_measurement_results(
     save_mode: str,
     crossings: dict[int, sim_crossings.CrossingsOutcome] | None = None,
     energy: dict[int, sim_energy.EnergyOutcome] | None = None,
+    stress: dict[int, sim_stress.StressOutcome] | None = None,
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
     snms: dict[int, sim_snm_meas.SnmOutcome] | None = None,
@@ -10489,6 +10529,7 @@ def _corner_measurement_results(
     ] = (
         (sim_crossings.is_crossings, _crossings_measurement_result, crossings),
         (sim_energy.is_energy, _energy_measurement_result, energy),
+        (sim_stress.is_stress, _stress_measurement_result, stress),
         (sim_cycle_mean.is_cycle_mean, _cycle_mean_measurement_result, cycle_means),
         (sim_transfer_meas.is_transfer, _transfer_measurement_result, transfers),
         (sim_tian.is_tian, _tian_measurement_result, tians),
@@ -11209,6 +11250,51 @@ def _energy_measurement_result(
     return result, grading_diagnostics
 
 
+def _stress_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_stress.StressOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``stress`` measurement's response entry (issue #4592).
+
+    ``value`` is the worst ``|v(a) - v(b)|`` in volts over the window -- a
+    plain number, graded through :func:`_grade_measurement_value` like any
+    scalar -- and ``{from, to, peak_time}`` rides the additive ``stress``
+    sibling. A node that did not resolve is an ordinary ``status: "error"``
+    entry with a ``code: "measurement"`` diagnostic and no ``stress`` member."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.error is not None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no stress"
+        )
+        if save_mode == "netlist":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {"severity": "error", "code": "measurement", "message": message}
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(spec, outcome.peak)
+    result = {
+        "name": name,
+        "value": outcome.peak,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "stress": outcome.report(),
+    }
+    return result, grading_diagnostics
+
+
 #: ngspice's own ``.meas`` failure line, e.g.
 #: ``Error: measure  bad  when(WHEN) : Expressions like 0.5*1.62 are not
 #: supported.`` (verified on ngspice-46). Group 1 is the card's (lower-cased)
@@ -11798,6 +11884,7 @@ def _corner_deck_control_lines(
         return lines
     crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)
     energy_lines = sim_energy.control_lines(measurements_spec, corner_dir)
+    stress_lines = sim_stress.control_lines(measurements_spec, corner_dir)
     cycle_mean_lines = sim_cycle_mean.control_lines(measurements_spec, corner_dir)
     transfer_lines = sim_transfer_meas.control_lines(measurements_spec, corner_dir)
     snm_lines = sim_snm_meas.control_lines(measurements_spec, corner_dir)
@@ -11810,6 +11897,7 @@ def _corner_deck_control_lines(
         raw_path is not None
         or crossings_lines
         or energy_lines
+        or stress_lines
         or cycle_mean_lines
         or transfer_lines
         or snm_lines
@@ -11839,6 +11927,7 @@ def _corner_deck_control_lines(
         lines.append(f"print {spec['name']}")
     lines.extend(crossings_lines)
     lines.extend(energy_lines)
+    lines.extend(stress_lines)
     lines.extend(cycle_mean_lines)
     lines.extend(transfer_lines)
     lines.extend(snm_lines)

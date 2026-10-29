@@ -347,6 +347,22 @@ _MOS_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
     },
 }
 
+#: (deck_name, pdk_variant_family) -> {"nfet": (min_width_um, fallback_subckt)}
+#: (issue #4575). The scalable `sky130_fd_pr__nfet_01v8` is a binned model
+#: whose narrowest W bin starts at `wmin = 4.2e-07` (0.42 um) in
+#: `libs.ref/sky130_fd_pr/spice/sky130_fd_pr__nfet_01v8__tt.pm3.spice`
+#: (verified against a fetched sky130A install); ngspice rejects any `W`
+#: below it at parse time. The same file also declares the fixed-geometry
+#: `sky130_fd_pr__special_nfet_01v8` (same `d g s b` ports and `l`/`w`/`as`/
+#: `ad`/`ps`/`pd` params, single bin `wmin = 3.59e-07`, `wmax = 3.61e-07`),
+#: so an nFET narrower than the threshold is bound to it instead. Only
+#: sky130's nfet is curated: its pfet has no analogous gap in the same file.
+_MOS_NARROW_FALLBACK_TABLE: dict[tuple[str, str], dict[str, tuple[float, str]]] = {
+    ("sky130", "sky130"): {
+        "nfet": (0.42, "sky130_fd_pr__special_nfet_01v8"),
+    },
+}
+
 #: The KLayout device-property key `extract.py` sets (`kdb.Device.set_property`)
 #: on a MOS device it extracted from inside a
 #: `~klayout_tools.decks.ExtractionDeck.mos_flavours` marker (issue #1111),
@@ -429,6 +445,16 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
         "06v0": {
             "nfet": "nfet_06v0",
             "pfet": "pfet_06v0",
+        },
+        # Drain-extended LDMOS (issue #4570); the PDK's own `mos_extraction.lvs`
+        # extracts them as `mos4('nfet_10v0_asym')` / `mos4('pfet_10v0_asym')`.
+        "10v0_asym_n": {
+            "nfet": "nfet_10v0_asym",
+            "pfet": "pfet_10v0_asym",
+        },
+        "10v0_asym_p": {
+            "nfet": "nfet_10v0_asym",
+            "pfet": "pfet_10v0_asym",
         },
     },
     ("sg13g2", "sg13g2"): {
@@ -1370,6 +1396,13 @@ class DeviceBinding:
     :data:`_GEOMETRY_STYLE_BY_FAMILY` for the per-family evidence. Defaults to
     the unit-suffix form, which is what every caller got before this field
     existed.
+
+    ``narrow_fallback`` (issue #4575, ``"mos"`` only) is an optional
+    ``(min_width_um, subckt)`` pair: a device whose extracted ``W`` is below
+    ``min_width_um`` (and that carries no flavour override) is written against
+    ``subckt`` instead of :attr:`subckt`, and the delegate records the
+    substitution in its ``substitution_notes``. See
+    :data:`_MOS_NARROW_FALLBACK_TABLE`.
     """
 
     kind: str
@@ -1381,6 +1414,7 @@ class DeviceBinding:
     dropped_params: tuple[str, ...] = field(default_factory=tuple)
     flavour_subckts: dict[str, str] = field(default_factory=dict)
     geometry_style: str = GEOMETRY_STYLE_UNIT_SUFFIX
+    narrow_fallback: tuple[float, str] | None = None
 
 
 #: (deck_name, pdk_variant_family) -> {deck ResistorDevice.name -> subckt name}.
@@ -1693,6 +1727,7 @@ def resolve_device_bindings(
         for flavour, table in mos_flavours.items()
         if "pfet" in table
     }
+    narrow = _MOS_NARROW_FALLBACK_TABLE.get((deck_name, family), {})
     bindings: dict[str, DeviceBinding] = {
         deck.nfet_class: DeviceBinding(
             "mos",
@@ -1700,6 +1735,7 @@ def resolve_device_bindings(
             ("D", "G", "S", "B"),
             flavour_subckts=nfet_flavour_subckts,
             geometry_style=geometry_style,
+            narrow_fallback=narrow.get("nfet"),
         ),
         deck.pfet_class: DeviceBinding(
             "mos",
@@ -1810,6 +1846,40 @@ def _select_bipolar_variant(
     return min(variants, key=lambda entry: abs(entry[0] - emitter_area_um2))[1]
 
 
+def _apply_narrow_fallback(
+    binding: DeviceBinding,
+    subckt: str,
+    name: str,
+    length_um: float,
+    width_um: float,
+    notes: list[str],
+) -> str:
+    """Return the subckt a MOS device is written against (issue #4575).
+
+    ``subckt`` unchanged unless ``binding`` carries a ``narrow_fallback`` and
+    ``subckt`` is the binding's default (no flavour override) and ``width_um``
+    is below the fallback threshold; then the fallback subckt, with one
+    human-readable line appended to ``notes``.
+    """
+    if (
+        binding.kind != "mos"
+        or binding.narrow_fallback is None
+        or subckt != binding.subckt
+    ):
+        return subckt
+    min_width_um, fallback_subckt = binding.narrow_fallback
+    if round(width_um, _PARAM_PRECISION_UM) >= min_width_um:
+        return subckt
+    w_txt = _format_um(width_um, GEOMETRY_STYLE_BARE_UM)
+    l_txt = _format_um(length_um, GEOMETRY_STYLE_BARE_UM)
+    notes.append(
+        f"device {name} (W={w_txt} um, L={l_txt} um) is "
+        f"narrower than {subckt}'s smallest width bin "
+        f"({min_width_um:g} um); bound to {fallback_subckt}"
+    )
+    return fallback_subckt
+
+
 def create_model_binding_delegate(
     bindings: dict[str, DeviceBinding],
     global_nets: Sequence[str] = (),
@@ -1902,6 +1972,10 @@ def create_model_binding_delegate(
             super().__init__()
             self._bindings = mapping
             self._global_nets = list(global_net_names)
+            # One human-readable line per device bound to a narrow-width
+            # fallback subcircuit (issue #4575); `extract.py` surfaces them in
+            # `warnings[]`.
+            self.substitution_notes: list[str] = []
 
         def write_header(self) -> None:
             if self._global_nets:
@@ -2212,6 +2286,10 @@ def create_model_binding_delegate(
             else:
                 length_um = self._device_param(device, "L") or 0.0
                 width_um = self._device_param(device, "W") or 0.0
+
+            subckt = _apply_narrow_fallback(
+                binding, subckt, name, length_um, width_um, self.substitution_notes
+            )
 
             extra_params = ""
             if binding.kind == "mos":

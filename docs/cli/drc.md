@@ -1085,6 +1085,11 @@ comp.not_interacting(v5_xtor).not_interacting(dualgate)`):
   rather than skipping the rule (the `"overlapping"` halves do skip, and
   appear in `coverage.rules_skipped`).
 
+The curated gf180mcu deck has no rules for the 10 V module's LDMOS layers
+(`LDMOS_XTOR` 226/0 and 210/0): a layout using them is not checked there, and
+the layers appear in `coverage.layers_in_stream_without_rules`
+(issue #4568).
+
 Only these two rule pairs are voltage-scoped today. Every other gf180mcu
 rule still encodes the 3.3 V column, which is what
 [`coverage.voltage_domain_warnings`](#coveragevoltage_domain_warnings) now
@@ -1950,6 +1955,24 @@ listed with a reason each in `_EFUSE_UNMODELED_RULES` and reported in
 `coverage.unmodeled_rules`, so a `clean` verdict on a fuse-bearing layout is
 not read as full eFuse coverage.
 
+**10 V drain-extended LDMOS (`MDN.*`/`MDP.*`) rules (issue #4569).**
+`rule_decks/ldnmos.rb` registers 35 rule ids and `ldpmos.rb` 38. The deck now
+draws MVSD (210/0), MVPSD (11/39; `ldpmos.rb` is driven by MVPSD, not MVSD) and
+LDMOS_XTOR (226/0), so a PDK-drawn `nfet_10v0_asym` no longer lists them in
+`layers_in_stream_without_rules`. Only three rules are exact from drawn layers
+and are transcribed, under scopes `MDN`/`MDP`: `MDN.1` (`mvsd.width.1`, 1 um),
+`MDN.14` (`mvsd.separation.dnwell.1`, 6 um; the runset's extra
+`mvsd.not_outside(dnwell)` overlap term is not covered, as for `SB.4`) and
+`MDP.6` (`ldmos_xtor.enclosing.mvpsd.1`, every MVPSD inside LDMOS_XTOR), plus
+`mvsd.ongrid.1`/`mvpsd.ongrid.1`. The other 70 ids run on derived regions
+(`poly_mdn`, `ldnmos_source`, `pcomp_holes`, ...) or are connectivity-aware
+(`conn_space`/`conn_separation`); each is in `UNTRANSCRIBED_RULES` with a reason
+and reported in `coverage.unmodeled_rules`, so a `clean` verdict on an LDMOS
+layout is not read as full coverage. `--engine both` against the native deck
+agrees on `MDN.1` for a sub-1 um MVSD; the native runset aborts on a minimal
+layout once it reaches its connectivity rules (`MDN.2*`), so the remaining
+transcribed rules were not compared.
+
 The conductor *above* a cut is checked as well as the layers below it
 (issue #551). `Contact` previously had `CO.3` (Poly2) and `CO.4` (Comp) —
 both *below* the cut — and nothing above it, so a contact whose Metal1 strap
@@ -1975,7 +1998,8 @@ primitives can't isolate (`comp.space.1`/`comp.space.mv.1`, `poly2.space.1`,
 curated layer set doesn't draw (`comp.width.1`/`comp.space.1` model the
 `Dualgate` half of the PDK's own thin-oxide region but not its `v5_xtor`
 half; `comp.width.mv.1` doesn't exclude the `mvsd`/`mvpsd` LDMOS drain
-markers the official `DF.1a_MV` does), the axis-aligned-envelope
+markers the official `DF.1a_MV` does -- both are drawn layers since issue
+#4569, but a derived layer cannot subtract two markers), the axis-aligned-envelope
 conservatism of a fixed-size bound (`contact.width.1`'s and
 `via1.width.1`-`via4.width.1`'s squares — *both* bounds are enforced as of
 issue #2370, see "Fixed-size rules" above, but the maximum is measured on
@@ -3400,7 +3424,7 @@ On a run with findings:
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
 | `waived_count`, `waived_rule_counts`, `waived`, `unused_waivers` | integer, object\<string, int\>, array\<object\>, array\<object\> | Present only on a `--waivers` run (issue #3483): the markers a reviewed waiver file moved out of `violations`, with their justification; see "Waivers". Absent otherwise, so a default run's report is byte-identical. |
 | `source_cell_rollup` | array\<object\> | Issue #4520. Sorted `{source_cell, rule, count, waived_count}` rows (`source_cell: null` last = unattributed): kept markers in `count`, waived ones in `waived_count`. Present only when some finding has a `source_cell` or on a `--waivers` run; absent for a flat layout, so a default report is unchanged. |
-| `runset_correspondence` | array\<object\> | Issue #4520. For each rule that produced a finding and carries a note (sg13cmos5l `nwell.space.2`, `nwell.enclosing.pactiv*.1`): `{rule, implemented_by_pdk_runset, runset_file, pdk_revision, note}`. `pdk_revision` is the `ihp-sg13cmos5l` commit the deck was read against. The PDK's NWell table (`5_1_nwell.drc`) runs only NW.b, NW.b1, NW.f1, NW.f1.digibnd; NW.c/c1 live in the optional `sg13cmos5l_maximal.drc`. Absent when no noted rule fired. |
+| `runset_correspondence` | array\<object\> | Issue #4520. For each rule that produced a finding and carries a note (sg13cmos5l `nwell.space.2`, `nwell.enclosing.pactiv*.1`, `nwell.space.nactiv.1`; the NW.c/NW.d rules `nwell.enclosing.pactiv.1` and `nwell.space.nactiv.1` note that the runset exempts NWell inside SRAM marker layer 25/0 via `NWell_Nsram`, while NW.c1 does not): `{rule, implemented_by_pdk_runset, runset_file, pdk_revision, note}`. `pdk_revision` is the `ihp-sg13cmos5l` commit the deck was read against. The PDK's NWell table (`5_1_nwell.drc`) runs only NW.b, NW.b1, NW.f1, NW.f1.digibnd; NW.c/c1/d live in the optional `sg13cmos5l_maximal.drc`. Absent when no noted rule fired. |
 | `rule_selection`  | object                   | Present only on a `--rules` run (issue #2768): `{"selectors", "selected", "omitted", "deck_rule_count", "subset"}`, relative to the full registered deck — see "Rule listing and selection" above. Absent otherwise, so a default run's report is unchanged. |
 | `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. A deck hash is stable only per package version; to re-run under a previously pinned deck see [`deck.md`](deck.md#reproducing-a-run-under-a-pinned-deck). A `--waivers` run additionally carries `waivers` (issue #3483): `{"file", "content_hash"}` pinning the waiver file by `sha256:` hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
 
@@ -3466,7 +3490,7 @@ for which skipped rules make a run partial and which do not.
 | `isolation_only_rules`             | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "reason": "isolation_only", "description": string}` — `--engine klayout` with the packaged `asap7.drc` only (issue #4029): boundary-sensitive rules (`FIN.W.2`, `GATE.S.3`, `NSELECT.W.1`, `PSELECT.W.1`, `WELL.W.1`) whose layer is in the stream. `klt drc` judges the top cell in free space, so a shape ending at the cell outline can trip them for a cell built to be abutted; see "Checking abutment-designed cells". Describes the check, not the outcome: listed on `clean` and `violations` runs alike, and purely informational (does not change `status`, violations or the exit code). Sorted by rule id; `[]` for any other deck or a byte-different deck file. Additive. |
 | `marker_blind_layers_in_stream`    | array\<string\> | `"<layer>/<datatype>"` area-marker layers present in the stream that the selected deck declares it does **not** model rule-switching for (issue #3815; sky130: `81/2` `areaid.ce`). The curated deck evaluates every rule uniformly, so the marker changes no result — a `clean` or an identical violation set with and without the marker is not marker-aware evidence. Purely informational: does not change `status`, violations or the exit code. Sorted; `[]` when none is present or the deck declares none. Curated engine only. Additive. Deck-static counterpart: `klt deck rules` `marker_blind_layers`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
-| `unmodeled_rules`                  | array\<string\> | Official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. For sky130 this includes the enclosure refinements and the thick-oxide/marker-layer width and spacing rules (`UNMODELED_RULES` in `decks/sky130.py` is the authoritative list); sg13g2: the `Pad.*` and `LU.*` ids; gf180mcu: `MT30.*`, `MT.2b`/`MT.3`/`MT.4`, `MSLOT.*`, the Metal1–5 wide-metal `M1.2b`–`M5.2b` and narrow-line end-of-line `CO.6a`/`CO.6b`, `V1.3c`–`V4.4c` ids (issue #3968), and the untranscribed `ESD.*`/`GR.*` remainder (issues #3796, #3792). `--engine klayout` with the packaged `asap7.drc`: the ids under "Not implemented" in the ASAP7 deck section; any other deck script gets `[]`. See below. Sorted alphabetically; empty for a deck that declares none. |
+| `unmodeled_rules`                  | array\<string\> | Official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. For sky130 this includes the enclosure refinements and the thick-oxide/marker-layer width and spacing rules (`UNMODELED_RULES` in `decks/sky130.py` is the authoritative list); sg13g2: the `Pad.*` and `LU.*` ids; gf180mcu: `MT30.*`, `MT.2b`/`MT.3`/`MT.4`, `MSLOT.*`, the Metal1–5 wide-metal `M1.2b`–`M5.2b` and narrow-line end-of-line `CO.6a`/`CO.6b`, `V1.3c`–`V4.4c` ids (issue #3968), and the untranscribed `ESD.*`/`GR.*` remainder (issues #3796, #3792) and `MDN.*`/`MDP.*` LDMOS remainder (issue #4569). `--engine klayout` with the packaged `asap7.drc`: the ids under "Not implemented" in the ASAP7 deck section; any other deck script gets `[]`. See below. Sorted alphabetically; empty for a deck that declares none. |
 | `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |
 | `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
 | `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |

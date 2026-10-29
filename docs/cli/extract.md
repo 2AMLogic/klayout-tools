@@ -923,9 +923,10 @@ win on any name present in both; `abstracted_cells[].lef_path` names the LEF
 when at least one pin was merged, `resolution_source` stays
 `in_cell_labels`). This is how a std cell's `VNB` — drawn on a label layer
 the deck does not read — reaches the `.SUBCKT`. A merged pin on a
-`pwell`/`psub` LEF layer that lands on no conductor connects to the deck's
-substrate global net (`vsubs`) instead of an isolated per-instance net, and
-the warning above is not emitted for that cell. No new flag or JSON field.
+`pwell`/`psub` LEF layer connects to the deck's substrate global net
+(`vsubs`) on every instance, without probing for a conductor at its access
+point (issue #4571: a routed signal over the LEF box centre cannot capture
+it), and the warning above is not emitted for that cell. No new flag or JSON field.
 
 Dropping the port only loses *that terminal's* connectivity on *that*
 instance. It must not perturb anything else, and since issue #1911 it does
@@ -2666,6 +2667,20 @@ labels are unaffected either way (every MOS device, flavoured or not, still
 reports the deck's ordinary `"nfet"`/`"pfet"` class; only the *bound SPICE
 model name* differs).
 
+**Drain-extended LDMOS (issue #4570).** gf180mcu also declares two asymmetric
+flavours, claimed ahead of `Dualgate` because the device sits inside it:
+`nfet_10v0_asym` (islands interacting `MVSD` 210/0 and `LDMOS_XTOR` 226/0) and
+`pfet_10v0_asym` (islands interacting `MVPSD` 11/39, `LDMOS_XTOR` and `DNWELL`
+12/0, with no `Nwell` over the device; `DNWELL` is the PMOS body, joined to any
+drawn `Nwell` tie). Like every flavour they report the ordinary `"nfet"`/`"pfet"`
+class and bind `nfet_10v0_asym`/`pfet_10v0_asym` under `--pdk`. Unlike the others
+their source and drain are **not interchangeable**: the drain is the
+marker-covered (`MVSD`/`MVPSD`) side, the gate is cut back by the marker, and
+the source/drain nets (and `AS`/`AD`/`PS`/`PD`) follow that side even in a
+mirrored layout. This is stricter than the PDK's own `gf180mcu.lvs`, whose
+KLayout MOS extractor orders S/D geometrically (`tests/test_lvs_native_extraction_cross_check_gf180mcu.py`
+compares the two on the unmirrored layout, where they agree on L, W and AS/AD/PS/PD).
+
 `sg13g2` declares one such entry too (issue #1231), keyed on its
 `ThickGateOx` (44/0) marker: a transistor drawn inside it binds the real
 thick-oxide `sg13_hv_nmos`/`sg13_hv_pmos` models under `--pdk` instead of
@@ -2752,6 +2767,15 @@ entry (`kind`, `marker`, `count`, `bbox_um`, `description`) plus a prose line in
 `warnings[]`. `status` and the exit code are unchanged, so a caller must check
 the field. A marker component that *was* recognised as a capacitor is not
 reported.
+
+gf180mcu also registers `LDMOS_XTOR` (226/0, issue #4568), the marker on the
+10 V module's drain-extended `nfet_10v0_asym`/`pfet_10v0_asym` devices. The
+curated deck extracts recognised LDMOS devices through its `mos_flavours`
+(issue #4570), so a 226/0 component on a recognised LDMOS island is not
+reported. A 226/0 shape that is not part of a recognised LDMOS (for example a
+bare marker with no gate or drain marker) still yields an
+`unsupported_devices[]` entry with `kind: "ldmos"` (and a `warnings[]` line)
+instead of dropping the device silently.
 
 **What this field does and does not guarantee**: for a marker with no
 `mos_flavours` coverage, it only flags that the bound model name may be
@@ -4709,6 +4733,22 @@ transistor drawn entirely outside either marker is unaffected. Selecting a
 flavour this way never changes `devices[].class` (every flavour reports the
 deck's ordinary `"nfet"`/`"pfet"` class) or `device_counts` — only which real
 subcircuit the `X` card names.
+
+Narrow-width nFET fallback (issue #4575, sky130 only): the scalable
+`sky130_fd_pr__nfet_01v8` is a binned model whose narrowest width bin starts
+at 0.42 µm (`wmin = 4.2e-07` in `sky130_fd_pr__nfet_01v8__tt.pm3.spice`), and
+ngspice rejects a narrower `W` at parse time. An `nfet` whose extracted `W`
+is below 0.42 µm is therefore written against the fixed-geometry
+`sky130_fd_pr__special_nfet_01v8` (same ports and `L`/`W`/`AS`/`AD`/`PS`/`PD`
+parameters; only the model token changes), and each such device adds one
+`warnings[]` entry naming the device, its W/L and the substituted subcircuit.
+A `W` at or above 0.42 µm is unchanged. A device that already carries a
+flavour override (e.g. `hvi`) keeps its flavour subcircuit. The special
+subcircuit has a single bin (`W` ≈ 0.36 µm, `L` ≈ 0.15 µm), so a device that
+narrow with other dimensions still needs a model decision from the caller.
+`--device-model` accepts bipolar classes only, so it cannot name `nfet`; there
+is no override to conflict with this rule. pfet and the other PDKs are
+unchanged.
 
 Resistor note: the binding is **flavour-complete** on gf180mcu — every value
 `--deck-option poly_res=` accepts binds its own real subcircuit

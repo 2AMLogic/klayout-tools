@@ -144,7 +144,11 @@ that cannot be determined or parsed also fails (closed). On `local` and
 `local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
 front. `remote` and `batch` have no pre-submit probe, so the pin is checked
 against the version in the runner's report once the run returns; the job has
-already run by then. Unset, behaviour is unchanged.
+already run by then. Unset, behaviour is unchanged. The pin applies to
+deck-list requests (see "Pre-composed decks") the same way — decks always run
+on `ngspice`, and an off-host runner that reports no `engine_version` fails
+closed — but `unsupported_analysis` does not, as decks have no `analysis`
+block.
 
 **Pinning the PDK revision (`models.pdk_version`, issue #4046).** The
 request's `models` block may carry an optional `models.pdk_version` string,
@@ -4905,6 +4909,87 @@ generates a byte-identical deck.
 - Inside `analysis_steps[]` (exit 1): no per-step energy is implemented.
 - AC/noise/DC analyses; one window per entry.
 
+## Worst voltage stress over a settled window (`measurements[].stress`)
+
+Issue [#4592](https://github.com/2AMLogic/klayout-tools/issues/4592). A device
+rating check needs the worst `|V|` across a node pair *after* the edge-charging
+transient has settled. One `stress` declaration returns it, graded against an
+explicit rating in `limits`:
+
+```json
+{
+  "name": "vstress_md1",
+  "stress": {"a": "d1", "b": "s1", "from": "20n", "to": "90n"},
+  "unit": "V",
+  "limits": {"max": 5.5}
+}
+```
+
+| Key         | Required | Meaning |
+| ----------- | -------- | ------- |
+| `a`         | yes      | Circuit node name (`"d1"`), read as `v(d1)`. |
+| `b`         | no       | Reference node. Default: ground, i.e. `|v(a)|`. |
+| `from`/`to` | no       | Window in seconds, a number or SPICE time literal. Default: the whole transient. Must lie inside the `tran` analysis and `from < to`. |
+
+`stress` is a further measurement form: an entry declares **exactly one** of
+`spice`, `expr`, `crossings`, `cycle_mean`, `energy`, `noise`, `transfer`,
+`tian`, `snm`, `search` or `stress` (two is exit 1). It requires
+`analysis.kind: "tran"`. Unknown keys, a missing `a`, a malformed or inverted
+window, or a window outside `analysis.args` are refused up front (`SimError`,
+exit 1). Optional `unit`, `limits`, `plausible_range` and `k_sigma` apply to
+`value`. Declare one entry per node pair.
+
+### Response
+
+An ordinary `corners[].measurements[]` entry plus one additive member (no
+`schema_version` bump):
+
+```json
+{
+  "name": "vstress_md1",
+  "value": 4.93,
+  "unit": "V",
+  "status": "pass",
+  "margin": 0.57,
+  "stress": {"from": 2e-08, "to": 9e-08, "peak_time": 3.1e-08}
+}
+```
+
+- `value` is the **maximum of `|v(a) - v(b)|` over the window**, in volts, so
+  `limits`, `plausible_range`, per-corner pass/fail, `margin` and Monte Carlo
+  statistics grade it like any scalar. `limits.max` exceeded in a corner
+  gives that measurement and corner `fail` with a negative `margin`.
+- The difference is sampled at the simulator's timepoints and taken piecewise
+  linear between them; the window edges are interpolated, so a window with no
+  interior sample still has a value. Samples outside the window are ignored.
+- A node that does not resolve gives `status: "error"`, `value: null`, no
+  `stress` member and a `code: "measurement"` diagnostic; other measurements
+  are unaffected.
+- The rating is not read from the PDK model card; give it in `limits.max`.
+
+For a whole-run worst case, `measurements[].expr` such as
+`vecmax(abs(v(d)-v(s)))` with `limits` remains an equally valid alternative.
+
+### What `klt sim` generates
+
+After the analysis, each `stress` entry adds
+
+```
+let __klt_vs_<k> = v(<a>) - v(<b>)
+write <corner_dir>/stress_<k>.raw __klt_vs_<k>
+```
+
+to the generated `.control` block, and `klt sim` reduces those small rawfiles
+inside the corner run, so `options.keep_artifacts: false` and `remote`/`batch`
+workers need no waveform artifact. A request without `stress` generates a
+byte-identical deck.
+
+### Not supported
+
+- `engine: "xyce"` (exit 1): the dump is ngspice `.control` commands.
+- Inside `analysis_steps[]` (exit 1): no per-step stress is implemented.
+- AC/noise/DC analyses; one window per entry.
+
 ## Several solves per corner (`analysis_steps[]`)
 
 The scalar `analysis` runs **one** analysis per corner. Many analog figures of
@@ -5063,6 +5148,28 @@ error, exit 1).
     (a dependency chain).
   - A bare step-measurement name without its `<step>.` qualifier is refused
     with a hint.
+- **Derived sweep windows.** A step's `analysis.args` may contain
+  `${<expr>}` placeholders over earlier steps' scalar results, so a second
+  sweep can be centred on a feature a first one located
+  ([#3055](https://github.com/2AMLogic/klayout-tools/issues/3055)):
+  `"args": "VIN ${coarse.edge - 0.5} ${coarse.edge + 0.5} 0.25"`.
+  - Each `<expr>` must reference at least one `<step>.<measurement>` of an
+    **earlier** step; unknown, forward and self references are refused, as is
+    a reference to an `intermediate` (it may be non-scalar).
+  - The deck `let`s each expression into a scalar in the step's fresh plot
+    and the analysis line reads it with `$&`, so the window is computed at
+    full precision inside ngspice. The step's `args` in the report stay the
+    request text.
+  - If a referenced result produced no value in a corner (its step failed, or
+    the expression was not a scalar), the dependent step is reported failed
+    with `derived_input_unavailable` and its results are never graded.
+- **Intermediates.** A step or top-level `expr` measurement with
+  `"intermediate": true` is `let` only: later `expr` entries may use it (by
+  bare name inside the step, `<step>.<name>` elsewhere), but it is not
+  printed, graded, or reported, and does not count toward `limits` coverage.
+  It must be an `expr` and may not declare `limits` or `plausible_range`;
+  it is refused on the scalar `analysis` form. Use it to name a vector stage
+  (a per-segment slope, a mask) instead of repeating the expression.
 - **References** must point backwards. An unknown step, an unknown
   measurement, a forward reference, and a self-reference are each refused,
   as is a step measurement that reads its own or a later step.
@@ -7704,7 +7811,7 @@ the *response* echoes back.
 | `monte_carlo.window_scope` | string          | `"pooled"` (default) or `"per_corner"`: which `mean ± k*stddev` window gates status. `"per_corner"` fails a measurement if any `by_corner[]` window fails and adds `failing_corners` to its `monte_carlo` block; see "Pooled vs. per corner". |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}` (`alter` values are a finite number, or `{"pwl": [t0, v0, ...]}` for a `pwl`-declared source). With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), or `snm` (issue #3895 — `{x, y1, y2}`, a butterfly static noise margin of two voltage-transfer curves, `dc` only; see "Butterfly static noise margin" above), plus optional `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see "Optional measurements" above), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply), and `spec_row` (issue #3778 — non-empty string, the spec row this measurement grades, echoed on the rollup entry only when declared; `klt signoff` item 5 derives a citation's row coverage from it, see `docs/cli/signoff.md` "Derived coverage". Same meaning as `spec_row` in `klt pex` delta rows). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see "Unreached `.meas` targets" below). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), `stress` (issue #4592 — `{a, b?, from?, to?}`, the worst `|v(a)-v(b)|` over a transient window, `tran` only; see "Worst voltage stress over a settled window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), or `snm` (issue #3895 — `{x, y1, y2}`, a butterfly static noise margin of two voltage-transfer curves, `dc` only; see "Butterfly static noise margin" above), plus optional `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see "Optional measurements" above), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply), and `spec_row` (issue #3778 — non-empty string, the spec row this measurement grades, echoed on the rollup entry only when declared; `klt signoff` item 5 derives a citation's row coverage from it, see `docs/cli/signoff.md` "Derived coverage". Same meaning as `spec_row` in `klt pex` delta rows). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see "Unreached `.meas` targets" below). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |

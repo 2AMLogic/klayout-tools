@@ -33,8 +33,11 @@ from typing import Any
 from .gen_layer_tables import (  # noqa: F401
     _CAP_GEOMETRY_MIN_KEYS,
     _PDK_CAP_GEOMETRY_MIN_UM,
+    _PDK_CAP_PARALLEL_UNIT_RANGE_UM,
+    _PDK_CAP_STACK_GEOMETRY_UM,
     _PDK_ROLE_LAYERS,
     CAP_BOTTOM_PLATE_MARGIN_UM,
+    CAP_PARALLEL_VIA_EDGE_INSET_UM,
     CAP_TOP_ESCAPE_CLEARANCE_UM,
     CONTACT_GAP_SAFE_UM,
     ESD_FINGER_WIDTH_MAX_UM,
@@ -2320,6 +2323,50 @@ def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
     }
 
 
+def _check_cap_stack_supported(family: str, params: dict[str, Any]) -> None:
+    """Reject ``stack=2`` on a family it is not verified on, or without
+    ``connect="parallel"`` (issue #3332). A no-op for ``stack=1``."""
+    from .gen import GenError
+
+    if params.get("stack", 1) != 2:
+        return
+    if family not in _PDK_CAP_STACK_GEOMETRY_UM:
+        raise GenError(
+            "generator 'cap_array': params.stack=2 is only supported on "
+            f"{', '.join(sorted(_PDK_CAP_STACK_GEOMETRY_UM))}, not on PDK "
+            f"family '{family}'"
+        )
+    if params.get("connect", "independent") != "parallel":
+        raise GenError(
+            "generator 'cap_array': params.stack=2 requires connect='parallel'"
+        )
+
+
+def _check_cap_parallel_supported(family: str, params: dict[str, Any]) -> None:
+    """Reject ``connect="parallel"`` on a family it is not verified on, or a
+    unit plate side outside that family's characterised range (issue #3022).
+    A no-op for ``connect="independent"``."""
+    from .gen import GenError
+
+    if params.get("connect", "independent") != "parallel":
+        return
+    unit_range = _PDK_CAP_PARALLEL_UNIT_RANGE_UM.get(family)
+    if unit_range is None:
+        raise GenError(
+            "generator 'cap_array': params.connect='parallel' is only verified "
+            f"on {', '.join(sorted(_PDK_CAP_PARALLEL_UNIT_RANGE_UM))}, not on "
+            f"PDK family '{family}'"
+        )
+    lo, hi = unit_range
+    for name in ("plate_w_um", "plate_h_um"):
+        if not lo <= params[name] <= hi:
+            raise GenError(
+                f"generator 'cap_array': params.{name} must be within the "
+                f"{family} MiM characterised unit range {lo}-{hi}um for "
+                f"connect='parallel' (got {params[name]})"
+            )
+
+
 def _cap_array_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2350,6 +2397,8 @@ def _cap_array_layer_params(
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
+    _check_cap_stack_supported(family, params)
+    _check_cap_parallel_supported(family, params)
     layers = _cap_family_layers(family)
     top_via = layers["cap_top_via"]
     top_via_metal = layers["cap_top_via_metal"]
@@ -2370,6 +2419,19 @@ def _cap_array_layer_params(
         "cap_top_via_metal_present": top_via_metal is not None,
         **_cap_geometry_min_um(family),
     }
+    stack_geometry = _PDK_CAP_STACK_GEOMETRY_UM.get(family)
+    for name in ("cap2_top_plate", "cap2_top_via", "cap2_top_via_metal"):
+        pair = _PDK_ROLE_LAYERS[family].get(name)
+        resolved[f"{name}_layer"] = (
+            kdb.LayerInfo(*pair) if pair is not None else kdb.LayerInfo(0, 0)
+        )
+    resolved["cap2_present"] = stack_geometry is not None
+    for key in (
+        "cap2_via_side_um",
+        "cap2_metal_min_w_um",
+        "cap2_metal_via_enclosure_um",
+    ):
+        resolved[key] = (stack_geometry or {}).get(key, 0.0)
     for i in range(_MAX_CAP_TOP_PLATE_REQUIRES):
         pair = top_requires[i] if i < len(top_requires) else None
         resolved[f"cap_top_requires_{i}_layer"] = (

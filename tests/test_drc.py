@@ -10231,7 +10231,11 @@ def test_legacy_enclosing_unchanged_without_opt_in(tmp_path, monkeypatch):
     )
     assert not _synthetic_hits(path)
     gf = get_deck("gf180mcu")
-    assert not any(getattr(r, "require_containment", False) for r in gf)
+    # Only MDP.6 opts in: upstream's `mvpsd.not_inside(ldmos_xtor)` flags an
+    # MVPSD not wholly inside LDMOS_XTOR, which interaction-scoped enclosing
+    # cannot express. Every other gf180mcu rule keeps the legacy semantics.
+    opted_in = {r.id for r in gf if getattr(r, "require_containment", False)}
+    assert opted_in == {"ldmos_xtor.enclosing.mvpsd.1"}
 
 
 @pytest.fixture
@@ -11048,6 +11052,25 @@ def test_runset_correspondence_only_for_firing_rules_with_a_note():
     assert len(notes[0]["pdk_revision"]) == 40
     assert _runset_correspondence(deck, [], []) == []
     assert _runset_correspondence(get_deck("sky130"), fired, []) == []
+
+
+def test_runset_correspondence_names_sram_marker_for_nwell_nsram_rules():
+    from klayout_tools.decks import get_deck
+    from klayout_tools.drc import _runset_correspondence
+
+    deck = get_deck("sg13cmos5l")
+    fired = [
+        {"rule": "nwell.enclosing.pactiv.1"},
+        {"rule": "nwell.space.nactiv.1"},
+        {"rule": "nwell.enclosing.pactiv.hv.1"},
+    ]
+    notes = {n["rule"]: n["note"] for n in _runset_correspondence(deck, fired, [])}
+
+    for rule in ("nwell.enclosing.pactiv.1", "nwell.space.nactiv.1"):
+        assert "25/0" in notes[rule] and "NWell_Nsram" in notes[rule]
+        assert "--disable_extra_rules" in notes[rule]
+    assert "25/0" in notes["nwell.enclosing.pactiv.hv.1"]
+    assert "NWell_Nsram" not in notes["nwell.enclosing.pactiv.hv.1"]
 
 
 def test_without_waivers_report_has_no_waiver_fields(tmp_path):

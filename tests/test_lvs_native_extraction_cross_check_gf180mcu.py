@@ -95,6 +95,7 @@ import klayout.db as kdb
 import pytest
 
 from helpers.extract_klayout_oracle import run_extract_klayout_engine
+from helpers.gf180mcu_ldmos import make_ldmos_layout
 from klayout_tools import pdk
 from klayout_tools.decks.gf180mcu import EXTRACTION_DECK
 from klayout_tools.extract import ExtractError, run_extract
@@ -693,6 +694,45 @@ def test_diode_pd2nw_06v0_native_cross_check_deferred() -> None:
     assert by_name["diode_pd2nw_06v0"].provenance.rule_id == (
         "gf180mcu_fd_pr__diode_pd2nw_06v0"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Drain-extended LDMOS (issue #4570): AGREES. The native deck's
+# `nfet_10v0_asym` / `pfet_10v0_asym` and the compiled deck's `10v0_asym_n/p`
+# flavours agree on L, W and the source/drain-side AS/AD/PS/PD for both
+# orientations. The native deck's own S/D ordering is geometric (KLayout's MOS4
+# extractor ignores the `tS`/`tD` roles), so a mirrored layout comes back with
+# S/D swapped; the compiled deck re-orients drain onto the marker side, so only
+# the unmirrored layout is compared on S/D-sided params.
+# --------------------------------------------------------------------------- #
+
+
+@_SKIP_NO_GF180MCU_LVS_CROSS_CHECK
+@pytest.mark.parametrize(
+    ("kind", "native_class", "compiled_class"),
+    [("n", "nfet_10v0_asym", "nfet"), ("p", "pfet_10v0_asym", "pfet")],
+)
+def test_ldmos_matches_native_deck(
+    tmp_path: Path, kind: str, native_class: str, compiled_class: str
+) -> None:
+    path = _write_gds(make_ldmos_layout(kind), tmp_path / f"ldmos_{kind}.gds")
+
+    compiled = run_extract(path, "gf180mcu", output=str(tmp_path / f"{kind}.spice"))
+    assert compiled["device_counts"] == {compiled_class: 1}
+    cparams = compiled["devices"][0]["params"]
+
+    native = _one_native_device(_run_native(path))
+    assert native["class"].lower() == native_class
+    nparams = native["params"]
+    assert nparams["L"] == pytest.approx(cparams["l_um"])
+    assert nparams["W"] == pytest.approx(cparams["w_um"])
+    for native_key, compiled_key in (
+        ("AS", "as_um2"),
+        ("AD", "ad_um2"),
+        ("PS", "ps_um"),
+        ("PD", "pd_um"),
+    ):
+        assert nparams[native_key] == pytest.approx(cparams[compiled_key])
 
 
 # --------------------------------------------------------------------------- #
