@@ -1892,17 +1892,6 @@ def _substrate_pin_names(
     }
 
 
-def _probe_pin_or_substrate(
-    l2n: kdb.LayoutToNetlist,
-    global_points: list[tuple[kdb.Point, str | None]],
-    probe_layers: list[tuple[str, kdb.Region]],
-    substrate: kdb.Net | None,
-) -> kdb.Net | None:
-    """Probe a pin's net; a LEF-merged substrate pin (``substrate`` given)
-    that lands on no conductor joins the substrate net (issue #3749)."""
-    return _probe_abstract_pin_net(l2n, global_points, probe_layers) or substrate
-
-
 def _substrate_net(top_circuit: kdb.Circuit, deck: ExtractionDeck) -> kdb.Net:
     """The deck's substrate global net in ``top_circuit`` (created if absent)
     -- where a LEF-merged substrate pin connects (issue #3749)."""
@@ -2100,13 +2089,14 @@ def _wire_abstract_cells(
             pins_by_net: dict[str, list[str]] = {}
             for pin_name, points in pins:
                 global_points = [(trans * point, role) for point, role in points]
-                net = _probe_pin_or_substrate(
-                    l2n,
-                    global_points,
-                    probe_layers,
+                # A LEF-merged substrate pin is the cell's body, not a point
+                # on a routed conductor: bind it to the substrate net without
+                # probing, so a signal drawn over the LEF box centre cannot
+                # capture it on some instances only (issue #4571).
+                net = (
                     _substrate_net(top_circuit, deck)
                     if pin_name in substrate_pins
-                    else None,
+                    else _probe_abstract_pin_net(l2n, global_points, probe_layers)
                 )
                 if net is None:
                     net = top_circuit.create_net(f"{instance_name}__{pin_name}")

@@ -1221,6 +1221,25 @@ def _cap_array_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'cap_array': params.spacing_um must be >= 0")
     if params["num"] < 1:
         raise GenError("generator 'cap_array': params.num must be >= 1")
+    from .gen import CONTACT_SIZE_UM
+
+    if params["connect"] not in ("independent", "parallel"):
+        raise GenError(
+            "generator 'cap_array': params.connect must be 'independent' or 'parallel'"
+        )
+    pitch = params["top_via_pitch_um"]
+    if pitch < 0:
+        raise GenError("generator 'cap_array': params.top_via_pitch_um must be >= 0")
+    if pitch > 0 and params["connect"] != "parallel":
+        raise GenError(
+            "generator 'cap_array': params.top_via_pitch_um only applies to "
+            "connect='parallel'"
+        )
+    if 0 < pitch < 2 * CONTACT_SIZE_UM:
+        raise GenError(
+            "generator 'cap_array': params.top_via_pitch_um must be >= "
+            f"{2 * CONTACT_SIZE_UM} (twice the via side) or 0 for the default"
+        )
 
 
 def _cap_array_describe(
@@ -1246,6 +1265,8 @@ def _cap_array_describe(
         floors["cap_top_via_min_w_um"],
         floors["cap_bottom_plate_margin_min_um"],
         floors["cap_min_spacing_um"],
+        params["connect"],
+        params["top_via_pitch_um"],
     )
     unit = info["unit"]
     bottom_pair = layers["cap_bottom_plate"]
@@ -1273,7 +1294,38 @@ def _cap_array_describe(
 
     notes = []
     ports = []
-    for c in info["cells"]:
+    parallel = info.get("parallel")
+    if parallel is not None:
+        # One bank, one device: exactly two terminals (issue #3022).
+        ports.append(
+            {
+                "name": "C_BOT",
+                "net": None,
+                "layer": bottom_layer,
+                "x_um": parallel["bot_xy"][0],
+                "y_um": parallel["bot_xy"][1],
+                "width_um": parallel["total_h_um"],
+                "direction_deg": 180,
+            }
+        )
+        ports.append(
+            {
+                "name": "C_TOP",
+                "net": None,
+                "layer": top_layer,
+                "x_um": parallel["top_escape_xy"][0],
+                "y_um": parallel["top_escape_xy"][1],
+                "width_um": parallel["top_pad_w_um"],
+                "direction_deg": RING_SIDE_DIRECTIONS["N"],
+            }
+        )
+        notes.append(
+            f"connect='parallel': {params['num']} unit(s) share one bottom "
+            f"plate, each top plate carries {parallel['vias_per_unit']} "
+            "top-plate via(s), and all are strapped into one capacitor "
+            "(ports C_BOT/C_TOP)"
+        )
+    for c in [] if parallel is not None else info["cells"]:
         idx = c["idx"]
         bot_xy = unit["bot_xy"]
         ports.append(
@@ -1362,8 +1414,8 @@ def _cap_array_describe(
     # same-layer margin every other generator reports.
     foreign_clearance_um = max(MIN_SAME_LAYER_SPACING_UM, floors["cap_min_spacing_um"])
 
-    return {
-        "device_count": params["num"],
+    described: dict[str, Any] = {
+        "device_count": 1 if parallel is not None else params["num"],
         "ports": ports,
         "drc_hints": {
             "min_spacing_um": effective_spacing_um,
@@ -1377,6 +1429,28 @@ def _cap_array_describe(
             if snapped
             else []
         ),
+    }
+    if parallel is not None:
+        described["expected"] = _cap_parallel_expected(family, params)
+    return described
+
+
+def _cap_parallel_expected(family: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Expected extracted capacitance (issue #3022) of a ``connect='parallel'``
+    bank: ``num x (area_cap * W * H + perim_cap * 2 * (W + H))`` from the
+    family's extraction-deck :class:`~klayout_tools.decks.CapacitorDevice`
+    -- the same two-term law ``klt extract`` applies to each top plate."""
+    from .decks import get_extraction_deck
+
+    cap = get_extraction_deck(family).capacitors[0]
+    w, h = params["plate_w_um"], params["plate_h_um"]
+    unit_f = cap.area_cap_f_um2 * w * h + cap.perim_cap_f_um * 2.0 * (w + h)
+    return {
+        "capacitance_f": unit_f * params["num"],
+        "unit_capacitance_f": unit_f,
+        "device_class": cap.name,
+        "area_cap_f_um2": cap.area_cap_f_um2,
+        "perim_cap_f_um": cap.perim_cap_f_um,
     }
 
 

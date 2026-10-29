@@ -923,9 +923,10 @@ win on any name present in both; `abstracted_cells[].lef_path` names the LEF
 when at least one pin was merged, `resolution_source` stays
 `in_cell_labels`). This is how a std cell's `VNB` — drawn on a label layer
 the deck does not read — reaches the `.SUBCKT`. A merged pin on a
-`pwell`/`psub` LEF layer that lands on no conductor connects to the deck's
-substrate global net (`vsubs`) instead of an isolated per-instance net, and
-the warning above is not emitted for that cell. No new flag or JSON field.
+`pwell`/`psub` LEF layer connects to the deck's substrate global net
+(`vsubs`) on every instance, without probing for a conductor at its access
+point (issue #4571: a routed signal over the LEF box centre cannot capture
+it), and the warning above is not emitted for that cell. No new flag or JSON field.
 
 Dropping the port only loses *that terminal's* connectivity on *that*
 instance. It must not perturb anything else, and since issue #1911 it does

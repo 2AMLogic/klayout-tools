@@ -1342,6 +1342,32 @@ three are the identical drawn geometry, selected at extraction time with
 | `plate_h_um`   | double | `5.0`   | Unit top-plate height (µm). Must be `>= 0.42`. |
 | `spacing_um`   | double | `0.5`   | Spacing between unit capacitors (µm). Must be `>= 0`; below `0.4`um risks violating a target PDK's minimum same-layer spacing rule (flagged via `drc_hints.notes`, not rejected). On a family with its own MiM-capacitor spacing rule (gf180mcu's `mim.space.1`, 1.2µm) a smaller value is widened to that rule instead — see the gf180mcu note above; `drc_hints.min_spacing_um` always reports the spacing actually drawn. This is an **intra-array pitch**: a deliberately wide value (to open a span for other blocks to sit between the units) is not a keep-out radius around the array — `drc_hints.foreign_clearance_um` reports that separately (#2638). |
 | `num`          | int    | `4`     | Number of matched unit capacitors. Must be `>= 1`. |
+| `connect`      | string | `"independent"` | `"independent"` draws `num` separate capacitors (the output described above, unchanged). `"parallel"` draws one capacitor of `num × C_unit` — see below (#3022). |
+| `top_via_pitch_um` | double | `0.0` | `connect: "parallel"` only: pitch (µm) of the top-plate via grid over each unit. `0.0` = twice the drawn via side. A nonzero value must be `>= 0.44`; rejected with `connect: "independent"`. |
+
+#### `connect: "parallel"` — one capacitor from many units (#3022)
+
+Draws a single shared bottom plate under all `num` units, keeps each unit's
+own top plate, puts a grid of top-plate vias (`top_via_pitch_um`) over every
+top plate, and straps them all with one top-plate-metal rectangle that also
+runs a stub north to a landing pad clear of the bottom plate. The report then
+has:
+
+- **two ports**, `C_BOT` (the shared bottom plate's left edge) and `C_TOP`
+  (the escape pad) instead of `C<i>_BOT`/`C<i>_TOP` per unit;
+- `device_count: 1`; `drc_hints.matched_group_id` is still `cap_array:<num>`;
+- an `expected` object: `capacitance_f` = `num × (area_cap · W · H +
+  perim_cap · 2 · (W + H))` from the extraction deck's `CapacitorDevice`
+  (`unit_capacitance_f`, `device_class`, `area_cap_f_um2`, `perim_cap_f_um`
+  alongside). Absent in `"independent"` mode.
+
+Verified on **sky130 only**: `klt drc --deck sky130` reports 0 violations and
+`klt extract` returns `num` `sky130_fd_pr__model__cap_mim` devices (one per top
+plate) all across the same two nets, whose `c_f` sum to `expected.capacitance_f`
+(`klt lvs` with `options.combine_devices` folds them into one). Requests are
+rejected with a `GenError` on any other family, and when `plate_w_um`/
+`plate_h_um` is outside sky130's characterised 2–30 µm unit range. A stacked
+two-level MiM (`capm2`) is not part of this mode (#3332).
 
 ### `guard_ring` (family 3: substrate/well tap ring)
 

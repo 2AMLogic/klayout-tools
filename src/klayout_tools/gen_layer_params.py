@@ -33,8 +33,10 @@ from typing import Any
 from .gen_layer_tables import (  # noqa: F401
     _CAP_GEOMETRY_MIN_KEYS,
     _PDK_CAP_GEOMETRY_MIN_UM,
+    _PDK_CAP_PARALLEL_UNIT_RANGE_UM,
     _PDK_ROLE_LAYERS,
     CAP_BOTTOM_PLATE_MARGIN_UM,
+    CAP_PARALLEL_VIA_EDGE_INSET_UM,
     CAP_TOP_ESCAPE_CLEARANCE_UM,
     CONTACT_GAP_SAFE_UM,
     ESD_FINGER_WIDTH_MAX_UM,
@@ -2320,6 +2322,31 @@ def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
     }
 
 
+def _check_cap_parallel_supported(family: str, params: dict[str, Any]) -> None:
+    """Reject ``connect="parallel"`` on a family it is not verified on, or a
+    unit plate side outside that family's characterised range (issue #3022).
+    A no-op for ``connect="independent"``."""
+    from .gen import GenError
+
+    if params.get("connect", "independent") != "parallel":
+        return
+    unit_range = _PDK_CAP_PARALLEL_UNIT_RANGE_UM.get(family)
+    if unit_range is None:
+        raise GenError(
+            "generator 'cap_array': params.connect='parallel' is only verified "
+            f"on {', '.join(sorted(_PDK_CAP_PARALLEL_UNIT_RANGE_UM))}, not on "
+            f"PDK family '{family}'"
+        )
+    lo, hi = unit_range
+    for name in ("plate_w_um", "plate_h_um"):
+        if not lo <= params[name] <= hi:
+            raise GenError(
+                f"generator 'cap_array': params.{name} must be within the "
+                f"{family} MiM characterised unit range {lo}-{hi}um for "
+                f"connect='parallel' (got {params[name]})"
+            )
+
+
 def _cap_array_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2350,6 +2377,7 @@ def _cap_array_layer_params(
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
+    _check_cap_parallel_supported(family, params)
     layers = _cap_family_layers(family)
     top_via = layers["cap_top_via"]
     top_via_metal = layers["cap_top_via_metal"]

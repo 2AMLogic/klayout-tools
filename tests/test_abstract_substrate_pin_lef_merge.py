@@ -102,3 +102,32 @@ def test_lef_pin_duplicating_a_label_name_keeps_the_label(tmp_path):
     assert subckt.split()[2:].count("Y") == 1
     (entry,) = report["abstracted_cells"]
     assert entry["lef_path"] is None  # nothing was merged
+
+
+def test_routed_conductor_over_lef_substrate_box_does_not_capture_the_pin(tmp_path):
+    """A signal conductor over the LEF ``pwell`` box centre must not steal the
+    substrate pin from one instance (issue #4571)."""
+    import klayout.db as kdb
+
+    layout = _make_abstract_cells_layout()
+    top = layout.cell("TOP")
+    # LEF pwell box (0.210..1.140, 0.105..1.015 um) centre = (675, 560) nm.
+    top.shapes(layout.layer(67, 20)).insert(kdb.Box(575, 460, 775, 660))
+    top.shapes(layout.layer(67, 5)).insert(kdb.Text("SIG", kdb.Trans(675, 560)))
+    path = _write_gds(layout, tmp_path / "over.gds")
+    lef_path = tmp_path / "over.lef"
+    lef_path.write_text(_LEF_WITH_VNB)
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "over.spice"),
+        abstract_cell_patterns=("SC_BUF",),
+        abstract_cell_lef_paths=(str(lef_path),),
+    )
+    spice = Path(report["netlist_path"]).read_text()
+    (subckt,) = [x for x in spice.splitlines() if x.startswith(".SUBCKT SC_BUF")]
+    idx = subckt.split()[2:].index("VNB")
+    x_lines = [x for x in spice.splitlines() if x.startswith("X")]
+    assert len(x_lines) == 2
+    for x_line in x_lines:
+        assert x_line.split()[1 + idx] == "vsubs", x_line
