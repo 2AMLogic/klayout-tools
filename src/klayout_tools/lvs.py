@@ -165,6 +165,7 @@ from .lvs_combine import (
     _combine_devices_safely,
     _correct_combine_parameters,
     _flatten_netlist_safely,
+    _hierarchy_mismatch_warnings,
     _net_for_terminal_or_none,
     _parse_combine_devices,
     _parse_combine_devices_max_attempts,
@@ -418,6 +419,10 @@ CATEGORY_HINTS_REJECTED = "hints.rejected"
 #: structural flatten rather than the netlist's original hierarchy (see
 #: `_flatten_netlist_safely`).
 CATEGORY_TOPOLOGY_FLATTENED = "topology.flattened"
+#: Issue #4548: a flat layout netlist against a still-hierarchical reference
+#: with `options.flatten_reference` unset -- advisory naming that option (see
+#: `_hierarchy_mismatch_warnings`).
+CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH = "topology.hierarchy_mismatch"
 #: Issue #1552: one of `options.combine_devices_per_circuit`'s own glob
 #: patterns matched zero circuits on this side -- most often a typo'd
 #: circuit name, or one written in the request's own source-file case
@@ -1796,6 +1801,11 @@ def run_lvs(
 
     _prune_extra_top_circuits(layout_netlist, layout_circuit)
     _prune_extra_top_circuits(reference_netlist, reference_circuit)
+    flatten_warnings.extend(
+        _hierarchy_mismatch_warnings(
+            layout_netlist, reference_netlist, flatten_reference
+        )
+    )
 
     # Issue #2813: FinFET comparison setup -- reference fingers merged with the
     # extractor's combiner, the opt-in bulk policy applied (and disclosed),
