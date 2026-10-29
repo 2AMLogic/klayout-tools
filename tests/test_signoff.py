@@ -18318,6 +18318,92 @@ def test_item4_partition_qualified_lists_grade_each_partition(tmp_path):
     assert by_partition["digital"] == "unmet"
 
 
+# --- Issue #4562: item 7 accepts a list of per-cell `klt pex` reports -------
+
+
+def _item_7(entry, **manifest_extra):
+    manifest_extra.setdefault("kind", "analog")
+    report = build_tier_report(_manifest(evidence={"7": entry}, **manifest_extra))
+    return next(i for i in report["items"] if i["id"] == 7)
+
+
+def test_item7_list_of_passing_pex_reports_is_met(tmp_path):
+    a = _write(tmp_path, "a.json", PEX_PASS_ENVELOPE)
+    b = _write(tmp_path, "b.json", PEX_PASS_ENVELOPE)
+    item = _item_7([a, {"file": b}])
+    assert item["status"] == "met"
+    assert len(item["citations_graded"]) == 2
+
+
+def test_item7_one_failing_member_is_unmet_and_named(tmp_path):
+    a = _write(tmp_path, "a.json", PEX_PASS_ENVELOPE)
+    b = _write(tmp_path, "b.json", PEX_FAIL_ENVELOPE)
+    item = _item_7([a, b])
+    assert item["status"] == "unmet"
+    assert item["detail"]["failed_citations"] == [str(b)]
+
+
+def test_item7_stale_member_is_unmet(tmp_path):
+    a = _write(tmp_path, "a.json", PEX_PASS_ENVELOPE)
+    b = _write(tmp_path, "b.json", PEX_PASS_ENVELOPE)
+    item = _item_7([a, {"file": b, "content_hash": "0" * 64}])
+    assert item["status"] == "unmet"
+    assert item["detail"]["failed_citations"] == [str(b)]
+
+
+def test_item7_non_pex_member_is_wrong_kind(tmp_path):
+    a = _write(tmp_path, "a.json", PEX_PASS_ENVELOPE)
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    item = _item_7([a, sim])
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+
+
+def test_item7_unannotated_digital_fv_member_is_not_post_layout(tmp_path):
+    a = _write(tmp_path, "a.json", PEX_PASS_ENVELOPE)
+    fv = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+    item = _item_7([a, fv], kind="digital")
+    assert item["status"] == "unmet"
+    assert item["reason"] == "not_post_layout"
+
+
+def test_item7_malformed_member_and_empty_list_carry_a_problem(tmp_path):
+    a = _write(tmp_path, "a.json", PEX_PASS_ENVELOPE)
+    bad = _item_7([a, 42])
+    assert bad["reason"] == "invalid_evidence"
+    assert bad["detail"]["problem"].startswith("member 2 is not a string")
+    empty = _item_7([])
+    assert empty["reason"] == "invalid_evidence"
+    assert "empty" in empty["detail"]["problem"]
+
+
+def test_item7_malformed_single_entry_carries_a_problem():
+    item = _item_7({"pointer": "/x"})
+    assert item["reason"] == "invalid_evidence"
+    assert "problem" in item["detail"]
+
+
+def test_item7_single_entry_renders_as_before(tmp_path):
+    a = _write(tmp_path, "a.json", PEX_PASS_ENVELOPE)
+    item = _item_7(a)
+    assert item["status"] == "met"
+    assert "citations_graded" not in item
+
+
+def test_item7_partition_qualified_list_with_digital_single_entry(tmp_path):
+    a = _write(tmp_path, "a.json", PEX_PASS_ENVELOPE)
+    b = _write(tmp_path, "b.json", PEX_PASS_ENVELOPE)
+    fv = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+    report = build_tier_report(
+        _mixed_signal_manifest(evidence={"7.analog": [a, b], "7.digital": fv})
+    )
+    by_partition = {i["partition"]: i for i in report["items"] if i["id"] == 7}
+    assert by_partition["analog"]["status"] == "met"
+    assert len(by_partition["analog"]["citations_graded"]) == 2
+    assert by_partition["digital"]["status"] == "met"
+    assert "citations_graded" not in by_partition["digital"]
+
+
 def _capture_attest_timeout(monkeypatch, spec):
     from klayout_tools import signoff_attest
 

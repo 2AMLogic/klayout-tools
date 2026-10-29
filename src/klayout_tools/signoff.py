@@ -6962,7 +6962,7 @@ def _build_tier_item(
         if item_id == 5 and partition_kind == "digital"
         else None
     )
-    lvs_report_list = item_id == _LVS_ITEM_ID and isinstance(raw_entry, list)
+    report_list = item_id in _REPORT_LIST_ITEMS and isinstance(raw_entry, list)
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
     elif (
@@ -6980,7 +6980,7 @@ def _build_tier_item(
                 raw_entry["not_applicable"], partition_kind
             )
     elif (
-        lvs_report_list
+        report_list
         or item_id in _ITEMS_ACCEPTING_MULTI_CITATION
         and (
             raw_entry is not None
@@ -7000,11 +7000,12 @@ def _build_tier_item(
         # spec rows they must cover) -- graded per citation, then aggregated.
         # Issue #4354: item 4 may cite one ``klt lvs`` report per cell;
         # ``spec_rows`` has no meaning for LVS, so it is ignored there.
+        # Issue #4562: likewise item 7, one ``klt pex`` report per cell.
         status, reason, citation, failure_detail, extra = _grade_multi_citation(
             raw_entry,
             grade_spec,
-            spec_rows=None if lvs_report_list else spec_rows,
-            spec_rows_invalid=False if lvs_report_list else spec_rows_invalid,
+            spec_rows=None if report_list else spec_rows,
+            spec_rows_invalid=False if report_list else spec_rows_invalid,
             met_envelopes=met_envelopes,
             required_kind_pair=required_kind_pair,
         )
@@ -7012,6 +7013,8 @@ def _build_tier_item(
         spec = _normalize_evidence_entry(raw_entry)
         if spec is None:
             reason = _REASON_INVALID_EVIDENCE
+            if item_id in _REPORT_LIST_ITEMS:
+                failure_detail = {"problem": _entry_problem(raw_entry)}
         else:
             status, reason, citation, failure_detail = grade_spec(spec)
 
@@ -7046,6 +7049,14 @@ _ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5, 6})
 #: an analog partition (issue #4354) -- but never ``spec_rows``, so it is
 #: kept out of :data:`_ITEMS_ACCEPTING_MULTI_CITATION`.
 _LVS_ITEM_ID = 4
+
+#: T1 item 7 (post-layout verification): likewise accepts a list of
+#: ``klt pex`` reports -- one per cell of a hierarchical design (issue
+#: #4562) -- and never ``spec_rows``.
+_POST_LAYOUT_ITEM_ID = 7
+
+#: Items whose list form is a plain per-cell report list (no ``spec_rows``).
+_REPORT_LIST_ITEMS: frozenset[int] = frozenset({_LVS_ITEM_ID, _POST_LAYOUT_ITEM_ID})
 
 #: Issue #3741: the RTL-flow evidence kinds of T1 item 5, digital -- the tier
 #: doc's "multi-corner STA **plus** a bit-exact functional test suite". A
@@ -7192,19 +7203,22 @@ def _grade_multi_citation(
 
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
-    invalid: tuple[str, str | None, None, dict[str, Any], dict[str, Any]] = (
-        "unmet",
-        _REASON_INVALID_EVIDENCE,
-        None,
-        {},
-        {},
-    )
+
+    def invalid(
+        problem: str,
+    ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]]:
+        return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, {}
+
     if spec_rows_invalid:
-        return invalid
+        return invalid("'spec_rows' for this item is malformed")
     # Issue #4190: no evidence entry -> zero members; only ``spec_rows`` grade.
-    members = [] if raw_entry is None else _parse_multi_members(raw_entry)
-    if members is None or not _members_rows_declared(members, spec_rows):
-        return invalid
+    members, problem = (
+        ([], None) if raw_entry is None else _parse_multi_members(raw_entry)
+    )
+    if members is None:
+        return invalid(problem or "malformed evidence entry")
+    if not _members_rows_declared(members, spec_rows):
+        return invalid("a member names a row that is undeclared or a declared gap")
 
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
     failed = [g for g in graded if g[2][0] != "met"]
@@ -7381,19 +7395,38 @@ def _row_margin_lacking_corners(envelope: dict[str, Any] | None, row: str) -> li
     return best or []
 
 
+def _entry_problem(raw: Any) -> str:
+    """Human-readable cause for an evidence entry
+    :func:`_normalize_evidence_entry` rejects (issue #4562)."""
+    if not isinstance(raw, (str, dict)):
+        return "not a string or an object with 'file'/'command'"
+    if isinstance(raw, dict) and not isinstance(raw.get("file"), str):
+        command = raw.get("command")
+        if not (
+            isinstance(command, list)
+            and command
+            and all(isinstance(part, str) for part in command)
+        ):
+            return "object has neither a string 'file' nor a non-empty 'command' list"
+    return "invalid 'pointer' or option field"
+
+
 def _parse_multi_members(
     raw_entry: Any,
-) -> list[tuple[dict[str, Any], list[str] | None]] | None:
+) -> tuple[list[tuple[dict[str, Any], list[str] | None]] | None, str | None]:
     """Normalize each member of a multi-citation entry to ``(spec, rows)``;
-    ``None`` when the entry or any member is malformed."""
-    raw_members = raw_entry if isinstance(raw_entry, list) else [raw_entry]
+    ``(None, <problem>)`` when the entry or any member is malformed (issue
+    #4562: the problem names the cause, 1-based for list members)."""
+    is_list = isinstance(raw_entry, list)
+    raw_members = raw_entry if is_list else [raw_entry]
     if not raw_members:
-        return None
+        return None, "evidence list is empty"
     members: list[tuple[dict[str, Any], list[str] | None]] = []
-    for raw in raw_members:
+    for index, raw in enumerate(raw_members, start=1):
+        where = f"member {index}" if is_list else "entry"
         spec = _normalize_evidence_entry(raw)
         if spec is None:
-            return None
+            return None, f"{where} is {_entry_problem(raw)}"
         rows: list[str] | None = None
         if isinstance(raw, dict) and "rows" in raw:
             rows = raw["rows"]
@@ -7402,9 +7435,9 @@ def _parse_multi_members(
                 or not rows
                 or not all(isinstance(r, str) and r for r in rows)
             ):
-                return None
+                return None, f"{where} 'rows' is not a non-empty list of strings"
         members.append((spec, rows))
-    return members
+    return members, None
 
 
 def _members_rows_declared(
