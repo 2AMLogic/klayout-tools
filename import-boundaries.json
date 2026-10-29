@@ -226,6 +226,7 @@
         "klayout_tools.cli.gen_cmd",
         "klayout_tools.gen",
         "klayout_tools.gen_cap_vpp",
+        "klayout_tools.gen_cap_stack",
         "klayout_tools.gen_describe",
         "klayout_tools.gen_diode",
         "klayout_tools.gen_layer_params",

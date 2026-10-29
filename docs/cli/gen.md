@@ -1328,10 +1328,11 @@ Neither `rows` folding (`res_array`'s own boustrophedon fold, issue #415) nor
 `dummy` padding elements are implemented yet — both are natural `res_array`-
 parity follow-ups, not correctness gaps for a first `cap_array` `num`-only
 generator. There is also no `flavor` param (`res_array`'s own #463) — sky130's
-second MiM stack (`capm2`/`met4`) and sg13g2's RF variant (`rfcmim`) are out
-of this generator's initial scope; every family's drawn output classifies as
-its base flavour (`sky130_fd_pr__model__cap_mim`/`cap_cmim`/
-`cap_mim_2f0_m4m5_noshield`), never the RF/second-stack variant.
+second MiM stack (`capm2`/`met4`) is only drawn by the opt-in `stack: 2` below,
+and sg13g2's RF variant (`rfcmim`) is out of this generator's initial scope;
+otherwise every family's drawn output classifies as its base flavour
+(`sky130_fd_pr__model__cap_mim`/`cap_cmim`/`cap_mim_2f0_m4m5_noshield`), never
+the RF variant.
 gf180mcu's own three MiM *densities* need no `flavor` param at all — all
 three are the identical drawn geometry, selected at extraction time with
 `klt extract --deck-option mim_cap=…` (issue #1151).
@@ -1343,6 +1344,7 @@ three are the identical drawn geometry, selected at extraction time with
 | `spacing_um`   | double | `0.5`   | Spacing between unit capacitors (µm). Must be `>= 0`; below `0.4`um risks violating a target PDK's minimum same-layer spacing rule (flagged via `drc_hints.notes`, not rejected). On a family with its own MiM-capacitor spacing rule (gf180mcu's `mim.space.1`, 1.2µm) a smaller value is widened to that rule instead — see the gf180mcu note above; `drc_hints.min_spacing_um` always reports the spacing actually drawn. This is an **intra-array pitch**: a deliberately wide value (to open a span for other blocks to sit between the units) is not a keep-out radius around the array — `drc_hints.foreign_clearance_um` reports that separately (#2638). |
 | `num`          | int    | `4`     | Number of matched unit capacitors. Must be `>= 1`. |
 | `connect`      | string | `"independent"` | `"independent"` draws `num` separate capacitors (the output described above, unchanged). `"parallel"` draws one capacitor of `num × C_unit` — see below (#3022). |
+| `stack` | int | `1` | `1` draws one MiM level (unchanged). `2` (sky130 only, requires `connect: "parallel"`) stacks the `capm2`/met4 level over the `capm`/met3 one — see below (#3332). Other values and other families are rejected with a `GenError`. |
 | `top_via_pitch_um` | double | `0.0` | `connect: "parallel"` only: pitch (µm) of the top-plate via grid over each unit. `0.0` = twice the drawn via side. A nonzero value must be `>= 0.44`; rejected with `connect: "independent"`. |
 
 #### `connect: "parallel"` — one capacitor from many units (#3022)
@@ -1367,7 +1369,29 @@ plate) all across the same two nets, whose `c_f` sum to `expected.capacitance_f`
 (`klt lvs` with `options.combine_devices` folds them into one). Requests are
 rejected with a `GenError` on any other family, and when `plate_w_um`/
 `plate_h_um` is outside sky130's characterised 2–30 µm unit range. A stacked
-two-level MiM (`capm2`) is not part of this mode (#3332).
+two-level MiM is the separate `stack: 2` option below.
+
+#### `stack: 2` — stacked two-level MiM (#3332)
+
+With `connect: "parallel"`, `stack: 2` draws sky130's two MiM levels over the
+same footprint: met3 / `capm` / met4 / `capm2` / met5. met4 is the shared
+**middle** plate (the `capm` level's via3 landing metal and the `capm2` level's
+bottom plate), so "parallel" means the two **outer** plates (met3 and met5) are
+tied together — by a met3 tab, via3, met4 pad, via4 and met5 pad stacked south
+of the bank, clear of the capacitor footprint — and met4 is the other terminal.
+The report has:
+
+- **two ports**: `C_OUTER` (the met5 pad, facing south) and `C_MID` (the met4
+  escape pad, facing north);
+- `device_count: 2` (one per MiM level; `klt extract` returns `num` devices of
+  each of `sky130_fd_pr__model__cap_mim` and `..._cap_mim_m4`, all across the
+  same two nets);
+- `expected.capacitance_f` = both levels summed (≈ 2× one level), with a
+  per-level `levels` list.
+
+The `capm2` via4 grid is fixed at the 0.8 µm cut on a 1.6 µm pitch
+(`top_via_pitch_um` applies to the via3 grid only). Verified on sky130 only:
+`klt drc --deck sky130` reports 0 violations at 2–30 µm units.
 
 ### `guard_ring` (family 3: substrate/well tap ring)
 
