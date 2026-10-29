@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt gen cap_array` `connect: "parallel"`** (issue #3022): new `connect`
+  (`"independent"` default, output unchanged) and `top_via_pitch_um` params draw
+  one shared bottom plate under all units, a via grid over each top plate and a
+  strap, reported as two ports (`C_BOT`/`C_TOP`), `device_count: 1` and a new
+  optional top-level `expected` object (`capacitance_f`, ...). sky130 only;
+  other families and unit sides outside 2-30 um are rejected. Additive; no
+  `schema_version` bump.
 - **`klt drc` gains `-o/--output PATH`** (issue #4393, documented in
   [`docs/cli/drc.md`](docs/cli/drc.md)): an additive file copy of the report
   envelope, byte-identical to `--format json` stdout and written for clean and
