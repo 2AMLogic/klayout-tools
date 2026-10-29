@@ -12834,6 +12834,9 @@ def test_build_device_binding_map_derived_fallback_shape():
         "pfet_03v3",
         "nfet_06v0",
         "pfet_06v0",
+        # Drain-extended LDMOS (issue #4570) -- curated in `pdk_models.py`.
+        "nfet_10v0_asym",
+        "pfet_10v0_asym",
         "ppolyf_u",
         "ppolyf_u_1k",
         "ppolyf_u_2k",
