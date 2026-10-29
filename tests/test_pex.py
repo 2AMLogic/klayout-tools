@@ -4458,6 +4458,105 @@ print(json.dumps({"corners": [{"corner_id": "tt", "measurements": [
     assert report["errored"] == 1
 
 
+def _run_message_harness(tmp_path, resistor_layout, measure_reference, entry):
+    harness = f"""\
+import json, os
+side = os.environ["KLT_PEX_SIDE"]
+entry = {entry}
+print(json.dumps({{"corners": [{{"corner_id": "tt", "measurements": [
+    dict(name="t_cross", **entry.get(side, {{}}))
+]}}]}}))
+"""
+    return run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, harness),
+        reference_netlist=measure_reference,
+    )
+
+
+_OK = {"value": 1.0}
+
+
+@pytest.mark.parametrize("bad_side", ["extracted", "schematic"])
+def test_run_pex_measure_command_message_reaches_error_row(
+    tmp_path, resistor_layout, measure_reference, bad_side
+):
+    other = "schematic" if bad_side == "extracted" else "extracted"
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {bad_side: {"value": None, "message": "out of interval"}, other: _OK},
+    )
+    assert report["delta"][0]["error"] == {
+        "side": bad_side,
+        "stage": "execute",
+        "message": "out of interval",
+    }
+
+
+def test_run_pex_measure_command_no_message_keeps_fallback(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {"extracted": {"value": None}, "schematic": _OK},
+    )
+    error = report["delta"][0]["error"]
+    assert error["stage"] == "unknown"
+    assert error["message"] == "no diagnostic was recorded for this errored row"
+    assert set(error) == {"side", "stage", "message"}
+
+
+def test_run_pex_measure_command_both_null_blames_schematic_message(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {
+            "schematic": {"value": None, "message": "sch msg"},
+            "extracted": {"value": None, "message": "ext msg"},
+        },
+    )
+    error = report["delta"][0]["error"]
+    assert (error["side"], error["message"]) == ("schematic", "sch msg")
+
+
+def test_run_pex_measure_command_message_on_pass_row_is_ignored(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {"extracted": {**_OK, "message": "fine"}, "schematic": _OK},
+    )
+    assert report["delta"][0]["status"] == "pass"
+    assert "error" not in report["delta"][0]
+    assert "fine" not in json.dumps(report["delta"])
+
+
+@pytest.mark.parametrize("bad", [5, "", "  "])
+def test_run_pex_measure_command_bad_message_is_pex_error(
+    tmp_path, resistor_layout, measure_reference, bad
+):
+    with pytest.raises(PexError, match=r"measurements\[0\]\.message"):
+        _run_message_harness(
+            tmp_path,
+            resistor_layout,
+            measure_reference,
+            {"extracted": {"value": 1.0, "message": bad}, "schematic": _OK},
+        )
+
+
 def test_run_pex_measure_command_failing_row_status_is_a_fail(
     tmp_path, resistor_layout, measure_reference
 ):
