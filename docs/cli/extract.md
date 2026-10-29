@@ -2667,6 +2667,20 @@ labels are unaffected either way (every MOS device, flavoured or not, still
 reports the deck's ordinary `"nfet"`/`"pfet"` class; only the *bound SPICE
 model name* differs).
 
+**Drain-extended LDMOS (issue #4570).** gf180mcu also declares two asymmetric
+flavours, claimed ahead of `Dualgate` because the device sits inside it:
+`nfet_10v0_asym` (islands interacting `MVSD` 210/0 and `LDMOS_XTOR` 226/0) and
+`pfet_10v0_asym` (islands interacting `MVPSD` 11/39, `LDMOS_XTOR` and `DNWELL`
+12/0, with no `Nwell` over the device; `DNWELL` is the PMOS body, joined to any
+drawn `Nwell` tie). Like every flavour they report the ordinary `"nfet"`/`"pfet"`
+class and bind `nfet_10v0_asym`/`pfet_10v0_asym` under `--pdk`. Unlike the others
+their source and drain are **not interchangeable**: the drain is the
+marker-covered (`MVSD`/`MVPSD`) side, the gate is cut back by the marker, and
+the source/drain nets (and `AS`/`AD`/`PS`/`PD`) follow that side even in a
+mirrored layout. This is stricter than the PDK's own `gf180mcu.lvs`, whose
+KLayout MOS extractor orders S/D geometrically (`tests/test_lvs_native_extraction_cross_check_gf180mcu.py`
+compares the two on the unmirrored layout, where they agree on L, W and AS/AD/PS/PD).
+
 `sg13g2` declares one such entry too (issue #1231), keyed on its
 `ThickGateOx` (44/0) marker: a transistor drawn inside it binds the real
 thick-oxide `sg13_hv_nmos`/`sg13_hv_pmos` models under `--pdk` instead of

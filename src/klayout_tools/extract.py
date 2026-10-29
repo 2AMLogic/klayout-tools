@@ -177,6 +177,7 @@ from .decks import (
     InvalidDeckOptionError,
     InvalidLabelLayerError,
     MosCapacitorDevice,
+    MOSFlavour,
     ParasiticsDeck,
     SizeFilter,
     UnknownExtractionDeckError,
@@ -8891,6 +8892,167 @@ def _apply_declared_pins(
         )
 
 
+def _pfet_only_islands(
+    layout: kdb.Layout, top_cell: kdb.Cell, deck: ExtractionDeck, active: kdb.Region
+) -> kdb.Region:
+    """Active islands touching a ``pfet_only`` flavour's marker (issue #4570).
+
+    A PMOS outside every ``Nwell`` (the LDPMOS, which sits in ``DNWELL``) has
+    ``Pplus`` over its diffusion, which the p-tap derivation would otherwise
+    read as substrate ties and cut out of ``active`` before the flavour could
+    claim it.
+    """
+    import klayout.db as kdb
+
+    islands = kdb.Region()
+    for flavour in deck.mos_flavours:
+        if flavour.pfet_only:
+            marker = _region(layout, top_cell, flavour.marker)
+            if not marker.is_empty():
+                islands += active.merged().interacting(marker)
+    return islands
+
+
+def _flavour_mos_regions(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    flavour: MOSFlavour,
+    claimed: kdb.Region,
+    nwell: kdb.Region,
+    poly: kdb.Region,
+) -> tuple[
+    tuple[kdb.Region, kdb.Region],
+    tuple[kdb.Region, kdb.Region],
+    tuple[kdb.Region, kdb.Region] | None,
+]:
+    """Split one flavour's claimed active into ``((n_gate, p_gate), (n_sd,
+    p_sd), terminals)``. ``terminals`` is the ``(source, drain)`` region pair
+    for a ``drain_marker`` flavour (issue #4570), else ``None``.
+
+    The ordinary split is NMOS outside ``nwell`` / PMOS inside it; a
+    ``pfet_only`` flavour is all PMOS (the LDPMOS has no ``Nwell`` over it). A
+    ``drain_marker`` flavour cuts the gate back by the marker and hands the
+    marker-covered diffusion (including the part under the cut-away gate, so
+    the drain stays adjacent to the gate) to the drain terminal -- the same
+    ``tS``/``tD`` derivation the PDK's own ``ns_ldmos``/``nd_ldmos`` use.
+    """
+    import klayout.db as kdb
+
+    if flavour.pfet_only:
+        n_active, p_active = kdb.Region(), claimed
+    else:
+        n_active, p_active = claimed - nwell, claimed & nwell
+    n_gate, p_gate = n_active & poly, p_active & poly
+    n_sd, p_sd = n_active - poly, p_active - poly
+    if flavour.drain_marker is None:
+        return (n_gate, p_gate), (n_sd, p_sd), None
+    drain_marker = _region(layout, top_cell, flavour.drain_marker)
+    n_gate, p_gate = n_gate - drain_marker, p_gate - drain_marker
+    gate = n_gate + p_gate
+    sd = (claimed - gate).merged()
+    source = sd - drain_marker
+    drain = sd & drain_marker
+    if flavour.pfet_only:
+        return (n_gate, p_gate), (kdb.Region(), sd), (source, drain)
+    return (n_gate, p_gate), (sd, kdb.Region()), (source, drain)
+
+
+def _extract_flavour_devices(
+    l2n: kdb.LayoutToNetlist,
+    deck: ExtractionDeck,
+    flavour: MOSFlavour,
+    regions: tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region],
+    terminals: tuple[kdb.Region, kdb.Region] | None,
+    nfet_body: kdb.Region,
+    pfet_body: kdb.Region,
+) -> None:
+    """One flavour's NMOS then PMOS extraction pass. A ``drain_marker``
+    flavour (issue #4570) additionally hands KLayout its ``tS``/``tD`` layers
+    so source and drain are distinct, ordered terminals."""
+    import klayout.db as kdb
+
+    f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate = regions
+    extra: dict[str, kdb.Region] = {}
+    if terminals is not None:
+        extra = {"tS": terminals[0], "tD": terminals[1]}
+    if not flavour.pfet_only:
+        l2n.extract_devices(
+            kdb.DeviceExtractorMOS4Transistor(deck.nfet_class),
+            {"SD": f_nfet_sd, "G": f_nfet_gate, "W": nfet_body, **extra},
+        )
+    if not (flavour.nfet_only and terminals is not None):
+        l2n.extract_devices(
+            kdb.DeviceExtractorMOS4Transistor(deck.pfet_class),
+            {"SD": f_pfet_sd, "G": f_pfet_gate, "W": pfet_body, **extra},
+        )
+
+
+def _orient_asymmetric_mos(
+    l2n: kdb.LayoutToNetlist,
+    circuit: kdb.Circuit,
+    deck: ExtractionDeck,
+    flavour_terminals: list[tuple[kdb.Region, kdb.Region] | None],
+    flavour_gates: tuple[list[kdb.Region], list[kdb.Region]],
+) -> None:
+    """Make each ``drain_marker`` flavour device's ``D`` terminal the net of
+    the drain-marked diffusion touching its gate (issue #4570), swapping
+    ``S``/``D`` and the matching ``AS``/``AD``/``PS``/``PD`` parameters when
+    KLayout's geometric S/D ordering disagrees. The device's position is its
+    gate's centre, which selects the gate component and from it the adjacent
+    drain polygon whose net is probed."""
+    import klayout.db as kdb
+
+    if circuit is None:
+        return
+    by_flavour = {
+        flavour.flavour: (terminals, gates_n + gates_p)
+        for flavour, terminals, gates_n, gates_p in zip(
+            deck.mos_flavours,
+            flavour_terminals,
+            flavour_gates[0],
+            flavour_gates[1],
+            strict=True,
+        )
+        if terminals is not None
+    }
+    dbu = l2n.internal_layout().dbu
+    for device in circuit.each_device():
+        entry = by_flavour.get(device.property(MOS_FLAVOUR_PROPERTY))
+        if entry is None:
+            continue
+        (_source, drain), gates = entry
+        centre = device.trans.disp
+        probe = kdb.Region(
+            kdb.Box(
+                round(centre.x / dbu) - 1,
+                round(centre.y / dbu) - 1,
+                round(centre.x / dbu) + 1,
+                round(centre.y / dbu) + 1,
+            )
+        )
+        touching = drain.interacting(gates.interacting(probe))
+        polygon = next(iter(touching.each()), None)
+        if polygon is None:
+            continue
+        vertex = next(iter(polygon.each_point_hull()))
+        true_drain = l2n.probe_net(drain, kdb.DPoint(vertex.x * dbu, vertex.y * dbu))
+        defs = {td.name: td.id() for td in device.device_class().terminal_definitions()}
+        s_id, d_id = defs["S"], defs["D"]
+        s_net, d_net = device.net_for_terminal(s_id), device.net_for_terminal(d_id)
+        if (
+            true_drain is None
+            or d_net is None
+            or d_net.cluster_id == true_drain.cluster_id
+        ):
+            continue
+        device.connect_terminal(s_id, d_net)
+        device.connect_terminal(d_id, s_net)
+        for a, b in (("AS", "AD"), ("PS", "PD")):
+            va, vb = device.parameter(a), device.parameter(b)
+            device.set_parameter(a, vb)
+            device.set_parameter(b, va)
+
+
 def _extract_netlist(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -9356,7 +9518,14 @@ def _extract_netlist(
         # comment above).
         tap = (
             (tap_nplus_region & active & nwell_body_cover)
-            | (tap_pplus_region & (active - nwell_body_cover))
+            | (
+                tap_pplus_region
+                & (
+                    active
+                    - nwell_body_cover
+                    - _pfet_only_islands(layout, top_cell, deck, active)
+                )
+            )
         ) - poly
         tap = tap | _deck_complement_well_tie(
             layout, top_cell, deck, active, poly, nwell_body_cover
@@ -9486,13 +9655,19 @@ def _extract_netlist(
     flavour_pfet_gate: list[kdb.Region] = []
     flavour_nfet_sd: list[kdb.Region] = []
     flavour_pfet_sd: list[kdb.Region] = []
-    for claimed in flavour_active:
-        f_nfet_active = claimed - nwell
-        f_pfet_active = claimed & nwell
-        flavour_nfet_gate.append(f_nfet_active & poly)
-        flavour_pfet_gate.append(f_pfet_active & poly)
-        flavour_nfet_sd.append(f_nfet_active - poly)
-        flavour_pfet_sd.append(f_pfet_active - poly)
+    # Issue #4570: a flavour with a `drain_marker` (gf180mcu's asymmetric LDMOS)
+    # also carries distinct source/drain terminal regions, index-aligned here
+    # (`None` for every ordinary flavour).
+    flavour_terminals: list[tuple[kdb.Region, kdb.Region] | None] = []
+    for flavour, claimed in zip(deck.mos_flavours, flavour_active, strict=True):
+        f_gate, f_sd, terminals = _flavour_mos_regions(
+            layout, top_cell, flavour, claimed, nwell, poly
+        )
+        flavour_nfet_gate.append(f_gate[0])
+        flavour_pfet_gate.append(f_gate[1])
+        flavour_nfet_sd.append(f_sd[0])
+        flavour_pfet_sd.append(f_sd[1])
+        flavour_terminals.append(terminals)
 
     # Unmodelled-device diagnostic (issue #288, split by marker presence in
     # #299, resistor-body/routing false positives narrowed in #324):
@@ -9611,12 +9786,13 @@ def _extract_netlist(
     # *only* that flavour's geometry, never double-counting the default
     # split. `_compute_parasitics` folds these back into its diffusion/poly
     # roles alongside the default pair (see its own docstring).
-    for flavour, f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate in zip(
+    for flavour, f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate, terminals in zip(
         deck.mos_flavours,
         flavour_nfet_sd,
         flavour_nfet_gate,
         flavour_pfet_sd,
         flavour_pfet_gate,
+        flavour_terminals,
         strict=True,
     ):
         for name, region in [
@@ -9626,6 +9802,17 @@ def _extract_netlist(
             (f"pfet_gate_{flavour.flavour}", f_pfet_gate),
         ]:
             layer_index[name] = l2n.register(region, name)
+        if terminals is not None:
+            l2n.register(terminals[0], f"mos_source_{flavour.flavour}")
+            l2n.register(terminals[1], f"mos_drain_{flavour.flavour}")
+    # PMOS body layer of a `body` flavour (issue #4570, the LDPMOS's DNWELL),
+    # joined to `nwell` so a drawn well-tie ring supplies its net.
+    flavour_body: dict[str, kdb.Region] = {}
+    for flavour in deck.mos_flavours:
+        if flavour.body is not None:
+            body_region = _region(layout, top_cell, flavour.body)
+            l2n.register(body_region, f"mos_body_{flavour.flavour}")
+            flavour_body[flavour.flavour] = body_region
     # MOS-capacitor gate/diffusion regions (issue #2919), one pair per entry
     # that claimed an island, registered under the entry's own name.
     _register_mos_capacitors(l2n, mos_capacitors, layer_index)
@@ -9801,23 +9988,25 @@ def _extract_netlist(
     # to `deck.substrate_net`, exactly as every NMOS device did before
     # #1128 existed: a known, documented residual gap (see
     # `ExtractionDeck.substrate_isolation`'s docstring), not a regression.
-    for flavour, f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate in zip(
+    for flavour, f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate, terminals in zip(
         deck.mos_flavours,
         flavour_nfet_sd,
         flavour_nfet_gate,
         flavour_pfet_sd,
         flavour_pfet_gate,
+        flavour_terminals,
         strict=True,
     ):
         circuit = l2n.netlist().circuit_by_name(top_cell.name)
         before_ids = {device.id() for device in circuit.each_device()}
-        f_nfet_extractor = kdb.DeviceExtractorMOS4Transistor(deck.nfet_class)
-        l2n.extract_devices(
-            f_nfet_extractor, {"SD": f_nfet_sd, "G": f_nfet_gate, "W": nfet_body}
-        )
-        f_pfet_extractor = kdb.DeviceExtractorMOS4Transistor(deck.pfet_class)
-        l2n.extract_devices(
-            f_pfet_extractor, {"SD": f_pfet_sd, "G": f_pfet_gate, "W": nwell}
+        _extract_flavour_devices(
+            l2n,
+            deck,
+            flavour,
+            (f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate),
+            terminals,
+            nfet_body,
+            flavour_body.get(flavour.flavour, nwell),
         )
         for device in l2n.netlist().circuit_by_name(top_cell.name).each_device():
             if device.id() not in before_ids:
@@ -10277,13 +10466,18 @@ def _extract_netlist(
     # Same connectivity, per declared MOS flavour (issue #1111) -- mirrors
     # the default pair above exactly, just against each flavour's own SD/gate
     # regions.
-    for f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate in zip(
+    for f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate, terminals in zip(
         flavour_nfet_sd,
         flavour_nfet_gate,
         flavour_pfet_sd,
         flavour_pfet_gate,
+        flavour_terminals,
         strict=True,
     ):
+        if terminals is not None:
+            for terminal in terminals:
+                l2n.connect(terminal)
+                l2n.connect(terminal, contact)
         l2n.connect(f_nfet_sd)
         l2n.connect(f_pfet_sd)
         l2n.connect(f_nfet_gate)
@@ -10314,6 +10508,9 @@ def _extract_netlist(
             l2n.connect(gate_region, poly)
             l2n.connect(sd_region, contact)
     l2n.connect(nwell)
+    for body_region in flavour_body.values():
+        l2n.connect(body_region)
+        l2n.connect(body_region, nwell)
     if tap_declared:
         l2n.connect(tap)
         l2n.connect(nwell, tap)
@@ -10481,6 +10678,18 @@ def _extract_netlist(
             "device's other terminal(s)"
         ) from exc
     netlist = l2n.netlist()
+
+    # Asymmetric-MOS orientation (issue #4570): KLayout's MOS4 extractor
+    # orders S/D by geometry and ignores `tS`/`tD` roles (the PDK's own
+    # `gf180mcu.lvs` does the same), so re-point each LDMOS's S/D onto the
+    # source/drain-marked diffusion it actually touches.
+    _orient_asymmetric_mos(
+        l2n,
+        netlist.circuit_by_name(top_cell.name),
+        deck,
+        flavour_terminals,
+        (flavour_nfet_gate, flavour_pfet_gate),
+    )
 
     # `--def-net-names` (issue #951): must run right after `l2n.netlist()` --
     # `probe_net` needs the live `l2n` -- and before anything below reads or

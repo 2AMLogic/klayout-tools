@@ -3825,6 +3825,32 @@ EXTRACTION_DECK = ExtractionDeck(
     # diode/resistor citations use, e.g. `gf180mcu_fd_io.spice`'s own
     # `X5 n56 IE VSS VSS nfet_06v0 ...` instantiation).
     mos_flavours=(
+        # Drain-extended LDMOS (issue #4570): declared *before* `Dualgate`
+        # because the LDMOS sits inside it, and an island is claimed by the
+        # first flavour that matches. Mirrors `mos_derivations.lvs`'s
+        # `ngate_ldmos`/`ps_ldmos`/`nd_ldmos` (NMOS: `mvsd` 210/0 drain side,
+        # `ldmos_xtor` 226/0) and `pgate_ldmos`/`pd_ldmos` (PMOS: `mvpsd`
+        # 11/39 drain side, inside DNWELL with no Nwell) -- `nfet_10v0_asym` /
+        # `pfet_10v0_asym` with distinct source/drain terminals.
+        MOSFlavour(
+            marker=(210, 0),  # MVSD
+            flavour="10v0_asym_n",
+            description="gf180mcu LDNMOS nfet_10v0_asym (MVSD 210/0, LDMOS_XTOR 226/0)",
+            and_markers=((226, 0),),  # LDMOS_XTOR
+            not_markers=((11, 39),),  # MVPSD (ldnmos_exclude)
+            nfet_only=True,
+            drain_marker=(210, 0),
+        ),
+        MOSFlavour(
+            marker=(11, 39),  # MVPSD
+            flavour="10v0_asym_p",
+            description="gf180mcu LDPMOS pfet_10v0_asym (MVPSD 11/39 + LDMOS_XTOR)",
+            and_markers=((226, 0), (12, 0)),  # LDMOS_XTOR, DNWELL
+            not_markers=((210, 0),),  # MVSD (ldpmos_exclude)
+            pfet_only=True,
+            drain_marker=(11, 39),
+            body=(12, 0),  # DNWELL
+        ),
         MOSFlavour(
             marker=(55, 0),  # Dualgate
             flavour="06v0",

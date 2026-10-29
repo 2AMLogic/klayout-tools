@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --deck gf180mcu` extracts the drain-extended LDMOS devices**
+  (issue #4570, documented in [`docs/cli/extract.md`](docs/cli/extract.md)):
+  `nfet_10v0_asym` (`MVSD` 210/0 + `LDMOS_XTOR` 226/0) and `pfet_10v0_asym`
+  (`MVPSD` 11/39 in `DNWELL`) were silently absent from the netlist; they now
+  extract as `nfet`/`pfet` with distinct, marker-oriented source/drain and bind
+  their own models under `--pdk`. Additive: `MOSFlavour` gains optional
+  `drain_marker`/`pfet_only`/`body` fields; existing 3.3 V/5 V/6 V results are
+  unchanged.
 - **`klt gen cap_array` `connect: "parallel"`** (issue #3022): new `connect`
   (`"independent"` default, output unchanged) and `top_via_pitch_um` params draw
   one shared bottom plate under all units, a via grid over each top plate and a
