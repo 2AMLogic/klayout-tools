@@ -1651,6 +1651,7 @@ def _resolve_analysis_and_measurements(
                 '"expr": "v(out)"})'
             )
     _validate_no_dependent_meas_cards(measurements_spec)
+    sim_steps.refuse_scalar_intermediate(measurements_spec)
     # Issue #2868: a crossings series is a transient-time quantity.
     sim_crossings.validate_crossings_context(measurements_spec, analysis)
     # Issue #3033: an energy window is a transient-time quantity too.
