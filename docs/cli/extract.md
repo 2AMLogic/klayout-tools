@@ -4718,6 +4718,22 @@ flavour this way never changes `devices[].class` (every flavour reports the
 deck's ordinary `"nfet"`/`"pfet"` class) or `device_counts` — only which real
 subcircuit the `X` card names.
 
+Narrow-width nFET fallback (issue #4575, sky130 only): the scalable
+`sky130_fd_pr__nfet_01v8` is a binned model whose narrowest width bin starts
+at 0.42 µm (`wmin = 4.2e-07` in `sky130_fd_pr__nfet_01v8__tt.pm3.spice`), and
+ngspice rejects a narrower `W` at parse time. An `nfet` whose extracted `W`
+is below 0.42 µm is therefore written against the fixed-geometry
+`sky130_fd_pr__special_nfet_01v8` (same ports and `L`/`W`/`AS`/`AD`/`PS`/`PD`
+parameters; only the model token changes), and each such device adds one
+`warnings[]` entry naming the device, its W/L and the substituted subcircuit.
+A `W` at or above 0.42 µm is unchanged. A device that already carries a
+flavour override (e.g. `hvi`) keeps its flavour subcircuit. The special
+subcircuit has a single bin (`W` ≈ 0.36 µm, `L` ≈ 0.15 µm), so a device that
+narrow with other dimensions still needs a model decision from the caller.
+`--device-model` accepts bipolar classes only, so it cannot name `nfet`; there
+is no override to conflict with this rule. pfet and the other PDKs are
+unchanged.
+
 Resistor note: the binding is **flavour-complete** on gf180mcu — every value
 `--deck-option poly_res=` accepts binds its own real subcircuit
 (`ppolyf_u_1k` / `ppolyf_u_2k` / `ppolyf_u_3k`, all three confirmed in

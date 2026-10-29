@@ -1498,6 +1498,27 @@ def _validate_resistance_graph_r_cut(
         )
 
 
+def _model_delegate_factory(
+    model_bindings: Any, global_nets: Any, sink: list[Any]
+) -> Callable[[], Any]:
+    """Factory building the model-binding delegate and recording it in ``sink``."""
+
+    def make() -> Any:
+        delegate = create_model_binding_delegate(
+            model_bindings if model_bindings is not None else {},
+            global_nets=global_nets,
+        )
+        sink.append(delegate)
+        return delegate
+
+    return make
+
+
+def _substitution_notes(delegates: list[Any]) -> list[str]:
+    """Narrow-width fallback notes (issue #4575) recorded by ``delegates``."""
+    return [n for d in delegates for n in getattr(d, "substitution_notes", ())]
+
+
 @_timed
 def run_extract(
     path: str,
@@ -3889,12 +3910,14 @@ def run_extract(
     # model-binding delegate exactly as before.
     from .extract_finfet import spice_writer_delegate_for
 
+    # The model-binding delegate records any narrow-width fallback
+    # substitution it makes (issue #4575); keep a handle to surface it below.
+    model_delegates: list[Any] = []
     writer = kdb.NetlistSpiceWriter(
         spice_writer_delegate_for(
             deck_name,
-            lambda: create_model_binding_delegate(
-                model_bindings if model_bindings is not None else {},
-                global_nets=substrate_global_nets,
+            _model_delegate_factory(
+                model_bindings, substrate_global_nets, model_delegates
             ),
         )
     )
@@ -3914,6 +3937,8 @@ def run_extract(
         if scratch_dir is not None:
             shutil.rmtree(scratch_dir, ignore_errors=True)
         raise ExtractError(f"could not write netlist '{netlist_path}': {exc}") from exc
+
+    warnings.extend(_substitution_notes(model_delegates))
 
     pin_ties = (pin_renames or {}).get("ties") or []
     _apply_pin_ties_if_circuit(netlist_path, circuit, pin_ties)
