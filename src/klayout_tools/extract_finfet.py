@@ -49,9 +49,10 @@ from the deck's. Each raises :class:`FinFETGeometryError` (``error.code``
 Scope
 -----
 
-Flat extraction over the top cell, like the planar path. Options that
-depend on planar-only machinery (``--parasitics``, abstract cells, DEF pin
-promotion, ``--subcircuit``, ...) are rejected up front by
+Flat extraction over the top cell, like the planar path. ``--parasitics``
+runs the shared ``_compute_parasitics`` pass over the deck's metal stack
+(issue #4558). Options that depend on planar-only machinery (abstract
+cells, DEF pin promotion, ``--subcircuit``, ...) are rejected up front by
 :func:`reject_unsupported_options` rather than half-applied.
 """
 
@@ -753,6 +754,62 @@ def extract_finfet_netlist(
     """Extract ``top_cell`` (flattened) with ``deck``; return
     ``(netlist, warnings)``. Raises :class:`FinFETGeometryError` for refused
     geometry (see module docstring)."""
+    netlist, warnings, _parasitic_nets = _extract_with_parasitics(
+        layout, top_cell, deck, deck_name, None
+    )
+    return netlist, warnings
+
+
+#: ``(ground_nets, coupled_pairs)`` as ``_compute_parasitics`` returns them.
+_ParasiticNets = tuple[list[dict[str, Any]], list[dict[str, Any]]]
+
+
+def _parasitics_for(
+    l2n: kdb.LayoutToNetlist,
+    netlist: kdb.Netlist,
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: FinFETExtractionDeck,
+    layers: _Layers,
+    parasitics_deck: Any,
+    **options: Any,
+) -> _ParasiticNets:
+    """Run the shared ``_compute_parasitics`` pass over the deck's metal stack
+    while ``l2n`` still owns the per-net shapes (issue #4558). The roles it
+    reads are the registered metal/via/contact layers; ASAP7 curates no
+    diffusion or poly coefficient, so nothing planar-only is consulted."""
+    from .extract_parasitics import _compute_parasitics
+
+    return _compute_parasitics(
+        l2n,
+        netlist.circuit_by_name(top_cell.name),
+        layout.dbu,
+        deck,
+        parasitics_deck,
+        {"contact": l2n.layer_of(layers.v0)},
+        [l2n.layer_of(region) for region in layers.metals],
+        layout=layout,
+        top_cell=top_cell,
+        via_index=[l2n.layer_of(region) for region in layers.vias],
+        capacitor_top_regions={
+            cap.name: marker for cap, marker, _ in layers.capacitors
+        },
+        **options,
+    )
+
+
+def _extract_with_parasitics(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: FinFETExtractionDeck,
+    deck_name: str,
+    parasitics_deck: Any,
+    **parasitics_options: Any,
+) -> tuple[
+    kdb.Netlist, list[str], tuple[list[dict[str, Any]], list[dict[str, Any]]] | None
+]:
+    """:func:`extract_finfet_netlist` plus, when ``parasitics_deck`` is given,
+    the ``(ground_nets, coupled_pairs)`` pair ``_compute_parasitics`` returns."""
     import klayout.db as kdb
 
     from .extract import _purge_preserving_named_nets
@@ -788,8 +845,22 @@ def extract_finfet_netlist(
         if has_devices
         else []
     )
+    parasitic_nets = (
+        None
+        if parasitics_deck is None
+        else _parasitics_for(
+            l2n,
+            netlist,
+            layout,
+            top_cell,
+            deck,
+            layers,
+            parasitics_deck,
+            **parasitics_options,
+        )
+    )
     # `l2n` owns the netlist; detach a copy before it is collected.
-    return netlist.dup(), warnings
+    return netlist.dup(), warnings, parasitic_nets
 
 
 # --------------------------------------------------------------------------- #
@@ -814,20 +885,16 @@ def is_finfet_deck_name(deck_name: object) -> bool:
 def refuse_run_options(
     deck_name: str,
     *,
-    parasitics: bool,
     pdk_variant: str | None,
     pdk_root: str | None,
 ) -> None:
-    """``run_extract``'s early guard: name ``--parasitics``/``--pdk`` as
-    unsupported for a FinFET deck before any PDK lookup or parasitics-deck
-    resolution reports a less precise error."""
+    """``run_extract``'s early guard: name ``--pdk`` as unsupported for a
+    FinFET deck before any PDK lookup reports a less precise error.
+    ``--parasitics`` is supported (issue #4558) and not refused."""
     if is_finfet_deck_name(deck_name):
         reject_unsupported_options(
             deck_name,
-            **{
-                "--parasitics": parasitics,
-                "--pdk": pdk_variant is not None or pdk_root is not None,
-            },
+            **{"--pdk": pdk_variant is not None or pdk_root is not None},
         )
 
 
@@ -842,18 +909,48 @@ def extract_netlist_tuple(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
     deck: FinFETExtractionDeck,
-    *_a: Any,
-    **_k: Any,
+    parasitics_deck: Any = None,
+    **options: Any,
 ) -> tuple[Any, ...]:
     """Drop-in for ``extract._extract_netlist``'s 14-tuple contract. Every
-    option it would honour was already refused by :func:`refuse_layout_options`;
-    the planar-only result slots are their documented empty values."""
+    planar-only option was already refused by :func:`refuse_layout_options`;
+    the planar-only result slots are their documented empty values. Only the
+    ``--parasitics`` pass (issue #4558) is honoured, with its scoping knobs."""
     from .extract import _extraction_deck_name
 
-    netlist, warnings = extract_finfet_netlist(
-        layout, top_cell, deck, _extraction_deck_name(deck) or "finfet"
+    parasitics_options = {
+        key: options[key]
+        for key in (
+            "parasitics_top_cell_only",
+            "resistance_graph",
+            "resistance_graph_r_cut_ohm",
+        )
+        if key in options
+    }
+    netlist, warnings, parasitic_nets = _extract_with_parasitics(
+        layout,
+        top_cell,
+        deck,
+        _extraction_deck_name(deck) or "finfet",
+        parasitics_deck,
+        **parasitics_options,
     )
-    return (netlist, warnings, None, [], 0, [], [], [], None, {}, {}, None, None, None)
+    return (
+        netlist,
+        warnings,
+        parasitic_nets,
+        [],
+        0,
+        [],
+        [],
+        [],
+        None,
+        {},
+        {},
+        None,
+        None,
+        None,
+    )
 
 
 # --------------------------------------------------------------------------- #

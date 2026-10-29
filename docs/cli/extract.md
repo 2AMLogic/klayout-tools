@@ -2929,9 +2929,23 @@ Under `--format json` the error envelope carries `error.code`
 `error.message` lists each finding (up to 20) with its bounding box in
 micrometres.
 
+### Parasitics (issue #4558)
+
+`--parasitics` (and `--spef`) runs the same first-order lumped-RC pass as the
+planar decks and emits the same `parasitics` JSON shape. The coefficient table
+is `PARASITICS` in `src/klayout_tools/decks/asap7.py`: per-metal sheet
+resistance and ground capacitance for M1-M9, adjacent-pair vertical overlap
+coupling, and per-cut resistance. It is **first-order and uncalibrated**: the
+numbers are derived from the OpenRCX `typical.rules` and `asap7_tech.lef`
+shipped in the pinned lambdapdk archive (checksums in the module comment), but
+that file does not state its units, so the unit reading is an assumption, and
+the cut resistance is a single placeholder (`ASSUMED_CUT_OHM`) with no public
+source. Diffusion and poly are not curated, so only the metal stack
+contributes. Do not use these values for signoff.
+
 ### Not supported (refused by name)
 
-`--parasitics`, `--pdk`/`--pdk-root`, `--top-cell-pins`, `--pins`,
+`--pdk`/`--pdk-root`, `--top-cell-pins`, `--pins`,
 `--abstract-cells`, `--abstract-cell-lef`, `--mom-net`, `--def-net-names`,
 `--critical-net`, `--parasitics-net`, `--def-pins`, `--pin-source-cells`,
 `--subcircuit`, `--hierarchical-cells` and `--substrate-spreading` each exit 1,
@@ -2994,7 +3008,7 @@ that does not have exactly two terminals, a capacitor marker that does not
 touch exactly two metal pieces, or a marker straddling two metal levels.
 `klt lvs` compares `R`/`C` through the usual planar parameter handling (see
 [`lvs.md`](lvs.md#finfet-decks-asap7-issues-2761-2813)).
-Out of scope: poly/active resistors, MIM capacitors and `--parasitics`.
+Out of scope: poly/active resistors and MIM capacitors.
 
 ## Device rule provenance (issues #868, #867)
 

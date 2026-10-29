@@ -2839,14 +2839,12 @@ def run_extract(
             "--abstract-cell-lef only has an effect as a pin-resolution "
             "fallback for a cell type --abstract-cells actually matches"
         )
-    # Issue #2761: a FinFET deck has no `--pdk` subcircuit binding and no
-    # parasitics pass; name that before the PDK lookup / parasitics-deck
-    # resolution below reports a less precise error. No-op for other decks.
+    # Issue #2761: a FinFET deck has no `--pdk` subcircuit binding; name that
+    # before the PDK lookup below reports a less precise error. No-op for
+    # other decks.
     from .extract_finfet import refuse_run_options
 
-    refuse_run_options(
-        deck_name, parasitics=parasitics, pdk_variant=pdk_variant, pdk_root=pdk_root
-    )
+    refuse_run_options(deck_name, pdk_variant=pdk_variant, pdk_root=pdk_root)
     pdk_info: dict[str, Any] | None = None
     # Populated only when a PDK resolves: `{<deck's device class name>:
     # DeviceBinding}` for every device class this deck extracts that has a
@@ -5433,7 +5431,6 @@ def extract_netlist_from_layout(
         deck,
         deck_name,
         **{
-            "--parasitics": parasitics_deck is not None,
             "--top-cell-pins": top_cell_pins_only,
             "--pins": bool(declared_pins),
             "--abstract-cells": bool(abstract_cell_patterns),

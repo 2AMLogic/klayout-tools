@@ -224,9 +224,9 @@ DECISIONS: Mapping[str, Mapping[str, Decision]] = MappingProxyType(
                     "Registered FinFET extraction deck (geometry-counted nfin).",
                 ),
                 "parasitics": Decision(
-                    "unsupported",
-                    "FinFET extraction does not run the --parasitics pass; no "
-                    "ASAP7 RC coefficients are curated.",
+                    "supported",
+                    "First-order, uncalibrated metal RC/overlap/cut table "
+                    "(ASSUMED coefficients; diffusion and poly uncurated).",
                 ),
                 "default_mos_model_binding": Decision(
                     "unsupported",
