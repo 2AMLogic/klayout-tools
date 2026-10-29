@@ -10,6 +10,7 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 - **#3310**: fix(release): guard unpublished klt-*-native extra pins and correct [yield] install docs
 - **#3467**: ci: fetch the PDK with ciel pinned to open_pdks f6eeac7
 - **#4172**: chore(deps): bump astral-sh/setup-uv from 10.2.0 to 10.3.0 in the github-actions group across 1 directory
+- **#4566**: feat(blocks): add canary manifest, --manifest ingest mode and weekly refresh PR
 
 ## Very Important
 
@@ -31,8 +32,6 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#2812**: ASAP7 FEOL/MOL gap tracker: mechanism-specific rule increments
 - **#2900**: Friction: documented 'klayout-tools[yield]' install path does not resolve (klt-yield-native not on PyPI)
 - **#2912**: Friction: sky130 native-Vt NMOS (nfet_05v0_nvt) cannot be drawn by klt gen or compared by klt lvs
-- **#3022**: gen cap_array: no parallel-connected multi-unit capacitor and no stacked (two-level) MiM option
-- **#3055**: klt sim: no way to center a DC sweep window on a value measured in the same corner, and no ungraded named vector intermediates in measurements[].expr
 - **#3057**: klt sim --backend batch: -o FILE not written when --format json (report goes to stdout)
 - **#3094**: decks/sg13cmos5l: poly resistors assume coincident GatPoly/PolyRes, same as sg13g2 before #2679
 - **#3289**: signoff: generator-command evidence for T1 items 1/2 (klt executes and byte-compares) — needs trust-model ruling
@@ -44,21 +43,30 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s)
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported
-- **#4558**: extract: ASAP7 first-order parasitics deck and FinFET --parasitics (part of #4557)
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
-- **#4508**: ASAP7: trim protruding VIA_* M1 pad tips to clear M1.S.2-5 (follow-up to #4495)
+- **#4565**: site: present the public chip design work on klayout-tools.org
+- **#4568**: gen: no generator for gf180mcu drain-extended 10 V (LDMOS) devices; PDK pcell library not loaded
+- **#4569**: drc: curated gf180mcu deck has no rules for the 10 V LDMOS module (ldnmos/ldpmos)
+- **#4570**: extract: gf180mcu deck does not recognise nfet_10v0_asym / pfet_10v0_asym LDMOS devices
+- **#4571**: extract --abstract-cells: LEF substrate pin binds to an arbitrary signal net via box-centre probe
+- **#4574**: drc(sg13cmos5l): deck does not apply the PDK runset's SRAM-marker scoping to NW.c/NW.d-family rules
+- **#4575**: extract --pdk: MOS cards narrower than the scalable model's smallest bin are written with a subckt that has no bin
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
+- **#4572**: feat(extract): report gf180mcu LDMOS_XTOR (226/0) as an unsupported device
+- **#4573**: fix(extract): bind LEF-merged substrate pins to the substrate net without probing
+- **#4576**: feat(drc): add gf180mcu 10V LDMOS layers and exact MDN/MDP rules, disclose the rest
+- **#4577**: feat(extract): extract gf180mcu drain-extended LDMOS devices
+- **#4578**: docs(drc): name SRAM marker 25/0 in sg13cmos5l NW.c/NW.d runset notes
 
 ## Approved (Awaiting Merge)
 
@@ -67,6 +75,7 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 - **#3310**: fix(release): guard unpublished klt-*-native extra pins and correct [yield] install docs
 - **#3467**: ci: fetch the PDK with ciel pinned to open_pdks f6eeac7
 - **#4172**: chore(deps): bump astral-sh/setup-uv from 10.2.0 to 10.3.0 in the github-actions group across 1 directory
+- **#4566**: feat(blocks): add canary manifest, --manifest ingest mode and weekly refresh PR
 
 ## Proposed
 
@@ -82,8 +91,6 @@ Issues carrying `loom:curated`.
 - **#2840**: Friction: klt yield reports carry no seed / corner-matrix / spec-row provenance for T1 item 6's recorded-seed requirement *(curated)*
 - **#2900**: Friction: documented 'klayout-tools[yield]' install path does not resolve (klt-yield-native not on PyPI) *(curated)*
 - **#2912**: Friction: sky130 native-Vt NMOS (nfet_05v0_nvt) cannot be drawn by klt gen or compared by klt lvs *(curated)*
-- **#3022**: gen cap_array: no parallel-connected multi-unit capacitor and no stacked (two-level) MiM option *(curated)*
-- **#3055**: klt sim: no way to center a DC sweep window on a value measured in the same corner, and no ungraded named vector intermediates in measurements[].expr *(curated)*
 - **#3057**: klt sim --backend batch: -o FILE not written when --format json (report goes to stdout) *(curated)*
 - **#3147**: ASAP7 DRC deck: BEOL rules needing track, net, corner or grid predicates *(curated)*
 - **#3289**: signoff: generator-command evidence for T1 items 1/2 (klt executes and byte-compares) — needs trust-model ruling *(curated)*
@@ -91,7 +98,6 @@ Issues carrying `loom:curated`.
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin *(curated)*
 - **#3516**: klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249) *(curated)*
 - **#3522**: Verify OMP_NUM_THREADS pinning on the batch fleet (follow-up to #3502) *(curated)*
-- **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests *(curated)*
 - **#3930**: Live-verify klt place-and-route io.pin_constraints against real OpenROAD (N/E/S/W) *(curated)*
 - **#3998**: Emit a real prBoundary (235/4) from a chip-level assembly step, the precondition the operator set for boundary-scoped density (#1991) *(curated)*
 - **#3999**: Add a metal/poly/diffusion fill insertion verb driven by the PDK's density window *(curated)*
@@ -113,7 +119,13 @@ Issues carrying `loom:curated`.
 - **#4440**: Friction: klt's OpenROAD steps need Docker, which fleet workers can't use; no fleet executor for OpenROAD regeneration *(curated)*
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
 - **#4508**: ASAP7: trim protruding VIA_* M1 pad tips to clear M1.S.2-5 (follow-up to #4495) *(curated)*
-- **#4558**: extract: ASAP7 first-order parasitics deck and FinFET --parasitics (part of #4557) *(curated)*
+- **#4565**: site: present the public chip design work on klayout-tools.org *(curated)*
+- **#4568**: gen: no generator for gf180mcu drain-extended 10 V (LDMOS) devices; PDK pcell library not loaded *(curated)*
+- **#4569**: drc: curated gf180mcu deck has no rules for the 10 V LDMOS module (ldnmos/ldpmos) *(curated)*
+- **#4570**: extract: gf180mcu deck does not recognise nfet_10v0_asym / pfet_10v0_asym LDMOS devices *(curated)*
+- **#4571**: extract --abstract-cells: LEF substrate pin binds to an arbitrary signal net via box-centre probe *(curated)*
+- **#4574**: drc(sg13cmos5l): deck does not apply the PDK runset's SRAM-marker scoping to NW.c/NW.d-family rules *(curated)*
+- **#4575**: extract --pdk: MOS cards narrower than the scalable model's smallest bin are written with a subckt that has no bin *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -135,14 +147,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 3 |
+| Operator merge-risk holds | 4 |
 | Very important | 1 |
 | Important | 1 |
-| Ready (`loom:issue`) | 18 |
-| In Progress (`loom:building`) | 3 |
-| PRs awaiting review | 1 |
-| Approved PRs awaiting merge | 3 |
-| Curated | 42 |
+| Ready (`loom:issue`) | 15 |
+| In Progress (`loom:building`) | 8 |
+| PRs awaiting review | 6 |
+| Approved PRs awaiting merge | 4 |
+| Curated | 45 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
