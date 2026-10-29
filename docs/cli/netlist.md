@@ -142,6 +142,34 @@ xschem's release notes). It applies to `--check` too, which fails with this
 cause instead of reporting `drifted`, and nothing is written. Under
 `--backend batch` the same code is returned.
 
+### `--allow-unevaluated-expr`
+
+For a caller that evaluates `expr()` itself downstream, `--allow-unevaluated-expr`
+downgrades this one gate to a warning: the netlist is written (or, with
+`--check`, compared) as xschem produced it and the run exits `0`/`3` as usual.
+The condition is never silent: a `klt netlist: warning:` line goes to stderr
+and `--format json` gains an additive `warnings` array (present only when
+non-empty) with an entry
+`{"code": "unevaluated_expr", "line": N, "snippet": "...", "xschem_version": "..."}`
+for the first offending line. A netlist with no `expr(` is unchanged. It works
+with `--block`, does **not** relax the `unresolved_symbol` gate, and combined
+with `--backend batch` is a usage error (exit `1`) — the runner applies the
+gate itself.
+
+## An unresolved symbol is a failure, not a netlist
+
+When an instance refers to a symbol xschem cannot find, xschem still writes a
+"fresh" `.spice`; the only trace is a comment line such as
+`*  E1 -  no_such_device  IS MISSING !!!!`, and the device is absent from the
+netlist. After the export (and after `--block` post-processing) the netlist is
+scanned — **including** `*` comment lines, since the marker lives in one — for
+`IS MISSING`. A hit is an error (exit `1`) with
+`error.code: "unresolved_symbol"`; the message names the first offending line
+number and text. It applies to `--check` too, which fails with this cause
+instead of reporting `drifted`, and nothing is written. Under `--backend batch`
+the same code is returned. This is on by default; there is no flag. xschem's
+ERC pass and its stdout/stderr are not consulted.
+
 ## Success is the output file, not the exit status
 
 `xschem -n -s -q -x` returns a **non-zero** status after a *successful* batch
@@ -176,7 +204,8 @@ and CI need no schematic-capture tool installed. The risk is that it drifts:
 simulation results to a schematic that no longer exists.**
 
 `klt netlist <schematic> -o <committed netlist> --check` regenerates into a
-temp directory and compares byte-for-byte against the committed file:
+temp directory and compares against the committed file, after the
+normalizations described below (checkout paths, `+` layout):
 
 | Outcome | `status` | Exit | Notes |
 | --- | --- | --- | --- |
@@ -204,11 +233,33 @@ predecessor and whitespace runs are collapsed (comment lines are left as
 lines; CRLF and trailing whitespace are ignored), so a netlist whose long
 cards a project post-processor re-wrapped still reports `"match"`. Only
 layout is normalized, never a token: a changed device card, parameter value,
-node or pin order still reports `"drifted"`. When the files match only
-because of this, `drift.layout_differs` is `true`. This does not hide the
+node or pin order still reports `"drifted"`. The one exception is the port
+order of xschem's informational `**.subckt <name> <ports...>` comment line,
+which differs between xschem versions and is compared order-insensitively
+(issue #3743); the electrical `.subckt` card's port order is still strict, and
+a permutation-only change is diagnosed in `drift.subckt_port_order` (issue #4524).
+When the files match only because of this, `drift.layout_differs` is `true`. This does not hide the
 `.subckt`/`.ends` wrapper difference — for a committed netlist wrapped as a
 real `.subckt`, pass `--block`, which `--check` applies before comparing
 ([Block mode](#block-mode-an-includable-subckt)).
+
+**Post-processed committed netlists: `--ignore-comments`** (issue #4525).
+When a project lightly post-processes the export (an added header comment, a
+rewritten `** sch_path:` line), pass `--ignore-comments` with `--check`: every
+SPICE comment line (first non-blank character `*`) and blank line is ignored
+on both sides, so the files compare equal if only comments differ. Any
+change to a non-comment line (device card, parameter, node or pin order) still
+reports `"drifted"`; without the flag a comment-only difference still does.
+When the match relied on this, `drift.comments_differ` is `true`
+(`drift.comments_differ` is `false` otherwise). The flag only affects the
+comparison, so it is a usage error (exit `2`) without `--check`; it works
+under `--backend batch` too. Note a `*` line inside a `.control` block counts
+as a comment, as in SPICE.
+
+```bash
+klt netlist design/block.sch -o design/netlist/block.spice \
+    --block --check --ignore-comments
+```
 
 The `0`/`3` split is deliberately the same one `klt drc --check` and `klt lvs
 --check` use for `"match"`/`"drifted"`, so a CI gate treats a stale committed
@@ -259,6 +310,7 @@ envelope's `error.code` classifies it:
 | `batch_job_timeout` | The harness stopped the job at its `timeout_seconds`. |
 | `batch_job_failed` | The job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted (and its `error.code` used, when it has one). |
 | `unevaluated_expr` | The netlist still contains a literal `expr(...)` (see above). Also returned by the local backend. |
+| `unresolved_symbol` | The netlist contains an `IS MISSING` marker: xschem could not resolve a symbol (see above). Also returned by the local backend. |
 | `batch_input_too_large` | The input tree is above the size cap (below). Raised before any upload. |
 
 **What is uploaded.** The job instance holds no forge credential and cannot
@@ -364,7 +416,10 @@ is a reusable block meant to be `.include`d elsewhere: the including deck
 already has its own `.end`, so a second one would terminate it early.
 
 `--block` post-processes the export: the first commented `.subckt`/`.ends`
-pair is uncommented, and the trailing `.end` is dropped. The result carries a
+pair is uncommented, and the trailing `.end` is dropped. When xschem wrapped a
+long port list onto commented continuation lines (`*+ ...`) directly after the
+header, those lines are rewritten to real `+` continuations so the `.subckt`
+card carries the whole port list. The result carries a
 `block` object in the JSON payload:
 
 | Field | Type | Description |
@@ -380,6 +435,23 @@ the xschem invocation (`--block` adds no xschem flags). Under `--check`,
 the transform runs before the comparison, so a committed block artifact is
 diffed against the transformed (not the raw testbench-shaped) regeneration.
 
+## Port-list form and symbol references
+
+xschem writes a bus port as a comma-joined group (`a[1],a[0]`). ngspice
+silently mis-maps the ports of a subcircuit with two or more such groups (the
+trailing nodes are left unconnected, so the failure shows up only as a
+singular matrix or wrong results). `klt netlist` therefore rewrites every
+`.subckt` header — the `--block` top sheet and nested sub-block headers,
+including their `+` continuation lines — to a space-separated port list
+(`a[1] a[0]`). Text from `params:` onward, comments and device cards are not
+touched, and a bus-free netlist is unchanged. The rewrite runs before the
+write and before the `--check` comparison, so a committed netlist that still
+has comma-joined ports reports `"drifted"`: regenerate it.
+
+A symbol reference relative to the schematic (`../x/y.sym`) resolves only when
+that schematic is the netlisting top, because xschem resolves it against the
+working directory. Nested blocks need a library-path reference.
+
 ## PDK-root consistency
 
 `--pdk` / `--pdk-root` mirror [`klt sim`](sim.md)'s flags and resolve through
@@ -392,6 +464,15 @@ resolved install root, or equals/sits under the resolved variant directory
 naming a *different* variant under the same install root, or merely sitting
 above the install root, is a mismatch. A mismatch is a **warning**, not an
 error: the netlist is still produced and the exit code is unchanged.
+
+When a PDK resolves, `klt netlist` also **exports it to xschem**: the xschem
+process is launched with `PDK_ROOT` set to the resolved install root and `PDK`
+to the resolved variant, overriding any inherited values, so an `xschemrc`
+that reads `$env(PDK_ROOT)`/`$env(PDK)` agrees with `--pdk`/`--pdk-root`. With
+no PDK in play, xschem inherits klt's environment unchanged. The
+`unresolved_symbol` error names the `--rcfile` used and the `PDK_ROOT`/`PDK`
+xschem was given (or "inherited / not set"). The `--backend batch` runner
+resolves its own `$PDK_ROOT`.
 
 - `--pdk`/`--pdk-root` given: strict — an unresolvable PDK is an error (exit `1`).
 - Neither given, `--rcfile` given, and `$PDK`/`$PDK_ROOT` set: best effort — an
@@ -484,7 +565,8 @@ error: the netlist is still produced and the exit code is unchanged.
 | `committed_bytes` | integer \| null | Size of the committed netlist, or `null` when absent. |
 | `committed_content_hash` | string \| null | `sha256:<hex>` of the committed netlist, or `null` when absent. |
 | `path_comments_differ` | boolean | `true` when the files differ only in the directories of xschem's `** sch_path:` / `** sym_path:` comments, which `--check` ignores (status is then `"match"`). Additive (issue #3010). |
-| `layout_differs` | boolean | `true` when the files match only after `--check` ignored `+` continuation layout and whitespace runs. Additive (issue #3324). |
+| `layout_differs` | boolean | `true` when the files match only after `--check` ignored `+` continuation layout, whitespace runs, or the port order of the `**.subckt` comment line (issue #3743). Additive (issue #3324). |
+| `subckt_port_order` | array\<object\> | One `{subckt, committed, regenerated}` entry per `.subckt` card whose port set is unchanged but whose port order differs, when that is the *only* drift (typically a different xschem build). Status stays `"drifted"` (port order is the positional contract of `subckt-call` and LVS), and `reason` names the local xschem version and warns to recheck positional callers. `[]` otherwise, including a missing file or any other drift. Additive (issue #4524). |
 | `diff` | array\<string\> | Unified diff lines, committed → regenerated. `[]` on `"match"`. Capped at 200 lines. |
 | `diff_truncated` | boolean | Whether `diff` was cut off at the cap. |
 | `reason` | string \| null | Human-readable explanation of the verdict; `null` on `"match"`. |

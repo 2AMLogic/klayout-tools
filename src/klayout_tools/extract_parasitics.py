@@ -155,6 +155,15 @@ def parse_parasitic_variants(
 #: are never routed through :func:`spice_safe_net_name`.
 SPICE_HIERARCHY_SEPARATOR = "."
 
+#: Integer revision of the ``--parasitics`` R/C extraction model (issue #2957).
+#: Emitted as ``parasitics.model_revision``. Bump it whenever a change alters
+#: the R or C values extracted from identical input, so a consumer comparing
+#: two klt versions can tell "tool bumped, model unchanged" from "model
+#: changed". ``1`` is the 0.6.0-and-earlier model (series-R squares counted
+#: per merged net); ``2`` is 0.7.0's (squares counted per conductor fragment,
+#: #2392).
+PARASITICS_MODEL_REVISION = 2
+
 #: What :data:`SPICE_HIERARCHY_SEPARATOR` is rewritten to (issue #2145).
 #: ``_`` is an ordinary identifier character in every SPICE dialect and is
 #: the join several other extractors already use; ``/`` was rejected because
@@ -637,11 +646,9 @@ def _boundary_sides(box: kdb.Box, region: kdb.Region) -> list[kdb.Box]:
     """The sides of ``box`` (as zero-width boxes, longest first, ties
     left/right/bottom/top) that lie entirely on ``region``'s outline.
 
-    The graph builder attaches a port to every piece its patch touches, so a
-    port in the *interior* of a conductor would sit in parallel with the
-    in-plane edge it cuts and double the conductance there. It is specified
-    for ports on the conductor's boundary (Stage 3.D4's end-edge ports), so
-    the adapter only ever attaches a contact/via there (issue #2982)."""
+    A contact/via with such a side shared by all its roles attaches along it
+    (Stage 3.D4's end-edge ports, issue #2982); one with none is attached by
+    its full bounding box instead (issue #4061)."""
     import klayout.db as kdb
 
     outline = region.merged().edges()
@@ -671,16 +678,18 @@ def _graph_landings_and_ports(
     vias: list[kdb.Region],
     dbu: float,
     r_cut_ohm: float | None,
-) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
-    """The ``LandingInput`` / terminal ``PortInput`` lists for one net, plus
-    the contacts/vias that could not be placed on a conductor boundary.
+) -> tuple[list[Any], list[Any]]:
+    """The ``LandingInput`` / terminal ``PortInput`` lists for one net.
 
     A contact/via polygon whose two sides are both modelled roles becomes a
     landing; one with a single modelled side is where current leaves the
     modelled conductor (into a device diffusion, or a level the deck has no
     coefficient for), so it becomes a terminal on that side. Device-body cut
     edges (drawn-layer interfaces) are terminals too. Every ordering is by
-    integer geometry, so repeated equivalent requests are byte-identical."""
+    integer geometry, so repeated equivalent requests are byte-identical.
+
+    A contact/via with no side on the conductor outline (a landing in the
+    interior of a strap) is attached by its whole bounding box."""
     import klayout.db as kdb
 
     from .extract_resistance_graph import LandingInput, PortInput
@@ -693,7 +702,6 @@ def _graph_landings_and_ports(
 
     landings: list[Any] = []
     terminals: dict[str, tuple[str, kdb.Box]] = {}
-    interior: list[dict[str, Any]] = []
     for cut_region, lower_names, upper_name in joins:
         for polygon in cut_region.merged().each():
             probe = kdb.Region(polygon)
@@ -717,27 +725,20 @@ def _graph_landings_and_ports(
                 continue
             sides = [_boundary_sides(box, region_of[r]) for r in attached]
             shared = [side for side in sides[0] if all(side in s for s in sides)]
-            if not shared:
-                interior.append(
-                    {
-                        "roles": attached,
-                        "x_um": box.center().x * dbu,
-                        "y_um": box.center().y * dbu,
-                    }
-                )
-            elif lower is not None and upper is not None:
+            patch = shared[0] if shared else box
+            if lower is not None and upper is not None:
                 landings.append(
                     LandingInput(
                         lower,
                         upper,
-                        shared[0],
+                        patch,
                         max(polygon.area() * dbu * dbu, 1e-12),
                         r_cut_ohm,
                     )
                 )
             else:
                 terminals.setdefault(
-                    _graph_port_name("via", box, dbu), (attached[0], shared[0])
+                    _graph_port_name("via", box, dbu), (attached[0], patch)
                 )
     for name, _rs, region, drawn in roles:
         for box in _cut_edge_boxes(region, drawn):
@@ -760,7 +761,7 @@ def _graph_landings_and_ports(
             lnd.box.right,
         )
     )
-    return landings, ports, interior
+    return landings, ports
 
 
 class _ResistanceGraphCollector:
@@ -768,8 +769,9 @@ class _ResistanceGraphCollector:
     method is a no-op when ``enabled`` is false, so the caller stays
     branch-free and the default path does no graph work and adds no key."""
 
-    def __init__(self, enabled: bool) -> None:
+    def __init__(self, enabled: bool, r_cut_ohm: float | None = None) -> None:
         self._enabled = enabled
+        self._r_cut_ohm = r_cut_ohm
         self._roles: dict[
             Any, list[tuple[str, float | None, kdb.Region, kdb.Region | None]]
         ] = {}
@@ -801,6 +803,7 @@ class _ResistanceGraphCollector:
                 *self._landings[net],
                 dbu,
                 entry["resistance_ohm"],
+                self._r_cut_ohm,
             )
 
 
@@ -808,6 +811,37 @@ def _copy_resistance_graph(entry: dict[str, Any], report_net: dict[str, Any]) ->
     """Carry the opt-in ``resistance_graph`` key onto a report net, if present."""
     if "resistance_graph" in entry:
         report_net["resistance_graph"] = entry["resistance_graph"]
+
+
+def _with_selected_resistance(report: dict[str, Any]) -> dict[str, Any]:
+    """Add the additive scalar-selection provenance (issue #2983).
+
+    The graph result is selected only when the net has exactly two terminals,
+    the solve is ``ok`` and the pair resistance is a number. Anything else
+    (``unsupported``, ``skipped``, three or more terminals, a disconnected
+    pair) keeps the legacy scalar, and ``resistance_source_reason`` says why.
+    ``resistance_ohm`` itself is never changed; this only reports which value
+    a caller that wants the topology-aware scalar should read."""
+    terminals = report["terminals"]
+    pair = report["pair_resistance_ohm"]
+    selected: float | None = None
+    if report["status"] != "ok":
+        reason = f"graph_status_{report['status']}"
+    elif len(terminals) != 2:
+        reason = "terminal_count_not_two"
+    else:
+        selected = pair[0][1]
+        reason = (
+            "pair_resistance_unavailable" if selected is None else "two_terminal_graph"
+        )
+    if selected is None:
+        report["selected_resistance_ohm"] = report["legacy_resistance_ohm"]
+        report["resistance_source"] = "legacy"
+    else:
+        report["selected_resistance_ohm"] = selected
+        report["resistance_source"] = "graph"
+    report["resistance_source_reason"] = reason
+    return report
 
 
 def _resistance_graph_report(
@@ -840,30 +874,7 @@ def _resistance_graph_report(
         terminal_resistance_matrix,
     )
 
-    landings, ports, interior = _graph_landings_and_ports(
-        roles, contacts, vias, dbu, r_cut_ohm
-    )
-    if interior:
-        # Coverage gap, reported rather than solved with a wrong attachment.
-        return {
-            "status": "unsupported",
-            "terminals": [],
-            "pair_resistance_ohm": [],
-            "legacy_resistance_ohm": legacy_resistance_ohm,
-            "nodes": 0,
-            "edges": 0,
-            "diagnostics": [
-                {
-                    "code": "unsupported_geometry",
-                    "message": (
-                        f"{len(interior)} contact/via landing(s) lie in the "
-                        "interior of a conductor; ports are only attached at "
-                        "conductor edges"
-                    ),
-                    "detail": {"interior_landings": interior},
-                }
-            ],
-        }
+    landings, ports = _graph_landings_and_ports(roles, contacts, vias, dbu, r_cut_ohm)
     role_inputs = [
         RoleInput(name, sheet_res, tuple(region.merged().each()))
         for name, sheet_res, region, _drawn in roles
@@ -880,7 +891,7 @@ def _resistance_graph_report(
         {"code": d.code, "message": d.message, "detail": d.detail} for d in reported
     ]
     diagnostics.sort(key=lambda d: (d["code"], d["message"]))
-    return {
+    report = {
         "status": matrix.status,
         "terminals": list(matrix.terminals),
         "pair_resistance_ohm": [list(row) for row in matrix.pair_resistance_ohm],
@@ -889,6 +900,7 @@ def _resistance_graph_report(
         "edges": len(graph.edges),
         "diagnostics": diagnostics,
     }
+    return _with_selected_resistance(report)
 
 
 def _instance_drawn_mask(
@@ -1073,6 +1085,7 @@ def _compute_parasitics(
     via_index: list[int] | None = None,
     capacitor_top_regions: dict[str, kdb.Region] | None = None,
     resistance_graph: bool = False,
+    resistance_graph_r_cut_ohm: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute one first-order lumped ``(R, C)`` per net, plus net-to-net
     vertical-overlap coupling capacitance, from the extracted per-net/
@@ -1515,7 +1528,9 @@ def _compute_parasitics(
     contact_layer_index = layer_index.get("contact")
     # `resistance_graph` (issue #2982): each net's per-role geometry and
     # landings, kept only when the opt-in flag is on.
-    graph_collector = _ResistanceGraphCollector(resistance_graph)
+    graph_collector = _ResistanceGraphCollector(
+        resistance_graph, resistance_graph_r_cut_ohm
+    )
 
     for net in nets:
         r_ohm = 0.0
@@ -2331,6 +2346,22 @@ def _attach_network_integrity(
     return integrity
 
 
+def _lumped_resistance_ohm(entry: dict[str, Any], emit_selected: bool) -> float:
+    """A net's lumped R (issue #4037): the terminal-aware
+    ``selected_resistance_ohm`` when ``emit_selected`` and the net's
+    ``resistance_source`` is ``"graph"`` (and no MoM-RLC override), else
+    ``resistance_ohm``."""
+    graph_report = entry.get("resistance_graph")
+    if (
+        emit_selected
+        and graph_report is not None
+        and graph_report.get("resistance_source") == "graph"
+        and not entry.get("mom_rlc_r_override")
+    ):
+        return graph_report["selected_resistance_ohm"]
+    return entry["resistance_ohm"]
+
+
 def _inject_parasitics(
     kdb: Any,
     circuit: kdb.Circuit,
@@ -2342,6 +2373,7 @@ def _inject_parasitics(
     record_slice_topology: bool = False,
     variants: ParasiticVariants | None = None,
     substrate_tie_ohms: float | None = None,
+    emit_selected_resistance: bool = False,
 ) -> dict[str, Any]:
     """Inject a star-topology parasitic RC per net (or a distributed
     multi-segment ladder for a caller-declared subset, see below), plus one
@@ -2349,6 +2381,14 @@ def _inject_parasitics(
     vertical-overlap and/or (``--critical-net``-scoped) lateral coupling
     capacitance, into ``circuit`` and return the JSON ``parasitics`` summary
     block (issue #592, extended by issues #760, #976, and #977).
+
+    ``emit_selected_resistance`` (issue #4037, internal -- only ``klt pex``
+    sets it) writes the terminal-aware ``resistance_graph.selected_resistance_ohm``
+    as a net's lumped R wherever that net's ``resistance_source`` is
+    ``"graph"``; every other net (``legacy`` source, no ``resistance_graph``
+    block, or a ``--mom-rlc-resistance-ohm`` override) keeps
+    ``resistance_ohm``. ``False`` (the default, and what ``klt extract``
+    always passes) is the legacy-scalar netlist.
 
     ``mom_rlc_inductor`` (``(net_name, inductance_nh)``, issue #988, Epic
     #709 Phase 3a) -- ``None`` unless ``--mom-rlc-net`` was given together
@@ -2613,7 +2653,10 @@ def _inject_parasitics(
             if dup_count == 0
             else f"{base_instance_name}_dup{dup_count}"
         )
-        r_total_ohm = max(entry["resistance_ohm"], _MIN_PARASITIC_R_OHM)
+        r_total_ohm = max(
+            _lumped_resistance_ohm(entry, emit_selected_resistance),
+            _MIN_PARASITIC_R_OHM,
+        )
         c_farad = entry["capacitance_ff"] * 1e-15
         net_escaped = spice_safe_net_name(entry["net"])
         drop_r = variants is not None and variants.drops_r(net_escaped)
@@ -2626,6 +2669,7 @@ def _inject_parasitics(
         terminal_reports: list[dict[str, Any]] = []
         segment_reports: list[dict[str, Any]] = []
         rc_model = "lumped"
+        pin_order: int | None = None
         net_c_count = 0
         if (
             distributed_rc_nets is not None
@@ -2660,6 +2704,7 @@ def _inject_parasitics(
             # docstring) keeps that position's identity intact for free,
             # mirroring the star's own reuse.
             mid_index = len(order) // 2
+            pin_order = mid_index
 
             legs: list[kdb.Net] = [net] * len(order)
             leg_names: list[str] = [entry["net"]] * len(order)
@@ -2972,6 +3017,11 @@ def _inject_parasitics(
                 # resistors, in `order` sequence -- `[]` unless
                 # `rc_model == "distributed"`.
                 "segments": segment_reports,
+                # Additive field (issue #3937): the `order` of the terminal
+                # whose `leg_net` is the net's own name (the subcircuit
+                # pin) -- the ladder's middle node, `len(order) // 2`.
+                # `None` unless `rc_model == "distributed"`.
+                "pin_order": pin_order,
                 "coupled": [
                     {**c, "net": spice_safe_net_name(c["net"])}
                     for c in coupled_by_net.get(entry["net"], [])

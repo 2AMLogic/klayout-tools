@@ -56,6 +56,7 @@ NSEL, PSEL, LIG, LISD, V0, M1, SDT = (
 )
 M1_PIN, WELL_PIN, GATE_PIN = (19, 251), (1, 251), (7, 251)
 LVT, SLVT = (98, 0), (97, 0)
+THICKOX = (111, 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -187,10 +188,11 @@ def test_asap7_family_and_extraction_deck_registered():
     assert isinstance(get_extraction_deck("asap7"), FinFETExtractionDeck)
 
 
-def test_asap7_capabilities_advertise_extraction_only():
+def test_asap7_capabilities_advertise_extraction_and_parasitics():
     decisions = pdk_capabilities.DECISIONS["asap7"]
     supported = {name for name, d in decisions.items() if d.status == "supported"}
-    assert supported == {"extraction"}
+    assert supported == {"extraction", "parasitics"}
+    assert "uncalibrated" in decisions["parasitics"].reason
     # DRC stays a separate rule table (#2760).
     assert "#2760" in decisions["curated_drc"].reason
 
@@ -205,6 +207,7 @@ def test_asap7_deck_layers_match_pinned_lyp_roles():
         (98, 0): "nmos_lvt",
         (97, 0): "nmos_slvt",
         (110, 0): "nmos_sram",
+        (111, 0): "nmos_io",
     }
 
 
@@ -264,7 +267,11 @@ def test_three_fingers_merge(tmp_path):
 
 @pytest.mark.parametrize(
     ("marker", "nclass", "pclass"),
-    [(LVT, "nmos_lvt", "pmos_lvt"), (SLVT, "nmos_slvt", "pmos_slvt")],
+    [
+        (LVT, "nmos_lvt", "pmos_lvt"),
+        (SLVT, "nmos_slvt", "pmos_slvt"),
+        (THICKOX, "nmos_io", "pmos_io"),
+    ],
 )
 def test_vt_marker_selects_model_class(tmp_path, marker, nclass, pclass):
     assert _only_device(_extract(tmp_path, vt=marker))["class"] == nclass
@@ -408,6 +415,7 @@ def test_device_class_contract_compares_nfin_exactly():
         ({"polarity": "p", "well": False}, "PMOS channel not inside the well"),
         ({"well": True}, "NMOS channel inside the well"),
         ({"vt": (LVT, SLVT)}, "channel touches two VT markers"),
+        ({"vt": (LVT, THICKOX)}, "channel touches two VT markers"),
     ],
 )
 def test_malformed_geometry_is_refused_with_location(tmp_path, kwargs, fragment):
@@ -475,7 +483,6 @@ def test_cli_json_success_uses_shared_envelope(tmp_path, capsys):
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"parasitics": True},
         {"abstract_cell_patterns": ("X*",)},
         {"pdk_variant": "asap7"},
         # Issue #2722: hierarchical emission is planar-only in increment 1.
@@ -486,6 +493,107 @@ def test_planar_only_options_are_refused_by_name(tmp_path, kwargs):
     path = _write(_draw_device(), tmp_path)
     with pytest.raises(ExtractError, match="FinFET extraction deck"):
         run_extract(path, "asap7", output=str(tmp_path / "o.spice"), **kwargs)
+
+
+def test_def_driven_options_are_accepted_on_a_finfet_layout(tmp_path):
+    """Issue #4559: the post-route SPEF pass hands `--def-net-names` and
+    `--pins` to the FinFET path. A hand-drawn layout carries no DEF net-name
+    shape property, so the rename is a loud no-op, and the declared set
+    demotes every undeclared promoted pin."""
+    path = _write(_draw_device(fins=2), tmp_path)
+    report = run_extract(
+        path,
+        "asap7",
+        output=str(tmp_path / "p.spice"),
+        parasitics=True,
+        def_net_names=True,
+        declared_pins=frozenset({"G"}),
+    )
+    warnings = " | ".join(report["warnings"])
+    assert "--def-net-names found no DEF net-name shape property" in warnings
+    assert "not in the declared pin set" in warnings
+    assert report["device_counts"] == {"nmos_rvt": 1}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"top_cell_pins_only": True},
+        {"def_pins": frozenset({"G"})},
+    ],
+)
+def test_remaining_planar_pin_options_stay_refused(tmp_path, kwargs):
+    path = _write(_draw_device(), tmp_path)
+    with pytest.raises(ExtractError, match="FinFET extraction deck"):
+        run_extract(path, "asap7", output=str(tmp_path / "o.spice"), **kwargs)
+
+
+def test_asap7_parasitics_deck_is_registered_and_index_aligned():
+    from klayout_tools.decks import get_parasitics_deck
+    from klayout_tools.extract_report import _describe_parasitics_overlap_gaps
+
+    deck = get_parasitics_deck("asap7")
+    assert len(deck.metals) == len(EXTRACTION_DECK.metals) == 9
+    assert all(rc is not None and rc.sheet_res_ohm_sq > 0 for rc in deck.metals)
+    assert len(deck.metal_overlaps) == len(deck.metals) - 1
+    assert [cut.lower_metal_index for cut in deck.cuts] == list(range(8))
+    assert not _describe_parasitics_overlap_gaps(EXTRACTION_DECK, deck)
+
+
+def test_parasitics_run_on_a_finfet_layout(tmp_path):
+    path = _write(_draw_device(fins=2), tmp_path)
+    report = run_extract(
+        path, "asap7", output=str(tmp_path / "p.spice"), parasitics=True
+    )
+    parasitics = report["parasitics"]
+    assert parasitics["nets"], parasitics
+    for entry in parasitics["nets"]:
+        assert entry["resistance_ohm"] >= 0
+        assert entry["capacitance_ff"] >= 0
+    assert report["device_counts"] == {"nmos_rvt": 1}
+
+
+def test_parasitics_cli_json_shape_matches_planar(tmp_path, capsys):
+    path = _write(_draw_device(fins=2), tmp_path)
+    rc = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "asap7",
+            "--parasitics",
+            "-o",
+            str(tmp_path / "o.spice"),
+            "--format",
+            "json",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert {"nets", "r_count", "c_count", "total_capacitance_ff"} <= set(
+        report["parasitics"]
+    )
+    assert report["parasitics"]["metals_without_coefficient"] == []
+
+
+def test_parasitics_spef_is_written_for_a_finfet_layout(tmp_path):
+    path = _write(_draw_device(fins=2), tmp_path)
+    spef = tmp_path / "dev.spef"
+    rc = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "asap7",
+            "--parasitics",
+            "--spef",
+            str(spef),
+            "-o",
+            str(tmp_path / "o.spice"),
+        ]
+    )
+    assert rc == 0
+    assert "*D_NET" in spef.read_text()
 
 
 @pytest.fixture(autouse=True)
@@ -588,6 +696,61 @@ def test_lvs_different_model_class_is_a_mismatch(tmp_path):
     report = _lvs(tmp_path, "M0 D G S vsubs nmos_lvt w=81n l=20n nfin=3")
     assert report["status"] == "mismatch"
     assert _errors(report)
+
+
+def _lvs_io(tmp_path, card, *, polarity="n", top_line=".SUBCKT TOP S G D"):
+    layout = _write(_draw_device(polarity=polarity, vt=THICKOX), tmp_path)
+    ref = tmp_path / "ref.cdl"
+    ref.write_text(f"{top_line}\n{card}\n.ENDS\n")
+    return run_lvs(
+        json.dumps(
+            {
+                "layout": {"file": layout, "deck": "asap7", "top": "TOP"},
+                "reference": {"netlist": str(ref), "top": "TOP"},
+            }
+        )
+    )
+
+
+def test_lvs_io_nfet_matches_nmos_io_reference(tmp_path):
+    report = _lvs_io(tmp_path, "M0 D G S vsubs nmos_io w=81n l=20n nfin=3")
+    assert report["status"] == "match"
+
+
+def test_lvs_io_pfet_matches_pmos_io_reference(tmp_path):
+    report = _lvs_io(
+        tmp_path,
+        "M0 D G S VB pmos_io w=81n l=20n nfin=3",
+        polarity="p",
+        top_line=".SUBCKT TOP S G D VB",
+    )
+    assert report["status"] == "match"
+
+
+def test_lvs_io_device_against_core_reference_is_a_mismatch(tmp_path):
+    report = _lvs_io(tmp_path, "M0 D G S vsubs nmos_rvt w=81n l=20n nfin=3")
+    assert report["status"] == "mismatch"
+    assert _errors(report)
+
+
+def test_lvs_core_device_against_io_reference_is_a_mismatch(tmp_path):
+    report = _lvs(tmp_path, "M0 D G S vsubs nmos_io w=81n l=20n nfin=3")
+    assert report["status"] == "mismatch"
+    assert _errors(report)
+
+
+def test_core_and_io_devices_in_one_cell_keep_their_own_classes(tmp_path):
+    c = _Canvas(DBU)
+    for dx, vt in ((0, None), (3000, THICKOX)):
+        sub = _draw_device(vt=vt)
+        for li in sub.layer_indexes():
+            info = sub.get_info(li)
+            dst = c.layout.layer(info.layer, info.datatype)
+            for sh in sub.top_cell().shapes(li).each():
+                c.top.shapes(dst).insert(sh).transform(kdb.Trans(dx, 0))
+    path = _write(c.layout, tmp_path)
+    report = run_extract(path, "asap7", output=str(tmp_path / "dev.spice"))
+    assert sorted(d["class"] for d in report["devices"]) == ["nmos_io", "nmos_rvt"]
 
 
 def test_lvs_changed_gate_length_is_a_mismatch(tmp_path):
@@ -718,6 +881,64 @@ def test_lvs_bulk_policy_enabled_ties_discloses_and_echoes(tmp_path):
     assert entry["details"]["net"] == "S"
     assert entry["details"]["bulk_net"] == "vsubs"
     assert report["category_counts"]["device.finfet_bulk_tied"] == 1
+
+
+def _two_cell_library(tmp_path: Path, *, with_labels: bool = True) -> str:
+    """Two placed unit cells (``U1``/``U2``) in one ``TOP``; the ``S``/``G``/``D``
+    labels live only in the sub-cells, never at the top."""
+    out = kdb.Layout()
+    out.dbu = DBU
+    top = out.create_cell("TOP")
+    for k, name in enumerate(("U1", "U2")):
+        src = _draw_device()
+        cell = out.create_cell(name)
+        cell.copy_tree(src.top_cell())
+        if not with_labels:
+            for layer in out.layer_indexes():
+                for shape in list(cell.shapes(layer).each(kdb.Shapes.STexts)):
+                    cell.shapes(layer).erase(shape)
+        top.insert(kdb.CellInstArray(cell.cell_index(), kdb.Trans(k * 2000, 0)))
+    return _write(out, tmp_path, "lib.gds")
+
+
+_LIB_REF = (
+    ".SUBCKT U S G D\nM0 D G S S nmos_rvt w=81n l=20n nfin=3\n.ENDS\n"
+    ".SUBCKT TOP\nX1 vss b c U\nX2 vss e f U\n.ENDS\n"
+)
+
+
+def _lib_request(tmp_path: Path, layout: str, options: dict) -> str:
+    ref = tmp_path / "lib.cdl"
+    ref.write_text(_LIB_REF)
+    return json.dumps(
+        {
+            "layout": {"file": layout, "deck": "asap7", "top": "TOP"},
+            "reference": {"netlist": str(ref), "top": "TOP"},
+            "options": options,
+        }
+    )
+
+
+def test_lvs_bulk_policy_resolves_sub_cell_rail_labels(tmp_path):
+    layout = _two_cell_library(tmp_path)
+    options = {
+        "finfet_bulk": {"nmos": "S"},
+        "flatten_layout": True,
+        "flatten_reference": True,
+    }
+    report = run_lvs(_lib_request(tmp_path, layout, options))
+    assert report["status"] == "match", _errors(report)
+    tied = [
+        m for m in report["mismatches"] if m["category"] == "device.finfet_bulk_tied"
+    ]
+    assert sorted(m["details"]["circuit"] for m in tied) == ["U1", "U2"]
+
+
+def test_lvs_bulk_policy_missing_sub_cell_label_names_the_circuit(tmp_path):
+    layout = _two_cell_library(tmp_path, with_labels=False)
+    options = {"finfet_bulk": {"nmos": "S"}, "flatten_layout": True}
+    with pytest.raises(LvsError, match=r"not found in circuit 'U[12]'"):
+        run_lvs(_lib_request(tmp_path, layout, options))
 
 
 def test_lvs_bulk_policy_round_trips_through_rerun_reconstruction(tmp_path):
@@ -1338,3 +1559,69 @@ def test_corpus_full_rvt_library_via_klt_lvs_in_a_checked_subprocess(tmp_path):
     for cell in _FOLDED_STACK_CELLS | _SERIES_ORDER_CELLS:
         assert results[cell] == "mismatch", cell
     assert results["TAPCELL_ASAP7_75t_R"].startswith("error: ")
+
+
+# --------------------------------------------------------------------------- #
+# klt lvs: gate-level-verilog reference on a FinFET deck (issue #4462)
+# --------------------------------------------------------------------------- #
+
+_CELL_CDL = ".SUBCKT MYN G D S VSS\nM0 D G S VSS nmos_rvt w=81n l=20n nfin={n}\n.ENDS\n"
+_TOP_V = (
+    "module TOP (S, G, D);\n input S, G; output D;\n"
+    " MYN u0 (.G(G), .D(D), .S(S));\nendmodule\n"
+)
+
+
+def _lvs_gate_level(
+    tmp_path: Path,
+    *,
+    cdl_fins=3,
+    layout_fins=3,
+    verilog=_TOP_V,
+    options=None,
+    extra=None,
+):
+    layout = _write(_draw_device(polarity="n", fins=layout_fins), tmp_path)
+    cdl = tmp_path / "lib.cdl"
+    cdl.write_text(_CELL_CDL.format(n=cdl_fins))
+    ref = tmp_path / "ref.v"
+    ref.write_text(verilog)
+    request = {
+        "layout": {"file": layout, "deck": "asap7", "top": "TOP"},
+        "reference": {
+            "netlist": str(ref),
+            "top": "TOP",
+            "form": "gate-level-verilog",
+            "pin_order_files": [str(cdl)],
+            **(extra or {}),
+        },
+    }
+    if options is not None:
+        request["options"] = options
+    return run_lvs(json.dumps(request))
+
+
+def test_lvs_gate_level_verilog_expands_cells_and_matches(tmp_path):
+    report = _lvs_gate_level(tmp_path)
+    assert report["status"] == "match"
+    assert report["power_connectivity"]["status"] == "unchecked"
+    assert "transistor-level" in report["power_connectivity"]["reason"]
+
+
+def test_lvs_gate_level_verilog_changed_library_nfin_is_a_mismatch(tmp_path):
+    report = _lvs_gate_level(tmp_path, cdl_fins=2)
+    assert report["status"] != "match"
+    props = [m for m in _errors(report) if m.get("category") == "device.property"]
+    assert props
+    assert props[0]["property"]["name"].lower() == "nfin"
+
+
+def test_lvs_gate_level_verilog_missing_cell_body_is_an_error(tmp_path):
+    verilog = _TOP_V.replace("MYN u0", "NOPE u0")
+    with pytest.raises(LvsError, match="NOPE"):
+        _lvs_gate_level(tmp_path, verilog=verilog)
+
+
+def test_lvs_gate_level_verilog_still_refuses_device_map(tmp_path):
+    with pytest.raises(LvsError, match="device_map"):
+        _lvs_gate_level(tmp_path, extra={"device_map": {"a": "b"}})

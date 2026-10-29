@@ -96,7 +96,10 @@ A request naming both, or neither, is a request error.
   other tool's routed DEF).
 - **Not `klayout_tools.sta`** (`klt synthesize`'s integrated, *pre-layout*,
   gate-level `sta` report backed by the `klt_statime_native` Rust
-  extension — see `docs/cli/synthesize.md`'s `sta` section). That module
+  extension — see `docs/cli/synthesize.md`'s `sta` section; that extension
+  is not shipped with the published package, so there `klt synthesize`
+  reports `"sta": null` and this command's `verilog` mode is the
+  installed-package route to a netlist timing estimate). That module
   times a structural netlist against a uniform input-transition/output-load
   boundary condition with no floorplan/placement/routing at all; this
   command instead times real, already-placed-and-routed geometry against
@@ -123,7 +126,10 @@ A request naming both, or neither, is a request error.
   },
   "constraints": { "clock_port": "clk", "clock_period_ns": 1.1 },
   "spef": "gcd_route.spef",
-  "geometry_source": "routed"
+  "geometry_source": "routed",
+  "macros": [
+    { "lef": "sram_8x8.lef", "lib": { "tt_025C_1v80": "sram_8x8_tt.lib" } }
+  ]
 }
 ```
 
@@ -137,17 +143,23 @@ A request naming both, or neither, is a request error.
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. This is the field a corner sweep varies across runs — the `def`/`verilog` above stays byte-identical across every run in the sweep. Mutually exclusive with `pdk.corners` below (issue #1871) — a request giving both is a request error. |
 | `pdk.corners` | array of string \| omitted | Additive field (issue #1871). A **list** of corner names to characterize the *same* loaded geometry against, in one request/response round trip, instead of a caller hand-rolling an external loop of N single-corner requests (see "Multi-corner characterization" below). Mutually exclusive with the scalar `pdk.corner` above. Must be a non-empty list of non-empty, mutually-distinct strings — unlike `klt place-and-route`'s `pdk.sweep_corners` (which *narrows* an already-enumerated shipped-corner set, so `[]` meaningfully means "sweep zero of them"), `corners` here *is* the primary corner selection, so an empty list is a request error, not "characterize nothing". |
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). **Both required** — unlike `klt place-and-route` (where a clock is optional until `target_stage` reaches `"place"`), a standalone STA run has no meaning without one; there is no earlier stage to fall back to. |
+| `constraints.clocks` | array\<{port, period_ns}\> \| omitted | Additive field (issue #4241). The multi-clock alternative to `clock_port`/`clock_period_ns` — **mutually exclusive** with them (giving both is a request error). Each entry needs a unique non-empty `port` and a positive `period_ns`; unknown keys, an empty list or a malformed entry are errors. One `create_clock -name <port> -period <p> [get_ports <port>]` is emitted per entry. The **first entry is the primary clock** and keeps every role `clock_port` has: the `-clock` of `set_input_delay`/`set_output_delay`, the `report_ports` / `false_path_from` anchors, and the non-clock-input exclusion. Secondary clock ports are not excluded from the default input delay, and per-clock I/O delays, generated clocks and uncertainty are not supported. With `propagated_clock: true`, every declared clock is marked propagated. A single-entry list equals the shorthand. |
+| `constraints.clock_groups` | array\<array\<string\>\> \| omitted | Additive field (issue #4241). Each inner array names declared clock ports that form one group; emits `set_clock_groups -asynchronous -group [get_clocks {a}] -group [get_clocks {b}]`. At least two groups; every port must be a declared clock (an undeclared name is an error). **Without it OpenSTA times cross-domain paths as synchronous** — this command never guesses a relationship. |
 | `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful). Omitted (the default) emits no `set_input_delay` line, leaving this command's generated Tcl byte-identical to before this field existed. Validated and emitted **here**, independently of `klt place-and-route` — this command can run standalone against an externally-produced DEF/netlist with no place-and-route request anywhere upstream, so nothing is inherited. See "I/O timing constraints" below. |
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation and omitted-default behavior as `input_delay_ns`; the two are independently optional. |
 | `constraints.input_delays` / `.output_delays` | object \| omitted | Additive fields (issue #2740). Per-port maps `{"<port>": {"min_ns": n, "max_ns": n}}` → `set_input_delay -min/-max` / `set_output_delay -min/-max` on exactly that port. Each bound is independently optional (at least one per entry); a missing bound is left **unconstrained**, never copied from the other. Values are finite numbers and may be negative; `min_ns <= max_ns` when both are given. Keys are literal names of one scalar port or one bus bit (`data[3]`) — no wildcards, no whole buses, no Tcl. The scalar `input_delay_ns`/`output_delay_ns` above become the **default for ports absent from the map**. Missing, ambiguous and wrong-direction keys, and the clock port, are request errors. See "Per-port I/O delays and worst-path identity" below. |
 | `constraints.input_transition_ns` / `.input_transitions` | number / object \| omitted | Additive fields (issue #3227). `input_transition_ns` is the default input slew (ns) → `set_input_transition` on every **non-clock** input not named in `input_transitions`; `input_transitions` is a literal `{"<port>": ns}` map (one scalar port or one bus bit, e.g. `data[3]`) whose values **override** the scalar for that port. Every value is a finite, non-boolean number `>= 0` (`0` is valid). Keys follow the per-port delay rules: no wildcards, no whole buses, no Tcl; the clock port, a missing/ambiguous port or an output-only port is a request error. Omitted fields (and an empty map) emit no Tcl — the generated script stays byte-identical. See "Input transitions" below. |
+| `constraints.driving_cell` / `.driving_cells` / `.output_load_pf` / `.output_loads` | object / number \| omitted | Additive fields (issue #3742). `driving_cell` is `{"cell": "<lib cell>", "pin": "<out pin>"}` (optional `"input_pin"`) → `set_driving_cell -lib_cell … -pin … [-from_pin …]` on every non-clock input not named in `driving_cells` or `input_transitions`; `driving_cells` is a literal `{"<port>": {…}}` override map. `output_load_pf` (pF, `>= 0`) → `set_load` on every output not named in `output_loads`, a literal `{"<port>": pF}` map. Same literal-port rules as `input_transitions`; a port in both `driving_cells` and `input_transitions`, or `input_transition_ns` together with a driving-cell field, is a request error. Omitted fields emit no Tcl. See "Driving cell and output load" below. |
 | `constraints.report_ports` | list of strings \| omitted | Additive field (issue #3042). Literal port names (one scalar port or one bus bit such as `data[3]`) whose **own** worst setup and hold path is reported as `port_paths`, alongside the global `worst_*_path`. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown and ambiguous names are request errors. Any direction is allowed. Omitted or `[]` emits nothing. See "Per-port path queries" below. |
 | `constraints.false_path_from` | list of strings \| omitted | Additive field (issue #2968). Literal **input** port names (one scalar port or one bus bit such as `cfg[3]`) excluded from timing with `set_false_path -from [get_ports <port>]`, emitted after the I/O-delay lines in every analysed corner. Use it for quasi-static configuration inputs whose paths are not real datapaths and would otherwise dominate WNS/TNS and the `worst_*_path` records. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown, ambiguous and output-only names are request errors (`constraints.false_path_from rejected: ...`). `inout` ports are allowed. Omitted or `[]` emits nothing and the generated Tcl is byte-identical to before. The applied list is echoed as `false_path_from`. See "Timing exceptions" below. |
 | `constraints.wire_load_model` / `.wire_load_mode` | string \| omitted | (Issue #1825.) **Only valid in `verilog` mode** — a request error otherwise. Drives OpenSTA's own `set_wire_load_model`/`set_wire_load_mode`, the parasitics-estimate mechanism for a from-scratch netlist session that has no placement or routing to estimate from. See "From-scratch netlist input" below. |
 | `constraints.propagated_clock` | boolean \| omitted | Additive field (issue #2739). **`def` mode only.** `true` marks the request's created clock propagated (`set_propagated_clock`) in every analyzed corner, so hold/removal checks include the DEF's clock-tree insertion delay and skew (and, with a caller-supplied `spef`, its clock-net RC) — the timing a routed post-CTS design actually meets. Omitted or `false` (the default) keeps the **ideal** SDC-only clock this command has always timed — byte-for-byte the pre-#2739 behavior — so existing requests' numbers never change. Any non-boolean value is a request error; `true` together with `verilog` is a request error (a linked netlist has no placed clock tree to propagate through). Meaningful only for a **post-CTS** DEF: a pre-CTS DEF propagates through plain wires and reports ~zero insertion delay — the response's `clock_propagation` evidence block is what says what propagation actually reached (see "Propagated-clock timing" below). |
+| `constraints.power_activity` | object \| omitted | Additive field (issue #3744). `{"activity": <number >= 0>, "duty": <number in [0, 1]>}`, each key optional but at least one required. Emits `set_power_activity -global -activity <a> -duty <d>` before `report_power_metric` in every analyzed corner (`def` and `verilog` mode), so `estimated_power_mw` reflects that switching activity instead of OpenSTA's built-in default. Omitted (the default) emits nothing — the generated script and every number are unchanged. A boolean, negative or non-finite value, `duty` outside `[0, 1]`, an empty object, an unknown key or a non-object is a request error (exit 1) raised before the engine runs. Not VCD/SAIF input; the response's `power_basis` records what was applied. |
+| `constraints.clock_uncertainty_ns` | number \| object \| omitted | Additive field (issue #4240). A number `>= 0` applies the same uncertainty to setup and hold; or `{"setup_ns": <number >= 0>, "hold_ns": <number >= 0>}`, each key optional but at least one required. Emits `set_clock_uncertainty -setup <ns> [get_clocks <clock_port>]` and/or `-hold <ns> ...` right after `create_clock` in every analyzed corner (`def` and `verilog` mode); orthogonal to `propagated_clock` (both may be set). Omitted or `null` (the default) emits nothing — the generated script and every number are unchanged. A boolean, negative or non-finite value, an empty object, an unknown key or any other type is a request error (exit 1) raised before the engine runs. Values are ns, not a fraction of the period. The response's `clock_uncertainty` records what was applied. |
 | `spef` | string \| object \| omitted | A caller-supplied SPEF (e.g. from `klt extract --parasitics`) to annotate real parasitics via `read_spef`, in place of OpenSTA's own default (unannotated, LEF-capacitance-only) timing. **Only valid in `def` mode** — rejected together with `verilog` (no routed/placement geometry in that mode for a SPEF to annotate onto). Resolved relative to the request file's own directory. Omitted (the default) times the design with whatever parasitics OpenSTA derives from the loaded LEF/DEF alone. An **object** mapping a non-empty subset of `min`/`nom`/`max` to SPEF paths (same resolution rule) requests the liberty × interconnect matrix — see "Liberty × interconnect matrix" below (issue #3228). An unknown key, an empty object, or a missing/invalid path is a request error naming the offending key; the object form together with `verilog` is a request error. |
 | `sdf` | boolean \| omitted | Additive field (issue #2886). **`def` mode only, and requires `spef`.** `true` writes one post-route IEEE-1497 SDF per analyzed corner (`write_sdf -divider . -include_typ`, immediately after `read_spef`) to `.klt/sta/<def stem>.<corner>.sdf`, reported per corner as the response's `sdf` field. Omitted or `false` (the default) writes nothing and leaves the generated Tcl byte-identical. Any non-boolean value, `true` with `verilog`, and `true` without `spef`, and `true` with the map form of `spef` (one SDF per liberty corner is ambiguous across the interconnect axis) are each a request error (exit 1). See "Post-route SDF per corner" below. |
 | `geometry_source` | string \| omitted | In `def` mode (issue #1826): `"routed"` (the default, when omitted) declares `def` a fully-implemented, detailed-SPEF-eligible signoff geometry — this command's original and only behaviour. `"placement_estimate"` declares `def` a pre-route DEF from `klt place-and-route`'s `"place"`/`"cts"` stages (its own `unrouted_def_path` output) — nothing about this command's OpenSTA session construction actually changes (it is a plain `read_def` either way), but a placement-/CTS-stage DEF's parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so the resulting slack numbers are real but less accurate than the same fields on a routed DEF. Purely a caller-supplied label — a bare DEF file carries no stage provenance, so this command cannot infer it — echoed back verbatim as the response's own `geometry_source` field (see "Pre-route DEFs" below). Any other value is a request error in `def` mode. In `verilog` mode (issue #1825): this field is forced to `"netlist_estimate"` regardless of whether the request supplies it — omit it, or set it explicitly to `"netlist_estimate"`; any other explicit value is a request error. |
+| `macros` | array\<object\> \| omitted | Hard-macro declarations (issue #2635) — the same shared shape `klt synthesize`/`klt place-and-route` accept, documented once in `klayout_tools.macros`. See "Hard macros" below. `[]`/omitted (the default) leaves every pre-#2635 request byte-identical. |
 
 ## Response
 
@@ -165,6 +177,7 @@ A request naming both, or neither, is a request error.
   "wire_load_mode": null,
   "clock_mode": "ideal",
   "spef_path": null,
+  "macros": [],
   "worst_slack_ns": -0.15321,
   "total_negative_slack_ns": -1.20144,
   "worst_hold_slack_ns": 0.03812,
@@ -196,7 +209,7 @@ A request naming both, or neither, is a request error.
     "klt_version": "0.2.0",
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
-    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>" },
+    "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>", "path": { "path": null, "scope": "external" } },
     "input": { "content_hash": "sha256:<hex>", "role": "layout" }
   }
 }
@@ -238,6 +251,15 @@ it verifiable from other checkouts. The text format renders a repo path as
 the path itself, an external one as `<outside repo>`, and an unused input as
 `None`.
 
+**Liberty location (issue #3785).** `provenance.deck` (and each
+`corners[].deck` in the multi-corner shape) additionally carries `path`, the
+same `{path, scope}` envelope for the resolved Liberty file whose bytes
+`deck.content_hash` pins. An out-of-repo Liberty (the usual PDK-under-`$PDK_ROOT`
+case) is `{"path": null, "scope": "external"}`: the hash and `deck.name`
+identify the file, the location is withheld. Additive; no `schema_version`
+bump. Reports without the field still verify, and `--check` treats
+`content_hash` as authoritative, never `path`.
+
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. Versioned independently of `klt place-and-route`'s own `schema_version` (each command owns its own). |
@@ -248,9 +270,11 @@ the path itself, an external one as `<outside repo>`, and an unused input as
 | `verilog_path` | object \| null | Additive field (issue #1825). `{path, scope}` identity of the analysed netlist (issue #2879; a plain absolute string in schema 1); `null` unless `request.verilog` was given — the mutually-exclusive counterpart to `def_path`. |
 | `geometry_source` | string | Additive field (issue #1826), extended by issue #1825. Echo of `request.geometry_source` in `def` mode — always present (never `null`); `"routed"` when the request omitted it, matching this command's pre-#1826 behaviour byte-for-byte. Forced to `"netlist_estimate"` whenever `request.verilog` was given, regardless of what (if anything) the request supplied. See "Pre-route DEFs" and "From-scratch netlist input" below. |
 | `wire_load_model` / `wire_load_mode` | string \| null | Additive fields (issue #1825). Echo of `request.constraints.wire_load_model`/`.wire_load_mode` — the parasitics-estimate knob actually used, for provenance. Always `null`/`null` on a `def`-mode response (that mode's parasitics never come from a liberty wire-load model); on a `verilog`-mode response, `null`/`null` means no `set_wire_load*` command was issued at all (the resolved liberty's own default wire load, if any, was left in effect). See "From-scratch netlist input" below. |
+| `clock_targets` | object | Additive field (issue #4241). Always present: `{clocks, clock_groups}` — `clocks` echoes every clock applied (`[{port, period_ns}]`, primary first; one entry for the single-clock shorthand) and `clock_groups` the asynchronous groups (`[]` when none). |
 | `clock_mode` | string | Additive field (issue #2739). Exactly `"ideal"` or `"propagated"` — which clock mode **every analyzed corner** was timed with. `"ideal"` (the default) is the pre-#2739 behavior; `"propagated"` when the request set `constraints.propagated_clock: true`. Present on both response shapes (hoisted to the top level on a `corners` response) and identical across every per-corner session. **Never infer it from `clock_skew_ns`** — that is a measured skew metric the clock tree carries under ideal timing too. See "Propagated-clock timing" below. |
 | `clock_propagation` | object \| null | Additive field (issue #2739). `null` unless the request asked for propagated-clock timing. On a `corners` response the field is not hoisted — one block per `corners[]` entry instead (the latencies it reports *do* vary per corner). See "Propagated-clock timing" below for the field shapes. |
 | `spef_path` | object \| null | `{path, scope}` identity of the caller-supplied SPEF (issue #2879; a plain absolute string in schema 1); `null` unless a string `request.spef` was given (never given together with `request.verilog`); also `null` in map form, where each `corners[]` entry carries its own. |
+| `macros` | array\<object\> | **Always present** (issue #2635). Echo of `request.macros`, resolved to absolute paths (`cell`, `lef`, `lib` per corner, `gds`, `verilog_blackbox`) — the same shape `klt synthesize`'s own `macros` response field carries. `[]` when the request declared none. On a `pdk.corners` (list) response this is hoisted to the top level like every other field that cannot vary per corner — see "Multi-corner characterization" below. |
 | `worst_slack_ns` / `total_negative_slack_ns` | number \| null | Setup WNS/TNS from `report_worst_slack_metric -setup`/`report_tns_metric -setup`. Negative values are expected, not an error. A design with **no constrained path at all** reports OpenSTA's own unconstrained sentinel (`1e+39`/`0`) here rather than a real number — check `timing_status` below before treating this as a measurement. |
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the four slack fields above are measurements at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever either setup or hold WNS carries the sentinel; `null` when the run reported no slack metric at all. **Require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so a `worst_slack_ns >= 0` gate otherwise reports "timing closed" on a design that was never timed. The slack fields themselves are unchanged and still report exactly what OpenSTA reported — this field is additive and retypes nothing. Computed identically to `klt place-and-route`'s field of the same name, so the two commands' responses can be correlated directly. See "I/O timing constraints" below. |
@@ -262,10 +286,46 @@ the path itself, an external one as `<outside repo>`, and an unused input as
 | `false_path_from` | array \| omitted | Additive field (issue #2968), present only when `constraints.false_path_from` is given: the exclusion list that was applied, in request order. On a multi-corner response it is hoisted to the top level (it is the same for every corner), not repeated in `corners[]`. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
+| `power_basis` | object | Additive field (issue #3744), present on the single-corner response and on every `corners[]` entry. What `estimated_power_mw` was computed under: `activity_source` (`"engine_default"` — no `constraints.power_activity`, OpenSTA's built-in default applied — or `"global"`), `activity` / `duty` (the requested numbers, `null` when not given — never a guessed engine default), and `parasitics` (`"spef_annotated"` when that session read a SPEF, else `"estimate_only"`). |
+| `clock_uncertainty` | object | Additive field (issue #4240), always present (hoisted to the top level on a `corners` response). `{"applied": false}` when `constraints.clock_uncertainty_ns` was omitted; otherwise `{"applied": true, "setup_ns": <number or null>, "hold_ns": <number or null>}` — a side the request did not give is `null` (unconstrained), never copied from the other. Check it before comparing slack against a spec that assumes clock uncertainty. |
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
 | `sdf` | object \| null | Additive field (issue #2886). `null` unless `request.sdf: true`. Otherwise `{path, scope, content_hash}`: the `{path, scope}` identity of the SDF this corner's session wrote (the same envelope `spef_path` uses — never an absolute host path) plus the `sha256:`-prefixed digest of its bytes, so it can be cited as an input. On a `corners` response the field is not hoisted — one per `corners[]` entry. See "Post-route SDF per corner" below. |
 | `electrical_checks` | object \| null | Additive field (issue #3005). **`def` mode only** (`null` with `verilog`). Max-transition and max-capacitance checks from the same OpenSTA session as the timing numbers, so with a `spef` they are against the extracted parasitics. Per `corners[]` entry on a multi-corner response. See "Electrical limit checks" below. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `def` (`input.role: "layout"`) — or of `verilog` in netlist mode, where the role is `"netlist"` instead (issue #2027, so a consumer never compares a netlist digest against a layout one). On a `pdk.corners` (list) response this block carries `deck: null` at the top level — see "Multi-corner characterization" below for where the per-corner `deck` block actually lives. |
+
+## Hard macros (`request.macros`)
+
+Issue #2635 adds an optional `macros` array — the same shared shape `klt
+synthesize` and `klt place-and-route` accept, documented once in
+`klayout_tools.macros`. Each entry's `lef` is `read_lef`'d alongside the
+tech/cell LEF **before** `read_def`/`link_design` — without it, a
+macro-bearing DEF/netlist fails to load at all with `[ERROR ORD-2013]
+instance <inst> LEF master <cell> not found`, because OpenSTA resolves a
+DEF's `COMPONENTS` records (or a netlist's instances) against the already-
+loaded masters. This command's own error message appends a hint naming the
+`request.macros` entry that would fix an `ORD-2013` failure, rather than
+leaving a caller to search the OpenROAD source for what a LEF master is.
+
+Each entry's optional `lib` (alias `liberty`) — a per-corner liberty map,
+exactly as `klt synthesize` takes it — is `read_liberty`'d alongside the
+standard-cell library for whichever corner is being analysed, so the
+macro's real timing arcs participate in this command's slack/`fmax`/power
+numbers instead of the macro being timed as an untimed blackbox (OpenSTA's
+own `[WARNING STA-0198] module <cell> not found. Creating black box for
+<inst>`, a legitimate choice for a geometry-only run with no macro `lib`
+declared at all). A `lib` map with **no entry for the corner actually being
+analysed** (and no `"default"` key) is a request error naming the macro,
+the corner, and the keys that are available — never a silent fallback to
+another corner's timing, which matters most in a `pdk.corners` sweep, where
+one corner's macro liberty is the wrong answer for the next.
+
+`gds`/`verilog_blackbox` are accepted (for shape-compatibility with the
+other two verbs) but unused by this command — it reads physical/timing
+views only, never Verilog or GDS.
+
+See `docs/cli/synthesize.md`'s and `docs/cli/place-and-route.md`'s own
+"Hard macros"/"Hard-macro placement" sections for how the other two verbs
+consume the same declaration.
 
 ## Electrical limit checks (`electrical_checks`, issue #3005)
 
@@ -530,7 +590,7 @@ closes that gap natively:
       "clock_skew_ns": 0.0512,
       "estimated_power_mw": 13.2,
       "spef_annotation": null,
-      "deck": { "name": "sky130_fd_sc_hd__ss_100C_1v60", "content_hash": "sha256:<hex>", "released": true }
+      "deck": { "name": "sky130_fd_sc_hd__ss_100C_1v60", "content_hash": "sha256:<hex>", "released": true, "path": { "path": null, "scope": "external" } }
     },
     { "corner": "tt_025C_1v80", "...": "..." },
     { "corner": "ff_n40C_1v95", "...": "..." }
@@ -685,6 +745,15 @@ The string form of `spef` (and omitting it) is unchanged.
 
 ## Annotation evidence (`spef_annotation`)
 
+**Name-mapped SPEFs (issue #3742).** A SPEF written with a `*NAME_MAP` (e.g.
+OpenROAD's `write_spef`, which declares `*D_NET *12 <cap>`) is resolved
+through the map before its net names are compared with the design: `*<n>`
+indices are replaced by the mapped names, backslash escapes are removed, and a
+header `*DIVIDER` other than `/` is translated to the `/` OpenSTA uses. Before
+this, such a file reported `design_nets_annotated: 0` because the `*12` indices
+matched no design net. `design_nets_annotated` is this name correlation, not
+OpenSTA's own annotation count; `annotation_complete` rules are unchanged.
+
 A caller-supplied `spef` has the same name-mismatch risk `klt
 place-and-route`'s own `post_route_spef` in-flow pass documents: a SPEF
 written by a different tool (or a different net-naming convention) can
@@ -720,6 +789,10 @@ accepted anything:
   "reader_warning_sample": [],
   "unannotated_driver_count": 0,
   "partially_unannotated_driver_count": 4,
+  "floating_driver_count": 0,
+  "floating_driver_sample": [],
+  "unannotated_driver_sample": [],
+  "partially_unannotated_driver_sample": ["u3/Y"],
   "delay_changed": true,
   "annotation_complete": true,
   "annotation_warning": null
@@ -787,8 +860,10 @@ reader's own. It answers "does the SPEF name the nets this design has", not
 ### 4. Post-`read_spef` accounting
 
 - `unannotated_driver_count` — `report_parasitic_annotation`'s own count of
-  driver pins OpenSTA holds *no* parasitics for after `read_spef`. Non-zero
-  forces `annotation_complete: false`; `null` when the running OpenSTA build
+  driver pins OpenSTA holds *no* parasitics for after `read_spef`. This is
+  OpenSTA's raw count and includes floating no-net drivers (below); the count
+  **less** `floating_driver_count` forces `annotation_complete: false`.
+  `null` when the running OpenSTA build
   has no `report_parasitic_annotation` (the call is `catch`-guarded and the
   field degrades to `null` rather than failing the run).
 - `partially_unannotated_driver_count` — the companion "partially
@@ -796,13 +871,54 @@ reader's own. It answers "does the SPEF name the nets this design has", not
   correctly-read SPEF routinely reports a non-zero partial count (load pins
   with no distinct RC node of their own), so gating on it would fail honest
   runs.
+- `floating_driver_count` / `floating_driver_sample` (issue #3662) — how many
+  of the unannotated drivers sit on **no net at all** or on a **driver-only
+  dangling net** (no other pin, no top-level port) — e.g. the outputs of CTS
+  dummy-load cells: `clkloadN/Z` (issue #3669) — with a capped sample (at most 20) of their
+  pin names. They carry no load and are on no timed path, so they are
+  **excluded from the completeness predicate**; a strict gate can thereby tell
+  "floating, untimed" from "timed driver missing parasitics". `null` when the
+  OpenSTA build cannot list the offending pins
+  (`report_parasitic_annotation -report_unannotated`), in which case the raw
+  `unannotated_driver_count` keeps gating.
+  Format verified against real OpenSTA 26Q3-1510-g6cb3f2b704 (issue #3664): one
+  pin per line after each `Found N ... drivers.` line; on a routed gf180mcu
+  design the floating set was exactly its 7 `clkload` cells and
+  `annotation_complete` was `true`.
+- `unannotated_driver_sample` — capped sample (at most 20) of the unannotated
+  drivers that are *not* floating, i.e. the ones that gate. `null` when pins
+  cannot be listed.
+- `unannotated_driver_detail` (issue #3668) — one `{pin, net_status, net}`
+  entry per pin in `unannotated_driver_sample`, saying *why* it lacks
+  parasitics as far as the netlist shows: `net_status` is `single_pin_net`
+  (the pin's net has no other instance pin — an unconnected stub or a net
+  that only reaches a port; `net` names it) or `net_with_other_pins` (a real
+  net the SPEF failed to cover; `net` is `null`). Evidence only: a
+  `single_pin_net` driver still gates, because its net may reach a timed
+  port. `null` when pins cannot be listed. Pin names are matched
+  spelling-insensitively (escape backslashes ignored) between OpenSTA's
+  unannotated listing and the floating-pin query.
+  Measured on OpenROAD 26Q3 (issue #3668, reduced DEF): an output pin on no
+  net and one on a single-pin net are both classified floating; the
+  evidence query tolerates the NULL net OpenSTA returns for a no-net pin.
+- `partially_unannotated_driver_sample` — capped sample (at most 20) of the
+  partially unannotated driver pins, so a caller can judge whether the count
+  is real missing parasitics or a counting artefact. `null` when pins cannot
+  be listed. Measured on OpenROAD 26Q3 (issue #3668, reduced DEF): a flop `Q`
+  whose net also reaches a top-level port with a different name (net
+  `c0_r`, port `c0`) is listed as partially unannotated together with that
+  port, and clock-net sinks are listed under their driver. Partial drivers
+  never gate `annotation_complete`.
+
+All the fields above are additive; none of the existing fields changed meaning
+except that `unannotated_driver_count` now gates net of the floating drivers.
 
 ### Verdict
 
 - `annotation_complete` — `true` only when *all* of: the design-side name
   pair is equal and non-zero, `reader_warning_count` is 0,
-  `delay_changed` is not `false`, and `unannotated_driver_count` is not
-  greater than 0. A `null` (unknown) piece of evidence never forces `false`
+  `delay_changed` is not `false`, and `unannotated_driver_count` minus
+  `floating_driver_count` is not greater than 0. A `null` (unknown) piece of evidence never forces `false`
   on its own — but it never manufactures a `true` either, because the
   name-correlation gate still applies.
 - `annotation_warning` — `null` when complete, otherwise a sentence naming
@@ -1018,9 +1134,10 @@ gets the same constraints both times.
 
 Per-port delay maps are covered in the next section (issue #2740). Static
 input exclusions are `constraints.false_path_from` (issue #2968, see "Timing
-exceptions"). A full caller-supplied SDC passthrough (`read_sdc`, which would
-also cover multicycle paths, clock uncertainty and `-to`/`-through` false
-paths) is still **not** in scope.
+exceptions"). Clock uncertainty is `constraints.clock_uncertainty_ns` (issue
+#4240, see "Clock uncertainty"). A full caller-supplied SDC passthrough
+(`read_sdc`, which would also cover multicycle paths and `-to`/`-through`
+false paths) is still **not** in scope.
 
 **Detect the sentinel mechanically.** Independent of any constraint the caller
 sets, `timing_status` reports `"constrained"` when every slack value in the
@@ -1214,7 +1331,33 @@ The global `worst_hold_path` is still `rst_n → ff_a/RESET_B`.
 - **Not SDC.** Only one clock and only `set_input_delay`/`set_output_delay`
   are supported, plus `set_false_path -from` for the ports named in
   `constraints.false_path_from`: there are no multicycle paths, no
-  `-to`/`-through` false paths, no clock uncertainty, and no `read_sdc`.
+  `-to`/`-through` false paths, and no `read_sdc`. Clock uncertainty is
+  supported (`constraints.clock_uncertainty_ns`, issue #4240).
+
+## Clock uncertainty (`constraints.clock_uncertainty_ns`, issue #4240)
+
+A block whose spec fixes a clock-quality assumption (for example 5 % of the
+period for setup and 2 % for hold) states it as nanoseconds; the caller does
+the fraction-of-period math. `constraints.clock_uncertainty_ns` takes a number
+(setup and hold) or `{"setup_ns": ..., "hold_ns": ...}` (either key optional):
+
+```json
+"constraints": {"clock_port": "clk", "clock_period_ns": 2.0,
+                "clock_uncertainty_ns": {"setup_ns": 0.1, "hold_ns": 0.04}}
+```
+
+emits, in every analyzed corner and in both input modes:
+
+```tcl
+set_clock_uncertainty -setup 0.1 [get_clocks clk]
+set_clock_uncertainty -hold 0.04 [get_clocks clk]
+```
+
+On an ideal clock, setup slack drops by the setup value and hold slack by the
+hold value. The response's `clock_uncertainty` block says whether any
+uncertainty was applied, so a slack computed with the assumption is
+distinguishable from one computed without it. Not supported: inter-clock
+uncertainty, multiple clocks, per-corner values.
 
 ## Input transitions (issue #3227)
 
@@ -1232,7 +1375,8 @@ set with `set_input_transition`:
 ```
 
 - **Scope is transition-only.** Nothing else about input drive changes: there
-  is no driving-cell model and no max-transition/max-capacitance limit check.
+  is no max-transition/max-capacitance limit check (for a driving-cell model see
+  "Driving cell and output load" below).
 - **Override semantics.** The scalar is the default for every non-clock input
   that is not a key of `input_transitions`; a mapped port gets exactly its own
   value. Bus bits are matched individually, so mapping `din[0]` leaves
@@ -1248,6 +1392,43 @@ set with `set_input_transition`:
 - **Contract.** The response schema is unchanged (additive request fields only).
   Omitting both fields, or giving an empty map, leaves the generated Tcl
   byte-for-byte as before.
+
+
+## Driving cell and output load (issue #3742)
+
+`constraints.driving_cell` / `.driving_cells` and `constraints.output_load_pf`
+/ `.output_loads` express the boundary conditions an SDC flow writes with
+`set_driving_cell` and `set_load`:
+
+```json
+"constraints": {
+  "clock_port": "clk",
+  "clock_period_ns": 2.0,
+  "driving_cell": {"cell": "sky130_fd_sc_hd__buf_2", "pin": "X"},
+  "driving_cells": {"rst_n": {"cell": "sky130_fd_sc_hd__inv_1", "pin": "Y", "input_pin": "A"}},
+  "output_load_pf": 0.02,
+  "output_loads": {"tmds[0]": 0.05}
+}
+```
+
+- **Override semantics** are the same as `input_transitions`: the scalar-style
+  default (`driving_cell`, `output_load_pf`) covers every non-clock input /
+  every output not named in the map; a mapped port gets exactly its own entry.
+- **Driving cell vs. input transition.** A driving cell sets the input slew
+  itself, so a port may carry one or the other. A port named in both
+  `driving_cells` and `input_transitions`, or `input_transition_ns` combined
+  with a driving-cell field, is a request error naming the keys; the default
+  `driving_cell` skips ports named in `input_transitions`.
+- **Validation.** `cell` / `pin` / `input_pin` are literal liberty names
+  (`[A-Za-z0-9_$.]+`, never Tcl or a pattern); loads are finite, non-boolean
+  numbers `>= 0`. Port existence and direction (inputs for driving cells,
+  outputs for loads) are checked in the engine-session port check, naming
+  `constraints.driving_cells[...]` / `constraints.output_loads[...]`.
+- **Propagated clock is not new.** `constraints.propagated_clock` already
+  exists (issue #2739); there is no `sdc` file passthrough (arbitrary Tcl
+  would defeat the JSON contract and the constraint-completeness accounting).
+- **Contract.** Additive request fields only; omitting them leaves the
+  generated Tcl byte-for-byte as before.
 
 
 ## Pre-route DEFs (`geometry_source`, issue #1826)

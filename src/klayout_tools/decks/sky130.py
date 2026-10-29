@@ -307,6 +307,12 @@ negative-control case. Density (``"density"`` check kind) remains out of
 scope entirely, per ``docs/cli/drc.md``'s own floorplan-boundary limitation
 on this engine's windowed density implementation.
 
+Cross-check against the foundry deck on stock geometry (issue #4472): on the
+stock ``sky130_ef_io__analog_noesd_pad`` the curated ``met4.holes_area.1`` and
+``sky130A_mr.drc``'s ``m4.7`` both count 20 voids (formed by abutting drawn
+rectangles; merged semantics in both). ``sky130A_mr.drc`` only runs its
+``m*`` rules with ``-rd beol=true`` -- see ``docs/cli/drc.md``.
+
 nwell (well-layer) rule coverage (issue #1420): before this, ``DECK`` had
 *zero* rules referencing ``nwell`` (64/20), even though ``EXTRACTION_DECK``
 below has always used that exact layer to derive PMOS device recognition and
@@ -320,29 +326,20 @@ transcribed from ``sky130.lydrc``'s ``nwell.1a``/``nwell.2a`` (see
 kind, issue #1654).
 
 Two more ``sky130.lydrc`` well rules are deliberately **not** transcribed
-here: ``nwell.enclosing(diff.and(psdm), 0.18)`` and
-``nwell.enclosing(tap.and(nsdm), 0.18)`` (an nwell's minimum enclosure of,
-respectively, the p-select-implant diffusion inside it -- PMOS source/drain
--- and the n-select-implant tap inside it -- the well's own body/substrate
-tie). Both are scoped to a *compound* layer expression this engine's
-single-layer/two-layer ``Region`` check primitives cannot evaluate (the same
-class of gap ``difftap.1``/``poly.1a``'s compound-layer notes above already
-document), and unlike those other compound-layer approximations elsewhere in
-this deck, there is no honest plain-layer stand-in available: ``psdm``/
-``nsdm`` (the implant marker layers the compound expressions key off) are
-not drawn by any ``klt gen`` generator today (per issue #1420's own scoping
-note), so a rule scoped by well-*containment* instead of implant -- "nwell
-encloses whatever diff/tap already overlaps it" -- would silently pass on
-every generator-produced layout regardless of correctness, while risking new
-false positives against the real ``sky130_fd_sc_hd`` standard-cell corpus
-this repo already exercises (whose diff/tap-to-nwell margins are the
-implant-scoped rule's business, not this unscoped stand-in's). Rather than
-ship an untested widening with no generator coverage to exercise it, this
-gap is left explicitly open: ``EXTRACTION_DECK`` still has no ``psdm``/
-``nsdm`` fields, ``coverage.deck_scope`` will not include an enclosure-rule
-entry for the ``nwell.*`` family, and a future issue that also teaches
-``klt gen`` to draw implant layers is the natural place to revisit both
-rules together with real geometry to test them against.
+here: ``difftap.8`` (``nwell.enclosing(diff.and(psdm), 0.18)``) and
+``difftap.10`` (``nwell.enclosing(tap.and(nsdm), 0.18)``). Both are scoped to
+a *compound* layer expression this engine's single-layer/two-layer ``Region``
+check primitives cannot evaluate, and a well-containment stand-in ("nwell
+encloses whatever diff/tap overlaps it") would risk false positives against
+the ``sky130_fd_sc_hd`` corpus. Since issue #2934 ``klt gen`` draws
+``nsdm``/``psdm``/``npc``, and this deck checks their plain-layer rules
+(``npc.1``/``npc.2``, ``nsdm.1``/``psdm.1``, ``n/psdm.1`` spacing). The
+implant area rules (``n/psdm.10a``/``10b``) and the compound implant rules
+(``difftap.8``-``difftap.11``, ``n/psdm.5a``/``5b``/``6``/``7``/``8``,
+``npc.4``) are listed in
+``UNMODELED_RULES`` so ``coverage.unmodeled_rules`` discloses them instead of
+``clean`` implying they were checked. ``EXTRACTION_DECK`` still has no
+``psdm``/``nsdm`` fields.
 
 tap (tie-layer) rule coverage (issue #2321, closing the gap the
 ``difftap``-family notes above and ``_PDK_ROLE_LAYERS["sky130"]["tap"]``'s
@@ -374,7 +371,9 @@ from __future__ import annotations
 from . import (
     BipolarDevice,
     CapacitorDevice,
+    CutRC,
     DerivedLayer,
+    DiodeDevice,
     DrcRule,
     ExtractionDeck,
     LayerRC,
@@ -442,6 +441,67 @@ def _sky130_lvs_provenance(rule_id: str) -> RuleProvenance:
     )
 
 
+# Junction-diode device recognition (issue #3803), transcribed from
+# `sky130.lvs`'s "DIODE DERIVATIONS" / "DIODE EXTRACTION" sections. The
+# recognition mark is `areaid.diode` (81/23, `areaid_de` upstream); a diff
+# region that also touches `areaid.ed` (81/19, `areaid_ed`) is an ESD-flagged
+# device upstream excludes, and `pnp.drawing` (82/44) keeps a vertical PNP's
+# p+ emitter (also a diff-in-nwell region) from reading as a diode, as
+# upstream's `ptap_conn` excludes `pnpid`. The oxide/threshold flavour is
+# keyed by `hvi` (75/20), `lvtn` (125/44) and `hvtp` (78/44), exactly as
+# upstream splits `*_05v5`, `*_05v5_lvt`, `*_05v5_nvt`, `*_05v5_hvt` and
+# `*_11v0`.
+_DIODE_MARK = (81, 23)  # areaid.diode
+_DIODE_ESD_MARK = (81, 19)  # areaid.ed
+_PNP_MARK = (82, 44)  # pnp.drawing
+_NWELL = (64, 20)
+_DNWELL = (64, 18)
+_DIFF = (65, 20)
+_NSDM = (93, 44)
+_PSDM = (94, 20)
+_HVI = (75, 20)
+_LVTN = (125, 44)
+_HVTP = (78, 44)
+
+
+def _sky130_diode(
+    name: str,
+    *,
+    n_plus: bool,
+    requires: tuple[tuple[int, int], ...] = (),
+    excludes: tuple[tuple[int, int], ...] = (),
+) -> DiodeDevice:
+    """One sky130 flavour of the n+/p-substrate (``n_plus``) or p+/nwell
+    diode, as upstream derives it: ``requires``/``excludes`` carry the
+    ``hvi``/``lvtn``/``hvtp`` flavour terms and apply to the diffusion
+    terminal."""
+    if n_plus:
+        # `ndiode_terminal_n = ncomp.outside(dnwell)...`; the p side
+        # (`ptap_conn.holes`) is the native substrate, so it is the marker
+        # footprint kept outside every well and tied to `substrate_net`.
+        return DiodeDevice(
+            name=name,
+            marker=_DIODE_MARK,
+            anode=None,
+            anode_excludes=(_NWELL, _DNWELL),
+            cathode=_DIFF,
+            cathode_requires=(_NSDM, *requires),
+            cathode_excludes=(_NWELL, _DNWELL, _DIODE_ESD_MARK, _PNP_MARK, *excludes),
+            provenance=_sky130_lvs_provenance(f"sky130_fd_pr__{name}"),
+        )
+    # `pdiode_terminal_n = pcomp.outside(dnwell)...` is the p+ (anode) side;
+    # `pdiode_terminal_p = nwell...` is the cathode.
+    return DiodeDevice(
+        name=name,
+        marker=_DIODE_MARK,
+        anode=_DIFF,
+        anode_requires=(_PSDM, *requires),
+        anode_excludes=(_DNWELL, _DIODE_ESD_MARK, _PNP_MARK, *excludes),
+        cathode=_NWELL,
+        provenance=_sky130_lvs_provenance(f"sky130_fd_pr__{name}"),
+    )
+
+
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001), so a threshold in micrometres times 1000 gives
 # threshold_dbu. `run_drc()` rescales threshold_dbu by NOMINAL_DBU_UM /
@@ -460,6 +520,20 @@ DECK: list[DrcRule] = [
         # -> "poly.1a : min. poly width : 0.15um"
         scope="poly",  # sky130.lydrc "poly.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "poly.1a"),
+    ),
+    DrcRule(
+        id="poly.space.1",
+        description="minimum poly spacing",
+        layer=(66, 20),  # poly.drawing
+        check="space",
+        threshold_dbu=210,  # 0.21 um
+        # sky130A_mr.drc rule "poly.2": poly.not(areaid_ce).space(0.21,
+        # euclidian) -> "poly.2 : min. poly spacing : 0.21um". The deck is
+        # areaid-marker-blind (MARKER_BLIND_LAYERS), so the 0.21 um general
+        # value is applied everywhere, including inside areaid:core where the
+        # runset relaxes it to poly.3's 0.16 um (listed in UNMODELED_RULES).
+        scope="poly",  # sky130.lydrc "poly.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "poly.2"),
     ),
     DrcRule(
         id="poly.endcap.diff.1",
@@ -525,6 +599,33 @@ DECK: list[DrcRule] = [
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "difftap.1"),
     ),
     DrcRule(
+        id="diff.space.1",
+        description="minimum diff spacing (approximates the official difftap.3 rule)",
+        layer=(65, 20),  # diff.drawing
+        check="space",
+        threshold_dbu=270,  # 0.27 um
+        # sky130A_mr.drc rule "difftap.3": difftap.space(0.27, euclidian),
+        # where difftap = diff.or(tap) -- a compound layer our engine does not
+        # evaluate; approximated like difftap.1 as a pair of single-layer
+        # rules (this one and tap.space.1). Diff-to-tap spacing across the two
+        # layers is NOT checked here (diff/tap abutting or overlapping merges
+        # in the source union, which a per-layer check cannot reproduce).
+        # -> "difftap.3 : min. difftap spacing : 0.27um"
+        scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "difftap.3"),
+    ),
+    DrcRule(
+        id="tap.space.1",
+        description="minimum tap spacing (approximates the official difftap.3 rule)",
+        layer=(65, 44),  # tap.drawing
+        check="space",
+        threshold_dbu=270,  # 0.27 um
+        # sky130A_mr.drc rule "difftap.3" -- tap-side half; see diff.space.1.
+        # -> "difftap.3 : min. difftap spacing : 0.27um"
+        scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "difftap.3"),
+    ),
+    DrcRule(
         id="li1.width.1",
         description="minimum li1 (local interconnect) width",
         layer=(67, 20),  # li1.drawing
@@ -547,6 +648,74 @@ DECK: list[DrcRule] = [
         # -> "li.3 : min. li spacing : 0.17um"
         scope="li",  # sky130.lydrc "li.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "li.3"),
+    ),
+    # Implant / npc rules (issue #2934): `klt gen` now draws nsdm/psdm/npc, so
+    # the width/spacing/area rules that were deliberately absent are checked.
+    DrcRule(
+        id="npc.width.1",
+        description="minimum npc width",
+        layer=(95, 20),  # npc.drawing
+        check="width",
+        threshold_dbu=270,
+        # sky130.lydrc rule "npc.1": npc.width(0.27, euclidian)
+        # -> "npc.1 : min. npc width : 0.27um"
+        scope="npc",  # sky130.lydrc "npc.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "npc.1"),
+    ),
+    DrcRule(
+        id="npc.space.1",
+        description="minimum npc spacing (nearer shapes should be merged)",
+        layer=(95, 20),  # npc.drawing
+        check="isolated",
+        threshold_dbu=270,
+        # sky130.lydrc rule "npc.2": npc.isolated(0.27, euclidian)
+        # -> "npc.2 : min. npc spacing, should be manually merged if less : 0.27um"
+        scope="npc",  # sky130.lydrc "npc.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "npc.2"),
+    ),
+    DrcRule(
+        id="nsdm.width.1",
+        description="minimum nsdm width",
+        layer=(93, 44),  # nsdm.drawing
+        check="width",
+        threshold_dbu=380,
+        # sky130.lydrc rule "nsdm.1": nsdm.width(0.38, euclidian)
+        # -> "nsdm.1 : min. nsdm width : 0.38um"
+        scope="nsdm",  # sky130.lydrc "nsdm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "nsdm.1"),
+    ),
+    DrcRule(
+        id="nsdm.space.1",
+        description="minimum nsdm spacing (nearer shapes should be merged)",
+        layer=(93, 44),  # nsdm.drawing
+        check="isolated",
+        threshold_dbu=380,
+        # sky130.lydrc rule "n/psdm.1": nsdm.isolated(0.38, euclidian)
+        # -> "n/psdm.1 : min. nsdm spacing, should be manually merged if less : 0.38um"
+        scope="nsdm",  # sky130.lydrc "nsdm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "n/psdm.1"),
+    ),
+    DrcRule(
+        id="psdm.width.1",
+        description="minimum psdm width",
+        layer=(94, 20),  # psdm.drawing
+        check="width",
+        threshold_dbu=380,
+        # sky130.lydrc rule "psdm.1": psdm.width(0.38, euclidian)
+        # -> "psdm.1 : min. psdm width : 0.38um"
+        scope="psdm",  # sky130.lydrc "psdm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "psdm.1"),
+    ),
+    DrcRule(
+        id="psdm.space.1",
+        description="minimum psdm spacing (nearer shapes should be merged)",
+        layer=(94, 20),  # psdm.drawing
+        check="isolated",
+        threshold_dbu=380,
+        # sky130.lydrc rule "n/psdm.1": psdm.isolated(0.38, euclidian)
+        # -> "n/psdm.1 : min. psdm spacing, should be manually merged if less : 0.38um"
+        scope="psdm",  # sky130.lydrc "psdm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "n/psdm.1"),
     ),
     DrcRule(
         id="met1.width.1",
@@ -1010,7 +1179,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=300,  # 0.3 um
         # sky130A_mr.drc rule "m3.2": non_huge_m3.space(0.3, euclidian)
         # -> "m3.2 : min. m3 spacing : 0.3um"
-        # (the wide-metal 0.4um exception, "m3.3cd", is not modelled here --
+        # (the wide-metal 0.4um exception, "m3.3ab", is not modelled here --
         # the same approximation met1.space.1/met2.space.1 above already
         # make for their own wide-metal exceptions.)
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
@@ -1924,17 +2093,88 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # 0.15um column here, which is why registering this marker still produces
 # `klt drc`'s `voltage_domain_warnings` diagnostic (issue #552) even though
 # the *extraction*-side binding gap is now closed.
+#: Process area-marker layers (``areaid.*``) whose rule-switching this deck
+#: does not model (issue #3815): the deck evaluates every rule uniformly, so a
+#: marker such as ``areaid.ce`` (81/2) -- which the foundry runsets use to
+#: narrow or relax rules inside/outside the marked area -- changes nothing
+#: here. ``klt drc`` lists those present in the stream as
+#: ``coverage.marker_blind_layers_in_stream`` and ``klt deck rules`` as
+#: ``marker_blind_layers``, so identical results with and without the marker
+#: are not misread as marker-aware behaviour.
+MARKER_BLIND_LAYERS: tuple[tuple[int, int], ...] = ((81, 2),)
+
 #: Official sky130A_mr.drc rule ids this curated deck knowingly does *not*
 #: transcribe (issue #3031): the "2-adjacent-edges-relaxed" enclosure
 #: refinements, which need a per-edge-pair primitive ``DrcRule`` does not have
 #: (see the "primary rule only" notes on ``met1.enclosing.mcon.1``,
-#: ``via.enclosing.met1.1`` and their ``met2``/``met3`` siblings). A layout can
-#: be ``klt drc --deck sky130`` clean yet fail the foundry runset on exactly
-#: these, so ``coverage.unmodeled_rules`` lists them rather than let a clean
-#: verdict read as full coverage. Remove an id here when its rule is added.
+#: ``via.enclosing.met1.1`` and their ``met2``/``met3`` siblings), and the
+#: width/spacing/overlap checks on the thick-oxide and marker layers (``hvi``,
+#: ``hvntm``, ``hvtp``, ``hvtr``, ``pad``, ``rdl``; issue #3802), which the
+#: deck gives only ongrid/angle rules. A layout can be ``klt drc --deck
+#: sky130`` clean yet fail the foundry runset on exactly these, so
+#: ``coverage.unmodeled_rules`` lists them rather than let a clean verdict read
+#: as full coverage. The open ``sky130A_mr.drc`` defines no latch-up or ESD
+#: rules, so there is no id to list for those (see ``docs/cli/drc.md``).
+#: Remove an id here when its rule is added.
 UNMODELED_RULES: tuple[str, ...] = (
+    # Implant/npc/well rules (issue #2934) scoped to compound layer
+    # expressions (diff.and(psdm), npsdm enclosing diff/tap, gate, ...) that
+    # `DrcRule` cannot evaluate; ids from sky130.lydrc. Also the spacing rules
+    # of sky130A_mr.drc this deck omits (issue #4282): marker/special layers
+    # not modelled (dnwell, lvtn, ncm, nsm, rpm, urpm, tunm, thkox, ldntm),
+    # licon spacing, areaid:core splits (poly.3, li.7) and capacitor-plate
+    # separations needing two-layer checks (capm.*, cap2m.*).
+    "MR_licon.SP.1",
+    "cap2m.11",
+    "cap2m.2b",
+    "cap2m.2b_a",
+    "cap2m.5",
+    "capm.11",
+    "capm.2b",
+    "capm.2b_a",
+    "capm.5",
+    "difftap.10",
+    "difftap.11",
+    "difftap.8",
+    "difftap.9",
+    "dnwell.2",
+    "hvi.1",
+    "hvi.2a",
+    "hvntm.1",
+    "hvntm.2",
+    "hvtp.1",
+    "hvtp.2",
+    "hvtr.1",
+    "hvtr.2",
+    "hvtr.2_a",
+    "ldntm.2",
+    "li.7",
+    "licon.13",
+    "lvtn.2",
+    "m1.3ab",
     "m1.5",
+    "m2.3ab",
     "m2.5",
+    "m3.3ab",
+    "m4.5ab",
+    "n/psdm.10a",
+    "n/psdm.10b",
+    "n/psdm.5a",
+    "n/psdm.5b",
+    "n/psdm.6",
+    "n/psdm.7",
+    "n/psdm.8",
+    "ncm.2a",
+    "npc.4",
+    "nsm.1",
+    "pad.2",
+    "poly.3",
+    "rdl.1",
+    "rdl.2",
+    "rpm.2",
+    "thkox.2",
+    "tunm.2",
+    "urpm.2",
     "via.5a",
     "via2.5",
     "via3.5",
@@ -2303,8 +2543,9 @@ EXTRACTION_DECK = ExtractionDeck(
     # No `emitter_excludes`/`emitter_requires` narrowing (issue #302):
     # unlike gf180mcu (whose p+ emitter carries `Pplus` and whose n+ base
     # tie carries `Nplus`, so an `emitter_excludes=(Nplus,)` cleanly drops
-    # the base-contact ring), this curated deck models **no implant layers**
-    # (see this module's docstring, the #183/#223 negative finding). The real
+    # the base-contact ring), this bipolar entry models **no implant layers**
+    # (only the `diodes` entries below use `nsdm`/`psdm`; see this module's
+    # docstring, the #183/#223 negative finding). The real
     # `sky130_fd_pr__pnp` draws its base tie on the *distinct* `tap.drawing`
     # (65/44) layer, not the `diff.drawing` (65/20) emitter layer, so no
     # same-layer collision occurs in practice -- a base tie on `tap.drawing`
@@ -2312,7 +2553,7 @@ EXTRACTION_DECK = ExtractionDeck(
     # were a base tie drawn on the *literal* `diff.drawing` emitter layer,
     # no already-modelled layer could distinguish it from the emitter, so it
     # would still double-count. Resolving that would require modelling
-    # sky130's implant (`nsdm`/`psdm`) masks, which this starter deck does
+    # sky130's implant (`nsdm`/`psdm`) masks on this entry, which it does
     # not -- documented rather than partially/incorrectly worked around.
     bipolars=(
         BipolarDevice(
@@ -2330,6 +2571,84 @@ EXTRACTION_DECK = ExtractionDeck(
             # `res_high_po`/`res_xhigh_po`); cites the smaller variant as
             # representative.
             provenance=_sky130_lvs_provenance("sky130_fd_pr__pnp_05v5_W0p68L0p68"),
+        ),
+    ),
+    # Junction diodes (issue #3803) -- see `_sky130_diode` above for the
+    # `sky130.lvs` derivations these transcribe. Not modelled: the
+    # `photodiode` (needs `areaid.po` and a fixed-area filter) and the RF
+    # diode (`areaid.rfdiode`).
+    diodes=(
+        _sky130_diode(
+            "diode_pw2nd_05v5",
+            n_plus=True,
+            excludes=(
+                _HVTP,
+                _HVI,
+                _LVTN,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pw2nd_05v5_lvt",
+            n_plus=True,
+            requires=(_LVTN,),
+            excludes=(
+                _HVTP,
+                _HVI,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pw2nd_05v5_nvt",
+            n_plus=True,
+            requires=(
+                _HVI,
+                _LVTN,
+            ),
+            excludes=(_HVTP,),
+        ),
+        _sky130_diode(
+            "diode_pw2nd_11v0",
+            n_plus=True,
+            requires=(_HVI,),
+            excludes=(
+                _HVTP,
+                _LVTN,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pd2nw_05v5",
+            n_plus=False,
+            excludes=(
+                _HVTP,
+                _HVI,
+                _LVTN,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pd2nw_05v5_lvt",
+            n_plus=False,
+            requires=(_LVTN,),
+            excludes=(
+                _HVTP,
+                _HVI,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pd2nw_05v5_hvt",
+            n_plus=False,
+            requires=(_HVTP,),
+            excludes=(
+                _HVI,
+                _LVTN,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pd2nw_11v0",
+            n_plus=False,
+            requires=(_HVI,),
+            excludes=(
+                _HVTP,
+                _LVTN,
+            ),
         ),
     ),
     # MiM capacitors (issue #225, see the module docstring's provenance note
@@ -2640,11 +2959,21 @@ PARASITICS = ParasiticsDeck(
     poly=LayerRC(sheet_res_ohm_sq=48.2, cap_area_ff_um2=0.107, cap_perim_ff_um=0.05527),
     metals=(
         # li1 local interconnect. perim from `defaultperimeter` li1 (40.7 aF/um).
-        LayerRC(sheet_res_ohm_sq=12.8, cap_area_ff_um2=0.037, cap_perim_ff_um=0.0407),
+        LayerRC(
+            sheet_res_ohm_sq=12.8,
+            sheet_res_high_ohm_sq=17.0,
+            sheet_res_low_ohm_sq=10.5,
+            cap_area_ff_um2=0.037,
+            cap_perim_ff_um=0.0407,
+        ),
         # met1. area/perim from `defaultareacap`/`defaultperimeter` met1
         # (25.78 aF/um^2, 40.57 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.125, cap_area_ff_um2=0.02578, cap_perim_ff_um=0.04057
+            sheet_res_ohm_sq=0.125,
+            sheet_res_high_ohm_sq=0.145,
+            sheet_res_low_ohm_sq=0.105,
+            cap_area_ff_um2=0.02578,
+            cap_perim_ff_um=0.04057,
         ),
         # met2 (issue #508). sheet: `resist (allm2)/metal2` in the same
         # nominal `variants (),(orig),(si)` block as met1 above (125
@@ -2653,7 +2982,11 @@ PARASITICS = ParasiticsDeck(
         # `defaultareacap`/`defaultperimeter allm2 metal2` entries (17.5
         # aF/um^2, 37.76 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.125, cap_area_ff_um2=0.0175, cap_perim_ff_um=0.03776
+            sheet_res_ohm_sq=0.125,
+            sheet_res_high_ohm_sq=0.145,
+            sheet_res_low_ohm_sq=0.105,
+            cap_area_ff_um2=0.0175,
+            cap_perim_ff_um=0.03776,
         ),
         # met3 (issue #619). sheet: `resist (allm3)/metal3` in the same
         # nominal `variants (),(orig),(si)` block as met1/met2 above (47
@@ -2662,7 +2995,11 @@ PARASITICS = ParasiticsDeck(
         # (12.37 aF/um^2, 40.99 aF/um -- the `#else (!RERAM)` branch, the
         # same branch met1/met2's own values above were transcribed from).
         LayerRC(
-            sheet_res_ohm_sq=0.047, cap_area_ff_um2=0.01237, cap_perim_ff_um=0.04099
+            sheet_res_ohm_sq=0.047,
+            sheet_res_high_ohm_sq=0.056,
+            sheet_res_low_ohm_sq=0.038,
+            cap_area_ff_um2=0.01237,
+            cap_perim_ff_um=0.04099,
         ),
         # met4 (issue #619). sheet: `resist (allm4)/metal4`, same nominal
         # block and `#ifdef METAL5` guard sky130.tech wraps met4/met5 in (47
@@ -2671,15 +3008,43 @@ PARASITICS = ParasiticsDeck(
         # `defaultareacap`/`defaultperimeter allm4 metal4` entries (8.42
         # aF/um^2, 36.68 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.047, cap_area_ff_um2=0.00842, cap_perim_ff_um=0.03668
+            sheet_res_ohm_sq=0.047,
+            sheet_res_high_ohm_sq=0.056,
+            sheet_res_low_ohm_sq=0.038,
+            cap_area_ff_um2=0.00842,
+            cap_perim_ff_um=0.03668,
         ),
         # met5 (issue #619). sheet: `resist (allm5)/metal5`, same nominal
         # block (29 milliohms/sq = 0.029 ohm/sq); area/perim from the
         # matching nominal, non-RERAM `defaultareacap`/`defaultperimeter
         # allm5 metal5` entries (6.32 aF/um^2, 38.85 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.029, cap_area_ff_um2=0.00632, cap_perim_ff_um=0.03885
+            sheet_res_ohm_sq=0.029,
+            sheet_res_high_ohm_sq=0.036,
+            sheet_res_low_ohm_sq=0.021,
+            cap_area_ff_um2=0.00632,
+            cap_perim_ff_um=0.03885,
         ),
+    ),
+    # Per-cut via resistance and the interconnect-resistance corners (issue
+    # #3053), from `sky130A.tech` at the pinned PDK commit
+    # f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7. `contact` rows are milliohm
+    # per cut, divided by 1000. Nominal: `variants (),(orig),(si)` block
+    # (L5132-5138); high-R: `variants (hrhc),(hrlc)` (L5180-5186); low-R:
+    # `variants (lrhc),(lrlc)` (L5228-5234). The high/low *metal* sheet
+    # resistances on `metals` above are from L5166-5170 / L5214-5218 (li1 is
+    # `allli`, L5165 / L5213; nominal L5117-5122). Unlike gf180mcu the cuts
+    # differ per layer.
+    # `lower_metal_index` is the level the cut lands on: mcon = li1->met1,
+    # m2c = met1->met2, m3c = met2->met3, via3 = met3->met4, via4 =
+    # met4->met5. Not curated: the diffusion/poly contacts (`ndc`, `pdc`,
+    # `pc`, ...), `mimcc`/`mim2cc`, and `mrdlc` (RDL, outside this stack).
+    cuts=(
+        CutRC("mcon", 0, nominal_ohm=9.3, high_ohm=23.0, low_ohm=1.6),
+        CutRC("m2c", 1, nominal_ohm=4.5, high_ohm=15.0, low_ohm=2.0),
+        CutRC("m3c", 2, nominal_ohm=3.41, high_ohm=8.0, low_ohm=0.5),
+        CutRC("via3", 3, nominal_ohm=3.41, high_ohm=8.0, low_ohm=0.5),
+        CutRC("via4", 4, nominal_ohm=0.38, high_ohm=0.891, low_ohm=0.012),
     ),
     # `defaultoverlap` vertical plate-coupling coefficients (issue #760,
     # Extract Stage 2a): entry `i` is the coefficient between `metals[i]`

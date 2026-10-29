@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -23,7 +23,8 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   (none and more than one are both hard errors), and every testbench must
   include the *same* schematic DUT file — `klt pex` reports one
   `reference_netlist` for the whole run. **Required unless
-  `--measure-command` is given**; the two are mutually exclusive.
+  `--measure-command` (or `--extract-only`) is given**; the three are
+  mutually exclusive.
 - `--measure-command` — measure both legs with a caller-supplied command
   instead of with `klt sim` testbenches (issue #2478). For a spec row no
   single `.meas` card can express. Requires `--reference-netlist`; mutually
@@ -94,6 +95,16 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   joined net name. Requires `--pins`. Off by default — byte-identical to
   before this flag existed. The effective value is echoed as
   `extraction.rename_declared_pins`.
+- `--tie-declared-pins` — passed through to `klt extract
+  --tie-declared-pins` (issue #4383); see [`extract.md`](extract.md). Declared
+  pins that extraction joins into one net (a ground and a body pin, say) are
+  tied back to every declared name, so the extracted `.SUBCKT` keeps the
+  schematic's pin count instead of every delta row failing with
+  `pin_count_mismatch`. Requires `--pins`. Off by default — byte-identical.
+  Echoed as `extraction.tie_declared_pins`. `extraction.pdk` records the PDK
+  install the extraction read (`variant`, `root` as `{path, scope}`,
+  `version`; `null` without `--pdk`), so a run with two installs of one
+  variant shows which was used.
 - `--flatten-schematic` — flatten the schematic DUT to PDK leaf devices
   before the schematic-side run (issue #2889) — the `klt pex` counterpart of
   `klt lvs`'s `options.flatten_reference`. Off by default — byte-identical
@@ -101,9 +112,31 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   (`--flatten-schematic`)" below.
 - `--device-only-leg` — measure a parasitic-free third leg (issue #3298) and
   split each `delta[]` row into a device-representation part and a parasitic
-  part. Off by default — byte-identical to before this flag existed. Not
-  supported with `--measure-command` (exit 1, error envelope). See "Separating
+  part. Off by default — byte-identical to before this flag existed. With
+  `--measure-command` the command is run a third time on the parasitic-free
+  netlist (`$KLT_PEX_SIDE=device-only`, issue #4293). See "Separating
   device representation from parasitics (`--device-only-leg`)" below.
+- `--extract-only` — extract and report, with no measurement leg (issue
+  #3739). No testbench, `--measure-command` or placeholder measurement is
+  needed, so nothing fake lands in `delta[]`. The response carries
+  `extraction`, `body_bias` and `provenance` exactly as a graded run does,
+  plus `testbenches: []`, `delta: []`, `measurement.mode: "extract-only"`
+  (`command`/`timeout_s`/`sides` null) and `status: "not_checked"`
+  (`coverage.nothing_checked_reasons: ["no_delta_rows"]`, exit 4 — see
+  "`coverage`" below), so it is distinguishable from a graded run and `klt
+  signoff` cannot cite it as comparison evidence. `reference_netlist` is
+  `{"path": null, "scope": "absent"}` and `reference_netlist_sha256`,
+  `pin_count_mismatch`, `flat_dut_mismatch` and `model_mismatch` are `null`:
+  there is no schematic side. Combining it with a testbench,
+  `--measure-command`, `--reference-netlist`, `--measure-timeout-s`,
+  `--device-only-leg` or `--flatten-schematic` is exit 1 (error envelope).
+  Off by default — without it, naming no testbench still fails with "at
+  least one testbench request is required".
+- `--tie-net` — repeatable `<extracted-net>=<schematic-net>` (issue #4245).
+  Merges one reported-unbiased well/body net of the extracted netlist into a
+  schematic net before the extracted leg is simulated, so the leg is
+  physically meaningful without a hand-rolled `--measure-command`. See
+  "Tying an unbiased body net (`--tie-net`)" below.
 - `--label-layer` — repeatable `<role>=<layer>/<datatype>`, passed through
   to `klt extract --label-layer` (issue #2686); see
   [`extract.md`](extract.md)'s "Overriding a deck's label layers" section.
@@ -128,6 +161,14 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   untouched. Off by default — byte-identical to before this flag existed.
   The applied mapping is echoed as `extraction.label_layers` (`null` when
   the flag was never given; a cleared role is `null` inside the object).
+- `--device-model` — repeatable `<class>=<subckt>`, passed through to `klt
+  extract --device-model` (issue #4234); see [`extract.md`](extract.md).
+  Under `--pdk`, writes a bipolar class with no curated PDK binding (gf180mcu's
+  `bjt`) as an `X` call to the named subcircuit, so the extracted netlist
+  loads in ngspice instead of failing with `could not find a valid
+  modelname`. An unknown or already-curated class is a clean error (exit 1).
+  Off by default — byte-identical to before this flag existed. Echoed as
+  `extraction.device_models` (`null` when not given).
 - `--critical-net` — repeatable, passed through to `klt extract
   --critical-net` (issue #976, Epic #709 Phase 2a). Scopes the lateral
   (same-layer, sidewall) coupling-capacitance pass onto these net names, on
@@ -141,6 +182,20 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   `--critical-net`, passed through to `klt extract` (issue #2974; see
   [`extract.md`](extract.md)'s "Many nets" paragraph).
   `extraction.critical_nets` echoes the resolved concrete names.
+- `--resistance-graph` / `--resistance-graph-r-cut OHM` — passed through to
+  `klt extract --resistance-graph` / `--resistance-graph-r-cut` (issue #4037),
+  with the same validation errors (r-cut requires the graph flag; r-cut must be
+  finite and `>= 0`, `0` = ideal via), surfaced as `PexError`. Unlike `klt
+  extract`, which keeps the legacy per-level series sum in its netlist, `klt
+  pex` writes each net's terminal-aware `selected_resistance_ohm` as that net's
+  lumped R wherever `resistance_source` is `graph`; `legacy` nets (no per-cut
+  resistance given, three or more terminals, ...) keep the legacy value, as do
+  nets overridden with `--mom-rlc-resistance-ohm`. This removes the
+  double-counting of strapped / via-stitched conductors from the re-simulated
+  extracted side (#2458). Cannot be combined with `--distributed-rc` (the
+  ladder stays on the legacy scalar, so a critical net would mix sources):
+  `PexError`. Off by default -- the netlist and JSON report are byte-identical
+  to a run without the flags. Echoed under `extraction.resistance_graph`.
 - `--distributed-rc` — passed through to `klt extract --distributed-rc`
   (issue #977, Epic #709 Phase 2b); requires `--critical-net`. Replaces the
   single-lumped-star R/C model with a distributed, multi-segment ladder for
@@ -470,6 +525,33 @@ DUT in a matching `.SUBCKT ... .ENDS` (with the same top-level pin list
 reused unmodified on both sides — the same convention `pin_count_mismatch`
 already requires.
 
+### Pin order must match: `pin_order_mismatch`
+
+The testbench's positional `X...` line is reused on both legs, so the
+*order* of the pins matters as well as their count. `klt extract` writes its
+`.SUBCKT <top>` header deterministically (real ports first, then parasitic
+references, each alphabetical); a schematic DUT declares pins in symbol
+order. When both headers declare the top subcircuit with the same number of
+pins and the same pin set (compared case-insensitively) but a different
+sequence, `pin_count_mismatch` and `flat_dut_mismatch` are both `null` and
+the extracted leg would otherwise simulate with signals on the wrong pins and
+report meaningless deltas.
+
+`klt pex` detects this statically, before either leg simulates, and reports
+a top-level `pin_order_mismatch` block in the same shape as
+`pin_count_mismatch` (`subcircuit`, `schematic`/`extracted` per-side detail
+with `pins` in declared order, `ngspice_message` — always `null`, no engine
+is invoked — and `detail`). It is mutually exclusive with `pin_count_mismatch`
+and `flat_dut_mismatch`, and always `null` in `--measure-command` mode.
+
+**Exit behaviour.** Identical to its siblings: the extracted leg is skipped,
+`delta[]` rows carry `extracted_value: null` and `status: "error"`, the
+report `status` is `"error"`, and the exit code is `4`. Fix by wrapping the
+schematic DUT in a `.SUBCKT` that declares the pins in the extracted order
+(shown in the block), so one instantiation line is valid for both legs.
+Rewriting the testbench instance by pin name, or reordering the extracted
+header, is not done by `klt pex`.
+
 ## The extracted side carries its own substrate DC reference (issue #1263)
 
 The extraction `klt pex` runs is `--parasitics`, so every net's ground
@@ -562,6 +644,63 @@ surfaces it on item 7's citation (`citation.body_bias`, see
 condition a `pex` citation is only valid under. Grading on it here would
 retroactively fail every design on a PDK whose deck has no well-tap
 mechanism, which is a separate decision from making the condition visible.
+
+### Tying an unbiased body net (`--tie-net`)
+
+Issue #4245. For a layout that cannot be relabelled, `--tie-net
+'<extracted-net>=<schematic-net>'` (repeatable) merges the named
+reported-unbiased net into a schematic net in the extracted netlist every
+simulated leg reads:
+
+```bash
+klt pex amp.gds tb.json --deck sky130 --tie-net '\$5=VDD'
+```
+
+- `<extracted-net>` must be one of an untied run's `body_bias.unbiased_nets`.
+  Any other name, or a layout with no unbiased net, is an error in the usual
+  envelope error shape (`error.code: "invalid_tie_net"`) that lists the valid
+  names; a malformed pair (no `=`, an empty half, one extracted net tied to two
+  different schematic nets) is rejected the same way. This confines the flag
+  to floating bodies — it cannot rewrite arbitrary nets.
+- Several extracted nets may be tied to one schematic net.
+- Anonymous names (`\$5`) are synthesized by KLayout and can change when the
+  layout changes, so a declared tie is **per extraction**: re-read
+  `unbiased_nets` after re-laying-out.
+- `extraction.netlist_sha256` is the digest of the netlist as rewritten by the
+  tie, so it always matches the file `netlist.path` points at.
+- Without the flag the output is byte-identical to a run that never had it.
+
+The tie is disclosed, not hidden. `body_bias` gains an additive `tied[]`:
+
+```json
+"body_bias": {
+  "status": "tied",
+  "unbiased_device_count": 3,
+  "unbiased_nets": ["\\$5", "\\$7"],
+  "unbiased_pmos_body_nets": [ ... ],
+  "tied": [
+    {"extracted_net": "\\$5", "schematic_net": "VDD", "source": "declared"},
+    {"extracted_net": "\\$7", "schematic_net": "VDD", "source": "declared"}
+  ]
+}
+```
+
+`unbiased_pmos_body_nets` keeps reporting what the layout drew; ties are
+additive. `status` stays `"unbiased"` while any unbiased net is left untied,
+and is `"tied"` — never `"biased"` — once every one is tied, so an item-7
+citation can tell "tied by declaration" (`source: "declared"`) from a drawn
+tap (`"biased"`). The *reported, not enforced* policy above is unchanged:
+`status` and the exit code do not depend on `body_bias`.
+
+**Check first: a well label may be enough.** If the layout can be relabelled,
+a text label on the deck's well label layer (`--label-layer well=<l>/<d>`; on
+sky130 `nwell.pin`, 64/5) names the well net, which then drops out of
+`unbiased_pmos_body_nets[]` with no `--tie-net` at all. Verified (issue
+#4245) on the sky130 deck with a tap-less inverter: without a label the PMOS
+body is the anonymous `\$8` and is reported unbiased; with an `nwell.pin`
+label it is the named net and `unbiased_pmos_body_nets` is empty. Decks with no
+well label layer (gf180mcu, per `extract.md`) cannot use this route, which is
+what `--tie-net` is for.
 
 **A clean run says so positively.** `status: "biased"` with a zero count is
 emitted for a run that checked and found every body biased — distinct from a
@@ -887,7 +1026,7 @@ klt pex 06-layout.gds --deck sky130 \
 
   | Variable | Value |
   |---|---|
-  | `KLT_PEX_SIDE` | `schematic` or `extracted` |
+  | `KLT_PEX_SIDE` | `schematic` or `extracted`; `device-only` for the third run `--device-only-leg` adds (issue #4293) |
   | `KLT_PEX_NETLIST` | the same path passed as the final argument |
   | `KLT_PEX_ARTIFACTS_DIR` | a per-side directory under this run's `--outdir` (`<outdir>/measure/<side>/`), created before the command runs — for whatever decks/logs/raw files the harness wants to keep |
   | `KLT_PEX_BACKEND` | the `--backend` value (`local`/`batch`/…), set **only** when `klt pex` was given `--backend`; the same value is also exported as `KLT_SIM_BACKEND` so a child `klt sim` obeys it. Absent otherwise — the host's inherited `$KLT_SIM_BACKEND` default applies unchanged |
@@ -930,6 +1069,7 @@ only needs post-processing on *some* of its rows.
 | `…measurements[].name` | string | Required, non-empty, unique within its corner. Becomes the `delta[]` row's `spec_row`. |
 | `…measurements[].value` | number \| null | Required. A finite number, or `null` for the caller's own **"unresolved"** outcome. `null` renders an `"error"` delta row — never a fabricated pass. `NaN`/`Infinity`, booleans and strings are refused. |
 | `…measurements[].status` | string | Optional, one of `"pass"`/`"fail"`/`"error"`. Omitted ⇒ `"error"` for a `null` value, `"pass"` otherwise. A caller that owns its own limits states them; a caller with none gets the same "measured, therefore comparable" default `klt sim` gives an unlimited measurement. |
+| `…measurements[].message` | string | Optional, non-empty (issue #4555). Why the measurement has no value (e.g. a `.meas` threshold never crossed). Copied into `delta[].error.message` when the row errors on this side, with `stage: "execute"`; ignored on `pass`/`fail` measurements. A non-string or blank value is a hard error. |
 
 Any violation of the table is a hard error (exit `1`) naming the offending
 path (e.g. `corners[0].measurements[2].value`), for the same reason a failed
@@ -960,7 +1100,7 @@ indistinguishable from a real measurement failure.
 
 ### Two diagnostics are inapplicable here
 
-`pin_count_mismatch` and `flat_dut_mismatch` are always `null` in this mode.
+`pin_count_mismatch`, `flat_dut_mismatch` and `pin_order_mismatch` are always `null` in this mode.
 Both exist because testbench mode re-runs the testbench's **own unmodified
 `X...` instantiation line** against both netlists, so a pin-list or
 flat-vs-wrapped difference silently breaks the extracted-side deck. A
@@ -1114,7 +1254,7 @@ full `repo`/`external`/`absent` scope meanings.
   "status": "pass",
   "layout": { "path": "top.gds", "scope": "repo" },
   "netlist": { "path": "top.spice", "scope": "repo" },
-  "reference_netlist": { "path": null, "scope": "external" },
+  "reference_netlist": { "path": null, "scope": "absent" },
   "extraction": {
     "deck": "sky130",
     "device_count": 1,
@@ -1130,6 +1270,7 @@ full `repo`/`external`/`absent` scope meanings.
     "distributed_rc": false,
     "mom_rlc_override": null,
     "label_layers": null,
+    "device_models": null,
     "parasitic_integrity": {
       "short_threshold_ohm": 1.0,
       "cap_tolerance": { "absolute_ff": 1e-06, "relative": 1e-09 },
@@ -1213,6 +1354,7 @@ full `repo`/`external`/`absent` scope meanings.
     "nothing_checked_reasons": []
   },
   "pin_count_mismatch": null,
+  "pin_order_mismatch": null,
   "backend_failure": null,
   "flat_dut_mismatch": null,
   "model_mismatch": null,
@@ -1236,10 +1378,10 @@ full `repo`/`external`/`absent` scope meanings.
 | `status`             | string            | Aggregate: `"pass"`, `"fail"`, `"error"`, or `"not_checked"`. Precedence: `error` > `fail` > `not_checked` > `pass` — mirrors `klt sim`. |
 | `layout`             | object            | `{path, scope}` — `<layout>` normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when `<layout>` sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
 | `netlist`            | object            | `{path, scope}` — the extracted (parasitic-annotated) netlist `klt extract` wrote, normalised the same way as `layout`. |
-| `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. |
-| `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), `parasitic_variant` (issue #3056 — the `--parasitic-variant` request echoed back; present only when the flag was given), `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list), `label_layers` (issue #2686 — `null` unless `--label-layer` was given, in which case `klt extract`'s own `label_layers` echo: `{"<role>": [layer, datatype] | null}`, sorted by role, `null` for a role cleared with `none`), and `parasitic_integrity` (issue #2764 — the extraction's own per-net parasitic RC network integrity diagnostics; see below). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
-| `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. |
-| `measurement`        | object            | Issue #2478 (additive field, always present). How this run's two legs were measured, so a reader of a committed record never has to infer it from the presence/absence of `testbenches[]`. `mode` is `"testbench"` (the default path — `command`/`timeout_s`/`sides` are then all `null`) or `"command"` (a caller-supplied `--measure-command` produced both legs). For `"command"`: `command` is the argv **list** verbatim (never a shell string — it is never run through a shell), `timeout_s` the per-invocation cap in force, and `sides` an object keyed `schematic`/`extracted`, each carrying `netlist` (`{path, scope}`, the exact netlist that side was measured on), `exit_status`, `corner_count` and `measurement_names`. See "Measuring with a caller-supplied command" above. |
+| `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. `{path: null, scope: "absent"}` for `--extract-only` (issue #3739), which has no schematic side. |
+| `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), `parasitic_variant` (issue #3056 — the `--parasitic-variant` request echoed back; present only when the flag was given), `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list), `label_layers` (issue #2686 — `null` unless `--label-layer` was given, in which case `klt extract`'s own `label_layers` echo: `{"<role>": [layer, datatype] | null}`, sorted by role, `null` for a role cleared with `none`), `device_models` (issue #4234 — `null` unless `--device-model` was given, in which case the applied `{"<class>": "<subckt>"}` mapping), `resistance_graph` (issue #4037 — present only with `--resistance-graph`: `{r_cut_ohm, nets[]}` where each `nets[]` entry is `{net, net_id, resistance_source, selected_resistance_ohm, legacy_resistance_ohm}`; `resistance_source` says which value the extracted netlist's lumped R used), and `parasitic_integrity` (issue #2764 — the extraction's own per-net parasitic RC network integrity diagnostics; see below). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
+| `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`, or `"tied"` when every unbiased net was declared tied with `--tie-net`), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim), and — only with `--tie-net` (issue #4245) — `tied[]` (`{extracted_net, schematic_net, source: "declared"}`). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. |
+| `measurement`        | object            | Issue #2478 (additive field, always present). How this run's two legs were measured, so a reader of a committed record never has to infer it from the presence/absence of `testbenches[]`. `mode` is `"testbench"` (the default path — `command`/`timeout_s`/`sides` are then all `null`) `"command"` (a caller-supplied `--measure-command` produced both legs) or `"extract-only"` (issue #3739: `--extract-only` measured nothing — `testbenches` and `delta` are empty, `status` is `not_checked`, and `command`/`timeout_s`/`sides` are `null`). For `"command"`: `command` is the argv **list** verbatim (never a shell string — it is never run through a shell), `timeout_s` the per-invocation cap in force, and `sides` an object keyed `schematic`/`extracted`, each carrying `netlist` (`{path, scope}`, the exact netlist that side was measured on), `exit_status`, `corner_count` and `measurement_names`. See "Measuring with a caller-supplied command" above. |
 | `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (`{path, scope}` — the `<testbench>` argument, normalised the same way as `layout`; issue #1261), `request_sha256`, `netlist` (`{path, scope}` — the simulation body the request names), `netlist_sha256`, `schematic_netlist` (`{path, scope}` — the resolved DUT path it `.include`d, normalised the same way), `schematic_netlist_sha256`, `corner_count`, `measurement_names`, and the issue #2872 `sides` / `nothing_simulated_corners` execution evidence (see "Per-side execution evidence" below). The `*_sha256` fields are the issue #2875 content identities, see "Schematic-side content identity" below. Informational — the full per-corner detail lives in `delta[]`. **Empty (`[]`) for a `--measure-command` run**, which has no testbenches at all; `measurement.sides` carries the equivalent per-leg detail there. |
 | `reference_netlist_sha256` | string | Issue #2875 (additive). `sha256:<64 lowercase hex>` of the exact bytes of `reference_netlist` — the schematic DUT (testbench mode) or `--reference-netlist` (`--measure-command` mode). `null` only if the file was unreadable. |
 | `corner_count`       | integer           | Number of distinct `corner_id` values across every `delta[]` row.                       |
@@ -1250,6 +1392,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `pin_count_mismatch` | object \| null    | `null` on every run whose extracted side simulated (issue #1030 — additive field). Non-`null` names the schematic/extracted top-level pin-list mismatch that made the extracted-side deck unrunnable: `subcircuit`, a `schematic` and an `extracted` object (each `netlist`, `subcircuit`, `pin_count`, `pins` — `null` pin data when the header could not be read), `ngspice_message` (ngspice's own line, `null` when no per-corner log was kept), and a human-readable `detail`. See "The pin lists must match" above. |
 | `backend_failure`    | object \| null    | `null` unless an extracted-side `klt sim` call raised something other than a pin-count mismatch (issue #2990 — additive field), e.g. a batch-fleet capacity refusal. Non-`null` is `{testbench, side, message, code}` for the first such failure (`side` is always `"extracted"`; `code` is the underlying `SimError.code`, e.g. `batch_no_capacity`, or `null`). The run does **not** abort: that testbench's `delta[]` rows are `status: "error"` with the schematic value intact and `extracted_value: null`, and its `testbenches[].sides.schematic` evidence (including a remote job id) is kept, so only the extracted side needs re-running. A caller can retry mechanically on `code`. A schematic-side failure still aborts (nothing completed), but its error envelope now carries `error.code` too. |
 | `flat_dut_mismatch`  | object \| null    | `null` unless the schematic DUT is netlisted flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction (issue #1255, Gap 2 — additive field). Same shape as `pin_count_mismatch` (`subcircuit`, `schematic`/`extracted` objects, `ngspice_message` — always `null` here, no engine is ever invoked — and `detail`); mutually exclusive with `pin_count_mismatch` (the extracted side is never attempted when this fires). See "Flat schematic DUT vs `.SUBCKT`-wrapped extraction" above. |
+| `pin_order_mismatch` | object \| null    | `null` unless both sides declare the top subcircuit with the same pin set in a different order (issue #2890 — additive field). Same shape as `flat_dut_mismatch` (`ngspice_message` always `null`); mutually exclusive with `pin_count_mismatch`/`flat_dut_mismatch`; `null` in `--measure-command` mode. The extracted leg is skipped and the run exits `4`. See "Pin order must match" above. |
 | `model_mismatch`     | object \| null    | `null` when the reference (schematic) and extracted netlists' `M`/`X`/`Q`/`D` device cards instantiate the same models/`.subckt`s the same number of times (issue #2402 — additive field). Non-`null` names the divergence: `kind` (`model_set` or `count_only`, issue #3054), `reference_only`/`extracted_only` (model names unique to one side, by instance count), `counts` (each side's full per-model instance count), and a human-readable `detail`. Unlike `pin_count_mismatch`/`flat_dut_mismatch`, computed unconditionally (independent of whether the top-level pin lists match) and never skips the extracted-side simulation — it never changes `status`. See "A device-model divergence invalidates the comparison too" above. |
 | `flatten_schematic`  | boolean           | Issue #2889 (additive, always present). Echo of `--flatten-schematic` — `false` when not given. |
 | `schematic_flatten`  | object \| null    | Issue #2889 (additive). `null` unless `--flatten-schematic` was given. Otherwise the flattened schematic DUT the schematic leg ran: `netlist` (`{path, scope}`), `netlist_sha256` (`sha256:<hex>` of its exact bytes), `subckts` (root `.subckt` names kept), `inlined_instances`, `inlined_subckts`, `external_subckts` (undefined `X` targets kept as leaf devices — audit these) and `already_flat`. See "Flattening a hierarchical schematic DUT" above. |
@@ -1271,7 +1414,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `status`          | string          | `"pass"`, `"fail"`, or `"error"` — mirrors the **extracted-side** measurement's own `klt sim` status (the side item 7 actually grades) against its declared `measurements[].limits`, except `"error"` also covers a missing/errored schematic-side value (no trustworthy delta to report). Issue #3620: an optional measurement that is `"absent"` on exactly one side (a figure lost — or newly appearing — after parasitics) is also `"error"` (`delta_pct: null`, `error` blames the absent side); `"absent"` on both sides is `"pass"`. Never a delta-magnitude threshold of its own — the same measurement `limits` a caller already declared, not a second, undocumented tolerance. |
 | `schematic_status` | string         | Issue #2989 (additive). The schematic-side measurement's own `klt sim` limit status: `"pass"`, `"fail"`, `"error"` (also when the schematic measurement is missing), or `"absent"` (issue #3620: an optional measurement with no value). Does not affect `status`. |
 | `extracted_status` | string         | Issue #2989 (additive). The extracted-side measurement's own `klt sim` limit status (may be `"absent"`, see `schematic_status`); `"error"` for rows whose extracted side never produced a response. |
-| `error`           | object          | Issue #3062 (additive). Present **only** on `status: "error"` rows (absent on `pass`/`fail`), naming why the row has no trustworthy value: `side` (`"schematic"` or `"extracted"`), `stage` (`"submit"`, `"execute"`, `"collect"`, `"parse"` or `"unknown"` — `"unknown"` when the source code maps to no stage, never guessed), `message`, and `code` when the source has one (e.g. `batch_job_failed`, `batch_no_capacity`). Taken from that side's corner `diagnostics[]` (first error-severity entry) or, when that side never returned a report, from the recorded failure; `remote` carries the side's `environment.remote` (the batch job id) when present. The side's full evidence stays under `testbenches[].sides.<side>.corners[]` for the same `corner_id`. |
+| `error`           | object          | Issue #3062 (additive). Present **only** on `status: "error"` rows (absent on `pass`/`fail`), naming why the row has no trustworthy value: `side` (`"schematic"` or `"extracted"`), `stage` (`"submit"`, `"execute"`, `"collect"`, `"parse"` or `"unknown"` — `"unknown"` when the source code maps to no stage, never guessed), `message`, and `code` when the source has one (e.g. `batch_job_failed`, `batch_no_capacity`). Taken from that side's corner `diagnostics[]` (first error-severity entry) or, when that side never returned a report, from the recorded failure; `remote` carries the side's `environment.remote` (the batch job id) when present. In `--measure-command` mode, when the blamed side has no diagnostics, `message` is that side's measurement-document `message` and `stage` is `"execute"` (issue #4555). The side's full evidence stays under `testbenches[].sides.<side>.corners[]` for the same `corner_id`. |
 | `device_only_value` | number \| null | Issue #3298 (additive, `--device-only-leg` only). The measurement on the parasitic-free third leg; `null` when that leg produced nothing for this row. |
 | `representation_delta_pct` | number \| null | Issue #3298 (additive, `--device-only-leg` only). `delta_pct`'s rule applied to `schematic_value` → `device_only_value`: the device-representation/geometry part of `delta_pct`. |
 | `parasitic_delta_pct` | number \| null | Issue #3298 (additive, `--device-only-leg` only). `delta_pct`'s rule applied to `device_only_value` → `extracted_value`: the parasitic part of `delta_pct`. |
@@ -1334,7 +1477,7 @@ ownership".
 | `0`       | At least one actual comparison ran and every `delta[]` row passed.                                                                   |
 | `1`       | Failed to run at all — bad layout/testbench, unresolvable deck/PDK, a testbench with no `.include`/`.inc` DUT reference **or more than one** or one that does not plausibly name the DUT (issue #1255, Gap 1), testbenches disagreeing on their schematic DUT, or an extraction/simulation failure. For a `--measure-command` run (issue #2478): also a mis-combined invocation (`--measure-command` with a `<testbench>`, or without `--reference-netlist`; `--reference-netlist`/`--measure-timeout-s` without `--measure-command`), a `--reference-netlist` that is missing or is not a DUT, and any measurement-command failure — unrunnable, non-zero exit, timeout, non-JSON stdout, or a malformed measurement document. With `--flatten-schematic` (issue #2889): a schematic DUT the flattener refuses (cycle, `X`-call pin-count mismatch, unsupported card, unbalanced `.subckt`), classified as `error.code` `schematic_flatten_*`. Documented error shape on stderr (`--format json`). |
 | `3`       | Ran successfully; at least one `delta[]` row's `status` is `"fail"`.                           |
-| `4`       | No actual comparison ran (`status: "not_checked"`), or at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`, and a flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which reports a named `flat_dut_mismatch` block the same way (issue #1255, Gap 2), and an extracted-side backend failure, which reports a named `backend_failure` field (issue #2990). |
+| `4`       | No actual comparison ran (`status: "not_checked"`), or at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`, and a flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which reports a named `flat_dut_mismatch` block the same way (issue #1255, Gap 2), and a same-pins-different-order mismatch, which reports a named `pin_order_mismatch` block the same way (issue #2890), and an extracted-side backend failure, which reports a named `backend_failure` field (issue #2990). |
 
 (`2` is reserved for argparse usage errors, as with every other `klt`
 subcommand. Exit codes `3`/`4` mirror `klt sim`'s own precedent — see

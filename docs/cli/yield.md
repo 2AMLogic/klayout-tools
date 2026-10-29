@@ -124,7 +124,9 @@ klt yield mc.json --limits spec-limits.json --format json
   always grades without one. To grade a control from a second, known-bad
   campaign, derive a sample set from both reports with
   [`klt yield-samples`](#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples)
-  — never by hand-editing a committed response.
+  — never by hand-editing a committed response. A
+  [`klt yield-campaign`](yield-campaign.md#negative-control) spec can declare
+  the control itself (`negative_control`) and run both campaigns in one call.
 
 ### Sample-set document
 
@@ -425,7 +427,7 @@ value `0.787`:
 | `consistent` | The sample set is not inconsistent with a normal. |
 | `rejected` | `A2*` exceeds the critical value — a warning says so, and the parametric estimate and Cpk should be treated as indicative only. |
 | `insufficient_samples` | `N < 8`, below where the critical values apply; normality was **not** tested. |
-| `degenerate` | Zero sample spread; the statistic is undefined. |
+| `degenerate` | Zero sample spread; the statistic is undefined. A bit-identical sample set, or one whose sample standard deviation is at or below `1e-12 * max(abs(mean), tiny)` (a floating-point rounding residue, e.g. 100 copies of `1.800306041`), counts as zero spread. A genuine relative spread of `1e-9` does not. |
 
 ### Two yield estimates, side by side
 
@@ -457,7 +459,7 @@ past where it is informative.
 | `sigma_to_spec_confidence_interval` | `3 ×` the `cpk` interval. |
 | `limiting_side` | `"lower"` or `"upper"` — which limit `cpk` is measured against. |
 
-All are `null` when the sample spread is zero (the fit is degenerate).
+All are `null` when the sample spread is zero (the fit is degenerate), using the same relative floor (`stddev <= 1e-12 * max(abs(mean), tiny)`) as the `degenerate` normality verdict.
 
 ### Sample-size verdict
 
@@ -727,6 +729,26 @@ point estimate:
 | --- | --- |
 | `detected` | The negative control's empirical yield is lower **and** its exact (Clopper-Pearson) confidence interval does not overlap the nominal measurement's — a difference too large to be sampling noise. |
 | `not_detected` | The point estimates may differ, but the intervals overlap (or the control isn't even lower) — the deliberate defect did not show up as a statistically distinguishable degradation. |
+
+| `not_applicable` | Not computed: the measurement **declared** that the seeded defect cannot degrade it by construction (see below). |
+
+**Declaring "control not applicable"** ([#4523](https://github.com/2AMLogic/klayout-tools/issues/4523)):
+a measurement the seeded defect can only *improve* (a one-sided defect applied
+to a measurement it pushes the other way) can say so instead of carrying a
+control that reads `not_detected`:
+
+```json
+"negative_control": {"not_applicable": true, "reason": "defect is one-sided; it can only improve this measurement"}
+```
+
+`reason` is required and must be a non-empty string, and `samples` cannot be
+given alongside `not_applicable` — either is a `YieldError` (exit 1). The
+report's `negative_control` for that measurement is then
+`{"verdict": "not_applicable", "reason": "..."}` (no `yield`, `n` or
+`nominal_empirical_estimate` keys — consumers that only match `detected` /
+`not_detected` must handle this third value). `klt yield` does not judge
+whether the reason is valid; `klt signoff` discloses it (see
+[signoff.md](signoff.md)).
 
 To build this block from a second `klt sim` campaign rather than by hand, see
 ["Deriving a sample set from two `klt sim` reports"](#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples).

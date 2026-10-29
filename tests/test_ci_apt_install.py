@@ -811,9 +811,12 @@ _APT_WORKFLOWS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 # The steps whose payload earns the widened #1224/#2662 budget (an 11.2 MB
-# `cmake` fetch), and therefore the 7-minute rather than 5-minute backstop.
-# Everything else takes the script's own defaults.
-_WIDE_BUDGET_STEP = "Install Yosys build dependencies"
+# `cmake` fetch; the apt `klayout` Qt5 libs, #4059), and therefore the
+# 7-minute rather than 5-minute backstop. Everything else takes the script's
+# own defaults.
+_WIDE_BUDGET_STEPS = frozenset(
+    {"Install Yosys build dependencies", "Install the klayout binary"}
+)
 
 
 def test_the_apt_workflow_table_covers_every_wrapper_caller():
@@ -860,16 +863,16 @@ def test_apt_steps_keep_their_timeout_backstop():
     the outer backstop -- the wrapper's own budget is sized to fit inside
     it.
 
-    The Yosys steps' backstop is 7 minutes rather than 5 (issues #2662,
-    #2672): their deadline has to hold two full-length 150s `cmake` fetches,
-    which 300s cannot. Every other step keeps the script's defaults and the
-    original 5-minute backstop.
+    The Yosys steps' (and the klayout step's, #4059) backstop is 7 minutes
+    rather than 5 (issues #2662, #2672): their deadline has to hold two
+    full-length 150s fetches, which 300s cannot. Every other step keeps the
+    script's defaults and the original 5-minute backstop.
     """
     for workflow_name, step_names in _APT_WORKFLOWS:
         path = WORKFLOW_DIR / workflow_name
         text = path.read_text(encoding="utf-8")
         for name in step_names:
-            expected = 7 if name == _WIDE_BUDGET_STEP else 5
+            expected = 7 if name in _WIDE_BUDGET_STEPS else 5
             for step in _step_texts(text, name):
                 assert f"timeout-minutes: {expected}" in step, (
                     f"{path}: '{name}' lost its timeout backstop (expected "
@@ -906,6 +909,26 @@ def _step_text(workflow_text: str, name: str) -> str:
     steps = _step_texts(workflow_text, name)
     assert steps, f"step '{name}' not found"
     return steps[0]
+
+
+def test_yosys_apt_step_is_gated_on_a_yosys_cache_miss():
+    """Issue #4100: the Yosys build prerequisites are only needed to compile
+    Yosys, and the compile step is already skipped on a cache hit. The apt
+    step must therefore run after the cache step and only on a miss, so a
+    warm-cache leg never touches the (flaky) apt mirror."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    apt_step = _step_text(text, "Install Yosys build dependencies")
+
+    assert re.search(
+        r"^        if: steps\.yosys-cache\.outputs\.cache-hit != 'true'$",
+        apt_step,
+        re.MULTILINE,
+    ), "Yosys apt step must be skipped on a cache hit"
+
+    cache_pos = text.index("name: Cache pinned Yosys build")
+    apt_pos = text.index("name: Install Yosys build dependencies")
+    assert "id: yosys-cache" in _step_text(text, "Cache pinned Yosys build")
+    assert cache_pos < apt_pos, "Yosys cache step must precede the apt step"
 
 
 def test_yosys_step_widens_the_retry_budget_for_its_large_cmake_download():

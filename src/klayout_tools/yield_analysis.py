@@ -183,65 +183,61 @@ def _apply_qualification_defaults(
             limits[key] = spec_defaults[key]
 
 
-def _failed_unmeasurable_from(raw: Any, name: str, where: str) -> int:
-    """Normalise a ``failed_unmeasurable`` count -- draws that left the
-    regime a measurement is only defined in and produced no value (issue
-    #1095). Additive to ``errored``: unlike a tooling failure, this **does**
-    enter the empirical yield's numerator/denominator as a failure (see
-    ``native/yield/src/estimate.rs``), while still being excluded from the
-    distribution fit and Cp/Cpk, exactly like ``errored`` is.
+def _count_from(raw: Any, field: str, name: str, where: str) -> int:
+    """Normalise a no-usable-value draw count (``errored``-style category),
+    ``None`` -> 0, else a non-negative ``int``.
+
+    Per-category semantics (denominator treatment is implemented in
+    ``native/yield/src/estimate.rs``, not here):
+
+    - ``failed_unmeasurable`` (issue #1095): draws that left the regime a
+      measurement is defined in and produced no value. Unlike ``errored``,
+      enters the empirical yield's numerator/denominator as a failure; still
+      excluded from the distribution fit and Cp/Cpk.
+    - ``censored`` (issue #2468): draws whose measurement precondition was
+      never satisfied inside the analysis window. Gets ``errored``'s
+      denominator treatment (excluded from numerator and denominator).
+    - ``inconclusive`` (issue #2507): draws whose value exists but is not
+      trustworthy. Caller-supplied on the sample-set path (no per-sample
+      status channel; the sim-report path derives it from ``klt sim``
+      status grading). Gets ``errored``'s denominator treatment.
     """
     if raw is None:
         return 0
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
         raise YieldError(
-            f"{where}: measurement '{name}' failed_unmeasurable must be a "
-            "non-negative integer"
+            f"{where}: measurement '{name}' {field} must be a non-negative integer"
         )
     return raw
 
 
-def _censored_from(raw: Any, name: str, where: str) -> int:
-    """Normalise a ``censored`` count -- draws whose measurement precondition
-    (a conditioning event, e.g. reaching a settled/converged/acquired state)
-    was never satisfied inside the analysis window, so no value was produced
-    (issue #2468). Unlike ``failed_unmeasurable``, this gets ``errored``'s
-    denominator treatment: excluded from both the numerator and denominator
-    of the empirical yield (see ``native/yield/src/estimate.rs``), while
-    still being excluded from the distribution fit and Cp/Cpk like both
-    existing no-value categories.
+def _not_applicable_control_from(
+    raw: dict[str, Any], name: str, where: str
+) -> dict[str, Any]:
+    """Validate a ``negative_control`` that declares ``not_applicable``.
+
+    Issue #4523: a declared "control not applicable" disposition -- the
+    seeded defect cannot degrade this measurement by construction. It
+    carries a required reason and no samples; it never reaches the native
+    core (see ``run_yield``).
     """
-    if raw is None:
-        return 0
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+    if raw["not_applicable"] is not True:
         raise YieldError(
-            f"{where}: measurement '{name}' censored must be a non-negative integer"
+            f"{where}: measurement '{name}' negative_control.not_applicable "
+            "must be true"
         )
-    return raw
-
-
-def _inconclusive_from(raw: Any, name: str, where: str) -> int:
-    """Normalise an ``inconclusive`` count -- draws whose value exists but is
-    not trustworthy, so it must not be graded against ``limits`` as if it
-    were a result (issue #2507).
-
-    This is the sample-set path's counterpart of what
-    ``_measurements_from_sim_report`` derives from a `klt sim` report's own
-    ``status`` grading: a plain sample-set document has no per-sample status
-    channel, so the count is caller-supplied, exactly like
-    ``errored``/``failed_unmeasurable``/``censored``. Gets ``errored``'s
-    denominator treatment -- excluded from both the numerator and denominator
-    of the empirical yield (see ``native/yield/src/estimate.rs``) as well as
-    from the distribution fit and Cp/Cpk, because a distrusted number carries
-    no verdict in either direction.
-    """
-    if raw is None:
-        return 0
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+    reason = raw.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
         raise YieldError(
-            f"{where}: measurement '{name}' inconclusive must be a non-negative integer"
+            f"{where}: measurement '{name}' negative_control declares "
+            "not_applicable but no non-empty string 'reason'"
         )
-    return raw
+    if "samples" in raw:
+        raise YieldError(
+            f"{where}: measurement '{name}' negative_control cannot declare "
+            "both not_applicable and samples"
+        )
+    return {"not_applicable": True, "reason": reason.strip()}
 
 
 def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
@@ -254,6 +250,8 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         raise YieldError(
             f"{where}: measurement '{name}' has a non-object negative_control"
         )
+    if raw.get("not_applicable") is not None:
+        return _not_applicable_control_from(raw, name, where)
     raw_samples = raw.get("samples")
     if not isinstance(raw_samples, list):
         raise YieldError(
@@ -276,14 +274,14 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
     # empirical yield rather than being excluded, so a deliberate defect
     # that drives every draw out of the regime still shows up as a detected
     # degradation.
-    failed_unmeasurable = _failed_unmeasurable_from(
-        raw.get("failed_unmeasurable"), name, where
+    failed_unmeasurable = _count_from(
+        raw.get("failed_unmeasurable"), "failed_unmeasurable", name, where
     )
     # Issue #2468: the negative control's own `censored` count -- excluded
     # from both the numerator and denominator of its own empirical yield,
     # exactly like `errored` (the opposite polarity from
     # `failed_unmeasurable` above).
-    censored = _censored_from(raw.get("censored"), name, where)
+    censored = _count_from(raw.get("censored"), "censored", name, where)
     description = raw.get("description")
     if description is not None and not isinstance(description, str):
         raise YieldError(
@@ -533,15 +531,20 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
                 # has no way to distinguish a tooling failure from a design
                 # failure, so the caller supplies the count directly on the
                 # rollup entry.
-                "failed_unmeasurable": _failed_unmeasurable_from(
-                    entry.get("failed_unmeasurable"), name, "sim report"
+                "failed_unmeasurable": _count_from(
+                    entry.get("failed_unmeasurable"),
+                    "failed_unmeasurable",
+                    name,
+                    "sim report",
                 ),
                 # Issue #2468: same provenance story as `failed_unmeasurable`
                 # above -- a sim report's per-corner value has no way to
                 # distinguish an unmet measurement precondition from either
                 # a tooling failure or a design failure, so the caller
                 # supplies the count directly on the rollup entry.
-                "censored": _censored_from(entry.get("censored"), name, "sim report"),
+                "censored": _count_from(
+                    entry.get("censored"), "censored", name, "sim report"
+                ),
                 "limits": _limits_from(entry.get("limits"), name, "sim report"),
                 "source_corners": source_corners,
                 # A sim report's own corners are the nominal draw; a
@@ -608,18 +611,23 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
                 # sim`'s own corner/measurement `status` grading), so the
                 # count is supplied directly -- the same shape the three
                 # other no-usable-value categories already use.
-                "inconclusive": _inconclusive_from(
-                    entry.get("inconclusive"), name, "sample set"
+                "inconclusive": _count_from(
+                    entry.get("inconclusive"), "inconclusive", name, "sample set"
                 ),
                 # Issue #1095: a draw that failed the limit without producing
                 # a value -- a design failure, not a measurement failure.
-                "failed_unmeasurable": _failed_unmeasurable_from(
-                    entry.get("failed_unmeasurable"), name, "sample set"
+                "failed_unmeasurable": _count_from(
+                    entry.get("failed_unmeasurable"),
+                    "failed_unmeasurable",
+                    name,
+                    "sample set",
                 ),
                 # Issue #2468: a draw whose measurement precondition was
                 # never satisfied -- nothing failed and no value-defining
                 # event was violated, the row is simply undefined.
-                "censored": _censored_from(entry.get("censored"), name, "sample set"),
+                "censored": _count_from(
+                    entry.get("censored"), "censored", name, "sample set"
+                ),
                 "limits": _limits_from(entry.get("limits"), name, "sample set"),
                 "source_corners": [str(c) for c in source_corners],
                 "negative_control": _negative_control_from(
@@ -725,6 +733,30 @@ def _read_spec(path: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 
 
+def _strip_not_applicable(
+    entry: dict[str, Any], not_applicable: dict[str, str]
+) -> dict[str, Any]:
+    """Record and drop a ``not_applicable`` negative control (issue #4523) so
+    the native core never sees it; other entries pass through unchanged."""
+    control = entry.get("negative_control")
+    if control is not None and control.get("not_applicable"):
+        not_applicable[entry["name"]] = control["reason"]
+        return {**entry, "negative_control": None}
+    return entry
+
+
+def _patch_not_applicable(
+    response: dict[str, Any], not_applicable: dict[str, str]
+) -> None:
+    """Write the declared ``not_applicable`` verdicts into the core response."""
+    for m in response.get("measurements") or []:
+        if m.get("name") in not_applicable:
+            m["negative_control"] = {
+                "verdict": "not_applicable",
+                "reason": not_applicable[m["name"]],
+            }
+
+
 def run_yield(
     samples_path: str,
     *,
@@ -767,6 +799,9 @@ def run_yield(
     run_target_yield = spec_defaults.get("target_yield")
     warnings: list[str] = []
     request_measurements: list[dict[str, Any]] = []
+    # Issue #4523: measurements that declared "negative control not
+    # applicable" -- carried around the native core and patched into the report.
+    not_applicable: dict[str, str] = {}
     for entry in selected:
         name = entry["name"]
         limits = dict(entry["limits"])
@@ -788,6 +823,7 @@ def run_yield(
                 "supply limits via --limits to include it"
             )
             continue
+        entry = _strip_not_applicable(entry, not_applicable)
         request_measurements.append({**entry, "limits": limits})
 
     if not request_measurements:
@@ -818,6 +854,7 @@ def run_yield(
     except ValueError as exc:
         raise YieldError(str(exc)) from exc
     response = json.loads(response_json)
+    _patch_not_applicable(response, not_applicable)
 
     payload: dict[str, Any] = {
         "samples": samples_path,

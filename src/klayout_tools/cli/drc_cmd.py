@@ -40,11 +40,12 @@ document" section for the schema.
 
 ``--check <report>`` (issue #1106) switches ``klt drc`` from running a fresh
 DRC into *verifying a previously committed* ``--format json`` report still
-reproduces -- see ``docs/cli/drc.md``, "--check" -- and is mutually exclusive
-with the positional ``file`` argument (the input path is read from the
-committed report itself). Cheap mode (default): re-hash the input/deck named
-in the report and compare against its own recorded ``content_hash`` values,
-no DRC engine re-run. Full mode (``--check <report> --rerun``): actually
+reproduces -- see ``docs/cli/drc.md``, "--check". The input path is read from
+the committed report itself unless the positional ``file`` is also given
+(issue #2699), which then overrides the recorded input unconditionally.
+Cheap mode (default): re-hash the input/deck named in the report and compare
+against its own recorded ``content_hash`` values, no DRC engine re-run. Full mode
+(``--check <report> --rerun``): actually
 re-run the deck the report names and diff verdict-bearing fields. Both reuse
 ``status: "match"`` / ``"drifted"`` and the same 0/3 exit-code split as a
 normal run (see ``klayout_tools._report_verify``).
@@ -68,8 +69,16 @@ from ..drc import (
     run_drc,
     run_drc_klayout_engine,
 )
+from ..drc_crosscheck import crosscheck_exit_code, run_drc_crosscheck
+from ..env_provenance import render_path_field
 from . import _request_document as reqdoc
-from .output import emit_error, emit_success, render_rerun_drift
+from .output import (
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+    write_json_file,
+)
 
 EXIT_CLEAN = 0
 EXIT_VIOLATIONS = 3
@@ -81,9 +90,10 @@ EXIT_DRIFTED = EXIT_VIOLATIONS
 
 
 def run(args: argparse.Namespace) -> int:
-    # `file` and `--check` are a required, mutually exclusive argparse group
-    # (parser.py) -- omitting both, or giving both, is already a usage error
-    # (exit 2) by the time `run()` is ever called.
+    # `file`/`--check`/`--list-rules`: at least one is required and
+    # `--list-rules` stands alone -- both usage errors (exit 2) enforced by
+    # `parser._require_one_input` before `run()` is ever called. `file` may
+    # accompany `--check` (issue #2699) as an explicit input override.
     if args.check is not None:
         return _run_check(args)
 
@@ -106,6 +116,14 @@ def run(args: argparse.Namespace) -> int:
     except pdk_module.PdkNotFoundError as exc:
         return emit_error("drc", str(exc), args.format)
 
+    write_failure = _write_output(report, args)
+    if write_failure is not None:
+        return write_failure
+
+    if report.get("mode") == "crosscheck":
+        emit_success(report, args.format, _print_crosscheck_text)
+        return crosscheck_exit_code(report)
+
     emit_success(report, args.format, _print_text)
 
     # Issue #2110: the common rollup table decides this, not a local
@@ -114,6 +132,26 @@ def run(args: argparse.Namespace) -> int:
     # `status == "clean"` test is exactly the per-verb divergence
     # `docs/coverage-contract.md` exists to prevent.
     return drc_exit_code(report)
+
+
+def _write_output(report: dict, args: argparse.Namespace) -> int | None:
+    """Write the ``-o/--output`` file copy; return an exit code only on failure.
+
+    Issue #4393: an additive copy of the envelope, written before emitting so
+    it lands regardless of the verdict's exit code and an unwritable path
+    fails with the error envelope. Stdout is unchanged.
+    """
+    if not args.output:
+        return None
+    try:
+        write_json_file(report, args.output)
+    except OSError as exc:
+        return emit_error(
+            "drc",
+            f"could not write report to '{args.output}': {exc}",
+            args.format,
+        )
+    return None
 
 
 def _run_list_rules(args: argparse.Namespace) -> int:
@@ -161,6 +199,14 @@ def _non_default_flags(
 
 
 def _run_check(args: argparse.Namespace) -> int:
+    if args.output is not None:
+        # Issue #4393: --check emits a verification result, not a run report.
+        return emit_error(
+            "drc",
+            "-o/--output cannot be combined with --check: --check emits no "
+            "run report to write",
+            args.format,
+        )
     if args.waivers is not None:
         # Issue #3483: like --rules, the waivers a report was run with are
         # recorded in its provenance and replayed by `--check --rerun`.
@@ -168,6 +214,15 @@ def _run_check(args: argparse.Namespace) -> int:
             "drc",
             "--waivers cannot be combined with --check: --check --rerun "
             "replays the committed report's own recorded waivers file",
+            args.format,
+        )
+    if args.tile is not None:
+        # Issue #4226: the abutment context a report was run with is
+        # recorded in its `tile` echo and replayed by `--check --rerun`.
+        return emit_error(
+            "drc",
+            "--tile cannot be combined with --check: --check --rerun replays "
+            "the committed report's own recorded tile",
             args.format,
         )
     if args.rules is not None:
@@ -182,15 +237,15 @@ def _run_check(args: argparse.Namespace) -> int:
         )
     try:
         if args.rerun:
-            result = rerun_drc_report(args.check)
+            result = rerun_drc_report(args.check, input_path=args.file)
         else:
-            result = check_drc_report(args.check)
+            result = check_drc_report(args.check, input_path=args.file)
     except DrcError as exc:
         return emit_error("drc", str(exc), args.format)
     except pdk_module.PdkNotFoundError as exc:
         return emit_error("drc", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
@@ -222,6 +277,9 @@ _REQUEST_FIELD_DESTS = {
     "pdk_root": "pdk_root",
     "rules": "rules",
     "waivers_file": "waivers",
+    "output": "output",
+    "tile": "tile",
+    "max_violations": "max_violations",
 }
 
 
@@ -254,10 +312,10 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
 
     timeout_s = reqdoc.get_number(request, "timeout_s", verb="drc", error_cls=DrcError)
     engine = _str("engine")
-    if engine is not None and engine not in ("curated", "klayout"):
+    if engine is not None and engine not in ("curated", "klayout", "both"):
         raise DrcError(
-            f"`klt drc` request field 'engine' must be 'curated' or "
-            f"'klayout' (got {engine!r})"
+            f"`klt drc` request field 'engine' must be 'curated', "
+            f"'klayout' or 'both' (got {engine!r})"
         )
 
     return argparse.Namespace(
@@ -296,6 +354,12 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "rules": _request_rules(request),
             # Issue #3483: resolved against the request document's directory.
             "waivers": _path("waivers_file"),
+            # Issue #4393: resolved against the request document's directory.
+            "output": _path("output"),
+            "tile": _str("tile"),
+            "max_violations": reqdoc.get_int(
+                request, "max_violations", verb="drc", error_cls=DrcError
+            ),
         }
     )
 
@@ -332,49 +396,110 @@ def _expect_rule_categories(request: dict) -> int | None:
     return value
 
 
-def _run(args: argparse.Namespace) -> dict:
-    if args.engine == "klayout":
-        if args.waivers is not None:
+def _run_crosscheck(args: argparse.Namespace) -> dict:
+    """``--engine both`` (issue #3973): both engines, one comparison report."""
+    for flag, value in (
+        ("--rules", args.rules),
+        ("--waivers", args.waivers),
+        ("--tile", args.tile),
+        ("--max-violations", args.max_violations),
+    ):
+        if value is not None:
             raise DrcError(
-                "--waivers is not supported with --engine klayout: waivers "
-                "match a marker's source_cell, which only the curated engine "
-                "attributes (see docs/cli/drc.md, 'Waivers')"
+                f"{flag} is not supported with --engine both: the cross-check "
+                "compares each engine's whole-deck report unchanged (see "
+                "docs/cli/drc.md, 'Cross-check')"
             )
-        if args.rules is not None:
-            # Issue #2768: a native runset's rules are not the curated
-            # registry `--rules` resolves against (#2806 tracks native
-            # category discovery), so the selection is refused, not ignored.
-            raise DrcError(
-                "--rules is not supported with --engine klayout: a PDK-native "
-                "runset does not share the curated rule registry (see "
-                "docs/cli/drc.md, 'Rule listing and selection')"
-            )
-        deck_file = args.deck_file
-        if deck_file is None:
-            deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
-        if deck_file is None:
-            raise DrcError(
-                "no PDK-native klayout DRC deck script found for this PDK "
-                "variant -- pass --deck-file to point at one directly (see "
-                "docs/cli/drc.md, 'Engine' -> 'klayout')"
-            )
-        return run_drc_klayout_engine(
-            args.file,
-            deck_file,
-            top=args.top,
-            timeout_s=args.timeout_s,
-            deck_vars=_parse_deck_vars(args.deck_var),
-            pdk_variant=args.pdk,
-            pdk_root=args.pdk_root,
-            allow_deck_errors=args.allow_deck_errors,
-            allow_missing_host_tools=args.allow_missing_host_tools,
-            expected_rule_categories=args.expect_rule_categories,
-            min_klayout_version=args.min_klayout_version,
-            expected_rule_category_names=_expected_rule_category_names(args),
-            negative_control=args.negative_control,
-            negative_control_categories=_negative_control_categories(args),
-        )
+    if not args.deck:
+        raise DrcError("argument --deck is required for --engine both")
+    deck_file = args.deck_file
+    if deck_file is None:
+        deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
+    return run_drc_crosscheck(
+        args.file,
+        args.deck,
+        deck_file,
+        top=args.top,
+        pdk_variant=args.pdk,
+        pdk_root=args.pdk_root,
+        native_kwargs={
+            "timeout_s": args.timeout_s,
+            "deck_vars": _parse_deck_vars(args.deck_var),
+            "allow_deck_errors": args.allow_deck_errors,
+            "allow_missing_host_tools": args.allow_missing_host_tools,
+            "expected_rule_categories": args.expect_rule_categories,
+            "min_klayout_version": args.min_klayout_version,
+            "expected_rule_category_names": _expected_rule_category_names(args),
+            "negative_control": args.negative_control,
+            "negative_control_categories": _negative_control_categories(args),
+        },
+    )
 
+
+def _run_klayout_engine(args: argparse.Namespace) -> dict:
+    if args.tile is not None:
+        raise DrcError(
+            "--tile is not supported with --engine klayout: the abutment "
+            "context is built by the curated engine (see docs/cli/drc.md, "
+            "'Abutment context')"
+        )
+    if args.waivers is not None:
+        raise DrcError(
+            "--waivers is not supported with --engine klayout: waivers "
+            "match a marker's source_cell, which only the curated engine "
+            "attributes (see docs/cli/drc.md, 'Waivers')"
+        )
+    if args.rules is not None:
+        # Issue #2768: a native runset's rules are not the curated
+        # registry `--rules` resolves against (#2806 tracks native
+        # category discovery), so the selection is refused, not ignored.
+        raise DrcError(
+            "--rules is not supported with --engine klayout: a PDK-native "
+            "runset does not share the curated rule registry (see "
+            "docs/cli/drc.md, 'Rule listing and selection')"
+        )
+    deck_file = args.deck_file
+    if deck_file is None:
+        deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
+    if deck_file is None:
+        raise DrcError(
+            "no PDK-native klayout DRC deck script found for this PDK "
+            "variant -- pass --deck-file to point at one directly (see "
+            "docs/cli/drc.md, 'Engine' -> 'klayout')"
+        )
+    return run_drc_klayout_engine(
+        args.file,
+        deck_file,
+        top=args.top,
+        timeout_s=args.timeout_s,
+        deck_vars=_parse_deck_vars(args.deck_var),
+        pdk_variant=args.pdk,
+        pdk_root=args.pdk_root,
+        deck_name=args.deck or None,
+        allow_deck_errors=args.allow_deck_errors,
+        allow_missing_host_tools=args.allow_missing_host_tools,
+        expected_rule_categories=args.expect_rule_categories,
+        min_klayout_version=args.min_klayout_version,
+        expected_rule_category_names=_expected_rule_category_names(args),
+        negative_control=args.negative_control,
+        negative_control_categories=_negative_control_categories(args),
+        max_violations=args.max_violations,
+    )
+
+
+def _run(args: argparse.Namespace) -> dict:
+    if args.engine == "both":
+        return _run_crosscheck(args)
+    if args.max_violations is not None and args.max_violations < 0:
+        raise DrcError(f"--max-violations must be >= 0 (got {args.max_violations})")
+    if args.engine == "klayout":
+        return _run_klayout_engine(args)
+
+    if args.max_violations is not None:
+        raise DrcError(
+            "--max-violations is only supported with --engine klayout: the "
+            "curated report is bounded by its rule set (see docs/cli/drc.md)"
+        )
     if not args.deck:
         raise DrcError("argument --deck is required for --engine curated")
     # Token syntax (empty tokens) is checked here, before any file is read;
@@ -389,6 +514,9 @@ def _run(args: argparse.Namespace) -> dict:
         pdk_root=args.pdk_root,
         rules=selectors,
         waivers_file=args.waivers,
+        tile=args.tile,
+        negative_control=args.negative_control,
+        negative_control_categories=_negative_control_categories(args),
     )
 
 
@@ -483,6 +611,15 @@ def _print_coverage_gaps(coverage: dict) -> None:
     if unchecked_layers:
         print(f"unchecked layers in stream: {len(unchecked_layers)}")
 
+    # Issue #3796: deck-static foundry rules this deck knowingly omits, so a
+    # text-mode "clean" is not read as full runset coverage.
+    unmodeled = coverage.get("unmodeled_rules") or []
+    if unmodeled:
+        print(
+            f"warning: {len(unmodeled)} foundry rule(s) not enforced by this "
+            f"deck: {_abbreviate(unmodeled)} (see coverage.unmodeled_rules)"
+        )
+
 
 def _print_coverage_assertion(assertion: dict | None) -> None:
     """One line summarizing a caller-vouched rule-category assertion
@@ -546,7 +683,9 @@ def _print_rule_list(listing: dict) -> None:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    # `file` is the `{path, scope}` object (issue #2659) -- rendered via the
+    # same courtesy helper `klt sim`/`klt pex` use, never the absolute path.
+    print(f"file: {render_path_field(report['file'])}")
     print(f"deck: {report['deck']}")
     if "engine" in report:
         print(f"engine: {report['engine']}")
@@ -594,12 +733,23 @@ def _print_text(report: dict) -> None:
         )
 
 
-def _print_check_text(result: dict) -> None:
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")
+def _print_crosscheck_text(report: dict) -> None:
+    comparison = report["comparison"]
+    print(f"file: {report['file']}")
+    print(f"status: {report['status']}")
+    print(f"comparison: {comparison['state']}")
+    error = comparison.get("error")
+    if error:
+        print(f"  native run did not complete: {error['message']}")
+    for engine in ("curated", "native"):
+        sub = report["reports"][engine]
+        if sub is None:
+            print(f"{engine}: not run")
+        else:
+            print(f"{engine}: {sub['status']} ({sub['violation_count']} violations)")
+    for group in comparison["groups"]:
+        print(f"  group {group['id']}: {group['state']}")
+    unmapped = comparison["unmapped"]
+    for engine in ("curated", "native"):
+        if unmapped[engine]:
+            print(f"unmapped {engine} rules: {len(unmapped[engine])}")

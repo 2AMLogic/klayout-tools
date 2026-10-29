@@ -141,6 +141,8 @@ declares the item and pins the audited artifact's hash. See
 | Field | Why it is normalized |
 | --- | --- |
 | `provenance.klt_version` | The running build's identity suffix ([#2090](https://github.com/2AMLogic/klayout-tools/issues/2090)): `0.5.0` from a clean release tag, `0.5.0+g<sha>` or `0.5.0+g<sha>.dirty` from anything else. It is not stable even *within* one regeneration: `drc.json` is captured first, and writing it dirties the tree, so `lvs.json` would record a `.dirty` suffix its sibling does not. |
+| `provenance.klt_git_commit` | The full git SHA of the running build, or `null` when it cannot be determined. It changes on every commit, so the fixtures normalize it to `null`. |
+| `provenance.klt_reinstall_spec` | The pip spec that reinstalls the running build (e.g. `klayout-tools==0.5.0`), or `null`. Also specific to the regenerating checkout, so normalized to `null`. |
 | `provenance.deck.released` | A lookup of the deck's content hash in the running build's release-history table. It says whether a *released* `klayout-tools` ships this exact deck — which flips to `false` the moment anyone edits a deck after a tag, and flips back when the next release regenerates the table, for unchanged fixture bytes. |
 
 Both describe the machine and checkout that *regenerated the fixture*, not

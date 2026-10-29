@@ -26,9 +26,10 @@ the one case where LVS genuinely cannot reach a verdict; see docs/cli/lvs.md's
 compare into *verifying a previously committed* ``--format json`` report
 still reproduces -- see ``docs/cli/lvs.md``, "--check" -- and is mutually
 exclusive with the positional ``request`` argument (inputs are read from the
-committed report itself). Cheap mode (default): re-hash the layout/
-reference netlists (and extraction deck, when one was used) named in the
-report and compare against its own recorded hash values, no compare engine
+committed report itself). ``--layout PATH`` (issue #2699) supplies the layout
+explicitly, overriding the recorded one unconditionally. Cheap mode (default):
+re-hash the layout/reference netlists (and extraction deck, when one was used)
+named in the report and compare against its own recorded hash values, no compare engine
 re-run. Full mode (``--check <report> --rerun``): best-effort re-run of the
 compare the report describes and diff verdict-bearing fields. Both reuse
 ``status: "match"`` / ``"drifted"`` and the same 0/3 exit-code split as a
@@ -36,9 +37,11 @@ normal run (see ``klayout_tools._report_verify``).
 """
 
 import argparse
+import sys
 
+from ..env_provenance import render_path_field
 from ..lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
-from .output import emit_error, emit_success, render_rerun_drift
+from .output import emit_error, emit_success, render_check_text, render_rerun_drift
 
 EXIT_MATCH = 0
 EXIT_MISMATCH = 3
@@ -66,13 +69,34 @@ def run(args: argparse.Namespace) -> int:
     # group (parser.py) -- omitting both, or giving both, is already a usage
     # error (exit 2) by the time `run()` is ever called.
     if args.check is not None:
+        if args.deck_file is not None or args.deck_var:
+            return emit_error(
+                "lvs",
+                "--deck-file/--deck-var apply to a fresh run; --check reads "
+                "the deck from the committed report",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
         return emit_error("lvs", "--rerun requires --check <report>", args.format)
 
+    if args.layout is not None:
+        return emit_error("lvs", "--layout requires --check <report>", args.format)
+
     try:
-        report = run_lvs(args.request)
+        report = run_lvs(
+            args.request,
+            deck_file=args.deck_file,
+            deck_vars=_parse_deck_vars(args.deck_var),
+            # `--progress` (issue #4347), same default as `klt extract`:
+            # heartbeat only, and only when stderr is not a TTY.
+            progress=(
+                args.progress
+                if args.progress is not None
+                else ("heartbeat" if not sys.stderr.isatty() else False)
+            ),
+        )
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
 
@@ -83,23 +107,52 @@ def run(args: argparse.Namespace) -> int:
     return _EXIT_BY_STATUS.get(report["status"], EXIT_MISMATCH)
 
 
+def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
+    """Parse repeatable ``--deck-var NAME=VALUE`` (issue #3206), same
+    spelling and last-one-wins rule as ``klt drc --deck-var``."""
+    deck_vars: dict[str, str] = {}
+    for item in raw or ():
+        name, sep, value = item.partition("=")
+        if not sep or not name:
+            raise LvsError(
+                f"invalid --deck-var {item!r}: expected 'name=value' "
+                "(e.g. --deck-var feol=true)"
+            )
+        deck_vars[name] = value
+    return deck_vars
+
+
 def _run_check(args: argparse.Namespace) -> int:
     try:
         if args.rerun:
-            result = rerun_lvs_report(args.check)
+            result = rerun_lvs_report(args.check, layout_path=args.layout)
         else:
-            result = check_lvs_report(args.check)
+            result = check_lvs_report(args.check, layout_path=args.layout)
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
+def _print_excluded_pins(power: dict) -> None:
+    """Issue #4363: name each well-layer LEF pin the power check skipped."""
+    for excluded in power.get("excluded_pins") or []:
+        print(
+            f"  excluded_pin: {excluded['pin']} "
+            f"({excluded['instance_count']} instance(s)) -- {excluded['reason']}"
+        )
+
+
 def _print_text(report: dict) -> None:
-    print(f"layout: {report['layout']}")
+    # `layout` is the `{path, scope}` object
+    # `env_provenance.repo_relative_path` defines (issue #2659) -- rendered
+    # through the same courtesy helper `klt sim`/`klt pex` use, so the
+    # absolute path is never printed even in text mode. `reference` is still
+    # the request's own verbatim echo (a plain string) and prints as-is.
+    print(f"layout: {render_path_field(report['layout'])}")
     print(f"reference: {report['reference']}")
     print(f"top: {report['top']}")
     # Issue #1205: only printed when the two sides resolved to different top
@@ -152,6 +205,7 @@ def _print_text(report: dict) -> None:
                 "options.power_connectivity.expected_nets but never "
                 "observed on any layout-side instance)"
             )
+        _print_excluded_pins(power)
         for finding in power["findings"]:
             print(
                 f"  [{finding['severity']}] {finding['rule']}  {finding['description']}"
@@ -173,41 +227,4 @@ def _print_text(report: dict) -> None:
         print(
             f"[{entry['severity']}] {entry['category']}  ({entry['side']})  "
             f"{entry['description']}"
-        )
-
-
-def _print_check_text(result: dict) -> None:
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            # Issue #2595: an echoed `layout`/`reference` that resolves to no
-            # existing file re-hashes to `null`, which on its own reads as
-            # "the recorded hash moved". Say what actually happened, and --
-            # for the common cause, a committed request/report pair whose
-            # relative paths were written against the report's own directory
-            # -- where the input really is.
-            missing = check.get("input_not_found")
-            if missing is None:
-                print(f"      actual:   {check['actual']}")
-            else:
-                print(f"      actual:   None (input not found: {missing['resolved']})")
-                if missing["found_relative_to_report"] is not None:
-                    print(
-                        "      note:     it exists relative to the report's own "
-                        f"directory ({missing['found_relative_to_report']}); "
-                        "--check resolves relative paths against the current "
-                        "working directory -- re-run from there"
-                    )
-    # Issue #1373: engine-version drift is a non-fatal advisory, never folded
-    # into the `[OK]`/`[DRIFTED]` hash-integrity list above -- it does not
-    # affect `status`/exit code, so a scripted gate parsing that list alone
-    # never sees it.
-    for advisory in result.get("advisories", ()):
-        print(
-            f"  [DRIFT] {advisory['field']}: {advisory['report']} (report) "
-            f"vs {advisory['current']} (current)"
         )

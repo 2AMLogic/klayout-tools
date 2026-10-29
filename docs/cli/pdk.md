@@ -12,6 +12,7 @@ klt pdk env         [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk check       [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk cells       [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
 klt pdk macros      [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk decks       [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk corners     [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk em-limits   [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 klt pdk pcell-check [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
@@ -19,6 +20,9 @@ klt pdk stackup     [--pdk <variant>] [--pdk-root <dir>] [--corner <name>] [--th
 ```
 
 - `find` — resolve **one** install/variant and emit its paths.
+  `--pdk` accepts the deck/family spelling for IHP installs (`sg13g2` →
+  `ihp-sg13g2`, `sg13cmos5l` → `ihp-sg13cmos5l`); an exact directory-name match
+  always wins and the reported `pdk`/`variant` is the resolved directory name.
 - `list` — enumerate **every** install/variant discovered across the search order.
 - `env` — the resolved paths as eval-able shell `export` lines.
 - `check` — resolve one install/variant and exit non-zero if any of its
@@ -30,7 +34,7 @@ klt pdk stackup     [--pdk <variant>] [--pdk-root <dir>] [--corner <name>] [--th
 - `cells` — per standard-cell digital library, its device flavor(s) and the
   nominal supply its `.lib` timing views are characterised at.
 - `macros` — per hard-macro IP library (`libs.ref` entries named
-  `*_fd_ip_*`, e.g. an SRAM/ROM compiler output), which views it ships.
+  `*_fd_ip_*` or `lef`+`lib`, e.g. an SRAM/ROM compiler output), which views it ships.
 - `corners` — per SPICE process corner, which curated device families skew
   vs. resolve to typical, and whether the corner is complete.
 - `em-limits` — per routing/cut layer, the electromigration current-density
@@ -180,6 +184,18 @@ and joined with `"; "`. When the file is absent, unreadable, or empty, `version`
 is `null` — **never guessed**. Flat, single-PDK installs (below) ship no
 `SOURCES` file at all, so `version` is always `null` for those today.
 
+### Upstream commit (`commit`)
+
+A tag-tarball install (`scripts/fetch-pdks.sh`, `scripts/fetch-ihp-sg13g2.sh`)
+reports `version: "fetched:<tag>"`, which names a tag, not the commit behind
+it. After the checksum passes, those scripts read the 40-hex commit id from the
+tarball's pax global header (`git archive` writes it) and record it in a
+`.fetched-commit` file beside `.fetched-version`. `klt pdk find` reports it as
+`commit`: a 40-hex string, or `null` when no valid record exists (older
+installs, tarballs without the header, other install kinds) — never guessed.
+`version` is unchanged. The fleet-bundle `.pdk-store.json` is written outside
+this repo (2AMLogic/2am); recording a commit there is out of scope here.
+
 ## PDK layouts: what resolves and what doesn't
 
 Issue #522's own framing — the resolver had only ever been exercised against
@@ -194,6 +210,60 @@ rediscover a gap by failure.
 | IHP-Open-PDK SG13G2 | open_pdks-layout (nested, `PDK_ROOT` at the clone root) or flat (`PDK_ROOT` at `ihp-sg13g2/` itself) | ✅ (issue #522) | ✅ curated deck (`sg13g2`, issue #905) — a starter subset, see below | ✅ `"klayout"` engine (curated deck, device coverage below) or `"netgen"` engine with a resolved `netgen_setup_file` (issue #522) and a `netgen` binary |
 | IHP-Open-PDK SG13CMOS5L | flat (same shape as SG13G2 above) | ✅ (issue #1399) | ✅ curated deck (`sg13cmos5l`, issue #1408) — a starter subset, see below — or `klt drc --engine klayout` against the PDK's own native `ihp-sg13cmos5l.drc` via `drc_deck_file` (issue #1399) | ✅ `"klayout"` engine (curated deck, device coverage below) or `"netgen"` engine with a resolved `netgen_setup_file` and a `netgen` binary (issue #1399) |
 | lambdapdk (`scripts/fetch-pdks.sh`, any process incl. its own `ihp130`) | `lambdapdk/<process>/{libs,base}` — no `libs.tech`/`libs.ref` marker at all | ❌ never resolved by this module — point tools at `pdks/lambdapdk/...` paths directly | ❌ | ❌ |
+| Any upstream checkout that ships a `klt-pdk.json` (e.g. the public ASAP7 sources) | descriptor-declared (root or nested variant dir) | ✅ (issue #3782) — assets and Liberty exactly as the descriptor maps them | ❌ | ❌ |
+
+### 4. Descriptor-declared tree (`klt-pdk.json`, issue #3782)
+
+A plain upstream checkout that matches no structural layout above can declare
+itself with an optional `klt-pdk.json` at the variant root (the `--pdk-root`
+directory itself, or a named subdirectory of it). When present it wins over
+`libs.tech/` and the ASAP7 shape, and nothing is guessed:
+
+```json
+{
+  "schema_version": 1,
+  "variant": "asap7",
+  "assets": {"libs_ref": "asap7sc7p5t_28", "klayout": null},
+  "liberty": {"asap7sc7p5t_28_R": {"tt": "LIB/asap7sc7p5t_28_R_TT_nldm.lib"}}
+}
+```
+
+- `variant` (optional) names a flat root; defaults to the directory basename.
+  A nested variant is always named by its directory.
+- `assets` maps the same keys as `klt pdk find` (`ngspice`, `xschem`, `klayout`,
+  `magic`, `netgen`, `libs_ref`) to root-relative directories; omitted or `null`
+  keys stay `null` (no DRC/LVS support is implied).
+- `liberty` maps `cell_library` → `corner` → root-relative `.lib`. `klt
+  synthesize` / `place-and-route` / `post-route-sta` consult it before the
+  `lib/<cell_library>__<corner>.lib` convention; unmapped libraries keep the
+  convention. With several mapped corners, pass the corner explicitly.
+- `liberty.<cell_library>.<corner>` may also be a **list** of `.lib` files (a
+  library split into cell-group files whose headers match apart from the
+  `library (<name>)` name and comments). klt merges them
+  into one content-addressed `.lib` under `$KLT_CACHE_DIR` (default
+  `~/.cache/klt/liberty-merged`, never inside the PDK tree) and hands that single
+  path to Yosys/OpenROAD/OpenSTA. Top-level `lu_table_template` and
+  `power_lut_template` groups are unioned by name (same name with different
+  content is an error). Any other header difference (units, operating
+  conditions) or a duplicate cell name is an error; the merged header is the
+  first file's plus any templates it lacks; a one-element list equals the
+  string form.
+- `views` (optional) maps `cell_library` → `{"cell_lef": path, "tech_lef":
+  {"min"|"nom"|"max": path}, "gds": path}` (every key optional) for trees that
+  do not use the open_pdks `lef/`, `techlef/`, `gds/` naming. `klt
+  place-and-route` consults it before the convention; unmapped libraries/keys
+  keep the convention. A requested interconnect corner missing from a mapped
+  `tech_lef` is an error naming the mapped corners (no fallback to `nom`).
+  CDL/SPICE views are not covered.
+- Every path must be relative and stay under the root (`..`/absolute paths are
+  rejected; symlinks the checkout ships are followed). A malformed descriptor,
+  an escaping path, or a mapped `.lib` that does not exist is a
+  `PdkNotFoundError` naming the file and field — never a silent fallthrough.
+
+**Compressed Liberty policy.** `klt` never unpacks archives. Some upstream trees
+ship Liberty only as `.7z`; extract it in the pinned flow (or a fetch script)
+and point the descriptor at the plain `.lib`. When the mapped file is missing but
+a sibling `.7z` exists, the error says so.
 
 See [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md)
 for the SG13G2→CMOS5L differences (metal stack, capacitors, devices,
@@ -365,6 +435,7 @@ Resolves one install/variant.
   "root": "/usr/share/pdk",
   "variant": "sky130A",
   "version": "open_pdks 0fe599b; sky130 41c0908",
+  "commit": null,
   "resolved_via": "PDK_ROOT environment variable",
   "assets": {
     "ngspice": "/usr/share/pdk/sky130A/libs.tech/ngspice",
@@ -376,7 +447,9 @@ Resolves one install/variant.
   },
   "broken_symlinks": [],
   "has_pcell_library": true,
-  "ambiguous_roots": []
+  "pcell_shim": "not_required",
+  "ambiguous_roots": [],
+  "alternative_variants": []
 }
 ```
 
@@ -386,11 +459,15 @@ Resolves one install/variant.
 | `root` | string | Absolute install root. |
 | `variant` | string | Resolved variant name. |
 | `version` | string \| null | Version stamp from `SOURCES`, or `null`. |
+| `commit` | string \| null | Additive (issue #3786): 40-hex upstream commit from `.fetched-commit` (written by `scripts/fetch-*.sh`), or `null`. |
 | `resolved_via` | string | Which resolution step matched (see table above). |
+| `layout` | string | Additive (issue #3782): the tree shape that matched — `open_pdks`, `asap7`, or `descriptor` (a `klt-pdk.json` was present). |
 | `assets` | object | Tool area → absolute directory. |
 | `broken_symlinks` | array | Dangling symlinks found under any resolved `assets` directory (issue #1406). `[]` when the install is clean. |
 | `has_pcell_library` | boolean | The variant ships at least one Python package under `libs.tech/klayout/python/` (issue #1535) — the PDK's own KLayout PCell library. See below. |
+| `pcell_shim` | string | Additive (issue #4236): `present`, `missing` or `not_required` — whether the vendored compat shim a shipped PyCell package imports (ihp-sg13g2's `pycell4klayout-api`) is on disk. `missing` means the package exists but cannot load. See below. |
 | `ambiguous_roots` | array | Later candidate roots in the search order that **also** hold a variant of the resolved name (issue #2564) — `[{"root", "resolved_via"}]`, in search order. `[]` for the common single-install case, and always `[]` when `--pdk-root` pinned the root (the search is disabled). See below. |
+| `alternative_variants` | array | Additive (issue #3814): sorted names of the *other* variants in the chosen root when no variant was selected (no `--pdk`, no `$PDK`) and the first variant was taken as the default. `[]` when a variant was pinned or the root holds only one. See below. |
 | `compatibility` | object | Additive (issue #2759): whether the install's version identity matches the one a klt technology package declares. See "Package compatibility" below. |
 
 ### Package compatibility (`compatibility`, issue #2759)
@@ -443,6 +520,39 @@ output is unchanged. The comparison lives in
 `klayout_tools.pdk_compat` (`check_compatibility`, `compare_identities`) for
 later consumers that want to enforce.
 
+### Asserting a pin (`--expect-version`, issue #3810)
+
+`compatibility` only compares against the pins klt itself declares and never
+changes an exit code. A downstream repo pinning its own open_pdks commit can
+instead assert it on `find` and `check`:
+
+```bash
+klt pdk check --pdk sky130A --expect-version f6eeac7 --format json || exit 1
+```
+
+`--expect-version` takes an open_pdks commit (a bare hex SHA of 7+ chars,
+matched by prefix, or an `open_pdks <sha>` stamp) compared with the installed
+`SOURCES` stamp, or any other string compared exactly with a lambdapdk
+`.fetched-version` marker. Identities in different namespaces (a SHA against a
+lambdapdk tree) are `unknown`. With the flag, `--format json` adds an additive
+`version_expectation` object (absent otherwise; no paths, no `schema_version`
+change):
+
+```json
+"version_expectation": {
+  "status": "mismatch",
+  "expected": "c6d73a3",
+  "installed": "open_pdks f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
+}
+```
+
+`status` is `match`, `mismatch` or `unknown` (the installed identity is
+unreadable or in another namespace; `installed` is `null` when unreadable).
+**Fail closed:** on `mismatch` or `unknown` the normal payload is still
+emitted, one stderr line names both revisions, and the verb exits `6`. If
+`check` also finds dangling symlinks, the lower code `4` wins. Without the
+flag nothing changes.
+
 ### Several installs of one variant (`ambiguous_roots`, issue #2564)
 
 A host that has followed the tooling's own migration ordinarily carries
@@ -485,6 +595,23 @@ one-line warning (naming the absolute root read, every root skipped, and the
 remedy) or `None` when unambiguous. `klt sim` prints it to stderr; see
 [`sim.md`](sim.md)'s "Model library resolution".
 
+### Silent default among several variants (`alternative_variants`, issue #3814)
+
+With no `--pdk` and no `$PDK`, `find` takes the first variant in sorted order.
+A root holding `gf180mcuA`–`gf180mcuD` therefore resolves to `gf180mcuA` — the
+choice itself is unchanged, but it is no longer silent:
+
+```json
+"alternative_variants": ["gf180mcuB", "gf180mcuC", "gf180mcuD"]
+```
+
+The field is `[]` whenever the variant was explicitly selected (`--pdk` /
+`$PDK`) or the root holds a single variant. In text mode `klt pdk find`
+prints a one-line warning to stderr (rendered by
+`klayout_tools.pdk.alternative_variants_warning(report)`) only when the field
+is non-empty; the exit code stays `0`. The remedy is to set `$PDK` or pass
+`--pdk`.
+
 ### PCell libraries (`has_pcell_library`, issue #1535)
 
 `has_pcell_library` is `true` when the resolved variant ships at least one
@@ -501,6 +628,21 @@ klt has no dependency on (sky130A's `cells` needs `gdsfactory`; ihp-sg13g2's
 chain reaches `cni`). Use [`klt gen --list-pdk-pcells`](gen.md#pdk-shipped-pcells-list-pdk-pcells--pdk-pcell)
 to find out which packages actually load and what cells/parameters they
 expose, and `klt gen --pdk-pcell <library>/<cell>` to instantiate one.
+
+#### `pcell_shim` (issue #4236)
+
+`pcell_shim` is a cheap filesystem check (no imports) that tells a repo whether
+the PDK's PyCell packages are usable before it tries to load them. It is
+`not_required` when no shipped package needs a vendored compat shim (sky130A,
+gf180mcuD), `present` when each required shim directory has content, and
+`missing` when one is absent or empty. The ihp-sg13g2 release tarball omits git
+submodules, so a `fetched:<version>` install reports `missing` for
+`sg13g2_pycell_lib` (its `pycell4klayout-api` shim): `has_pcell_library` is
+`true` but the package cannot load. The `reason` `klt gen --list-pdk-pcells` /
+`klt pdk pcell-check` print then names the source to populate it from
+(<https://github.com/IHP-GmbH/pycell4klayout-api>, at the revision the PDK
+release pins). The text output of `klt pdk find` prints a `pcell_shim: missing`
+line in that state.
 
 **`assets` keys are always present.** Each of `ngspice`, `xschem`, `klayout`,
 `magic`, `netgen` (under `libs.tech/`) and `libs_ref` (`libs.ref/`) maps to its
@@ -583,8 +725,8 @@ result is **success (exit 0)**, not an error.
       "root": "/usr/share/pdk",
       "resolved_via": "PDK_ROOT environment variable",
       "variants": [
-        { "name": "sky130A", "version": "open_pdks 0fe599b", "has_pcell_library": true },
-        { "name": "sky130B", "version": null, "has_pcell_library": true }
+        { "name": "sky130A", "version": "open_pdks 0fe599b", "has_pcell_library": true, "pcell_shim": "not_required" },
+        { "name": "sky130B", "version": null, "has_pcell_library": true, "pcell_shim": "not_required" }
       ]
     }
   ]
@@ -740,6 +882,8 @@ gf180mcu_fd_sc_mcu9t5v0  nfet_06v0/pfet_06v0  1.8V @ tt_025C_1v80 (+ 3.3V, 5V)
 | `libraries[].nominal_corner` | string \| null | The nominal view's Liberty operating-condition name (its `default_operating_conditions`, e.g. `tt_025C_1v80`), always bare — never `<name>__<corner>` or `<name>_<corner>` — even for a library whose `.lib` file's own `default_operating_conditions` attribute already carries a leading `<name>__` prefix (e.g. gf180mcu's `gf180mcu_fd_sc_mcu9t5v0`) or a leading `<name>_` prefix (e.g. IHP's `sg13g2_stdcell`, issue #1790); that prefix is stripped. `null` alongside `nominal_supply_v`. |
 | `libraries[].supplies_v` | array of float | **Every** distinct supply (volts) the library's nominal-corner `.lib` views are characterised at, sorted ascending — e.g. `[1.8]` for a single-supply library, or `[1.8, 3.3, 5.0]` for a library separately, fully characterised at multiple voltages (e.g. gf180mcu's `gf180mcu_fd_sc_mcu9t5v0`). `[]` alongside a `null` `nominal_supply_v`. See "Nominal supply selection" below. |
 | `libraries[].voltage_class` | `"core"` \| `"io"` \| null | `"core"` when `nominal_supply_v <= 2.5`, `"io"` above that. A documented heuristic threshold — not a field the PDK itself declares. `null` when `nominal_supply_v` is `null`. |
+| `libraries[].corners` | array of string | Sorted names of the liberty corners the library ships under `lib/` — exactly the names `request.pdk.corner` / `pdk.corners` accept (e.g. `tt_025C_1v80` for open_pdks-shaped libraries, `typ_1p20V_25C` for IHP's `sg13g2_stdcell`); the `<name>__` / `<name>_` filename prefix is stripped and `_ccsnoise` views are excluded. `[]` when the library ships no `lib/` directory. |
+| `libraries[].corner_points` | array of object | One `{name, process, temperature_c, supply_v}` per `corners` entry, in the same order, parsed from the open_pdks-style name (`ss_n40C_3v00` -> `"ss"`, `-40`, `3.0`; `n` marks a negative temperature). A name the parser does not recognise (e.g. IHP's `typ_1p20V_25C`) yields `null` for `process`, `temperature_c` and `supply_v` — never a guess. `[]` when `corners` is `[]`. Additive: `corners` is unchanged. |
 | `libraries[].compatible` | boolean | **Present only when `--supply` is given.** See "Compatibility verdict (`--supply`)" below. |
 | `supply_v` | float | **Present only when `--supply` is given.** Echoes the caller-stated supply. |
 | `any_compatible` | boolean | **Present only when `--supply` is given.** `true` when at least one library is compatible; the CLI's exit code is derived from this. |
@@ -826,6 +970,40 @@ found violations" — so this can gate CI rather than being a manual check
 (`klt pdk cells --pdk sky130A --supply 1.8 || exit 1` in a block repo's
 decision-record check).
 
+### Shipped liberty corner sets
+
+The corner set a library offers is exactly the `.lib` files the PDK ships;
+`klt` cannot widen it. As of ciel gf180mcu build `f6eeac7dad08` (2026-10-27),
+both `gf180mcu_fd_sc_mcu7t5v0` and `gf180mcu_fd_sc_mcu9t5v0` (variant
+`gf180mcuD`) ship these 15 corners:
+
+| process | temperature | 1.8 V family | 3.3 V family | 5.0 V family |
+| ------- | ----------- | ------------ | ------------ | ------------ |
+| `ff` | -40 C, 125 C | 1.98 V | 3.60 V | 5.50 V |
+| `ss` | -40 C, 125 C | 1.62 V | 3.00 V | 4.50 V |
+| `tt` | 25 C only | 1.80 V | 3.30 V | 5.00 V |
+
+Not shipped: skewed `fs`/`sf` process corners; `tt` at -40/125 C; `ss`/`ff`
+at 25 C; and the 3.3 V family is bracketed at 3.00/3.60 V (about -9 %/+9 %)
+rather than +/-10 %. A 5-process x 3-temperature x +/-10 % matrix therefore
+cannot be expressed through `pdk.corners`. The set is a property of the
+installed PDK and changes with the PDK commit; regenerate this table from
+`corner_points` after a PDK upgrade rather than trusting it.
+
+To list what a requested matrix is missing, diff it against `corner_points`:
+
+```
+$ klt pdk cells --pdk gf180mcuD --format json | jq -c --argjson want \
+    '[{"process":"fs","temperature_c":25,"supply_v":3.3},
+      {"process":"tt","temperature_c":125,"supply_v":3.3}]' '
+    .libraries[] | select(.name == "gf180mcu_fd_sc_mcu7t5v0")
+    | .corner_points as $have
+    | [$want[] | select(. as $w | $have
+        | any(.process == $w.process and .temperature_c == $w.temperature_c
+              and .supply_v == $w.supply_v) | not)]'
+[{"process":"fs","temperature_c":25,"supply_v":3.3},{"process":"tt","temperature_c":125,"supply_v":3.3}]
+```
+
 ### Design choice: live-parsed, not a curated table
 
 Unlike `klt pdk corners` (below) and the still-unimplemented `klt pdk
@@ -894,16 +1072,15 @@ sky130_fd_ip_sram_1k  gds/lef/lib/spice/verilog
 
 ### Which libraries are reported
 
-Only `libs_ref` entries whose name contains `_fd_ip_` — the open_pdks
-"foundry digital, IP" (hard-macro) naming convention — are reported. Like
-`klt pdk cells`, this is a **deliberate** name-convention filter, not an
-accident of the glob used to walk `libs_ref`: standard-cell digital
-libraries (`*_fd_sc_*`), primitive-device libraries (`*_fd_pr`), I/O-pad
-libraries (`*_fd_io`), and other macro libraries that don't match the
-`*_fd_ip_*` convention are all excluded — they are `klt pdk cells`'s domain
-(or neither command's), not this one's.
+A `libs_ref` entry is reported when its name contains `_fd_ip_` (the
+open_pdks "foundry digital, IP" hard-macro convention) **or** it structurally
+ships both `lef/` and `lib/` views (e.g. IHP's `sg13g2_sram`). Standard-cell
+digital libraries (`*_fd_sc_*`, `*_stdcell`), primitive-device libraries
+(`*_fd_pr`, `sg13g2_pr`) and I/O-pad libraries (`*_fd_io`, `sg13g2_io`) are
+excluded — they are `klt pdk cells`'s domain (or neither command's), not
+this one's.
 
-An empty `macros` list (a variant with no `_fd_ip_`-named `libs_ref` entry)
+An empty `macros` list (a variant with no hard-macro `libs_ref` entry)
 is a **successful result**, not an error — mirroring `klt pdk cells`'s
 empty-`libraries` convention.
 
@@ -917,6 +1094,65 @@ views: there is no PDK-wide-consistent convention across hard-macro IP
 (an SRAM compiler's `.lib`/`.spice` shape differs from a standard-cell
 library's) to extract from the way `klt pdk cells` extracts from
 `spice/<lib>.spice`/`lib/*.lib`.
+
+## `klt pdk decks`
+
+Lists the KLayout DRC deck files a variant ships under
+`libs.tech/klayout/drc/` (or the flat-install `tech/drc/`) and the `-rd`
+globals each one consumes. `klt drc --engine klayout --pdk <variant>` runs
+exactly one of them (`is_default`); the siblings (for sky130A,
+`sky130A_mr.drc`, the "maximal rules" runset) are otherwise invisible, and a
+sibling passed via `--deck-file` without the globals it gates on silently
+runs zero rules (`coverage_unknown`, issue #1302).
+
+```
+$ klt pdk decks --pdk sky130A
+pdk: sky130A
+
+deck             kind   default  globals
+---------------  -----  -------  -------------------------------------------------------
+sky130A.lydrc    lydrc  yes      -
+sky130A_mr.drc   drc             beol, feol, floating_met, offgrid, seal*, sram_exclude, thr*
+...
+* = no default detected; supply with `klt drc --deck-var name=value`
+```
+
+```json
+{
+  "schema_version": 1,
+  "pdk": "sky130A",
+  "root": "/usr/share/pdk",
+  "decks": [
+    {
+      "path": "/usr/share/pdk/sky130A/libs.tech/klayout/drc/sky130A_mr.drc",
+      "name": "sky130A_mr.drc",
+      "kind": "drc",
+      "is_default": false,
+      "globals": [
+        {"name": "feol", "required_by_caller": false, "default": "false"},
+        {"name": "thr", "required_by_caller": true, "default": null}
+      ]
+    }
+  ]
+}
+```
+
+- `kind` — `lydrc` (`*.lydrc`), `drc` (`*.drc`), or `helper` (`*.rb.drc`,
+  Ruby helper scripts that merely carry the `.drc` extension; listed but not
+  scanned, `globals: []`). Other files in the directory (e.g. Python drivers)
+  are not listed.
+- `globals` — name-sorted. `$input`, `$report` (supplied by `klt`) and
+  `$top_cell` (read under `if $input`) are never listed, nor are Ruby's own
+  globals. A global assigned under `if not defined? $x`, `... unless defined?
+  $x` or `||=` is `required_by_caller: false` with its literal `default`;
+  any other `$name` mentioned outside a comment is `required_by_caller: true`.
+  Literal `require`/`load` includes are followed.
+- **This is a heuristic line scan, not a Ruby parser.** A missing entry is not
+  proof a deck ignores a variable, and a defaulted global (e.g. `feol`
+  defaulting to `"false"`) can still silently disable whole rule groups —
+  read the defaults, not just the `required_by_caller` flag.
+- A variant with no `drc/` directory is a successful empty `decks` list.
+  Library: `klayout_tools.pdk.drc_decks(variant, root)`.
 
 ## `klt pdk corners`
 
@@ -956,7 +1192,12 @@ sf        no        mos=skewed bjt=- diode=- resistor=- mim_cap=- mos_cap=-
     {
       "corner": "ss",
       "sections": [
-        { "family": "mos", "section": "ss", "skew": "skewed" },
+        { "family": "mos", "section": "ss", "skew": "skewed",
+          "devices": [
+            { "flavour": "03v3", "section": "ss", "skew": "skewed" },
+            { "flavour": "06v0", "section": "ss", "skew": "typical" },
+            { "flavour": "06v0_nvt", "section": "ss", "skew": "typical" }
+          ] },
         { "family": "bjt", "section": "bjt_ss", "skew": "param" },
         { "family": "diode", "section": "diode_ss", "skew": "param" },
         { "family": "resistor", "section": "res_ss", "skew": "param" },
@@ -1047,17 +1288,24 @@ values) — so this half of the answer never drifts silently against an
 upgraded PDK. A CI-validation harness that checks the curated grouping
 itself against a release (the spike's own open question) is not built here.
 
-Skew is classified **per curated family**, not per individual device flavor.
-A family reported `"skewed"` means *some* of its devices moved off the
-typical section for that corner — not that *every* device did. gf180mcu's
-own deck, for example, leaves its `nfet_06v0`/`pfet_06v0` MOSFET flavors
-bound to the same `_t`-suffixed (typical) model inside every corner while
-its `nfet_03v3`/`pfet_03v3` flavors do skew, both inside the single curated
-`mos` family — this command correctly reports `mos` as `"skewed"` for that
-corner, but does not itself flag the 06v0 sub-flavor as unmoved. Resolving
-that finer, per-flavor question is the spike's own proposed `klt pdk device`/
-`klt pdk corner --pdk <variant> --corner <name>` follow-up (section 2.2), a
-natural next issue, not this command's scope.
+Family-level skew is classified **per curated family**: a family reported
+`"skewed"` means *some* of its devices moved off the typical section for that
+corner — not that *every* device did. gf180mcu's own deck, for example, leaves
+its `nfet_06v0`/`pfet_06v0` MOSFET flavors bound to the same `_t`-suffixed
+(typical) model inside every corner while its `nfet_03v3`/`pfet_03v3` flavors
+do skew, both inside the single curated `mos` family.
+
+To resolve that finer question, gf180mcu's `mos` section entries carry an
+additive `devices` list (issue #3794) — one `{flavour, section, skew}` per
+device flavour (`03v3`, `06v0`, `06v0_nvt`, …, derived from the section's
+`.lib '<file>' <model>_<flavour>_<suffix>` include tokens), each classified
+against that flavour's own typical-corner include set (`"skewed"`/`"typical"`;
+`section`/`skew` are `null` for a flavour the typical corner has but the
+section does not). For gf180mcuD, `ff`/`ss`/`fs`/`sf` report `03v3` as
+`"skewed"` and `06v0`/`06v0_nvt` as `"typical"`. Family-level `skew` and
+`complete` keep their meaning; other families and sky130 carry no `devices`.
+`klt sim` surfaces the unmoved flavours as
+[`environment.corner_coverage`](sim.md#environmentcorner_coverage-issue-3794).
 
 ## `klt pdk em-limits`
 
@@ -1293,7 +1541,10 @@ failure with the same generic import-error text:
   at '<path>', next to '<package>'), but that directory is missing or appears
   empty in this install -- likely an uninitialized git submodule. This is a
   compat shim the PDK itself vendors, not a third-party PyPI dependency klt
-  would need to add."` klt already adds this shim's own directory to
+  would need to add. The PDK release tarball omits git submodules; populate
+  '<path>' from <upstream source and pinned revision>."` (issue #4236 added the
+  last sentence; `klt pdk find` reports the same state as `pcell_shim:
+  "missing"`) klt already adds this shim's own directory to
   `sys.path` before importing the package that needs it (no manual step
   required once it is populated) — this reason only fires when that
   directory is still missing or empty afterward.
@@ -1668,6 +1919,7 @@ libraries ship no `techlef/` directory at all, returns an empty
 | `3` | `cells --supply <volts>` ran fine, but no library is compatible with the stated supply (see "Compatibility verdict" above). |
 | `4` | `check` resolved an install, but one or more of its asset directories contain a dangling symlink (see "Dangling symlinks" above). |
 | `5` | `pcell-check` resolved an install, but one or more of its KLayout PyCell packages could not be imported here (see "`klt pdk pcell-check`" above). |
+| `6` | `find`/`check --expect-version` ran fine, but the installed PDK identity is a `mismatch` or `unknown` against the supplied value (see "Asserting a pin"). `check`'s `4` takes precedence. |
 
 On a `find`/`env` failure the error names the search order tried and points at
 a concrete way to install a PDK, so a downstream tool never crashes deep in a
@@ -1686,7 +1938,7 @@ log with a mysterious path error:
 See [`docs/json-contract.md`](../json-contract.md) for the envelope shared
 across all `klt` commands. **Gate on the payload's own verdict, not the
 exit code** — these codes are additive (a future release may add a new one
-above `5`), and the exit code is only a shortcut derived from the payload's
+above `6`), and the exit code is only a shortcut derived from the payload's
 own fields, which are authoritative; see that document's "Exit codes"
 section.
 

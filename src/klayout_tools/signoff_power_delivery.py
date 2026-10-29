@@ -32,9 +32,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ._provenance import sha256_file
+from .signoff_runset import runset_disclosure, runset_refusal
 
 #: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Six
 #: reasons, not one, for the same reason
@@ -47,9 +48,13 @@ from ._provenance import sha256_file
 #: checklist text:
 #:
 #: - :data:`_REASON_NO_PDN` -- the cited `klt place-and-route` response says
-#:   no power grid was built (``power.pdn`` is not ``true``, or no
-#:   ``power.tapcell_master`` was placed). Fix: re-run P&R with a
-#:   ``request.power`` block.
+#:   no power grid was built (``power.pdn`` is not ``true``). Fix: re-run
+#:   P&R with a ``request.power`` block.
+#: - :data:`_REASON_NO_TAPCELL_MASTER` -- the grid was built (``power.pdn``
+#:   is ``true``) but ``power.tapcell_master`` is null and the response does
+#:   not state ``power.tapless: true`` (issue #4199). A library documented
+#:   tapless (``sg13g2_stdcell``) states it and is exempt; a tapped library
+#:   whose tap step did not run, or a pre-#4199 envelope, is not.
 #: - :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- the cited `klt erc` run's own
 #:   spec document does not ask the question item 11 grades: it could not be
 #:   read at *any* path it could mean from here (issue #2608 --
@@ -136,12 +141,17 @@ from ._provenance import sha256_file
 #:   is blocked on it too) -- never the ERC spec, which already asked and
 #:   answered.
 _REASON_NO_PDN = "no_pdn"
+_REASON_NO_TAPCELL_MASTER = "no_tapcell_master"
 _REASON_SUPPLY_SPEC_INCOMPLETE = "supply_spec_incomplete"
 _REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE = "supply_spec_disclosed_unexpressible"
 _REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION = "supply_spec_disclosed_tool_limitation"
 _REASON_SUPPLY_NOT_CONTINUOUS = "supply_not_continuous"
 _REASON_LVS_SUPPLY_UNPROVEN = "lvs_supply_unproven"
 _REASON_LVS_DID_NOT_PASS = "lvs_did_not_pass"
+#: Issue #4193: the cited set resolved cleanly but lacks the ``erc`` and/or
+#: the ``lvs`` part. Distinct from ``wrong_kind`` ("cite a different
+#: artifact"): the parts that are cited are right, the set is incomplete.
+_REASON_POWER_DELIVERY_PARTS_MISSING = "power_delivery_parts_missing"
 
 #: Issue #2839: T1 item 11's **port-accessibility** sub-checks -- the
 #: provisional amendment (2AMLogic/product#134, drafted in product PR #168)
@@ -689,8 +699,9 @@ def _pdn_branch_reason(
 
     Three conditions, in the order a reader would debug them: the response
     itself must pass (a P&R run that errored proves nothing); it must report
-    ``power.pdn: true`` with a ``power.tapcell_master`` named, i.e. a grid
-    was actually built (:data:`_REASON_NO_PDN`); and every
+    ``power.pdn: true`` (:data:`_REASON_NO_PDN`) with a
+    ``power.tapcell_master`` named, or ``power.tapless: true`` for a library
+    documented tapless (:data:`_REASON_NO_TAPCELL_MASTER`); and every
     ``power.straps[].layer`` it reports must be covered by the ERC spec's own
     stackup (:data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- an ERC run that never
     looked at the layers the supply is routed on says nothing about the grid
@@ -704,8 +715,10 @@ def _pdn_branch_reason(
     if not _check_passed("place-and-route", par["envelope"]):
         return _REASON_CHECK_FAILED
     power = par["envelope"].get("power") or {}
-    if power.get("pdn") is not True or not power.get("tapcell_master"):
+    if power.get("pdn") is not True:
         return _REASON_NO_PDN
+    if not power.get("tapcell_master") and power.get("tapless") is not True:
+        return _REASON_NO_TAPCELL_MASTER
     strap_layers = _strap_layers(par["envelope"])
     if not strap_layers or any(
         layer not in supply_spec["stackup"] for layer in strap_layers
@@ -1073,6 +1086,28 @@ def _resolve_erc_supply_spec(
         return None, _REASON_SUPPLY_NOT_CONTINUOUS, {}
 
     return supply_spec, None, {}
+
+
+def _lvs_half_verdict(
+    envelope: dict[str, Any], supply_spec: dict[str, Any] | None
+) -> tuple[str, str, None, dict[str, Any]] | None:
+    """The ``"unmet"`` verdict for an LVS citation that cannot be item 11's
+    LVS half, or ``None`` when it can (issue #2870 added the runset gate).
+
+    A report that did not pass renders :func:`_failed_lvs_verdict`'s reason. A
+    passing PDK-runset report must also be pinned and re-hash clean
+    (:func:`~klayout_tools.signoff_runset.runset_refusal`); a curated-deck
+    report is never refused here.
+    """
+    from .signoff import _check_passed
+
+    if not _check_passed("lvs", cast(Any, envelope)):
+        reason, detail = _failed_lvs_verdict(envelope, supply_spec)
+        return "unmet", reason, None, detail
+    runset_reason = runset_refusal(envelope)
+    if runset_reason is not None:
+        return "unmet", runset_reason, None, runset_disclosure(envelope) or {}
+    return None
 
 
 def _failed_lvs_verdict(
@@ -1622,6 +1657,46 @@ def _port_accessibility_verdict(
     )
 
 
+def _missing_parts_verdict(
+    by_kind: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any]]:
+    """The ``"unmet"`` verdict for a cited set lacking the ``erc`` and/or
+    ``lvs`` part (issue #4193). An ERC part whose spec does not resolve
+    reports its own, more actionable reason first; otherwise
+    :data:`_REASON_POWER_DELIVERY_PARTS_MISSING` names the absent parts and
+    credits the supplies a resolved ERC spec proved. Never ``"met"``.
+    """
+    erc = by_kind.get("erc")
+    supply_spec = None
+    if erc is not None:
+        supply_spec, reason, detail = _resolve_erc_supply_spec(erc)
+        if supply_spec is None:
+            return "unmet", reason, None, detail
+    block: dict[str, Any] = {
+        "missing_parts": [k for k in ("erc", "lvs") if k not in by_kind],
+        "cited_parts": [k for k in _POWER_DELIVERY_PART_ORDER if k in by_kind],
+    }
+    if supply_spec is not None:
+        block["supply_nets"] = list(supply_spec["supply_nets"])
+    return (
+        "unmet",
+        _REASON_POWER_DELIVERY_PARTS_MISSING,
+        None,
+        {"power_delivery": block},
+    )
+
+
+def _par_tapless_field(par: dict[str, Any] | None) -> dict[str, Any]:
+    """``{"tapless": True}`` when the cited ``place-and-route`` part states
+    ``power.tapless`` is ``true`` (issue #4199), else ``{}``; split out of
+    :func:`_grade_power_delivery` to keep its own complexity under the repo's
+    ratchet (issue #2094)."""
+    if par is None:
+        return {}
+    tapless = (par["envelope"].get("power") or {}).get("tapless") is True
+    return {"tapless": True} if tapless else {}
+
+
 def _grade_power_delivery(
     specs: list[dict[str, Any]],
     *,
@@ -1719,7 +1794,8 @@ def _grade_power_delivery(
     :data:`_REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION`,
     :data:`_REASON_SUPPLY_NOT_CONTINUOUS`,
     :data:`_REASON_LVS_SUPPLY_UNPROVEN`,
-    :data:`_REASON_LVS_DID_NOT_PASS`) are reserved for a cited set that
+    :data:`_REASON_LVS_DID_NOT_PASS`,
+    :data:`_REASON_POWER_DELIVERY_PARTS_MISSING`) are reserved for a cited set that
     resolved cleanly and still does not prove power delivery.
     Issue #2496: ``stale_evidence``/``unverifiable_provenance`` can also
     arise a second way for the ``erc`` part specifically -- not from the
@@ -1745,7 +1821,7 @@ def _grade_power_delivery(
     those unrelated findings
     newly fatal.
     """
-    from .signoff import _REASON_WRONG_KIND, _check_passed, _citation
+    from .signoff import _citation
 
     by_kind, reason = _resolve_power_delivery_parts(specs, repo_root)
     if by_kind is None:
@@ -1754,10 +1830,7 @@ def _grade_power_delivery(
     erc = by_kind.get("erc")
     lvs = by_kind.get("lvs")
     if erc is None or lvs is None:
-        # The cited set does not contain the artifacts this item names at
-        # all -- "cite a different artifact", which is exactly what
-        # `wrong_kind` means everywhere else in this module.
-        return "unmet", _REASON_WRONG_KIND, None, {}
+        return _missing_parts_verdict(by_kind)
 
     # Issue #2495: the ERC half is resolved *before* the LVS pass gate, not
     # after it, so a failing LVS citation can say which of the two halves is
@@ -1765,9 +1838,9 @@ def _grade_power_delivery(
     # the already-resolved ERC part plus the spec document it names, so
     # doing it unconditionally changes nothing but the reason rendered.
     supply_spec, reason, detail = _resolve_erc_supply_spec(erc)
-    if not _check_passed("lvs", lvs["envelope"]):
-        lvs_reason, lvs_detail = _failed_lvs_verdict(lvs["envelope"], supply_spec)
-        return "unmet", lvs_reason, None, lvs_detail
+    lvs_verdict = _lvs_half_verdict(lvs["envelope"], supply_spec)
+    if lvs_verdict is not None:
+        return lvs_verdict
     if supply_spec is None:
         return "unmet", reason, None, detail
 
@@ -1857,6 +1930,9 @@ def _grade_power_delivery(
         citation["power_delivery"]["disclosed_undeclared_tie_classes"] = (
             disclosed_undeclared_tie_classes
         )
+    # Issue #4199: present only when the cited P&R response states the
+    # library is tapless, so a `null` tapcell_master reads as by-design.
+    citation["power_delivery"].update(_par_tapless_field(par))
     # Issue #2839: present only when the port-accessibility half was graded,
     # so a block that does not opt in renders this citation exactly as before.
     citation["power_delivery"].update(

@@ -848,6 +848,32 @@ def test_poll_timeout(repo, fake, no_local_xschem, monkeypatch, tmp_path, capsys
     assert no_local_xschem == []
 
 
+def test_interrupted_past_grace_is_a_distinct_code_with_no_progress(
+    repo, fake, no_local_xschem, monkeypatch, tmp_path, capsys
+):
+    fake.statuses = [_status("interrupted")]
+    clock = iter(range(0, 10**9, 1000))
+    real_poll = sim_batch.poll_status
+
+    def _fast_poll(config, job_id, **kwargs):
+        kwargs["monotonic"] = lambda: float(next(clock))
+        kwargs["sleep"] = lambda s: None
+        return real_poll(config, job_id, **kwargs)
+
+    monkeypatch.setattr(sim_batch, "poll_status", _fast_poll)
+    code = main(_argv(repo, tmp_path / "o.spice", "--backend", "batch"))
+    stderr = capsys.readouterr().err
+    error = json.loads(stderr)["error"]
+    assert code == 1
+    assert error["code"] == sim_batch.BATCH_JOB_INTERRUPTED_CODE
+    assert error["code"] != nb.BATCH_POLL_TIMEOUT_CODE
+    assert _job_id(fake) in error["message"]
+    # `progress=False`: stderr is the error envelope alone (it parsed whole
+    # above), with no progress line before or after it.
+    assert stderr.startswith("{") and stderr.rstrip().endswith("}")
+    assert no_local_xschem == []
+
+
 def test_terminal_failed_carries_the_runner_error(
     repo, fake, no_local_xschem, tmp_path, capsys
 ):
@@ -1056,3 +1082,38 @@ def test_unevaluated_expr_in_collected_netlist_fails_on_batch(
     assert main(_argv(repo, output, "--backend", "batch")) == 1
     assert _error(capsys)["code"] == "unevaluated_expr"
     assert not output.exists()
+
+
+def test_unresolved_symbol_in_collected_netlist_fails_on_batch(
+    repo, fake, no_local_xschem, tmp_path, capsys
+):
+    """Parity with the local backend (issue #3964): same stable `error.code`."""
+    fake.statuses = [_status("done")]
+    fake.outputs = _runner_outputs("* n\n*  E1 -  no_such  IS MISSING !!!!\n.end\n")
+    output = tmp_path / "out.spice"
+
+    assert main(_argv(repo, output, "--backend", "batch")) == 1
+    assert _error(capsys)["code"] == "unresolved_symbol"
+    assert not output.exists()
+
+
+def test_check_ignore_comments_passes_through_on_batch(repo, fake, tmp_path, capsys):
+    """Issue #4525: the batch path compares with the same comment-ignoring
+    `_check_result`."""
+    fake.statuses = [_status("done")]
+    fake.outputs = _runner_outputs(_BODY.format(sch=f"{RUNNER_TREE}/design/block.sch"))
+    committed = tmp_path / "block.spice"
+    committed.write_text(
+        "* project header\n"
+        + _BODY.format(sch="/home/someone/elsewhere/design/block.sch"),
+        encoding="utf-8",
+    )
+
+    assert main(_argv(repo, committed, "--backend", "batch", "--check")) == 3
+    capsys.readouterr()
+    fake.statuses = [_status("done")]
+    args = _argv(repo, committed, "--backend", "batch", "--check", "--ignore-comments")
+    assert main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "match"
+    assert payload["drift"]["comments_differ"] is True

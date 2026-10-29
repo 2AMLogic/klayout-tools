@@ -194,6 +194,74 @@ def parse_deck_options(
     return options
 
 
+def parse_tie_nets(
+    raw: list[str] | None,
+    error_cls: ErrorFactory,
+    flag: str = "--tie-net",
+) -> list[tuple[str, str]] | None:
+    """Parse the ``--tie-net`` flag's ``EXTRACTED_NET=SCHEMATIC_NET`` entries
+    (issue #4245, repeatable) into ordered ``(extracted_net, schematic_net)``
+    pairs, or ``None`` when the flag was never given.
+
+    Several extracted nets may name one schematic net; one extracted net named
+    twice with different schematic nets is an error (the tie would be
+    ambiguous), and a verbatim repeat is collapsed. Whether the extracted net
+    is a reported unbiased net is checked by ``run_pex``, which has the
+    extraction to hand.
+    """
+    if raw is None:
+        return None
+    pairs: dict[str, str] = {}
+    for entry in raw:
+        extracted, sep, schematic = entry.partition("=")
+        extracted = extracted.strip()
+        schematic = schematic.strip()
+        if not sep or not extracted or not schematic:
+            raise error_cls(
+                f"{flag} entry {entry!r} is not EXTRACTED_NET=SCHEMATIC_NET "
+                f"-- e.g. {flag} '\\$5=VDD'"
+            )
+        if pairs.get(extracted, schematic) != schematic:
+            raise error_cls(
+                f"{flag} names extracted net {extracted!r} twice with "
+                f"different schematic nets ({pairs[extracted]!r} and "
+                f"{schematic!r})"
+            )
+        pairs[extracted] = schematic
+    return list(pairs.items())
+
+
+def parse_device_models(
+    raw: list[str] | None,
+    error_cls: ErrorFactory,
+    flag: str = "--device-model",
+) -> dict[str, str] | None:
+    """Parse the ``--device-model`` flag's ``CLASS=SUBCKT`` entries (issue
+    #4234, repeatable) into the ``{device class: PDK model name}`` mapping
+    ``run_extract``'s ``device_models`` parameter takes, or ``None`` when the
+    flag was never given. Shared by ``klt extract`` and ``klt pex``.
+
+    Raises ``error_cls`` for a malformed entry (no ``=``, blank class or blank
+    model name). A later entry for the same CLASS wins. Whether CLASS exists
+    in the deck, or already has a curated binding, is checked at binding
+    resolution, where the deck's class list can be quoted.
+    """
+    if raw is None:
+        return None
+    models: dict[str, str] = {}
+    for entry in raw:
+        name, sep, value = entry.partition("=")
+        name = name.strip()
+        value = value.strip()
+        if not sep or not name or not value:
+            raise error_cls(
+                f"{flag} entry {entry!r} is not CLASS=SUBCKT -- e.g. "
+                f"{flag} bjt=pnp_05p00x05p00"
+            )
+        models[name] = value
+    return models
+
+
 #: The spelling :func:`parse_label_layers` accepts for "this role reads no
 #: label layer at all" -- compared case-insensitively against the value half
 #: of a ``ROLE=VALUE`` entry.

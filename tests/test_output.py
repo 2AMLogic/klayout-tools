@@ -7,6 +7,7 @@ from klayout_tools.cli.output import (
     EXIT_USAGE_ERROR,
     emit_error,
     emit_success,
+    render_check_text,
 )
 
 
@@ -105,3 +106,49 @@ def test_emit_error_exit_code_is_overridable_without_changing_envelope(capsys):
 def test_emit_error_exit_code_defaults_to_error_exit_code(capsys):
     assert emit_error("layers", "boom", "text") == ERROR_EXIT_CODE == 1
     capsys.readouterr()
+
+
+def test_render_check_text_plain_check_list(capsys):
+    render_check_text(
+        {
+            "report": "r.json",
+            "status": "drift",
+            "checks": [
+                {"field": "a", "match": True},
+                {"field": "b", "match": False, "expected": "x", "actual": "y"},
+            ],
+        }
+    )
+
+    assert capsys.readouterr().out == (
+        "report: r.json\nstatus: drift\n"
+        "  [OK] a\n  [DRIFTED] b\n"
+        "      expected: x\n      actual:   y\n"
+    )
+
+
+def test_render_check_text_input_not_found_and_advisories(capsys):
+    render_check_text(
+        {
+            "report": "r.json",
+            "status": "drift",
+            "checks": [
+                {
+                    "field": "layout_sha",
+                    "match": False,
+                    "expected": "x",
+                    "actual": None,
+                    "input_not_found": {
+                        "resolved": "/cwd/a.gds",
+                        "found_relative_to_report": "/rep/a.gds",
+                    },
+                }
+            ],
+            "advisories": [{"field": "engine", "report": "1", "current": "2"}],
+        }
+    )
+
+    out = capsys.readouterr().out
+    assert "actual:   None (input not found: /cwd/a.gds)" in out
+    assert "exists relative to the report's own directory (/rep/a.gds)" in out
+    assert "  [DRIFT] engine: 1 (report) vs 2 (current)" in out

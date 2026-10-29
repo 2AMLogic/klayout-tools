@@ -40,7 +40,7 @@ from ..place_and_route import (
     rerun_place_and_route_report,
     run_place_and_route,
 )
-from .output import emit_error, emit_success, render_rerun_drift
+from .output import emit_error, emit_success, render_check_text, render_rerun_drift
 
 #: Aliases for the --check/--rerun outcome (issue #2224) -- the same 0/3
 #: split `klt drc --check` uses. This verb has no exit 3 of its own (see this
@@ -53,6 +53,12 @@ EXIT_DRIFTED = 3
 
 def run(args: argparse.Namespace) -> int:
     if args.check is not None:
+        if args.resume:
+            return emit_error(
+                "place-and-route",
+                "--resume cannot be combined with --check",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
@@ -66,6 +72,7 @@ def run(args: argparse.Namespace) -> int:
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
             backend=args.backend,
+            resume=args.resume,
         )
     except PlaceAndRouteError as exc:
         return _emit_flow_error(exc, args.format)
@@ -134,23 +141,10 @@ def _run_check(args: argparse.Namespace) -> int:
     except OutputLockError as exc:
         return emit_error("place-and-route", str(exc), args.format, code=exc.code)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
-
-
-def _print_check_text(result: dict) -> None:
-    """`--format text` rendering of a cheap-mode `--check` result -- the same
-    shape `klt drc`/`klt lvs`/`klt extract` already print (issue #1106)."""
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")
 
 
 def _print_corner_runs_text(report: dict) -> None:
@@ -178,6 +172,9 @@ def _print_text(report: dict) -> None:
     print(f"status: {report['status']}")
     print(f"stage_reached: {report['stage_reached']}")
     print(f"seed: {report['seed']}")
+    if "resume" in report:
+        resumed = report["resume"]["resumed_stages"]
+        print(f"resumed_stages: {', '.join(resumed) if resumed else '(none)'}")
     print()
     print(f"die_area_um2: {report['die_area_um2']}")
     print(f"core_area_um2: {report['core_area_um2']}")

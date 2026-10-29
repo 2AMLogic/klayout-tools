@@ -36,6 +36,7 @@ from klayout_tools.pex import (
     BODY_BIAS_BIASED,
     BODY_BIAS_UNBIASED,
     PexError,
+    _apply_tie_nets,
     _body_bias_report,
     _build_coverage,
     _build_delta_rows,
@@ -48,6 +49,7 @@ from klayout_tools.pex import (
     _normalize_measurement_document,
     _pin_count_mismatch,
     _pin_count_mismatch_from_report,
+    _pin_order_mismatch,
     _prepare_extracted_request,
     _reference_is_hierarchical,
     _rewrite_dut_include,
@@ -55,6 +57,7 @@ from klayout_tools.pex import (
     _status_from_coverage,
     _subckt_interfaces,
     _unextracted_delta_rows,
+    _validate_tie_nets,
     run_pex,
 )
 
@@ -279,6 +282,153 @@ def test_body_bias_report_unbiased_names_devices_and_nets():
     assert report["unbiased_device_count"] == 3
     assert report["unbiased_nets"] == ["\\$5", "\\$7"]
     assert report["unbiased_pmos_body_nets"] == entries
+
+
+# --------------------------------------------------------------------------- #
+# `--tie-net` (issue #4245): a caller-declared tie of a reported-unbiased net.
+# --------------------------------------------------------------------------- #
+
+_TIE_ENTRIES = [
+    {"device": "M1", "net": "\\$5"},
+    {"device": "M2", "net": "\\$7"},
+]
+
+
+def test_body_bias_report_without_ties_has_no_tied_key():
+    assert "tied" not in _body_bias_report({"unbiased_pmos_body_nets": _TIE_ENTRIES})
+
+
+def test_body_bias_report_partial_tie_stays_unbiased():
+    report = _body_bias_report(
+        {"unbiased_pmos_body_nets": _TIE_ENTRIES}, [("\\$5", "VDD")]
+    )
+    assert report["status"] == BODY_BIAS_UNBIASED
+    assert report["tied"] == [
+        {"extracted_net": "\\$5", "schematic_net": "VDD", "source": "declared"}
+    ]
+    # The layout's own finding is carried verbatim.
+    assert report["unbiased_pmos_body_nets"] == _TIE_ENTRIES
+
+
+def test_body_bias_report_fully_tied_is_tied_not_biased():
+    report = _body_bias_report(
+        {"unbiased_pmos_body_nets": _TIE_ENTRIES},
+        [("\\$5", "VDD"), ("\\$7", "VDD")],
+    )
+    assert report["status"] == "tied"
+    assert [t["schematic_net"] for t in report["tied"]] == ["VDD", "VDD"]
+
+
+def test_validate_tie_nets_lists_valid_names_for_unknown_net():
+    with pytest.raises(PexError) as exc:
+        _validate_tie_nets([("vout", "VDD")], {"unbiased_pmos_body_nets": _TIE_ENTRIES})
+    assert "vout" in str(exc.value)
+    assert "\\$5" in str(exc.value) and "\\$7" in str(exc.value)
+    assert exc.value.code == "invalid_tie_net"
+
+
+def test_validate_tie_nets_errors_when_nothing_is_unbiased():
+    with pytest.raises(PexError, match="no unbiased net"):
+        _validate_tie_nets([("\\$5", "VDD")], {"unbiased_pmos_body_nets": []})
+
+
+def test_apply_tie_nets_rewrites_whole_tokens_on_device_cards(tmp_path):
+    path = tmp_path / "x.spice"
+    path.write_text(
+        "* \\$5 comment\n.SUBCKT top a b\n"
+        "M1 a b c \\$5 pmos w=1\nM2 a b c \\$7 pmos w=1\n"
+        "M3 a b c \\$55 pmos w=1\n.ENDS\n"
+    )
+    _apply_tie_nets(str(path), [("\\$5", "VDD"), ("\\$7", "VDD")])
+    assert path.read_text() == (
+        "* \\$5 comment\n.SUBCKT top a b\n"
+        "M1 a b c VDD pmos w=1\nM2 a b c VDD pmos w=1\n"
+        "M3 a b c \\$55 pmos w=1\n.ENDS\n"
+    )
+
+
+def test_apply_tie_nets_does_not_chain(tmp_path):
+    path = tmp_path / "x.spice"
+    path.write_text("M1 a b c n1 pmos\nM2 a b c n2 pmos\n")
+    _apply_tie_nets(str(path), [("n1", "n2"), ("n2", "n3")])
+    assert path.read_text() == "M1 a b c n2 pmos\nM2 a b c n3 pmos\n"
+
+
+def test_apply_tie_nets_errors_when_net_absent(tmp_path):
+    path = tmp_path / "x.spice"
+    path.write_text("M1 a b c d pmos\n")
+    with pytest.raises(PexError, match="does not appear"):
+        _apply_tie_nets(str(path), [("\\$9", "VDD")])
+
+
+def test_parse_tie_nets():
+    from klayout_tools.cli._parsing import parse_tie_nets
+
+    assert parse_tie_nets(None, PexError) is None
+    assert parse_tie_nets(["\\$5=VDD", "\\$7=VDD", "\\$5=VDD"], PexError) == [
+        ("\\$5", "VDD"),
+        ("\\$7", "VDD"),
+    ]
+    for bad in ("nope", "=VDD", "a="):
+        with pytest.raises(PexError):
+            parse_tie_nets([bad], PexError)
+    with pytest.raises(PexError, match="twice"):
+        parse_tie_nets(["a=X", "a=Y"], PexError)
+
+
+def test_run_pex_tie_net_on_layout_with_no_unbiased_nets_errors(
+    tmp_path, resistor_layout, measure_reference
+):
+    with pytest.raises(PexError, match="not an unbiased"):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            measure_command=_write_harness(tmp_path),
+            reference_netlist=measure_reference,
+            tie_nets=[("\\$5", "VDD")],
+        )
+
+
+def test_run_pex_tie_net_reports_hash_of_rewritten_netlist(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    import klayout_tools.pex as pex_module
+    from klayout_tools._provenance import sha256_file
+
+    real = pex_module.run_extract
+
+    def _with_unbiased(*args, **kwargs):
+        rep = real(*args, **kwargs)
+        rep["unbiased_pmos_body_nets"] = [{"device": "M0", "net": "n_tie"}]
+        return rep
+
+    monkeypatch.setattr(pex_module, "run_extract", _with_unbiased)
+    monkeypatch.setattr(
+        pex_module,
+        "_validate_tie_nets",
+        lambda ties, rep: None,
+    )
+    out = tmp_path / "res.spice"
+
+    def _fake_apply(path, ties):
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("* tied\n")
+
+    monkeypatch.setattr(pex_module, "_apply_tie_nets", _fake_apply)
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(out),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=measure_reference,
+        tie_nets=[("n_tie", "VDD")],
+    )
+    assert report["extraction"]["netlist_sha256"] == sha256_file(str(out))
 
 
 # --------------------------------------------------------------------------- #
@@ -1799,6 +1949,124 @@ def test_run_pex_flat_dut_mismatch_skips_extracted_side_entirely(
     assert mismatch["subcircuit"] == "RES"
     assert mismatch["schematic"]["netlist"] == dut
     assert mismatch["schematic"]["pin_count"] is None
+    assert mismatch["extracted"]["pins"] == ["RA", "RB"]
+
+
+def test_pin_order_mismatch_reports_same_set_different_order(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["b", "a", "vdd"], ["a", "b", "vdd"])
+    mismatch = _pin_order_mismatch(
+        reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+    )
+    assert mismatch is not None
+    assert mismatch["subcircuit"] == "RES"
+    assert mismatch["schematic"]["pins"] == ["b", "a", "vdd"]
+    assert mismatch["extracted"]["pins"] == ["a", "b", "vdd"]
+    assert mismatch["ngspice_message"] is None
+    assert "(b, a, vdd)" in mismatch["detail"]
+    assert "(a, b, vdd)" in mismatch["detail"]
+
+
+def test_pin_order_mismatch_none_when_order_agrees(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["a", "b"], ["a", "b"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_pin_order_mismatch_ignores_case_only_differences(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["RA", "RB"], ["ra", "rb"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+    schematic, extracted = _write_pair(tmp_path, ["RB", "RA"], ["ra", "rb"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is not None
+    )
+
+
+def test_pin_order_mismatch_none_when_counts_or_sets_differ(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["b", "a"], ["a", "b", "vsub"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+    assert (
+        _pin_count_mismatch(reference_netlist=schematic, extracted_netlist=extracted)
+        is not None
+    )
+    schematic, extracted = _write_pair(tmp_path, ["b", "a"], ["a", "c"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_pin_order_mismatch_none_for_flat_schematic(tmp_path):
+    dut = _write_flat_dut(tmp_path)
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(".SUBCKT RES RA RB\nR1 RA RB 1\n.ENDS RES\n")
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=dut, extracted_netlist=str(extracted), top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_run_pex_pin_order_mismatch_skips_extracted_side(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #2890: same pins, different order -> flagged pre-flight, the
+    extracted leg is never simulated, rows error (exit 4 path)."""
+    import klayout_tools.pex as pex_module
+
+    calls = {"n": 0}
+
+    def _fake_run_sim(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "corners": [
+                    {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
+                ],
+                "corner_count": 1,
+                "measurements": [{"name": "vout"}],
+            }
+        raise AssertionError("extracted leg must not run on pin_order_mismatch")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(".SUBCKT RES RB RA\nR1 RA RB 289.2\n.ENDS RES\n")
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(
+        f'.include "{dut}"\n.model res_generic_po r\n'
+        "Vdd RA 0 DC 1.8\nXres RB RA RES\nRload RB 0 1k\n"
+    )
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert calls["n"] == 1
+    assert report["status"] == "error"
+    assert all(row["status"] == "error" for row in report["delta"])
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+    mismatch = report["pin_order_mismatch"]
+    assert mismatch is not None
+    assert mismatch["schematic"]["pins"] == ["RB", "RA"]
     assert mismatch["extracted"]["pins"] == ["RA", "RB"]
 
 
@@ -4190,6 +4458,105 @@ print(json.dumps({"corners": [{"corner_id": "tt", "measurements": [
     assert report["errored"] == 1
 
 
+def _run_message_harness(tmp_path, resistor_layout, measure_reference, entry):
+    harness = f"""\
+import json, os
+side = os.environ["KLT_PEX_SIDE"]
+entry = {entry}
+print(json.dumps({{"corners": [{{"corner_id": "tt", "measurements": [
+    dict(name="t_cross", **entry.get(side, {{}}))
+]}}]}}))
+"""
+    return run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, harness),
+        reference_netlist=measure_reference,
+    )
+
+
+_OK = {"value": 1.0}
+
+
+@pytest.mark.parametrize("bad_side", ["extracted", "schematic"])
+def test_run_pex_measure_command_message_reaches_error_row(
+    tmp_path, resistor_layout, measure_reference, bad_side
+):
+    other = "schematic" if bad_side == "extracted" else "extracted"
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {bad_side: {"value": None, "message": "out of interval"}, other: _OK},
+    )
+    assert report["delta"][0]["error"] == {
+        "side": bad_side,
+        "stage": "execute",
+        "message": "out of interval",
+    }
+
+
+def test_run_pex_measure_command_no_message_keeps_fallback(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {"extracted": {"value": None}, "schematic": _OK},
+    )
+    error = report["delta"][0]["error"]
+    assert error["stage"] == "unknown"
+    assert error["message"] == "no diagnostic was recorded for this errored row"
+    assert set(error) == {"side", "stage", "message"}
+
+
+def test_run_pex_measure_command_both_null_blames_schematic_message(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {
+            "schematic": {"value": None, "message": "sch msg"},
+            "extracted": {"value": None, "message": "ext msg"},
+        },
+    )
+    error = report["delta"][0]["error"]
+    assert (error["side"], error["message"]) == ("schematic", "sch msg")
+
+
+def test_run_pex_measure_command_message_on_pass_row_is_ignored(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {"extracted": {**_OK, "message": "fine"}, "schematic": _OK},
+    )
+    assert report["delta"][0]["status"] == "pass"
+    assert "error" not in report["delta"][0]
+    assert "fine" not in json.dumps(report["delta"])
+
+
+@pytest.mark.parametrize("bad", [5, "", "  "])
+def test_run_pex_measure_command_bad_message_is_pex_error(
+    tmp_path, resistor_layout, measure_reference, bad
+):
+    with pytest.raises(PexError, match=r"measurements\[0\]\.message"):
+        _run_message_harness(
+            tmp_path,
+            resistor_layout,
+            measure_reference,
+            {"extracted": {"value": 1.0, "message": bad}, "schematic": _OK},
+        )
+
+
 def test_run_pex_measure_command_failing_row_status_is_a_fail(
     tmp_path, resistor_layout, measure_reference
 ):
@@ -4876,6 +5243,51 @@ def test_cli_pex_label_layer_reaches_run_pex(tmp_path, resistor_layout, monkeypa
 
     assert exit_code == 0
     assert captured["label_layers"] == {"metal0": (67, 10), "poly": None}
+
+
+def test_cli_pex_device_model_reaches_run_pex(tmp_path, resistor_layout, monkeypatch):
+    """`--device-model` is repeatable and a later CLASS wins (issue #4234);
+    omitting it passes `None`."""
+    captured = _fake_run_pex_capturing(monkeypatch)
+    argv = [
+        "pex",
+        resistor_layout,
+        str(tmp_path / "request.json"),
+        "--deck",
+        "gf180mcu",
+        "--format",
+        "json",
+    ]
+    assert main(argv) == 0
+    assert captured["device_models"] is None
+
+    assert (
+        main(
+            argv + ["--device-model", "bjt=a", "--device-model", "bjt=pnp_05p00x05p00"]
+        )
+        == 0
+    )
+    assert captured["device_models"] == {"bjt": "pnp_05p00x05p00"}
+
+
+def test_cli_pex_malformed_device_model_is_a_clean_error(
+    tmp_path, resistor_layout, monkeypatch
+):
+    _fake_run_pex_capturing(monkeypatch)
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(tmp_path / "request.json"),
+            "--deck",
+            "gf180mcu",
+            "--device-model",
+            "bjt",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
 
 
 def test_cli_pex_omitting_label_layer_passes_none(
@@ -5979,44 +6391,406 @@ def test_run_pex_device_only_leg_failure_nulls_only_its_fields(
     assert report["status"] == "pass"
 
 
-def test_run_pex_device_only_leg_rejects_measure_command(tmp_path, resistor_layout):
-    reference = tmp_path / "ref.spice"
-    reference.write_text(".SUBCKT RES RA RB\nR1 RA RB 289.2\n.ENDS RES\n")
-    with pytest.raises(PexError, match="--device-only-leg is not supported"):
-        run_pex(
+_DEVICE_ONLY_HARNESS = """\
+import json, os, sys
+
+side = os.environ["KLT_PEX_SIDE"]
+assert sys.argv[-1] == os.environ["KLT_PEX_NETLIST"]
+assert os.environ["KLT_PEX_ARTIFACTS_DIR"].endswith(os.path.join("measure", side))
+with open(os.environ["KLT_PEX_LOG"], "a") as log:
+    log.write(side + "\\n")
+if side == "device-only" and os.environ.get("KLT_TEST_FAIL") == "1":
+    sys.exit(3)
+value = {"schematic": 1.0, "device-only": 1.2, "extracted": 1.5}[side]
+if side == "device-only" and os.environ.get("KLT_TEST_NULL") == "1":
+    value = None
+print(
+    json.dumps(
+        {
+            "corners": [
+                {
+                    "corner_id": "tt/1.800V/27C",
+                    "measurements": [
+                        {"name": "t_cross", "value": value, "status": "pass"}
+                    ],
+                }
+            ]
+        }
+    )
+)
+"""
+
+
+def _run_device_only_command(
+    tmp_path, resistor_layout, measure_reference, monkeypatch, **env
+):
+    log = tmp_path / "sides.log"
+    monkeypatch.setenv("KLT_PEX_LOG", str(log))
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        measure_command=_write_harness(tmp_path, _DEVICE_ONLY_HARNESS),
+        reference_netlist=str(measure_reference),
+        device_only_leg=True,
+    )
+    return report, log
+
+
+def test_run_pex_device_only_leg_with_measure_command_splits_delta(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    report, log = _run_device_only_command(
+        tmp_path, resistor_layout, measure_reference, monkeypatch
+    )
+
+    assert log.read_text().split() == ["schematic", "extracted", "device-only"]
+    assert set(report["measurement"]["sides"]) == {
+        "schematic",
+        "extracted",
+        "device_only",
+    }
+    (row,) = report["delta"]
+    assert row["device_only_value"] == 1.2
+    assert row["representation_delta_pct"] == pytest.approx(20.0)
+    assert row["parasitic_delta_pct"] == pytest.approx(25.0)
+    assert row["device_only_status"] == "pass"
+
+
+def test_run_pex_device_only_leg_command_null_value_is_error_row(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    report, _ = _run_device_only_command(
+        tmp_path, resistor_layout, measure_reference, monkeypatch, KLT_TEST_NULL="1"
+    )
+
+    (row,) = report["delta"]
+    assert row["device_only_value"] is None
+    assert row["representation_delta_pct"] is None
+    assert row["parasitic_delta_pct"] is None
+    assert row["device_only_status"] != "pass"
+    assert row["delta_pct"] == pytest.approx(50.0)
+
+
+def test_run_pex_device_only_leg_command_failure_is_pex_error(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    with pytest.raises(PexError):
+        _run_device_only_command(
+            tmp_path,
             resistor_layout,
-            [],
-            "sky130",
-            measure_command=[sys.executable, "-c", "pass"],
-            reference_netlist=str(reference),
-            device_only_leg=True,
+            measure_reference,
+            monkeypatch,
+            KLT_TEST_FAIL="1",
         )
 
 
-def test_cli_device_only_leg_with_measure_command_is_a_json_error(
-    tmp_path, resistor_layout, capsys
+def test_run_pex_measure_command_without_device_only_leg_has_no_third_side(
+    tmp_path, resistor_layout, measure_reference
 ):
-    reference = tmp_path / "ref.spice"
-    reference.write_text(".SUBCKT RES RA RB\nR1 RA RB 289.2\n.ENDS RES\n")
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=str(measure_reference),
+    )
+
+    assert set(report["measurement"]["sides"]) == {"schematic", "extracted"}
+    assert "device_only_value" not in report["delta"][0]
+
+
+# --- `--extract-only` (issue #3739) ----------------------------------------
+
+
+def test_run_pex_extract_only_reports_extraction_without_measuring(
+    tmp_path, resistor_layout
+):
+    netlist = tmp_path / "res.spice"
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(netlist),
+        artifacts_dir=str(tmp_path / "art"),
+        extract_only=True,
+    )
+
+    assert netlist.is_file()
+    assert report["extraction"]["device_count"] >= 1
+    assert report["body_bias"]
+    assert report["provenance"]
+    assert report["testbenches"] == []
+    assert report["delta"] == []
+    assert report["measurement"] == {
+        "mode": "extract-only",
+        "command": None,
+        "timeout_s": None,
+        "sides": None,
+    }
+    assert report["status"] == "not_checked"
+    assert report["coverage"]["nothing_checked_reasons"] == ["no_delta_rows"]
+    assert report["reference_netlist"] == {"path": None, "scope": "absent"}
+    assert report["reference_netlist_sha256"] is None
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+    assert report["model_mismatch"] is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "needle"),
+    [
+        ({"measure_command": ["true"]}, "--measure-command"),
+        ({"reference_netlist": "x.spice"}, "--reference-netlist"),
+        ({"measure_timeout_s": 5.0}, "--measure-timeout-s"),
+        ({"device_only_leg": True}, "--device-only-leg"),
+        ({"flatten_schematic": True}, "--flatten-schematic"),
+        ({"testbench_paths": ["tb.json"]}, "a testbench request"),
+    ],
+)
+def test_run_pex_extract_only_rejects_measurement_options(
+    tmp_path, resistor_layout, kwargs, needle
+):
+    testbenches = kwargs.pop("testbench_paths", [])
+    with pytest.raises(PexError, match=f"--extract-only cannot be combined.*{needle}"):
+        run_pex(
+            resistor_layout,
+            testbenches,
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            extract_only=True,
+            **kwargs,
+        )
+
+
+def test_cli_pex_extract_only_json_and_exit_code(tmp_path, resistor_layout, capsys):
     exit_code = main(
         [
             "pex",
             resistor_layout,
             "--deck",
             "sky130",
-            "--measure-command",
-            f"{sys.executable} -c pass",
-            "--reference-netlist",
-            str(reference),
+            "--extract-only",
+            "-o",
+            str(tmp_path / "res.spice"),
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 4
+    report = json.loads(capsys.readouterr().out)
+    assert report["measurement"]["mode"] == "extract-only"
+    assert report["status"] == "not_checked"
+
+
+def test_cli_pex_extract_only_text_prints_mode(tmp_path, resistor_layout, capsys):
+    main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "-o",
+            str(tmp_path / "res.spice"),
+            "--outdir",
+            str(tmp_path / "art"),
+        ]
+    )
+    assert "measurement: extract-only" in capsys.readouterr().out
+
+
+def test_cli_pex_extract_only_conflict_is_clean_error(
+    tmp_path, resistor_layout, capsys
+):
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--extract-only",
             "--device-only-leg",
             "--format",
             "json",
         ]
     )
     assert exit_code == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
     assert (
-        "--device-only-leg is not supported"
-        in json.loads(captured.err)["error"]["message"]
+        "--extract-only cannot be combined"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
     )
+
+
+def test_signoff_refuses_extract_only_report_as_evidence(tmp_path, resistor_layout):
+    """Issue #3739: an `--extract-only` envelope is not comparison evidence."""
+    from klayout_tools.signoff import build_signoff
+
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        extract_only=True,
+    )
+    path = tmp_path / "pex.json"
+    path.write_text(json.dumps(report))
+
+    check = build_signoff([str(path)])["checks"][0]
+
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["no_delta_rows"]
+
+
+# ---------------------------------------------------------------------------
+# --resistance-graph (issue #4037): pex consumes the selected scalar
+# ---------------------------------------------------------------------------
+
+_STRAP_GDS = Path(__file__).parent / "fixtures" / "resistance_graph_strap"
+
+
+def _netlist_resistors(path) -> list[float]:
+    """Every ``R`` card's value in a written SPICE netlist."""
+    values = []
+    for line in Path(path).read_text().splitlines():
+        parts = line.split()
+        if parts and parts[0].upper().startswith("R") and len(parts) >= 4:
+            value = float(parts[3])
+            if value < 1e9:  # skip the 1 TOhm substrate-isolation card
+                values.append(value)
+    return values
+
+
+def _pex_strapped(tmp_path, name, label, **kwargs):
+    out = tmp_path / f"{label}.spice"
+    report = run_pex(
+        str(_STRAP_GDS / f"{name}.gds"),
+        [],
+        "sky130",
+        output=str(out),
+        artifacts_dir=str(tmp_path / f"art_{label}"),
+        extract_only=True,
+        **kwargs,
+    )
+    return report, out
+
+
+def test_run_pex_resistance_graph_writes_selected_resistance(tmp_path):
+    """The strapped conductor's pex-written R is the graph value (smaller than
+    the legacy series sum), the envelope echoes the source, and without the
+    flag the netlist and report carry neither."""
+    base, base_out = _pex_strapped(tmp_path, "strapped", "base")
+    graph, graph_out = _pex_strapped(
+        tmp_path,
+        "strapped",
+        "graph",
+        resistance_graph=True,
+        resistance_graph_r_cut_ohm=0.0,
+    )
+
+    assert "resistance_graph" not in base["extraction"]
+    echo = graph["extraction"]["resistance_graph"]
+    assert echo["r_cut_ohm"] == 0.0
+    (net,) = echo["nets"]
+    assert net["resistance_source"] == "graph"
+    assert net["selected_resistance_ohm"] < net["legacy_resistance_ohm"]
+    assert sum(_netlist_resistors(base_out)) == pytest.approx(
+        net["legacy_resistance_ohm"], rel=1e-3
+    )
+    assert sum(_netlist_resistors(graph_out)) == pytest.approx(
+        net["selected_resistance_ohm"], rel=1e-3
+    )
+    assert graph["extraction"]["netlist_sha256"] != base["extraction"]["netlist_sha256"]
+
+
+def test_run_pex_resistance_graph_legacy_net_keeps_legacy_value(tmp_path):
+    """Without a per-cut resistance the strapped net is `unsupported`: the
+    source stays `legacy` and the written netlist is unchanged."""
+    base, _ = _pex_strapped(tmp_path, "strapped", "base")
+    graph, _ = _pex_strapped(tmp_path, "strapped", "graph", resistance_graph=True)
+
+    (net,) = graph["extraction"]["resistance_graph"]["nets"]
+    assert net["resistance_source"] == "legacy"
+    assert net["selected_resistance_ohm"] == net["legacy_resistance_ohm"]
+    assert graph["extraction"]["netlist_sha256"] == base["extraction"]["netlist_sha256"]
+
+
+def test_run_pex_resistance_graph_r_cut_zero_is_forwarded(tmp_path, monkeypatch):
+    calls = _capture_run_extract_kwargs(monkeypatch)
+    _pex_strapped(
+        tmp_path,
+        "single_level",
+        "g",
+        resistance_graph=True,
+        resistance_graph_r_cut_ohm=0,
+    )
+    assert calls[0]["resistance_graph"] is True
+    assert calls[0]["resistance_graph_r_cut_ohm"] == 0
+    assert calls[0]["emit_selected_resistance"] is True
+
+
+def test_run_pex_resistance_graph_default_passes_no_graph_request(
+    tmp_path, monkeypatch
+):
+    calls = _capture_run_extract_kwargs(monkeypatch)
+    _pex_strapped(tmp_path, "single_level", "d")
+    assert calls[0]["resistance_graph"] is False
+    assert calls[0]["emit_selected_resistance"] is False
+
+
+def test_run_pex_resistance_graph_r_cut_requires_graph_flag(tmp_path):
+    with pytest.raises(PexError, match="--resistance-graph-r-cut requires"):
+        _pex_strapped(tmp_path, "strapped", "x", resistance_graph_r_cut_ohm=1.0)
+    with pytest.raises(PexError, match="finite number >= 0"):
+        _pex_strapped(
+            tmp_path,
+            "strapped",
+            "y",
+            resistance_graph=True,
+            resistance_graph_r_cut_ohm=-1.0,
+        )
+
+
+def test_run_pex_resistance_graph_rejects_distributed_rc(tmp_path):
+    with pytest.raises(PexError, match="cannot be combined with --distributed-rc"):
+        _pex_strapped(
+            tmp_path,
+            "strapped",
+            "z",
+            resistance_graph=True,
+            critical_nets=["S"],
+            distributed_rc=True,
+        )
+
+
+def test_cli_pex_resistance_graph_extract_only_json(tmp_path, capsys):
+    out = tmp_path / "cli.spice"
+    code = main(
+        [
+            "pex",
+            str(_STRAP_GDS / "strapped.gds"),
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "--resistance-graph",
+            "--resistance-graph-r-cut",
+            "0",
+            "-o",
+            str(out),
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 4  # extract-only: nothing checked
+    report = json.loads(capsys.readouterr().out)
+    (net,) = report["extraction"]["resistance_graph"]["nets"]
+    assert net["resistance_source"] == "graph"

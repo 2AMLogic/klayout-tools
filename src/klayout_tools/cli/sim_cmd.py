@@ -67,7 +67,7 @@ def _print_dry_run_text(report: dict[str, Any]) -> None:
             for key in ("rndseed", "process_seed", "mismatch_seed")
             if key in unit
         )
-        print(f"  {unit['corner_id']}{seeds}")
+        print(f"  {unit.get('corner_id') or unit['id']}{seeds}")
     for staged in report["staged_files"]:
         print(f"  stage: {staged['name']} ({staged['kind']})")
     for warning in report["warnings"]:
@@ -127,10 +127,12 @@ def _run_sweep(args: argparse.Namespace) -> int:
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
             max_units_per_job=args.max_units_per_job,
+            max_concurrent_jobs=args.max_concurrent_jobs,
             dry_run=getattr(args, "dry_run", False),
             submit_only=getattr(args, "submit_only", False),
             attach_job_id=getattr(args, "attach_job_id", None),
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
+            command_approvals=getattr(args, "command_approvals", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -151,8 +153,13 @@ def _run_sweep(args: argparse.Namespace) -> int:
         emit_success(report, args.format, _print_dry_run_text)
         return EXIT_PASS
 
-    deck_mode = report.get("mode") == "decks"
-    emit_success(report, args.format, _print_deck_text if deck_mode else _print_text)
+    deck_mode = report.get("mode") in ("decks", "commands")
+    printer = _print_text
+    if report.get("mode") == "decks":
+        printer = _print_deck_text
+    elif report.get("mode") == "commands":
+        printer = _print_commands_text
+    emit_success(report, args.format, printer)
     return _exit_code_for(report, deck_mode)
 
 
@@ -264,7 +271,6 @@ def _run_batch_set(args: argparse.Namespace) -> int:
         flag
         for flag, value in (
             ("a positional request", args.request),
-            ("--resume", args.resume),
             ("--attach", getattr(args, "attach_job_id", None)),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
@@ -301,6 +307,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             max_workers=args.max_workers,
             hosts=args.hosts,
             budget_s=args.budget_s,
+            resume=args.resume,
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
         )
@@ -421,6 +428,58 @@ def _print_pdk(report: dict) -> None:
         )
 
 
+def _print_worker_pdk(report: dict) -> None:
+    """Surface the batch runner's PDK stamp comparison in text output (issue
+    #3946). Which library the simulator read used to be JSON-only
+    (`environment.remote.worker_environment`), so a run on a different PDK
+    revision than the one the client resolved read like a run on the client's.
+    No-op for a report without a worker capture (non-batch backends)."""
+    remote = (report.get("environment") or {}).get("remote") or {}
+    worker = remote.get("worker_environment")
+    if not isinstance(worker, dict):
+        return
+    comparison = worker.get("pdk_stamp_comparison")
+    if isinstance(comparison, dict) and comparison.get("status"):
+        line = f"pdk_stamp: {comparison['status']}"
+        if comparison.get("reason"):
+            line += f" ({comparison['reason']})"
+        if comparison.get("basis"):
+            line += f" [basis: {comparison['basis']}]"
+        print(line)
+        if comparison.get("warning"):
+            print(f"warning: {comparison['warning']}")
+    pdk = worker.get("pdk")
+    if isinstance(pdk, dict):
+        print(f"models_staged: {str(pdk.get('models_staged') is True).lower()}")
+
+
+def _print_commands_text(report: dict) -> None:
+    """Text courtesy rendering for a command-list report (issue #4443)."""
+    print(f"mode: {report['mode']}")
+    print(f"status: {report['status']}")
+    print(
+        f"units: {report['unit_count']}  passed: {report['passed']}  "
+        f"errored: {report['errored']}  timed_out: {report['timed_out']}"
+    )
+    print(f"outdir: {report['outdir']}")
+    remote = report["environment"].get("remote")
+    if remote:
+        print(
+            f"remote: {remote.get('provider', 'remote')} "
+            f"job {remote.get('job_id', '-')}"
+        )
+    for unit in report["units"]:
+        exit_desc = "-" if unit["exit_code"] is None else str(unit["exit_code"])
+        print(f"  {unit['id']} [{unit['status']}] exit={exit_desc}  {unit['stdout']}")
+        for diagnostic in unit["diagnostics"]:
+            print(
+                f"    diagnostic: {diagnostic['severity']} "
+                f"{diagnostic['code']} - {diagnostic['message']}"
+            )
+        if unit["missing_outputs"]:
+            print(f"    missing outputs: {', '.join(unit['missing_outputs'])}")
+
+
 def _print_deck_text(report: dict) -> None:
     """Text courtesy rendering for a deck-list report (issue #2804): one
     line per unit -- id, status, exit code, and where its streams landed --
@@ -438,6 +497,8 @@ def _print_deck_text(report: dict) -> None:
     env = report["environment"]
     print(f"engine: {env['engine']} {env['engine_version'] or '-'}")
     print(f"outdir: {report['outdir']}")
+    if env.get("resume"):
+        print(f"resume: skipped {env['resume']['resumed_units']} complete unit(s)")
     if env.get("remote"):
         remote = env["remote"]
         provider = remote.get("provider", "remote")
@@ -445,8 +506,9 @@ def _print_deck_text(report: dict) -> None:
         print(f"remote: {provider} {instance}")
     for unit in report["units"]:
         exit_desc = "-" if unit["exit_code"] is None else str(unit["exit_code"])
+        resumed_tag = " (resumed)" if unit.get("resumed") else ""
         print(
-            f"  {unit['id']} [{unit['status']}] exit={exit_desc} "
+            f"  {unit['id']} [{unit['status']}]{resumed_tag} exit={exit_desc} "
             f"duration={unit['duration_s']}s  {unit['stdout']}"
         )
         for diagnostic in unit["diagnostics"]:
@@ -485,6 +547,7 @@ def _print_text(report: dict) -> None:
     # the repo prints `<outside repo>`, never an absolute home path.
     print(f"models_lib: {render_path_field(env['models_lib'])}")
     _print_pdk(report)
+    _print_worker_pdk(report)
 
     budget = env.get("budget")
     if budget is not None:

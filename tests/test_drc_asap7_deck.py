@@ -40,7 +40,12 @@ from klayout_tools.decks.asap7_rules import (
     DECK_PATH,
     DENSITY_DISPOSITION,
     DRM_SOURCE,
+    ISOLATION_ONLY_RULES,
     NOT_IMPLEMENTED,
+    OPT_IN_DECK_VARS,
+    OPT_IN_RULE_IDS,
+    PAD_DISPOSITION,
+    PAD_LAYER,
     RULE_IDS,
     RULES,
     SHIPPED_CELL_DEVIATION_RECORDS,
@@ -54,6 +59,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DOCS = _REPO_ROOT / "docs" / "cli" / "drc.md"
 _ASAP7_ROOT = _REPO_ROOT / "pdks" / "lambdapdk" / "lambdapdk" / "asap7"
 _ASAP7_LYP = _ASAP7_ROOT / "base" / "setup" / "klayout" / "asap7.lyp"
+_ASAP7_LAYERMAP = _ASAP7_ROOT / "base" / "apr" / "asap7.layermap"
+_ASAP7_TECH_LEF = _ASAP7_ROOT / "base" / "apr" / "asap7_tech.lef"
 
 HAVE_KLAYOUT_BINARY = shutil.which("klayout") is not None
 _needs_klayout = pytest.mark.skipif(
@@ -97,7 +104,7 @@ _DECK_LAYERS = {
     *(f"v{i}" for i in range(1, 10)),
 }  # fmt: skip
 #: Read by number from DRM Table 2.3.1: the pinned asap7.lyp has no PAD entry.
-_DECK_LAYERS_NOT_IN_LYP = {"pad": (96, 0)}
+_DECK_LAYERS_NOT_IN_LYP = {"pad": (96, 0), "thickox": (111, 0)}
 _CASES = fx.all_cases()
 #: The pinned shipped-cell libraries: (lambdapdk library, GDS / cell suffix).
 _LIBRARIES = (
@@ -221,7 +228,9 @@ def test_docs_list_every_rule_and_gap():
         assert f"`{gap.id}`" in section, gap.id
     for cell in SHIPPED_CELL_DEVIATIONS:
         assert f"`{cell}`" in section, cell
-    assert f"--expect-rule-categories {len(RULE_IDS)}" in section
+    counts = re.findall(r"--expect-rule-categories (\d+)", section)
+    assert counts, "no --expect-rule-categories example in the ASAP7 section"
+    assert {int(n) for n in counts} == {len(RULE_IDS)}, counts
     assert f"--expect-rule-categories {len(RULE_IDS)}" in _deck_text()
 
 
@@ -263,6 +272,166 @@ def test_density_disposition_is_documented_without_thresholds():
     assert "lambdapdk v0.2.17" in density
     assert "states no density rule" in density
     assert "DENSITY_DISPOSITION" in density
+
+
+def test_pad_disposition_is_documented():
+    """PAD is read as DRM mask 96/0 and has no rule of its own (#3807): the
+    docs state the number, the pinned files that disagree, and the absence."""
+    assert PAD_LAYER == (96, 0)
+    assert "has no rule for the PAD layer itself" in PAD_DISPOSITION
+    assert "pad     = input(96, 0)" in _deck_text()
+    section = _docs_asap7_section()
+    start = section.index("**PAD (`96/0`)")
+    pad = section[start : section.index("\n### ", start)]
+    for text in (
+        "Table 2.3.1",
+        "asap7.layermap",
+        "asap7.lyp",
+        "asap7_tech.lef",
+        "95/251",
+        "no rule for the PAD layer itself",
+        "coverage.unchecked_rules",
+    ):
+        assert text in pad, text
+
+
+@_needs_asap7
+def test_pad_number_facts_in_pinned_pdk():
+    """The facts behind the PAD disposition, pinned so a lambdapdk bump that
+    changes them fails visibly (#3807)."""
+    layermap = _ASAP7_LAYERMAP.read_text()
+    pad_lines = [
+        ln.split()
+        for ln in layermap.splitlines()
+        if ln.split()[:2]
+        and ln.split()[1].startswith("Pad/")
+        and not ln.lstrip().startswith("#")
+    ]
+    assert {ln[1]: ln[2] for ln in pad_lines} == {
+        "Pad/SPNET": "95/251",
+        "Pad/PIN": "95/251",
+        "Pad/LEFPIN": "95/251",
+    }
+    assert any(
+        ln.split()[:2] == ["NAME", "V9"] or ln.split()[:1] == ["V9"]
+        for ln in layermap.splitlines()
+    )
+    assert re.search(r"^\s*#.*Pad/NET\s+95/1", layermap, re.M)
+    lyp_names = {
+        name.lower() for name, _, _ in _LYP_ENTRY_RE.findall(_ASAP7_LYP.read_text())
+    }
+    assert "pad" not in lyp_names and "v9" in lyp_names
+    lef = _ASAP7_TECH_LEF.read_text()
+    block = lef[lef.index("LAYER Pad") :]
+    block = block[: block.index("END Pad")]
+    assert "TYPE ROUTING" in block and "MINIMUMDENSITY 20" in block
+    assert not re.search(r"\b96\b", block)
+
+
+def _pad_layout(path: Path, *, with_pad: bool) -> Path:
+    layout = kdb.Layout()
+    layout.dbu = fx.DBU_UM
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(95, 0)).insert(kdb.Box(0, 0, 160, 160))
+    if with_pad:
+        top.shapes(layout.layer(*PAD_LAYER)).insert(kdb.Box(0, 0, 4000, 4000))
+    layout.write(str(path))
+    return path
+
+
+@_needs_klayout
+def test_pad_reported_unchecked_only_when_layer_is_present(tmp_path, capsys):
+    _, without = _run_cli(capsys, _pad_layout(tmp_path / "no_pad.gds", with_pad=False))
+    assert without["coverage"]["unchecked_rules"] == []
+    _, with_pad = _run_cli(capsys, _pad_layout(tmp_path / "pad.gds", with_pad=True))
+    assert with_pad["coverage"]["unchecked_rules"] == [
+        {"rule": "PAD.*", "layer": "96/0", "description": PAD_DISPOSITION}
+    ]
+
+
+@_needs_klayout
+def test_pad_unchecked_not_reported_for_a_different_deck(tmp_path, capsys):
+    deck = tmp_path / "other.drc"
+    deck.write_text(DECK_PATH.read_text() + "\n# edited\n")
+    gds = _pad_layout(tmp_path / "pad.gds", with_pad=True)
+    code = main(
+        [
+            "drc",
+            str(gds),
+            "--engine",
+            "klayout",
+            "--deck-file",
+            str(deck),
+            "--format",
+            "json",
+        ]
+    )
+    assert code in (0, 3)
+    assert json.loads(capsys.readouterr().out)["coverage"]["unchecked_rules"] == []
+
+
+def _isolation_layout(path: Path, layers: list[tuple[int, int]]) -> Path:
+    layout = kdb.Layout()
+    layout.dbu = fx.DBU_UM
+    top = layout.create_cell("TOP")
+    for layer in layers:
+        top.shapes(layout.layer(*layer)).insert(kdb.Box(0, 0, 160, 160))
+    layout.write(str(path))
+    return path
+
+
+@_needs_klayout
+def test_isolation_only_rules_follow_layers_present(tmp_path, capsys):
+    """#4029: the boundary-sensitive rules are named only for layers in the
+    stream, and never change the verdict."""
+    _, none = _run_cli(capsys, _pad_layout(tmp_path / "a.gds", with_pad=False))
+    assert none["coverage"]["isolation_only_rules"] == []
+    gds = _isolation_layout(tmp_path / "b.gds", [(1, 0), (13, 0)])
+    _, report = _run_cli(capsys, gds)
+    assert [
+        (r["rule"], r["layer"], r["reason"])
+        for r in report["coverage"]["isolation_only_rules"]
+    ] == [
+        ("PSELECT.W.1", "13/0", "isolation_only"),
+        ("WELL.W.1", "1/0", "isolation_only"),
+    ]
+
+
+@_needs_klayout
+def test_isolation_only_rules_empty_for_a_different_deck(tmp_path, capsys):
+    deck = tmp_path / "other.drc"
+    deck.write_text(DECK_PATH.read_text() + "\n# edited\n")
+    gds = _isolation_layout(tmp_path / "w.gds", [(1, 0)])
+    code = main(
+        [
+            "drc",
+            str(gds),
+            "--engine",
+            "klayout",
+            "--deck-file",
+            str(deck),
+            "--format",
+            "json",
+        ]
+    )
+    assert code in (0, 3)
+    out = json.loads(capsys.readouterr().out)
+    assert out["coverage"]["isolation_only_rules"] == []
+
+
+def test_isolation_only_rules_are_documented():
+    assert set(ISOLATION_ONLY_RULES) == {
+        "FIN.W.2",
+        "GATE.S.3",
+        "NSELECT.W.1",
+        "PSELECT.W.1",
+        "WELL.W.1",
+    }
+    for rule in ISOLATION_ONLY_RULES:
+        assert rule in RULE_IDS
+    docs = (Path(__file__).resolve().parents[1] / "docs/cli/drc.md").read_text()
+    assert "Checking abutment-designed cells" in docs
+    assert "isolation_only_rules" in docs
 
 
 def test_fixture_layers_match_deck():
@@ -375,6 +544,99 @@ def test_cli_envelope_clean_device(tmp_path, capsys):
     assert payload["status"] == "clean"
     assert payload["violation_count"] == 0
     assert payload["coverage_assertion"]["satisfied"] is True
+
+
+def _docs_not_implemented_ids() -> set[str]:
+    section = _docs_asap7_section()
+    start = section.index("### Not implemented")
+    end = section.find("\n### ", start + 1)
+    ids: set[str] = set()
+    for line in section[start : end if end != -1 else None].splitlines():
+        if line.startswith("| `"):
+            ids.update(re.findall(r"`([^`]+)`", line.split("|")[1]))
+    return ids
+
+
+@_needs_klayout
+def test_cli_envelope_unmodeled_rules_match_gaps_and_docs(tmp_path, capsys):
+    gds = tmp_path / "device.gds"
+    fx.write_shapes(str(gds), fx.device())
+    code, payload = _run_cli(
+        capsys, gds, "--expect-rule-categories", str(len(RULE_IDS))
+    )
+    assert code == 0
+    assert payload["status"] == "clean"
+    unmodeled = payload["coverage"]["unmodeled_rules"]
+    assert unmodeled == sorted(g.id for g in NOT_IMPLEMENTED)
+    # Both directions: the docs table and the envelope list the same ids.
+    assert set(unmodeled) == _docs_not_implemented_ids()
+
+
+@_needs_klayout
+@pytest.mark.parametrize(
+    "shapes",
+    [
+        pytest.param([fx.box("LIG", 0, 0, 100, 20)], id="lig-only"),
+        pytest.param(
+            [fx.box("LIG", 0, 0, 100, 20), fx.box("M1", 0, 0, 100, 36)],
+            id="lig-m1-tap-or-filler",
+        ),
+        pytest.param(
+            [fx.box("LIG", 0, 0, 100, 20), fx.box("GATE", 40, -10, 60, 30)],
+            id="lig-gate-no-active",
+        ),
+    ],
+)
+def test_cli_lig_without_lisd_returns_a_verdict(tmp_path, capsys, shapes):
+    """#3811: LIG with no LISD/SDT (a tap or filler cell) used to SIGSEGV
+    KLayout in the props_ne net separation; it must give a verdict, with the
+    full rule set still declared."""
+    gds = tmp_path / "lig_only.gds"
+    fx.write_shapes(str(gds), shapes)
+    code, payload = _run_cli(
+        capsys, gds, "--expect-rule-categories", str(len(RULE_IDS))
+    )
+    assert code in (0, 3), payload
+    assert payload["status"] in ("clean", "violations")
+    assert payload["coverage_assertion"]["satisfied"] is True
+
+
+@_needs_klayout
+@pytest.mark.parametrize(
+    "shapes",
+    [
+        pytest.param(
+            [fx.box("LIG", 0, 0, 18, 100), fx.box("LISD", 37, 0, 61, 100)],
+            id="lig-lisd-clear-of-the-14nm-rule",
+        ),
+        pytest.param(
+            [fx.box("LIG", 0, 0, 18, 100), fx.box("SDT", 37, 0, 61, 100)],
+            id="lig-sdt-clear-of-the-14nm-rule",
+        ),
+        pytest.param(
+            [
+                fx.box("LIG", 0, -8, 108, 8),
+                fx.box("LISD", 42, 27, 66, 108),
+                fx.box("SDT", 42, 27, 66, 108),
+            ],
+            id="tie-cell-lig-and-one-diffusion-row",
+        ),
+    ],
+)
+def test_cli_lig_near_unconnected_lisd_sdt_returns_a_verdict(tmp_path, capsys, shapes):
+    """#4340: LIG within the search distance of a LISD/SDT it does not touch,
+    with no pair actually closer than the rule, aborted the net separation
+    ("m_type == Polygon" in Region::separation_check) on a tie or tap cell."""
+    gds = tmp_path / "lig_near_sd.gds"
+    fx.write_shapes(str(gds), shapes)
+    code, payload = _run_cli(
+        capsys, gds, "--expect-rule-categories", str(len(RULE_IDS))
+    )
+    assert code in (0, 3), payload
+    assert payload["status"] in ("clean", "violations")
+    assert payload["coverage_assertion"]["satisfied"] is True
+    assert "LIG.LISD.S.6" not in {v["rule"] for v in payload["violations"]}
+    assert "LIG.SDT.S.8" not in {v["rule"] for v in payload["violations"]}
 
 
 @_needs_klayout
@@ -592,3 +854,73 @@ def test_lup_reference_predicate_on_written_layout(tmp_path, exp, metric):
     gds = tmp_path / f"{exp.name}.gds"
     fx.write_latchup_experiment(str(gds), exp)
     assert fx.latchup_reference(str(gds), metric) is exp.expect[metric]
+
+
+# --------------------------------------------------------------------------- #
+# Opt-in absolute grid-origin rules (#4082)
+# --------------------------------------------------------------------------- #
+
+
+def test_opt_in_grid_rules_are_declared_apart_from_the_default_ids():
+    assert not set(OPT_IN_RULE_IDS) & set(RULE_IDS)
+    text = _deck_text()
+    for rule_id in OPT_IN_RULE_IDS:
+        assert f'output("{rule_id}", "DRM Table' in text
+    for var in OPT_IN_DECK_VARS:
+        assert f"${var} = nil unless defined? ${var}" in text
+    # The default contract is untouched: nothing opt-in leaked into RULES.
+    assert len(RULE_IDS) == 267
+
+
+def test_docs_list_opt_in_grid_rules_and_vars():
+    section = _docs_asap7_section()
+    for name in (*OPT_IN_RULE_IDS, *OPT_IN_DECK_VARS):
+        assert f"`{name}`" in section, name
+
+
+def _grid_run(tmp_path, shapes, **deck_vars):
+    gds = tmp_path / "grid.gds"
+    fx.write_shapes(str(gds), shapes)
+    report = run_drc_klayout_engine(
+        str(gds), str(DECK_PATH), deck_vars={k: str(v) for k, v in deck_vars.items()}
+    )
+    return {v["rule"] for v in report["violations"]}
+
+
+@_needs_klayout
+def test_grid_rules_do_not_run_without_the_vars(tmp_path):
+    assert _grid_run(tmp_path, fx._move(fx.device(), dx=1, dy=1)) == set()
+
+
+@_needs_klayout
+@pytest.mark.parametrize(
+    ("dx", "dy", "expect"),
+    [
+        (0, 0, set()),
+        (1, 0, {"GATE.GRID.1"}),
+        (0, 1, {"FIN.GRID.1"}),
+        (1, 1, {"GATE.GRID.1", "FIN.GRID.1"}),
+        (54, 27, set()),
+    ],
+)
+def test_grid_rules_flag_a_shifted_cell(tmp_path, dx, dy, expect):
+    # device() draws gates at x 17 + 54k and fins at y 10 + 27k.
+    shapes = fx._move(fx.device(), dx=dx, dy=dy)
+    got = _grid_run(tmp_path, shapes, gate_x_origin_nm=17, fin_y_origin_nm=10)
+    assert got & {"GATE.GRID.1", "FIN.GRID.1"} == expect
+
+
+@_needs_klayout
+def test_grid_rules_honour_a_non_zero_origin(tmp_path):
+    shapes = fx.device()
+    on = _grid_run(tmp_path, shapes, gate_x_origin_nm=17, fin_y_origin_nm=10)
+    off = _grid_run(tmp_path, shapes, gate_x_origin_nm=0, fin_y_origin_nm=0)
+    assert not on & set(OPT_IN_RULE_IDS)
+    assert set(OPT_IN_RULE_IDS) <= off
+
+
+@_needs_klayout
+def test_grid_rules_each_var_enables_only_its_rule(tmp_path):
+    shapes = fx._move(fx.device(), dx=1, dy=1)
+    assert _grid_run(tmp_path, shapes, gate_x_origin_nm=17) == {"GATE.GRID.1"}
+    assert _grid_run(tmp_path, shapes, fin_y_origin_nm=10) == {"FIN.GRID.1"}

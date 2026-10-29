@@ -30,6 +30,7 @@ import pytest
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import signoff as signoff_module
 from klayout_tools import signoff_attest as attest_module
+from klayout_tools._provenance import layout_geometry_digest
 from klayout_tools._report_verify import strip_path_patterns
 from klayout_tools.cli import main
 from klayout_tools.cli.output import render_rerun_drift
@@ -1609,6 +1610,13 @@ def _full_t1_evidence(tmp_path, *, kind: str = "analog") -> dict:
         evidence[str(item_id)] = _attested_entry(tmp_path, item_id, prefix=kind)
     evidence["4"] = _write(tmp_path, f"{kind}-lvs.json", LVS_MATCH_ENVELOPE)
     evidence["5"] = _write(tmp_path, f"{kind}-sim.json", SIM_PASS_ENVELOPE)
+    if kind == "digital":
+        # Issue #4314: a `sim`-only digital item 5 needs a `timing_margin`
+        # spec row (manifest side); the RTL-flow pair needs nothing extra.
+        evidence["5"] = [
+            _write(tmp_path, "digital-sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE),
+            _write(tmp_path, "digital-fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE),
+        ]
     evidence["6"] = _write(tmp_path, f"{kind}-yield.json", YIELD_PASS_ENVELOPE)
     evidence["7"] = _write(tmp_path, f"{kind}-pex.json", PEX_PASS_ENVELOPE)
     evidence["8"] = _write(
@@ -2355,6 +2363,78 @@ def test_sim_empty_corner_matrix_never_counts_as_a_passing_check(tmp_path):
     assert check["detail"]["nothing_checked_reasons"] == ["empty_corner_matrix"]
 
 
+def _sim_with_counts(declared, limited, **extra):
+    coverage = {
+        "corners_simulated": 1,
+        "measurements_declared": declared,
+        "measurements_with_limits": limited,
+        "unrecognized_limit_keys": [],
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    }
+    return {**SIM_PASS_ENVELOPE, "coverage": coverage, **extra}
+
+
+def test_sim_with_no_limited_measurement_never_counts_as_a_passing_check(tmp_path):
+    """Issue #3769: an all-observation sim envelope applied no spec bound."""
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 0))
+
+    check = build_signoff([path])["checks"][0]
+
+    assert check["status"] == "pass"
+    assert check["passed"] is False
+    assert check["detail"]["no_limits_checked"] == {
+        "measurements_declared": 3,
+        "measurements_with_limits": 0,
+    }
+
+
+def test_sim_with_one_limited_measurement_still_passes(tmp_path):
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 1))
+
+    check = build_signoff([path])["checks"][0]
+
+    assert check["passed"] is True
+    assert "no_limits_checked" not in check["detail"]
+
+
+def test_tier_report_refuses_a_no_limits_item_5_citation(tmp_path):
+    """Issue #3769: item 5 cannot cite an all-observation sim envelope. It
+    renders `unmet` with the dedicated reason, and a limited one still meets."""
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 0))
+
+    result = build_tier_report(_manifest(evidence={"5": path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "no_limits_checked"
+    assert item_5["citation"] is None
+
+
+def test_tier_report_still_meets_item_5_for_a_limited_sim(tmp_path):
+    path = _write(tmp_path, "sim.json", _sim_with_counts(3, 1))
+
+    result = build_tier_report(_manifest(evidence={"5": path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "met"
+
+
+def test_sim_without_coverage_block_grades_as_before(tmp_path):
+    envelope = {k: v for k, v in SIM_PASS_ENVELOPE.items() if k != "coverage"}
+    path = _write(tmp_path, "sim.json", envelope)
+
+    assert build_signoff([path])["checks"][0]["passed"] is True
+
+
+def test_sim_capture_only_with_no_measurements_declared_not_newly_refused(tmp_path):
+    path = _write(tmp_path, "sim.json", _sim_with_counts(0, 0))
+
+    check = build_signoff([path])["checks"][0]
+
+    assert "no_limits_checked" not in check["detail"]
+
+
 def test_pex_empty_delta_never_counts_as_a_passing_check(tmp_path):
     path = _write(tmp_path, "pex.json", PEX_NOTHING_CHECKED_ENVELOPE)
 
@@ -2652,6 +2732,44 @@ def test_partial_status_never_aggregates_as_a_passing_check(tmp_path):
         "skipped": [{"id": "met5.width.1", "reason": "absent_input_layer"}],
     }
     assert result["status"] == "fail"
+
+
+def _partial_envelope_with_skipped(count):
+    skipped = [
+        {
+            "id": f"antenna.g{i:05d}.{'met1' if i % 2 else 'met2'}",
+            "reason": "no_antenna_table",
+        }
+        for i in range(count)
+    ]
+    return {
+        **DRC_CLEAN_ENVELOPE,
+        "status": "clean_partial",
+        "coverage": build_check_coverage(checked=["poly.width.1"], skipped=skipped),
+    }
+
+
+@pytest.mark.parametrize("count", [20, 21, 1850])
+def test_partial_coverage_qualification_is_bounded(tmp_path, count):
+    """Issue #4286: the quoted ``skipped`` list is capped; the full list stays
+    in the cited envelope. At or below the cap the shape is unchanged."""
+    cap = signoff_module._PARTIAL_COVERAGE_SKIPPED_CAP
+    envelope = _partial_envelope_with_skipped(count)
+    qualification = signoff_module._partial_coverage_disclosure(envelope)
+
+    assert qualification["reason"] == "partial_coverage"
+    assert qualification["skipped"] == envelope["coverage"]["skipped"][:cap]
+    if count <= cap:
+        assert set(qualification) == {"reason", "skipped"}
+        return
+    assert qualification["truncated"] is True
+    assert qualification["skipped_total"] == count
+    assert qualification["skipped_by_reason"] == {"no_antenna_table": count}
+    assert len(json.dumps(qualification)) < 4000
+
+    path = _write(tmp_path, "drc.json", envelope)
+    check = build_signoff([path])["checks"][0]
+    assert check["detail"]["coverage_qualification"] == qualification
 
 
 def test_power_em_pass_partial_is_refused_as_partial_not_as_a_failure(tmp_path):
@@ -3786,6 +3904,58 @@ def test_single_input_never_flags_provenance(tmp_path):
     assert result["provenance_consistency"]["ok"] is True
 
 
+def _drc_with_klt_version(version):
+    envelope = json.loads(json.dumps(DRC_CLEAN_ENVELOPE))
+    if version is None:
+        del envelope["provenance"]["klt_version"]
+    else:
+        envelope["provenance"]["klt_version"] = version
+    return envelope
+
+
+def test_build_drift_current_when_versions_match(tmp_path, monkeypatch):
+    monkeypatch.setattr(signoff_module, "build_version", lambda: "0.5.0+gabc")
+    path = _write(tmp_path, "drc.json", _drc_with_klt_version("0.5.0+gabc"))
+
+    drift = build_signoff([path])["checks"][0]["build_drift"]
+
+    assert drift == {
+        "state": "current",
+        "cited_klt_version": "0.5.0+gabc",
+        "running_klt_version": "0.5.0+gabc",
+    }
+
+
+def test_build_drift_stale_is_reported_but_does_not_demote_status(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(signoff_module, "build_version", lambda: "0.5.1+gdef")
+    path = _write(tmp_path, "drc.json", _drc_with_klt_version("0.5.0+gabc"))
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["build_drift"]["state"] == "stale"
+    assert result["checks"][0]["passed"] is True
+    assert result["status"] == "pass"
+
+
+def test_build_drift_unverifiable_without_klt_version(tmp_path, monkeypatch):
+    monkeypatch.setattr(signoff_module, "build_version", lambda: "0.5.1+gdef")
+    path = _write(tmp_path, "drc.json", _drc_with_klt_version(None))
+
+    drift = build_signoff([path])["checks"][0]["build_drift"]
+
+    assert drift["state"] == "unverifiable"
+    assert drift["cited_klt_version"] is None
+
+
+def test_build_drift_unverifiable_for_unknown_build(tmp_path, monkeypatch):
+    monkeypatch.setattr(signoff_module, "build_version", lambda: "0.5.1.dev0+unknown")
+    path = _write(tmp_path, "drc.json", _drc_with_klt_version("0.5.0+gabc"))
+
+    assert build_signoff([path])["checks"][0]["build_drift"]["state"] == "unverifiable"
+
+
 # --------------------------------------------------------------------------- #
 # Malformed / unrecognized envelopes
 # --------------------------------------------------------------------------- #
@@ -4010,7 +4180,11 @@ def test_every_recognized_kind_declares_a_typed_shape():
         "place-and-route",
         # Issue #2839: T1 item 11's port-accessibility evidence.
         "socket-check",
+        # Issue #4189: T1 item 2's seam/tiling evidence.
+        "seam-check",
         "lef-abstract",
+        # Issue #4015: T1 item 1's netlist-evidence half.
+        "synthesize",
         "generic",
         "error",
     }
@@ -4816,6 +4990,64 @@ def test_yield_negative_control_not_detected_renders_unmet(tmp_path):
     campaign = item_6["detail"]["yield_campaign"]
     assert campaign["negative_control"] == "not_detected"
     assert campaign["undetected_negative_controls"] == ["vref"]
+
+
+def _na_measurement(name, reason="one-sided defect can only improve it"):
+    m = _yield_measurement(name=name, negative_control="detected")
+    m["negative_control"] = {"verdict": "not_applicable", "reason": reason}
+    return m
+
+
+def _item_6(tmp_path, *measurements):
+    yield_path = _write(tmp_path, "yield.json", _yield_envelope(*measurements))
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+    return next(item for item in result["items"] if item["id"] == 6)
+
+
+def test_yield_not_applicable_control_is_disclosed_not_refused(tmp_path):
+    """Issue #4523: one detected control plus a declared N/A measurement."""
+    item = _item_6(
+        tmp_path,
+        _yield_measurement(name="vos", negative_control="detected"),
+        _na_measurement("psrr"),
+    )
+    assert item["reason"] != "negative_control_not_detected"
+    campaign = item["citation"]["yield_campaign"]
+    assert campaign["negative_control"] == "detected"
+    assert campaign["undetected_negative_controls"] == []
+    assert campaign["measurements_without_negative_control"] == []
+    assert campaign["not_applicable_negative_controls"] == [
+        {"name": "psrr", "reason": "one-sided defect can only improve it"}
+    ]
+
+
+def test_yield_all_not_applicable_controls_roll_up_to_not_declared(tmp_path):
+    item = _item_6(tmp_path, _na_measurement("a"), _na_measurement("b"))
+    campaign = item["citation"]["yield_campaign"]
+    assert campaign["negative_control"] == "not_declared"
+
+
+def test_yield_not_applicable_mixed_with_not_detected_names_only_the_latter(tmp_path):
+    item = _item_6(
+        tmp_path,
+        _yield_measurement(name="vos", negative_control="not_detected"),
+        _na_measurement("psrr"),
+    )
+    assert item["status"] == "unmet"
+    assert item["reason"] == "negative_control_not_detected"
+    campaign = item["detail"]["yield_campaign"]
+    assert campaign["undetected_negative_controls"] == ["vos"]
+    assert [e["name"] for e in campaign["not_applicable_negative_controls"]] == ["psrr"]
+
+
+def test_yield_not_applicable_without_a_reason_fails_closed(tmp_path):
+    item = _item_6(
+        tmp_path,
+        _yield_measurement(name="vos", negative_control="detected"),
+        _na_measurement("psrr", reason="  "),
+    )
+    assert item["reason"] == "negative_control_not_detected"
+    assert item["detail"]["yield_campaign"]["undetected_negative_controls"] == ["psrr"]
 
 
 def test_yield_undersized_sample_outranks_an_undetected_negative_control(tmp_path):
@@ -5778,28 +6010,83 @@ def test_genuine_evidence_for_items_5_6_and_8_still_renders_met(tmp_path):
     assert by_id[8]["citation"]["kind"] == "generic"
 
 
-@pytest.mark.parametrize(
-    "envelope,expected_kind",
-    [
-        (STA_MULTI_CORNER_CLEAN_ENVELOPE, "sta"),
-        (FUNCTIONAL_VERIFICATION_PASS_ENVELOPE, "functional-verification"),
-        (SIM_PASS_ENVELOPE, "sim"),
-    ],
-)
-def test_digital_item_5_still_accepts_every_kind_the_doc_names(
-    tmp_path, envelope, expected_kind
-):
-    """A digital partition's item 5 accepts all three artifacts the doc
-    names for it: `klt sta` and `klt functional-verification` for the RTL
-    flow (#1959), and `klt sim` for the full-custom sub-case, which
-    satisfies item 5 "instead by PVT corner-matrix SPICE simulation"."""
-    path = _write(tmp_path, "evidence.json", envelope)
+def test_digital_item_5_sim_alone_satisfies_the_full_custom_sub_case(tmp_path):
+    """`klt sim` alone is exempt from the both-kinds rule (#3741) but, since
+    #4314, a margin-less envelope grades `timing_margin_missing`; the `met`
+    path is covered in `test_signoff_timing_margin.py`."""
+    path = _write(tmp_path, "evidence.json", SIM_PASS_ENVELOPE)
 
     result = build_tier_report(_manifest(kind="digital", evidence={"5": path}))
 
     item_5 = next(i for i in result["items"] if i["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "timing_margin_missing"
+    assert "missing_kinds" not in item_5["detail"]
+
+
+def _digital_item_5(tmp_path, entry):
+    result = build_tier_report(_manifest(kind="digital", evidence={"5.digital": entry}))
+    return next(i for i in result["items"] if i["id"] == 5)
+
+
+def _sta_fv_paths(tmp_path):
+    return (
+        _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE),
+        _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE),
+    )
+
+
+def test_digital_item_5_sta_and_fv_together_grade_met(tmp_path):
+    """Issue #3741: the RTL-flow route is STA *plus* a functional suite."""
+    sta_path, fv_path = _sta_fv_paths(tmp_path)
+
+    item_5 = _digital_item_5(tmp_path, [sta_path, fv_path])
+
     assert item_5["status"] == "met"
-    assert item_5["citation"]["kind"] == expected_kind
+    assert [c["status"] for c in item_5["citations_graded"]] == ["met", "met"]
+    assert len(item_5["citations_graded"]) == 2
+
+
+@pytest.mark.parametrize("list_form", [False, True], ids=["single", "list"])
+@pytest.mark.parametrize(
+    "which,missing",
+    [("sta", ["functional-verification"]), ("fv", ["sta"])],
+)
+def test_digital_item_5_one_rtl_kind_alone_is_partial_coverage(
+    tmp_path, which, missing, list_form
+):
+    sta_path, fv_path = _sta_fv_paths(tmp_path)
+    path = sta_path if which == "sta" else fv_path
+
+    item_5 = _digital_item_5(tmp_path, [path] if list_form else path)
+
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "partial_coverage"
+    assert item_5["detail"]["missing_kinds"] == missing
+    assert item_5["citation"] is None
+
+
+def test_digital_item_5_failing_member_reports_its_own_reason_first(tmp_path):
+    _, fv_path = _sta_fv_paths(tmp_path)
+    bad_sta = _write(
+        tmp_path, "bad-sta.json", STA_MULTI_CORNER_SETUP_VIOLATION_ENVELOPE
+    )
+
+    item_5 = _digital_item_5(tmp_path, [bad_sta, fv_path])
+
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "check_failed"
+    assert "missing_kinds" not in item_5["detail"]
+
+
+def test_digital_item_5_sim_alongside_one_rtl_kind_still_needs_the_pair(tmp_path):
+    sta_path, _ = _sta_fv_paths(tmp_path)
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    item_5 = _digital_item_5(tmp_path, [sta_path, sim_path])
+
+    assert item_5["reason"] == "partial_coverage"
+    assert item_5["detail"]["missing_kinds"] == ["functional-verification"]
 
 
 def test_analog_item_5_rejects_the_digital_column_artifacts(tmp_path):
@@ -5824,11 +6111,12 @@ def test_mixed_signal_partitions_apply_their_own_item_5_rule(tmp_path):
     key."""
     sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
     sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
 
     result = build_tier_report(
         _manifest(
             kind="mixed-signal",
-            evidence={"5.analog": sim_path, "5.digital": sta_path},
+            evidence={"5.analog": sim_path, "5.digital": [sta_path, fv_path]},
         )
     )
 
@@ -5931,6 +6219,9 @@ def test_generic_evidence_satisfies_item_8(tmp_path):
         # nothing to verify against an artifact either.
         "input_verified": None,
         "exit_status": 0,
+        # Issue #4311: a bare (hand-written) item-8 envelope discloses that
+        # no tool produced it.
+        "attestation": {"tool_produced": False},
     }
 
 
@@ -6183,6 +6474,7 @@ def test_unpinned_manifest_entry_renders_unanchored(tmp_path):
 
 
 def test_pin_mismatch_renders_stale(tmp_path):
+    (tmp_path / ".git").mkdir(exist_ok=True)  # a repo root for the geometry digest
     envelope_path, _ = _anchored_generic(tmp_path, 2)
 
     result = build_tier_report(
@@ -6344,6 +6636,252 @@ def test_anchored_binding_is_shown_in_text_output(tmp_path, capsys):
     assert exit_code in (0, 3)
     assert "bound: T1 item #9 -> testbenches.txt" in out
     assert "topic: not bound" in out
+
+
+# --------------------------------------------------------------------------- #
+# Regeneration claims on items 1 and 2 (issue #2887)
+# --------------------------------------------------------------------------- #
+
+_GENERATOR = "klt netlist schematic/ota.sch -o netlist/ota.spice"
+
+
+def _with_regeneration(envelope_path: str, block: object) -> str:
+    """Rewrite an anchored envelope with ``provenance.regeneration = block``."""
+    envelope = json.loads(Path(envelope_path).read_text())
+    envelope["provenance"]["regeneration"] = block
+    Path(envelope_path).write_text(json.dumps(envelope))
+    return envelope_path
+
+
+def _anchored_manifest(item_id: int, envelope_path: str, digest: str) -> dict:
+    return _manifest(
+        evidence={str(item_id): {"file": envelope_path, "content_hash": digest}}
+    )
+
+
+@pytest.mark.parametrize("item_id", [1, 2])
+def test_matching_regeneration_claim_is_met_and_disclosed(tmp_path, item_id):
+    envelope_path, digest = _anchored_generic(tmp_path, item_id)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+
+    item = _item(
+        build_tier_report(_anchored_manifest(item_id, envelope_path, digest)), item_id
+    )
+
+    assert item["status"] == "met"
+    binding = item["citation"]["artifact_binding"]
+    assert binding["regeneration"] == {
+        "generator": _GENERATOR,
+        "regenerated_hash": digest,
+        "executed_by_klt": False,
+    }
+    assert binding["content_hash"] == digest
+
+
+@pytest.mark.parametrize("item_id", [1, 2])
+def test_mismatched_regeneration_claim_renders_stale_artifact(tmp_path, item_id):
+    """The attested bytes are intact (the pin and re-hash agree), but the
+    attester's own regeneration produced different bytes: the committed
+    artifact is out of date with its generator."""
+    envelope_path, digest = _anchored_generic(tmp_path, item_id)
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": "sha256:" + "0" * 64},
+    )
+
+    item = _item(
+        build_tier_report(_anchored_manifest(item_id, envelope_path, digest)), item_id
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_artifact"
+    assert item["citation"] is None
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "make netlist",
+        [],
+        {},
+        {"regenerated_hash": "sha256:" + "0" * 64},
+        {"generator": "", "regenerated_hash": "sha256:" + "0" * 64},
+        {"generator": 7, "regenerated_hash": "sha256:" + "0" * 64},
+        {"generator": _GENERATOR},
+        {"generator": _GENERATOR, "regenerated_hash": 12},
+        {"generator": _GENERATOR, "regenerated_hash": "sha256:3f1c..."},
+        {"generator": _GENERATOR, "regenerated_hash": "0" * 64},
+    ],
+    ids=[
+        "string-block",
+        "list-block",
+        "empty-block",
+        "no-generator",
+        "empty-generator",
+        "int-generator",
+        "no-hash",
+        "int-hash",
+        "placeholder-hash",
+        "unprefixed-hash",
+    ],
+)
+def test_malformed_regeneration_claim_renders_unanchored(tmp_path, block):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(envelope_path, block)
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unanchored_evidence"
+
+
+@pytest.mark.parametrize("block", ["absent", None])
+def test_absent_regeneration_claim_is_unchanged(tmp_path, block):
+    envelope_path, digest = _anchored_generic(tmp_path, 2)
+    if block != "absent":
+        _with_regeneration(envelope_path, block)
+
+    item = _item(build_tier_report(_anchored_manifest(2, envelope_path, digest)), 2)
+
+    assert item["status"] == "met"
+    assert "regeneration" not in item["citation"]["artifact_binding"]
+
+
+@pytest.mark.parametrize("item_id", [9, 10])
+def test_regeneration_claim_is_not_graded_for_items_9_and_10(tmp_path, item_id):
+    """Items 9/10 bind inventories with no generator: the block is ignored,
+    neither refusing the row nor appearing in the disclosure."""
+    envelope_path, digest = _anchored_generic(tmp_path, item_id)
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": "sha256:" + "0" * 64},
+    )
+
+    item = _item(
+        build_tier_report(_anchored_manifest(item_id, envelope_path, digest)), item_id
+    )
+
+    assert item["status"] == "met"
+    assert "regeneration" not in item["citation"]["artifact_binding"]
+
+
+def test_regenerated_item_1_attestation_cited_elsewhere_is_unchanged(tmp_path):
+    """A regeneration claim unlocks nothing: cited for item 3 it is still
+    `wrong_kind`, for item 9 still `wrong_item`."""
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+    evidence = {
+        key: {"file": envelope_path, "content_hash": digest} for key in ("3", "9")
+    }
+
+    result = build_tier_report(_manifest(evidence=evidence))
+
+    assert _item(result, 3)["reason"] == "wrong_kind"
+    assert _item(result, 9)["reason"] == "wrong_item"
+
+
+def test_bound_file_drift_wins_over_a_matching_regeneration_claim(tmp_path):
+    """Editing the committed artifact after attesting is `stale_evidence`
+    (#2718), checked before the regeneration claim."""
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+    (tmp_path / "design-sources.txt").write_text("schematic/other.sch\n")
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["reason"] == "stale_evidence"
+
+
+def test_regeneration_claim_on_a_repo_scoped_path(tmp_path):
+    """The `{path, scope: "repo"}` input form and `repo_root` grade the claim
+    exactly like a plain path; the disclosure echoes the path object."""
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+
+    item = _item(
+        build_tier_report(
+            _anchored_manifest(1, envelope_path, digest), repo_root=str(tmp_path)
+        ),
+        1,
+    )
+
+    assert item["status"] == "met"
+    binding = item["citation"]["artifact_binding"]
+    assert binding["path"] == {"path": "audited/design-sources.txt", "scope": "repo"}
+    assert binding["regeneration"]["executed_by_klt"] is False
+
+
+def test_check_reports_a_changed_regeneration_claim_as_drift(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+    manifest = _anchored_manifest(1, envelope_path, digest)
+    committed_path = _write(tmp_path, "committed.json", build_tier_report(manifest))
+    assert check_tier_report(committed_path, manifest)["status"] == "match"
+
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": "sha256:" + "1" * 64},
+    )
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "drifted"
+    assert any(entry["field"].endswith("reason") for entry in result["drift"])
+
+
+def test_generator_is_never_executed(tmp_path, monkeypatch):
+    """The generator string is echoed, never run: no subprocess is spawned
+    for a file-backed attestation that carries one."""
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": "touch PWNED", "regenerated_hash": digest}
+    )
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("klt signoff must not execute the generator")
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", refuse)
+    monkeypatch.setattr(signoff_module.subprocess, "Popen", refuse)
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["status"] == "met"
+    assert not (tmp_path / "PWNED").exists()
+
+
+def test_regeneration_line_is_shown_in_text_output(tmp_path, capsys):
+    claimed_path, claimed_digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        claimed_path, {"generator": _GENERATOR, "regenerated_hash": claimed_digest}
+    )
+    plain_path, plain_digest = _anchored_generic(tmp_path, 2)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(
+            evidence={
+                "1": {"file": claimed_path, "content_hash": claimed_digest},
+                "2": {"file": plain_path, "content_hash": plain_digest},
+            }
+        ),
+    )
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert exit_code in (0, 3)
+    assert f"regeneration: {claimed_digest} matches the bound artifact" in out
+    assert "not run by klt" in out
+    assert "regeneration: not claimed" in out
 
 
 # --------------------------------------------------------------------------- #
@@ -6614,6 +7152,20 @@ def test_unprovenanced_generic_evidence_cannot_satisfy_a_pinned_content_hash(tmp
     assert item_8["status"] == "unmet"
     assert item_8["reason"] == "unverifiable_provenance"
     assert item_8["citation"] is None
+    assert item_8["detail"]["content_hash_pin"] == "unverifiable"
+    assert "generic" in item_8["detail"]["content_hash_pin_note"]
+
+
+def test_unpinned_unprovenanced_evidence_carries_no_pin_detail(tmp_path):
+    """Issue #3747: no pin in the manifest -> no `content_hash_pin` disclosure."""
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"5": {"file": fv_path}})
+    )
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert "content_hash_pin" not in (item_5.get("detail") or {})
 
 
 def test_unprovenanced_functional_verification_cannot_satisfy_pinned_content_hash(
@@ -6637,6 +7189,11 @@ def test_unprovenanced_functional_verification_cannot_satisfy_pinned_content_has
     assert item_5["status"] == "unmet"
     assert item_5["reason"] == "unverifiable_provenance"
     assert item_5["citation"] is None
+    # Issue #3747: the pin itself is disclosed as the cause.
+    assert item_5["detail"]["content_hash_pin"] == "unverifiable"
+    note = item_5["detail"]["content_hash_pin_note"]
+    assert "functional-verification" in note
+    assert "provenance.input.content_hash" in note
 
 
 # --------------------------------------------------------------------------- #
@@ -8112,8 +8669,14 @@ def test_describe_grader_shape():
         "opt_in_evidence_kinds",
         "opt_in_kinds_by_item",
         "not_applicable_items",
+        "pinned_runsets",
     }
     assert result["not_applicable_items"] == {"6": ["digital"]}
+    assert {p["pdk"] for p in result["pinned_runsets"].values()} == {
+        "ihp-sg13g2",
+        "ihp-sg13cmos5l",
+        "gf180mcu",
+    }
     assert result["schema_version"] == signoff_module.DESCRIBE_GRADER_SCHEMA_VERSION
     assert result["grading_ruleset_id"].startswith("sha256:")
     assert result["source_doc"] == "docs/design-evidence-tiers.md"
@@ -9433,6 +9996,25 @@ def test_sdf_annotated_functional_verification_is_marked_in_detail(tmp_path):
     assert result["checks"][0]["detail"]["sdf_corner"] == "typ"
 
 
+def test_portable_place_and_route_envelope_is_accepted(tmp_path):
+    """A `portable_paths: true` response (issue #3820) carries `{path, scope}`
+    objects where the default one has strings; it must still classify as
+    `place-and-route` and pass."""
+    envelope = {
+        **PLACE_AND_ROUTE_ENVELOPE,
+        "def_path": {"path": "out/gcd.def", "scope": "repo"},
+        "gds_path": {"path": None, "scope": "external"},
+        "verilog_path": {"path": "out/gcd.v", "scope": "repo"},
+    }
+    pnr_path = _write(tmp_path, "pnr.json", envelope)
+
+    result = build_signoff([pnr_path])
+
+    assert result["checks"][0]["kind"] == "place-and-route"
+    assert result["checks"][0]["passed"] is True
+    assert result["checks"][0]["detail"]["power_pdn"] is True
+
+
 def test_place_and_route_envelope_is_never_classified_as_sta(tmp_path):
     """`klt place-and-route`'s response overlaps `klt sta`'s timing fields
     (`worst_slack_ns`/`timing_status`/`corners`) but is a different verb with
@@ -9568,8 +10150,11 @@ def test_sta_evidence_satisfies_item_5_for_a_digital_manifest(tmp_path):
     multi-corner `klt sta` run, not a `klt sim` corner sweep it has no reason
     to produce."""
     sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
 
-    result = build_tier_report(_manifest(kind="digital", evidence={"5": sta_path}))
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"5": [sta_path, fv_path]})
+    )
 
     item_5 = next(item for item in result["items"] if item["id"] == 5)
     assert item_5["status"] == "met"
@@ -9582,7 +10167,11 @@ def test_sta_evidence_satisfies_item_5_for_a_digital_manifest(tmp_path):
 def test_functional_verification_evidence_satisfies_item_5_for_digital(tmp_path):
     fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
 
-    result = build_tier_report(_manifest(kind="digital", evidence={"5": fv_path}))
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"5": [fv_path, sta_path]})
+    )
 
     item_5 = next(item for item in result["items"] if item["id"] == 5)
     assert item_5["status"] == "met"
@@ -9693,8 +10282,8 @@ def test_item_5_accepts_the_sim_corner_matrix_for_both_block_kinds(tmp_path):
         _manifest(kind="digital", evidence={"5": sim_path})
     )
     item_5 = next(i for i in full_custom_digital["items"] if i["id"] == 5)
-    assert item_5["status"] == "met"
-    assert item_5["citation"]["kind"] == "sim"
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "timing_margin_missing"
 
 
 def test_mixed_signal_partitions_apply_their_own_item_7_rule(tmp_path):
@@ -9827,7 +10416,7 @@ def test_generic_citation_still_rejected_on_items_5_and_7_for_digital(tmp_path):
         assert item["citation"] is None
 
 
-def test_command_backed_sta_evidence_satisfies_item_5(monkeypatch):
+def test_command_backed_sta_evidence_satisfies_item_5(monkeypatch, tmp_path):
     """The new kinds work through the command-backed evidence path exactly
     like the file-backed one -- no separate wiring."""
 
@@ -9838,10 +10427,12 @@ def test_command_backed_sta_evidence_satisfies_item_5(monkeypatch):
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+
     result = build_tier_report(
         _manifest(
             kind="digital",
-            evidence={"5": {"command": ["klt", "sta", "request.json"]}},
+            evidence={"5": [{"command": ["klt", "sta", "request.json"]}, fv_path]},
         )
     )
 
@@ -9872,7 +10463,7 @@ def test_realistic_digital_envelope_set_reaches_eight_of_ten_items(tmp_path):
                 "2": drc_path,
                 "3": drc_path,
                 "4": lvs_path,
-                "5": sta_path,
+                "5": [sta_path, fv_sdf_path],
                 "7": fv_sdf_path,
                 "8": generic_path,
                 "9": _attested_entry(tmp_path, 9),
@@ -9905,7 +10496,7 @@ def test_fleet_rollup_blocking_item_reflects_the_new_digital_kinds(tmp_path):
                 {
                     "block": "digital-canary",
                     "kind": "digital",
-                    "evidence": {"5": sta_path, "7": fv_sdf_path},
+                    "evidence": {"5": [sta_path, fv_sdf_path], "7": fv_sdf_path},
                 }
             ]
         }
@@ -10511,7 +11102,57 @@ def test_item_11_digital_unmet_when_no_tapcell_master_was_placed(tmp_path):
         )
     )
 
+    assert _item_11(result)["reason"] == "no_tapcell_master"
+
+
+def test_item_11_digital_unmet_no_pdn_wins_over_tapless(tmp_path):
+    par = {
+        **PLACE_AND_ROUTE_ENVELOPE,
+        "power": {
+            **PLACE_AND_ROUTE_ENVELOPE["power"],
+            "pdn": False,
+            "tapcell_master": None,
+            "tapless": True,
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", par_envelope=par
+                )
+            },
+        )
+    )
+
     assert _item_11(result)["reason"] == "no_pdn"
+
+
+def test_item_11_digital_met_for_tapless_library(tmp_path):
+    par = {
+        **PLACE_AND_ROUTE_ENVELOPE,
+        "power": {
+            **PLACE_AND_ROUTE_ENVELOPE["power"],
+            "tapcell_master": None,
+            "tapless": True,
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", par_envelope=par
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["tapless"] is True
+    assert item["citation"]["power_delivery"]["tapcell_master"] is None
 
 
 @pytest.mark.parametrize(
@@ -10977,6 +11618,40 @@ def test_item_11_is_not_blocked_by_a_non_supply_erc_finding(tmp_path, envelope):
     item = _item_11(result)
     assert item["status"] == "met"
     assert item["citation"]["check_status"] == "violations"
+
+
+def test_item_11_grade_is_unchanged_by_the_substrate_continuity_disclosure(tmp_path):
+    """Issue #4384: `klt erc` now discloses `erc.supply_short` as
+    inapplicable (`substrate_continuity_not_modelled`) for a spec with two or
+    more supply nets. Item 11 only reads `erc.missing_tie:` reasons, so the
+    grade stays `met` -- downgrading on it is a separate decision."""
+    erc = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": {
+            "scope": "connectivity",
+            "checked": [],
+            "skipped": [],
+            "inapplicable": [
+                {
+                    "id": "erc.supply_short",
+                    "reason": "substrate_continuity_not_modelled",
+                }
+            ],
+        },
+    }
+
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=erc
+                )
+            },
+        )
+    )
+
+    assert _item_11(result)["status"] == "met"
 
 
 def test_item_11_unmet_when_the_erc_spec_declared_no_supply_net(tmp_path):
@@ -11687,18 +12362,50 @@ def test_item_11_edited_spec_beside_the_evidence_is_still_stale(tmp_path):
     assert item["citation"] is None
 
 
-def test_item_11_requires_both_an_erc_and_an_lvs_citation(tmp_path):
-    """An ERC run alone proves supply continuity but says nothing about
-    whether the supplies were part of the LVS compare -- "cite a different
-    artifact", which is what `wrong_kind` means everywhere in this module."""
-    erc_path = _erc_evidence(tmp_path)
+def test_item_11_erc_only_is_unmet_parts_missing_and_credits_supplies(tmp_path):
+    """Issue #4193: an ERC run alone is a correct but incomplete set -- not
+    "cite a different artifact" (`wrong_kind`). Never `met`; the reason names
+    the absent part and the detail credits the supplies ERC proved."""
+    parts = _power_delivery_evidence(tmp_path)[:1]
 
-    result = build_tier_report(_manifest(kind="analog", evidence={"11": erc_path}))
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
 
     item = _item_11(result)
     assert item["status"] == "unmet"
-    assert item["reason"] == "wrong_kind"
+    assert item["reason"] == "power_delivery_parts_missing"
     assert item["citation"] is None
+    assert item["detail"]["power_delivery"] == {
+        "missing_parts": ["lvs"],
+        "cited_parts": ["erc"],
+        "supply_nets": ["VPWR", "VGND"],
+    }
+
+
+def test_item_11_lvs_only_is_unmet_parts_missing_without_credit(tmp_path):
+    parts = _power_delivery_evidence(tmp_path)[1:2]
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "power_delivery_parts_missing"
+    assert item["detail"]["power_delivery"] == {
+        "missing_parts": ["erc"],
+        "cited_parts": ["lvs"],
+    }
+
+
+def test_item_11_erc_only_with_unresolved_spec_keeps_the_erc_reason(tmp_path):
+    """The more actionable ERC defect wins over the missing-parts reason."""
+    parts = _power_delivery_evidence(
+        tmp_path, erc_spec={**ERC_SUPPLY_SPEC, "ties": []}
+    )[:1]
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_incomplete"
 
 
 def test_item_11_rejects_an_unrelated_kind_in_the_cited_set(tmp_path):
@@ -12337,6 +13044,12 @@ def test_cli_item_11_text_output_names_caller_asserted_substrate_regions(
 
 def _hash_of(path) -> str:
     return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _hash_of_bytes(payload: bytes) -> str:
+    """:func:`_hash_of` for an artifact built from literal bytes -- the same
+    `sha256:`-prefixed form, without needing the file on disk first."""
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
 def _drc_evidence_beside_its_layout(
@@ -14162,6 +14875,347 @@ def test_signoff_help_lists_opt_in_kind_scopes(capsys):
 
 
 # --------------------------------------------------------------------------- #
+# Issue #2659: a `drc`/`extract`/`lvs` citation's `input_verified` re-derives
+# from *any* checkout, not only the producing one.
+#
+# `klt drc`/`klt extract` used to echo their input layout as the producing
+# run's absolute path, and `klt lvs` its layout as the request document's own
+# (often relative) echo. `_resolve_input_artifact_value` can only try the
+# grading host's filesystem for those shapes, so a committed envelope cited
+# by a block manifest graded `input_verified: true` on the producing host and
+# `null` everywhere else -- and `klt signoff --check` then reported drift on
+# `items.N.citation.input_verified` for a signoff record whose evidence was
+# committed in full beside it.
+#
+# #2659 fixed that in the *emitters*: all three now carry the `{path, scope}`
+# shape this module's resolver has handled generically since `klt sim`/`klt
+# pex` adopted it in #1261. These tests are the proof that no change to
+# `signoff.py` was needed -- they drive the resolver with the three new
+# shapes directly, rather than asserting the claim in prose.
+# --------------------------------------------------------------------------- #
+
+
+def _repo_committed_evidence(
+    tmp_path, name: str, envelope: dict, artifact_name: str, artifact_bytes: bytes
+) -> tuple[str, Path]:
+    """One envelope committed beside the artifact it names, inside a repo --
+    the shape committed evidence actually takes in a block repo.
+
+    Returns `(envelope path, repo root)`. The repo root is a `.git`-marked
+    directory (`env_provenance.find_repo_root` only looks for a `.git` entry),
+    and the envelope's own input-path field is the `{path, scope: "repo"}`
+    object the three verbs emit since issue #2659 -- repo-relative, so it
+    resolves against whichever clone the grading happens in.
+    """
+    root = tmp_path / name
+    (root / ".git").mkdir(parents=True)
+    artifact = root / artifact_name
+    artifact.write_bytes(artifact_bytes)
+    return _write(root, f"{name}.json", envelope), root
+
+
+def _portable_drc_envelope(content_hash: str) -> dict:
+    return {
+        **DRC_CLEAN_ENVELOPE,
+        "schema_version": 3,
+        "file": {"path": "block.gds", "scope": "repo"},
+        "provenance": {
+            **DRC_CLEAN_ENVELOPE["provenance"],
+            "input": {"content_hash": content_hash, "role": "layout"},
+        },
+    }
+
+
+def test_drc_citation_input_verified_true_from_a_different_checkout(tmp_path):
+    """The issue's own reproduction: evidence produced in one clone grades
+    `input_verified: true` when re-graded from a *second* clone of the same
+    content, at a different absolute path, with the process cwd in neither.
+
+    The pre-#2659 `file` -- an absolute path into the producing checkout --
+    could only ever resolve on the producing host, which is what made the
+    committed signoff record irreproducible elsewhere.
+    """
+    layout_bytes = b"GDS-A"
+    recorded = _hash_of_bytes(layout_bytes)
+    drc_path, _ = _repo_committed_evidence(
+        tmp_path,
+        "consumer",
+        _portable_drc_envelope(recorded),
+        "block.gds",
+        layout_bytes,
+    )
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["input_verified"] is True
+
+
+def test_drc_citation_input_verified_false_when_the_repo_copy_changed(tmp_path):
+    """Portability must not be bought with a false pass: a repo-scoped entry
+    that resolves to a file whose bytes no longer match the recorded hash is
+    `False`, exactly as the pre-#2659 absolute path was on its own host."""
+    drc_path, _ = _repo_committed_evidence(
+        tmp_path,
+        "consumer",
+        _portable_drc_envelope(_hash_of_bytes(b"GDS-A")),
+        "block.gds",
+        b"GDS-B -- rewritten after the report was made",
+    )
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["citation"]["input_verified"] is False
+
+
+def test_drc_citation_input_verified_null_for_an_external_scope_entry(tmp_path):
+    """`scope: "external"` carries no path at all, on purpose -- so there is
+    nothing to re-hash and the citation says `null` rather than guessing or
+    raising. This is the shape a `klt drc` run whose layout lives outside any
+    repository emits, and the edge case the issue's Test Plan calls out."""
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "schema_version": 3,
+        "file": {"path": None, "scope": "external"},
+    }
+    drc_path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["input_verified"] is None
+
+
+def test_extract_citation_input_verified_true_from_a_different_checkout(tmp_path):
+    """The same portability, for `klt extract`'s own `file` field.
+
+    Driven through the resolver directly rather than through
+    `build_tier_report`: no numbered T1 item accepts an `extract` citation
+    (`_ITEM_ALLOWED_KINDS` restricts item 3 to `drc` and item 4 to `lvs`,
+    issue #1987 -- `klt extract` has no verdict to pass), yet
+    `_INPUT_ARTIFACT_FIELDS` still names `extract`'s `file`, so the shape it
+    emits has to resolve here for every other consumer of that table.
+    """
+    layout_bytes = b"GDS-EXTRACT"
+    recorded = _hash_of_bytes(layout_bytes)
+    envelope = {
+        **EXTRACT_ENVELOPE,
+        "schema_version": 4,
+        "file": {"path": "block.gds", "scope": "repo"},
+        "provenance": {
+            **EXTRACT_ENVELOPE["provenance"],
+            "input": {"content_hash": recorded, "role": "layout"},
+        },
+    }
+    extract_path, root = _repo_committed_evidence(
+        tmp_path, "consumer", envelope, "block.gds", layout_bytes
+    )
+
+    candidates = signoff_module._input_artifact_candidates(
+        "extract", envelope, {}, extract_path
+    )
+    verified = signoff_module._verify_input_artifact(
+        "extract", envelope, {}, recorded, extract_path
+    )
+
+    assert candidates == [str(root / "block.gds")]
+    assert verified is True
+
+
+def test_extract_citation_input_verified_false_when_the_repo_copy_changed(tmp_path):
+    """Portability must not be bought with a false pass, for `extract` either
+    (the counterpart to the `drc` case above)."""
+    envelope = {
+        **EXTRACT_ENVELOPE,
+        "schema_version": 4,
+        "file": {"path": "block.gds", "scope": "repo"},
+    }
+    extract_path, _ = _repo_committed_evidence(
+        tmp_path, "consumer", envelope, "block.gds", b"GDS-REWRITTEN"
+    )
+
+    verified = signoff_module._verify_input_artifact(
+        "extract", envelope, {}, _hash_of_bytes(b"GDS-EXTRACT"), extract_path
+    )
+
+    assert verified is False
+
+
+def test_extract_citation_input_verified_null_for_an_external_scope_entry(tmp_path):
+    """`scope: "external"` names no path, so `extract`'s own field reports
+    `null` rather than guessing -- same as `drc`'s."""
+    envelope = {
+        **EXTRACT_ENVELOPE,
+        "schema_version": 4,
+        "file": {"path": None, "scope": "external"},
+    }
+    extract_path = _write(tmp_path, "extract.json", envelope)
+
+    assert (
+        signoff_module._input_artifact_candidates("extract", envelope, {}, extract_path)
+        == []
+    )
+    assert (
+        signoff_module._verify_input_artifact(
+            "extract", envelope, {}, "sha256:whatever", extract_path
+        )
+        is None
+    )
+
+
+def test_lvs_citation_input_verified_true_from_a_different_checkout(tmp_path):
+    """And for `klt lvs`'s `layout` (item 4). `reference` is deliberately
+    still the verbatim request echo -- it is pinned by
+    `environment.reference_sha256`, not by `provenance.input`, so it is not
+    the field this gate re-hashes (`_INPUT_ARTIFACT_FIELDS` names `layout`
+    only for `lvs`)."""
+    layout_bytes = b".SUBCKT INV\n.ENDS\n"
+    recorded = _hash_of_bytes(layout_bytes)
+    envelope = {
+        **LVS_MATCH_ENVELOPE,
+        "schema_version": 2,
+        "layout": {"path": "design.spice", "scope": "repo"},
+        "provenance": {
+            **LVS_MATCH_ENVELOPE["provenance"],
+            "input": {"content_hash": recorded, "role": "netlist"},
+        },
+    }
+    lvs_path, _ = _repo_committed_evidence(
+        tmp_path, "consumer", envelope, "design.spice", layout_bytes
+    )
+
+    result = build_tier_report(_manifest(evidence={"4": lvs_path}))
+
+    item_4 = next(item for item in result["items"] if item["id"] == 4)
+    assert item_4["citation"]["kind"] == "lvs"
+    assert item_4["citation"]["input_verified"] is True
+
+
+def test_check_reproduces_a_portable_citation_from_another_checkout(tmp_path):
+    """The issue's reproduction all the way to its reported symptom: a
+    committed tier report re-graded with `klt signoff --check` from a
+    *different* clone no longer drifts on
+    `items.N.citation.input_verified`.
+
+    Both halves run against clones at different absolute paths, so a report
+    that still reproduces can only be doing so by resolving the citation's
+    `{path, scope}` entry against each clone's own root.
+    """
+    layout_bytes = b"GDS-A"
+    recorded = _hash_of_bytes(layout_bytes)
+    producer_path, _ = _repo_committed_evidence(
+        tmp_path,
+        "producer",
+        _portable_drc_envelope(recorded),
+        "block.gds",
+        layout_bytes,
+    )
+    committed = build_tier_report(_manifest(evidence={"3": producer_path}))
+    item_3 = next(item for item in committed["items"] if item["id"] == 3)
+    assert item_3["citation"]["input_verified"] is True
+
+    # A second clone: same bytes, different absolute location.
+    consumer_path, _ = _repo_committed_evidence(
+        tmp_path,
+        "consumer",
+        _portable_drc_envelope(recorded),
+        "block.gds",
+        layout_bytes,
+    )
+    regraded = build_tier_report(_manifest(evidence={"3": consumer_path}))
+
+    regraded_item = next(item for item in regraded["items"] if item["id"] == 3)
+    assert regraded_item["citation"]["input_verified"] is True
+
+
+def test_resolver_still_handles_a_pre_2659_bare_string_citation(tmp_path):
+    """Backwards compatibility, asserted on the resolver this module already
+    had: an envelope committed *before* #2659 carries a bare path string, and
+    a relative one is still resolved against the evidence file's own
+    directory (the branch `examples/signoff/`'s own fixtures relied on).
+    Nothing about reading older evidence changed."""
+    layout_bytes = b"GDS-A"
+    root = tmp_path / "legacy"
+    root.mkdir()
+    (root / "block.gds").write_bytes(layout_bytes)
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "file": "block.gds",  # the pre-#2659 shape
+        "provenance": {
+            **DRC_CLEAN_ENVELOPE["provenance"],
+            "input": {
+                "content_hash": _hash_of_bytes(layout_bytes),
+                "role": "layout",
+            },
+        },
+    }
+    drc_path = _write(root, "drc.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["citation"]["input_verified"] is True
+
+
+def test_erc_citation_input_verified_true_from_a_different_checkout(tmp_path):
+    """Issue #2703: `klt erc`'s `file` is the same `{path, scope}` envelope,
+    so an `erc` citation re-verifies from a second clone."""
+    layout_bytes = b"GDS-ERC"
+    recorded = _hash_of_bytes(layout_bytes)
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "schema_version": 2,
+        "file": {"path": "block.gds", "scope": "repo"},
+        "provenance": {
+            **ERC_CLEAN_ENVELOPE["provenance"],
+            "input": {"content_hash": recorded, "role": "layout"},
+        },
+    }
+    erc_path, root = _repo_committed_evidence(
+        tmp_path, "consumer", envelope, "block.gds", layout_bytes
+    )
+
+    candidates = signoff_module._input_artifact_candidates(
+        "erc", envelope, {}, erc_path
+    )
+    verified = signoff_module._verify_input_artifact(
+        "erc", envelope, {}, recorded, erc_path
+    )
+
+    assert candidates == [str(root / "block.gds")]
+    assert verified is True
+
+
+def test_lef_abstract_citation_input_verified_true_from_a_different_checkout(
+    tmp_path,
+):
+    """Issue #2703: the same, for `klt lef-abstract`'s `file`."""
+    layout_bytes = b"GDS-LEF"
+    recorded = _hash_of_bytes(layout_bytes)
+    envelope = {
+        "schema_version": 2,
+        "file": {"path": "block.gds", "scope": "repo"},
+        "provenance": {"input": {"content_hash": recorded, "role": "layout"}},
+    }
+    lef_path, root = _repo_committed_evidence(
+        tmp_path, "consumer", envelope, "block.gds", layout_bytes
+    )
+
+    candidates = signoff_module._input_artifact_candidates(
+        "lef-abstract", envelope, {}, lef_path
+    )
+    verified = signoff_module._verify_input_artifact(
+        "lef-abstract", envelope, {}, recorded, lef_path
+    )
+
+    assert candidates == [str(root / "block.gds")]
+    assert verified is True
+
+
+# --------------------------------------------------------------------------- #
 # `klt drc --rules` subsets (issue #2768): a report that executed only part of
 # its deck never earns full DRC credit, in either entry point.
 # --------------------------------------------------------------------------- #
@@ -14814,6 +15868,58 @@ def test_build_signoff_classifies_port_evidence(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Issue #4189: `klt seam-check` evidence (item 2)
+# --------------------------------------------------------------------------- #
+
+
+def _seam_check_envelope(**overrides) -> dict:
+    return {
+        "schema_version": 1,
+        "file": "row.gds",
+        "tiling": ["TILE"],
+        "layer": None,
+        "bands_um": None,
+        "dbu_um": 0.001,
+        "status": "pass",
+        "violation_count": 0,
+        "violations": [],
+        **overrides,
+    }
+
+
+def test_seam_check_is_not_classified_as_drc(tmp_path):
+    path = _write(tmp_path, "seam.json", _seam_check_envelope())
+    failing = _write(
+        tmp_path,
+        "seam_fail.json",
+        _seam_check_envelope(
+            status="fail",
+            violation_count=1,
+            violations=[{"kind": "gap", "rule": "seam.tiling"}],
+        ),
+    )
+
+    result = build_signoff([path, failing])
+
+    assert [(c["kind"], c["passed"]) for c in result["checks"]] == [
+        ("seam-check", True),
+        ("seam-check", False),
+    ]
+    assert result["checks"][1]["detail"]["violation_kinds"] == ["gap"]
+
+
+def test_seam_check_satisfies_only_item_2(tmp_path):
+    path = _write(tmp_path, "seam.json", _seam_check_envelope())
+    result = build_tier_report(_manifest(evidence={"2": path, "1": path}))
+
+    item2 = next(i for i in result["items"] if i["id"] == 2)
+    item1 = next(i for i in result["items"] if i["id"] == 1)
+    assert item2["status"] == "met"
+    assert item1["status"] == "unmet"
+    assert item1["reason"] == "wrong_kind"
+
+
+# --------------------------------------------------------------------------- #
 # Issue #2875: `klt pex` schematic-side input verification (item 7)
 # --------------------------------------------------------------------------- #
 
@@ -15323,7 +16429,7 @@ def test_attest_refuses_an_inventory_outside_any_repository(tmp_path):
 
 def test_attest_refuses_unsupported_item_and_unreadable_inventory(tmp_path):
     repo = _attest_repo(tmp_path)
-    with pytest.raises(AttestationError, match="supports T1 items 1, 9, 10"):
+    with pytest.raises(AttestationError, match="supports T1 items 1, 8, 9, 10"):
         build_attestation(2, _write_inventory(repo, 1))
     with pytest.raises(AttestationError, match="not found"):
         build_attestation(1, str(repo / "missing.json"))
@@ -15592,9 +16698,9 @@ def test_attest_argument_conflicts_are_refused(argv, capsys):
 
 
 def test_attest_rejects_an_item_it_does_not_attest_as_a_usage_error():
-    """Item 2 is out of scope (its binding is the layout stream itself)."""
+    """Only items 1, 2, 9 and 10 are attestable (item 2 via `--input`)."""
     with pytest.raises(SystemExit) as excinfo:
-        main(["signoff", "--attest", "2", "--inventory", "x.json"])
+        main(["signoff", "--attest", "3", "--inventory", "x.json"])
     assert excinfo.value.code == 2
 
 
@@ -15679,7 +16785,12 @@ def _sta_checkout(root: Path, *, verilog: bool = False) -> Path:
 
 
 def _sta_item_5(evidence: Path) -> dict:
-    result = build_tier_report(_manifest(kind="digital", evidence={"5": str(evidence)}))
+    # Item 5 digital needs STA *and* a functional suite (#3741); the STA
+    # citation is listed first so it stays the item's reported citation.
+    fv_path = _write(evidence.parent, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"5": [str(evidence), fv_path]})
+    )
     return next(item for item in result["items"] if item["id"] == 5)
 
 
@@ -16067,6 +17178,60 @@ def test_item5_declared_gap_row_is_reported_apart_and_never_met(tmp_path):
     ]
 
 
+def test_item5_all_gap_rows_without_evidence_is_partial_coverage_never_met():
+    rows = [
+        {"id": "A", "gap": "no sim yet"},
+        {"id": "B", "gap": "no sim yet"},
+    ]
+
+    item = _item5({}, rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["citation"] is None
+    assert item["detail"]["failed_rows"] == []
+    assert item["detail"]["uncovered_rows"] == []
+    assert [g["id"] for g in item["detail"]["declared_gaps"]] == ["A", "B"]
+
+
+def test_item5_mixed_rows_without_evidence_lists_uncovered_rows():
+    item = _item5({}, [{"id": "tdec"}, {"id": "zin", "gap": "later"}])
+
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == ["tdec"]
+    assert item["detail"]["declared_gaps"] == [{"id": "zin", "gap": "later"}]
+
+
+def test_item5_unratified_row_without_evidence_is_reported():
+    item = _item5({}, [{"id": "tdec", "ratified": False}])
+
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["unratified_rows"] == ["tdec"]
+
+
+def test_item6_rows_without_evidence_is_partial_coverage():
+    manifest = _manifest(evidence={})
+    manifest["spec_rows"] = {"6": [{"id": "mc", "gap": "pending"}]}
+
+    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 6)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+
+
+def test_item5_no_spec_rows_and_no_evidence_stays_no_evidence():
+    item = _item5({})
+
+    assert item["reason"] == "no_evidence"
+    assert "detail" not in item
+
+
+def test_item5_malformed_spec_rows_without_evidence_is_invalid_evidence():
+    item = _item5({}, [{"id": "a"}, {"id": "a"}])
+
+    assert item["reason"] == "invalid_evidence"
+
+
 def test_item5_all_declared_rows_covered_is_met_with_row_coverage(tmp_path):
     a = _write(tmp_path, "a.json", SIM_PASS_ENVELOPE)
 
@@ -16090,6 +17255,112 @@ def test_item5_failing_citation_rows_are_listed_as_failed_rows(tmp_path):
     assert item["status"] == "unmet"
     assert item["detail"]["failed_rows"] == ["zin"]
     assert item["detail"]["uncovered_rows"] == []
+
+
+# --- Issue #3778: spec rows derived from `spec_row`-tagged measurements -----
+
+
+def _tagged_sim(measurements: list[dict]) -> dict:
+    return {**SIM_PASS_ENVELOPE, "measurements": measurements}
+
+
+def _meas(name, spec_row=None, *, limits=None, status="pass") -> dict:
+    entry = {"name": name, "status": status, "limits": limits}
+    if spec_row is not None:
+        entry["spec_row"] = spec_row
+    return entry
+
+
+_LIM = {"min": 1.0}
+
+
+def test_item5_tagged_envelope_derives_row_coverage(tmp_path):
+    a = _write(
+        tmp_path,
+        "a.json",
+        _tagged_sim([_meas("t", "tdec", limits=_LIM), _meas("z", "zin", limits=_LIM)]),
+    )
+
+    item = _item5(
+        {"5": [{"file": a, "rows": ["tdec", "zin"]}]}, [{"id": "tdec"}, {"id": "zin"}]
+    )
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["row_sources"] == {"tdec": "derived", "zin": "derived"}
+
+
+def test_item5_tagged_envelope_without_the_named_row_is_partial_coverage(tmp_path):
+    a = _write(tmp_path, "a.json", _tagged_sim([_meas("t", "tdec", limits=_LIM)]))
+
+    item = _item5(
+        {"5": [{"file": a, "rows": ["tdec", "zin"]}]}, [{"id": "tdec"}, {"id": "zin"}]
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == ["zin"]
+
+
+def test_item5_tag_without_limits_never_covers(tmp_path):
+    a = _write(tmp_path, "a.json", _tagged_sim([_meas("t", "tdec")]))
+
+    item = _item5({"5": [{"file": a, "rows": ["tdec"]}]}, [{"id": "tdec"}])
+
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == ["tdec"]
+
+
+def test_item5_failing_tagged_measurement_does_not_cover(tmp_path):
+    a = _write(
+        tmp_path,
+        "a.json",
+        _tagged_sim(
+            [
+                _meas("t", "tdec", limits=_LIM, status="fail"),
+                _meas("o", "x", limits=_LIM),
+            ]
+        ),
+    )
+
+    item = _item5({"5": [{"file": a, "rows": ["tdec"]}]}, [{"id": "tdec"}])
+
+    assert item["status"] == "unmet"
+    assert item["detail"]["uncovered_rows"] == ["tdec"]
+
+
+def test_item5_tag_for_a_row_the_citation_does_not_name_is_ignored(tmp_path):
+    a = _write(
+        tmp_path,
+        "a.json",
+        _tagged_sim([_meas("t", "tdec", limits=_LIM), _meas("z", "zin", limits=_LIM)]),
+    )
+
+    item = _item5({"5": [{"file": a, "rows": ["tdec"]}]}, [{"id": "tdec"}])
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["row_sources"] == {"tdec": "derived"}
+
+
+def test_item5_untagged_envelope_keeps_asserted_rows(tmp_path):
+    a = _write(tmp_path, "a.json", _tagged_sim([_meas("t", limits=_LIM)]))
+
+    item = _item5({"5": [{"file": a, "rows": ["tdec"]}]}, [{"id": "tdec"}])
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["row_sources"] == {"tdec": "asserted"}
+
+
+def test_item5_row_covered_by_a_second_citation_is_still_covered(tmp_path):
+    a = _write(tmp_path, "a.json", _tagged_sim([_meas("t", "tdec", limits=_LIM)]))
+    b = _write(tmp_path, "b.json", _tagged_sim([_meas("z", "zin", limits=_LIM)]))
+
+    item = _item5(
+        {"5": [{"file": a, "rows": ["tdec", "zin"]}, {"file": b, "rows": ["zin"]}]},
+        [{"id": "tdec"}, {"id": "zin"}],
+    )
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["row_sources"] == {"tdec": "derived", "zin": "derived"}
 
 
 @pytest.mark.parametrize(
@@ -16127,6 +17398,96 @@ def test_item5_stale_content_hash_on_one_member_is_unmet(tmp_path):
     assert item["detail"]["failed_citations"] == [other]
 
 
+def _ms_item5(tmp_path, spec_rows, analog_entry=None):
+    """Mixed-signal item-5 entries by partition (issue #3768)."""
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    sta = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+    manifest = _manifest(
+        kind="mixed-signal",
+        evidence={
+            "5.analog": analog_entry or [{"file": sim, "rows": ["tdec"]}],
+            "5.digital": [sta, fv],
+        },
+        spec_rows=spec_rows,
+    )
+    return {
+        i["partition"]: i
+        for i in build_tier_report(manifest)["items"]
+        if i["id"] == 5 and i["tier"] == "T1"
+    }
+
+
+def test_item5_qualified_spec_rows_do_not_regress_other_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5.analog": [{"id": "tdec"}]})
+
+    assert items["digital"]["status"] == "met"
+    assert items["analog"]["status"] == "met"
+    assert items["analog"]["row_coverage"]["uncovered_rows"] == []
+
+
+def test_item5_qualified_spec_rows_grade_their_own_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5.analog": [{"id": "tdec"}, {"id": "zin"}]})
+
+    assert items["digital"]["status"] == "met"
+    assert items["analog"]["status"] == "unmet"
+    assert items["analog"]["reason"] == "partial_coverage"
+    assert items["analog"]["detail"]["uncovered_rows"] == ["zin"]
+
+
+def test_item5_qualified_spec_rows_win_over_bare_for_their_partition(tmp_path):
+    items = _ms_item5(
+        tmp_path,
+        {"5": [{"id": "other"}], "5.analog": [{"id": "tdec"}]},
+    )
+
+    assert items["analog"]["status"] == "met"
+    # Bare "5" still applies to the partition with no qualified key.
+    assert items["digital"]["status"] == "unmet"
+    assert items["digital"]["reason"] == "partial_coverage"
+
+
+def test_item5_bare_spec_rows_key_still_applies_to_every_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5": [{"id": "tdec"}]})
+
+    assert items["analog"]["status"] == "met"
+    assert items["digital"]["status"] == "unmet"
+    assert items["digital"]["reason"] == "partial_coverage"
+
+
+def test_item5_bad_qualified_suffix_is_invalid_evidence_for_the_item_only(tmp_path):
+    items = _ms_item5(tmp_path, {"5.mixed": [{"id": "tdec"}]})
+
+    assert items["analog"]["status"] == "unmet"
+    assert items["analog"]["reason"] == "invalid_evidence"
+    assert items["digital"]["reason"] == "invalid_evidence"
+
+
+def test_item5_malformed_qualified_rows_degrade_only_that_partition(tmp_path):
+    items = _ms_item5(tmp_path, {"5.analog": []})
+
+    assert items["analog"]["reason"] == "invalid_evidence"
+    assert items["digital"]["status"] == "met"
+
+
+def test_item5_analog_kind_manifest_resolves_qualified_key(tmp_path):
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    evidence = {"5": [{"file": sim, "rows": ["tdec"]}]}
+
+    manifest = _manifest(
+        kind="analog", evidence=evidence, spec_rows={"5.analog": [{"id": "tdec"}]}
+    )
+    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
+    assert item["status"] == "met"
+    assert "row_coverage" in item
+
+    manifest["spec_rows"] = {"5.digital": [{"id": "zin"}]}
+    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
+    # A mismatched-partition key is ignored (falls to the absent bare key).
+    assert item["status"] == "met"
+    assert "row_coverage" not in item
+
+
 def test_item5_single_citation_report_is_unchanged(tmp_path):
     sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
 
@@ -16162,10 +17523,11 @@ def _sta_with_annotation(corner_blocks: list) -> dict:
 
 def _grade_sta_item_5(tmp_path, envelope: dict, **entry_extra):
     path = _write(tmp_path, "sta.json", envelope)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
     result = build_tier_report(
         _manifest(
             kind="digital",
-            evidence={"5.digital": {"file": path, **entry_extra}},
+            evidence={"5.digital": [{"file": path, **entry_extra}, fv_path]},
         )
     )
     return next(item for item in result["items"] if item["id"] == 5)
@@ -16234,3 +17596,764 @@ def test_require_annotation_complete_non_boolean_entry_is_invalid_evidence(tmp_p
     item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete="true")
     assert item["status"] == "unmet"
     assert item["reason"] == "invalid_evidence"
+
+
+# --------------------------------------------------------------------------- #
+# Item 6: several citations + declared statistical rows (issue #2908)
+# --------------------------------------------------------------------------- #
+
+
+def _item6_rows(tmp_path, entry, rows=None, kind="digital"):
+    evidence = _full_t1_evidence(tmp_path, kind=kind)
+    evidence["6"] = entry
+    manifest = _manifest(kind=kind, evidence=evidence)
+    if rows is not None:
+        manifest["spec_rows"] = {"6": rows}
+    return build_tier_report(manifest), _item6(build_tier_report(manifest))
+
+
+def test_item6_two_declared_rows_one_cited_is_partial_coverage(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    rows = [{"id": "offset"}, {"id": "gain_err", "gap": "function not implemented"}]
+
+    report, item = _item6_rows(tmp_path, [{"file": a, "rows": ["offset"]}], rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == []
+    assert item["detail"]["declared_gaps"] == [
+        {"id": "gain_err", "gap": "function not implemented"}
+    ]
+    assert report["tier"] is None
+
+
+def test_item6_second_row_without_a_citation_is_named_uncovered(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    rows = [{"id": "offset"}, {"id": "gain_err"}]
+
+    _, item = _item6_rows(tmp_path, [{"file": a, "rows": ["offset"]}], rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["uncovered_rows"] == ["gain_err"]
+
+
+def test_item6_unratified_row_is_provisional_not_met(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    rows = [{"id": "offset", "ratified": False}]
+
+    _, item = _item6_rows(tmp_path, [{"file": a, "rows": ["offset"]}], rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["unratified_rows"] == ["offset"]
+    assert item["detail"]["uncovered_rows"] == []
+
+
+def test_item6_all_declared_rows_covered_and_ratified_is_met(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    b = _write(tmp_path, "mc_b.json", YIELD_PASS_ENVELOPE)
+    rows = [{"id": "offset"}, {"id": "gain_err", "ratified": True}]
+
+    report, item = _item6_rows(
+        tmp_path,
+        [{"file": a, "rows": ["offset"]}, {"file": b, "rows": ["gain_err"]}],
+        rows,
+    )
+
+    assert item["status"] == "met"
+    assert item["row_coverage"]["unratified_rows"] == []
+    assert report["tier"] == "T1"
+
+
+def test_item6_failing_citation_names_its_row_while_another_passes(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+    bad = _write(tmp_path, "mc_bad.json", YIELD_FAIL_ENVELOPE)
+    rows = [{"id": "offset"}, {"id": "gain_err"}]
+
+    _, item = _item6_rows(
+        tmp_path,
+        [{"file": a, "rows": ["offset"]}, {"file": bad, "rows": ["gain_err"]}],
+        rows,
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+    assert item["detail"]["failed_rows"] == ["gain_err"]
+
+
+@pytest.mark.parametrize(
+    "entry_rows, rows",
+    [
+        (["undeclared"], [{"id": "offset"}]),
+        (["gain_err"], [{"id": "gain_err", "gap": "not implemented"}]),
+        (["offset"], [{"id": "offset"}, {"id": "offset"}]),
+        (["offset"], [{"id": "offset", "ratified": "no"}]),
+    ],
+)
+def test_item6_malformed_row_declaration_is_invalid_evidence(
+    tmp_path, entry_rows, rows
+):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+
+    _, item = _item6_rows(tmp_path, [{"file": a, "rows": entry_rows}], rows)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+
+
+def test_item6_not_applicable_with_declared_rows_is_invalid(tmp_path):
+    _, item = _item6_rows(tmp_path, _na_entry(tmp_path), [{"id": "offset"}])
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+
+
+def test_item6_without_declaration_grades_as_before(tmp_path):
+    a = _write(tmp_path, "mc_a.json", YIELD_PASS_ENVELOPE)
+
+    _, item = _item6_rows(tmp_path, a)
+
+    assert item["status"] == "met"
+    assert "citations" not in item
+    assert "row_coverage" not in item
+
+
+# --------------------------------------------------------------------------- #
+# Regeneration claims on a set binding (issues #2887 and #3044)
+# --------------------------------------------------------------------------- #
+
+
+def _set_with_regeneration(tmp_path, regenerated_hash):
+    envelope_path, digest = _set_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": regenerated_hash}
+    )
+    return envelope_path, digest
+
+
+def test_regeneration_claim_on_a_set_binding_compares_the_combined_digest(tmp_path):
+    envelope_path, digest = _set_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path, {"generator": _GENERATOR, "regenerated_hash": digest}
+    )
+
+    item = _grade_set(envelope_path, digest)
+
+    assert item["status"] == "met"
+    binding = item["citation"]["artifact_binding"]
+    assert binding["members"]
+    assert binding["regeneration"]["regenerated_hash"] == digest
+
+
+def test_mismatched_regeneration_claim_on_a_set_binding_is_stale_artifact(tmp_path):
+    envelope_path, digest = _set_with_regeneration(tmp_path, "sha256:" + "0" * 64)
+
+    item = _grade_set(envelope_path, digest)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_artifact"
+
+
+# --------------------------------------------------------------------------- #
+# `local_only` attest checks, `hash_kind: geometry` regeneration (issue #3743)
+# --------------------------------------------------------------------------- #
+
+
+def _local_only_inventory(repo: Path, **extra) -> str:
+    inventory = _inventory(1)
+    inventory["derived"][0]["check"] = {"argv": _OK, **extra}
+    return _write_inventory(repo, 1, inventory)
+
+
+def _commit_attestation(repo: Path, inventory: str) -> Path:
+    committed = repo / "evidence" / "item1.json"
+    committed.write_text(attest_module.render_envelope(build_attestation(1, inventory)))
+    return committed
+
+
+def test_attest_check_does_not_run_local_only_command(tmp_path):
+    repo = _attest_repo(tmp_path)
+    marker = repo / "ran.txt"
+    script = f"open({str(marker)!r}, 'w').write('x')"
+    argv = [sys.executable, "-c", script]
+    inventory = _local_only_inventory(repo, argv=argv, local_only=True)
+    committed = _commit_attestation(repo, inventory)
+    assert marker.exists()  # attest (produce) ran it
+    marker.unlink()
+
+    result = check_attestation(1, inventory, str(committed))
+
+    assert not marker.exists()
+    assert result["status"] == "match"
+    assert result["fresh_status"] == "pass"
+    assert [c["role"] for c in result["skipped_checks"]] == ["freshness"]
+    assert result["skipped_checks"][0]["argv"] == argv
+    assert "skipped" not in json.dumps(result["fresh"]["attestation"])
+
+
+def test_attest_check_still_detects_hash_drift_with_local_only(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, local_only=True)
+    committed = _commit_attestation(repo, inventory)
+    (repo / "design" / "ota.sch").write_text("v {xschem edited}\n")
+
+    result = check_attestation(1, inventory, str(committed))
+
+    assert result["status"] == "drifted"
+    assert result["skipped_checks"]
+
+
+def test_attest_check_committed_local_only_failure_fails_gate(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, argv=_STALE, local_only=True)
+    committed = _commit_attestation(repo, inventory)
+    assert json.loads(committed.read_text())["status"] == "fail"
+
+    result = check_attestation(1, inventory, str(committed))
+
+    assert result["status"] == "match"
+    assert result["fresh_status"] == "fail"
+    assert result["skipped_checks"][0]["passed"] is False
+
+
+def test_attest_check_cli_exit_codes_with_local_only(tmp_path, capsys):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, local_only=True)
+    committed = _commit_attestation(repo, inventory)
+
+    code = _attest_cli(1, inventory, "--check", str(committed), "--format", "text")
+
+    assert code == 0
+    assert "[SKIP]" in capsys.readouterr().out
+
+
+_NOISY_FAIL = [
+    sys.executable,
+    "-c",
+    "import sys; print('out'+'-line'); print('boom'+'-on-stderr', file=sys.stderr); "
+    "[print(f'row {i}') for i in range(100)]; sys.exit(1)",
+]
+
+
+def test_attest_check_text_shows_bounded_tail_of_failing_command(tmp_path, capsys):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, argv=_NOISY_FAIL)
+    committed = _commit_attestation(repo, inventory)
+
+    code = _attest_cli(1, inventory, "--check", str(committed), "--format", "text")
+
+    out = capsys.readouterr().out
+    assert code != 0
+    assert "row 99" in out
+    assert "row 50" not in out  # only the last ~20 lines
+    assert "out-line" not in out
+
+
+def test_attest_text_shows_stderr_tail_but_passing_check_prints_none(tmp_path, capsys):
+    repo = _attest_repo(tmp_path)
+    failing = _local_only_inventory(
+        repo,
+        argv=[
+            sys.executable,
+            "-c",
+            "import sys; print('boom'+'-on-stderr', file=sys.stderr); sys.exit(1)",
+        ],
+    )
+    assert _attest_cli(1, failing, "--format", "text") != 0
+    assert "| boom-on-stderr" in capsys.readouterr().out
+
+    passing = _local_only_inventory(
+        repo, argv=[sys.executable, "-c", "print('quiet'+'-success')"]
+    )
+    assert _attest_cli(1, passing, "--format", "text") == 0
+    assert "quiet-success" not in capsys.readouterr().out
+
+
+def test_attest_failure_output_never_enters_the_envelope(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, argv=_NOISY_FAIL)
+
+    rendered = attest_module.render_envelope(build_attestation(1, inventory))
+
+    assert "row 99" not in rendered
+    assert build_attestation(1, inventory) == build_attestation(1, inventory)
+
+
+def test_attest_without_local_only_still_runs_every_command(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo)
+    committed = _commit_attestation(repo, inventory)
+    assert check_attestation(1, inventory, str(committed))["skipped_checks"] == []
+
+
+@pytest.mark.parametrize("value", ["yes", 1, None])
+def test_attest_rejects_non_boolean_local_only(tmp_path, value):
+    repo = _attest_repo(tmp_path)
+    inventory = _local_only_inventory(repo, local_only=value)
+    with pytest.raises(AttestationError, match="local_only"):
+        build_attestation(1, inventory)
+
+
+def _write_gds(path: Path, *, extra_box: bool = False, year: int = 2020) -> None:
+    kdb = pytest.importorskip("klayout.db")
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 1000, 1000))
+    if extra_box:
+        top.shapes(layout.layer(2, 0)).insert(kdb.Box(0, 0, 500, 500))
+    options = kdb.SaveLayoutOptions()
+    options.format = "GDS2"
+    # Pin different write timestamps so the bytes differ run to run.
+    layout.write(str(path), options)
+    data = bytearray(path.read_bytes())
+    data[10:12] = year.to_bytes(2, "big")  # BGNLIB modification year
+    path.write_bytes(bytes(data))
+
+
+def _geometry_envelope(tmp_path, claim_gds: Path, **claim) -> tuple[str, str]:
+    (tmp_path / ".git").mkdir(exist_ok=True)  # a repo root for the geometry digest
+    envelope_path, _ = _anchored_generic(tmp_path, 2)
+    artifact = tmp_path / "ota.gds"
+    _write_gds(artifact)
+    digest = _hash_of(artifact)
+    envelope = json.loads(Path(envelope_path).read_text())
+    envelope["provenance"]["input"]["content_hash"] = digest
+    regenerated = layout_geometry_digest(str(claim_gds))
+    envelope["provenance"]["regeneration"] = {
+        "generator": _GENERATOR,
+        "regenerated_hash": regenerated,
+        "hash_kind": "geometry",
+        **claim,
+    }
+    Path(envelope_path).write_text(json.dumps(envelope))
+    return envelope_path, digest
+
+
+def test_geometry_regeneration_survives_a_rewrite_with_new_timestamps(tmp_path):
+    other = tmp_path / "regen.gds"
+    _write_gds(other, year=2031)
+    envelope_path, digest = _geometry_envelope(tmp_path, other)
+    assert _hash_of(tmp_path / "ota.gds") != _hash_of(other)
+
+    item = _item(build_tier_report(_anchored_manifest(2, envelope_path, digest)), 2)
+
+    assert item["status"] == "met"
+    regeneration = item["citation"]["artifact_binding"]["regeneration"]
+    assert regeneration["hash_kind"] == "geometry"
+    assert regeneration["executed_by_klt"] is False
+
+
+def test_geometry_regeneration_real_change_is_stale_artifact(tmp_path):
+    other = tmp_path / "regen.gds"
+    _write_gds(other, extra_box=True)
+    envelope_path, digest = _geometry_envelope(tmp_path, other)
+
+    item = _item(build_tier_report(_anchored_manifest(2, envelope_path, digest)), 2)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_artifact"
+
+
+def test_geometry_regeneration_on_non_layout_is_unanchored(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path,
+        {
+            "generator": _GENERATOR,
+            "regenerated_hash": digest,
+            "hash_kind": "geometry",
+        },
+    )
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unanchored_evidence"
+
+
+@pytest.mark.parametrize("kind", ["sha1", "", 3, None])
+def test_unknown_hash_kind_is_unanchored(tmp_path, kind):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": digest, "hash_kind": kind},
+    )
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["reason"] == "unanchored_evidence"
+
+
+def test_explicit_bytes_hash_kind_matches_default(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    _with_regeneration(
+        envelope_path,
+        {"generator": _GENERATOR, "regenerated_hash": digest, "hash_kind": "bytes"},
+    )
+
+    item = _item(build_tier_report(_anchored_manifest(1, envelope_path, digest)), 1)
+
+    assert item["status"] == "met"
+
+
+# --------------------------------------------------------------------------- #
+# `klt synthesize` evidence (issue #4015): opt-in kind scoped to T1 item 1.
+# --------------------------------------------------------------------------- #
+
+
+def _synthesize_envelope(**structural) -> dict:
+    return {
+        "schema_version": 1,
+        "status": "ok",
+        "netlist_path": "build/top.v",
+        "netlist_sha256": "ab" * 32,
+        "structural": {
+            "latches": 0,
+            "expected_latches": 0,
+            "unexpected_latches": 0,
+            "comb_loops": 0,
+            "multi_driven": 0,
+            "has_critical": False,
+            **structural,
+        },
+        "warnings": {"count": 2},
+        "provenance": {"input": {"content_hash": "sha256:rtlA", "role": "rtl"}},
+    }
+
+
+def _synth_item_1(tmp_path, envelope, *, content_hash=None, item="1.digital"):
+    entry = _write(tmp_path, "synth.json", envelope)
+    if content_hash is not None:
+        entry = {"file": entry, "content_hash": content_hash}
+    result = build_tier_report(_manifest(kind="digital", evidence={item: entry}))
+    return next(
+        row
+        for row in result["items"]
+        if row["id"] == int(item.split(".")[0]) and row["tier"] == "T1"
+    )
+
+
+def test_synthesize_response_classifies_as_synthesize():
+    assert signoff_module._classify(_synthesize_envelope(), "s.json") == "synthesize"
+
+
+def test_synthesize_shape_does_not_capture_other_kinds():
+    for envelope in (ERC_CLEAN_ENVELOPE, EXTRACT_ENVELOPE, DRC_CLEAN_ENVELOPE):
+        assert signoff_module._classify(envelope, "x.json") != "synthesize"
+    assert not signoff_module._is_synthesize_shape(EXTRACT_ENVELOPE)
+
+
+def test_synthesize_citation_grades_item_1_met_with_matching_pin(tmp_path):
+    item = _synth_item_1(tmp_path, _synthesize_envelope(), content_hash="sha256:rtlA")
+
+    assert item["status"] == "met"
+    assert item["citation"]["kind"] == "synthesize"
+
+
+@pytest.mark.parametrize("field", ["unexpected_latches", "comb_loops", "multi_driven"])
+def test_synthesize_structural_defect_grades_item_1_unmet(tmp_path, field):
+    item = _synth_item_1(tmp_path, _synthesize_envelope(**{field: 1}))
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+
+
+def test_synthesize_stale_pin_renders_stale_evidence(tmp_path):
+    item = _synth_item_1(
+        tmp_path, _synthesize_envelope(), content_hash="sha256:other-rtl"
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+
+
+@pytest.mark.parametrize("item_id", ["2", "3", "9"])
+def test_synthesize_citation_for_other_items_is_wrong_kind(tmp_path, item_id):
+    item = _synth_item_1(tmp_path, _synthesize_envelope(), item=item_id)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+
+
+def test_synthesize_with_warnings_but_zero_counts_passes(tmp_path):
+    envelope = _synthesize_envelope(latches=1, expected_latches=1)
+    envelope["warnings"] = {"count": 40}
+
+    assert _synth_item_1(tmp_path, envelope)["status"] == "met"
+
+
+def test_synthesize_detail_surfaces_graded_netlist(tmp_path):
+    path = _write(tmp_path, "synth.json", _synthesize_envelope(comb_loops=2))
+
+    result = signoff_module.build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["kind"] == "synthesize"
+    assert check["passed"] is False
+    assert check["detail"]["netlist_path"] == "build/top.v"
+    assert check["detail"]["structural"]["comb_loops"] == 2
+
+
+def test_synthesize_citation_for_analog_item_1_is_wrong_kind(tmp_path):
+    path = _write(tmp_path, "synth.json", _synthesize_envelope())
+    result = build_tier_report(_manifest(kind="analog", evidence={"1": path}))
+
+    item = next(row for row in result["items"] if row["id"] == 1)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+
+
+def test_unreadable_file_evidence_detail_names_path_and_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = build_tier_report(_manifest(evidence={"3": "missing/drc.json"}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["reason"] == "unreadable_evidence"
+    assert item_3["detail"]["path"] == os.path.abspath("missing/drc.json")
+    assert item_3["detail"]["cwd"] == os.getcwd()
+
+
+def test_unreadable_file_evidence_absolute_path_is_unchanged(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    gone = str(tmp_path / "gone.json")
+    result = build_tier_report(_manifest(evidence={"3": gone}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["detail"]["path"] == gone
+
+
+def _capture_attest_env(monkeypatch):
+    from klayout_tools import signoff_attest
+
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(argv, 0, stdout=b"")
+
+    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
+    signoff_attest._run_command(".", {"argv": ["python3"], "cwd": "."})
+    return seen["env"]
+
+
+def test_attest_command_env_drops_venv_bin_from_path(monkeypatch):
+    venv_bin = os.path.dirname(sys.executable)
+    monkeypatch.setattr(sys, "prefix", "/venv")
+    monkeypatch.setattr(sys, "base_prefix", "/base")
+    monkeypatch.setenv("PATH", os.pathsep.join([venv_bin, "/usr/bin"]))
+    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
+
+
+def test_attest_command_env_unchanged_outside_venv(monkeypatch):
+    monkeypatch.setattr(sys, "prefix", "/base")
+    monkeypatch.setattr(sys, "base_prefix", "/base")
+    path = os.pathsep.join([os.path.dirname(sys.executable), "/usr/bin"])
+    monkeypatch.setenv("PATH", path)
+    assert _capture_attest_env(monkeypatch)["PATH"] == path
+
+
+def test_attest_command_env_tolerates_unset_path_and_absent_venv_bin(monkeypatch):
+    monkeypatch.setattr(sys, "prefix", "/venv")
+    monkeypatch.setattr(sys, "base_prefix", "/base")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
+    monkeypatch.delenv("PATH")
+    assert "PATH" not in _capture_attest_env(monkeypatch)
+
+
+# --------------------------------------------------------------------------- #
+# Manifest grading re-hashes an attestation's listed sources/derived (#4197)
+# --------------------------------------------------------------------------- #
+
+
+def _graded_attestation(repo: Path, item: int = 1, **grade_kwargs) -> dict:
+    inventory = _write_inventory(repo, item)
+    envelope = build_attestation(item, inventory)
+    envelope_path = repo / "evidence" / f"item{item}.json"
+    envelope_path.write_text(json.dumps(envelope, indent=2))
+    manifest = _manifest(
+        evidence={
+            str(item): {
+                "file": str(envelope_path),
+                "content_hash": _hash_of(inventory),
+            }
+        }
+    )
+    return _item(build_tier_report(manifest, repo_root=str(repo), **grade_kwargs), item)
+
+
+@pytest.mark.parametrize("item", [1, 9, 10])
+def test_untouched_attested_tree_stays_met_without_extra_fields(tmp_path, item):
+    graded = _graded_attestation(_attest_repo(tmp_path), item)
+
+    assert graded["status"] == "met"
+    assert "detail" not in graded or not graded["detail"]
+    assert "members" not in graded["citation"]["artifact_binding"]
+
+
+@pytest.mark.parametrize("path", ["design/ota.sch", "netlist/ota.spice"])
+def test_editing_an_attested_source_or_derived_file_is_stale(tmp_path, path):
+    repo = _attest_repo(tmp_path)
+    inventory = _write_inventory(repo, 1)
+    envelope = build_attestation(1, inventory)
+    (repo / "evidence" / "item1.json").write_text(json.dumps(envelope))
+    manifest = _manifest(
+        evidence={
+            "1": {
+                "file": str(repo / "evidence" / "item1.json"),
+                "content_hash": _hash_of(inventory),
+            }
+        }
+    )
+    assert _item(build_tier_report(manifest, repo_root=str(repo)), 1)["status"] == "met"
+
+    (repo / path).write_text("edited after attestation\n")
+    graded = _item(build_tier_report(manifest, repo_root=str(repo)), 1)
+
+    assert graded["status"] == "unmet"
+    assert graded["reason"] == "stale_evidence"
+    members = graded["detail"]["artifact_binding"]["members"]
+    assert [(m["path"], m["status"]) for m in members] == [(path, "stale")]
+
+
+def test_deleting_an_attested_file_is_unverifiable_provenance(tmp_path):
+    repo = _attest_repo(tmp_path)
+    inventory = _write_inventory(repo, 1)
+    (repo / "evidence" / "item1.json").write_text(
+        json.dumps(build_attestation(1, inventory))
+    )
+    manifest = _manifest(
+        evidence={
+            "1": {
+                "file": str(repo / "evidence" / "item1.json"),
+                "content_hash": _hash_of(inventory),
+            }
+        }
+    )
+    (repo / "design" / "bias.sch").unlink()
+
+    graded = _item(build_tier_report(manifest, repo_root=str(repo)), 1)
+
+    assert graded["status"] == "unmet"
+    assert graded["reason"] == "unverifiable_provenance"
+    members = graded["detail"]["artifact_binding"]["members"]
+    assert [(m["path"], m["status"]) for m in members] == [
+        ("design/bias.sch", "unverifiable")
+    ]
+
+
+# --- Issue #4354: item 4 accepts a list of per-cell `klt lvs` reports -------
+
+
+def _item_4(tmp_path, entry, **manifest_extra):
+    report = build_tier_report(_manifest(evidence={"4": entry}, **manifest_extra))
+    return next(i for i in report["items"] if i["id"] == 4)
+
+
+def test_item4_list_of_matching_lvs_reports_is_met(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    b = _write(tmp_path, "b.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    item = _item_4(tmp_path, [a, b])
+    assert item["status"] == "met"
+    assert len(item["citations_graded"]) == 2
+
+
+def test_item4_one_mismatch_member_is_unmet_and_named(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    b = _write(tmp_path, "b.json", LVS_MISMATCH_ENVELOPE)
+    item = _item_4(tmp_path, [a, b])
+    assert item["status"] == "unmet"
+    assert item["detail"]["failed_citations"] == [str(b)]
+
+
+def test_item4_power_connectivity_mismatch_member_is_unmet(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    b = _write(tmp_path, "b.json", LVS_MATCH_POWER_MISMATCH_ENVELOPE)
+    item = _item_4(tmp_path, [a, b])
+    assert item["status"] == "unmet"
+    assert item["detail"]["failed_citations"] == [str(b)]
+
+
+def test_item4_malformed_member_and_empty_list_are_invalid(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    assert _item_4(tmp_path, [a, 42])["reason"] == "invalid_evidence"
+    assert _item_4(tmp_path, [])["reason"] == "invalid_evidence"
+
+
+def test_item4_non_lvs_member_is_wrong_kind(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    sim = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    item = _item_4(tmp_path, [a, sim])
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+
+
+def test_item4_single_entry_renders_as_before(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    item = _item_4(tmp_path, a)
+    assert item["status"] == "met"
+    assert "citations_graded" not in item
+
+
+def test_item4_spec_rows_are_ignored_for_lvs_list(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    item = _item_4(tmp_path, [a], spec_rows={"4": [{"id": "gain"}]})
+    assert item["status"] == "met"
+    assert "row_coverage" not in item
+
+
+def test_item4_partition_qualified_lists_grade_each_partition(tmp_path):
+    a = _write(tmp_path, "a.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    b = _write(tmp_path, "b.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    bad = _write(tmp_path, "bad.json", LVS_MISMATCH_ENVELOPE)
+    report = build_tier_report(
+        _mixed_signal_manifest(evidence={"4.analog": [a, b], "4.digital": [a, bad]})
+    )
+    by_partition = {
+        i["partition"]: i["status"] for i in report["items"] if i["id"] == 4
+    }
+    assert by_partition["analog"] == "met"
+    assert by_partition["digital"] == "unmet"
+
+
+def _capture_attest_timeout(monkeypatch, spec):
+    from klayout_tools import signoff_attest
+
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        return subprocess.CompletedProcess(argv, 0, stdout=b"")
+
+    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
+    signoff_attest._run_command(".", spec)
+    return seen["timeout"]
+
+
+def test_attest_command_timeout_s_plumbed_and_defaults(monkeypatch):
+    from klayout_tools import signoff_attest
+
+    spec = signoff_attest._command_spec(
+        {"argv": ["x"], "timeout_s": 5400, "local_only": True}, "f", "."
+    )
+    assert spec["timeout_s"] == 5400 and spec["local_only"] is True
+    assert _capture_attest_timeout(monkeypatch, spec) == 5400
+    plain = signoff_attest._command_spec({"argv": ["x"]}, "f", ".")
+    assert "timeout_s" not in plain
+    assert _capture_attest_timeout(monkeypatch, plain) == 1800
+    top = signoff_attest._command_spec(
+        {"argv": ["x"], "timeout_s": signoff_attest.COMMAND_TIMEOUT_CEILING_S},
+        "f",
+        ".",
+    )
+    assert top["timeout_s"] == 21600
+
+
+@pytest.mark.parametrize("bad", ["60", True, 0, -1, float("nan"), float("inf"), 21601])
+def test_attest_command_timeout_s_refused(bad):
+    from klayout_tools import signoff_attest
+
+    with pytest.raises(signoff_attest.AttestationError, match=r"f\.timeout_s"):
+        signoff_attest._command_spec({"argv": ["x"], "timeout_s": bad}, "f", ".")

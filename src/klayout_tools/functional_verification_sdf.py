@@ -59,6 +59,8 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from .functional_verification_sdf_rename import _sdf_unresolvable_pin_tokens
+
 
 def _reject_sdf_with_functional_models(
     sdf: dict[str, str] | None, defines: dict[str, str | None]
@@ -129,15 +131,41 @@ def _resolve_sdf_option(
             "point through this flow)"
         )
 
-    unknown = sorted(set(sdf) - {"file", "corner", "entries"})
+    unknown = sorted(set(sdf) - {"file", "corner", "entries", "scope"})
     if unknown:
         raise FunctionalVerificationError(
             "request.options.sdf has unknown field(s): "
             + ", ".join(unknown)
-            + " (supported: file, corner, entries)"
+            + " (supported: file, corner, entries, scope)"
         )
 
-    file_value = sdf.get("file")
+    path = _resolve_sdf_file(sdf.get("file"), request_dir)
+
+    corner = sdf.get("corner", DEFAULT_SDF_CORNER)
+    if corner not in SDF_CORNERS:
+        raise FunctionalVerificationError(
+            "request.options.sdf.corner must be one of: " + ", ".join(SDF_CORNERS)
+        )
+
+    entries = sdf.get("entries", DEFAULT_SDF_ENTRIES)
+    if entries not in SDF_ENTRIES_MODES:
+        raise FunctionalVerificationError(
+            "request.options.sdf.entries must be one of: "
+            + ", ".join(SDF_ENTRIES_MODES)
+        )
+
+    resolved = {"file": os.path.abspath(path), "corner": corner, "entries": entries}
+    scope = sdf.get("scope")
+    if scope is not None:
+        resolved["scope"] = _validate_sdf_scope(scope)
+    return resolved
+
+
+def _resolve_sdf_file(file_value: Any, request_dir: str) -> str:
+    """Validate ``options.sdf.file`` and return its path (absolute or
+    ``request_dir``-relative); the file must exist and be readable."""
+    from .functional_verification import FunctionalVerificationError
+
     if not isinstance(file_value, str) or not file_value:
         raise FunctionalVerificationError(
             "request.options.sdf.file must be a non-empty string"
@@ -156,21 +184,55 @@ def _resolve_sdf_option(
         raise FunctionalVerificationError(
             f"could not read SDF file '{file_value}': {exc}"
         ) from exc
+    return path
 
-    corner = sdf.get("corner", DEFAULT_SDF_CORNER)
-    if corner not in SDF_CORNERS:
+
+#: One component of ``options.sdf.scope``: a plain identifier or an escaped
+#: identifier (``\name``, ended by whitespace in Verilog source).
+_SDF_SCOPE_COMPONENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*|\\[^\s.]+")
+
+
+def _validate_sdf_scope(scope: Any) -> str:
+    """``options.sdf.scope``: a non-empty ``.``-separated path of instance
+    names, relative to ``hdl_toplevel`` (issue #4521)."""
+    from .functional_verification import FunctionalVerificationError
+
+    parts = _split_sdf_scope(scope) if isinstance(scope, str) else []
+    if not parts:
         raise FunctionalVerificationError(
-            "request.options.sdf.corner must be one of: " + ", ".join(SDF_CORNERS)
+            "request.options.sdf.scope must be a non-empty hierarchical "
+            "instance path relative to hdl_toplevel (e.g. 'dut' or "
+            "'core.u_netlist'), not including hdl_toplevel itself"
         )
+    return scope
 
-    entries = sdf.get("entries", DEFAULT_SDF_ENTRIES)
-    if entries not in SDF_ENTRIES_MODES:
-        raise FunctionalVerificationError(
-            "request.options.sdf.entries must be one of: "
-            + ", ".join(SDF_ENTRIES_MODES)
-        )
 
-    return {"file": os.path.abspath(path), "corner": corner, "entries": entries}
+def _split_sdf_scope(scope: str) -> list[str]:
+    """Components of a validated scope string, or ``[]`` when malformed."""
+    parts: list[str] = []
+    rest = scope
+    while rest:
+        match = _SDF_SCOPE_COMPONENT_RE.match(rest)
+        if match is None:
+            return []
+        parts.append(match.group(0))
+        rest = rest[match.end() :]
+        if rest.startswith("."):
+            rest = rest[1:]
+            if not rest:
+                return []
+        elif rest:
+            return []
+    return parts
+
+
+def _sdf_scope_reference(scope: str) -> str:
+    """``scope`` as a Verilog hierarchical reference suffix (an escaped
+    identifier needs its terminating space before the next ``.``)."""
+    return ".".join(
+        part + " " if part.startswith("\\") else part
+        for part in _split_sdf_scope(scope)
+    )
 
 
 def _write_sdf_annotate_shim(path: str, *, sdf_paths: list[str], scope: str) -> None:
@@ -238,6 +300,99 @@ _ANSI_PORT_TOKEN_RE = re.compile(
 )
 
 
+def _balanced_group(text: str, start: int) -> tuple[str, int] | None:
+    """``(inner, end)`` of the parenthesised group opening at ``text[start]``
+    (``end`` is the index after the closing paren), or ``None`` when
+    ``text[start]`` is not ``(`` or the group never closes."""
+    if start >= len(text) or text[start] != "(":
+        return None
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1 : index], index + 1
+    return None
+
+
+def _find_toplevel_header(
+    source_paths: list[str], hdl_toplevel: str
+) -> tuple[str | None, tuple[str, str] | None]:
+    """``(source_text, (parameter_list, port_list))`` for the first source
+    declaring ``module <hdl_toplevel>``, with an optional ``#( ... )``
+    parameter list (empty string when absent) -- issue #4521. Balanced
+    parentheses, since a default such as ``(2+3)`` nests. ``(None, None)``
+    when no source has the declaration."""
+    start_re = re.compile(
+        r"\bmodule\s+" + re.escape(hdl_toplevel) + r"(?![A-Za-z0-9_$])\s*"
+    )
+    for path in source_paths:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            continue
+        for match in start_re.finditer(text):
+            position = match.end()
+            parameters = ""
+            if text.startswith("#", position):
+                group = _balanced_group(text, text.find("(", position))
+                if (
+                    group is None
+                    or text[position + 1 : text.find("(", position)].strip()
+                ):
+                    continue
+                parameters, position = group
+                while position < len(text) and text[position].isspace():
+                    position += 1
+            ports = _balanced_group(text, position)
+            if ports is None:
+                continue
+            rest = text[ports[1] :].lstrip()
+            if rest.startswith(";"):
+                return text, (parameters, ports[0])
+    return None, None
+
+
+def _parse_toplevel_parameters(
+    source_paths: list[str], hdl_toplevel: str
+) -> tuple[str, list[str]]:
+    """``(declaration_text, overridable_names)`` of ``hdl_toplevel``'s header
+    ``#( ... )`` parameter list (``("", [])`` when it has none). The wrapper
+    re-declares the text verbatim (so port widths such as ``[N-1:0]`` stay
+    valid) and forwards each overridable name to the DUT instance; a
+    ``localparam`` is declared but cannot be forwarded (issue #4521)."""
+    _, header = _find_toplevel_header(source_paths, hdl_toplevel)
+    if header is None or not header[0].strip():
+        return "", []
+    names: list[str] = []
+    depth = 0
+    token = ""
+    tokens: list[str] = []
+    for char in header[0]:
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        if char == "," and depth == 0:
+            tokens.append(token)
+            token = ""
+        else:
+            token += char
+    tokens.append(token)
+    forwardable = True
+    for item in tokens:
+        words = item.split()
+        if words and words[0] in ("parameter", "localparam"):
+            forwardable = words[0] == "parameter"
+        name_match = re.match(r"[^=]*?([A-Za-z_][A-Za-z0-9_$]*)\s*=", item)
+        if forwardable and name_match is not None:
+            names.append(name_match.group(1))
+    return header[0].strip(), names
+
+
 def _parse_toplevel_ports(
     source_paths: list[str], hdl_toplevel: str
 ) -> list[tuple[str, str, str]]:
@@ -254,22 +409,8 @@ def _parse_toplevel_ports(
     """
     from .functional_verification import FunctionalVerificationError
 
-    header_re = re.compile(
-        r"module\s+" + re.escape(hdl_toplevel) + r"\s*\(([^;]*?)\)\s*;", re.DOTALL
-    )
-    text: str | None = None
-    header_match = None
-    for path in source_paths:
-        try:
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                candidate = handle.read()
-        except OSError:
-            continue
-        match = header_re.search(candidate)
-        if match is not None:
-            text, header_match = candidate, match
-            break
-    if header_match is None or text is None:
+    text, header = _find_toplevel_header(source_paths, hdl_toplevel)
+    if header is None or text is None:
         raise FunctionalVerificationError(
             f"options.sdf could not find a 'module {hdl_toplevel}(...)' "
             "declaration in request.sources to build the SDF top-level-port "
@@ -278,7 +419,7 @@ def _parse_toplevel_ports(
 
     tokens = [
         " ".join(token.split()).lstrip("\\")
-        for token in header_match.group(1).split(",")
+        for token in header[1].split(",")
         if token.strip()
     ]
     if not tokens:
@@ -326,7 +467,11 @@ def _parse_toplevel_ports(
 
 
 def _write_sdf_dut_wrapper(
-    path: str, *, hdl_toplevel: str, ports: list[tuple[str, str, str]]
+    path: str,
+    *,
+    hdl_toplevel: str,
+    ports: list[tuple[str, str, str]],
+    parameters: tuple[str, list[str]] = ("", []),
 ) -> None:
     """Write a transparent pass-through wrapper module around ``hdl_toplevel``
     -- the client-side fix for issue #1056.
@@ -362,14 +507,22 @@ def _write_sdf_dut_wrapper(
         for direction, width, name in ports
     )
     connections = ",\n".join(f"    .{name}({name})" for _, _, name in ports)
+    declaration, forwarded = parameters
+    wrapper_parameters = f" #({declaration})" if declaration else ""
+    dut_parameters = (
+        " #(" + ", ".join(f".{name}({name})" for name in forwarded) + ")"
+        if forwarded
+        else ""
+    )
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(
             "// Generated by klt functional-verification -- do not edit.\n"
             "// Transparent pass-through wrapper working around Icarus's\n"
             "// inability to resolve a top-level-port INTERCONNECT entry\n"
             "// against a module elaborated as its own -s root (issue #1056).\n"
-            f"module {SDF_WRAPPER_MODULE} (\n{port_lines}\n);\n"
-            f"  {hdl_toplevel} {SDF_WRAPPER_DUT_INSTANCE} (\n{connections}\n  );\n"
+            f"module {SDF_WRAPPER_MODULE}{wrapper_parameters} (\n{port_lines}\n);\n"
+            f"  {hdl_toplevel}{dut_parameters} {SDF_WRAPPER_DUT_INSTANCE} (\n"
+            f"{connections}\n  );\n"
             "endmodule\n"
         )
 
@@ -1926,28 +2079,34 @@ def _drop_sdf_bit_selected_bus_iopaths(
 # `$sdf_annotate` ever sees a scope argument. This is a genuine Icarus
 # upstream limitation -- guarded here with a clear, request-validation-time
 # error instead of a bare `vvp` assertion abort/core dump.
+#
+# Issue #2897 follow-up (re-verified live, Icarus 13.0): an escaped `.` is
+# mis-split under *either* DIVIDER, so canonicalizing the header to `/` does
+# not help (still aborts); renaming the escaped *instance* to a plain
+# identifier in build-dir copies of the SDF and netlist does. That rename
+# lives in `functional_verification_sdf_rename.py` and runs first, so the
+# guard below now only fires for the residual pin/top-level-port shape.
 # --------------------------------------------------------------------------- #
 
 
 def _reject_sdf_escaped_divider_interconnects(sdf_path: str) -> None:
     """Fail loud, before any build artifact is written, when ``sdf_path``
-    has an ``INTERCONNECT`` entry whose endpoint is an escaped identifier
-    containing a literal occurrence of the file's own ``DIVIDER`` character
-    -- the shape that crashes Icarus's ``$sdf_annotate`` outright (issue
-    #1890; see the module comment above for the confirmed root cause).
+    has an ``INTERCONNECT`` endpoint whose *pin or top-level port* (the
+    endpoint's final path component) is an escaped identifier containing a
+    literal ``.`` or the file's own ``DIVIDER`` character -- the shape that
+    crashes Icarus's ``$sdf_annotate`` outright (issue #1890; see the
+    module comment above for the confirmed root cause).
 
-    Only ``INTERCONNECT`` entries are scanned: the same escaped identifier
-    used as a plain ``CELL``/``(INSTANCE ...)`` field for an ``IOPATH``
-    entry does not crash (it fails to resolve, a separate and non-fatal
-    diagnostic :func:`_scan_sdf_diagnostics` already surfaces) -- confirmed
-    live, and consistent with the root cause being specific to
-    ``INTERCONNECT``'s own path-splitting code.
+    Narrowed by issue #2897: the same shape in an *instance* component (a
+    flattened ``generate`` array's ``g\\[0\\]\\.sub\\.u1``, the common case)
+    is no longer rejected -- ``functional_verification_sdf_rename``'s
+    ``_rename_sdf_escaped_divider_instances`` renames it to a plain
+    identifier in build-dir copies of the SDF and netlist instead. A
+    pin/port is never renamed (the testbench reaches top-level ports by
+    name), so only that residual shape still lands here.
 
-    Never raises on a malformed/unreadable SDF file -- that is
-    :func:`_split_sdf_bus_port_interconnects` and the simulator's own
-    parser's job to report; this function only adds a *narrower*,
-    *earlier* diagnosis for the one shape that would otherwise reach a
-    bare abort.
+    Never raises on a malformed/unreadable SDF file -- that is the
+    simulator's own parser's job to report.
     """
     from .functional_verification import FunctionalVerificationError
 
@@ -1957,67 +2116,268 @@ def _reject_sdf_escaped_divider_interconnects(sdf_path: str) -> None:
     except OSError:
         return
 
-    divider_match = re.search(r"\(DIVIDER\s+(\S+?)\)", text)
-    divider = divider_match.group(1) if divider_match else "."
-    # The two SDF-legal divider characters are `.` and `/` -- anything else
-    # in a `(DIVIDER ...)` header is not a shape this crash's mechanism
-    # (escaping *the* divider character) can apply to.
-    if divider not in (".", "/"):
-        return
-    escaped_divider_re = re.compile(r"\\" + re.escape(divider))
-
-    offenders: list[str] = []
-    for cell_match in re.finditer(r"\(CELL\b", text):
-        cell_start = cell_match.start()
-        try:
-            cell_end = _sdf_matching_paren(text, cell_start) + 1
-        except Exception:
-            continue
-        cell_text = text[cell_start:cell_end]
-        delay_match = re.search(r"\(DELAY\b", cell_text)
-        if delay_match is None:
-            continue
-        delay_start = cell_start + delay_match.start()
-        try:
-            delay_end = _sdf_matching_paren(text, delay_start) + 1
-            delay_type_spans = _sdf_top_level_clauses(
-                text, delay_start + 1, delay_end - 1
-            )
-        except Exception:
-            continue
-        for type_start, type_end in delay_type_spans:
-            entry_spans = _sdf_top_level_clauses(text, type_start + 1, type_end - 1)
-            for entry_start, entry_end in entry_spans:
-                entry_text = text[entry_start:entry_end]
-                interconnect_match = re.match(
-                    r"\(INTERCONNECT\s+(\S+)\s+(\S+)", entry_text
-                )
-                if interconnect_match is None:
-                    continue
-                for token in interconnect_match.groups():
-                    if escaped_divider_re.search(token):
-                        offenders.append(token)
-
+    offenders = _sdf_unresolvable_pin_tokens(text)
     if not offenders:
         return
 
     examples = ", ".join(sorted(set(offenders))[:3])
     raise FunctionalVerificationError(
-        "options.sdf: this SDF has an INTERCONNECT entry naming an escaped "
-        f"identifier that contains a literal '{divider}' -- the file's own "
-        f"DIVIDER character (e.g. {examples}). This is a known Icarus "
-        "Verilog upstream limitation, not something klt's generated "
-        "$sdf_annotate wrapper can work around: Icarus's INTERCONNECT path "
-        "splitter does not honor the backslash-escape on that character, "
-        "which crashes vvp outright ('ERROR: NULL handle passed to "
-        "vpi_scan.', SIGABRT) rather than failing to resolve the entry. "
-        "This shape is produced whenever synthesis/place-and-route "
-        "flattens a `generate` block array of sub-modules into one escaped "
-        "Verilog identifier (e.g. Yosys 'flatten', OpenROAD's post-route "
-        "write_verilog/write_sdf) -- avoid flattening that hierarchy "
-        "before generating the SDF this option consumes, or annotate a "
-        "netlist whose corresponding generate-block instances are not "
-        "collapsed into one escaped identifier"
+        "options.sdf: this SDF has an INTERCONNECT entry whose pin or "
+        "top-level port is an escaped identifier containing a literal '.' "
+        f"or the file's own DIVIDER character (e.g. {examples}). This is a "
+        "known Icarus Verilog upstream limitation: Icarus's INTERCONNECT "
+        "path splitter does not honor the backslash-escape on that "
+        "character, which crashes vvp outright ('ERROR: NULL handle passed "
+        "to vpi_scan.', SIGABRT). klt renames an *instance* name of this "
+        "shape to a plain identifier automatically (issue #2897), but not a "
+        "pin or top-level port name, which the testbench addresses directly "
+        "-- rename that port in the netlist and SDF to a plain identifier"
+    )
+
+
+def _sdf_interconnect_entries(text: str) -> list[tuple[str, int, str]]:
+    """Every ``INTERCONNECT`` entry of ``text`` as ``(cell instance path,
+    start offset, entry text)``, where the instance path is the enclosing
+    ``CELL``'s ``(INSTANCE ...)`` field (empty for the design's own top
+    cell). A ``CELL``/``DELAY`` block that does not balance is skipped --
+    parse failures are the simulator's own parser's job to report.
+    """
+    entries: list[tuple[str, int, str]] = []
+    for cell_match in re.finditer(r"\(CELL\b", text):
+        try:
+            cell_end = _sdf_matching_paren(text, cell_match.start()) + 1
+        except Exception:
+            continue
+        cell_text = text[cell_match.start() : cell_end]
+        instance_match = re.search(r"\(INSTANCE\b\s*([^)\s]*)\s*\)", cell_text)
+        delay_match = re.search(r"\(DELAY\b", cell_text)
+        if instance_match is None or delay_match is None:
+            continue
+        delay_start = cell_match.start() + delay_match.start()
+        try:
+            delay_end = _sdf_matching_paren(text, delay_start) + 1
+            type_spans = _sdf_top_level_clauses(text, delay_start + 1, delay_end - 1)
+        except Exception:
+            continue
+        for type_start, type_end in type_spans:
+            for entry_start, entry_end in _sdf_top_level_clauses(
+                text, type_start + 1, type_end - 1
+            ):
+                entry_text = text[entry_start:entry_end]
+                if re.match(r"\(INTERCONNECT\b", entry_text):
+                    entries.append((instance_match.group(1), entry_start, entry_text))
+    return entries
+
+
+def _sdf_split_unescaped(path: str, divider: str) -> list[str]:
+    """``path`` split at every ``divider`` not preceded by a backslash, with
+    the remaining backslash escapes removed from each part."""
+    parts: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(path):
+        char = path[index]
+        if char == "\\" and index + 1 < len(path):
+            current.append(path[index + 1])
+            index += 2
+            continue
+        if char == divider:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    parts.append("".join(current))
+    return parts
+
+
+def _sdf_unresolvable_interconnect_endpoints(
+    text: str, names: set[str], divider: str
+) -> list[tuple[int, str]]:
+    """``(line, token)`` for each top-cell ``INTERCONNECT`` endpoint whose
+    path names no instance in ``names`` (see
+    :func:`_reject_sdf_unresolvable_interconnect_instances`)."""
+
+    def resolves(parts: list[str]) -> bool:
+        return any(
+            divider.join(parts[:count]) in names for count in range(1, len(parts))
+        )
+
+    offenders: list[tuple[int, str]] = []
+    for cell_instance, entry_start, entry_text in _sdf_interconnect_entries(text):
+        if cell_instance not in ("", "*"):
+            continue
+        match = re.match(r"\(INTERCONNECT\s+(\S+)\s+(\S+)", entry_text)
+        if match is None:
+            continue
+        for token in match.groups():
+            parts = _sdf_split_unescaped(token, divider)
+            if len(parts) > 1 and not resolves(parts):
+                line = text.count("\n", 0, entry_start) + 1
+                offenders.append((line, token))
+    return offenders
+
+
+def _reject_sdf_unresolvable_interconnect_instances(
+    sdf_path: str,
+    source_paths: list[str],
+    hdl_toplevel: str,
+    scope: str | None = None,
+) -> None:
+    """Fail loud, before ``vvp`` starts, when an ``INTERCONNECT`` entry of
+    the design's top cell names ``<instance><DIVIDER><pin>`` where
+    ``<instance>`` is not an instance of ``hdl_toplevel`` (issue #3740).
+
+    Icarus 13.0's ``$sdf_annotate`` does not report such an endpoint: its
+    INTERCONNECT path resolver walks off the end of the scope's item list and
+    ``vvp`` dies with ``ERROR: NULL handle passed to vpi_scan.`` /
+    ``Assertion `0' failed`` (SIGABRT). Measured live on raw
+    ``iverilog -ginterconnect``/``vvp`` -- same abort for either endpoint, for
+    scalar or bus ports, and for both ``DIVIDER`` characters -- while a bare
+    name with no divider (an unknown net or port) fails soft with ``Could not
+    find handles for both ports!``. Typical producers: the design name used
+    as a path prefix on a port (``top/a``), or a cell the netlist no longer
+    has (the SDF and the netlist come from different runs or stages).
+
+    The check is deliberately conservative -- it can only turn a ``vvp``
+    abort into a named error, never reject a run that would have worked:
+
+    * a no-op when the top module's instance list cannot be derived
+      (:func:`_find_gate_level_instances`, e.g. an ANSI header or RTL top);
+    * only the design's own top ``CELL`` (empty ``(INSTANCE)``) is checked --
+      a ``CELL`` scoped to a sub-instance has endpoints relative to it;
+    * an endpoint with no unescaped ``DIVIDER`` is never flagged;
+    * an endpoint resolves when its path before the final divider equals an
+      instance name or begins with ``<instance><DIVIDER>`` (hierarchy below a
+      top-level instance is not inspected).
+    """
+    from .functional_verification import FunctionalVerificationError
+
+    try:
+        with open(sdf_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return
+    source_texts = _read_verilog_source_texts(source_paths)
+    # With `options.sdf.scope` the SDF's paths are relative to the scoped
+    # instance's module, not to `hdl_toplevel` (issue #4521).
+    scope_module = _resolve_sdf_scope_module(source_texts, hdl_toplevel, scope)
+    if scope_module is None:
+        return
+    instances = _find_gate_level_instances(source_texts, scope_module)
+    names = {str(instance["name"]) for instance in instances}
+    if not names:
+        return
+    divider_match = re.search(r"\(DIVIDER\s+(\S+?)\)", text)
+    divider = divider_match.group(1) if divider_match else "."
+    if divider not in (".", "/"):
+        return
+
+    offenders = _sdf_unresolvable_interconnect_endpoints(text, names, divider)
+    if not offenders:
+        return
+
+    shown = "; ".join(f"line {line}: {token}" for line, token in offenders[:3])
+    raise FunctionalVerificationError(
+        "options.sdf: this SDF has an INTERCONNECT entry whose endpoint "
+        f"names an instance that is not in '{hdl_toplevel}' ({shown}"
+        f"{'; ...' if len(offenders) > 3 else ''}; {len(offenders)} "
+        "unresolvable endpoint(s)). Icarus Verilog cannot report such an "
+        "endpoint: its $sdf_annotate INTERCONNECT resolver aborts vvp "
+        "outright ('ERROR: NULL handle passed to vpi_scan.', SIGABRT). "
+        "Regenerate the SDF from the same netlist the simulation reads, and "
+        "write top-level ports as bare names (no design-name prefix)"
+    )
+
+
+def _resolve_sdf_scope_module(
+    source_texts: list[str], hdl_toplevel: str, scope: str | None
+) -> str | None:
+    """Module name of the instance ``scope`` names under ``hdl_toplevel``
+    (``hdl_toplevel`` itself for ``None``), found by following each path
+    component's instantiation through the sources; ``None`` when any step
+    cannot be resolved (issue #4521)."""
+    module = hdl_toplevel
+    for part in _split_sdf_scope(scope) if scope else []:
+        body = _module_body(source_texts, module)
+        if body is None:
+            return None
+        inst = re.search(
+            r"(?<![\w$.])([A-Za-z_][\w$]*)\s*(?:#\s*\([^;]*?\)\s*)?"
+            + re.escape(part.lstrip("\\"))
+            + r"\s*\(",
+            body,
+        )
+        if inst is None:
+            return None
+        module = inst.group(1)
+    return module
+
+
+def _module_body(source_texts: list[str], module: str) -> str | None:
+    """Comment-stripped text of ``module``'s declaration after its header's
+    terminating ``;``, from the first source defining it."""
+    for text in source_texts:
+        chunk = re.search(
+            _VERILOG_MODULE_CHUNK_TEMPLATE.format(name=re.escape(module)),
+            text,
+            re.DOTALL,
+        )
+        if chunk is not None:
+            stripped = _VERILOG_COMMENT_RE.sub(" ", chunk.group(0))
+            return stripped[stripped.find(";") + 1 :]
+    return None
+
+
+def _reject_sdf_mis_scoped_top_cell(
+    sdf_path: str, source_paths: list[str], hdl_toplevel: str, scope: str | None
+) -> None:
+    """Fail loud, before ``vvp`` starts, when the SDF is rooted at a module
+    that is a *child* of the annotation scope rather than the scope itself
+    (issue #4521).
+
+    A post-route SDF's top ``CELL`` has ``(CELLTYPE "<netlist module>")`` and
+    an empty ``(INSTANCE)``. When the bench wrapping that netlist is
+    ``hdl_toplevel``, ``$sdf_annotate`` at ``hdl_toplevel`` resolves every
+    path one level too high: with ``INTERCONNECT`` entries Icarus 13.0 then
+    aborts ``vvp`` (``NULL handle passed to vpi_scan``, SIGABRT) with no SDF
+    diagnostic. Narrow by construction: it only fires when the top cell's
+    ``CELLTYPE`` is a module defined in the sources, differs from the scope's
+    module, and is instantiated directly inside that module.
+    """
+    from .functional_verification import FunctionalVerificationError
+
+    try:
+        with open(sdf_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return
+    top = re.search(r'\(CELL\s*\(CELLTYPE\s+"([^"]*)"\s*\)\s*\(INSTANCE\s*\)', text)
+    if top is None:
+        return
+    celltype = top.group(1)
+    source_texts = _read_verilog_source_texts(source_paths)
+    scope_module = _resolve_sdf_scope_module(source_texts, hdl_toplevel, scope)
+    if scope_module is None or scope_module == celltype:
+        return
+    body = _module_body(source_texts, scope_module) or ""
+    child_names = re.findall(
+        r"(?<![\w$.])" + re.escape(celltype) + r"\s*(?:#\s*\([^;]*?\)\s*)?"
+        r"([A-Za-z_][\w$]*)\s*\(",
+        body,
+    )
+    if not child_names:
+        return
+    where = f"'{scope}' under '{hdl_toplevel}'" if scope else f"'{hdl_toplevel}'"
+    raise FunctionalVerificationError(
+        f"options.sdf: this SDF is rooted at module '{celltype}' "
+        f"(top CELLTYPE, empty INSTANCE) but the annotation scope {where} is "
+        f"module '{scope_module}', which instantiates '{celltype}' as "
+        f"'{child_names[0]}'. Every SDF path would resolve one level too "
+        "high (Icarus aborts vvp with 'NULL handle passed to vpi_scan.' when "
+        "INTERCONNECT entries exist). Set request.options.sdf.scope to "
+        f"'{child_names[0]}' (the netlist instance, relative to hdl_toplevel)"
+        + (f" -- it is currently '{scope}'" if scope else "")
     )
 
 

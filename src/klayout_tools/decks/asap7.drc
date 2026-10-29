@@ -5,7 +5,7 @@
 #
 #   klt drc <layout.gds> --engine klayout \
 #       --deck-file src/klayout_tools/decks/asap7.drc \
-#       --expect-rule-categories 263 --format json
+#       --expect-rule-categories 267 --format json
 #
 # or directly:
 #
@@ -101,6 +101,11 @@ slvt    = input(97, 0)
 lvt     = input(98, 0)
 sramdrc = input(99, 0)
 sramvt  = input(110, 0)
+# THICKOX is NOT a DRM layer: the pinned asap7.lyp / asap7.layermap / DRM 1p7
+# have no thick-oxide (I/O) marker. 111/0 is an assumed, unused stream number
+# (97/98/99/110 are SLVT/LVT/SRAMDRC/SRAMVT) and the THICKOX.* rules below are
+# predictive, not foundry rules (#4465).
+thickox = input(111, 0)
 
 # --------------------------------------------------------------------------
 # Derived layers and direction helpers
@@ -203,7 +208,7 @@ end
 # GEOMETRY.NONORTHOGONAL: non-orthogonal shapes are not allowed. Applied to
 # every drawing layer this deck reads, FEOL through V9 (SRAMDRC is a marker,
 # not a mask; PAD is read only by the V9 rules below).
-[well, fin, gate, gcut, active, nselect, pselect, slvt, lvt, sramvt,
+[well, fin, gate, gcut, active, nselect, pselect, slvt, lvt, sramvt, thickox,
  sdt, lisd, lig, v0, m1, v1, m2, v2, m3, v3, m4, v4, m5, v5, m6, v6,
  m7, v7, m8, v8, m9, v9].map { |l| l.non_rectilinear }.inject(:+)
   .output("GEOMETRY.NONORTHOGONAL", "Table 3.1.1: non-orthogonal shapes are not allowed")
@@ -341,6 +346,32 @@ end
 (nselect & pselect).output("NSELECT.PSELECT.AUX.1", "Table 3.7.1: NSELECT and PSELECT may not overlap")
 ((slvt & lvt) + (slvt & sramvt) + (lvt & sramvt))
   .output("VT.AUX.2", "Table 3.7.1: VT layers (LVT, SLVT, SRAMVT) may not overlap")
+
+# --------------------------------------------------------------------------
+# THICKOX -- thick-oxide (I/O) device marker. PREDICTIVE / ASSUMED: the DRM
+# has no thick-oxide layer or rule (#4465). The cited table is Table 3.7.1,
+# the select-layer table these rules are modelled on; every threshold below
+# is an assumption (basis stated per rule), never a foundry value.
+# --------------------------------------------------------------------------
+# A marked device is ACTIVE crossed by a GATE and interacting with THICKOX.
+thickox_active = active.interacting(thickox)
+thickox_channel = channel & thickox
+thickox_gate = gate.interacting(thickox_channel)
+thickox_device_active = thickox_active.interacting(gate)
+# Assumed: marker encloses ACTIVE by 27 nm (core NSELECT.ACTIVE.EN.2). Shrinking
+# the marker by 27 nm and requiring ACTIVE inside it (coincident edges allowed)
+# is that enclosure; ACTIVE only partly covered, or merely touching, fails too.
+thickox_active.not_inside(thickox.sized(-27.nm))
+  .output("THICKOX.ACTIVE.EN", "Table 3.7.1: min enclosure of ACTIVE by THICKOX 27 nm (assumed, not a DRM rule)")
+# Assumed: 54 nm (core NSELECT.W.2); abutting or overlapping markers merge.
+thickox.space(54.nm, projection)
+  .output("THICKOX.S", "Table 3.7.1: min THICKOX spacing 54 nm (assumed, not a DRM rule)")
+# Assumed: 30 nm minimum Lg on a marked gate (1.5x the 20 nm core GATE.W.1).
+hwidth(thickox_gate, 30.nm)
+  .output("THICKOX.GATE.L", "Table 3.7.1: min horizontal GATE width (Lg) on a THICKOX device 30 nm (assumed, not a DRM rule)")
+# Assumed: 54 nm minimum channel width (two 27 nm ACTIVE.W.2 steps).
+vwidth(thickox_device_active, 54.nm)
+  .output("THICKOX.ACTIVE.W", "Table 3.7.1: min vertical ACTIVE width on a THICKOX device 54 nm (assumed, not a DRM rule)")
 
 # --------------------------------------------------------------------------
 # Table 3.8.1 -- SDT
@@ -521,14 +552,36 @@ s2a_pairs.polygons.raw.not_overlapping(active)
 
 # LIG.LISD.S.6 / LIG.SDT.S.8: spacing in any direction between a LIG polygon
 # and a LISD (SDT) polygon on a different net.
-lig_nets.separation(lisd_nets, 14.nm, euclidian, props_ne)
+#
+# A two-layer net separation with props_ne SIGSEGVs KLayout 0.28 when the
+# second operand has no shapes (#3811: a tap or filler cell draws LIG but no
+# LISD or SDT). With an empty second layer there is nothing to separate LIG
+# from, so the result is the (empty) edge pairs of that layer. The rule is
+# still declared via output(), so the coverage count is unchanged.
+#
+# The same net separation also aborts KLayout 0.28 ("m_type == Polygon was not
+# true in Region::separation_check", #4340) when its operands are non-empty
+# but no pair lies within the distance: a tie or tap cell whose LIG sits
+# near, but not within, the LISD/SDT. The net-aware result is always a subset
+# of the plain one (props_ne only drops pairs on one net), so an empty plain
+# separation is already the answer and the net-aware call is skipped; the
+# rule is still declared via output().
+lig_net_separation = lambda do |other, other_nets, *args|
+  if other.is_empty?
+    other.space(1.nm)
+  else
+    plain = lig.separation(other, *args)
+    plain.is_empty? ? plain : lig_nets.separation(other_nets, *args, props_ne)
+  end
+end
+lig_net_separation.call(lisd, lisd_nets, 14.nm, euclidian)
   .output("LIG.LISD.S.6", "Table 3.10.1: min spacing between LIG and LISD not on the same net 14 nm")
-lig_nets.separation(sdt_nets, 14.nm, euclidian, props_ne)
+lig_net_separation.call(sdt, sdt_nets, 14.nm, euclidian)
   .output("LIG.SDT.S.8", "Table 3.10.1: min spacing between LIG and SDT not on the same net 14 nm")
 # LIG.LISD.S.7: the corner-to-corner case, with the longer 15 nm distance.
 # As for M1.S.6, "corner-to-corner" is Euclidean spacing between edges whose
 # projections onto each other overlap by less than one database unit.
-lig_nets.separation(lisd_nets, 15.nm, euclidian, projection_limits(nil, 0.25.nm), props_ne)
+lig_net_separation.call(lisd, lisd_nets, 15.nm, euclidian, projection_limits(nil, 0.25.nm))
   .output("LIG.LISD.S.7", "Table 3.10.1: min corner-to-corner spacing between LISD and LIG not on the same net 15 nm")
 
 # --------------------------------------------------------------------------
@@ -764,7 +817,9 @@ end
 # --------------------------------------------------------------------------
 # Section 3.19: rules for V8 (with M8 / M9) apply to V9 (with M9 / PAD).
 # PAD (DRM mask 96, Table 2.3.1) is not in the pinned asap7.lyp, so it is read
-# by number, like every other layer here; the V8.M9.EN.2 / V8.AUX.1 rules
+# by number, like every other layer here. The DRM has no rule for PAD itself, so
+# shapes on PAD are unchecked beyond the V9 rules below and `klt drc` reports
+# that in coverage.unchecked_rules (asap7_rules.PAD_DISPOSITION, #3807); the V8.M9.EN.2 / V8.AUX.1 rules
 # for "V8 in conjunction with M9" carry over to "V9 in conjunction with PAD".
 { "V8" => [v8, m8], "V9" => [v9, m9] }.each do |name, (via, lower)|
   r = via.rectangles
@@ -789,3 +844,28 @@ v8.not_inside(m8 & m9)
   .output("V8.AUX.1", "Table 3.19.1: V8 must be inside M8 and M9")
 v9.not_inside(m9 & pad)
   .output("V9.AUX.1", "Table 3.19.1: V9 must be inside M9 and PAD")
+
+# --------------------------------------------------------------------------
+# Opt-in absolute grid origin (#4082) -- NOT part of the 263 default ids
+# --------------------------------------------------------------------------
+# FIN.S.1 / GATE.S.1 above only look at neighbour spacing, so a whole cell
+# moved off the grid still passes. When the caller declares an origin with
+# --deck-var, the lower edge of every FIN is held to the 27 nm vertical
+# pitch (DRM Table 3.3.1) and the left edge of every GATE to the 54 nm
+# horizontal pitch (DRM Table 3.4.1), counted from that origin. The DRM states
+# the pitches only, not an absolute origin, so the origin is the caller's.
+$fin_y_origin_nm = nil unless defined? $fin_y_origin_nm
+$gate_x_origin_nm = nil unless defined? $gate_x_origin_nm
+
+# Edges of `m` that bound it from below / the left: the horizontal (vertical)
+# edges that are not inside the layer shifted up (right) by one dbu.
+if $fin_y_origin_nm
+  fy = $fin_y_origin_nm.to_f
+  horz(fin).outside(fin.moved(0, 0.25.nm)).extended(:in => 27.nm).moved(0, -fy.nm).ongrid(0.25.nm, 27.nm)
+    .output("FIN.GRID.1", "DRM Table 3.3.1 (opt-in fin_y_origin_nm): FIN lower edge must be on the 27 nm vertical pitch from the declared origin")
+end
+if $gate_x_origin_nm
+  gx = $gate_x_origin_nm.to_f
+  vert(gate).outside(gate.moved(0.25.nm, 0)).extended(:in => 54.nm).moved(-gx.nm, 0).ongrid(54.nm, 0.25.nm)
+    .output("GATE.GRID.1", "DRM Table 3.4.1 (opt-in gate_x_origin_nm): GATE left edge must be on the 54 nm horizontal pitch from the declared origin")
+end

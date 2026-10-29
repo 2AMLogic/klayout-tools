@@ -248,8 +248,8 @@ generic job type rather than inventing a second fan-out shape.
 | Output artifact | A SPICE netlist (schematic-level, pre-layout) — the same `netlist` reference field `klt sim`'s request contract already expects (`docs/design/spice-corner-runner-spike.md` → "Request"). |
 | Entry criteria | Sizing candidate produced by S5, even if not yet Loop-A-converged (schematic-level sim passes need a netlist to run against). |
 | Exit criteria | Netlist elaborates cleanly (parses, every device model resolves against the target PDK) and its topology matches S4/S5's intent (no missing/extra elements). |
-| `klt` verbs | None currently — schematic capture (xschem) is out-of-repo per current scope; the export/staleness-check gap is #55 (see §4). |
-| Failure modes | Netlist silently diverges from the sized schematic it claims to represent (the staleness problem #55 names directly); a block netlisted as a testbench rather than an includable subcircuit (also #55). |
+| `klt` verbs | `klt netlist` ([docs/cli/netlist.md](../cli/netlist.md), shipped — #55, closed): headless xschem → SPICE export, `--block` for an includable `.subckt` body, `--check` as the staleness gate. Schematic capture itself (drawing the xschem schematic) remains out-of-repo. |
+| Failure modes | Netlist silently diverges from the sized schematic it claims to represent (the staleness problem #55 named; `klt netlist --check` detects it); a block netlisted as a testbench rather than an includable subcircuit (also #55; `klt netlist --block` emits the includable form). |
 
 ### S7 — layout generation
 
@@ -341,10 +341,10 @@ layout-generator spike issue.
 | S3 block specs | None. | No friction issue filed yet — currently absorbed into S1/S2's human/agent judgment. |
 | S4 topology selection (KB-assisted) | Shipped. `klt kb list`/`show`/`search`/`validate` (`docs/cli/kb.md`) query the KB corpus (`kb/`); Epic #102 (corpus + query surface) and its sub-issues (#106–#110) are closed. What remains is corpus *breadth*, grown incrementally, not the query surface. | — |
 | S5 sizing | Partial, **by decision**. `klt sim` (shipped, #96) gives the feedback signal Loop A needs; next-candidate proposal is fully agent-side and stays that way until the re-trigger in §2's S5 recorded decision fires. | #310 (sizing candidate proposer — decision recorded, see §2 S5) |
-| S6 schematic/netlist | None in `klt`. Schematic capture and netlist export live outside the repo today (xschem); the specific staleness/testbench-vs-block/config gaps a shared `klt netlist` (or documented helper) would close are filed. | #55 |
+| S6 schematic/netlist | Shipped. `klt netlist` (`docs/cli/netlist.md`) exports an xschem schematic to SPICE headlessly, with `--block` (includable `.subckt`) and `--check` (staleness gate); #55 closed. Schematic capture itself stays in xschem, outside the repo. | — |
 | S7 layout generation | Shipped. `klt gen`/`klt gen-compose` (`docs/cli/gen.md`, `docs/cli/gen-compose.md`) generate and compose layout from a netlist + parameters; `klt render` (visual check) and `klt layout-metrics` (area/utilization) support inspection. #104 closed; `klt gen-compose` was driven end-to-end against a real sky130 5T OTA (Epic #153 phase 4, #164/#196). | — |
 | S8 DRC/LVS | Shipped. `klt drc` (`docs/cli/drc.md`) runs a curated sky130/gf180mcu deck subset (see that doc's "Coverage" section for fidelity caveats); `klt lvs` (`docs/cli/lvs.md`) runs a device/net compare (phase 3 of Epic #153). #54 closed. | — |
-| S9 extraction | Shipped. `klt extract` (`docs/cli/extract.md`) produces a schematic-equivalent netlist (devices + connectivity, sky130/gf180mcu) and, with `--parasitics`, RC-parasitic extraction (#216 decision / #217 implementation, both closed); see `.claude/skills/design-extraction/SKILL.md`. | — |
+| S9 extraction | Shipped. `klt extract` (`docs/cli/extract.md`) produces a schematic-equivalent netlist (devices + connectivity, sky130/gf180mcu) and, with `--parasitics`, RC-parasitic extraction (#216 decision / #217 implementation, both closed); `klt pex` (`docs/cli/pex.md`, Epic #709, closed) re-runs S10 testbenches against the parasitic-annotated netlist and reports the schematic-vs-extracted delta. RC-model fidelity work is sequenced in `docs/design/extract-fidelity-roadmap.md`; see `.claude/skills/design-extraction/SKILL.md`. | — |
 | S10 simulation across corners | Mostly shipped. `klt sim` (#96) covers scalar `.meas`-based corner sweeps per the accepted spike. Sequence/waveform measurements (jitter, cycle-to-cycle, TIE) beyond scalar reduction are not covered. | #56 (waveform post-processing) |
 | S11 signoff report | Partial. `klt signoff` (`docs/cli/signoff.md`, #309) aggregates `klt drc`/`klt lvs`/`klt extract`/`klt sim` JSON into one pass/fail verdict with provenance-consistency refusal. Does not diff against S3 spec fields (S3 has no schema — see the S3 row above) or walk the full T1 checklist's non-JSON items (design-hygiene, testbenches shipped). | No tracking issue — the remaining gap is the S3 block-spec schema (row above), not a signoff-side gap. |
 
@@ -359,7 +359,7 @@ obstacle-unaware routing, missing net labels, a spurious LVS device-class
 mismatch — all closed). The stages that remain unbuilt are not loop
 tooling but the *bracketing* stages: S2/S3 spec-and-partition work (no
 tool, by design), the S5 sizing proposer (#310 — also no tool by design,
-pending its re-trigger), S6 netlist export (#55), and S10 waveform
+pending its re-trigger) and S10 waveform
 post-processing (#56); S11's mechanical drc/lvs/extract/sim aggregation now
 ships as `klt signoff` (#309).
 Epic #105's Phase 3 worked example can now drive a genuine closed-loop run

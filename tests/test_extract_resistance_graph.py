@@ -136,7 +136,7 @@ def _f5(pieces: int) -> ResistanceGraph:
     )
 
 
-def _f4() -> ResistanceGraph:
+def _f4(r_cut: float = 0.0) -> ResistanceGraph:
     return build_resistance_graph(
         [
             RoleInput("M1", RS, (_strip(0, 0, S_LEN),)),
@@ -147,8 +147,8 @@ def _f4() -> ResistanceGraph:
             PortInput("B", (("M1", _end(S_LEN, 0)),)),
         ],
         [
-            LandingInput("M1", "M2", _end(0, 0), 0.04, 0.0),
-            LandingInput("M1", "M2", _end(S_LEN, 0), 0.04, 0.0),
+            LandingInput("M1", "M2", _end(0, 0), 0.04, r_cut),
+            LandingInput("M1", "M2", _end(S_LEN, 0), 0.04, r_cut),
         ],
         DBU,
     )
@@ -206,13 +206,13 @@ def test_f4_two_level_parallel_has_ideal_via_edges_at_both_ends():
     graph = _f4()
     assert graph.status == "ok"
     assert graph.diagnostics == ()
-    # 2 pieces, 2 terminals, 4 landing ports.
-    assert len(graph.nodes) == 8
+    # 2 pieces, 2 terminals that double as the M1 landing ports, 2 M2 ports.
+    assert len(graph.nodes) == 6
     vias = [e for e in graph.edges if e.kind == "via"]
     assert len(vias) == 2
     assert all(e.resistance_ohm == 0.0 for e in vias)
-    # 8 edges: 2 terminal + 4 landing attachments + 2 vias.
-    assert len(graph.edges) == 8
+    # 6 edges: 2 terminal + 2 M2 landing attachments + 2 vias.
+    assert len(graph.edges) == 6
     assert _components(graph) == 1
 
 
@@ -689,6 +689,15 @@ def test_f4_and_f4v_stacked_parallel_levels():
     assert terminal_resistance_matrix(f4v).solves == 1
 
 
+def test_f4_and_f4v_through_landings_share_the_terminal_node():
+    """A landing end on a terminal's own patch reuses the terminal node, so the
+    landing form of F4/F4v gives the same resistance as the hand-built graph."""
+    f4, f4v = _f4(0.0), _f4(10.0)
+    assert _two_terminal(f4, "A", "B") == pytest.approx(50.0, rel=TOL)
+    assert _two_terminal(f4v, "A", "B") == pytest.approx(12000 / 220, rel=TOL6)
+    assert terminal_resistance_matrix(f4v).solves == 1
+
+
 def test_f5_and_f5v_single_landing_is_series():
     f5, f5v = _solve_f5(0.0), _solve_f5(10.0)
     assert _two_terminal(f5, "A", "B") == pytest.approx(200.0, rel=TOL)
@@ -841,3 +850,52 @@ def test_monotonicity_holds_only_for_the_bounded_relations():
     assert _two_terminal(_solve_f5(10.0), "A", "B") > _two_terminal(
         _solve_f5(0.0), "A", "B"
     )
+
+
+def _landing_pair_resistance(landing: kdb.Box) -> float:
+    graph = build_resistance_graph(
+        [
+            RoleInput("M1", RS, (_strip(0, 0, S_LEN),)),
+            RoleInput("M2", RS, (_strip(0, 0, S_LEN),)),
+        ],
+        [
+            PortInput("A", (("M1", _end(0, 0)),)),
+            PortInput("B", (("M2", _end(S_LEN, 0)),)),
+        ],
+        [LandingInput("M1", "M2", landing, 0.04, 0.0)],
+        DBU,
+    )
+    assert graph.status == "ok"
+    matrix = terminal_resistance_matrix(graph, dbu=DBU)
+    assert matrix.status == "ok"
+    return matrix.pair_resistance_ohm[0][1]
+
+
+def test_interior_landing_does_not_double_conductance_across_it():
+    """A landing wholly inside both strips attaches by its footprint only. The
+    full-height landing at the same x span is the analytic reference (the
+    patch centre at 7 um: 20 um of strip = 100 ohm); insetting the landing from
+    the outline only
+    adds current crowding, so the result is >= the reference, whereas half
+    edges to the abutting neighbours would push it below."""
+    full = kdb.Box(6 * UM, 0, 8 * UM, WIDTH)
+    inset = kdb.Box(6 * UM, UM // 2, 8 * UM, WIDTH - UM // 2)
+    r_full = _landing_pair_resistance(full)
+    r_inset = _landing_pair_resistance(inset)
+    assert r_full == pytest.approx(RS * 20 / 2, rel=1e-9)
+    assert r_full - TOL <= r_inset < r_full * 1.6
+
+
+def test_interior_landing_attaches_only_overlapped_pieces():
+    inset = kdb.Box(6 * UM, UM // 2, 8 * UM, WIDTH - UM // 2)
+    graph = build_resistance_graph(
+        [RoleInput("M1", RS, (_strip(0, 0, S_LEN),))],
+        [PortInput("A", (("M1", inset),))],
+        [],
+        DBU,
+    )
+    port_edges = [
+        e for e in graph.edges if e.a.startswith("port") or e.b.startswith("port")
+    ]
+    assert len(port_edges) == 1
+    assert port_edges[0].resistance_ohm == 0.0

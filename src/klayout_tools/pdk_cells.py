@@ -27,7 +27,15 @@ import os
 import re
 from typing import Any
 
-from .pdk import PdkNotFoundError, _read_text, find_pdk
+from .liberty_merge import LibertyMergeError, merge_liberty
+from .pdk import (
+    PdkNotFoundError,
+    _read_text,
+    find_pdk,
+    list_pdks,
+    variant_dir_of,
+)
+from .pdk_descriptor import DescriptorError, has_descriptor, load_descriptor
 
 #: Marker substrings identifying a `libs_ref` entry as a "foundry digital,
 #: standard cell" library, as opposed to primitive-device libraries
@@ -95,6 +103,9 @@ _NOM_PROCESS_RE = re.compile(r"nom_process\s*:\s*([0-9.eE+-]+)")
 _NOM_TEMPERATURE_RE = re.compile(r"nom_temperature\s*:\s*(-?[0-9.eE+-]+)")
 _NOM_VOLTAGE_RE = re.compile(r"nom_voltage\s*:\s*([0-9.eE+-]+)")
 _OPERATING_CONDITIONS_RE = re.compile(r'default_operating_conditions\s*:\s*"([^"]+)"')
+# open_pdks-style liberty corner name: ``<process>_<temp>C_<V>v<frac>`` with
+# ``n`` marking a negative temperature (``ss_n40C_3v00`` -> ss, -40 C, 3.00 V).
+_CORNER_NAME_RE = re.compile(r"^([a-z]{2})_(n?)(\d+)C_(\d+)v(\d+)$")
 
 
 def list_cell_libraries(
@@ -191,6 +202,12 @@ def list_cell_libraries(
                     "nominal_corner": str | None,
                     "supplies_v": [float, ...],
                     "voltage_class": "core" | "io" | None,
+                    "corners": [str, ...],   # shipped liberty corner names
+                    "corner_points": [       # one per corners entry
+                        {"name": str, "process": str | None,
+                         "temperature_c": int | None,
+                         "supply_v": float | None},
+                    ],
                     # "compatible": bool,   -- present only when supply= is given
                 },
                 ...
@@ -227,6 +244,100 @@ def list_cell_libraries(
     return result
 
 
+def _ships_cell_library(info: dict[str, Any], cell_library: str) -> bool:
+    """True when the resolved install ships ``cell_library`` (libs_ref dir or
+    a ``klt-pdk.json`` liberty mapping)."""
+    libs_ref = info["assets"]["libs_ref"]
+    if libs_ref and os.path.isdir(os.path.join(libs_ref, cell_library)):
+        return True
+    variant_dir = variant_dir_of(info)
+    if variant_dir is None or not has_descriptor(variant_dir):
+        return False
+    try:
+        return cell_library in load_descriptor(variant_dir)["liberty"]
+    except DescriptorError:
+        return False
+
+
+def _variants_shipping(
+    cell_library: str,
+    *,
+    root: str | None = None,
+    exclude: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Installed ``find_pdk`` payloads that ship ``cell_library``.
+
+    In :func:`list_pdks` order (root precedence, then sorted variant).
+    ``root`` restricts the scan to one install root; ``exclude`` skips the
+    already-resolved variant/root pair.
+    """
+    found: list[dict[str, Any]] = []
+    for install in list_pdks(root=root)["installs"]:
+        for variant in install["variants"]:
+            name = variant["name"]
+            if (
+                exclude is not None
+                and name == exclude["variant"]
+                and install["root"] == exclude["root"]
+            ):
+                continue
+            try:
+                other = find_pdk(variant=name, root=install["root"])
+            except PdkNotFoundError:
+                continue
+            if _ships_cell_library(other, cell_library):
+                found.append(other)
+    return found
+
+
+def _other_variants_hint(cell_library: str, resolved: dict[str, Any]) -> str:
+    """Suffix naming other installed variants that ship ``cell_library``.
+
+    Appended to the not-found error so a headless agent can self-correct with
+    ``--pdk``. Returns ``""`` when no other variant ships the library, and on
+    any discovery failure -- the hint must never mask the original error.
+    """
+    try:
+        candidates: list[str] = []
+        for other in _variants_shipping(cell_library, exclude=resolved):
+            entry = f"'{other['variant']}' at '{other['root']}'"
+            if entry not in candidates:
+                candidates.append(entry)
+        if not candidates:
+            return ""
+        return (
+            f"; other installed variants ship it: {', '.join(candidates)} -- "
+            "pass --pdk <variant> (and --pdk-root <root> if needed) to select one"
+        )
+    except Exception:  # noqa: BLE001 -- best-effort hint only
+        return ""
+
+
+def _default_variant_shipping(
+    cell_library: str,
+    info: dict[str, Any],
+    variant: str | None,
+    root: str | None,
+) -> dict[str, Any]:
+    """Return ``info``, or the first installed variant shipping ``cell_library``.
+
+    Only substitutes when no explicit variant/``$PDK`` choice was made and the
+    default pick lacks the library (issue #4204); same first-match posture as
+    :func:`find_pdk`, so the choice shows in the returned pdk_info.
+    """
+    if (
+        variant is not None
+        or os.environ.get("PDK")
+        or _ships_cell_library(info, cell_library)
+    ):
+        return info
+    try:
+        shipping = _variants_shipping(cell_library, root=root)
+    except Exception:  # noqa: BLE001 -- fall through to the original error
+        return info
+    return shipping[0] if shipping else info
+
+
 def resolve_liberty_for_cell_library(
     cell_library: str,
     requested_corner: str | None,
@@ -252,6 +363,10 @@ def resolve_liberty_for_cell_library(
     installed PDK variant/root exactly as :func:`find_pdk` does; ``None`` for
     either leaves that resolver's own default search order in effect.
 
+    When neither ``variant`` nor ``$PDK`` is set and the default install lacks
+    ``cell_library``, the first installed variant that ships it is used
+    instead (issue #4204); an explicit ``variant``/``$PDK`` is never overridden.
+
     ``pdk_info`` is :func:`find_pdk`'s own resolution dict, returned
     unchanged for the caller to pass through to its own provenance builder.
 
@@ -267,6 +382,12 @@ def resolve_liberty_for_cell_library(
     except PdkNotFoundError as exc:
         raise error_cls(str(exc)) from exc
 
+    info = _default_variant_shipping(cell_library, info, variant, root)
+
+    mapped = _descriptor_liberty(info, cell_library, requested_corner, error_cls)
+    if mapped is not None:
+        return mapped[0], mapped[1], info
+
     libs_ref = info["assets"]["libs_ref"]
     if libs_ref is None:
         raise error_cls(
@@ -280,6 +401,7 @@ def resolve_liberty_for_cell_library(
             f"liberty not found for deck: standard-cell library "
             f"'{cell_library}' not found under resolved PDK install "
             f"'{info['variant']}' at '{info['root']}'"
+            + _other_variants_hint(cell_library, info)
         )
 
     corner = requested_corner
@@ -313,12 +435,87 @@ def resolve_liberty_for_cell_library(
         if os.path.isfile(single_underscore_path):
             liberty_path = single_underscore_path
     if not os.path.isfile(liberty_path):
+        shipped = [c["name"] for c in list_lib_corners(cell_library, info)]
+        available = (
+            f"available corners: {', '.join(shipped)}"
+            if shipped
+            else "no liberty corners found in its lib/ directory"
+        )
         raise error_cls(
             f"liberty not found for deck: no '{corner}' corner for "
             f"'{cell_library}' under resolved PDK install '{info['variant']}' "
-            f"(expected '{liberty_path}')"
+            f"({available})"
         )
     return liberty_path, corner, info
+
+
+def _descriptor_liberty(
+    info: dict[str, Any],
+    cell_library: str,
+    requested_corner: str | None,
+    error_cls: type[Exception],
+) -> tuple[str, str] | None:
+    """Explicit `klt-pdk.json` `liberty` mapping for `cell_library` (issue
+    #3782), or `None` to fall through to the open_pdks naming convention."""
+    variant_dir = variant_dir_of(info)
+    if variant_dir is None or not has_descriptor(variant_dir):
+        return None
+    try:
+        corners = load_descriptor(variant_dir)["liberty"].get(cell_library)
+    except DescriptorError as exc:
+        raise error_cls(str(exc)) from exc
+    if corners is None:
+        return None
+    corner = requested_corner
+    if corner is None:
+        if len(corners) != 1:
+            raise error_cls(
+                f"liberty not found for deck: descriptor maps {len(corners)} "
+                f"corners for '{cell_library}' ({', '.join(sorted(corners))}) "
+                "-- pass request.pdk.corner explicitly"
+            )
+        corner = next(iter(corners))
+    if corner not in corners:
+        raise error_cls(
+            f"liberty not found for deck: no '{corner}' corner mapped for "
+            f"'{cell_library}' in the PDK descriptor "
+            f"(mapped: {', '.join(sorted(corners))})"
+        )
+    mapped = corners[corner]
+    if isinstance(mapped, list):
+        try:
+            mapped = merge_liberty(mapped)
+        except LibertyMergeError as exc:
+            raise error_cls(
+                f"liberty not found for deck: cannot merge '{cell_library}' "
+                f"corner '{corner}': {exc}"
+            ) from exc
+    return mapped, corner
+
+
+def parse_corner_name(name: str) -> dict[str, Any]:
+    """Split a liberty corner name into ``{name, process, temperature_c,
+    supply_v}``.
+
+    Only the open_pdks ``<process>_<n?><temp>C_<V>v<frac>`` shape is
+    recognised; any other name (e.g. IHP ``typ_1p20V_25C``) yields ``None``
+    for the three parsed fields rather than a guess.
+    """
+    match = _CORNER_NAME_RE.match(name)
+    if match is None:
+        return {
+            "name": name,
+            "process": None,
+            "temperature_c": None,
+            "supply_v": None,
+        }
+    process, neg, temp, volts, frac = match.groups()
+    return {
+        "name": name,
+        "process": process,
+        "temperature_c": -int(temp) if neg else int(temp),
+        "supply_v": float(f"{volts}.{frac}"),
+    }
 
 
 def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
@@ -335,6 +532,10 @@ def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
             continue
         nominal = _nominal_supply(lib_dir)
         flavors, flavors_status = _device_flavors(name, lib_dir)
+        corners = sorted(
+            c["name"]
+            for c in list_lib_corners(name, {"assets": {"libs_ref": libs_ref}})
+        )
         libraries.append(
             {
                 "name": name,
@@ -344,6 +545,8 @@ def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
                 "nominal_corner": nominal["corner"],
                 "supplies_v": nominal["supplies_v"],
                 "voltage_class": _voltage_class(nominal["voltage"]),
+                "corners": corners,
+                "corner_points": [parse_corner_name(c) for c in corners],
             }
         )
     return libraries
@@ -535,7 +738,9 @@ def list_lib_corners(
     - ``name`` -- a unique, Tcl-safe corner tag for OpenSTA's own
       ``define_corners``/``read_liberty -corner`` pair, derived from the
       ``.lib`` file's own **filename** (stripping the leading
-      ``f"{cell_library}__"`` prefix and the ``.lib`` suffix) -- deliberately
+      ``f"{cell_library}__"`` prefix -- or, failing that, IHP's single-underscore
+      ``f"{cell_library}_"`` -- and the ``.lib`` suffix, so the name is the
+      one :func:`resolve_liberty_for_cell_library` accepts) -- deliberately
       **never** the file's own ``default_operating_conditions`` Liberty
       attribute :func:`_parse_lib_corner` reads for ``nominal_corner``: that
       attribute is not guaranteed unique across a library's own shipped
@@ -559,6 +764,7 @@ def list_lib_corners(
         return []
 
     prefix = f"{cell_library}__"
+    single_prefix = f"{cell_library}_"
     corners: list[dict[str, str]] = []
     for filename in sorted(os.listdir(lib_views_dir)):
         if not filename.endswith(".lib"):
@@ -566,7 +772,11 @@ def list_lib_corners(
         stem = filename[: -len(".lib")]
         if stem.endswith(_CCSNOISE_LIB_SUFFIX):
             continue
-        name = stem[len(prefix) :] if stem.startswith(prefix) else stem
+        name = stem
+        for candidate in (prefix, single_prefix):
+            if stem.startswith(candidate):
+                name = stem[len(candidate) :]
+                break
         corners.append({"name": name, "path": os.path.join(lib_views_dir, filename)})
     return corners
 

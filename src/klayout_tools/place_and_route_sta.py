@@ -72,6 +72,7 @@ def _corner_sweep_script_lines(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    library: dict[str, Any] | None = None,
 ) -> list[str]:
     """Tcl for the post-route multi-corner setup/hold sweep (issue #949,
     ``docs/design/post-route-sta-survey.md`` section 4.2) -- a **second**,
@@ -184,6 +185,7 @@ def _corner_sweep_script_lines(
         _design_rule_check_lines,
         _design_rule_constraint_lines,
         _io_delay_lines,
+        _wire_rc_lines,
     )
 
     lines = [f"read_db {checkpoint_in}"]
@@ -200,7 +202,7 @@ def _corner_sweep_script_lines(
     # input-port -> register / register -> output-port.
     lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
     lines += [
-        f"set_wire_rc -layer {io_spec['layer_v']}",
+        *_wire_rc_lines(io_spec, library),
         "estimate_parasitics -global_routing",
     ]
     # Issue #2357: the library-only design-rule pass -- no caller-stated
@@ -623,7 +625,6 @@ def _post_route_spef_metrics(
     sites).
     """
     from .place_and_route import (
-        _EXTRACT_DECK_FOR_CELL_LIBRARY,
         _HOLD_VIOLATIONS_BEGIN,
         _HOLD_VIOLATIONS_END,
         _SETUP_VIOLATIONS_BEGIN,
@@ -634,17 +635,11 @@ def _post_route_spef_metrics(
         PlaceAndRouteError,
         _engine_error_message,
         _read_metrics,
+        _require_extract_deck_for_cell_library,
         _write_script,
     )
 
-    extract_deck = _EXTRACT_DECK_FOR_CELL_LIBRARY.get(cell_library)
-    if extract_deck is None:
-        raise PlaceAndRouteError(
-            "request.post_route_spef requires a known klt extract deck for "
-            f"cell_library '{cell_library}' (supported: "
-            + ", ".join(sorted(_EXTRACT_DECK_FOR_CELL_LIBRARY))
-            + ")"
-        )
+    extract_deck = _require_extract_deck_for_cell_library(cell_library)
 
     # Local import (mirrors `_merge_def_to_gds`'s own local `klayout.db`
     # import): keeps `extract.py`'s own (heavier) import cost out of every
@@ -830,6 +825,7 @@ def _run_corner_sweep(
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
     engine_logs: list[dict[str, Any]] | None = None,
+    library: dict[str, Any] | None = None,
 ) -> tuple[
     float | None,
     float | None,
@@ -974,6 +970,7 @@ def _run_corner_sweep(
         max_fanout=max_fanout,
         input_delay_ns=input_delay_ns,
         output_delay_ns=output_delay_ns,
+        library=library,
     )
     _write_script(script_path, lines)
 
@@ -1088,6 +1085,7 @@ def _run_corner_sweep(
             max_fanout=max_fanout,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            library=library,
         )
         _write_script(corner_script_path, corner_lines)
 

@@ -66,9 +66,10 @@ Suggested working shape (not a shipped contract):
   stage — the vision sentence's "simulation-verified" is only satisfied by a
   post-extraction (S9 -> S10) pass, per the design doc's S10 row. Don't let a
   clean pre-layout run get reported as final. See
-  `.claude/skills/design-extraction/SKILL.md`'s "Post-layout re-verification
-  workflow" for how to re-run this same testbench against the extracted
-  netlist (`klt sim`'s `netlist_source` field).
+  `.claude/skills/design-extraction/SKILL.md`'s "What an agent should do at
+  this stage" for how to re-run this same testbench against the
+  parasitic-extracted netlist (`klt pex`, or `klt sim`'s `netlist_source`
+  field by hand).
 
 ## Applicable `klt` verbs
 
