@@ -32,12 +32,12 @@ one.
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import os
 from typing import Any
 
 from . import sim
+from ._provenance import sha256_file
 
 MERGE_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
@@ -164,14 +164,6 @@ def load_manifest(path: str) -> dict[str, Any]:
     return manifest
 
 
-def _sha256_file(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _check_requests(manifest: dict[str, Any], manifest_path: str) -> list[str]:
     """Problems with the planned request files (``request_sha256`` pins)."""
     base = os.path.dirname(os.path.abspath(manifest_path))
@@ -180,12 +172,11 @@ def _check_requests(manifest: dict[str, Any], manifest_path: str) -> list[str]:
         pinned = shard.get("request_sha256")
         if pinned is None:
             continue
-        try:
-            actual = _sha256_file(os.path.join(base, shard["request"]))
-        except OSError as exc:
+        actual = sha256_file(os.path.join(base, shard["request"]))
+        if actual is None:
             problems.append(
                 f"shard {shard['id']!r}: planned request unreadable "
-                f"({shard['request']}): {exc.strerror or exc}"
+                f"({shard['request']}): not an existing file"
             )
             continue
         if actual != pinned:
