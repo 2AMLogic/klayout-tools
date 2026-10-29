@@ -4,6 +4,12 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-29
 
+- **Issue #3022** (closed): gen cap_array: no parallel-connected multi-unit capacitor and no stacked (two-level) MiM option
+- **PR #3489**: feat: add cap_array connect=parallel mode for one large MiM capacitor
+- **Issue #3625** (closed): klt sim: engine_version pin is silently ignored on deck-list (decks) requests
+- **PR #3643**: fix: enforce engine_version pin on deck-list sim requests
+- **Issue #3055** (closed): klt sim: no way to center a DC sweep window on a value measured in the same corner, and no ungraded named vector intermediates in measurements[].expr
+- **PR #3335**: feat(sim): derive step sweep windows from earlier results; add unreported intermediates
 - **Issue #4562** (closed): signoff: item 7 accepts only one pex citation; hierarchical designs verified per cell cannot cite all reports
 - **PR #4563**: feat(signoff): accept a list of klt pex reports for item 7
 - **Issue #4559** (closed): place-and-route: enable post_route_spef/post_route_sdf for asap7sc7p5t_rvt (part of #4557)
