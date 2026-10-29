@@ -1333,20 +1333,36 @@ _RUNSET_NOTES: dict[str, dict[str, object]] = {
         ),
     },
 }
-for _rule_id in (
-    "nwell.enclosing.pactiv.1",
-    "nwell.enclosing.pactiv.hv.1",
-    "nwell.enclosing.pactiv.dig.1",
-):
+_NW_TABLE_NOTE = (
+    "Not in the PDK's NWell table (5_1_nwell.drc runs only NW.b, NW.b1, "
+    "NW.f1, NW.f1.digibnd), so `run_drc.py --disable_extra_rules` does not "
+    "execute it and shows no counterpart; it lives in the optional "
+    "sg13cmos5l_maximal.drc. "
+)
+# Only NW.c and NW.d are evaluated on `NWell_Nsram` in the pinned runset
+# (`SRAM = source.polygons("25/0")`, `NWell_Nsram = NWell.ext_not(SRAM)`);
+# NW.c1/d1/e/e1 and the .dig variants use plain `NWell`.
+_SRAM_SCOPED_NOTE = (
+    "The runset evaluates this rule on NWell_Nsram = NWell.ext_not(SRAM) with "
+    "SRAM = layer 25/0, i.e. NWell inside the SRAM marker layer 25/0 is "
+    "exempt; this deck does not apply that scoping, so findings entirely "
+    "inside 25/0 (SRAM macro bit cells) are expected to be absent from the "
+    "runset."
+)
+for _rule_id in ("nwell.enclosing.pactiv.1", "nwell.space.nactiv.1"):
+    _RUNSET_NOTES[_rule_id] = {
+        "implemented_by_pdk_runset": True,
+        "runset_file": _MAXIMAL_DECK,
+        "note": _NW_TABLE_NOTE + _SRAM_SCOPED_NOTE,
+    }
+for _rule_id in ("nwell.enclosing.pactiv.hv.1", "nwell.enclosing.pactiv.dig.1"):
     _RUNSET_NOTES[_rule_id] = {
         "implemented_by_pdk_runset": True,
         "runset_file": _MAXIMAL_DECK,
         "note": (
-            "Not in the PDK's NWell table (5_1_nwell.drc runs only NW.b, "
-            "NW.b1, NW.f1, NW.f1.digibnd). NW.c/NW.c1 are implemented in the "
-            "optional sg13cmos5l_maximal.drc, which excludes SRAM-marked "
-            "NWell (NWell_Nsram); this deck does not, so SRAM-macro findings "
-            "may be stricter than the foundry runset."
+            _NW_TABLE_NOTE
+            + "NW.c1 uses plain NWell (no layer-25/0 SRAM exemption), unlike "
+            "NW.c, so SRAM-macro findings are expected in the runset too."
         ),
     }
 DECK = [
