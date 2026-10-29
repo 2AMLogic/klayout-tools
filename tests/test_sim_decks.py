@@ -603,6 +603,21 @@ class TestLocalRunner:
         assert "line no. 7557" in fatal["message"]
         assert "engine_output_tail" not in codes
 
+    def test_library_parse_error_after_blank_line_keeps_message(self, tmp_path):
+        request = deck_request(tmp_path, decks=[{"id": "u0", "deck": "deck.spice"}])
+        (tmp_path / "deck.spice").write_text(
+            "* stub-exit: 1\n* stub-emit-stderr-text: warn\\n\\n\\n"
+            "Error in netlist line no. 5, new internal line no. 2:"
+            "\\nUndefined parameter [expr]\n",
+            encoding="utf-8",
+        )
+        unit = run_local(tmp_path, request)["units"][0]
+        codes = [d["code"] for d in unit["diagnostics"]]
+        fatal = next(d for d in unit["diagnostics"] if d["code"] == "ngspice_fatal")
+        assert "line no. 5" in fatal["message"]
+        assert "Undefined parameter [expr]" in fatal["message"]
+        assert "engine_output_tail" not in codes
+
     def test_unrecognised_stderr_falls_back_to_tail(self, tmp_path):
         request = deck_request(tmp_path, decks=[{"id": "u0", "deck": "deck.spice"}])
         (tmp_path / "deck.spice").write_text(

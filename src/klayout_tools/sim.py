@@ -1119,8 +1119,8 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # already classified). The message is the first matching log line.
         "ngspice_fatal",
         re.compile(
-            r"^\s*Error on line \d+"
-            r"|^\s*Error in netlist line no\. \d+"
+            r"^[ \t]*Error on line \d+"
+            r"|^[ \t]*Error in netlist line no\. \d+"
             r"|Simulation interrupted due to error"
             r"|fatal error in ngspice",
             re.IGNORECASE | re.MULTILINE,
