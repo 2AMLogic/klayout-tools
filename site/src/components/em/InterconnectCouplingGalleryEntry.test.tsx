@@ -63,7 +63,7 @@ describe("InterconnectCouplingGalleryEntry", () => {
   it("renders the title, epic cross-references, and the wrapped result before provenance loads", () => {
     vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
     render(<InterconnectCouplingGalleryEntry />);
-    expect(screen.getByText("On-chip power/ground coupling — a real fleet block")).toBeInTheDocument();
+    expect(screen.getByText("On-chip power/ground coupling — a real gallery block")).toBeInTheDocument();
     expect(screen.getByText("#701")).toBeInTheDocument();
     expect(screen.getByText("#708")).toBeInTheDocument();
     expect(screen.getByText("#709")).toBeInTheDocument();

@@ -204,6 +204,15 @@ Let `X.Y.Z` be the new version.
    `tests/test_deck_history.py::test_checked_in_history_table_covers_every_release`
    on the next `main` checkout.
 
+6. **Refresh the site's release badge.** The klayout-tools.org landing page
+   reads the release, verb list and MCP tool count from
+   `site/src/data/cli.generated.json`, which is generated from the newest
+   `## X.Y.Z (YYYY-MM-DD)` heading in `CHANGELOG.md` and the CLI registry.
+   In the PR that adds that heading, run
+   `uv run python scripts/gen_site_cli_data.py` and commit the result.
+   `tests/test_site_cli_data.py` fails until you do, and the commit
+   (under `site/`) is what triggers the site redeploy.
+
 **Changelog convention for deck changes.** Any `CHANGELOG.md` entry that
 alters a built-in deck's content hash (rules added, removed or adjusted in
 `sky130`, `gf180mcu`, `sg13g2`, ...) must include the literal phrase
@@ -228,3 +237,6 @@ search for it. Hashes are stable only per package version; see
 - [ ] `git push origin vX.Y.Z` — confirm `publish.yml` runs and succeeds.
 - [ ] `src/klayout_tools/decks/_history.json` regenerated
       (`python scripts/generate_deck_history.py`) and committed to `main`.
+- [ ] `site/src/data/cli.generated.json` regenerated
+      (`uv run python scripts/gen_site_cli_data.py`) in the PR that adds the
+      `## X.Y.Z` CHANGELOG heading.
