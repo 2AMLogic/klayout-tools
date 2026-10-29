@@ -1,9 +1,11 @@
-"""Issue #4568: gf180mcu LDMOS_XTOR (226/0) is reported as an unsupported device."""
+"""Issue #4568: a gf180mcu LDMOS_XTOR (226/0) no flavour recognises is reported as
+an unsupported device; a recognised LDMOS is not (issue #4587)."""
 
 from __future__ import annotations
 
 from klayout import db as kdb
 
+from helpers.gf180mcu_ldmos import make_ldmos_layout
 from klayout_tools.extract import run_extract
 
 
@@ -45,3 +47,10 @@ def test_ldmos_and_mos_cap_both_reported(tmp_path):
         "ldmos",
         "mos_capacitor",
     }
+
+
+def test_recognised_ldmos_reports_nothing(tmp_path):
+    report = _run(make_ldmos_layout("n"), tmp_path)
+    assert report["device_counts"] == {"nfet": 1}
+    assert report["unsupported_devices"] == []
+    assert not any("unsupported device" in w for w in report["warnings"])

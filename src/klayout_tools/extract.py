@@ -8117,6 +8117,57 @@ def _resolve_mos_capacitors(
     return capacitors, remaining, recognised, dropped
 
 
+def _flavour_claims_island(
+    island: kdb.Region,
+    flavour: MOSFlavour,
+    marker_region: kdb.Region,
+    and_regions: list[kdb.Region],
+    not_regions: list[kdb.Region],
+    nwell: kdb.Region,
+) -> bool:
+    """Whether ``flavour`` claims the active ``island``: it touches the
+    flavour's ``marker`` and every ``and_markers`` layer, touches no
+    ``not_markers`` layer, and (``nfet_only``) lies outside the well."""
+    return (
+        not island.interacting(marker_region).is_empty()
+        and all(not island.interacting(r).is_empty() for r in and_regions)
+        and all(island.interacting(r).is_empty() for r in not_regions)
+        and not (flavour.nfet_only and not island.interacting(nwell).is_empty())
+    )
+
+
+def _flavour_recognised_islands(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    marker: tuple[int, int],
+) -> kdb.Region:
+    """Union of the gated ``deck.active`` islands claimed by a
+    ``deck.mos_flavours`` entry whose ``and_markers`` include ``marker``
+    (issue #4587): such a device is extracted, so its marker is not an
+    unsupported device. Empty when no flavour names ``marker``."""
+    import klayout.db as kdb
+
+    flavours = [f for f in deck.mos_flavours if marker in f.and_markers]
+    recognised = kdb.Region()
+    if not flavours:
+        return recognised
+    active = _region(layout, top_cell, deck.active)
+    poly = _region(layout, top_cell, deck.poly)
+    nwell = _region(layout, top_cell, deck.nwell)
+    for flavour in flavours:
+        marker_region = _region(layout, top_cell, flavour.marker)
+        and_regions = [_region(layout, top_cell, m) for m in flavour.and_markers]
+        not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
+        for component in active.merged().each():
+            island = kdb.Region(component)
+            if not (island & poly).is_empty() and _flavour_claims_island(
+                island, flavour, marker_region, and_regions, not_regions, nwell
+            ):
+                recognised += island
+    return recognised
+
+
 def _detect_unsupported_devices(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -8160,6 +8211,11 @@ def _detect_unsupported_devices(
         region = _region(layout, top_cell, spec.marker).merged()
         if not recognised.is_empty():
             region = region.not_interacting(recognised)
+        flavour_islands = _flavour_recognised_islands(
+            layout, top_cell, deck, spec.marker
+        )
+        if not flavour_islands.is_empty():
+            region = region.not_interacting(flavour_islands)
         if region.is_empty():
             continue
         count = region.count()
@@ -9566,19 +9622,13 @@ def _extract_netlist(
             remaining = kdb.Region()
             for component in active.merged().each():
                 component_region = kdb.Region(component)
-                if (
-                    not component_region.interacting(marker_region).is_empty()
-                    and all(
-                        not component_region.interacting(r).is_empty()
-                        for r in and_regions
-                    )
-                    and all(
-                        component_region.interacting(r).is_empty() for r in not_regions
-                    )
-                    and not (
-                        flavour.nfet_only
-                        and not component_region.interacting(nwell).is_empty()
-                    )
+                if _flavour_claims_island(
+                    component_region,
+                    flavour,
+                    marker_region,
+                    and_regions,
+                    not_regions,
+                    nwell,
                 ):
                     claimed += component_region
                 else:
