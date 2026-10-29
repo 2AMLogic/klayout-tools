@@ -1589,13 +1589,18 @@ def _side_error(
     *,
     message: str | None = None,
     code: str | None = None,
+    measurement: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The additive ``error`` object of an errored ``delta[]`` row (issue
     #3062): ``side``, ``stage``, ``message`` and, when the source has one,
     ``code`` -- taken from that side's corner ``diagnostics[]`` (first
     error-severity entry), else from the caller-supplied ``message``/``code``
     (a ``SimError``), never invented. ``remote`` carries the side's
-    ``environment.remote`` (the batch job id) when present."""
+    ``environment.remote`` (the batch job id) when present.
+
+    When neither exists, the blamed side's ``measurement`` may carry the
+    ``message`` a ``--measure-command`` harness recorded (issue #4555); the
+    stage is then ``"execute"``."""
     remote = None
     if sim_report is not None:
         remote = (sim_report.get("environment") or {}).get("remote")
@@ -1612,10 +1617,14 @@ def _side_error(
                     message = chosen.get("message") or chosen.get("code")
                     code = chosen.get("code")
                 break
+    stage = None
+    if not message and measurement is not None and measurement.get("message"):
+        message = measurement["message"]
+        stage = "execute"
     text = message or "no diagnostic was recorded for this errored row"
     error: dict[str, Any] = {
         "side": side,
-        "stage": _error_stage(code, text),
+        "stage": stage or _error_stage(code, text),
         "message": text,
     }
     if code:
@@ -1707,9 +1716,19 @@ def _build_delta_rows(
                     )
                 )
                 row["error"] = (
-                    _side_error("schematic", schematic_report, corner_id)
+                    _side_error(
+                        "schematic",
+                        schematic_report,
+                        corner_id,
+                        measurement=schematic_measurement,
+                    )
                     if schematic_bad
-                    else _side_error("extracted", extracted_report, corner_id)
+                    else _side_error(
+                        "extracted",
+                        extracted_report,
+                        corner_id,
+                        measurement=extracted_measurement,
+                    )
                 )
             if device_only_leg:
                 row.update(
@@ -2006,7 +2025,15 @@ def _normalize_measurement_row(row: Any, *, where: str, fail: Any) -> dict[str, 
             f"{where}.status must be one of "
             f"{', '.join(_MEASUREMENT_STATUSES)} (got {status!r})"
         )
-    return {"name": name, "value": value, "status": status}
+    normalized = {"name": name, "value": value, "status": status}
+    if "message" in row:
+        # Issue #4555: optional free-text reason a harness gives for a
+        # value-less measurement; surfaced only via ``delta[].error``.
+        message = row["message"]
+        if not isinstance(message, str) or not message.strip():
+            raise fail(f"{where}.message must be a non-empty string")
+        normalized["message"] = message
+    return normalized
 
 
 def _run_measure_command(
