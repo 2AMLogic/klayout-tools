@@ -4,6 +4,20 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-29
 
+- **PR #4584**: fix: accept DRC violations beneath an excepted foundry cell
+- **PR #4583**: feat: add stack=2 stacked two-level MiM mode to sky130 cap_array
+- **PR #4579**: fix(extract): bind sub-0.42um sky130 nFETs to special_nfet_01v8
+- **PR #4577**: feat(extract): extract gf180mcu drain-extended LDMOS devices
+- **PR #4576**: feat(drc): add gf180mcu 10V LDMOS layers and exact MDN/MDP rules, disclose the rest
+- **PR #4573**: fix(extract): bind LEF-merged substrate pins to the substrate net without probing
+- **PR #4572**: feat(extract): report gf180mcu LDMOS_XTOR (226/0) as an unsupported device
+- **Issue #4582** (closed): signoff foundry-cell exceptions lapse for violations in sub-cells of the excepted cell
+- **Issue #4575** (closed): extract --pdk: MOS cards narrower than the scalable model's smallest bin are written with a subckt that has no bin
+- **Issue #4571** (closed): extract --abstract-cells: LEF substrate pin binds to an arbitrary signal net via box-centre probe
+- **Issue #4570** (closed): extract: gf180mcu deck does not recognise nfet_10v0_asym / pfet_10v0_asym LDMOS devices
+- **Issue #4569** (closed): drc: curated gf180mcu deck has no rules for the 10 V LDMOS module (ldnmos/ldpmos)
+- **Issue #4568** (closed): gen: no generator for gf180mcu drain-extended 10 V (LDMOS) devices; PDK pcell library not loaded
+- **Issue #3332** (closed): gen cap_array: stacked two-level MiM option (sky130 cap_mim_m3_1 + cap_mim_m3_2)
 - **Issue #3022** (closed): gen cap_array: no parallel-connected multi-unit capacitor and no stacked (two-level) MiM option
 - **PR #3489**: feat: add cap_array connect=parallel mode for one large MiM capacitor
 - **Issue #3625** (closed): klt sim: engine_version pin is silently ignored on deck-list (decks) requests
