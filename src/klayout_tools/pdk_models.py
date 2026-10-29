@@ -1836,6 +1836,40 @@ def _select_bipolar_variant(
     return min(variants, key=lambda entry: abs(entry[0] - emitter_area_um2))[1]
 
 
+def _apply_narrow_fallback(
+    binding: DeviceBinding,
+    subckt: str,
+    name: str,
+    length_um: float,
+    width_um: float,
+    notes: list[str],
+) -> str:
+    """Return the subckt a MOS device is written against (issue #4575).
+
+    ``subckt`` unchanged unless ``binding`` carries a ``narrow_fallback`` and
+    ``subckt`` is the binding's default (no flavour override) and ``width_um``
+    is below the fallback threshold; then the fallback subckt, with one
+    human-readable line appended to ``notes``.
+    """
+    if (
+        binding.kind != "mos"
+        or binding.narrow_fallback is None
+        or subckt != binding.subckt
+    ):
+        return subckt
+    min_width_um, fallback_subckt = binding.narrow_fallback
+    if round(width_um, _PARAM_PRECISION_UM) >= min_width_um:
+        return subckt
+    w_txt = _format_um(width_um, GEOMETRY_STYLE_BARE_UM)
+    l_txt = _format_um(length_um, GEOMETRY_STYLE_BARE_UM)
+    notes.append(
+        f"device {name} (W={w_txt} um, L={l_txt} um) is "
+        f"narrower than {subckt}'s smallest width bin "
+        f"({min_width_um:g} um); bound to {fallback_subckt}"
+    )
+    return fallback_subckt
+
+
 def create_model_binding_delegate(
     bindings: dict[str, DeviceBinding],
     global_nets: Sequence[str] = (),
@@ -2243,21 +2277,9 @@ def create_model_binding_delegate(
                 length_um = self._device_param(device, "L") or 0.0
                 width_um = self._device_param(device, "W") or 0.0
 
-            if (
-                binding.kind == "mos"
-                and binding.narrow_fallback is not None
-                and subckt == binding.subckt
-            ):
-                min_width_um, fallback_subckt = binding.narrow_fallback
-                if round(width_um, _PARAM_PRECISION_UM) < min_width_um:
-                    w_txt = _format_um(width_um, GEOMETRY_STYLE_BARE_UM)
-                    l_txt = _format_um(length_um, GEOMETRY_STYLE_BARE_UM)
-                    self.substitution_notes.append(
-                        f"device {name} (W={w_txt} um, L={l_txt} um) is "
-                        f"narrower than {subckt}'s smallest width bin "
-                        f"({min_width_um:g} um); bound to {fallback_subckt}"
-                    )
-                    subckt = fallback_subckt
+            subckt = _apply_narrow_fallback(
+                binding, subckt, name, length_um, width_um, self.substitution_notes
+            )
 
             extra_params = ""
             if binding.kind == "mos":

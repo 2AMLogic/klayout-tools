@@ -1498,6 +1498,27 @@ def _validate_resistance_graph_r_cut(
         )
 
 
+def _model_delegate_factory(
+    model_bindings: Any, global_nets: Any, sink: list[Any]
+) -> Callable[[], Any]:
+    """Factory building the model-binding delegate and recording it in ``sink``."""
+
+    def make() -> Any:
+        delegate = create_model_binding_delegate(
+            model_bindings if model_bindings is not None else {},
+            global_nets=global_nets,
+        )
+        sink.append(delegate)
+        return delegate
+
+    return make
+
+
+def _substitution_notes(delegates: list[Any]) -> list[str]:
+    """Narrow-width fallback notes (issue #4575) recorded by ``delegates``."""
+    return [n for d in delegates for n in getattr(d, "substitution_notes", ())]
+
+
 @_timed
 def run_extract(
     path: str,
@@ -3892,17 +3913,13 @@ def run_extract(
     # The model-binding delegate records any narrow-width fallback
     # substitution it makes (issue #4575); keep a handle to surface it below.
     model_delegates: list[Any] = []
-
-    def _make_model_delegate() -> Any:
-        delegate = create_model_binding_delegate(
-            model_bindings if model_bindings is not None else {},
-            global_nets=substrate_global_nets,
-        )
-        model_delegates.append(delegate)
-        return delegate
-
     writer = kdb.NetlistSpiceWriter(
-        spice_writer_delegate_for(deck_name, _make_model_delegate)
+        spice_writer_delegate_for(
+            deck_name,
+            _model_delegate_factory(
+                model_bindings, substrate_global_nets, model_delegates
+            ),
+        )
     )
     writer.use_net_names = True
     netlist_description = f"extracted by klt extract --deck {deck_name}"
@@ -3921,8 +3938,7 @@ def run_extract(
             shutil.rmtree(scratch_dir, ignore_errors=True)
         raise ExtractError(f"could not write netlist '{netlist_path}': {exc}") from exc
 
-    for delegate in model_delegates:
-        warnings.extend(getattr(delegate, "substitution_notes", ()))
+    warnings.extend(_substitution_notes(model_delegates))
 
     pin_ties = (pin_renames or {}).get("ties") or []
     _apply_pin_ties_if_circuit(netlist_path, circuit, pin_ties)
