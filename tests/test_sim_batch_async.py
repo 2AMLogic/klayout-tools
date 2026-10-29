@@ -16,8 +16,10 @@ from klayout_tools.cli import main
 from test_sim_batch import (
     FAKE_BUCKET,
     _batch_request,
+    _Clock,
     _FakeRunner,
     _install_fake_batch_transport,
+    _sim_report,
     _status,
     _write_body,
     _write_request,
@@ -184,6 +186,52 @@ def test_submit_then_status_round_trip_through_the_cli(tmp_path, monkeypatch, ca
     assert status["state"] == "interrupted"
     # Reading an interrupted job re-launches nothing.
     assert len(runner.argvs_matching("launch")) == launches_before
+
+
+def test_submit_only_writes_the_submit_receipt(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    result = _submit(path)
+
+    receipt = json.loads((tmp_path / ".klt" / "sim" / "batch-receipt.json").read_text())
+    assert receipt["job_id"] == result["job_id"]
+    assert "bucket" not in receipt
+    raw = json.dumps(receipt)
+    assert FAKE_BUCKET not in raw
+    assert "s3://" not in raw
+    assert "arn:" not in raw
+    assert receipt["request_sha256"] == result["request_sha256"]
+    # state stays null: the client does not know the job's terminal state.
+    assert receipt["state"] is None
+
+
+def test_submit_status_attach_round_trip(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    job_id = _submit(path)["job_id"]
+    launches = len(runner.argvs_matching("launch"))
+    uploads = [a for a in runner.argvs_matching("s3", "cp") if "inputs/" in " ".join(a)]
+    assert uploads
+
+    # An interrupted job is reported, and nothing re-launches or re-uploads.
+    runner.default = fake_completed(_status("interrupted", job_id=job_id))
+    status = sba.read_job_status(_batch_request(tmp_path), job_id)
+    assert status["state"] == "interrupted"
+    assert len(runner.argvs_matching("launch")) == launches
+
+    # Once the fleet finishes, status says done and --attach collects.
+    runner.default = fake_completed(_status("done", job_id=job_id))
+    assert sba.read_job_status(_batch_request(tmp_path), job_id)["state"] == "done"
+    runner.outputs = {"report.json": _sim_report()}
+    report = sim.run_sim(str(path), attach_job_id=job_id)
+
+    assert report["environment"]["remote"]["job_id"] == job_id
+    assert len(runner.argvs_matching("launch")) == launches
+    assert [
+        a for a in runner.argvs_matching("s3", "cp") if "inputs/" in " ".join(a)
+    ] == uploads
 
 
 def test_cli_job_status_unknown_job_exits_1_with_code(tmp_path, monkeypatch, capsys):
@@ -383,3 +431,110 @@ def test_cli_wait_for_capacity_flows_to_submit_only(tmp_path, monkeypatch, capsy
 
     assert code == 0
     assert seen == [12.0]
+
+
+# --- issue #4291: progress passthrough and the never-started attach note ---
+
+
+def test_job_status_passes_progress_through_while_running(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    progress = {"sim_time_s": 1.5e-6, "stop_time_s": 1e-5}
+    runner.default = fake_completed(_status("running", progress=progress))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    status = sba.read_job_status(_batch_request(tmp_path), "klt-sim-deadbeef")
+
+    assert status["progress"] == progress
+    assert status["state"] == "running"
+
+
+def test_job_status_progress_absent_when_runner_publishes_none(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("running"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    running = sba.read_job_status(_batch_request(tmp_path), "klt-sim-deadbeef")
+    runner.default = fake_completed("")
+    runner.queue("status.json", fake_completed("", returncode=1))
+    pending = sba.read_job_status(_batch_request(tmp_path), "klt-sim-deadbeef")
+
+    assert "progress" not in running
+    assert "progress" not in pending
+
+
+def test_job_status_terminal_job_keeps_progress_additive(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done", progress={"sim_time_s": 1e-5}))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    status = sba.read_job_status(_batch_request(tmp_path), "klt-sim-deadbeef")
+
+    assert status["terminal"] is True
+    assert status["progress"] == {"sim_time_s": 1e-5}
+    assert status["elapsed_seconds"] == 300
+
+
+def _poll_never_launched(tmp_path, capsys, *, unstarted_grace_s, timeout_s):
+    runner = _FakeRunner()
+    runner.default = fake_completed("", returncode=1)  # no status.json, ever
+    clock = _Clock()
+    config = sb.BatchConfig(
+        provision_script="unused",
+        bucket=FAKE_BUCKET,
+        jobs_prefix="jobs",
+        profile=sb.DEFAULT_BATCH_PROFILE,
+        region="us-east-1",
+        poll_interval_s=10.0,
+        poll_timeout_s=timeout_s,
+    )
+    with pytest.raises(sb.BatchPollTimeout):
+        sb.poll_status(
+            config,
+            "klt-sim-deadbeef",
+            runner=runner,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+            progress=False,
+            unstarted_grace_s=unstarted_grace_s,
+        )
+    return capsys.readouterr().err
+
+
+def test_attach_names_a_never_started_job_once_after_the_grace(tmp_path, capsys):
+    err = _poll_never_launched(
+        tmp_path, capsys, unstarted_grace_s=30.0, timeout_s=200.0
+    )
+
+    assert err.count("was never started") == 1
+    assert "klt-sim-deadbeef" in err
+    assert "batch_concurrency_cap" in err
+
+
+def test_never_started_note_is_silent_before_the_grace(tmp_path, capsys):
+    err = _poll_never_launched(
+        tmp_path, capsys, unstarted_grace_s=500.0, timeout_s=200.0
+    )
+
+    assert "never started" not in err
+
+
+def test_never_started_note_is_off_without_a_grace(tmp_path, capsys):
+    err = _poll_never_launched(
+        tmp_path, capsys, unstarted_grace_s=None, timeout_s=200.0
+    )
+
+    assert "never started" not in err
+
+
+def test_attach_pending_job_emits_the_note_end_to_end(tmp_path, monkeypatch, capsys):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+    job_id = _submit(path)["job_id"]
+    monkeypatch.setattr(sb, "_ATTACH_UNSTARTED_GRACE_S", 0.0)
+    runner.queue("status.json", fake_completed("", returncode=1))
+    runner.default = fake_completed(_status("done", job_id=job_id))
+    runner.outputs = {"report.json": _sim_report()}
+
+    sim.run_sim(str(path), attach_job_id=job_id)
+
+    assert "was never started" in capsys.readouterr().err

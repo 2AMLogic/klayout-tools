@@ -1,0 +1,101 @@
+name: Live klt sta engine checks (SPEF *NAME_MAP, driving cell / load)
+
+# Issue #3776 (follow-up to #3755): `test_live_engine_spef_name_map_annotation`
+# (a SPEF written by OpenROAD's own `write_spef` must annotate every design
+# net) and `test_live_engine_driving_cell_and_output_load` (OpenSTA accepts
+# `set_driving_cell -lib_cell/-pin/-from_pin` and `set_load`) need a real
+# `openroad` and the sky130A PDK, so they skip in the ordinary `ci.yml` `test`
+# job. This manually-triggered job provisions both, exactly as
+# `equiv-canary.yml` does (minus Yosys, which these tests do not use), and
+# fails if either test is skipped. Trigger from the Actions tab, or
+# `gh workflow run post-route-sta-live.yml`, when `post_route_sta.py`'s Tcl
+# or SPEF handling changes. See `equiv-canary.yml` for the provisioning
+# rationale.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-route-sta-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  post-route-sta-live:
+    name: Live OpenROAD klt sta checks (SPEF *NAME_MAP, driving cell / load)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Verify KLayout imports headlessly
+        run: |
+          uv run --frozen --extra dev python -c "
+          import klayout.db as kdb
+          print('klayout', kdb.Layout().dbu)
+          "
+
+      - name: Install volare
+        run: |
+          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user volare
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+
+      - name: Cache full sky130A PDK (volare, pinned)
+        id: pdk-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .pdk-cache
+          # Same pinned open_pdks build place-and-route-smoke.yml pins, reused
+          # here for reproducibility rather than "whatever volare's latest is
+          # at run time".
+          key: sky130A-pdk-c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
+      - name: Fetch full sky130A PDK (volare, cache miss only)
+        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 20
+        run: |
+          PDK_ROOT="${{ github.workspace }}/.pdk-cache" \
+            volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
+      - name: Install the openroad Docker wrapper
+        # scripts/install-openroad-docker.sh (issue #1328) -- pulls the
+        # pinned `openroad/orfs` image digest (issue #2465, not the moving
+        # `:latest` tag) and writes a wrapper script that shells out
+        # to it per invocation, mirroring docs/cli/place-and-route.md's
+        # documented recipe. GitHub-hosted `ubuntu-latest` runners ship
+        # Docker preinstalled, so no separate Docker setup step is needed.
+        timeout-minutes: 15
+        run: |
+          mkdir -p "$HOME/.cache/openroad-docker/bin"
+          scripts/install-openroad-docker.sh "$HOME/.cache/openroad-docker/bin"
+          echo "$HOME/.cache/openroad-docker/bin" >>"$GITHUB_PATH"
+
+      - name: Run the live klt sta engine tests
+        env:
+          PDK: sky130A
+          PDK_ROOT: ${{ github.workspace }}/.pdk-cache
+        run: |
+          uv run --frozen --extra dev pytest tests/test_post_route_sta.py \
+            -k "test_live_engine_spef_name_map_annotation or test_live_engine_driving_cell_and_output_load" \
+            -v -rs | tee pytest-post-route-sta-live.log
+
+      - name: Confirm the live tests ran to completion, not skipped
+        # A skip exits 0, so grep the `-rs` summary and fail explicitly if
+        # provisioning did not satisfy `_live_sky130_env()`. The `-k` filter
+        # selects exactly the two tests above, so any skip is one of them.
+        run: |
+          if grep -Eq "^SKIPPED \[|[0-9]+ skipped" pytest-post-route-sta-live.log; then
+            echo "::error::Live klt sta test was SKIPPED, not run -- provisioning did not satisfy _live_sky130_env()." >&2
+            exit 1
+          fi
+          echo "Live klt sta tests ran to completion (not skipped)."

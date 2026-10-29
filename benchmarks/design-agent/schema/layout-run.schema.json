@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/benchmarks/design-agent/schema/layout-run.schema.json",
+  "title": "Layout-flow benchmark run record (klt.design_agent_benchmark.layout_run/1)",
+  "description": "One run = one (task, agent, arm, replicate) session of the layout-flow benchmark. Shape only; the cross-field rules (tool calls vs the arm's allowed classes, validity vs status, seed identity recomputation, gen+refine seed linkage) are enforced by `design_agent_benchmark_layout.validate_run` against the protocol and task the run names. Per-round detail stays in the existing `ledger.schema.json` lines; this record is the run-level summary the report regenerates from. A run that is not `valid` carries `score: null` -- never a partial score.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "run_id",
+    "protocol_sha256",
+    "task_id",
+    "task_sha256",
+    "arm",
+    "agent",
+    "replicate",
+    "seed_sha256",
+    "seed_from",
+    "tool_calls",
+    "status",
+    "artifact",
+    "validity",
+    "score",
+    "usage",
+    "notes"
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "gds_sha256", "report_sha256"],
+      "properties": {
+        "status": { "type": "string", "minLength": 1 },
+        "gds_sha256": { "$ref": "#/$defs/sha256" },
+        "report_sha256": { "$ref": "#/$defs/sha256" },
+        "netlist_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "LVS only: hash of the reference netlist the check compared against."
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema": { "const": "klt.design_agent_benchmark.layout_run/1" },
+    "run_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._+-]*$" },
+    "protocol_sha256": { "$ref": "#/$defs/sha256" },
+    "task_id": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+    "task_sha256": { "$ref": "#/$defs/sha256" },
+    "arm": { "enum": ["draw-only", "gen-only", "gen+refine"] },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider", "model"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "provider": { "enum": ["reference", "live-agent", "interactive-agent"] },
+        "model": { "type": ["string", "null"] }
+      }
+    },
+    "replicate": { "type": "integer", "minimum": 1 },
+    "seed_sha256": {
+      "$ref": "#/$defs/sha256",
+      "description": "The run's seed identity: sha256 over the protocol's `seed_identity.fields` (plus `seed_artifact_sha256` for a seeded arm). Recomputed and compared by the validator."
+    },
+    "seed_from": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["run_id", "gds_sha256"],
+          "properties": {
+            "run_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._+-]*$" },
+            "gds_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      ],
+      "description": "gen+refine only: the gen-only run (and its artifact hash) this run was seeded from. Null for the unseeded arms."
+    },
+    "tool_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["seq", "phase", "verb", "class", "exit_code"],
+        "properties": {
+          "seq": { "type": "integer", "minimum": 1 },
+          "phase": { "enum": ["draw", "generate", "refine"] },
+          "verb": { "type": "string", "minLength": 1 },
+          "class": { "type": "string", "minLength": 1 },
+          "exit_code": { "type": "integer" }
+        }
+      }
+    },
+    "status": {
+      "enum": [
+        "valid",
+        "invalid_drc",
+        "invalid_lvs",
+        "invalid_provenance",
+        "invalid_tool_surface",
+        "timeout",
+        "budget_exhausted",
+        "agent_error",
+        "not_run_no_seed",
+        "interrupted"
+      ]
+    },
+    "artifact": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gds_sha256", "cell_name", "selected_round"],
+          "properties": {
+            "gds_sha256": { "$ref": "#/$defs/sha256" },
+            "cell_name": { "type": "string", "minLength": 1 },
+            "selected_round": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Round chosen by the protocol's best-valid rule; 0 is the seed itself (gen+refine only)."
+            }
+          }
+        }
+      ]
+    },
+    "validity": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["drc", "lvs"],
+          "properties": {
+            "drc": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/check" }] },
+            "lvs": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/check" }] }
+          }
+        }
+      ]
+    },
+    "score": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["area_um2", "utilization", "sim_margin"],
+          "properties": {
+            "area_um2": { "type": "number", "exclusiveMinimum": 0 },
+            "utilization": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+            "sim_margin": { "type": ["number", "null"] }
+          }
+        }
+      ]
+    },
+    "usage": {
+      "type": ["object", "null"],
+      "description": "Verbatim ledger `usage` shape (ledger.schema.json); null when nothing is known (e.g. the reference provider).",
+      "additionalProperties": { "type": ["integer", "number"] }
+    },
+    "notes": { "type": ["string", "null"] },
+    "runtime_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Optional (executor, #3026). Wall-clock seconds of the whole run: sandbox seeding, the agent session, and scoring."
+    },
+    "versions": {
+      "type": "object",
+      "description": "Optional (executor, #3026). Tool versions the run was produced and scored with: `protocol` (protocol_version) and `klt`.",
+      "additionalProperties": { "type": "string" }
+    },
+    "diagnostics": {
+      "type": "object",
+      "description": "Optional (executor, #3026). Machine-readable audit detail that is not part of the score: the tool-log file name, the scorer's per-check verdict, and for a gen+refine run superseded by its seed the refined artifact's hash and area."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "valid" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "score": { "type": "object" },
+          "artifact": { "type": "object" },
+          "validity": {
+            "type": "object",
+            "properties": { "drc": { "type": "object" }, "lvs": { "type": "object" } }
+          }
+        }
+      },
+      "else": { "properties": { "score": { "type": "null" } } }
+    }
+  ]
+}

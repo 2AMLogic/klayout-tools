@@ -1,0 +1,15 @@
+{
+  "schema": "klt.design_agent_benchmark.layout_exclusions/1",
+  "exclusions": [
+    {
+      "id": "current-mirror",
+      "title": "NMOS current mirror",
+      "reason": "generator_reachable",
+      "detail": "klt gen-compose cannot wire a diode-connected mirror from mos_array blocks (bare-poly gate pins need gate_contact and the shared-net backbone would cross a block's own pad), so the gen-only arm has no recipe. Excluded from all three arms. First failure: compose: gen-compose left nets unrouted: ['IREF', 'VSS']",
+      "recipe": {
+        "path": "benchmarks/design-agent/layout-corpus/exclusions/current-mirror.recipe.json",
+        "sha256": "8c4268c92cee384fd3527c2c1271cc0cb0e4fe0fadcb3449f31d0525f39db224"
+      }
+    }
+  ]
+}

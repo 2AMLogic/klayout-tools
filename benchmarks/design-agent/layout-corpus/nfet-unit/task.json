@@ -1,0 +1,62 @@
+{
+  "schema": "klt.design_agent_benchmark.layout_task/1",
+  "id": "nfet-unit",
+  "title": "Single NMOS unit",
+  "pdk": "sky130",
+  "description": "One sky130 core NMOS, W/L = 2/0.5 um. The generators draw label-free cells, so only the substrate is a top-level pin; gate/source/drain nets are internal and LVS compares topology and device W/L.",
+  "block_spec": {
+    "spec_class": "other",
+    "io_nodes": [
+      "D",
+      "G",
+      "S",
+      "VSS"
+    ],
+    "target_specs": null
+  },
+  "frozen_netlist": {
+    "path": "benchmarks/design-agent/layout-corpus/nfet-unit/netlist.spice",
+    "sha256": "4d750133ad138b561269785bfc8c7974d101c29e35a40f4c7bcf8345f49c3ee6"
+  },
+  "reference_layout": {
+    "path": "benchmarks/design-agent/layout-corpus/nfet-unit/reference.gds",
+    "sha256": "c11d15f14d2e2715a7a3817968e20ce8c929c36474e68fdd3c8978206352229d",
+    "cell_name": "nfet_unit"
+  },
+  "generator_recipe": {
+    "path": "benchmarks/design-agent/layout-corpus/nfet-unit/recipe.json",
+    "sha256": "ae448a7fdfbbcb34b77ea6b1516443324e2d4339e175281af261d7fa240702cf"
+  },
+  "negative_controls": [
+    {
+      "id": "met1-width",
+      "path": "benchmarks/design-agent/layout-corpus/nfet-unit/neg-drc.gds",
+      "sha256": "f66f58b124fd94f18e255584fae7ef850ed18125b4c988e1c9abb1e810fecc08",
+      "expected_failure": "drc"
+    },
+    {
+      "id": "resized-device",
+      "path": "benchmarks/design-agent/layout-corpus/nfet-unit/neg-lvs.gds",
+      "sha256": "4a8decce087c770f66fa9a09f21c287ee64f0b08bec14e0463ea240a8a14f5c4",
+      "expected_failure": "lvs"
+    }
+  ],
+  "agent_inputs": [
+    "benchmarks/design-agent/layout-corpus/nfet-unit/netlist.spice"
+  ],
+  "eligibility": {
+    "rules": {
+      "frozen_netlist": "netlist.spice is a hand-written reference, hashed in task.json; the scorer reads it from the repo, never from an agent sandbox.",
+      "reference_layout_valid": "reference.gds is the recipe's output; the corpus gate re-runs klt drc (sky130 deck: clean) and klt lvs (match) on it.",
+      "generator_reachable": "recipe.json lists only klt gen / klt gen-compose steps; the gate re-runs it and requires a DRC-clean, LVS-matching layout.",
+      "negative_controls": "neg-drc.gds fails only DRC (met1 width sliver) and neg-lvs.gds fails only LVS (resized device); the gate checks each check fires alone.",
+      "open_pdk": "sky130A via open_pdks; no proprietary data."
+    },
+    "arms": {
+      "draw-only": "nfet-unit is a bounded layout of a few devices with a netlist-defined target; klt draw primitives can express a legal layout of it, and the gate scores it identically.",
+      "gen-only": "Reachable with klt gen / gen-compose alone: recipe.json is the existence proof and uses no draw verb.",
+      "gen+refine": "Seeded from the gen-only result (protocol seeding decision); every refinement edit is expressible with klt draw (base_gds / erase_um) or gen-compose."
+    }
+  },
+  "notes": null
+}

@@ -28,11 +28,12 @@ document" section for the schema.
 
 ``--check <report>`` (issue #1149) switches ``klt extract`` from running a
 fresh extraction into *verifying a previously committed* ``--format json``
-report still reproduces -- see ``docs/cli/extract.md``, "--check" -- and is
-mutually exclusive with the positional ``file`` argument (the input path is
-read from the committed report itself). Cheap mode (default): re-hash the
-input/deck named in the report and compare against its own recorded
-``content_hash`` values, no extraction engine re-run. Full mode (``--check
+report still reproduces -- see ``docs/cli/extract.md``, "--check". The input
+path is read from the committed report itself unless the positional ``file``
+is also given (issue #2699), which then overrides it unconditionally. Cheap
+mode (default): re-hash the input/deck named in the report and compare
+against its own recorded ``content_hash`` values, no extraction engine re-run. Full
+mode (``--check
 <report> --rerun``): actually re-run the extraction the report describes
 and diff verdict-bearing fields. Both reuse ``status: "match"`` /
 ``"drifted"`` and the same 0/3 exit-code split described above (see
@@ -44,6 +45,7 @@ import sys
 from typing import Any
 
 from .._paths import looks_like_request_document
+from ..env_provenance import render_path_field
 from ..extract import (
     REQUEST_SCHEMA,
     ExtractError,
@@ -57,10 +59,17 @@ from . import _request_document as reqdoc
 from ._parsing import (
     parse_deck_options,
     parse_declared_pins,
+    parse_device_models,
     parse_label_layers,
     parse_probes,
 )
-from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_rerun_drift
+from .output import (
+    EXIT_USAGE_ERROR,
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+)
 
 EXIT_OK = 0
 EXIT_DRIFTED = 3
@@ -86,6 +95,12 @@ def _parse_label_layers(
     flag was never given -- this command's :class:`ExtractError` binding of
     the shared :func:`.._parsing.parse_label_layers` helper."""
     return parse_label_layers(raw, ExtractError)
+
+
+def _parse_device_models(raw: list[str] | None) -> dict[str, str] | None:
+    """``--device-model`` (issue #4234, repeatable) as the ``{class: model}``
+    mapping ``run_extract`` takes, or ``None`` when the flag was never given."""
+    return parse_device_models(raw, ExtractError)
 
 
 def _parse_declared_pins(raw: str | None) -> frozenset[str] | None:
@@ -366,6 +381,7 @@ _REQUEST_FIELD_DESTS = {
         "parasitic_variants",
         "parasitics_top_cell_only",
         "resistance_graph",
+        "resistance_graph_r_cut",
         "distributed_rc",
         "substrate_tie_ohms",
         "resistance_paths",
@@ -381,9 +397,11 @@ _REQUEST_FIELD_DESTS = {
         "pins",
         "def_pins",
         "rename_declared_pins",
+        "tie_declared_pins",
         "pin_source_cells",
         "deck_options",
         "label_layers",
+        "device_models",
         "probes",
         "defer_resistor_fixed_offset",
         "abstract_cells",
@@ -478,6 +496,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "parasitic_variants": _str_list("parasitic_variants"),
             "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
             "resistance_graph": _bool("resistance_graph"),
+            "resistance_graph_r_cut": _number("resistance_graph_r_cut"),
             "distributed_rc": _bool("distributed_rc"),
             "substrate_tie_ohms": _number("substrate_tie_ohms"),
             "resistance_paths": _request_resistance_paths(request),
@@ -497,6 +516,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "pins": _comma_joined("pins"),
             "def_pins": _path("def_pins"),
             "rename_declared_pins": _bool("rename_declared_pins"),
+            "tie_declared_pins": _bool("tie_declared_pins"),
             "pin_source_cells": _comma_joined("pin_source_cells"),
             "deck_options": reqdoc.get_str_map_as_pairs(
                 request,
@@ -510,6 +530,13 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
                 "label_layers",
                 verb="extract",
                 flag="--label-layer",
+                error_cls=ExtractError,
+            ),
+            "device_models": reqdoc.get_str_map_as_pairs(
+                request,
+                "device_models",
+                verb="extract",
+                flag="--device-model",
                 error_cls=ExtractError,
             ),
             "probes": _request_probes(request),
@@ -531,9 +558,10 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> int:
-    # `file` and `--check` are a required, mutually exclusive argparse group
-    # (parser.py) -- omitting both, or giving both, is already a usage error
-    # (exit 2) by the time `run()` is ever called.
+    # `file` or `--check` is required -- omitting both is a usage error
+    # (exit 2) enforced by `parser._require_one_input` before `run()` is ever
+    # called. `file` may accompany `--check` (issue #2699) as an explicit
+    # input override.
     if args.check is not None:
         return _run_check(args)
 
@@ -564,6 +592,7 @@ def run(args: argparse.Namespace) -> int:
         hierarchical_cells = _parse_hierarchical_cells(args.hierarchical_cells)
         deck_options = _parse_deck_options(args.deck_options)
         label_layers = _parse_label_layers(args.label_layers)
+        device_models = _parse_device_models(args.device_models)
         probes = parse_probes(args.probes, ExtractError)
         def_net_connections = _parse_def_net_connections(
             args.def_net_connections, spef_output=args.spef
@@ -607,6 +636,9 @@ def run(args: argparse.Namespace) -> int:
             # curated default. `None` when the flag was never given,
             # unchanged from every call site that predates it.
             label_layers=label_layers,
+            # `--device-model` (issue #4234): caller-named PDK model for a
+            # bipolar class with no curated binding. `None` when never given.
+            device_models=device_models,
             # `--probe` (issue #2986): point-to-net queries answered on this
             # run's own extraction. `[]` when the flag was never given.
             probes=probes,
@@ -664,6 +696,9 @@ def run(args: argparse.Namespace) -> int:
             # `parasitics.nets[].resistance_graph`. `False` when the flag
             # was never given, unchanged from every call site before it.
             resistance_graph=args.resistance_graph,
+            # `--resistance-graph-r-cut` (issue #2983): per-cut via
+            # resistance for the graph; `None` when never given.
+            resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
             # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
             # the star/Gamma-shunt R/C model with a distributed ladder for
             # every `--critical-net`-named net. `False` when the flag was
@@ -712,6 +747,8 @@ def run(args: argparse.Namespace) -> int:
             # `False` when the flag was never given, unchanged from every
             # call site that predates it.
             rename_declared_pins=args.rename_declared_pins,
+            # `--tie-declared-pins` (issue #4383).
+            tie_declared_pins=args.tie_declared_pins,
             # `--pin-source-cells` (issue #1513): the positional, probe-based
             # declared-pin mechanism for a `klt gen-compose`d assembly with
             # no governing top-level DEF -- derives the declared top-level
@@ -747,16 +784,27 @@ def run(args: argparse.Namespace) -> int:
 def _run_check(args: argparse.Namespace) -> int:
     try:
         if args.rerun:
-            result = rerun_extract_report(args.check)
+            result = rerun_extract_report(args.check, input_path=args.file)
         else:
-            result = check_extract_report(args.check)
+            result = check_extract_report(args.check, input_path=args.file)
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
+
+
+def _print_device_models(device_models: dict | None) -> None:
+    """One ``device_models: CLASS=SUBCKT, ...`` line (issue #4234); silent
+    when ``--device-model`` was never given."""
+    if not device_models:
+        return
+    rendered = ", ".join(
+        f"{name}={model}" for name, model in sorted(device_models.items())
+    )
+    print(f"device_models: {rendered}")
 
 
 def _print_label_layers(label_layers: dict | None) -> None:
@@ -813,7 +861,12 @@ def _print_substrate_spreading(block: dict | None) -> None:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    # `file` is the `{path, scope}` object `env_provenance.repo_relative_path`
+    # defines (issue #2659) -- rendered through the same courtesy helper
+    # `klt sim`/`klt pex` use, so the absolute path is never printed even in
+    # text mode (`<outside repo>`/`<unresolved>` instead). `netlist_path`
+    # below is an output path, still a plain string, and prints as-is.
+    print(f"file: {render_path_field(report['file'])}")
     print(f"deck: {report['deck']}")
     # Present whenever this deck declares a caller-selectable option at all
     # (issues #595, #2394) -- mirrors `provenance.deck.options` in the JSON
@@ -842,6 +895,7 @@ def _print_text(report: dict) -> None:
     # this line adds no branch to an already long function -- the same shape
     # `_print_substrate_spreading` below already uses.
     _print_label_layers(report.get("label_layers"))
+    _print_device_models(report.get("device_models"))
     _print_probes(report.get("probes"))
     print(f"top: {report['top']}")
     print(f"dbu_um: {report['dbu_um']}")
@@ -1059,14 +1113,3 @@ def _print_subcircuit_text(subcircuit: dict | None) -> None:
             f"{excluded['capacitance_ff']} fF  "
             f"{excluded['resistance_ohm']} ohm"
         )
-
-
-def _print_check_text(result: dict) -> None:
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")

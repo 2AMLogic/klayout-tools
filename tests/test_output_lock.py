@@ -464,9 +464,21 @@ def test_run_sim_deck_list_flag_errors_take_no_lock_and_create_nothing(
 ):
     request = _deck_request_path(tmp_path)
     holder_factory(tmp_path / ".klt" / "sim")
-    with pytest.raises(sim.SimError, match="--resume"):
-        sim.run_sim(str(request), resume=True)
+    with pytest.raises(sim.SimError, match="--budget-s"):
+        sim.run_sim(str(request), budget_s=5.0)
     assert not (tmp_path / ".klt" / "sim" / "tt_27c").exists()
+
+
+def test_run_sim_deck_list_dry_run_takes_no_lock_and_creates_nothing(
+    tmp_path, holder_factory
+):
+    request = _deck_request_path(tmp_path)
+    outdir = tmp_path / ".klt" / "sim"
+    holder_factory(outdir)  # held by another process: a real run would contend
+    report = sim.run_sim(str(request), dry_run=True)
+    assert report["dry_run"] is True
+    assert report["status"] == "valid"
+    assert not (outdir / "tt_27c").exists()
 
 
 def test_run_pex_default_and_explicit_roots_are_owned(tmp_path, holder_factory):
@@ -488,9 +500,17 @@ def test_run_pex_without_contention_gets_past_the_lock(tmp_path):
         pex.run_pex(str(tmp_path / "cell.gds"), [], "deck")
 
 
+# Shape-valid (the stage root depends on the parsed request, #4231), but
+# otherwise unrunnable: the flow fails right after the lock is taken.
+_PNR_REQUEST = (
+    '{"netlist": "n.v", "hdl_toplevel": "top", "pdk": "sky130A",'
+    ' "floorplan": {}, "seed": 1}'
+)
+
+
 def test_run_place_and_route_owns_its_stage_root(tmp_path, holder_factory):
     request = tmp_path / "req.json"
-    request.write_text("{}")
+    request.write_text(_PNR_REQUEST)
     holder = holder_factory(tmp_path / ".klt" / "place-and-route")
     with pytest.raises(output_lock.OutputDirLockedError):
         place_and_route.run_place_and_route(str(request))
@@ -555,7 +575,7 @@ def test_cli_place_and_route_contention_is_exit_1_empty_stdout(
     tmp_path, holder_factory, capsys, fmt
 ):
     request = tmp_path / "req.json"
-    request.write_text("{}")
+    request.write_text(_PNR_REQUEST)
     holder = holder_factory(tmp_path / ".klt" / "place-and-route")
     assert main(["place-and-route", str(request), "--format", fmt]) == 1
     _assert_locked_envelope(capsys, "place-and-route", fmt, holder.proc.pid)

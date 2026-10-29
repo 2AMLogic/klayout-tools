@@ -67,6 +67,7 @@ def run(args: argparse.Namespace) -> int:
             str(exc),
             args.format,
             code=getattr(exc, "code", None),
+            details=getattr(exc, "details", None),
         )
 
     emit_success(report, args.format, _print_text)
@@ -97,13 +98,31 @@ def _print_initial_state(initial_state: dict | None) -> None:
     )
 
 
-def _print_log_lines(environment: dict, status: str) -> None:
-    test_log = environment.get("test_log")
+def _local_path(report: dict, key: str) -> str | None:
+    """The resolved absolute path for ``environment.<key>``. The JSON carries
+    only a repo-relative ``{path, scope}`` envelope (#2224), which is null for
+    an external outdir, so the text view reads the path the run kept aside."""
+    local_paths = getattr(report, "local_paths", None)
+    if local_paths is not None:
+        return local_paths.get(key)
+    return (report["environment"].get(key) or {}).get("path")
+
+
+def _print_log_lines(report: dict) -> None:
+    test_log = _local_path(report, "test_log")
+    status = report["status"]
     if test_log is None:
         return
     print(f"test_log: {test_log}")
     if status == "fail":
         print(f"test_log tail: {_log_tail(test_log, lines=40)}")
+
+
+def _print_results_xml(report: dict) -> None:
+    # Null on the Verilog-bench path (issue #4083): no cocotb run, no XML.
+    results_xml = _local_path(report, "results_xml")
+    if results_xml is not None:
+        print(f"results_xml: {results_xml}")
 
 
 def _print_text(report: dict) -> None:
@@ -149,8 +168,8 @@ def _print_text(report: dict) -> None:
         )
 
     print()
-    print(f"results_xml: {environment['results_xml']}")
-    _print_log_lines(environment, report["status"])
+    _print_results_xml(report)
+    _print_log_lines(report)
     random_seed = environment.get("random_seed")
     if random_seed is not None:
         print(f"random_seed: {random_seed}")

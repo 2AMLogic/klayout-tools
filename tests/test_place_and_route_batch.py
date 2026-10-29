@@ -423,6 +423,146 @@ def test_unresolvable_fleet_config_is_a_request_error(fake, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Runner capability gate (issue #4124)
+# --------------------------------------------------------------------------- #
+
+PAR_CODE = sim_batch.BATCH_RUNNER_LACKS_PLACE_AND_ROUTE_BACKEND_CODE
+
+
+def _image(version: str | None) -> dict:
+    return {
+        "pdk": "sky130",
+        "region": "us-east-1",
+        "ami_id": "ami-0old",
+        "klt_version": version,
+        "klt_ref": None,
+        "pdk_variants": None,
+    }
+
+
+def test_manifest_with_only_a_pre_backend_runner_refuses_before_any_cloud_call(
+    fake, monkeypatch
+):
+    monkeypatch.setattr(
+        sim_batch,
+        "published_runner_identities",
+        lambda *a, **k: [_image("0.7.1.dev1000")],
+    )
+
+    with pytest.raises(PlaceAndRouteError, match="0.7.1.dev1091") as ei:
+        _run(fake)
+
+    assert ei.value.code == PAR_CODE
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("version", ["0.7.1.dev1091", "0.7.1", "0.7.2", None])
+def test_manifest_runner_at_or_after_the_floor_or_unreadable_proceeds(
+    fake, monkeypatch, version
+):
+    monkeypatch.setattr(
+        sim_batch, "published_runner_identities", lambda *a, **k: [_image(version)]
+    )
+
+    report = _run(fake)
+
+    assert report["status"] == "ok"
+    assert fake.launched
+
+
+def test_mixed_manifest_falls_through_to_the_runner_side_check(fake, monkeypatch):
+    monkeypatch.setattr(
+        sim_batch,
+        "published_runner_identities",
+        lambda *a, **k: [_image("0.7.1.dev1000"), _image("0.7.1.dev1200")],
+    )
+
+    _run(fake)
+
+    assert fake.launched
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("0.7.0", False),
+        ("0.7.1.dev1090+gabc", False),
+        ("0.7.1.dev1091", True),
+        ("0.7.1", True),
+        ("0.8.0", True),
+        ("7", None),
+    ],
+)
+def test_runner_supports_par_backend_rule(version, expected):
+    assert sim_batch._runner_supports_par_backend(version) is expected
+
+
+def _run_job_cmd(tmp_path: Path, runner_version: str, version_check: str = "enforce"):
+    import subprocess
+
+    spec = par_batch.build_job_spec(
+        request_name="request.json",
+        unit={},
+        tarball_path=str(tmp_path / "tree.tgz"),
+        pdk_variant=None,
+        timeout_s=60,
+        version_check=version_check,
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    klt = bin_dir / "klt"
+    klt.write_text(
+        f"#!/bin/sh\n[ \"$1\" = --version ] && echo 'klt {runner_version}' && exit 0\n"
+        "echo argparse-failure >&2; exit 2\n",
+        encoding="utf-8",
+    )
+    klt.chmod(0o755)
+    out = tmp_path / "eda-out"
+    out.mkdir()
+    (tmp_path / "eda-in").mkdir()
+    result = subprocess.run(
+        ["bash", "-c", spec.cmd],
+        env={
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "EDA_OUTPUT_DIR": str(out),
+            "EDA_INPUT_DIR": str(tmp_path / "eda-in"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, out
+
+
+@pytest.mark.parametrize("version_check", ["enforce", "warn"])
+@pytest.mark.parametrize("runner_version", ["0.7.1.dev1000", "0.7.0"])
+def test_pre_backend_runner_exits_87_with_the_capability_code(
+    tmp_path, monkeypatch, runner_version, version_check
+):
+    monkeypatch.setattr(_provenance, "_klt_version", lambda: "0.7.1.dev1127")
+
+    result, out = _run_job_cmd(tmp_path, runner_version, version_check)
+
+    assert result.returncode == sim_batch._BATCH_PREFLIGHT_REJECT_EXIT
+    envelope = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert envelope["error"]["code"] == PAR_CODE
+    assert envelope["error"]["command"] == "place-and-route"
+    assert "argparse-failure" not in result.stderr
+
+
+@pytest.mark.parametrize("runner_version", ["0.7.1.dev1091", "0.7.1", "0.8.0"])
+def test_runner_at_or_after_the_floor_passes_the_capability_gate(
+    tmp_path, monkeypatch, runner_version
+):
+    monkeypatch.setattr(_provenance, "_klt_version", lambda: runner_version)
+
+    result, out = _run_job_cmd(tmp_path, runner_version)
+
+    assert result.returncode != sim_batch._BATCH_PREFLIGHT_REJECT_EXIT
+    assert PAR_CODE not in result.stderr
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 

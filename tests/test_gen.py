@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.drc_known_findings import GF180MCU_OFFGRID_RULES
 from klayout_tools import gen, pdk
 from klayout_tools.cli import main
 from klayout_tools.drc import run_drc
@@ -157,6 +158,35 @@ def test_generate_writes_gds_and_matches_contract(tmp_path, pdk_root):
     assert report["warnings"] == []
 
 
+def test_generate_child_cell_named_after_cell_name_no_collision(tmp_path, pdk_root):
+    import klayout.db as kdb
+
+    names = []
+    layout = kdb.Layout()
+    for cell_name, num in (("a", 2), ("b", 3)):
+        output = tmp_path / f"{cell_name}.gds"
+        generate(
+            {
+                "generator": "resistor_strip",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"num": num},
+                "options": {"cell_name": cell_name, "output": str(output)},
+            }
+        )
+        single = kdb.Layout()
+        single.read(str(output))
+        names.append(sorted(c.name for c in single.each_cell()))
+        layout.read(str(output))
+
+    assert names == [["a", "a__core"], ["b", "b__core"]]
+    assert sorted(c.name for c in layout.each_cell()) == [
+        "a",
+        "a__core",
+        "b",
+        "b__core",
+    ]
+
+
 def test_generate_defaults_cell_name_and_output(tmp_path, pdk_root, monkeypatch):
     monkeypatch.chdir(tmp_path)
     request = {
@@ -285,6 +315,8 @@ def test_generate_report_includes_provenance_block(tmp_path, pdk_root):
     provenance = report["provenance"]
     assert set(provenance) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",
@@ -677,6 +709,7 @@ def test_list_generators_includes_all_four_phase2_families():
         "diff_pair",
         "bjt_array",
         "bond_pad",
+        "diode",
         "esd_device",
         "cap_array",
         "cap_vpp_array",
@@ -806,6 +839,60 @@ def test_mos_array_device_count_and_ports(tmp_path, pdk_root):
     assert ports_by_name["U0_G"]["layer"] == {"layer": 66, "datatype": 20, "name": None}
     assert ports_by_name["U0_S"]["layer"] == {"layer": 67, "datatype": 20, "name": None}
     assert ports_by_name["U0_D"]["layer"] == {"layer": 67, "datatype": 20, "name": None}
+
+
+def _mos_array_port_names(tmp_path, pdk_root, **params):
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": params,
+            "options": {"output": str(tmp_path / "mos_array.gds")},
+        }
+    )
+    return report["ports"]
+
+
+@pytest.mark.parametrize("dummy", [0, 1, 2])
+@pytest.mark.parametrize("rows", [1, 2])
+def test_mos_array_dummy_ports_opt_in(tmp_path, pdk_root, dummy, rows):
+    # #2904: default output is unchanged; the opt-in adds D<k>_S/D/G per dummy.
+    base = {"rows": rows, "cols": 2, "dummy": dummy, "gate_contact": True}
+    default_ports = _mos_array_port_names(tmp_path, pdk_root, **base)
+    assert not any(p["name"].startswith("D") for p in default_ports)
+    assert default_ports == _mos_array_port_names(
+        tmp_path, pdk_root, dummy_ports=False, **base
+    )
+
+    ports = _mos_array_port_names(tmp_path, pdk_root, dummy_ports=True, **base)
+    n_dummy = 2 * dummy * rows
+    assert ports[: len(default_ports)] == default_ports
+    extra = ports[len(default_ports) :]
+    assert [p["name"] for p in extra] == [
+        f"D{k}_{t}" for k in range(n_dummy) for t in "SDG"
+    ]
+    real = {p["name"]: p for p in default_ports}
+    for p in extra:
+        # Same layer as the real units' matching terminal.
+        assert p["layer"] == real[f"U0_{p['name'][-1]}"]["layer"]
+        assert p["direction_deg"] == real[f"U0_{p['name'][-1]}"]["direction_deg"]
+
+
+def test_mos_array_dummy_ports_series_fingers(tmp_path, pdk_root):
+    base = {
+        "rows": 1,
+        "cols": 1,
+        "dummy": 1,
+        "fingers": 2,
+        "finger_topology": "series",
+    }
+    default_ports = _mos_array_port_names(tmp_path, pdk_root, **base)
+    ports = _mos_array_port_names(tmp_path, pdk_root, dummy_ports=True, **base)
+    names = {p["name"] for p in ports}
+    unit_names = {p["name"][len("U0_") :] for p in default_ports}
+    for k in (0, 1):
+        assert {f"D{k}_{n}" for n in unit_names} <= names
+    assert len(ports) == 3 * len(default_ports)
 
 
 def test_mos_array_1x1_boundary(tmp_path, pdk_root):
@@ -1136,7 +1223,9 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
     # an empty list -- the note is the only difference.
     family = gen._pdk_family(variant)
     expected_notes = (
-        [] if family == "gf180mcu" else [_sd_implant_absence_note(family, "pfet")]
+        []
+        if family in ("gf180mcu", "sky130")
+        else [_sd_implant_absence_note(family, "pfet")]
     )
     assert report["drc_hints"]["notes"] == expected_notes
 
@@ -1236,16 +1325,51 @@ def test_mos_array_guard_ring_flavor_pfet_draws_well_and_is_drc_clean(
         for i in layout.layer_indexes()
     }
     assert well_pair in present
-    # Same sky130-vs-gf180mcu split as the no-ring pfet test above (issue
-    # #2580's reporting-only absence note).
-    family = gen._pdk_family(variant)
-    expected_notes = (
-        [] if family == "gf180mcu" else [_sd_implant_absence_note(family, "pfet")]
-    )
-    assert report["drc_hints"]["notes"] == expected_notes
+    assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), deck)
     assert drc_report["status"] == "clean"
+
+
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair", "esd_device"])
+@pytest.mark.parametrize("ring_padding_um", [None, 0.4, 0.52, 0.6, 1.0])
+def test_gf180mcu_guard_ring_contacts_are_on_the_mfg_grid(
+    tmp_path, both_pdk_root, generator, ring_padding_um
+):
+    """Issue #2999: the evenly spaced guard-ring tap contacts must land on
+    gf180mcu's 0.005 um manufacturing grid (the PDK runset's `contact_OFFGRID`
+    check) -- the deck's `ongrid` rule (issue #3001) is what lets
+    `_clamp_cut_boxes` snap them."""
+    import klayout.db as kdb
+
+    params = {"add_guard_ring": True}
+    if ring_padding_um is not None:
+        params["ring_padding_um"] = ring_padding_um
+    output = tmp_path / f"{generator}_ring_grid.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    grid_dbu = round(0.005 / layout.dbu)
+    contact = layout.find_layer(33, 0)
+    boxes = [
+        shape.bbox()
+        for cell in layout.each_cell()
+        for shape in cell.shapes(contact).each()
+    ]
+    assert boxes
+    off_grid = [
+        str(b)
+        for b in boxes
+        if any(v % grid_dbu for v in (b.left, b.right, b.bottom, b.top))
+    ]
+    assert not off_grid
 
 
 @pytest.mark.parametrize(
@@ -1501,11 +1625,9 @@ def test_mos_array_default_voltage_flavor_output_unchanged(tmp_path, pdk_root):
     _assert_gds_geometry_equal(implicit, explicit)
     assert report["drc_hints"]["voltage_flavor"] is None
     assert report["drc_hints"]["voltage_flavor_mark_present"] is False
-    # sky130's S/D-implant absence note (issue #2580) is the one entry this
-    # default sky130 request now carries -- identical for the implicit and
-    # explicit requests compared above, so the default-unchanged contract
-    # holds.
-    assert report["drc_hints"]["notes"] == [_sd_implant_absence_note("sky130", "nfet")]
+    # sky130 draws its S/D implant since issue #2934, so a default request
+    # carries no notes.
+    assert report["drc_hints"]["notes"] == []
 
 
 def test_mos_array_voltage_flavor_medium_voltage_draws_marker_and_is_drc_clean(
@@ -1562,25 +1684,179 @@ def test_mos_array_voltage_flavor_unsupported_on_sky130_notes_not_drawn(
 
 
 @pytest.mark.parametrize("name", ["native", "nvt"])
-def test_mos_array_voltage_flavor_native_on_sky130_names_unsupported_nvt(
-    tmp_path, both_pdk_root, name
+def test_mos_array_voltage_flavor_native_draws_hvi_and_lvtn_no_areaid_le(
+    tmp_path, pdk_root, name
 ):
-    """sky130's native-Vt NMOS (`nfet_05v0_nvt`) is derived upstream from
-    hvi AND lvtn, which a single-marker `voltage_flavor` cannot express: the
-    note must name that flavour as unsupported rather than only reporting a
-    generic "no marker layer resolved" (issue #2912)."""
+    """sky130's native-Vt NMOS (`nfet_05v0_nvt`) is hvi AND lvtn: both marker
+    boxes are drawn over the device, `areaid_le` (81/60) never is, and the
+    flavour is reported as resolved (issue #3600)."""
     output = tmp_path / f"mos_array_voltage_flavor_{name}.gds"
     report = generate(
         {
             "generator": "mos_array",
-            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
             "params": {"voltage_flavor": name},
             "options": {"output": str(output)},
         }
     )
-    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
-    notes = report["drc_hints"]["notes"]
-    assert any("nfet_05v0_nvt" in n and "unsupported" in n for n in notes)
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+    assert not any("nvt" in n for n in report["drc_hints"]["notes"])
+    hvi = _layer_bbox(output, 75, 20)
+    lvtn = _layer_bbox(output, 125, 44)
+    assert hvi == lvtn
+    assert hvi["right"] > hvi["left"]
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    assert layout.top_cell().bbox_per_layer(layout.layer(81, 60)).empty()
+
+
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair"])
+def test_voltage_flavor_native_rejects_pfet(tmp_path, pdk_root, generator):
+    """The native-Vt device has no PMOS counterpart (issue #3600)."""
+    with pytest.raises(GenError, match="NMOS-only"):
+        generate(
+            {
+                "generator": generator,
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"flavor": "pfet", "voltage_flavor": "nvt"},
+                "options": {"output": str(tmp_path / "x.gds")},
+            }
+        )
+
+
+def _native_nfet_lvs(tmp_path, pdk_root, model, options=None):
+    import json
+
+    from klayout_tools.lvs import run_lvs
+
+    gds = tmp_path / "nvt.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "flavor": "nfet",
+                "voltage_flavor": "nvt",
+                "w_um": 1.0,
+                "l_um": 25.0,
+                "rows": 1,
+                "cols": 1,
+                "dummy": 0,
+            },
+            "options": {"output": str(gds)},
+        }
+    )
+    ref = tmp_path / "ref.spice"
+    ref.write_text(f".subckt ref d g s b\nX1 d g s b {model} L=25u W=1u\n.ends\n")
+    return run_lvs(
+        json.dumps(
+            {
+                "layout": {
+                    "file": str(gds),
+                    "deck": "sky130",
+                },
+                "reference": {
+                    "netlist": str(ref),
+                    "top": "ref",
+                    "form": "subckt-call",
+                    "deck": "sky130",
+                },
+                **({"options": options} if options is not None else {}),
+            }
+        )
+    )
+
+
+def test_native_nfet_gen_extract_lvs_round_trip_matches(tmp_path, pdk_root):
+    """gen -> extract -> lvs against a `nfet_05v0_nvt` subckt-call reference
+    reaches `match` (issue #3600)."""
+    report = _native_nfet_lvs(tmp_path, pdk_root, "sky130_fd_pr__nfet_05v0_nvt")
+    assert report["status"] == "match", report
+
+
+def test_native_nfet_extracts_as_nvt_not_g5v0d10v5_or_thin_oxide(tmp_path, pdk_root):
+    """The extracted model is `nfet_05v0_nvt` -- never the hvi-only
+    `nfet_g5v0d10v5` nor the thin-oxide `nfet_01v8` (issue #3600).
+
+    `klt lvs` by default does not compare MOS flavour subckts (they all
+    collapse to the base `nfet` class, see `build_subckt_to_class_map`), so a
+    wrong-model *reference* still matches there; the model binding is asserted
+    at the extract layer here, and the opt-in `options.compare_mos_flavour`
+    negative test is `test_native_nfet_lvs_compare_mos_flavour_*` below."""
+    output = tmp_path / "nvt_extract.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "nfet", "voltage_flavor": "nvt"},
+            "options": {"output": str(output)},
+        }
+    )
+    report = run_extract(
+        str(output), "sky130", pdk_variant="sky130A", pdk_root=str(pdk_root)
+    )
+    cards = [
+        line
+        for line in Path(report["netlist_path"]).read_text().splitlines()
+        if line and line[0] in ("M", "X")
+    ]
+    assert any(" sky130_fd_pr__nfet_05v0_nvt " in line for line in cards)
+    assert not any(" sky130_fd_pr__nfet_g5v0d10v5 " in line for line in cards)
+    assert not any(" sky130_fd_pr__nfet_01v8 " in line for line in cards)
+
+
+@pytest.mark.parametrize("options", [None, {}, {"compare_mos_flavour": False}])
+def test_native_nfet_lvs_wrong_model_still_matches_by_default(
+    tmp_path, pdk_root, options
+):
+    """Option omitted or `false`: the documented flavour collapse is unchanged,
+    a wrong-model reference still reaches `match` (issue #3650)."""
+    report = _native_nfet_lvs(
+        tmp_path, pdk_root, "sky130_fd_pr__nfet_g5v0d10v5", options
+    )
+    assert report["status"] == "match", report
+    assert report["options"]["compare_mos_flavour"] is False
+
+
+def test_native_nfet_lvs_compare_mos_flavour_rejects_wrong_model(tmp_path, pdk_root):
+    """`compare_mos_flavour: true`: a native-Vt layout against an
+    `nfet_g5v0d10v5` reference is a mismatch with a device finding (issue
+    #3650)."""
+    report = _native_nfet_lvs(
+        tmp_path,
+        pdk_root,
+        "sky130_fd_pr__nfet_g5v0d10v5",
+        {"compare_mos_flavour": True},
+    )
+    assert report["status"] == "mismatch", report
+    assert report["options"]["compare_mos_flavour"] is True
+    assert any(m["category"].startswith("device.") for m in report["mismatches"])
+
+
+def test_native_nfet_lvs_compare_mos_flavour_matches_right_model(tmp_path, pdk_root):
+    """...and the matching `nfet_05v0_nvt` reference still matches (#3650)."""
+    report = _native_nfet_lvs(
+        tmp_path,
+        pdk_root,
+        "sky130_fd_pr__nfet_05v0_nvt",
+        {"compare_mos_flavour": True},
+    )
+    assert report["status"] == "match", report
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"compare_mos_flavour": "yes"}, {"compare_mos_flavour": 1}],
+)
+def test_native_nfet_lvs_compare_mos_flavour_non_boolean_is_request_error(
+    tmp_path, pdk_root, options
+):
+    from klayout_tools.lvs import LvsError
+
+    with pytest.raises(LvsError, match="compare_mos_flavour must be a boolean"):
+        _native_nfet_lvs(tmp_path, pdk_root, "sky130_fd_pr__nfet_05v0_nvt", options)
 
 
 def test_mos_array_voltage_flavor_unrecognised_name_notes_not_drawn(
@@ -1666,9 +1942,8 @@ def test_mos_array_voltage_flavor_hvi_draws_marker_and_is_drc_clean(tmp_path, pd
     assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER in present
     assert report["drc_hints"]["voltage_flavor"] == "hvi"
     assert report["drc_hints"]["voltage_flavor_mark_present"] is True
-    # sky130's S/D-implant absence note (issue #2580) is the one entry this
-    # pfet request now carries.
-    assert report["drc_hints"]["notes"] == [_sd_implant_absence_note("sky130", "pfet")]
+    # sky130 draws its S/D implant since issue #2934: no notes.
+    assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), "sky130")
     assert drc_report["status"] == "clean", drc_report["violations"]
@@ -1723,6 +1998,18 @@ def _layer_bbox(gds_path, layer, datatype):
         "right": bbox.right * dbu,
         "top": bbox.top * dbu,
     }
+
+
+def _gf180mcu_device_active_region(layout):
+    """Merged gf180mcu Comp (22/0) of the unit devices only: the Comp polygons
+    that interact with a Poly2 (30/0) gate. Excludes the tap pads/ring (issue
+    #3648), whose Comp shares the mask but is not part of a device."""
+    import klayout.db as kdb
+
+    top = layout.top_cell()
+    comp = kdb.Region(top.begin_shapes_rec(layout.layer(22, 0))).merged()
+    poly = kdb.Region(top.begin_shapes_rec(layout.layer(30, 0))).merged()
+    return comp.interacting(poly)
 
 
 @pytest.mark.parametrize(
@@ -2183,12 +2470,9 @@ def test_mos_array_parallel_is_the_default_finger_topology(tmp_path, pdk_root):
     _assert_gds_geometry_equal(implicit, explicit)
     assert implicit_report["ports"] == explicit_report["ports"]
     assert implicit_report["warnings"] == []
-    # sky130's S/D-implant absence note (issue #2580) is the one entry this
-    # default-flavour sky130 unit now carries -- identical on both sides, so
-    # the implicit-vs-explicit contract holds.
-    assert implicit_report["drc_hints"]["notes"] == [
-        _sd_implant_absence_note("sky130", "nfet")
-    ]
+    # sky130 draws its S/D implant since issue #2934, so a default unit
+    # carries no notes -- identical on both sides.
+    assert implicit_report["drc_hints"]["notes"] == []
 
 
 @pytest.mark.parametrize("gate_contact", [False, True])
@@ -2621,6 +2905,110 @@ def test_mos_array_share_sd_incompatible_combinations_rejected(
         generate(
             _mos_array_share_request(
                 tmp_path, pdk_root, "bad", share_sd=True, **overrides
+            )
+        )
+
+
+# `mirror` (issue #3552, Phase 3 of #3299): flip odd columns so facing
+# terminals alternate S|S / D|D. Named `mirror` as filed: `diff_pair`'s own
+# `params.mirror` lives in a different generator's param table, and the
+# docs/PCell param text distinguish the two.
+
+
+def test_mos_array_mirror_false_output_unchanged(tmp_path, pdk_root):
+    implicit = generate(_mos_array_share_request(tmp_path, pdk_root, "implicit"))
+    explicit = generate(
+        _mos_array_share_request(tmp_path, pdk_root, "explicit", mirror=False)
+    )
+    _assert_gds_geometry_equal(tmp_path / "implicit.gds", tmp_path / "explicit.gds")
+    assert implicit["ports"] == explicit["ports"]
+    assert "mirror" not in explicit["drc_hints"]
+
+
+def test_mos_array_mirror_flips_odd_column_ports(tmp_path, pdk_root):
+    base = generate(_mos_array_share_request(tmp_path, pdk_root, "base", dummy=0))
+    mirrored = generate(
+        _mos_array_share_request(tmp_path, pdk_root, "mirrored", mirror=True, dummy=0)
+    )
+    b = {p["name"]: p for p in base["ports"]}
+    m = {p["name"]: p for p in mirrored["ports"]}
+    for idx in (0, 2):
+        assert m[f"U{idx}_S"] == b[f"U{idx}_S"]
+        assert m[f"U{idx}_D"] == b[f"U{idx}_D"]
+    for idx in (1, 3):
+        assert m[f"U{idx}_S"]["x_um"] == pytest.approx(b[f"U{idx}_D"]["x_um"])
+        assert m[f"U{idx}_D"]["x_um"] == pytest.approx(b[f"U{idx}_S"]["x_um"])
+        assert m[f"U{idx}_S"]["direction_deg"] == 0
+        assert m[f"U{idx}_D"]["direction_deg"] == 180
+    sides = mirrored["drc_hints"]["mirror"]
+    assert sides["mirrored_columns"] == [1, 3]
+    assert sides["terminal_sides"]["U1"] == {"S": "right", "D": "left"}
+    assert sides["terminal_sides"]["U0"] == {"S": "left", "D": "right"}
+    assert mirrored["device_count"] == base["device_count"] == 4
+
+
+def test_mos_array_mirror_share_sd_nodes_and_extract(tmp_path, pdk_root):
+    output = tmp_path / "mirrored.gds"
+    report = generate(
+        _mos_array_share_request(
+            tmp_path, pdk_root, "mirrored", share_sd=True, mirror=True
+        )
+    )
+    nodes = report["drc_hints"]["shared_sd_nodes"]
+    assert [n["ports"] for n in nodes] == [
+        ["U0_D", "U1_D"],
+        ["U1_S", "U2_S"],
+        ["U2_D", "U3_D"],
+    ]
+    ports = {p["name"]: p for p in report["ports"]}
+    for node in nodes:
+        for name in node["ports"]:
+            assert ports[name]["x_um"] == pytest.approx(node["x_um"])
+    devices = run_extract(str(output), "sky130")["devices"]
+    assert len(devices) == 4
+    # Facing like terminals (D|D, S|S) still merge into one node each: 3 shared
+    # nodes (two terminals apiece) plus the 2 outer terminals.
+    uses = {}
+    for d in devices:
+        for n in (d["nets"]["s"], d["nets"]["d"]):
+            uses[n] = uses.get(n, 0) + 1
+    assert sorted(uses.values()) == [1, 1, 2, 2, 2]
+
+
+@pytest.mark.parametrize("share_sd", [False, True])
+@pytest.mark.parametrize("dummy", [0, 1])
+def test_mos_array_mirror_is_drc_clean(tmp_path, pdk_root, share_sd, dummy):
+    output = tmp_path / "mirrored.gds"
+    generate(
+        _mos_array_share_request(
+            tmp_path,
+            pdk_root,
+            "mirrored",
+            mirror=True,
+            share_sd=share_sd,
+            dummy=dummy,
+            rows=2,
+        )
+    )
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"topology": "common_centroid"},
+        {"fingers": 2},
+        {"mos_cap": True, "add_guard_ring": True},
+    ],
+)
+def test_mos_array_mirror_incompatible_combinations_rejected(
+    tmp_path, pdk_root, overrides
+):
+    with pytest.raises(GenError, match="mirror"):
+        generate(
+            _mos_array_share_request(
+                tmp_path, pdk_root, "bad", mirror=True, **overrides
             )
         )
 
@@ -3292,7 +3680,15 @@ def test_res_array_half_dbu_tie_length_draws_full_contact_and_is_drc_clean(
     # carry `ongrid` findings (a user-supplied dimension, not a derived
     # centre -- issue #2648 snaps only the latter). Every other rule, and in
     # particular the licon1 cut and its `ongrid` rule, must stay clean.
-    assert set(drc_report["rule_counts"]) <= {"li1.ongrid.1", "poly.ongrid.1"}
+    allowed = {"li1.ongrid.1", "poly.ongrid.1"}
+    if deck == "gf180mcu":
+        # Same user-supplied-dimension reasoning for every gf180mcu body
+        # layer, but never the Contact cut's own grid rule. The half-dbu
+        # tie also leaves the SAB 1dbu inside SB.4's 0.15um contact clearance.
+        allowed = (GF180MCU_OFFGRID_RULES - {"contact.ongrid.1"}) | {
+            "sab.separation.contact.1"
+        }
+    assert set(drc_report["rule_counts"]) <= allowed
 
 
 @pytest.mark.parametrize("length_um", _ISSUE_1551_NON_TIE_LENGTHS_UM)
@@ -3456,7 +3852,7 @@ def test_gf180mcu_diff_pair_off_grid_ring_padding_is_drc_clean(
 
     drc_report = run_drc(str(output), "gf180mcu")
     assert drc_report["status"] == "clean", drc_report["violations"]
-    assert drc_report["rule_counts"] == {}
+    assert not any(rule.startswith("contact.") for rule in drc_report["rule_counts"])
 
 
 @pytest.mark.parametrize(
@@ -3500,7 +3896,7 @@ def test_gf180mcu_sibling_guard_ring_generators_off_grid_padding_drc_clean(
     )
     drc_report = run_drc(str(output), "gf180mcu")
     assert drc_report["status"] == "clean", drc_report["violations"]
-    assert drc_report["rule_counts"] == {}
+    assert not any(rule.startswith("contact.") for rule in drc_report["rule_counts"])
 
 
 @pytest.mark.parametrize("ring_padding_um", (0.5015, 1.2345, 3.1415))
@@ -5482,8 +5878,12 @@ def test_well_island_round_trip_two_named_body_nets(
     over everything, tied to one supply, satisfies that too. The per-device
     body names are what distinguishes two body domains from one.
     """
+    # Sized to hold the unit with room to spare: on gf180mcu the unit draws
+    # its own tap pads (issue #3648) around its array, which a default-size
+    # island's tie ring would collide with.
+    island_size = {"inner_width_um": 12.0, "inner_height_um": 9.0}
     island_a, report_a = _well_island(
-        tmp_path, both_pdk_root, variant, "island_a", net="VBODY_A"
+        tmp_path, both_pdk_root, variant, "island_a", net="VBODY_A", **island_size
     )
     device, device_report = _pfet_unit(tmp_path, both_pdk_root, variant, "pfet_unit")
 
@@ -5499,6 +5899,7 @@ def test_well_island_round_trip_two_named_body_nets(
         variant,
         "island_b",
         net="VBODY_B",
+        **island_size,
         # Island A's well, expressed in island B's own coordinate frame.
         isolate_from=[
             [
@@ -6304,6 +6705,49 @@ def test_sg13g2_generator_default_params_are_drc_clean(
 
     drc_report = run_drc(str(output), "sg13g2")
     assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+@pytest.mark.parametrize("generator_name", ("mos_array", "diff_pair"))
+def test_sg13g2_pfet_guard_ring_nwell_encloses_ring_nplus_activ(
+    generator_name, tmp_path, sg13g2_pdk_root
+):
+    """Issue #4426: the n-tap guard ring of an sg13g2 pfet must be enclosed by
+    NWell by IHP `NW.e` (0.24um), not the generic 0.15um margin."""
+    output = tmp_path / f"{generator_name}_ring_sg13g2.gds"
+    params = {
+        "w_um": 0.52,
+        "l_um": 0.52,
+        "flavor": "pfet",
+        "add_guard_ring": True,
+    }
+    if generator_name == "mos_array":
+        params.update({"rows": 1, "cols": 4, "topology": "common_centroid"})
+    generate(
+        {
+            "generator": generator_name,
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    # The synthetic PDK install draws no nSD, so the deck's N+ Activ-derived
+    # `nwell.enclosing.nactiv.1` cannot fire here; assert the geometry directly:
+    # NWell must enclose the outermost Activ (the ring) by at least NW.e.
+    activ = _layer_bbox(output, 1, 0)
+    nwell = _layer_bbox(output, 31, 0)
+    for edge, sign in (("left", 1), ("bottom", 1), ("right", -1), ("top", -1)):
+        assert sign * (activ[edge] - nwell[edge]) >= 0.24 - 1e-9, edge
+
+
+def test_sg13g2_ring_well_margin_clears_nw_e_and_others_unchanged():
+    from klayout_tools.decks import get_deck
+    from klayout_tools.gen_layer_params import _ring_well_margin_um
+
+    for family in ("sg13g2", "sg13cmos5l"):
+        (rule,) = [r for r in get_deck(family) if r.id == "nwell.enclosing.nactiv.1"]
+        assert _ring_well_margin_um(family) > rule.threshold_dbu / 1000
+    assert _ring_well_margin_um("sky130") == 0.2
+    assert _ring_well_margin_um("gf180mcu") == gen.WELL_ENCLOSURE_MARGIN_UM
 
 
 def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk_root):
@@ -7554,6 +7998,56 @@ def test_sg13cmos5l_mos_array_pfet_flavor_friction_report_repro(
     report = run_extract(str(output), "sg13cmos5l")
     assert report["device_counts"].get("pfet", 0) > 0
     assert report["unbiased_pmos_body_nets"] == []
+
+
+def test_sg13cmos5l_mos_array_well_tap_nwell_margin(tmp_path, sg13cmos5l_pdk_root):
+    """Regression pin for `WELL_TAP_ENCLOSURE_MARGIN_UM` (issue #3652): the
+    NWell around the `mos_array` well-tap pad must enclose the tap Activ by at
+    least that margin on all four sides, and the output must carry no
+    `nwell.enclosing.nactiv.1` violation. `sg13cmos5l` is the only family in
+    `_MOS_ARRAY_WELL_TAP_FAMILIES`, so it is the only PDK that reaches the
+    `draw_well_tap` path (other PDKs' output is pinned unchanged by
+    `test_gf180mcu_mos_array_pfet_flavor_still_omits_well_tap_port`)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_sg13cmos5l_well_tap_margin.gds"
+    response = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {
+                "w_um": 5.0,
+                "l_um": 0.5,
+                "rows": 1,
+                "cols": 2,
+                "flavor": "pfet",
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert "WELL_TAP" in {p["name"] for p in response["ports"]}
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    dbu = layout.dbu
+    top = layout.top_cell()
+    active = kdb.Region(top.begin_shapes_rec(layout.layer(1, 0))).merged()
+    nwell = kdb.Region(top.begin_shapes_rec(layout.layer(31, 0))).merged()
+    # The tap pad sits right of the array's own active, so it is the
+    # rightmost merged Activ polygon.
+    tap = max(active.each(), key=lambda poly: poly.bbox().left)
+    margin_dbu = round(gen.WELL_TAP_ENCLOSURE_MARGIN_UM / dbu)
+    # Growing the tap by the margin on all four sides must stay inside NWell.
+    grown = kdb.Region(tap.bbox().enlarged(margin_dbu, margin_dbu))
+    assert (grown - nwell).is_empty(), (
+        f"NWell encloses tap Activ by < {gen.WELL_TAP_ENCLOSURE_MARGIN_UM} um"
+    )
+
+    drc_report = run_drc(str(output), "sg13cmos5l")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert not any(
+        "nwell.enclosing.nactiv.1" in json.dumps(v) for v in drc_report["violations"]
+    )
 
 
 def test_gf180mcu_mos_array_pfet_flavor_still_omits_well_tap_port(
@@ -9207,6 +9701,8 @@ def test_esd_device_params_schema_has_no_hidden_layer_fields():
         "ring_padding_um",
         "gate_contact",
         "salicide_block",
+        "voltage_flavor",
+        "total_width_um",
     }
     assert not param_names & {
         "active_layer",
@@ -9651,7 +10147,7 @@ def test_families_without_the_1577_gf180mcu_knobs_are_unchanged(family):
     assert gen._contact_gate_extra_offset_um(family) == 0.0
     if family != "sky130":
         assert gen._gate_bottom_endcap_um(family) == 0.0
-    assert gen._sd_implant_margin_um(family) == 0.0
+    assert gen._sd_implant_margin_um(family) == (0.125 if family == "sky130" else 0.0)
     assert gen._voltage_flavor_mark_margin_um(family) == gen.WELL_ENCLOSURE_MARGIN_UM
 
 
@@ -9706,9 +10202,13 @@ def test_gf180mcu_mos_array_bottom_edge_gate_endcap_matches_top_edge_pad_clearan
 
     endcap_um = gen._gate_bottom_endcap_um("gf180mcu")
     assert endcap_um > 0
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
     poly_bbox = _layer_bbox(output, 30, 0)  # Poly2.drawing
-    active_bbox = _layer_bbox(output, 22, 0)  # Comp.drawing
-    assert poly_bbox["bottom"] == pytest.approx(active_bbox["bottom"] - endcap_um)
+    device_bottom = _gf180mcu_device_active_region(layout).bbox().bottom * layout.dbu
+    assert poly_bbox["bottom"] == pytest.approx(device_bottom - endcap_um)
 
     drc_report = run_drc(str(output), "gf180mcu")
     assert drc_report["status"] == "clean", drc_report["violations"]
@@ -9754,17 +10254,24 @@ def test_gf180mcu_sd_implant_covers_every_drawn_comp_shape(
 
     layout = kdb.Layout()
     layout.read(str(output))
-    active_region = kdb.Region(
-        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
-    ).merged()
+    active_region = _gf180mcu_device_active_region(layout)
     implant_region = kdb.Region(
         layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
     ).merged()
     assert not active_region.is_empty()
     assert (active_region - implant_region).is_empty()
 
+    # `esd_device` draws Dualgate, so its bare unit device (no guard ring) has
+    # NCOMP inside Dualgate and no substrate tap: `comp.tap_distance.*` (the
+    # MV DF.13_MV/DF.14_MV rules, #3793) correctly flags it. That tap is the
+    # same pre-existing guard-ring gap noted above, not a DF.12 coverage issue.
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    violations = [
+        v
+        for v in drc_report["violations"]
+        if not v["rule"].startswith("comp.tap_distance.")
+    ]
+    assert not violations, violations
 
 
 def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
@@ -9792,11 +10299,13 @@ def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
         for i in layout.layer_indexes()
     }
     assert (31, 0) in present  # Pplus
-    assert (32, 0) not in present  # no Nplus drawn for a pfet unit
-
-    active_region = kdb.Region(
-        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
+    # The well-tie tap pads (issue #3648) are Nplus; the unit device is not.
+    active_region = _gf180mcu_device_active_region(layout)
+    nplus_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
     ).merged()
+    assert (active_region & nplus_region).is_empty()
+
     implant_region = kdb.Region(
         layout.top_cell().begin_shapes_rec(layout.layer(31, 0))
     ).merged()
@@ -9939,23 +10448,69 @@ def test_mos_array_sg13g2_draws_dummy_marker_over_dummy_cells_only(
     }
 
 
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair"])
 @pytest.mark.parametrize("flavor", ["nfet", "pfet"])
-def test_mos_array_sd_implant_absence_noted_on_sky130(tmp_path, pdk_root, flavor):
-    """sky130 declares no ``"nplus"``/``"pplus"`` role either -- the same gap
-    as sg13g2, never filed only because sky130's curated deck has no implant
-    rule to make it visible (issue #2580's scope correction). The note must
-    fire there too, naming the flavor-selected role."""
-    output = tmp_path / f"mos_array_sky130_sd_implant_{flavor}.gds"
+def test_sky130_sd_implant_drawn_and_no_absence_note(
+    tmp_path, pdk_root, generator, flavor
+):
+    """sky130 (issue #2934) now draws nsdm (93/44) over n-diff and psdm
+    (94/20) over p-diff, for both ``mos_array`` and ``diff_pair`` alike, so
+    neither reports the S/D-implant absence note. The guard ring's tap implant
+    and ``npc`` (phase B) are drawn too, so no omission note remains."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"{generator}_sky130_sd_implant_{flavor}.gds"
     report = generate(
         {
-            "generator": "mos_array",
+            "generator": generator,
             "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "params": {"flavor": flavor},
+            "params": {
+                "flavor": flavor,
+                "gate_contact": True,
+                "add_guard_ring": True,
+            },
             "options": {"output": str(output)},
         }
     )
-    assert report["drc_hints"]["sd_implant_present"] is False
-    assert _sd_implant_absence_note("sky130", flavor) in report["drc_hints"]["notes"]
+    assert report["drc_hints"]["sd_implant_present"] is True
+    notes = report["drc_hints"]["notes"]
+    assert _sd_implant_absence_note("sky130", flavor) not in notes
+    assert not [n for n in notes if "nsdm/psdm" in n or "npc" in n]
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    # S/D implant of the flavor's own type plus the ring's tap implant: the
+    # p-tap substrate ring of an nfet is psdm, the n-tap well ring of a pfet
+    # nsdm, so both implants (and npc over the gate contact) are present.
+    assert {(93, 44), (94, 20), (95, 20)} <= present
+    assert run_drc(str(output), "sky130")["status"] == "clean"
+
+
+def test_sky130_sd_implant_boxes_merge_below_min_spacing(tmp_path, pdk_root):
+    """Adjacent unit devices' implant boxes sit closer than ``nsdm.2``'s
+    0.38um; they must be merged so no sub-minimum gap remains."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_sky130_merge.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "nfet", "rows": 1, "cols": 3},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.find_layer(93, 44))
+    ).merged()
+    assert region.count() == 1
+    assert region.space_check(380).count() == 0
 
 
 @pytest.mark.parametrize("flavor", ["nfet", "pfet"])
@@ -10032,8 +10587,18 @@ def test_gf180mcu_mos_array_voltage_flavor_marker_grows_past_well_margin(
         }
     )
 
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
     mark_bbox = _layer_bbox(output, *_GF180_VOLTAGE_FLAVOR_MARK_LAYER)
-    active_bbox = _layer_bbox(output, 22, 0)
+    device_bbox = _gf180mcu_device_active_region(layout).bbox()
+    active_bbox = {
+        "left": device_bbox.left * layout.dbu,
+        "bottom": device_bbox.bottom * layout.dbu,
+        "right": device_bbox.right * layout.dbu,
+        "top": device_bbox.top * layout.dbu,
+    }
     well_margin = gen.WELL_ENCLOSURE_MARGIN_UM
     for side, mark_edge, active_edge, sign in (
         ("left", mark_bbox["left"], active_bbox["left"], -1),
@@ -10865,6 +11430,174 @@ def test_no_supported_generator_path_draws_topvia1_and_compose_floor_holds():
         ) == pytest.approx(0.42)
 
 
+# --------------------------------------------------------------------------- #
+# Issue #2933: off-manufacturing-grid w_um/l_um warnings (mos_array/diff_pair)
+# --------------------------------------------------------------------------- #
+
+
+def _mfg_grid_warnings_of(report):
+    return [w for w in report["warnings"] if "manufacturing grid" in w]
+
+
+def _gen_mos(tmp_path, root, generator, variant="sky130A", **params):
+    return generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": variant, "root": str(root)},
+            "params": params,
+            "options": {"output": str(tmp_path / f"{generator}_grid.gds")},
+        }
+    )
+
+
+def test_mfg_grid_neighbours_helper():
+    assert gen._mfg_grid_neighbours(0.005, 4.634) == (4.63, 4.635)
+    assert gen._mfg_grid_neighbours(0.005, 4.635) is None
+    # Total of 2 units: representable totals are multiples of 0.01um.
+    assert gen._mfg_grid_neighbours(0.005, 4.634, multiple=2) == (4.63, 4.64)
+    assert gen._mfg_grid_neighbours(0.005, 4.64, multiple=2) is None
+    assert gen._mfg_grid_neighbours(0.0, 4.634) is None
+
+
+def test_mos_array_off_mfg_grid_width_warns(tmp_path, pdk_root):
+    """`w_um=4.634` is on the 1nm dbu grid but off sky130's 5nm
+    manufacturing grid: warned, naming the grid and both neighbours, while
+    `drc_hints.snapped_to_grid` (dbu-based) keeps its meaning."""
+    report = _gen_mos(
+        tmp_path, pdk_root, "mos_array", w_um=4.634, l_um=0.3, rows=1, cols=1, dummy=0
+    )
+    assert report["drc_hints"]["snapped_to_grid"] is False
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "params.w_um=4.634um" in warning
+    assert "0.005um" in warning
+    assert "4.63um (below)" in warning
+    assert "4.635um (above)" in warning
+    # fingers=1: no total-width clause.
+    assert "total width" not in warning
+
+
+@pytest.mark.parametrize("w_um", [4.635, 4.64])
+def test_mos_array_on_mfg_grid_width_no_warning(tmp_path, pdk_root, w_um):
+    report = _gen_mos(
+        tmp_path, pdk_root, "mos_array", w_um=w_um, l_um=0.3, rows=1, cols=1, dummy=0
+    )
+    assert _mfg_grid_warnings_of(report) == []
+
+
+def test_mos_array_off_mfg_grid_length_warns(tmp_path, pdk_root):
+    report = _gen_mos(tmp_path, pdk_root, "mos_array", w_um=1.0, l_um=0.302)
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "params.l_um=0.302um" in warning
+    assert "0.3um (below)" in warning
+    assert "0.305um (above)" in warning
+
+
+def test_mos_array_parallel_fingers_report_total_width_basis(tmp_path, pdk_root):
+    report = _gen_mos(tmp_path, pdk_root, "mos_array", w_um=2.317, l_um=0.3, fingers=2)
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "2.315um (below)" in warning
+    assert "2.32um (above)" in warning
+    assert "must be a multiple of 2 x 0.005um = 0.01um" in warning
+    assert "totals 4.63um (below) or 4.64um (above)" in warning
+
+
+def test_mos_array_series_fingers_report_no_total_width(tmp_path, pdk_root):
+    """ "series" fingers are separate devices -- no shared total width."""
+    report = _gen_mos(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        w_um=2.317,
+        l_um=0.3,
+        fingers=2,
+        finger_topology="series",
+    )
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "total width" not in warning
+
+
+def test_diff_pair_off_mfg_grid_width_splits_basis(tmp_path, pdk_root):
+    report = _gen_mos(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        w_um=2.317,
+        l_um=0.3,
+        splits=2,
+        mirror=True,
+        flavor="pfet",
+    )
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "generator 'diff_pair'" in warning
+    assert "2.315um (below) or 2.32um (above)" in warning
+    assert "params.splits=2" in warning
+    assert "must be a multiple of 2 x 0.005um = 0.01um" in warning
+    assert "totals 4.63um (below) or 4.64um (above)" in warning
+
+
+def test_diff_pair_splits_one_reports_no_total_width(tmp_path, pdk_root):
+    report = _gen_mos(tmp_path, pdk_root, "diff_pair", w_um=2.317, l_um=0.3, splits=1)
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "total width" not in warning
+
+
+def test_diff_pair_on_mfg_grid_width_no_warning(tmp_path, pdk_root):
+    report = _gen_mos(tmp_path, pdk_root, "diff_pair", w_um=2.32, l_um=0.3, splits=2)
+    assert _mfg_grid_warnings_of(report) == []
+
+
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair"])
+def test_no_ongrid_rule_family_emits_no_mfg_grid_warning(
+    tmp_path, both_pdk_root, generator, monkeypatch
+):
+    """A family whose curated deck declares no `ongrid` rule (grid 0.0) earns
+    no mfg-grid warning for an arbitrary width. No shipped deck is rule-less
+    any more (gf180mcu gained a 0.005um `ongrid` rule), so pin the lookup."""
+    from klayout_tools import gen_describe
+
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    report = _gen_mos(
+        tmp_path, both_pdk_root, generator, variant="gf180mcuD", w_um=2.317, l_um=0.302
+    )
+    assert _mfg_grid_warnings_of(report) == []
+
+
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair"])
+def test_gf180mcu_off_grid_width_warns(tmp_path, both_pdk_root, generator):
+    """gf180mcu's curated deck now declares a 0.005um `ongrid` rule, so an
+    off-grid width warns like sky130."""
+    assert (
+        gen.mfg_grid_um("gf180mcu", gen._PDK_ROLE_LAYERS["gf180mcu"]["active"]) == 0.005
+    )
+    report = _gen_mos(
+        tmp_path, both_pdk_root, generator, variant="gf180mcuD", w_um=2.317, l_um=0.3
+    )
+    assert len(_mfg_grid_warnings_of(report)) == 1
+
+
+def test_off_mfg_grid_warning_keeps_exit_code(tmp_path, pdk_root, capsys):
+    output = tmp_path / "cli_grid.gds"
+    code = main(
+        [
+            "gen",
+            "mos_array",
+            "--params",
+            '{"w_um":4.634,"l_um":0.3,"rows":1,"cols":1,"dummy":0}',
+            "--pdk",
+            "sky130A",
+            "--pdk-root",
+            str(pdk_root),
+            "-o",
+            str(output),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(_mfg_grid_warnings_of(payload)) == 1
+
+
 @pytest.mark.parametrize("gate_contact", (True, False))
 @pytest.mark.parametrize("l_um", (0.15, 0.28, 0.3, 0.41, 0.42, 0.5))
 def test_sky130_short_gate_pad_and_ring_well_clear_magic_rules(
@@ -11159,3 +11892,241 @@ def test_plain_mos_array_is_unchanged_by_mos_cap_option(tmp_path, both_pdk_root)
                 "options": {"output": str(tmp_path / "narrow.gds")},
             }
         )
+
+
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair"])
+@pytest.mark.parametrize("flavor", ["nfet", "pfet"])
+def test_sky130_ring_tap_implant_and_npc_geometry(
+    tmp_path, pdk_root, generator, flavor
+):
+    """Phase B of issue #2934: the guard ring's tap is covered by the implant
+    matching the well underneath it (nsdm for the pfet's n-tap well tie, psdm
+    for the nfet's p-tap substrate tie) with ``n/psdm.5b``'s 0.125um margin,
+    and ``npc`` caps every poly-contact licon with ``npc.2`` spacing met."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"{generator}_sky130_phase_b_{flavor}.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "flavor": flavor,
+                "gate_contact": True,
+                "add_guard_ring": True,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+
+    def region(layer: int, datatype: int) -> kdb.Region:
+        return kdb.Region(top.begin_shapes_rec(layout.layer(layer, datatype))).merged()
+
+    tap, poly, licon, npc = (
+        region(65, 44),
+        region(66, 20),
+        region(66, 44),
+        region(95, 20),
+    )
+    ring_implant = region(93, 44) if flavor == "pfet" else region(94, 20)
+    assert not tap.is_empty()
+    # Every tap shape sits wholly inside the implant, 0.125um from its edge.
+    assert (tap - ring_implant).is_empty()
+    assert (tap.sized(125) - ring_implant).is_empty()
+
+    gate_licons = licon.inside(poly)
+    assert not gate_licons.is_empty()
+    assert (gate_licons.sized(95) - npc).is_empty()
+    assert npc.space_check(270).count() == 0
+    assert npc.width_check(270).count() == 0
+    # No npc over source/drain or tap licons.
+    assert (licon - gate_licons).and_(npc).is_empty()
+
+
+def test_sky130_no_ring_draws_no_opposite_implant(tmp_path, pdk_root):
+    """Without ``add_guard_ring`` an nfet array carries nsdm only."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_sky130_no_ring.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "nfet"},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert (93, 44) in present
+    assert (94, 20) not in present
+    assert (95, 20) not in present
+
+
+# --- esd_device: voltage_flavor + total_width_um (issue #4299) -------------- #
+
+
+def _esd_gen(tmp_path, pdk_root, params, name="esd", variant="sky130A"):
+    output = tmp_path / f"{name}.gds"
+    report = generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": variant, "root": str(pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    return output, report
+
+
+def _gds_layers(gds_path):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    return {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+
+
+def test_esd_device_default_voltage_flavor_output_unchanged(tmp_path, pdk_root):
+    """No `voltage_flavor` draws no marker: geometry identical to an explicit `''`."""
+    implicit, _ = _esd_gen(tmp_path, pdk_root, {}, "implicit")
+    explicit, report = _esd_gen(tmp_path, pdk_root, {"voltage_flavor": ""}, "explicit")
+    _assert_gds_geometry_equal(implicit, explicit)
+    assert report["drc_hints"]["voltage_flavor"] is None
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER not in _gds_layers(implicit)
+
+
+def test_esd_device_voltage_flavor_hvi_draws_marker_and_extracts_g5v0d10v5(
+    tmp_path, pdk_root
+):
+    output, report = _esd_gen(tmp_path, pdk_root, {"voltage_flavor": "hvi"})
+    assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER in _gds_layers(output)
+    assert report["drc_hints"]["voltage_flavor"] == "hvi"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+
+    extract = run_extract(
+        str(output), "sky130", pdk_variant="sky130A", pdk_root=str(pdk_root)
+    )
+    cards = Path(extract["netlist_path"]).read_text().splitlines()
+    assert any(" sky130_fd_pr__nfet_g5v0d10v5 " in c for c in cards)
+    assert not any(" sky130_fd_pr__nfet_01v8 " in c for c in cards)
+
+
+def test_esd_device_unknown_voltage_flavor_notes_not_drawn(tmp_path, pdk_root):
+    output, report = _esd_gen(tmp_path, pdk_root, {"voltage_flavor": "bogus"})
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    flavor_notes = [n for n in report["drc_hints"]["notes"] if "voltage_flavor" in n]
+    assert len(flavor_notes) == 1
+    assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER not in _gds_layers(output)
+
+
+def test_esd_device_voltage_flavor_medium_voltage_gf180mcu(tmp_path, both_pdk_root):
+    """gf180mcu keeps its unconditional `esd_mark`; the flavor still resolves."""
+    _, report = _esd_gen(
+        tmp_path,
+        both_pdk_root,
+        {"voltage_flavor": "medium_voltage"},
+        variant="gf180mcuD",
+    )
+    assert report["drc_hints"]["voltage_flavor"] == "medium_voltage"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+
+
+@pytest.mark.parametrize(
+    ("total", "fingers", "finger_w"),
+    [(21.5, 2, 10.75), (20.0, 1, 20.0), (20.01, 2, 10.005), (40.0, 2, 20.0)],
+)
+def test_esd_device_total_width_splits_fingers(
+    tmp_path, pdk_root, total, fingers, finger_w
+):
+    _, report = _esd_gen(tmp_path, pdk_root, {"total_width_um": total})
+    assert report["drc_hints"]["fingers"] == fingers
+    assert report["drc_hints"]["finger_width_um"] == pytest.approx(finger_w)
+
+
+@pytest.mark.parametrize("extra", [{"fingers": 2}, {"finger_width_um": 5.0}])
+def test_esd_device_total_width_conflicts_with_explicit_split(
+    tmp_path, pdk_root, extra
+):
+    with pytest.raises(GenError, match="cannot be combined"):
+        _esd_gen(tmp_path, pdk_root, {"total_width_um": 21.5, **extra})
+
+
+def test_esd_device_total_width_over_finger_limit_rejected(tmp_path, pdk_root):
+    with pytest.raises(GenError, match="finger limit|-finger limit"):
+        _esd_gen(tmp_path, pdk_root, {"total_width_um": 20.0 * 33})
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4203: res_array length_um mfg-grid / short-length warnings
+# --------------------------------------------------------------------------- #
+
+
+def _gen_res(tmp_path, root, tag, variant="gf180mcuD", **params):
+    return generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": variant, "root": str(root)},
+            "params": {"width_um": 1.0, "spacing_um": 1.0, "num": 1, **params},
+            "options": {"output": str(tmp_path / f"res_{tag}.gds")},
+        }
+    )
+
+
+def test_res_array_off_mfg_grid_length_warns(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "off", length_um=3.343)
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "params.length_um=3.343um" in warning
+    assert "0.005um" in warning
+    assert "3.34um (below)" in warning
+    assert "3.345um (above)" in warning
+
+
+def test_res_array_on_grid_length_no_warning(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "on", length_um=3.345)
+    assert _mfg_grid_warnings_of(report) == []
+
+
+def test_res_array_no_ongrid_rule_no_warning(tmp_path, both_pdk_root, monkeypatch):
+    from klayout_tools import gen_describe
+
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    report = _gen_res(tmp_path, both_pdk_root, "nogrid", length_um=3.343)
+    assert _mfg_grid_warnings_of(report) == []
+
+
+def test_res_array_off_grid_warning_leaves_geometry_unchanged(
+    tmp_path, both_pdk_root, monkeypatch
+):
+    from klayout_tools import gen_describe
+
+    warned = _gen_res(tmp_path, both_pdk_root, "warned", length_um=3.343)
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    silent = _gen_res(tmp_path, both_pdk_root, "silent", length_um=3.343)
+    assert _mfg_grid_warnings_of(warned) and not _mfg_grid_warnings_of(silent)
+    assert (tmp_path / "res_warned.gds").read_bytes() == (
+        tmp_path / "res_silent.gds"
+    ).read_bytes()
+
+
+def test_res_array_short_length_warns_on_gf180mcu(tmp_path, both_pdk_root):
+    short = _gen_res(tmp_path, both_pdk_root, "short", length_um=0.3)
+    assert any("minimum mask width" in w for w in short["warnings"])
+    long = _gen_res(tmp_path, both_pdk_root, "long", length_um=3.0)
+    assert not any("minimum mask width" in w for w in long["warnings"])
+
+
+def test_res_array_sky130_has_no_short_length_warning(tmp_path, pdk_root):
+    report = _gen_res(tmp_path, pdk_root, "sky", variant="sky130A", length_um=0.5)
+    assert not any("minimum mask width" in w for w in report["warnings"])

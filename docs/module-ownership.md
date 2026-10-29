@@ -107,6 +107,7 @@ The `place_and_route` verb runs placement, global/detail routing, and post-PnR o
 
 - **place_and_route_cmd** (`cli/place_and_route_cmd.py`): CLI interface, JSON envelope and request document handling
 - **place_and_route** (`place_and_route.py`): Core place-and-route engine coordination (tool invocation, flow control)
+- **place_and_route_request** (`place_and_route_request.py`): Request validation — the pure validators/resolvers for the request document plus `PlaceAndRouteError` (issue #3699); re-exported from `place_and_route`
 - **place_and_route_gds_merge** (`place_and_route_gds_merge.py`): Post-PnR GDS file merging, port cleanup, and design finalization
 - **place_and_route_min_area** (`place_and_route_min_area.py`): Post-route minimum-**area** repair pass over the merged GDS — floors routed metal against the resolved PDK family's own `*.area.*` deck rules and reports what it could not repair safely (issue #2139); called only from `place_and_route_gds_merge._merge_def_to_gds`
 - **place_and_route_sta** (`place_and_route_sta.py`): Post-routing static timing analysis integration (timing closure, slew/delay annotation)
@@ -160,6 +161,8 @@ The `synthesize` verb maps RTL to a standard-cell netlist against a resolved lib
 
 `klt yield-samples` (issue #2563) is a separate verb whose CLI module is `cli/yield_samples_cmd.py`, but whose core (`derive_sample_set`) deliberately lives in `yield_analysis.py`: it reuses `klt yield`'s own sim-report reader so the draw-screening rules exist in exactly one place.
 
+`klt yield-csv` (issue #2931) follows the same split: CLI in `cli/yield_csv_cmd.py`, core (`derive_sample_set_from_csv`) in `yield_analysis.py`.
+
 **Not part of this split**: `klt yield-campaign` and `klt yield-sensitivity` are separate, independently-registered CLI verbs (their own `set_defaults` entries in `cli/parser.py`), not additional files of `klt yield` itself, despite the shared `yield*` module-name prefix:
 
 - `yield-campaign` = `cli/yield_campaign_cmd.py` + `yield_campaign.py` (multi-run campaign orchestration; also borrows `yield_cmd.py`'s text-report printer for its own text output)
@@ -172,7 +175,7 @@ Both fit the single-implementation-module pattern (see "Single-File Verbs" below
 
 The following verbs have all their implementation in a single module (`src/klayout_tools/<verb>.py`) with a corresponding CLI module (`src/klayout_tools/cli/<verb>_cmd.py`):
 
-arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, kb, layers, layout_metrics, lef_abstract, mom, pex, power, precheck, render, report, reset_coverage, ring_check, size, socket_check, stats, tap_distance, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
+arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, interface_check, kb, layers, layout_metrics, lef_abstract, mom, pex, power, power_intent, precheck, render, report, reset_coverage, ring_check, seam_check, size, socket_check, stats, tap_distance, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
 
 These verbs follow the simpler pattern: a single implementation module (e.g., `extract.py`) paired with a CLI command module (e.g., `cli/extract_cmd.py`).
 

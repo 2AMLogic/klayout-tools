@@ -56,12 +56,15 @@ def _have_gh_network() -> bool:
     binary that is at least unauthenticated-usable for public repo reads)."""
     if shutil.which("gh") is None:
         return False
-    result = subprocess.run(
-        ["gh", "api", "repos/2AMLogic/klayout-tools", "--jq", ".visibility"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    try:
+        result = subprocess.run(
+            ["gh", "api", "repos/2AMLogic/klayout-tools", "--jq", ".visibility"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
     return result.returncode == 0 and result.stdout.strip() == "public"
 
 
@@ -70,6 +73,40 @@ _SKIP_NO_NETWORK = pytest.mark.skipif(
     not HAVE_GH_NETWORK,
     reason="gh CLI + network access to GitHub not available in this environment",
 )
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [subprocess.TimeoutExpired(cmd="gh", timeout=15), OSError("spawn failed")],
+)
+def test_have_gh_network_false_on_probe_failure(monkeypatch, exc):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/gh")
+
+    def _raise(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert _have_gh_network() is False
+
+
+def test_have_gh_network_true_on_public(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="public\n", stderr=""),
+    )
+    assert _have_gh_network() is True
+
+
+def test_have_gh_network_false_on_nonzero_exit(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="err"),
+    )
+    assert _have_gh_network() is False
 
 
 # --------------------------------------------------------------------------- #
@@ -520,6 +557,78 @@ def test_no_gds_yields_in_design_status(tmp_path):
         "path": ".",
     }
     assert layout["downloadable"] is True
+
+
+# --------------------------------------------------------------------------- #
+# clone_repo transient-network retry (mocked)
+# --------------------------------------------------------------------------- #
+
+
+def _cp(returncode, stderr="", stdout=""):
+    return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=stderr)
+
+
+def test_clone_repo_retries_transient_clone_failure(tmp_path, monkeypatch):
+    clones = []
+    sleeps = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["git", "clone"]:
+            clones.append(cmd)
+            dest = Path(cmd[-1])
+            # A real failed clone can leave a partial dir; a retry must find it gone.
+            assert not dest.exists()
+            dest.mkdir(parents=True)
+            if len(clones) == 1:
+                return _cp(128, "fatal: Failure when receiving data from the peer")
+            return _cp(0)
+        if "rev-parse" in cmd:
+            return _cp(0, stdout="abc123\n")
+        return _cp(0)
+
+    monkeypatch.setattr(ic.subprocess, "run", fake_run)
+    monkeypatch.setattr(ic, "_sleep", sleeps.append)
+    repo_dir, sha = ic.clone_repo("2AMLogic/x", tmp_path / "cache", None)
+    assert repo_dir == tmp_path / "cache" / "x"
+    assert sha == "abc123"
+    assert len(clones) == 2
+    assert len(sleeps) == 1
+
+
+def test_clone_repo_raises_after_all_attempts_fail(tmp_path, monkeypatch):
+    clones = []
+
+    def fake_run(cmd, **kwargs):
+        clones.append(cmd)
+        return _cp(128, "fatal: repository not found")
+
+    monkeypatch.setattr(ic.subprocess, "run", fake_run)
+    monkeypatch.setattr(ic, "_sleep", lambda s: None)
+    with pytest.raises(
+        ic.IngestError,
+        match=r"git clone failed for 2AMLogic/x: fatal: repository not found",
+    ):
+        ic.clone_repo("2AMLogic/x", tmp_path / "cache", None)
+    assert len(clones) == ic.GIT_NETWORK_ATTEMPTS
+
+
+def test_clone_repo_retries_fetch_on_cached_path(tmp_path, monkeypatch):
+    (tmp_path / "cache" / "x").mkdir(parents=True)
+    fetches = []
+
+    def fake_run(cmd, **kwargs):
+        if "fetch" in cmd:
+            fetches.append(cmd)
+            return _cp(1, "transient") if len(fetches) == 1 else _cp(0)
+        if "rev-parse" in cmd:
+            return _cp(0, stdout="def456\n")
+        return _cp(0)
+
+    monkeypatch.setattr(ic.subprocess, "run", fake_run)
+    monkeypatch.setattr(ic, "_sleep", lambda s: None)
+    _, sha = ic.clone_repo("2AMLogic/x", tmp_path / "cache", None)
+    assert sha == "def456"
+    assert len(fetches) == 2
 
 
 # --------------------------------------------------------------------------- #

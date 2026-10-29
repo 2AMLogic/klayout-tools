@@ -168,6 +168,51 @@ def render_rerun_drift(result: dict) -> None:
             print(f"  {entry['field']}")
 
 
+def render_check_text(result: dict) -> None:
+    """Print the ``--format text`` rendering of a cheap-mode ``--check`` result.
+
+    Shared across the ``klt`` verbs that verify a stored report (issue #4139);
+    the ``input_not_found`` and ``advisories`` branches only fire when those
+    keys are present, so verbs without them print the plain hash-check list.
+    """
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    for check in result["checks"]:
+        mark = "OK" if check["match"] else "DRIFTED"
+        print(f"  [{mark}] {check['field']}")
+        if not check["match"]:
+            print(f"      expected: {check['expected']}")
+            # Issue #2595: an echoed `layout`/`reference` that resolves to no
+            # existing file re-hashes to `null`, which on its own reads as
+            # "the recorded hash moved". Say what actually happened, and --
+            # for the common cause, a committed request/report pair whose
+            # relative paths were written against the report's own directory
+            # -- where the input really is.
+            missing = check.get("input_not_found")
+            if missing is None:
+                print(f"      actual:   {check['actual']}")
+            else:
+                print(f"      actual:   None (input not found: {missing['resolved']})")
+                if missing["found_relative_to_report"] is not None:
+                    print(
+                        "      note:     it exists relative to the report's own "
+                        f"directory ({missing['found_relative_to_report']}); "
+                        "--check resolves relative paths against the current "
+                        "working directory -- re-run from there"
+                    )
+    for skipped in result.get("skipped", ()):
+        print(f"  [SKIPPED] {skipped['field']}: {skipped['reason']}")
+    # Issue #1373: engine-version drift is a non-fatal advisory, never folded
+    # into the `[OK]`/`[DRIFTED]` hash-integrity list above -- it does not
+    # affect `status`/exit code, so a scripted gate parsing that list alone
+    # never sees it.
+    for advisory in result.get("advisories", ()):
+        print(
+            f"  [DRIFT] {advisory['field']}: {advisory['report']} (report) "
+            f"vs {advisory['current']} (current)"
+        )
+
+
 def emit_error(
     command: str,
     message: str,

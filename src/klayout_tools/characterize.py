@@ -62,7 +62,7 @@ import re
 from typing import Any
 
 from . import liberty_writer, sim
-from ._paths import _load_request_json, _resolve_relative
+from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
 from .env_provenance import repo_relative_path
@@ -632,15 +632,7 @@ def _read_subckt_terminals(netlist_path: str, subckt: str) -> tuple[str, ...]:
     except OSError as exc:
         raise CharacterizeError(f"could not read '{netlist_path}': {exc}") from exc
 
-    folded: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("+") and folded:
-            folded[-1] = folded[-1] + " " + stripped[1:].strip()
-            continue
-        folded.append(line)
-
-    for line in folded:
+    for line in fold_spice_continuations(lines):
         match = _SUBCKT_RE.match(line.split("$")[0])
         if match is None:
             continue
@@ -2448,10 +2440,10 @@ def _build_response(
             # a *generated artifact a caller chains onward* (into `klt sta`'s
             # `pdk.liberty`, say), the same role `klt extract`'s
             # `netlist_path` and `klt sim`'s `corners[].artifacts.*` fill --
-            # see docs/json-contract.md's "Output-artifact path fields" table,
-            # which lists both shapes and which fields use each. `cell.netlist`
-            # above is an *input* and does use the envelope, matching
-            # `klt sim`'s own `netlist`.
+            # see docs/json-contract.md's "Path fields: envelope vs.
+            # plain string" table, which lists both shapes and which fields
+            # use each. `cell.netlist` above is an *input* and does use the
+            # envelope, matching `klt sim`'s own `netlist`.
             "path": emitted_path,
             "library_name": library.name,
             "cell_count": len(library.cells),

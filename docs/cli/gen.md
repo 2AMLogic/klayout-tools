@@ -136,6 +136,7 @@ dimension is now independently checkable — see the note itself.)
 | `esd_device` | yes | yes | no | no |
 | `bond_pad` | yes | yes | no | no |
 | `bjt_array` | yes | yes | no | no |
+| `diode` | yes | no | no | no |
 
 **gf180mcu — `mos_array`'s unit-device geometry was margined against the
 six-rule signoff gap (issue #1577), but this remains an *unverified*
@@ -626,6 +627,9 @@ extracted netlist instead of reporting it as a spurious unmatched device
 under `klt lvs`. Those are all three families `mos_array` runs on
 (sg13cmos5l is deferred — see "PDK-family support" above), so every
 `mos_array` dummy column is suppressed this way.
+Dummy units report no ports by default, so their pads float and `klt extract`
+lists them under `dead_metal`; set `dummy_ports: true` (issue #2904) to report
+them as `D<k>_S`/`D<k>_D`/`D<k>_G` and tie them off through `klt gen-compose`.
 For a single-finger unit device the (one) gate
 finger carries a **poly landing pad** that extends one
 `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` (0.42 µm) square past the
@@ -812,16 +816,16 @@ silently dropped. `voltage_flavor` is independent of `flavor`: requesting
 both `flavor="pfet"` and `voltage_flavor="medium_voltage"`/`"hv"`/`"hvi"`
 draws both the well and the marker with no conflict.
 
-**sky130's native-Vt NMOS (`sky130_fd_pr__nfet_05v0_nvt`) is unsupported
-(issue #2912).** `voltage_flavor="native"`/`"nvt"` on `sky130` draws no marker
-and the device extracts as a plain `nfet`; `drc_hints.notes` names the flavour
-as unsupported. The upstream `sky130.lvs` does not key it on one marker layer:
-`ngate_nvt = ngate_high_voltage.and(lvtn).not(areaid_ed).not(areaid_ce)`
-(`hvi` 75/20 AND `lvtn` 125/44), then `ngate_5p0v_nvt = ngate_nvt.not(areaid_le)
-.not_interacting(vpp)` → `nfet_05v0_nvt` (the `areaid_le` 3v3 variant is
-`nfet_03v3_nvt`), whereas `voltage_flavor` and the deck's `mos_flavours`
-express a single marker. Plan an explicit exclusion of such a device from the
-LVS comparison (see `lvs.md`, "Native-Vt NMOS is not supported on sky130").
+**sky130's native-Vt NMOS (`sky130_fd_pr__nfet_05v0_nvt`, issue #3600).**
+`voltage_flavor="native"`/`"nvt"` on `sky130` draws **two** marker boxes over
+the same footprint: `hvi` (75/20) and `lvtn` (125/44) — the pair the deck's
+`nvt` flavour keys on (`ngate_nvt = ngate_high_voltage.and(lvtn)…`). A unit
+device drawn this way extracts as `sky130_fd_pr__nfet_05v0_nvt`, and `klt lvs`
+accepts that name in a `form: "subckt-call"` reference. `areaid_le` (81/60),
+which upstream subtracts for the 5V native device, is never drawn; the 3v3
+variant (`nfet_03v3_nvt`) is not supported. The device is NMOS-only:
+`flavor="pfet"` with a native `voltage_flavor` fails with a `GenError`
+(`mos_array` and `diff_pair`).
 
 **Source/drain implant (issue #2580).** Only `gf180mcu`'s role-layer table
 declares the S/D implant roles (`"nplus"` 32/0 / `"pplus"` 31/0, issue
@@ -853,7 +857,12 @@ well shape and `voltage_flavor`'s marker already enclose) plus
 `ring_padding_um`, so it always clears every real and dummy unit device
 regardless of `flavor`. Reports `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` ports
 (local-metal) when `add_guard_ring` is `true` (and a `GAP_<side>` marker when
-the ring carries a routing opening). Unlike `diff_pair`'s `add_guard_ring`
+the ring carries a routing opening). On `gf180mcu`, with `add_guard_ring` `false`, the generator draws contacted
+well/substrate tap pads around the footprint (issue #3648, for `DF.13`/`DF.14`)
+and reports each as a `TAP_PAD<k>` port (`net` `null`, local-metal, `x_um`/`y_um`
+the pad centre, `width_um` the pad side, `direction_deg` the outward normal of its
+side) so a route can avoid them; no `TAP_PAD*` port appears with a ring or on
+other families. Unlike `diff_pair`'s `add_guard_ring`
 (which defaults `true`, since a guard ring is that generator's own primary
 composition), `mos_array`'s defaults to `false` — the ring is a strictly
 additive, opt-in capability here, so a request that omits it draws
@@ -870,6 +879,21 @@ same-block self-net — no `gen-compose`-level change was needed for this
 (issue #1493's own scope: a general declared-enclosure relationship for a
 ring around a *separately*-generated block is an explicit non-goal, tracked
 as a future follow-up if still needed).
+
+**Tap pads on gf180mcu (issue #3648).** gf180mcu's default deck enforces
+`DF.13_LV`/`DF.14_LV` (every active within 20 µm of a well/substrate tap), so
+on that family a `mos_array` or `diff_pair` with `add_guard_ring: false` still
+draws tap pads: 0.42 µm square tap/metal pads with one contact and the tap
+implant each (Nplus inside the pfet well, Pplus for nfet), in the band a ring
+would occupy (`ring_padding_um` outside the footprint). They sit at the
+footprint's top and bottom corners, plus evenly spaced interior pads on any
+side longer than 20 µm, so the band stays open where routes leave the block.
+The pads add no ports; `bbox_um` grows to enclose them (the pad band,
+`ring_padding_um` + 0.42 µm, at the top and bottom). A footprint
+deeper than about 17 µm from every side is out of reach of perimeter pads, as
+it is of the ring, and still reports `comp.tap_distance.*`. With
+`add_guard_ring: true` the ring is the tap and no pads are drawn. sky130 and
+the other families draw no pads and are byte-for-byte unchanged.
 
 **Below `UNIT_MIN_W_UM`: dog-bone terminals drawn by hand (issue #1574).**
 `w_um` below `0.42` µm is rejected outright, with no override — that floor is
@@ -905,6 +929,7 @@ with their `.drc.json` reports checked in alongside).
 | `rows`/`cols`  | int    | `2`/`2`            | Array shape. Must each be `>= 1`. |
 | `topology`     | string | `"common_centroid"`| `"array"` or `"common_centroid"` — see above. |
 | `dummy`        | int    | `1`                | Dummy unit-device columns added on each side. Must be `>= 0`. |
+| `dummy_ports`  | bool   | `false`            | Also report each dummy unit's terminals (issue #2904) as `D<k>_S`/`D<k>_D`/`D<k>_G` (`finger_topology: "series"` with `fingers > 1`: `D<k>_S<n>`/`D<k>_D<n>`/`D<k>_G<n>`, matching the real units' naming), appended after every real-unit port. `k` counts dummies row by row, left to right (`D0` is row 0's leftmost dummy). Same layers, positions and directions as a real unit's ports, so `klt gen-compose` `connectivity[]` can tie dummy gates and S/D to a rail instead of leaving them floating (which `klt extract` reports as `dead_metal`). `false` (the default) leaves `ports[]` byte-for-byte unchanged. |
 | `flavor`       | string | `"nfet"`           | Device flavor: `"nfet"` (no well drawn) or `"pfet"` (unit devices enclosed in a well on PDK families that check one, plus a `WELL_TAP` well-tie tap-pad port on `sg13cmos5l` — see above). Must be `"nfet"` or `"pfet"`. |
 | `voltage_flavor` | string | `""`             | Optional medium-voltage/thick-oxide device-class marker: `""` (default, no marker drawn) or a name the resolved PDK family's role-layer table recognises — `"medium_voltage"` on `gf180mcu` (its `Dualgate` layer), `"hv"` on `ihp-sg13g2`/`ihp-sg13cmos5l` (their shared `ThickGateOx` layer), or `"hvi"` on `sky130` (its `hvi.drawing` layer). Any other value on any family draws nothing and is flagged via `drc_hints.notes`, never rejected outright. |
 | `gate_contact` | bool   | `false`            | Draw a contact + local-metal pad on each gate landing pad and report `U<i>_G` on the `metal` role instead of `poly` — see above. Grows the unit device by `0.4` µm to keep the gate metal clear of the S/D pads. |
@@ -916,12 +941,13 @@ with their `.drc.json` reports checked in alongside).
 | `interior_channel_um` | double | `0.0`         | Extra gap (µm) reserved between adjacent rows/columns, on top of the fixed inter-device spacing, so an interior unit device's pin has a navigable path to the array's edge (issue #1531). Must be `>= 0`. `0.0` (the default) is a strict no-op — byte-for-byte identical geometry to every request that predates this param. A positive value widens `row_pitch`/`col_pitch` by that amount and reports the resulting inter-row/inter-column gap bands in the response's `navigable_regions` field (`{"x0_um", "y0_um", "x1_um", "y1_um"}` rectangles). `klt gen-compose` (issue #1835) subtracts a block's own declared `navigable_regions` from its obstacle bbox before its own overlap check runs, so a `waypoints_um` backbone that stays inside the declared channel is no longer rejected as crossing its own block. |
 | `pitch_x_um`/`pitch_y_um` | double | `0.0`      | Override the column/row pitch (µm) between adjacent unit devices (issue #3299). Must be `>= 0`. `0.0` (the default) means no override — byte-for-byte identical geometry to every request that predates these params. The default pitch is already the legal minimum (unit extent + the fixed `0.4` µm same-layer spacing), so an override can only *widen* it: a value below that minimum is **clamped up** to it, never emitted as DRC-violating geometry. When either is set, `drc_hints.pitch` reports `col_pitch_um`/`row_pitch_um` (effective), `min_col_pitch_um`/`min_row_pitch_um` and `pitch_x_clamped`/`pitch_y_clamped`, and a clamp adds a `warnings` entry. Composes with `interior_channel_um`: the channel is added on top of the effective pitch. |
 | `share_sd` | boolean | `false` | Abut horizontally adjacent unit devices so each pair shares one contacted S/D segment (issue #3551, Phase 2 of #3299): column pitch drops from `unit extent + 0.4` µm to `unit extent − one contact region`, and unit *c*'s drain segment **is** unit *c+1*'s source segment (identical drawn coordinates). **This changes electrical topology** — each row extracts as a series chain with `cols + 1` S/D nets instead of `2 × cols`. `U<i>_D`/`U<i+1>_S` stay reported, at the same position; `drc_hints.shared_sd_nodes` lists each shared pair. Dummy columns stay isolated at the normal pitch. Requires `topology: "array"` and `fingers: 1`, and is exclusive with `pitch_x_um`/`interior_channel_um`; any other combination is rejected with `GenError`. `false` (the default) is byte-for-byte identical to every request that predates it. |
+| `mirror` | boolean | `false` | Mirror every odd real column about its vertical axis (issue #3552, Phase 3 of #3299) so facing terminals alternate S\|S / D\|D; the pitch and device count are unchanged. `U<i>_S`/`U<i>_D` ports follow the flipped geometry (a mirrored unit has D on its left, S on its right, with `direction_deg` swapped), and `drc_hints.mirror` reports `mirrored_columns` and each unit's `terminal_sides`. With `share_sd`, `drc_hints.shared_sd_nodes` lists the abutted pairs as `U0_D`/`U1_D`, `U1_S`/`U2_S`, … instead of `D`/`S`. Dummy columns stay unmirrored; columns only (no row mirroring). **Unrelated to `diff_pair`'s `params.mirror`** (current-mirror device labels). Requires `topology: "array"`, `fingers: 1` and no `mos_cap`; `common_centroid` is rejected with `GenError`. `false` (the default) is byte-for-byte identical to every request that predates it. |
 
 #### Tighter than the generator allows: draw your own primitives
 
 `mos_array` places every unit device as a fully isolated cell, so its pitch
-cannot go below the legal minimum above (no shared source/drain abutment or
-mirroring yet — tracked separately from #3299). When a design needs a denser
+cannot go below the legal minimum above (no row mirroring yet — tracked
+separately from #3299). When a design needs a denser
 array than that, hand-draw the devices with `klayout.db` (the same Python API
 `klt` uses), then run the same headless gates on the result:
 
@@ -1587,6 +1613,8 @@ named `Q1_<n>_S`/`_D`/`_G` and `Q2_<n>_S`/`_D`/`_G` (or `M1_`/`M2_` when
 is identical either way), plus `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` when
 `add_guard_ring` is `true` (and a `GAP_<side>` marker when the ring carries a
 routing opening — see `guard_ring`'s "Ring routing openings" above).
+With `add_guard_ring` `false` on `gf180mcu` it reports one `TAP_PAD<k>` port per
+contacted tap pad it draws (see `mos_array`).
 `device_count` is `2 * splits`.
 `drc_hints.matched_group_id` is `"diff_pair:pair:<splits>"` (or
 `"diff_pair:mirror:<splits>"` with `params.mirror`; `flavor` is not folded in
@@ -1927,6 +1955,49 @@ current-sharing an ESD pulse depends on avoiding.
 | `ring_padding_um`    | double | `0.5`   | Padding between the finger array and the tap ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. |
 | `gate_contact`       | bool   | `false` | Draw a contact + local-metal pad on the gate landing pad and report `M1_G` on the `metal` role instead of `poly` — see `mos_array`'s equivalent note above. |
 | `salicide_block`     | bool   | `false` | Draw the PDK's salicide-block layer over the finger array on families that curate one (gf180mcu only — see above). |
+| `voltage_flavor`     | string | `""`    | Thick-oxide / medium-voltage device-class marker, same values and semantics as `mos_array`'s. `"hvi"` on `sky130` draws `hvi.drawing` over the finger array so `klt extract` classifies the clamp as `sky130_fd_pr__nfet_g5v0d10v5`; `"medium_voltage"` on `gf180mcu` draws its `Dualgate` marker. An unrecognised value draws nothing and is reported in `drc_hints.notes`. Echoed as `drc_hints.voltage_flavor`/`voltage_flavor_mark_present`. |
+| `total_width_um`     | double | `0.0`   | Total device width (µm); `0.0` means unset. When given, the generator picks the smallest finger count whose equal split is `<= 20.0` µm per finger (`21.5` → 2 × `10.75`) and sets `fingers`/`finger_width_um` itself. Cannot be combined with an explicit `fingers` or `finger_width_um`; must fit within the 32-finger limit. The derived `fingers`/`finger_width_um` are reported in `drc_hints`. The 20 µm per-finger cap is unchanged. |
+
+The drain net has no param of its own: to name it (e.g. the pad net), run the
+block through [`klt gen-compose`](gen-compose.md) and promote `M1_D` with a
+`pins[]` entry (`{"net": "PAD", "block": "esd", "port": "M1_D"}`), which
+writes the net label on the composed cell.
+
+### `diode` (junction diode / pad ESD clamp primitive, issue #4300)
+
+A single sky130 junction diode that extracts as the deck's own diode class.
+**sky130 only** — other families raise a clear `GenError` ("not yet supported
+by this generator"); gf180mcu and sg13g2 declare diode classes too and are a
+follow-up.
+
+- `kind="n_psub"` — n+ diffusion (`nsdm`) in the p-substrate. The substrate
+  is the anode; `ANODE` is a contacted p+ substrate tap beside the diode and
+  `CATHODE` is the diffusion's local metal. Extracts as `diode_pw2nd_*`.
+- `kind="p_nwell"` — p+ diffusion (`psdm`) in an nwell. `ANODE` is the
+  diffusion's local metal; `CATHODE` is a contacted n+ well tap in the same
+  well. Extracts as `diode_pd2nw_*`.
+- `voltage_class="05v5"` (default) or `"11v0"`, which adds the `hvi`
+  implant (covering the whole nwell for `p_nwell`, per `nwell.9`) so the
+  device extracts as `*_11v0`.
+
+Both draw the `areaid.diode` (81/23) recognition mark over the junction.
+**`areaid.ed` (81/19) is never drawn**: the extraction deck treats it as an
+exclusion, so an ESD-flagged diode would not extract as `diode_*`. Ports are
+`ANODE`/`CATHODE` on `li1`; `device_count` is `1` and
+`drc_hints.matched_group_id` is `null`. `lvt`/`nvt`/`hvt` flavours, guard
+rings, arrays and matching are not drawn.
+
+| `params` field  | Type   | Default    | Description |
+| --------------- | ------ | ---------- | ----------- |
+| `kind`          | string | `"n_psub"` | `"n_psub"` or `"p_nwell"`. |
+| `voltage_class` | string | `"05v5"`   | `"05v5"` or `"11v0"`. |
+| `width_um`      | double | `2.0`      | Junction diffusion width (µm). Must be `>= 0.4`. |
+| `length_um`     | double | `2.0`      | Junction diffusion length (µm). Must be `>= 0.4`. |
+
+The contact count is derived from the diffusion area. To verify against a
+schematic, label the two ports' `li1` (positions are in `ports[]`), run
+`klt extract`, and compare with a `D` element of the matching class under
+`klt lvs`.
 
 ## Output database unit (dbu)
 
@@ -2074,7 +2145,7 @@ family/variant split the resolver doesn't have. The response's
 | `device_count` | integer | Number of unit instances placed (`resistor_strip`'s `num`). |
 | `ports` | array\<object\> | Named terminals for downstream connection — see below. |
 | `drc_hints` | object | DRC-relevant metadata the generator itself already knows — see below. Advisory only; `klt drc` remains the actual authority on rule compliance. |
-| `warnings` | array\<string\> | Non-fatal generator notes (e.g. a requested dimension was snapped to the technology grid). Always present, empty when there is nothing to report. |
+| `warnings` | array\<string\> | Non-fatal generator notes (e.g. a requested dimension was snapped to the technology grid). Always present, empty when there is nothing to report. `mos_array`/`diff_pair` also warn when `w_um`/`l_um` is not a multiple of the resolved family's manufacturing grid (read from the curated deck's `ongrid` rule; none for a family without one), naming the nearest representable values -- for `diff_pair` `splits` (and parallel `mos_array` `fingers`) the total width must be a multiple of `splits x grid` (issue #2933). `res_array` likewise warns when a poly resistor's `length_um` is off that grid (nearest lengths below/above named), and on gf180mcu when `length_um` is below the deck's minimum SAB/Pplus mask width (read from the deck rule, e.g. `sab.width.1`); advisory only, the geometry is unchanged (issue #4203). |
 | `provenance` | object | The shared `provenance` block (issue #2035) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). A generator request involves no rule/model deck and no single input layout stream (the request is parameters, not a layout file), so `provenance.deck`/`provenance.input` are always `null`; `provenance.pdk` mirrors the top-level `pdk` field's identity. |
 
 #### `ports[]` entries
@@ -2209,7 +2280,10 @@ against the vendor's own declaration — the same sequence the PDK's own KLayout
 autoload macro performs. klt never re-executes, re-implements, or
 reinterprets vendor PCell code.
 
-`klt pdk find`/`klt pdk list` carry a `has_pcell_library` boolean
+`klt pdk find`/`klt pdk list` carry a `has_pcell_library` boolean and a
+`pcell_shim` state (`present`/`missing`/`not_required`; a `missing` vendored
+compat shim, as on an ihp-sg13g2 release tarball, makes the `unavailable`
+reason below name where to get it — issue #4236)
 ([`docs/cli/pdk.md`](pdk.md)) so a caller can discover PyCell availability
 without invoking this command at all. As of issue #1610,
 [`klt pdk pcell-check`](pdk.md#klt-pdk-pcell-check) goes one step further and
@@ -2224,11 +2298,12 @@ A PDK's PyCell package routinely imports third-party modules klt has no
 dependency on. klt does **not** vendor or reimplement those. Verified against
 the three real installs available when this landed:
 
-| Install | Ships `libs.tech/klayout/python/`? | Shape | Loadable with klt's own dependencies? |
+| Install | Ships `libs.tech/klayout/python/`? (or `tech/pymacros/`, probed second) | Shape | Loadable with klt's own dependencies? |
 | --- | --- | --- | --- |
 | `sky130A` (volare) | yes — `cells`, `import_netlist` | **plain `pya`** (`class pfet(pya.PCellDeclarationHelper)`, registered by `class sky130(pya.Library)`) — *not* Cadence-DLO/`cni`-based | no — its `__init__` chain reaches `import gdsfactory` (and `kfactory`), a genuine third-party PyPI dependency klt has no relationship to. The PDK's own `pymacros/sky130_pcells.lym` checks for exactly that import and disables the PCells when it is absent. |
 | `ihp-sg13g2` | yes — `sg13g2_native_pcell_lib`, `sg13g2_pycell_lib`, … | `sg13g2_native_pcell_lib` is plain `pya`, but transitively imports `sg13g2_pycell_lib`, whose first statement is `from cni.tech import Tech` | **yes, on a fully-provisioned install** (issue #1630) — `cni` is not a third-party PyPI package but the `pycell4klayout-api` compat layer *the PDK itself vendors*, at `pycell4klayout-api/source/python/cni`, one level deeper than the `sys.path` entry klt adds for every other package. klt adds that extra, PDK-relative directory to `sys.path` for this specific package before importing it (see `_VENDOR_COMPAT_SHIMS` in `src/klayout_tools/pdk_pcell.py`), and works around an unrelated `tkinter`-presence crash inside that same shim's PCell-instantiation path. Still reported `unavailable` when `pycell4klayout-api` itself checked out empty (an uninitialized git submodule) — see the `reason` breakdown below. |
-| `gf180mcuD` (volare) | **no** `python/` at all | — | n/a (`--list-pdk-pcells` enumerates empty, exit `0`) |
+| `gf180mcuC` (open_pdks) | no `python/`; packages `cells`, `klayout_api_cells`, `sealring_cells` under `libs.tech/klayout/tech/pymacros/` | PDK's `gf180mcu.lym` puts that dir on `sys.path` | per package; failures land in `unavailable` |
+| `gf180mcuD` (volare) | **no** `python/` or `tech/pymacros/` | — | n/a (`--list-pdk-pcells` enumerates empty, exit `0`) |
 
 A package that cannot be imported here is reported, never guessed at:
 
@@ -2256,6 +2331,7 @@ are told apart when a package still fails to load.
   "schema_version": 1,
   "pdk": { "name": "ihp-sg13g2", "variant": "ihp-sg13g2", "version": null },
   "pcell_lib_dir": "/…/ihp-sg13g2/libs.tech/klayout/python",
+  "searched_dirs": ["/…/ihp-sg13g2/libs.tech/klayout/python", "/…/ihp-sg13g2/libs.tech/klayout/tech/pymacros"],
   "libraries": [
     {
       "library": "SG13_native_pcell_lib",
@@ -2286,8 +2362,11 @@ imports and `sg13g2_pycell_lib` loads instead — see the table above (issue
 `{ "package": "cells", "missing_dependency": "gdsfactory", "reason": "requires
 Python module 'gdsfactory', which is not importable in this environment" }`.
 
-- `pcell_lib_dir` — the resolved `libs.tech/klayout/python` directory, or
-  `null` when the PDK ships none. A PDK with no such directory returns
+- `pcell_lib_dir` — the first existing of `libs.tech/klayout/python` then
+  `libs.tech/klayout/tech/pymacros`, or `null` when the PDK ships neither.
+- `searched_dirs` — the candidate directories probed, in order (empty when the
+  PDK has no `klayout` asset dir), so "not shipped" is distinguishable from
+  "not found". The text output lists them when nothing matched. A PDK with no such directory returns
   `libraries: []`, `unavailable: []` and exit `0` — a successful "this PDK
   ships none", never an error.
 - `library` — the name the vendor's own `pya.Library.register()` call used.

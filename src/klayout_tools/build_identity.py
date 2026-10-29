@@ -247,7 +247,7 @@ def _checkout_version(directory: str | None = None) -> str | None:
     return _version_scheme.version_for_checkout(root, base)
 
 
-def _klayout_version() -> str | None:
+def klayout_version() -> str | None:
     """``klayout.__version__`` (the KLayout Python engine build actually
     resolved into this process), or ``None`` when unresolvable.
 
@@ -422,6 +422,25 @@ def build_version() -> str:
     return live if live is not None else __version__
 
 
+_REPO_URL = "https://github.com/2AMLogic/klayout-tools"
+
+
+def reinstall_spec(ident: dict[str, Any], version: str) -> str | None:
+    """A ``uvx --from``/``pip install`` spec that re-obtains this build (issue #3985).
+
+    A release is resolvable from the index by version. A ``.devN+g<sha>``
+    build is not published anywhere, but its commit is installable from git.
+    ``None`` means "not reinstallable": a dirty tree (the working-tree edits
+    exist nowhere else) or no recorded commit (e.g. ``X.Y.Z.dev0+unknown``).
+    """
+    if ident.get("is_release") is True:
+        return f"klayout-tools=={version}"
+    commit = ident.get("git_commit")
+    if commit and ident.get("dirty") is False:
+        return f"klayout-tools @ git+{_REPO_URL}@{commit}"
+    return None
+
+
 def version_report() -> dict[str, Any]:
     """The ``klt version`` JSON payload (``docs/json-contract.md``).
 
@@ -450,6 +469,8 @@ def version_report() -> dict[str, Any]:
         "git_tag": ident["git_tag"],
         "dirty": ident["dirty"],
         "is_release": ident["is_release"],
+        # Issue #3985: how to get this build back, or null when it cannot be.
+        "reinstall_spec": reinstall_spec(ident, build_version()),
         # Issue #2216: a content hash of the grading rules `klt signoff`'s
         # tier-verdict mode ships -- distinct from git_commit/git_tag, which
         # identify the checkout, not the grading code. See
@@ -460,6 +481,6 @@ def version_report() -> dict[str, Any]:
         # and the version this build/commit was tested against -- a caller
         # can detect a drifted engine before trusting a "reproduced" report
         # without waiting for a `klt drc`/`klt lvs` run to say so.
-        "klayout_version": _klayout_version(),
+        "klayout_version": klayout_version(),
         "klayout_version_expected": klayout_version_expected(),
     }

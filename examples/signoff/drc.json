@@ -1,6 +1,9 @@
 {
-  "schema_version": 2,
-  "file": "examples/signoff/block.gds",
+  "schema_version": 3,
+  "file": {
+    "path": "examples/signoff/block.gds",
+    "scope": "repo"
+  },
   "deck": "sky130",
   "dbu_um": 0.001,
   "status": "clean",
@@ -64,6 +67,7 @@
     "rules_checked": [
       "diff.angle.1",
       "diff.ongrid.1",
+      "diff.space.1",
       "diff.width.1",
       "li1.angle.1",
       "li1.ongrid.1",
@@ -78,6 +82,7 @@
       "poly.angle.1",
       "poly.endcap.diff.1",
       "poly.ongrid.1",
+      "poly.space.1",
       "poly.width.1"
     ],
     "rules_skipped": [
@@ -156,8 +161,12 @@
       "ncm.ongrid.1",
       "npc.angle.1",
       "npc.ongrid.1",
+      "npc.space.1",
+      "npc.width.1",
       "nsdm.angle.1",
       "nsdm.ongrid.1",
+      "nsdm.space.1",
+      "nsdm.width.1",
       "nsm.angle.1",
       "nsm.ongrid.1",
       "nwell.angle.1",
@@ -170,6 +179,8 @@
       "poly.enclosing.licon.1",
       "psdm.angle.1",
       "psdm.ongrid.1",
+      "psdm.space.1",
+      "psdm.width.1",
       "pwbm.angle.1",
       "pwbm.ongrid.1",
       "pwde.angle.1",
@@ -182,6 +193,7 @@
       "tap.angle.1",
       "tap.enclosing.licon.1",
       "tap.ongrid.1",
+      "tap.space.1",
       "tap.width.1",
       "tunm.angle.1",
       "tunm.ongrid.1",
@@ -211,6 +223,7 @@
     ],
     "voltage_domain_warnings": [],
     "unchecked_rules": [],
+    "marker_blind_layers_in_stream": [],
     "deck_scope": [
       "cap2m",
       "capm",
@@ -223,8 +236,11 @@
       "m3",
       "m4",
       "m5",
+      "npc",
+      "nsdm",
       "nwell",
       "poly",
+      "psdm",
       "rpm",
       "urpm",
       "via",
@@ -234,8 +250,57 @@
       "x"
     ],
     "unmodeled_rules": [
+      "MR_licon.SP.1",
+      "cap2m.11",
+      "cap2m.2b",
+      "cap2m.2b_a",
+      "cap2m.5",
+      "capm.11",
+      "capm.2b",
+      "capm.2b_a",
+      "capm.5",
+      "difftap.10",
+      "difftap.11",
+      "difftap.8",
+      "difftap.9",
+      "dnwell.2",
+      "hvi.1",
+      "hvi.2a",
+      "hvntm.1",
+      "hvntm.2",
+      "hvtp.1",
+      "hvtp.2",
+      "hvtr.1",
+      "hvtr.2",
+      "hvtr.2_a",
+      "ldntm.2",
+      "li.7",
+      "licon.13",
+      "lvtn.2",
+      "m1.3ab",
       "m1.5",
+      "m2.3ab",
       "m2.5",
+      "m3.3ab",
+      "m4.5ab",
+      "n/psdm.10a",
+      "n/psdm.10b",
+      "n/psdm.5a",
+      "n/psdm.5b",
+      "n/psdm.6",
+      "n/psdm.7",
+      "n/psdm.8",
+      "ncm.2a",
+      "npc.4",
+      "nsm.1",
+      "pad.2",
+      "poly.3",
+      "rdl.1",
+      "rdl.2",
+      "rpm.2",
+      "thkox.2",
+      "tunm.2",
+      "urpm.2",
       "via.5a",
       "via2.5",
       "via3.5"
@@ -245,6 +310,7 @@
     "checked": [
       "diff.angle.1",
       "diff.ongrid.1",
+      "diff.space.1",
       "diff.width.1",
       "li1.angle.1",
       "li1.ongrid.1",
@@ -259,6 +325,7 @@
       "poly.angle.1",
       "poly.endcap.diff.1",
       "poly.ongrid.1",
+      "poly.space.1",
       "poly.width.1"
     ],
     "skipped": [],
@@ -564,11 +631,27 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "npc.space.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "npc.width.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "nsdm.angle.1",
         "reason": "no_applicable_geometry"
       },
       {
         "id": "nsdm.ongrid.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "nsdm.space.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "nsdm.width.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -620,6 +703,14 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "psdm.space.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "psdm.width.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "pwbm.angle.1",
         "reason": "no_applicable_geometry"
       },
@@ -665,6 +756,10 @@
       },
       {
         "id": "tap.ongrid.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "tap.space.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -778,11 +873,13 @@
   },
   "provenance": {
     "klt_version": null,
+    "klt_git_commit": null,
+    "klt_reinstall_spec": null,
     "klayout_version": "0.30.12",
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:7fb78d4d52b0be3868ea1cea7431c66e05acb8f739a36412288a48db0be286d5",
+      "content_hash": "sha256:029ef177c1f4e872c13cc81093f94a02a9bbfe1f51939a88194a83532d60bf7c",
       "released": null
     },
     "input": {

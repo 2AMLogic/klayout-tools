@@ -82,6 +82,7 @@ PEP 610 file in the installed `.dist-info` directory for URL/VCS installs).
   "git_tag": null,
   "dirty": false,
   "is_release": false,
+  "reinstall_spec": "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@4f1c8a9b2d3e5f60718293a4b5c6d7e8f9a0b1c2",
   "grading_ruleset_id": "sha256:1a2b3c4d5e6f...",
   "klayout_version": "0.30.12",
   "klayout_version_expected": "0.30.10"
@@ -123,6 +124,13 @@ PEP 610 file in the installed `.dist-info` directory for URL/VCS installs).
   release build, `false` for a confirmed non-release build, `null` when the
   question is unanswerable. A consumer gating on "this is a release" must
   require `is_release === true`; `null` is not a weaker `true`.
+- `reinstall_spec` (issue #3985) — a spec for `uvx --from` / `pip install` that
+  re-obtains this build, or `null` when it cannot be re-obtained. `is_release:
+  true` gives `klayout-tools==<version>`; a clean build with a recorded
+  `git_commit` gives `klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<git_commit>`;
+  a dirty tree or a build with no recorded commit (`…dev0+unknown`) gives
+  `null`, and `klt version` text then prints a `not reinstallable` note to stderr (stdout stays the one-line version).
+  Additive; `schema_version` stays `1`.
 - `grading_ruleset_id` (issue #2216) — **a `klt` version string alone does
   not identify the grading build.** Three installs can report the exact same
   `version`/`git_commit` yet grade a `klt signoff --manifest`/`--fleet`
@@ -154,6 +162,32 @@ under "Gating a build before doing work" below.
 Always exits `0`. Identifying the running build cannot fail — an
 unrecoverable identity is reported as `X.Y.Z.dev0+unknown` with
 `is_release: null`, never as an error.
+
+## Reproducing a recorded pin (issue #3985)
+
+A `.devN+g<sha>` version is not published to any index, so
+`uvx --from "klayout-tools==<version>"` cannot resolve it. Pin on
+**`git_commit`**, not on the version string: record `git_commit` (and
+`reinstall_spec`) next to the result, then re-run under the same build with
+
+```
+uvx --from "<reinstall_spec>" klt ...
+# e.g. uvx --from "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<git_commit>" klt ...
+```
+
+Caveat: the re-installed build is the same commit, so `git_commit` and the
+`+g<sha>` segment match, but `N` is computed from the tags visible to the
+clone and may differ from the original build's. Compare `git_commit`, not
+`version`. A build with `reinstall_spec: null` (dirty tree or no recorded
+commit) cannot be reproduced and should not be used as a pin.
+
+Reports record the same handle: `provenance.klt_git_commit` and
+`provenance.klt_reinstall_spec` (issue #4412) equal `git_commit` and
+`reinstall_spec` above, so a committed report names a re-obtainable build
+without re-running `klt version`. `klt_git_commit` is `null` only when no
+commit is recoverable (tarball install, `X.Y.Z.dev0+unknown`) and stays
+populated on a dirty tree; `klt_reinstall_spec` is `null` when the tree is
+dirty or the commit is unrecoverable.
 
 ## How the identity is determined
 

@@ -48,7 +48,13 @@ from ..synthesize import (
     rerun_synthesize_report,
     run_synthesize,
 )
-from .output import emit_error, emit_success, render_rerun_drift, render_table
+from .output import (
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+    render_table,
+)
 
 #: Returned when a successful run's `structural.has_critical` is `true` --
 #: see this module's docstring "Exit codes" and `docs/cli/synthesize.md`.
@@ -72,6 +78,10 @@ def run(args: argparse.Namespace) -> int:
         return emit_error(
             "synthesize", "--rerun requires --check <report>", args.format
         )
+    if args.skip_deck:
+        return emit_error(
+            "synthesize", "--skip-deck requires --check <report>", args.format
+        )
 
     try:
         report = run_synthesize(
@@ -80,6 +90,7 @@ def run(args: argparse.Namespace) -> int:
             pdk_root=args.pdk_root,
             verify_equivalence=args.verify_equivalence,
             equiv_timeout_s=args.equiv_timeout_s,
+            equiv_engine=args.equiv_engine,
             restructure_timing=args.restructure_timing,
             restructure_max_iterations=args.restructure_max_iterations,
         )
@@ -102,6 +113,12 @@ def _run_check(args: argparse.Namespace) -> int:
     hashes but never the request that produced it, so there is nothing to
     reconstruct the inputs from. See `_report_verify.py`'s module docstring.
     """
+    if args.skip_deck and args.rerun:
+        return emit_error(
+            "synthesize",
+            "--skip-deck is cheap-mode only; --rerun runs Yosys and needs the liberty",
+            args.format,
+        )
     try:
         if args.rerun:
             result = rerun_synthesize_report(
@@ -111,6 +128,7 @@ def _run_check(args: argparse.Namespace) -> int:
                 pdk_root=args.pdk_root,
                 verify_equivalence=args.verify_equivalence,
                 equiv_timeout_s=args.equiv_timeout_s,
+                equiv_engine=args.equiv_engine,
                 restructure_timing=args.restructure_timing,
                 restructure_max_iterations=args.restructure_max_iterations,
             )
@@ -120,27 +138,16 @@ def _run_check(args: argparse.Namespace) -> int:
                 args.request,
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
+                netlist_override=args.netlist,
+                skip_deck=args.skip_deck,
             )
     except SynthesizeError as exc:
         return emit_error("synthesize", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
-
-
-def _print_check_text(result: dict) -> None:
-    """`--format text` rendering of a cheap-mode `--check` result -- the same
-    shape `klt drc`/`klt lvs`/`klt extract` already print (issue #1106)."""
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")
 
 
 def _print_sta(report: dict) -> None:

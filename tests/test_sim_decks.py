@@ -47,6 +47,9 @@ import time
 
 def main() -> int:
     argv = sys.argv[1:]
+    if argv == ["--version"]:
+        print("ngspice-46 stub banner")
+        return 0
     if not argv or argv[0] != "-b" or len(argv) != 2:
         print("stub: expected `-b <deck>`", file=sys.stderr)
         return 2
@@ -1260,6 +1263,71 @@ class TestBatchDispatch:
         assert diagnostic["runner_code"] == "bad_request"
         assert "the runner refused the request" in diagnostic["message"]
 
+    def test_preflight_reject_envelope_and_identity_reach_the_units(
+        self, tmp_path, monkeypatch
+    ):
+        write_stub_engine(tmp_path)
+        fleet = _FakeFleet({"state": "failed", "exit_code": "87"})
+
+        def collect_preflight_reject(config, job_id, local_dir, **kwargs):
+            with open(
+                os.path.join(local_dir, sb.BATCH_REPORT_FILENAME),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                json.dump(
+                    {
+                        "schema_version": 1,
+                        "error": {
+                            "command": "sim",
+                            "code": "batch_runner_version_mismatch",
+                            "message": "runner klt 0.5.0 does not match client",
+                        },
+                    },
+                    handle,
+                )
+            with open(
+                os.path.join(local_dir, sb.BATCH_RUNNER_IDENTITY_FILENAME),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                json.dump({"runner_klt_version": "0.5.0"}, handle)
+
+        fleet.collect = collect_preflight_reject  # type: ignore[method-assign]
+        install_fake_batch(monkeypatch, fleet)
+        report = run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
+        for unit in report["units"]:
+            diagnostic = unit["diagnostics"][0]
+            assert diagnostic["runner_code"] == "batch_runner_version_mismatch"
+            assert "runner klt 0.5.0 does not match client" in diagnostic["message"]
+        remote = report["environment"]["remote"]
+        assert remote["runner_klt_version"] == "0.5.0"
+        assert remote["runner_compatibility"] == "mismatch"
+
+    def test_job_command_captures_stderr_from_the_first_line(self):
+        cmd = sd._deck_batch_command("enforce")
+        assert cmd.startswith(sb._job_stderr_capture_prefix())
+        assert cmd.count('> "$EDA_OUTPUT_DIR/report.json"') == 1
+
+    @pytest.mark.parametrize(("deck_count", "goes_to_fleet"), [(1, False), (2, True)])
+    def test_host_default_batch_keeps_a_single_deck_local(
+        self, tmp_path, monkeypatch, deck_count, goes_to_fleet
+    ):
+        fleet = install_fake_batch(
+            monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"})
+        )
+        monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+        request = batch_deck_request(tmp_path)
+        del request["backend"]
+        request["decks"] = request["decks"][:deck_count]
+        write_request(tmp_path, request)
+        report = sim.run_sim(
+            str(tmp_path / "request.json"), artifacts_dir=str(tmp_path / "out")
+        )
+        assert report["status"] == "pass"
+        assert (report["backend"] == "batch") is goes_to_fleet
+        assert (fleet.spec is not None) is goes_to_fleet
+
     def test_poll_timeout_reports_every_unit(self, tmp_path, monkeypatch):
         write_stub_engine(tmp_path)
 
@@ -1276,6 +1344,26 @@ class TestBatchDispatch:
             u["diagnostics"][0]["code"] == "batch_poll_timeout" for u in report["units"]
         )
 
+    def test_interrupted_reports_every_unit_with_interrupted_s(
+        self, tmp_path, monkeypatch
+    ):
+        write_stub_engine(tmp_path)
+
+        def interrupted(config, job_id, **kwargs):
+            raise sb.BatchJobInterrupted("job stayed interrupted", interrupted_s=123.45)
+
+        install_fake_batch(monkeypatch, _FakeFleet({}))
+        monkeypatch.setattr(sb, "poll_status", interrupted)
+        report = run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
+        assert report["status"] == "error"
+        assert all(
+            u["diagnostics"][0]["code"] == sb.BATCH_JOB_INTERRUPTED_CODE
+            for u in report["units"]
+        )
+        remote = report["environment"]["remote"]
+        assert remote["interrupted_s"] == 123.5
+        assert remote["state"] == "interrupted"
+
     def test_batch_error_raises_sim_error(self, tmp_path, monkeypatch):
         write_stub_engine(tmp_path)
         install_fake_batch(monkeypatch, _FakeFleet({"state": "done"}))
@@ -1287,10 +1375,434 @@ class TestBatchDispatch:
         with pytest.raises(sim.SimError, match="batch backend failed"):
             run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
 
+    def test_resume_submits_only_units_without_a_valid_record(
+        self, tmp_path, monkeypatch
+    ):
+        fleet = install_fake_batch(
+            monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"})
+        )
+        request = batch_deck_request(tmp_path)
+        first = _resume(tmp_path, request, backend="batch")
+        assert [u["resumed"] for u in first["units"]] == [False, False]
+        # The fleet-produced unit.json came back with the unit tree.
+        assert (Path(first["outdir"]) / "tt_27c" / "unit.json").is_file()
+
+        # Nothing changed: no job is submitted at all.
+        fleet.spec = None
+        again = _resume(tmp_path, request, backend="batch")
+        assert fleet.spec is None
+        assert again["status"] == "pass" and again["unit_count"] == 2
+        assert [u["resumed"] for u in again["units"]] == [True, True]
+        assert again["backend"] == "batch"
+
+        # One unit's timeout changed: the job carries only that unit; the
+        # other keeps its tree and is reported resumed, in request order.
+        request["decks"][0]["timeout_s"] = 31
+        third = _resume(tmp_path, request, backend="batch")
+        assert fleet.spec is not None
+        worker = next(json.loads(i.content) for i in fleet.spec.inputs if i.content)
+        assert [u["id"] for u in worker["decks"]] == ["tt_27c"]
+        assert [(u["id"], u["resumed"]) for u in third["units"]] == [
+            ("tt_27c", False),
+            ("ss_125c", True),
+        ]
+        assert third["status"] == "pass"
+
+
+class TestBatchAsync:
+    """`--submit-only` / `--attach <job_id>` on a deck list (issue #3958): one
+    job, one job id, split at the launch/poll seam."""
+
+    @staticmethod
+    def install(monkeypatch, fleet: _FakeFleet, *, job_exists: bool = True) -> list:
+        """The fleet fake, plus the names `sim_batch_async` bound at import
+        and a recorded call log (`submit`, `launch`, `poll`, `collect`)."""
+        from klayout_tools import sim_batch_async as sba
+
+        calls: list[str] = []
+        install_fake_batch(monkeypatch, fleet)
+
+        def record(name, fn):
+            def wrapper(*args, **kwargs):
+                calls.append(name)
+                return fn(*args, **kwargs)
+
+            return wrapper
+
+        monkeypatch.setattr(sb, "submit_job", record("submit", fleet.submit))
+        monkeypatch.setattr(sba, "submit_job", sb.submit_job)
+        monkeypatch.setattr(sb, "launch_job", record("launch", fleet.launch))
+        monkeypatch.setattr(sba, "launch_job", sb.launch_job)
+        monkeypatch.setattr(sb, "poll_status", record("poll", fleet.poll))
+        monkeypatch.setattr(sb, "collect_outputs", record("collect", fleet.collect))
+        monkeypatch.setattr(sb, "job_exists", lambda *a, **k: job_exists)
+        return calls
+
+    @staticmethod
+    def run(tmp_path, request, **kwargs):
+        write_request(tmp_path, request)
+        return sim.run_sim(str(tmp_path / "request.json"), **kwargs)
+
+    def test_submit_only_returns_identity_without_polling(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        calls = self.install(monkeypatch, _FakeFleet({"state": "done"}))
+        result = self.run(
+            tmp_path,
+            batch_deck_request(tmp_path),
+            submit_only=True,
+            artifacts_dir=str(tmp_path / "out"),
+        )
+        assert result["status"] == "submitted"
+        assert result["job_id"].startswith("klt-sim-")
+        assert result["unit_count"] == 2
+        assert result["job_ceiling"] is None
+        assert len(result["request_sha256"]) == 64
+        assert result["bucket"] == "fake-bucket"
+        assert {"job_uri", "launched_at", "region"} <= set(result)
+        assert calls == ["submit", "launch"]
+        receipt = json.loads((tmp_path / "out" / sb.BATCH_RECEIPT_FILENAME).read_text())
+        assert receipt["job_id"] == result["job_id"]
+        assert receipt["request_sha256"] == result["request_sha256"]
+
+    def test_submit_only_without_artifacts_dir_writes_no_receipt(
+        self, tmp_path, monkeypatch
+    ):
+        write_stub_engine(tmp_path)
+        self.install(monkeypatch, _FakeFleet({"state": "done"}))
+        self.run(tmp_path, batch_deck_request(tmp_path), submit_only=True)
+        assert not list(tmp_path.rglob(sb.BATCH_RECEIPT_FILENAME))
+        assert not (tmp_path / ".klt").exists()
+
+    def test_attach_collects_the_submitted_job_like_a_blocking_run(
+        self, tmp_path, monkeypatch
+    ):
+        write_stub_engine(tmp_path)
+        fleet = _FakeFleet({"state": "done", "exit_code": "0"})
+        calls = self.install(monkeypatch, fleet)
+        request = batch_deck_request(tmp_path)
+        submitted = self.run(tmp_path, request, submit_only=True)
+        calls.clear()
+
+        attached = self.run(
+            tmp_path,
+            request,
+            attach_job_id=submitted["job_id"],
+            artifacts_dir=str(tmp_path / "attached"),
+        )
+        # Nothing staged, uploaded or launched; just poll + collect.
+        assert calls == ["poll", "collect"]
+        blocking = self.run(tmp_path, request, artifacts_dir=str(tmp_path / "blocking"))
+        for report in (attached, blocking):
+            assert report["mode"] == "decks"
+            assert report["backend"] == "batch"
+            assert report["environment"]["remote"]["provider"] == "aws-batch-fleet"
+        assert attached["status"] == blocking["status"] == "pass"
+        assert [u["id"] for u in attached["units"]] == [
+            u["id"] for u in blocking["units"]
+        ]
+        outdir = Path(attached["outdir"])
+        assert outdir.name == "attached"
+        assert (outdir / attached["units"][0]["stdout"]).is_file()
+
+    def test_attach_unknown_job_id(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        calls = self.install(
+            monkeypatch, _FakeFleet({"state": "done"}), job_exists=False
+        )
+        with pytest.raises(sim.SimError) as err:
+            self.run(tmp_path, batch_deck_request(tmp_path), attach_job_id="nope-1")
+        assert err.value.code == sb.BATCH_UNKNOWN_JOB_CODE
+        assert calls == []
+
+    def test_attach_with_changed_request_is_refused(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        self.install(monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"}))
+        request = batch_deck_request(tmp_path)
+        submitted = self.run(tmp_path, request, submit_only=True)
+        request["decks"] = request["decks"][:1]
+        with pytest.raises(sim.SimError) as err:
+            self.run(tmp_path, request, attach_job_id=submitted["job_id"])
+        assert err.value.code == "attach_request_mismatch"
+
+    def test_attach_to_failed_job_recovers_like_a_blocking_run(
+        self, tmp_path, monkeypatch
+    ):
+        write_stub_engine(tmp_path)
+        fleet = _FakeFleet({"state": "failed", "exit_code": "1", "detail": "boom"})
+        fleet.fail_collect = True
+        self.install(monkeypatch, fleet)
+        report = self.run(
+            tmp_path,
+            batch_deck_request(tmp_path),
+            attach_job_id="klt-sim-1",
+            artifacts_dir=str(tmp_path / "out"),
+        )
+        assert report["status"] == "error"
+        assert report["units"][0]["diagnostics"][0]["code"] == "batch_job_failed"
+
+    def test_attach_to_interrupted_job_reports_interrupted(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        fleet = _FakeFleet({"state": "done"})
+        self.install(monkeypatch, fleet)
+
+        def interrupted(config, job_id, **kwargs):
+            raise sb.BatchJobInterrupted("interrupted too long", interrupted_s=9.0)
+
+        monkeypatch.setattr(sb, "poll_status", interrupted)
+        report = self.run(
+            tmp_path,
+            batch_deck_request(tmp_path),
+            attach_job_id="klt-sim-1",
+            artifacts_dir=str(tmp_path / "out"),
+        )
+        assert report["units"][0]["diagnostics"][0]["code"] == "batch_job_interrupted"
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match", "code"),
+        [
+            (
+                {"submit_only": True, "backend": "local"},
+                "requires backend 'batch'",
+                "submit_only_unsupported",
+            ),
+            (
+                {"submit_only": True, "hosts": 2},
+                "submits one job",
+                "submit_only_unsupported",
+            ),
+            (
+                {"submit_only": True, "plot_dir": "plots"},
+                "--plot",
+                "submit_only_unsupported",
+            ),
+            (
+                {"submit_only": True, "resume": True},
+                "--resume",
+                "submit_only_unsupported",
+            ),
+            (
+                {"submit_only": True, "attach_job_id": "klt-sim-1"},
+                "mutually exclusive",
+                None,
+            ),
+            (
+                {"attach_job_id": "klt-sim-1", "backend": "local"},
+                "--attach requires backend 'batch'",
+                None,
+            ),
+            (
+                {"attach_job_id": "klt-sim-1", "hosts": 2},
+                "--attach requires backend 'batch'",
+                None,
+            ),
+            (
+                {"attach_job_id": "klt-sim-1", "plot_dir": "plots"},
+                "--plot",
+                None,
+            ),
+            (
+                {"attach_job_id": "klt-sim-1", "capacity_wait_s": 60.0},
+                "--wait-for-capacity",
+                None,
+            ),
+        ],
+    )
+    def test_refusals_fire_before_any_transport_call(
+        self, tmp_path, monkeypatch, kwargs, match, code
+    ):
+        write_stub_engine(tmp_path)
+        calls = self.install(monkeypatch, _FakeFleet({"state": "done"}))
+        kwargs = {"backend": "batch", **kwargs}
+        with pytest.raises(sim.SimError, match=match) as err:
+            self.run(tmp_path, batch_deck_request(tmp_path), **kwargs)
+        if code is not None:
+            assert err.value.code == code
+        assert calls == []
+
+    def test_job_status_reads_a_deck_jobs_id(self, tmp_path, monkeypatch):
+        from klayout_tools import sim_batch_async as sba
+
+        write_stub_engine(tmp_path)
+        monkeypatch.setattr(
+            sba,
+            "_read_status",
+            lambda config, job_id, run: {"state": "running", "detail": "d"},
+        )
+        status = sba.read_job_status(batch_deck_request(tmp_path), "klt-sim-1")
+        assert status["job_id"] == "klt-sim-1"
+        assert status["state"] == "running"
+        assert status["terminal"] is False
+
 
 # --------------------------------------------------------------------------- #
 # run_sim / CLI integration
 # --------------------------------------------------------------------------- #
+
+
+def _resume(tmp_path: Path, request: dict, outdir: str = "out", **kwargs) -> dict:
+    write_request(tmp_path, request)
+    return sim.run_sim(
+        str(tmp_path / "request.json"),
+        backend=kwargs.pop("backend", "local"),
+        artifacts_dir=str(tmp_path / outdir),
+        resume=True,
+        **kwargs,
+    )
+
+
+class TestResume:
+    """Issue #3957: ``--resume`` for deck-list requests via ``unit.json``."""
+
+    def test_rerun_skips_all_and_reports_resumed(self, tmp_path):
+        request = deck_request(tmp_path)
+        first = _resume(tmp_path, request)
+        assert [u["resumed"] for u in first["units"]] == [False, False]
+        assert first["environment"]["resume"]["resumed_units"] == 0
+        unit_dir = Path(first["outdir"]) / "tt_27c"
+        stamp = (unit_dir / "stdout.bin").stat().st_mtime_ns
+        second = _resume(tmp_path, request)
+        assert [u["resumed"] for u in second["units"]] == [True, True]
+        assert second["environment"]["resume"] == {
+            "resumed_units": 2,
+            "resumed_ids": ["tt_27c", "ss_125c"],
+        }
+        assert second["status"] == "pass" and second["passed"] == 2
+        assert second["environment"]["engine_version"] == "46"
+        assert (unit_dir / "stdout.bin").stat().st_mtime_ns == stamp
+        assert second["units"][0]["outputs"] == ["out/measure.raw"]
+
+    def test_unit_record_written_without_resume(self, tmp_path):
+        report = run_local(tmp_path, deck_request(tmp_path))
+        record = json.loads(
+            (Path(report["outdir"]) / "tt_27c" / "unit.json").read_text()
+        )
+        assert record["result"]["status"] == "pass"
+        assert "resumed" not in report["units"][0]
+        assert "resume" not in report["environment"]
+        assert not list(Path(report["outdir"]).rglob("unit.json.tmp*"))
+
+    def test_changed_deck_reruns_only_that_unit(self, tmp_path):
+        request = deck_request(
+            tmp_path,
+            decks=[
+                {"id": "seed1", "deck": "a.spice"},
+                {"id": "seed2", "deck": "b.spice"},
+            ],
+        )
+        (tmp_path / "a.spice").write_text("* .param seed=1\n", encoding="utf-8")
+        (tmp_path / "b.spice").write_text("* .param seed=2\n", encoding="utf-8")
+        _resume(tmp_path, request)
+        (tmp_path / "b.spice").write_text("* .param seed=3\n", encoding="utf-8")
+        second = _resume(tmp_path, request)
+        assert [u["resumed"] for u in second["units"]] == [True, False]
+
+    def test_changed_input_timeout_and_include_rerun(self, tmp_path):
+        request = deck_request(tmp_path)
+        _resume(tmp_path, request)
+        (tmp_path / "extra.spice").write_text("* edited\n", encoding="utf-8")
+        assert [u["resumed"] for u in _resume(tmp_path, request)["units"]] == [
+            False,
+            False,
+        ]
+        request["decks"][0]["timeout_s"] = 31
+        assert [u["resumed"] for u in _resume(tmp_path, request)["units"]] == [
+            False,
+            True,
+        ]
+
+    def test_engine_version_change_reruns(self, tmp_path):
+        request = deck_request(tmp_path)
+        _resume(tmp_path, request)
+        stub = tmp_path / "stub-ngspice"
+        stub.write_text(
+            stub.read_text().replace("ngspice-46", "ngspice-47"), encoding="utf-8"
+        )
+        again = _resume(tmp_path, request)
+        assert [u["resumed"] for u in again["units"]] == [False, False]
+        assert again["units"][0]["engine_version"] == "47"
+
+    @pytest.mark.parametrize(
+        "damage", ["truncate", "garbage-json", "delete-output", "edit-output", "fail"]
+    )
+    def test_invalid_record_or_output_reruns_without_aborting(self, tmp_path, damage):
+        request = deck_request(tmp_path)
+        first = _resume(tmp_path, request)
+        unit_dir = Path(first["outdir"]) / "tt_27c"
+        record = unit_dir / "unit.json"
+        if damage == "truncate":
+            record.write_text(record.read_text()[:40], encoding="utf-8")
+        elif damage == "garbage-json":
+            record.write_text("[1, 2]", encoding="utf-8")
+        elif damage == "delete-output":
+            (unit_dir / "out" / "measure.raw").unlink()
+        elif damage == "edit-output":
+            (unit_dir / "out" / "measure.raw").write_bytes(b"x")
+        else:
+            data = json.loads(record.read_text())
+            data["result"]["status"] = "error"
+            record.write_text(json.dumps(data), encoding="utf-8")
+        second = _resume(tmp_path, request)
+        assert [u["resumed"] for u in second["units"]] == [False, True]
+        assert second["status"] == "pass"
+        assert (unit_dir / "out" / "measure.raw").stat().st_size == 300
+
+    def test_failed_unit_is_never_skipped(self, tmp_path):
+        (tmp_path / "bad.spice").write_text("* stub-exit: 3\n", encoding="utf-8")
+        request = deck_request(tmp_path, decks=[{"id": "bad", "deck": "bad.spice"}])
+        assert _resume(tmp_path, request)["status"] == "error"
+        again = _resume(tmp_path, request)
+        assert again["units"][0]["resumed"] is False
+
+    def test_duplicate_deck_bytes_and_unrelated_dirs(self, tmp_path):
+        (tmp_path / "same.spice").write_text("* same\n", encoding="utf-8")
+        request = deck_request(
+            tmp_path,
+            decks=[
+                {"id": "a", "deck": "same.spice"},
+                {"id": "b", "deck": "same.spice"},
+            ],
+        )
+        outdir = tmp_path / "out"
+        (outdir / "unrelated").mkdir(parents=True)
+        (outdir / "unrelated" / "keep.txt").write_text("keep", encoding="utf-8")
+        _resume(tmp_path, request)
+        shutil.rmtree(outdir / "b")
+        again = _resume(tmp_path, request)
+        assert [u["resumed"] for u in again["units"]] == [True, False]
+        assert (outdir / "unrelated" / "keep.txt").read_text() == "keep"
+
+    def test_options_resume_field_enables_it(self, tmp_path):
+        request = deck_request(tmp_path)
+        request["options"]["resume"] = True
+        run_local(tmp_path, request)
+        again = run_local(tmp_path, request)
+        assert [u["resumed"] for u in again["units"]] == [True, True]
+
+    def test_local_parallel_resume(self, tmp_path):
+        request = deck_request(tmp_path)
+        _resume(tmp_path, request, backend="local-parallel")
+        again = _resume(tmp_path, request, backend="local-parallel", max_workers=2)
+        assert [u["resumed"] for u in again["units"]] == [True, True]
+
+    def test_unit_record_is_a_reserved_name(self, tmp_path):
+        request = deck_request(
+            tmp_path,
+            decks=[{"id": "u", "deck": "deck.spice", "outputs": ["unit.json"]}],
+        )
+        write_request(tmp_path, request)
+        with pytest.raises(sim.SimError, match="unit.json"):
+            sim.run_sim(str(tmp_path / "request.json"), backend="local")
+
+    def test_atomic_write_failure_is_a_warning(self, tmp_path, monkeypatch):
+        def boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(sd.os, "replace", boom)
+        report = run_local(tmp_path, deck_request(tmp_path))
+        assert report["status"] == "pass"
+        codes = [d["code"] for d in report["units"][0]["diagnostics"]]
+        assert "unit_record_unwritten" in codes
+        assert not list(Path(report["outdir"]).rglob("unit.json*"))
 
 
 class TestRunSimIntegration:
@@ -1301,9 +1813,11 @@ class TestRunSimIntegration:
         outdir = str(tmp_path / "out")
         with pytest.raises(sim.SimError, match="--hosts"):
             sim.run_sim(request_path, backend="local", hosts=2, artifacts_dir=outdir)
-        with pytest.raises(sim.SimError, match="--resume"):
+        # --resume is accepted on local/local-parallel/batch for deck
+        # requests (issue #3957); only `remote` still refuses it.
+        with pytest.raises(sim.SimError, match="--resume.*remote"):
             sim.run_sim(
-                request_path, backend="local", resume=True, artifacts_dir=outdir
+                request_path, backend="remote", resume=True, artifacts_dir=outdir
             )
         with pytest.raises(sim.SimError, match="--budget-s"):
             sim.run_sim(
@@ -1416,6 +1930,7 @@ def argparse_namespace(request: str):
         fail_fast_probe=None,
         fail_on_diagnostic=None,
         max_units_per_job=None,
+        max_concurrent_jobs=None,
         op_lint=False,
         op_lint_corner=None,
         format="text",
@@ -1576,3 +2091,152 @@ class TestRunnerDecksGate:
         message = report["units"][0]["diagnostics"][0]["message"]
         assert "missing required field: netlist" in message
         assert "predates decks[] support" in message
+
+
+class TestDecksRequestFeatureReport:
+    """`environment.remote.runner_request_features` covers `decks[]` (#4109)."""
+
+    @staticmethod
+    def _identity(tmp_path, monkeypatch, runner, request):
+        monkeypatch.setattr(sb._provenance, "_klt_version", lambda: "0.7.1.dev500")
+        if runner is not None:
+            (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
+                json.dumps({"runner_klt_version": runner}), encoding="utf-8"
+            )
+        return sb._read_runner_identity(str(tmp_path), request)
+
+    def test_old_runner_is_unsupported_though_compatibility_matches(
+        self, tmp_path, monkeypatch
+    ):
+        fields = self._identity(tmp_path, monkeypatch, "0.7.0", {"decks": [{"a": 1}]})
+        assert fields["runner_compatibility"] == "match"
+        assert fields["runner_request_features"] == {
+            "required": ["decks"],
+            "missing": ["decks"],
+            "status": "unsupported",
+        }
+        assert "decks" in fields["runner_compatibility_warning"]
+
+    def test_supporting_runner_is_supported(self, tmp_path, monkeypatch):
+        fields = self._identity(
+            tmp_path, monkeypatch, "0.7.1.dev500+gabc", {"decks": [{"a": 1}]}
+        )
+        assert fields["runner_request_features"] == {
+            "required": ["decks"],
+            "missing": [],
+            "status": "supported",
+        }
+        assert "runner_compatibility_warning" not in fields
+
+    def test_unknown_runner_is_unknown(self, tmp_path, monkeypatch):
+        fields = self._identity(tmp_path, monkeypatch, None, {"decks": [{"a": 1}]})
+        assert fields["runner_request_features"] == {
+            "required": ["decks"],
+            "missing": None,
+            "status": "unknown",
+        }
+
+    def test_request_without_decks_is_unchanged(self, tmp_path, monkeypatch):
+        fields = self._identity(tmp_path, monkeypatch, "0.7.0", {"decks": []})
+        assert "runner_request_features" not in fields
+
+
+# --------------------------------------------------------------------------- #
+# --dry-run, --wait-for-capacity and engine_version (issue #4543)
+# --------------------------------------------------------------------------- #
+
+
+class TestDeckPreflightAndProvenance:
+    def test_dry_run_reports_units_and_spawns_nothing(self, tmp_path, monkeypatch):
+        request = deck_request(tmp_path)
+        write_request(tmp_path, request)
+
+        def explode(*args, **kwargs):
+            raise AssertionError("dry-run must not spawn an engine")
+
+        monkeypatch.setattr(sd.subprocess, "run", explode)
+        monkeypatch.setattr(sd.subprocess, "Popen", explode)
+        report = sim.run_sim(
+            str(tmp_path / "request.json"),
+            dry_run=True,
+            artifacts_dir=str(tmp_path / "out"),
+        )
+        assert report["dry_run"] is True
+        assert report["status"] == "valid"
+        assert report["mode"] == "decks"
+        assert report["unit_count"] == len(request["decks"])
+        assert [u["id"] for u in report["units"]] == [d["id"] for d in request["decks"]]
+        assert not (tmp_path / "out").exists()
+
+    def test_dry_run_gives_the_real_staging_error(self, tmp_path):
+        request = deck_request(tmp_path)
+        (tmp_path / "deck.spice").unlink()
+        write_request(tmp_path, request)
+        with pytest.raises(SimError, match="deck.spice"):
+            sim.run_sim(str(tmp_path / "request.json"), dry_run=True)
+
+    def test_batch_dry_run_launches_nothing(self, tmp_path, monkeypatch):
+        calls: list[str] = []
+        for name in ("submit_job", "launch_job", "poll_status", "collect_outputs"):
+            monkeypatch.setattr(sb, name, lambda *a, _n=name, **k: calls.append(_n))
+        write_request(tmp_path, batch_deck_request(tmp_path))
+        report = sim.run_sim(
+            str(tmp_path / "request.json"), backend="batch", dry_run=True
+        )
+        assert report["dry_run"] is True
+        assert report["backend"] == "batch"
+        assert report["staged_files"]
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        ("cli_value", "request_value", "expected"),
+        [(120.0, None, 120.0), (0.0, 600, 0.0), (None, 45, 45.0)],
+    )
+    def test_wait_for_capacity_overrides_request_field(
+        self, tmp_path, monkeypatch, cli_value, request_value, expected
+    ):
+        seen: list[float] = []
+        fleet = _FakeFleet({"state": "done", "exit_code": "0"})
+
+        def launch(config, job_id):
+            seen.append(config.capacity_wait_s)
+            return fleet.launch(config, job_id)
+
+        install_fake_batch(monkeypatch, fleet)
+        monkeypatch.setattr(sb, "launch_job", launch)
+        request = batch_deck_request(tmp_path)
+        if request_value is not None:
+            request["batch"]["capacity_wait_s"] = request_value
+        write_request(tmp_path, request)
+        sim.run_sim(
+            str(tmp_path / "request.json"),
+            backend="batch",
+            capacity_wait_s=cli_value,
+            artifacts_dir=str(tmp_path / "out"),
+        )
+        assert seen == [expected]
+
+    def test_wait_for_capacity_refused_off_batch(self, tmp_path):
+        write_request(tmp_path, deck_request(tmp_path))
+        with pytest.raises(SimError, match="requires backend 'batch'"):
+            sim.run_sim(
+                str(tmp_path / "request.json"),
+                backend="local",
+                capacity_wait_s=30.0,
+            )
+
+    def test_engine_version_from_version_probe_when_no_banner(self, tmp_path):
+        request = deck_request(tmp_path)
+        stub = tmp_path / "stub-ngspice"
+        # Banner only for --version, as a real `ngspice -b` behaves.
+        stub.write_text(
+            stub.read_text(encoding="utf-8").replace(
+                '    print("ngspice-46 stub banner")\n    sys.stdout.flush()\n', ""
+            ),
+            encoding="utf-8",
+        )
+        report = run_local(tmp_path, request)
+        assert all(u["engine_version"] == "46" for u in report["units"])
+        assert report["environment"]["engine_version"] == "46"
+        record = json.loads((tmp_path / "out" / "tt_27c" / "unit.json").read_text())
+        assert record["key"]["engine_version"] == "46"
