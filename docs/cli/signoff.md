@@ -482,7 +482,7 @@ directory.
 **Attribution limit.** The RDB/external-script engine reports
 `source_cell: null` (`drc.md`), so grading is by per-rule counts; where a
 violation does carry a `source_cell` (curated engine), it must be an excepted
-cell. A clean report grades as before and ignores the list.
+cell or lie beneath one (an excepted cell appears in its `source_path`). A clean report grades as before and ignores the list.
 
 Applied exceptions appear in item 3's `citation.foundry_cell_exceptions`
 (JSON; each with `cell`, `cell_hash`, `rules`, `bare_cell_report`) and as
