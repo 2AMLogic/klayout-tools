@@ -2,6 +2,11 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-29
+
+- **PR #4553**: feat(lvs): warn when a flat layout is compared to a hierarchical reference
+- **Issue #4548** (closed): lvs: hierarchical reference vs flat extracted layout reports only 'circuit could not be matched', with no pointer to options.flatten
+
 ### 2026-10-28
 
 - **PR #4551**: docs: explain klt synthesize external scope and run_id artifact lookup
