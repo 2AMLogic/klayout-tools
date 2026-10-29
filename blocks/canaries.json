@@ -1,0 +1,5 @@
+[
+  {"repo": "2AMLogic/gf180-bandgap", "slug": "gf180-bandgap", "pdk": "gf180mcu", "ref": null},
+  {"repo": "2AMLogic/sky130-bandgap", "slug": "sky130-bandgap", "pdk": "sky130", "ref": null},
+  {"repo": "2AMLogic/sky130-ota-5t", "slug": "sky130-ota-5t", "pdk": "sky130", "ref": null}
+]

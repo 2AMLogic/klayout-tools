@@ -742,3 +742,141 @@ def test_full_ingest_real_public_canary_with_layout(tmp_path, repo):
     # source.path records exactly which file within the source repo this
     # came from, not just "somewhere in the repo".
     assert layout["source"]["path"].endswith(layout["layout_file"])
+
+
+# --------------------------------------------------------------------------- #
+# Manifest mode (issue #4565)
+# --------------------------------------------------------------------------- #
+
+
+def _write_manifest(tmp_path, entries):
+    path = tmp_path / "canaries.json"
+    path.write_text(json.dumps(entries))
+    return path
+
+
+def _entry(name, ref=None):
+    return {"repo": f"2AMLogic/{name}", "slug": name, "pdk": "sky130", "ref": ref}
+
+
+def _fake_ingest(failing=()):
+    calls = []
+
+    def fake(repo, **kwargs):
+        calls.append((repo, kwargs))
+        if repo in failing:
+            raise ic.IngestError(f"{repo} is not public")
+        return {"slug": kwargs["slug"], "status": "ok"}
+
+    return fake, calls
+
+
+def test_manifest_all_ok(tmp_path, monkeypatch, capsys):
+    fake, calls = _fake_ingest()
+    monkeypatch.setattr(ic, "ingest", fake)
+    manifest = _write_manifest(
+        tmp_path, [_entry("sky130-a"), _entry("sky130-b", "abc")]
+    )
+    assert ic.main(["--manifest", str(manifest), "--dry-run"]) == 0
+    assert [c[0] for c in calls] == ["2AMLogic/sky130-a", "2AMLogic/sky130-b"]
+    assert calls[1][1]["ref"] == "abc"
+    assert calls[1][1]["pdk"] == "sky130"
+    assert "sky130-a: would write" in capsys.readouterr().out
+
+
+def test_manifest_one_private_does_not_stop_others(tmp_path, monkeypatch, capsys):
+    fake, calls = _fake_ingest(failing={"2AMLogic/sky130-a"})
+    monkeypatch.setattr(ic, "ingest", fake)
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a"), _entry("sky130-b")])
+    assert ic.main(["--manifest", str(manifest), "--dry-run"]) == 1
+    assert len(calls) == 2
+    captured = capsys.readouterr()
+    assert "sky130-a: FAILED" in captured.err
+    assert "sky130-b: would write" in captured.out
+
+
+def test_manifest_gate_refusal_is_reported_and_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(ic, "repo_visibility", lambda repo: "private")
+    blocks_dir = tmp_path / "blocks"
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a")])
+    rc = ic.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--blocks-dir",
+            str(blocks_dir),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+        ]
+    )
+    assert rc == 1
+    assert not blocks_dir.exists()
+
+
+def test_manifest_one_failing_unexpected_ingest_error(tmp_path, monkeypatch):
+    def fake(repo, **kwargs):
+        if repo.endswith("sky130-b"):
+            raise ic.IngestError("clone failed")
+        return {"slug": kwargs["slug"], "status": "ok"}
+
+    monkeypatch.setattr(ic, "ingest", fake)
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a"), _entry("sky130-b")])
+    results = ic.ingest_manifest(ic.load_manifest(manifest))
+    assert [r[2] for r in results] == [None, "clone failed"]
+
+
+def test_manifest_empty_is_ok(tmp_path):
+    manifest = _write_manifest(tmp_path, [])
+    assert ic.main(["--manifest", str(manifest), "--dry-run"]) == 0
+
+
+def test_manifest_duplicate_slugs_rejected(tmp_path):
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a"), _entry("sky130-a")])
+    with pytest.raises(ic.IngestError, match="duplicate slug"):
+        ic.load_manifest(manifest)
+    assert ic.main(["--manifest", str(manifest)]) == 1
+
+
+def test_manifest_malformed_rejected(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
+    with pytest.raises(ic.IngestError):
+        ic.load_manifest(bad)
+    with pytest.raises(ic.IngestError):
+        ic.load_manifest(tmp_path / "missing.json")
+
+
+def test_repo_and_manifest_are_exclusive(tmp_path):
+    manifest = _write_manifest(tmp_path, [])
+    with pytest.raises(SystemExit):
+        ic.main(["--manifest", str(manifest), "--repo", "2AMLogic/x"])
+    with pytest.raises(SystemExit):
+        ic.main([])
+
+
+def test_shipped_manifest_is_valid_and_lists_ingested_canaries():
+    entries = ic.load_manifest(
+        Path(__file__).parent.parent / "blocks" / "canaries.json"
+    )
+    assert sorted(e["slug"] for e in entries) == [
+        "gf180-bandgap",
+        "sky130-bandgap",
+        "sky130-ota-5t",
+    ]
+
+
+def test_rewrite_over_unchanged_content_keeps_file(tmp_path, monkeypatch):
+    """Idempotency: only `generated_at` differs -> file left untouched."""
+    monkeypatch.setattr(ic, "assert_public_repo", lambda repo: None)
+    monkeypatch.setattr(ic, "clone_repo", lambda repo, cache, ref: (tmp_path, "sha1"))
+    stamp = iter(["t1", "t2"])
+    monkeypatch.setattr(
+        ic,
+        "build_layout_json",
+        lambda *a, **k: {"slug": "x", "status": "ok", "generated_at": next(stamp)},
+    )
+    blocks = tmp_path / "blocks"
+    ic.ingest("2AMLogic/x", blocks_dir=blocks, cache_dir=tmp_path / "c")
+    before = (blocks / "x/output/layout.json").read_text()
+    ic.ingest("2AMLogic/x", blocks_dir=blocks, cache_dir=tmp_path / "c")
+    assert (blocks / "x/output/layout.json").read_text() == before

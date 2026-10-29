@@ -1010,16 +1010,105 @@ def ingest(
     if not dry_run:
         output_dir = block_dir / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "layout.json").write_text(json.dumps(layout, indent=2) + "\n")
+        target = output_dir / "layout.json"
+        if _unchanged_but_timestamp(target, layout):
+            # Keep the existing file (and its `generated_at`) so a refresh
+            # over unchanged upstream content leaves no `blocks/` diff.
+            layout = json.loads(target.read_text())
+        else:
+            target.write_text(json.dumps(layout, indent=2) + "\n")
 
     return layout
+
+
+def _unchanged_but_timestamp(target: Path, layout: dict[str, Any]) -> bool:
+    """True if `target` already holds `layout` modulo `generated_at`."""
+    if not target.is_file():
+        return False
+    try:
+        old = json.loads(target.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(old, dict):
+        return False
+
+    def strip(d: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in d.items() if k != "generated_at"}
+
+    return strip(old) == strip(layout)
+
+
+def load_manifest(path: Path) -> list[dict[str, Any]]:
+    """Parse and validate a canary manifest (`blocks/canaries.json`):
+    a JSON list of `{repo, slug, pdk, ref}` objects (`ref` may be null).
+    Raises `IngestError` on a malformed manifest or duplicate slugs."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise IngestError(f"cannot read manifest {path}: {exc}") from exc
+    if not isinstance(data, list):
+        raise IngestError(f"manifest {path} must be a JSON list of entries")
+    seen: set[str] = set()
+    for i, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            raise IngestError(f"manifest entry {i} is not an object")
+        for key in ("repo", "slug"):
+            if not isinstance(entry.get(key), str) or not entry[key]:
+                raise IngestError(f"manifest entry {i} needs a string `{key}`")
+        for key in ("pdk", "ref"):
+            if entry.get(key) is not None and not isinstance(entry[key], str):
+                raise IngestError(
+                    f"manifest entry {i}: `{key}` must be a string or null"
+                )
+        if entry["slug"] in seen:
+            raise IngestError(f"manifest has duplicate slug {entry['slug']!r}")
+        seen.add(entry["slug"])
+    return data
+
+
+def ingest_manifest(
+    entries: list[dict[str, Any]],
+    *,
+    blocks_dir: Path = DEFAULT_BLOCKS_DIR,
+    cache_dir: Path = DEFAULT_CACHE_DIR,
+    dry_run: bool = False,
+) -> list[tuple[dict[str, Any], dict[str, Any] | None, str | None]]:
+    """Ingest every entry; a failing entry (including the public-repo gate
+    refusing) is recorded and does not stop the rest. Returns
+    `(entry, layout_or_None, error_or_None)` per entry."""
+    results = []
+    for entry in entries:
+        try:
+            layout = ingest(
+                entry["repo"],
+                ref=entry.get("ref"),
+                slug=entry["slug"],
+                blocks_dir=blocks_dir,
+                cache_dir=cache_dir,
+                dry_run=dry_run,
+                pdk=entry.get("pdk"),
+            )
+            results.append((entry, layout, None))
+        except IngestError as exc:
+            results.append((entry, None, str(exc)))
+    return results
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0] if __doc__ else ""
     )
-    parser.add_argument("--repo", required=True, help="e.g. 2AMLogic/gf180-bandgap")
+    parser.add_argument("--repo", help="e.g. 2AMLogic/gf180-bandgap")
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Ingest every entry of a canary manifest (blocks/canaries.json) "
+            "instead of a single --repo. A failing entry is reported and the "
+            "rest still run; exit is non-zero if any failed."
+        ),
+    )
     parser.add_argument(
         "--ref",
         default=None,
@@ -1052,6 +1141,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="Print, do not write")
     args = parser.parse_args(argv)
+
+    if args.manifest is not None:
+        if args.repo:
+            parser.error("--manifest and --repo are mutually exclusive")
+        try:
+            entries = load_manifest(args.manifest)
+        except IngestError as exc:
+            print(f"ingest-canary: {exc}", file=sys.stderr)
+            return 1
+        failed = 0
+        for entry, layout, error in ingest_manifest(
+            entries,
+            blocks_dir=args.blocks_dir,
+            cache_dir=args.cache_dir,
+            dry_run=args.dry_run,
+        ):
+            if error is not None:
+                failed += 1
+                print(f"{entry['slug']}: FAILED: {error}", file=sys.stderr)
+            else:
+                assert layout is not None
+                verb = "would write" if args.dry_run else "ok"
+                print(f"{entry['slug']}: {verb} (status={layout['status']!r})")
+        if failed:
+            print(
+                f"ingest-canary: {failed}/{len(entries)} entries failed",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+    if not args.repo:
+        parser.error("one of --repo or --manifest is required")
 
     try:
         layout = ingest(
