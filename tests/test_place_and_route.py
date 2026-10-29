@@ -4292,6 +4292,17 @@ def test_post_route_spef_not_run_before_route_stage(tmp_path, monkeypatch):
     assert report["spef_sta"] is None
 
 
+def test_asap7_cell_library_resolves_to_the_asap7_extract_deck():
+    """Issue #4559: ASAP7 is accepted at validation time; the refusal message
+    for an unknown library lists it among the supported ones."""
+    assert (
+        place_and_route._require_extract_deck_for_cell_library("asap7sc7p5t_rvt")
+        == "asap7"
+    )
+    with pytest.raises(PlaceAndRouteError, match=r"supported: .*asap7sc7p5t_rvt"):
+        place_and_route._require_extract_deck_for_cell_library("nope")
+
+
 def test_post_route_spef_unsupported_cell_library_raises(tmp_path, monkeypatch):
     """An unrecognised `cell_library` (no `_EXTRACT_DECK_FOR_CELL_LIBRARY`
     entry) fails loudly -- never a silent skip of the requested A/B pass."""

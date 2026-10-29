@@ -495,6 +495,39 @@ def test_planar_only_options_are_refused_by_name(tmp_path, kwargs):
         run_extract(path, "asap7", output=str(tmp_path / "o.spice"), **kwargs)
 
 
+def test_def_driven_options_are_accepted_on_a_finfet_layout(tmp_path):
+    """Issue #4559: the post-route SPEF pass hands `--def-net-names` and
+    `--pins` to the FinFET path. A hand-drawn layout carries no DEF net-name
+    shape property, so the rename is a loud no-op, and the declared set
+    demotes every undeclared promoted pin."""
+    path = _write(_draw_device(fins=2), tmp_path)
+    report = run_extract(
+        path,
+        "asap7",
+        output=str(tmp_path / "p.spice"),
+        parasitics=True,
+        def_net_names=True,
+        declared_pins=frozenset({"G"}),
+    )
+    warnings = " | ".join(report["warnings"])
+    assert "--def-net-names found no DEF net-name shape property" in warnings
+    assert "not in the declared pin set" in warnings
+    assert report["device_counts"] == {"nmos_rvt": 1}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"top_cell_pins_only": True},
+        {"def_pins": frozenset({"G"})},
+    ],
+)
+def test_remaining_planar_pin_options_stay_refused(tmp_path, kwargs):
+    path = _write(_draw_device(), tmp_path)
+    with pytest.raises(ExtractError, match="FinFET extraction deck"):
+        run_extract(path, "asap7", output=str(tmp_path / "o.spice"), **kwargs)
+
+
 def test_asap7_parasitics_deck_is_registered_and_index_aligned():
     from klayout_tools.decks import get_parasitics_deck
     from klayout_tools.extract_report import _describe_parasitics_overlap_gaps

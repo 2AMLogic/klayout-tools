@@ -2945,12 +2945,15 @@ contributes. Do not use these values for signoff.
 
 ### Not supported (refused by name)
 
-`--pdk`/`--pdk-root`, `--top-cell-pins`, `--pins`,
-`--abstract-cells`, `--abstract-cell-lef`, `--mom-net`, `--def-net-names`,
+`--pdk`/`--pdk-root`, `--top-cell-pins`,
+`--abstract-cells`, `--abstract-cell-lef`, `--mom-net`,
 `--critical-net`, `--parasitics-net`, `--def-pins`, `--pin-source-cells`,
 `--subcircuit`, `--hierarchical-cells` and `--substrate-spreading` each exit 1,
 naming the option.
-None of them has a FinFET implementation. ASAP7 DRC is the separate
+None of them has a FinFET implementation. `--pins` and `--def-net-names`
+(issue #4559) are supported: they reuse the planar declared-pin demotion and
+DEF net-name rename, which is what `klt place-and-route`'s `post_route_spef`
+pass needs on a routed ASAP7 GDS. ASAP7 DRC is the separate
 DRC-DSL deck `src/klayout_tools/decks/asap7.drc` (issue #2760; see
 [`docs/cli/drc.md`](drc.md)), and `klt lvs` compares a FinFET deck with an
 `nfin`-preserving reference reader (issue #2813; see

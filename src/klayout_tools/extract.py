@@ -5432,11 +5432,9 @@ def extract_netlist_from_layout(
         deck_name,
         **{
             "--top-cell-pins": top_cell_pins_only,
-            "--pins": bool(declared_pins),
             "--abstract-cells": bool(abstract_cell_patterns),
             "--abstract-cell-lef": bool(abstract_cell_lef_paths),
             "--mom-net": mom_net is not None,
-            "--def-net-names": def_net_names,
             "--probe": bool(probes),
             "--critical-net": bool(critical_nets)
             or (net_selectors is not None and net_selectors.has_critical),
@@ -8795,6 +8793,79 @@ def _extract_bipolar_device(
     return (base, emitter, collector, substrate, substrate_layer), dropped
 
 
+def _apply_declared_pins(
+    netlist: kdb.Netlist,
+    top_name: str,
+    declared_pins: frozenset[str],
+    warnings: list[str],
+) -> None:
+    """Issue #514 declared-interface reconciliation: demote every promoted
+    top-circuit pin whose net carries no declared name, appending the
+    resulting ``warnings``. Shared by the planar and FinFET extractors."""
+    top_circuit = netlist.circuit_by_name(top_name)
+    promoted_names: set[str] = set()
+    if top_circuit is not None:
+        for pin in top_circuit.each_pin():
+            pin_net = top_circuit.net_for_pin(pin.id())
+            if pin_net is not None and pin_net.name:
+                promoted_names.add(pin_net.name)
+
+    matched_declared_pins: set[str] = set()
+    non_matching_declared_pins: set[str] = set()
+    for name in promoted_names:
+        hit = set(name.split(",")) & declared_pins
+        if hit:
+            matched_declared_pins |= hit
+        else:
+            non_matching_declared_pins.add(name)
+
+    demoted_by_declared_pins = _reconcile_top_pins(
+        netlist, top_name, non_matching_declared_pins, demote=True
+    )
+    if demoted_by_declared_pins:
+        joined = ", ".join(demoted_by_declared_pins)
+        warnings.append(
+            f"kept {len(demoted_by_declared_pins)} net(s) internal: not in "
+            f"the declared pin set (--pins / layout.declared_pins) "
+            f"({joined}) -- issue #514"
+        )
+
+    unmatched_declared_pins = sorted(declared_pins - matched_declared_pins)
+    if unmatched_declared_pins:
+        joined = ", ".join(unmatched_declared_pins)
+        count = len(unmatched_declared_pins)
+        plural = "s" if count != 1 else ""
+        warnings.append(
+            f"{count} declared pin name{plural} (--pins / "
+            f"layout.declared_pins) matched no promoted net in the "
+            f"layout: {joined}"
+        )
+
+    # Issue #2000: a declared name can also match *more than one*
+    # promoted net -- two physically disconnected islands that happen to
+    # carry the identical drawn label. Both stay pins (see
+    # `_duplicated_declared_pin_names`'s own docstring for why demoting
+    # either is unsafe), so `pin_count` can exceed `len(declared_pins)`
+    # with no other signal short of diffing the written `.SUBCKT` port
+    # list -- surface it explicitly instead.
+    duplicated_declared_pins = _duplicated_declared_pin_names(
+        netlist, top_name, declared_pins
+    )
+    if duplicated_declared_pins:
+        joined = ", ".join(duplicated_declared_pins)
+        count = len(duplicated_declared_pins)
+        plural = "s" if count != 1 else ""
+        warnings.append(
+            f"{count} declared pin name{plural} (--pins / "
+            f"layout.declared_pins) each matched 2+ physically "
+            f"disconnected nets in the layout: {joined} -- every "
+            f"matching net is kept promoted (demoting one would risk "
+            f"hiding a genuine split-net connectivity defect from a "
+            f"downstream `klt lvs` reference netlist), so pin_count can "
+            f"exceed the declared set's size -- issue #2000"
+        )
+
+
 def _extract_netlist(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -10581,68 +10652,7 @@ def _extract_netlist(
     # Matching on any component label instead makes a hand-declared pin list
     # robust to a *future* extra label landing on the same net, too.
     if declared_pins is not None:
-        top_circuit = netlist.circuit_by_name(top_cell.name)
-        promoted_names: set[str] = set()
-        if top_circuit is not None:
-            for pin in top_circuit.each_pin():
-                pin_net = top_circuit.net_for_pin(pin.id())
-                if pin_net is not None and pin_net.name:
-                    promoted_names.add(pin_net.name)
-
-        matched_declared_pins: set[str] = set()
-        non_matching_declared_pins: set[str] = set()
-        for name in promoted_names:
-            hit = set(name.split(",")) & declared_pins
-            if hit:
-                matched_declared_pins |= hit
-            else:
-                non_matching_declared_pins.add(name)
-
-        demoted_by_declared_pins = _reconcile_top_pins(
-            netlist, top_cell.name, non_matching_declared_pins, demote=True
-        )
-        if demoted_by_declared_pins:
-            joined = ", ".join(demoted_by_declared_pins)
-            warnings.append(
-                f"kept {len(demoted_by_declared_pins)} net(s) internal: not in "
-                f"the declared pin set (--pins / layout.declared_pins) "
-                f"({joined}) -- issue #514"
-            )
-
-        unmatched_declared_pins = sorted(declared_pins - matched_declared_pins)
-        if unmatched_declared_pins:
-            joined = ", ".join(unmatched_declared_pins)
-            count = len(unmatched_declared_pins)
-            plural = "s" if count != 1 else ""
-            warnings.append(
-                f"{count} declared pin name{plural} (--pins / "
-                f"layout.declared_pins) matched no promoted net in the "
-                f"layout: {joined}"
-            )
-
-        # Issue #2000: a declared name can also match *more than one*
-        # promoted net -- two physically disconnected islands that happen to
-        # carry the identical drawn label. Both stay pins (see
-        # `_duplicated_declared_pin_names`'s own docstring for why demoting
-        # either is unsafe), so `pin_count` can exceed `len(declared_pins)`
-        # with no other signal short of diffing the written `.SUBCKT` port
-        # list -- surface it explicitly instead.
-        duplicated_declared_pins = _duplicated_declared_pin_names(
-            netlist, top_cell.name, declared_pins
-        )
-        if duplicated_declared_pins:
-            joined = ", ".join(duplicated_declared_pins)
-            count = len(duplicated_declared_pins)
-            plural = "s" if count != 1 else ""
-            warnings.append(
-                f"{count} declared pin name{plural} (--pins / "
-                f"layout.declared_pins) each matched 2+ physically "
-                f"disconnected nets in the layout: {joined} -- every "
-                f"matching net is kept promoted (demoting one would risk "
-                f"hiding a genuine split-net connectivity defect from a "
-                f"downstream `klt lvs` reference netlist), so pin_count can "
-                f"exceed the declared set's size -- issue #2000"
-            )
+        _apply_declared_pins(netlist, top_cell.name, declared_pins, warnings)
 
     # `None` unless `def_pins` was given (issue #2473's `def_pin_promotion`
     # response block, assembled inside the pass below).
