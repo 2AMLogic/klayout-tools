@@ -4,6 +4,12 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-29
 
+- **Issue #4562** (closed): signoff: item 7 accepts only one pex citation; hierarchical designs verified per cell cannot cite all reports
+- **PR #4563**: feat(signoff): accept a list of klt pex reports for item 7
+- **Issue #4559** (closed): place-and-route: enable post_route_spef/post_route_sdf for asap7sc7p5t_rvt (part of #4557)
+- **PR #4564**: feat(place-and-route): support post_route_spef/sdf for ASAP7 FinFET extraction
+- **Issue #4558** (closed): extract: ASAP7 first-order parasitics deck and FinFET --parasitics (part of #4557)
+- **PR #4561**: feat: support --parasitics for the ASAP7 FinFET extraction deck
 - **PR #4556**: feat(pex): carry measurement-document message into delta error rows
 - **Issue #4555** (closed): klt pex --measure-command: let a measurement carry a diagnostic message that surfaces on its errored delta[] row
 - **Issue #4221** (closed): signoff --attest: support T1 item 2 (Layout) anchored generic envelope
