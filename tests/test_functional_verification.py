@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -547,6 +548,133 @@ def test_defines_keys_must_be_nonempty_strings(tmp_path):
         run_functional_verification(request_path)
 
 
+def _source_defines_request(tmp_path, source_defines, **options):
+    _setup_inputs(tmp_path)
+    _write(tmp_path / "macro.v", "module macro; endmodule\n")
+    request = _base_request(options={"source_defines": source_defines, **options})
+    request["sources"] = ["gcd.v", "macro.v"]
+    return _write_request(tmp_path / "request.json", request)
+
+
+@pytest.mark.parametrize("value", ["FUNCTIONAL", ["FUNCTIONAL"], 7])
+def test_source_defines_must_be_object(tmp_path, value):
+    request_path = _source_defines_request(tmp_path, value)
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="options.source_defines must be a JSON object",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_source_defines_unknown_source_is_a_request_error(tmp_path):
+    request_path = _source_defines_request(tmp_path, {"nope.v": {"FUNCTIONAL": "1"}})
+    with pytest.raises(FunctionalVerificationError, match="'nope.v'.*request.sources"):
+        run_functional_verification(request_path)
+
+
+@pytest.mark.parametrize("value", [7, 1.5, True, []])
+def test_source_defines_values_must_be_string_or_null(tmp_path, value):
+    request_path = _source_defines_request(tmp_path, {"macro.v": {"FUNCTIONAL": value}})
+    with pytest.raises(
+        FunctionalVerificationError,
+        match=r"source_defines\['macro.v'\]\['FUNCTIONAL'\]",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_source_defines_entry_must_be_a_defines_object(tmp_path):
+    request_path = _source_defines_request(tmp_path, {"macro.v": "FUNCTIONAL"})
+    with pytest.raises(
+        FunctionalVerificationError, match=r"source_defines\['macro.v'\] must be"
+    ):
+        run_functional_verification(request_path)
+
+
+def test_scoped_functional_with_sdf_is_not_rejected_but_global_still_is(
+    tmp_path, monkeypatch
+):
+    """Issue #3290: FUNCTIONAL scoped to a hard-macro source does not trip the
+    SDF rejection (std-cell sources stay unaffected); a global FUNCTIONAL does."""
+    _write(tmp_path / "route.sdf", _MINIMAL_SDF)
+    request_path = _source_defines_request(
+        tmp_path, {"macro.v": {"FUNCTIONAL": None}}, sdf={"file": "route.sdf"}
+    )
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    try:
+        run_functional_verification(request_path)
+    except FunctionalVerificationError as exc:
+        assert "cannot be combined with a 'FUNCTIONAL' define" not in str(exc)
+
+    request_path = _source_defines_request(
+        tmp_path,
+        {"macro.v": {"FUNCTIONAL": None}},
+        sdf={"file": "route.sdf"},
+        defines={"FUNCTIONAL": None},
+    )
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="options.sdf cannot be combined with a 'FUNCTIONAL' define",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_scoped_defines_wrapper_content_and_position(tmp_path):
+    gcd = str(tmp_path / "gcd.v")
+    macro = str(tmp_path / "macro.v")
+    sources, include_dirs = fv._write_scoped_define_wrappers(
+        [gcd, macro, gcd],
+        {macro: {"FUNCTIONAL": None, "WIDTH": "8"}},
+        str(tmp_path / "out"),
+    )
+    assert sources[0] == gcd and sources[2] == gcd
+    assert sources[1] != macro
+    assert Path(sources[1]).read_text().splitlines() == [
+        "`define FUNCTIONAL",
+        "`define WIDTH 8",
+        f'`include "{macro}"',
+        "`undef FUNCTIONAL",
+        "`undef WIDTH",
+    ]
+    assert include_dirs == [str(tmp_path)]
+
+
+def test_scoped_defines_absent_leaves_sources_untouched(tmp_path):
+    assert fv._write_scoped_define_wrappers(["a.v", "b.v"], {}, str(tmp_path)) == (
+        ["a.v", "b.v"],
+        [],
+    )
+
+
+def test_stubbed_run_substitutes_wrapper_and_echoes_source_defines(
+    tmp_path, monkeypatch
+):
+    request_path = _source_defines_request(tmp_path, {"macro.v": {"FUNCTIONAL": "1"}})
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    macro = str((tmp_path / "macro.v").resolve())
+    built = runner.build_kwargs["sources"]
+    assert built[0] == str((tmp_path / "gcd.v").resolve())
+    assert built[1] != macro and macro in Path(built[1]).read_text()
+    assert runner.build_kwargs["defines"] == {}
+    assert report["environment"]["source_defines"] == {macro: {"FUNCTIONAL": "1"}}
+
+
+def test_stubbed_run_without_source_defines_echoes_empty(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    assert report["environment"]["source_defines"] == {}
+    assert all(
+        not Path(s).name.startswith("scoped_defines_")
+        for s in runner.build_kwargs["sources"]
+    )
+
+
 @pytest.mark.parametrize("build_args", ["--foo", [7], [""], {"a": 1}])
 def test_build_args_shape_validation(tmp_path, build_args):
     _setup_inputs(tmp_path)
@@ -610,10 +738,109 @@ def test_parameters_values_must_be_scalars(tmp_path, value):
         run_functional_verification(request_path)
 
 
+@pytest.mark.parametrize(
+    "env",
+    [["X", "1"], {"X": 1}, {"X": None}, {"": "1"}, {"A=B": "1"}],
+)
+def test_env_malformed_is_a_request_error(tmp_path, env):
+    """`request.env` must be an object of non-empty, `=`-free keys to string
+    values -- anything else is a clear error naming `request.env`."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request(env=env))
+    with pytest.raises(FunctionalVerificationError, match="request.env"):
+        run_functional_verification(request_path)
+
+
+def test_stubbed_run_forwards_env_to_test_only_and_echoes_it(tmp_path, monkeypatch):
+    """`request.env` -> `Runner.test(extra_env=...)` (not the build), echoed
+    verbatim as `environment.env` (issue #4338)."""
+    _setup_inputs(tmp_path)
+    env = {"EXPECTED_SUM": "5"}
+    request_path = _write_request(tmp_path / "request.json", _base_request(env=env))
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    response = run_functional_verification(request_path)
+
+    assert runner.test_kwargs["extra_env"] == env
+    assert "extra_env" not in runner.build_kwargs
+    assert response["environment"]["env"] == env
+
+
+def test_stubbed_run_without_env_echoes_an_empty_mapping(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    response = run_functional_verification(request_path)
+
+    assert runner.test_kwargs["extra_env"] == {}
+    assert response["environment"]["env"] == {}
+
+
+def test_mutation_variant_forwards_env_to_its_test_step(tmp_path, monkeypatch):
+    """The per-mutant build+test sees the same `env` as the baseline run."""
+    captured: dict = {}
+    monkeypatch.setattr(fv, "_import_runner", lambda: object())
+    monkeypatch.setattr(fv, "_run_build", lambda *a, **k: object())
+    monkeypatch.setattr(
+        fv, "_run_test", lambda runner, **kwargs: captured.update(kwargs)
+    )
+    fv._build_and_test_variant(
+        engine="icarus",
+        sources=[],
+        hdl_toplevel="top",
+        build_dir=str(tmp_path),
+        build_args=[],
+        defines={},
+        includes=[],
+        timescale=("1ns", "1ps"),
+        parameters={},
+        env={"X": "1"},
+        build_log=str(tmp_path / "b.log"),
+        module="m",
+        module_dir=str(tmp_path),
+        testcase=None,
+        random_seed=None,
+        test_dir=str(tmp_path),
+        results_xml=str(tmp_path / "r.xml"),
+        test_log=str(tmp_path / "t.log"),
+    )
+    assert captured["extra_env"] == {"X": "1"}
+
+
 def test_missing_cocotb_is_an_actionable_error(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "cocotb_tools", None)
-    with pytest.raises(FunctionalVerificationError, match="cocotb is not installed"):
+    with pytest.raises(
+        FunctionalVerificationError, match="cocotb is not installed"
+    ) as excinfo:
         fv._import_runner()
+    message = str(excinfo.value)
+    assert sys.executable in message
+    assert "klayout-tools[functional-verification]" in message
+    assert "uv sync --extra functional-verification" in message
+    assert excinfo.value.code == "missing_optional_dependency"
+
+
+def test_missing_cocotb_cli_error_carries_code(tmp_path, monkeypatch, capsys):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    monkeypatch.setitem(sys.modules, "cocotb_tools", None)
+
+    exit_code = main(["functional-verification", request_path, "--format", "json"])
+
+    assert exit_code == 1
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error["code"] == "missing_optional_dependency"
+    assert "cocotb is not installed" in error["message"]
+
+
+def test_other_functional_verification_errors_have_no_code(tmp_path, capsys):
+    exit_code = main(
+        ["functional-verification", str(tmp_path / "nope.json"), "--format", "json"]
+    )
+
+    assert exit_code == 1
+    assert "code" not in json.loads(capsys.readouterr().err)["error"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1015,7 +1242,7 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
 
     report = run_functional_verification(request_path)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["engine"] == "icarus"
     assert report["hdl_toplevel"] == "gcd"
     assert report["testbench"] == "test_gcd"
@@ -1032,17 +1259,28 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
     assert report["environment"] == {
         "engine": "icarus",
         "engine_version": "13.0",
+        "tools": [],
         "cocotb_version": "2.0.1",
-        "results_xml": report["environment"]["results_xml"],
+        # Committable `{path, scope}` envelope (#4279): tmp_path is outside
+        # the invoking repo, so no absolute host path may appear here.
+        "results_xml": {"path": None, "scope": "external"},
+        "test_log": {"path": None, "scope": "external"},
+        "build_log": {"path": None, "scope": "external"},
         # `_RESULTS_XML_WITH_FAILURE` carries the exact `random_seed` value
         # the spike captured live (section 4) -- this is the authoritative
         # echo, read back from `results.xml` itself.
         "random_seed": 1785780800,
+        # Additive (issue #3290): `{}` without `options.source_defines`.
+        "source_defines": {},
+        "env": {},
         # Additive (issue #1002): `null` on any run without `options.sdf`,
         # so an unannotated verdict is never mistakable for an annotated one.
         "sdf": None,
+        # Additive (issue #2998): `null` on any run without
+        # `options.initial_state`.
+        "initial_state": None,
     }
-    results_xml = report["environment"]["results_xml"]
+    results_xml = report.local_paths["results_xml"]
     assert os.path.isabs(results_xml)
     assert os.path.isfile(results_xml)
     assert ".klt/functional-verification" in results_xml.replace(os.sep, "/")
@@ -1151,6 +1389,95 @@ def test_stubbed_run_default_engine_and_timescale(tmp_path, monkeypatch):
     assert report["engine"] == "icarus"
     assert runner.build_kwargs["timescale"] == ("1ns", "1ps")
     assert runner.test_kwargs["timescale"] == ("1ns", "1ps")
+
+
+def test_stubbed_run_outdir_redirects_artifacts(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    outdir = tmp_path / "nested" / "run_a"
+
+    report = run_functional_verification(request_path, output_dir=str(outdir))
+
+    results_xml = Path(report.local_paths["results_xml"])
+    assert results_xml.parent == outdir.resolve()
+    assert results_xml.is_file()
+    assert not (tmp_path / ".klt").exists()
+
+
+def test_stubbed_run_two_outdirs_keep_both_result_sets(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    first = run_functional_verification(request_path, output_dir=str(tmp_path / "a"))
+    second = run_functional_verification(request_path, output_dir=str(tmp_path / "b"))
+
+    assert first.local_paths["results_xml"] != second.local_paths["results_xml"]
+    assert os.path.isfile(first.local_paths["results_xml"])
+    assert os.path.isfile(second.local_paths["results_xml"])
+
+
+def test_stubbed_run_default_output_dir_unchanged(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    expected = tmp_path / ".klt" / "functional-verification" / "results_icarus.xml"
+    assert Path(report.local_paths["results_xml"]) == expected.resolve()
+
+
+def test_stubbed_run_relative_outdir_resolves_against_cwd(tmp_path, monkeypatch):
+    req_dir = tmp_path / "req"
+    req_dir.mkdir()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    _setup_inputs(req_dir)
+    request_path = _write_request(req_dir / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    monkeypatch.chdir(cwd)
+
+    report = run_functional_verification(request_path, output_dir="out")
+
+    assert Path(report.local_paths["results_xml"]).parent == (cwd / "out").resolve()
+    assert not (req_dir / ".klt").exists()
+
+
+def test_stubbed_run_unwritable_outdir_is_a_clean_error(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file, not a directory", encoding="utf-8")
+
+    with pytest.raises(FunctionalVerificationError, match="could not create output"):
+        run_functional_verification(request_path, output_dir=str(blocker / "sub"))
+
+
+def test_cli_outdir_flag_is_threaded_through(tmp_path, monkeypatch, capsys):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    outdir = tmp_path / "cli_out"
+
+    main(
+        [
+            "functional-verification",
+            request_path,
+            "--outdir",
+            str(outdir),
+            "--format",
+            "json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    data = payload.get("data", payload)
+    # JSON carries the envelope only; an outdir outside the repo is external.
+    assert data["environment"]["results_xml"] == {"path": None, "scope": "external"}
+    assert str(outdir) not in json.dumps(data)
 
 
 def test_stubbed_run_passes_testcase_filter_through(tmp_path, monkeypatch):
@@ -1668,6 +1995,10 @@ def test_cli_pass_exits_zero_json(tmp_path, monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "pass"
     assert out["skipped_count"] == 1
+    env = out["environment"]
+    # Default outdir is outside the invoking repo (tmp_path): envelope, no path.
+    assert env["test_log"] == {"path": None, "scope": "external"}
+    assert env["build_log"] == {"path": None, "scope": "external"}
 
 
 def test_cli_test_failure_exits_three(tmp_path, monkeypatch, capsys):
@@ -1698,6 +2029,8 @@ def test_cli_text_format(tmp_path, monkeypatch, capsys):
     assert "status: fail" in out
     assert "[failed] test_gcd_deliberately_wrong_expectation" in out
     assert "AssertionError" in out
+    assert "test_log: " in out
+    assert "test_log tail: " in out
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
 
@@ -2021,12 +2354,20 @@ _ESCAPED_DIVIDER_INTERCONNECT_SDF = """\
 def test_sdf_option_rejects_escaped_divider_interconnect_identifier(
     tmp_path, monkeypatch
 ):
-    """The load-bearing regression for issue #1890: an `INTERCONNECT`
-    endpoint whose escaped identifier contains a literal `.` (the file's own
-    `DIVIDER` character) is rejected up front with a clear message, instead
-    of reaching `$sdf_annotate` and crashing `vvp` with a bare `SIGABRT`."""
+    """The load-bearing regression for issue #1890, narrowed by issue
+    #2897: an `INTERCONNECT` endpoint whose *pin/top-level port* is an
+    escaped identifier containing a literal `.` is still rejected up front
+    with a clear message, instead of reaching `$sdf_annotate` and crashing
+    `vvp` with a bare `SIGABRT`. (An escaped-divider *instance* -- the
+    fixture's `g\\[0\\]\\.sub\\/x` -- is renamed instead; see
+    `tests/test_functional_verification_sdf_escaped_divider.py`.)"""
     _setup_inputs(tmp_path)
-    _write(tmp_path / "route.sdf", _ESCAPED_DIVIDER_INTERCONNECT_SDF)
+    _write(
+        tmp_path / "route.sdf",
+        _ESCAPED_DIVIDER_INTERCONNECT_SDF.replace(
+            "(INTERCONNECT a ", "(INTERCONNECT a\\.b "
+        ),
+    )
     request_path = _write_request(
         tmp_path / "request.json",
         _base_request(options={"coverage": False, "sdf": {"file": "route.sdf"}}),
@@ -2035,29 +2376,64 @@ def test_sdf_option_rejects_escaped_divider_interconnect_identifier(
 
     with pytest.raises(
         FunctionalVerificationError,
-        match=r"escaped identifier that contains a literal '\.'",
+        match=r"pin or top-level port is an escaped identifier",
     ):
         run_functional_verification(request_path)
 
 
 @pytest.mark.parametrize(
+    ("divider", "interconnect_line"),
+    [
+        # An escaped `.` in a bare top-level port.
+        (".", "      (INTERCONNECT a\\.b u1.a (0.100:0.100:0.100))\n"),
+        # An escaped `.` in a cell pin.
+        (".", "      (INTERCONNECT a u1.p\\.q (0.100:0.100:0.100))\n"),
+        # An escaped `.` under `DIVIDER /` (issue #2897: Icarus mis-splits
+        # an escaped `.` whatever the declared divider).
+        ("/", "      (INTERCONNECT a u1/p\\.q (0.100:0.100:0.100))\n"),
+        # An escaped occurrence of the file's own `/` divider.
+        ("/", "      (INTERCONNECT a u1/p\\/q (0.100:0.100:0.100))\n"),
+    ],
+)
+def test_reject_sdf_escaped_divider_interconnects_catches_pin_shapes(
+    tmp_path, divider, interconnect_line
+):
+    """Unit-level: every escaped-divider shape left in an endpoint's final
+    (pin/port) component is caught -- the one shape issue #2897's instance
+    rename does not rewrite."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        "(DELAYFILE\n"
+        '  (SDFVERSION "3.0")\n'
+        '  (DESIGN "gcd")\n'
+        f"  (DIVIDER {divider})\n"
+        "  (TIMESCALE 1ns)\n"
+        "  (CELL\n"
+        '    (CELLTYPE "gcd")\n'
+        "    (INSTANCE)\n"
+        "    (DELAY (ABSOLUTE\n" + interconnect_line + "    ))\n"
+        "  )\n"
+        ")\n",
+    )
+    with pytest.raises(FunctionalVerificationError, match="pin or top-level port"):
+        fv._reject_sdf_escaped_divider_interconnects(sdf_path)
+
+
+@pytest.mark.parametrize(
     "interconnect_line",
     [
-        # `.` alone (no brackets) -- one of the issue's own bisected shapes.
+        # `.` alone (no brackets) -- one of #1890's own bisected shapes.
         "      (INTERCONNECT a g\\.sub.a (0.100:0.100:0.100))\n",
-        # The combined shape from the issue's own minimal reproduction.
+        # The combined shape from #1890's own minimal reproduction.
         "      (INTERCONNECT a g\\[0\\]\\.sub\\/x.a (0.100:0.100:0.100))\n",
     ],
 )
-def test_reject_sdf_escaped_divider_interconnects_catches_both_dot_shapes(
+def test_reject_sdf_escaped_divider_interconnects_admits_instance_shapes(
     tmp_path, interconnect_line
 ):
-    """Unit-level: both bisected shapes that embed a literal `.` are caught,
-    not just the combined shape -- the issue's own bisection notes that
-    either special character alone is sufficient to crash Icarus, but only
-    the literal `.` (the file's `DIVIDER` character) is the actual trigger
-    (see the module comment above `_reject_sdf_escaped_divider_interconnects`
-    for the confirmed root cause)."""
+    """Issue #2897: an escaped-divider *instance* component is no longer
+    rejected -- the run renames it to a plain identifier in build-dir copies
+    instead (see `functional_verification_sdf_rename.py`)."""
     sdf_path = _write(
         tmp_path / "route.sdf",
         "(DELAYFILE\n"
@@ -2072,8 +2448,7 @@ def test_reject_sdf_escaped_divider_interconnects_catches_both_dot_shapes(
         "  )\n"
         ")\n",
     )
-    with pytest.raises(FunctionalVerificationError, match="literal '\\.'"):
-        fv._reject_sdf_escaped_divider_interconnects(sdf_path)
+    fv._reject_sdf_escaped_divider_interconnects(sdf_path)  # must not raise
 
 
 def test_reject_sdf_escaped_divider_interconnects_admits_escaped_bracket_alone(
@@ -2767,7 +3142,7 @@ def test_integration_real_icarus_gcd_worked_example(tmp_path):
     assert report["coverage"] is None
     assert report["environment"]["cocotb_version"]
     assert report["environment"]["engine_version"]
-    assert os.path.isfile(report["environment"]["results_xml"])
+    assert os.path.isfile(report.local_paths["results_xml"])
 
 
 @pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
@@ -3287,12 +3662,14 @@ from cocotb.triggers import Timer
 
 
 @cocotb.test()
-async def test_never_reached(dut):
-    """This test body is never reached -- options.sdf's own request-
-    validation gate (issue #1890) must reject the request before cocotb
-    ever elaborates the design."""
+async def test_runs_annotated(dut):
+    """Issue #2897: reached -- the escaped-divider instance is renamed in
+    build-dir copies, so `vvp` no longer aborts and the design simulates."""
     dut.a.value = 0
     await Timer(5, unit="ns")
+    dut.a.value = 1
+    await Timer(5, unit="ns")
+    assert dut.y.value == 1
 '''
 
 
@@ -3323,15 +3700,16 @@ def _generate_flattened_sdf_text() -> str:
 @pytest.mark.skipif(
     not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
 )
-def test_integration_real_icarus_escaped_divider_interconnect_fails_loud_not_a_crash(
+def test_integration_real_icarus_escaped_divider_interconnect_annotates_not_a_crash(
     tmp_path,
 ):
     """Issue #1890's own scenario, end to end against the real toolchain: a
     `generate`-flattened-style escaped identifier (`\\g[0].sub/x`) in an
     `INTERCONNECT` entry used to crash `vvp` outright (`ERROR: NULL handle
-    passed to vpi_scan.`, SIGABRT/core dump). It must now be rejected as a
-    clear `FunctionalVerificationError` at request-validation time, before
-    `iverilog`/`vvp` ever run at all."""
+    passed to vpi_scan.`, SIGABRT/core dump), and #1890 then rejected it up
+    front. Issue #2897: it now annotates and simulates, with the instance
+    renamed to a plain identifier in build-dir copies and the rename
+    reported as `environment.sdf.renamed`."""
     tmp_path.joinpath("gen_flat_top.v").write_text(
         _GENERATE_FLATTENED_DUT_V, encoding="utf-8"
     )
@@ -3347,11 +3725,16 @@ def test_integration_real_icarus_escaped_divider_interconnect_fails_loud_not_a_c
         },
     )
 
-    with pytest.raises(
-        FunctionalVerificationError,
-        match=r"escaped identifier that contains a literal '\.'",
-    ):
-        run_functional_verification(request_path)
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert sdf["annotated"] is True
+    assert sdf["partial"] is False
+    assert sdf["renamed"] == [{"from": "g[0].sub/x", "to": "g_0__sub_x"}]
+    # The caller's own inputs are untouched.
+    assert "\\g[0].sub/x " in (tmp_path / "gen_flat_top.v").read_text()
+    assert _generate_flattened_sdf_text() == (tmp_path / "route.sdf").read_text()
 
 
 # --------------------------------------------------------------------------- #
@@ -4956,6 +5339,134 @@ def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tm
         run_functional_verification(annotated)
 
 
+def _bus_port_source_sdf_text(
+    u1_delay: str = "0.000:0.000:0.000", scalar_delay: str = "0.000:0.000:0.000"
+) -> str:
+    """Issue #2984's shape: a zero-delay entry from bit-selected input port
+    `a[0]` onto an ordinary (`specify`-bearing) cell pin, plus a scalar-port
+    entry and a non-port-source entry that must never be touched."""
+    return f"""\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "bus_fanout_in")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "bus_fanout_in")
+    (INSTANCE)
+    (DELAY (ABSOLUTE
+      (INTERCONNECT a[0] u1.in ({u1_delay}) ({u1_delay}))
+      (INTERCONNECT s u2.in ({scalar_delay}) ({scalar_delay}))
+      (INTERCONNECT u1.out u2.in (0.000:0.000:0.000) (0.000:0.000:0.000))
+    ))
+  )
+)
+"""
+
+
+def test_drop_sdf_zero_delay_bus_port_source_interconnects_drops_only_that_entry(
+    tmp_path,
+):
+    sdf_path = _write(tmp_path / "route.sdf", _bus_port_source_sdf_text())
+
+    result = fv._drop_sdf_zero_delay_bus_port_source_interconnects(sdf_path, {"a"})
+
+    assert result is not None
+    text, dropped = result
+    assert dropped == 1
+    assert "a[0]" not in text
+    assert "(INTERCONNECT s u2.in (0.000:0.000:0.000)" in text
+    assert "(INTERCONNECT u1.out u2.in (0.000:0.000:0.000)" in text
+
+
+def test_drop_sdf_zero_delay_bus_port_source_interconnects_keeps_a_nonzero_entry(
+    tmp_path,
+):
+    sdf_path = _write(
+        tmp_path / "route.sdf", _bus_port_source_sdf_text(u1_delay="0.000:0.000:1.000")
+    )
+
+    assert (
+        fv._drop_sdf_zero_delay_bus_port_source_interconnects(sdf_path, {"a"}) is None
+    )
+
+
+def test_drop_sdf_zero_delay_bus_port_source_interconnects_keeps_scalar_and_non_input(
+    tmp_path,
+):
+    """A scalar-port source, and a bus that is not a top-level input port,
+    are untouched even at zero delay."""
+    sdf_path = _write(tmp_path / "route.sdf", _bus_port_source_sdf_text())
+
+    # `s` is scalar (not in the bus-input set); `u1.out` is not a bus bit.
+    result = fv._drop_sdf_zero_delay_bus_port_source_interconnects(sdf_path, {"s"})
+    assert result is None
+    # `a` is not an input bus here, so its entry stays.
+    assert (
+        fv._drop_sdf_zero_delay_bus_port_source_interconnects(sdf_path, {"b"}) is None
+    )
+
+
+def test_drop_sdf_zero_delay_bus_port_source_interconnects_noop_without_bus_inputs(
+    tmp_path,
+):
+    """No bus input ports: returns None without even reading the file."""
+    missing = str(tmp_path / "does-not-exist.sdf")
+    assert fv._drop_sdf_zero_delay_bus_port_source_interconnects(missing, set()) is None
+
+
+def test_bus_port_source_class_has_a_reason():
+    assert fv.SDF_BUS_PORT_SOURCE_DROPPED_CLASS in fv.SDF_BENIGN_DIAGNOSTIC_REASONS
+
+
+def test_physical_only_pass_runs_first_so_classes_do_not_double_count(tmp_path):
+    """Entries the #2363 pass already removed are absent when the #2984 pass
+    runs on its output, so each entry is counted under exactly one class."""
+    sdf_path = _write(tmp_path / "route.sdf", _physical_only_diode_sdf_text())
+    first = fv._drop_sdf_zero_delay_physical_only_interconnects(
+        sdf_path, {"ui_in"}, _PHYSICAL_ONLY_DIODE_INSTANCES
+    )
+    assert first is not None
+    after = _write(tmp_path / "after.sdf", first[0])
+    assert (
+        fv._drop_sdf_zero_delay_bus_port_source_interconnects(after, {"ui_in"}) is None
+    )
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_zero_delay_bus_port_input_fanout_is_dropped(
+    tmp_path,
+):
+    """Issue #2984: the #1619 shape (b) fixture with the `a[0]` entries
+    zero-delay completes and reports the new class; the sibling non-zero
+    fixture above still raises."""
+    tmp_path.joinpath("bus_fanout_in.v").write_text(
+        _BUS_PORT_FANOUT_INPUT_DUT_V, encoding="utf-8"
+    )
+    _write(tmp_path / "test_bus_fanout_in.py", _BUS_PORT_FANOUT_INPUT_TESTBENCH_PY)
+    zero = "(0.000:0.000:0.000) (0.000:0.000:0.000)"
+    _write(
+        tmp_path / "route_bus_in.sdf",
+        _bus_port_fanout_input_sdf_text().replace(
+            "(1.000:5.000:9.000) (1.000:5.000:9.000)", zero
+        ),
+    )
+    request = {
+        "sources": ["bus_fanout_in.v"],
+        "hdl_toplevel": "bus_fanout_in",
+        "testbench": {"module": "test_bus_fanout_in"},
+        "options": {"sdf": {"file": "route_bus_in.sdf", "corner": "typ"}},
+    }
+    report = run_functional_verification(_write_request(tmp_path / "r.json", request))
+
+    sdf = report["environment"]["sdf"]
+    assert sdf["partial"] is True
+    assert sdf["dropped"][fv.SDF_BUS_PORT_SOURCE_DROPPED_CLASS]["count"] == 2
+
+
 # --------------------------------------------------------------------------- #
 # Integration: the "constant-zero result on every test case" shape (issue
 # #1854), pinned as a *timing* outcome rather than an annotation failure --
@@ -5509,6 +6020,9 @@ def _write_mutation_proposals(tmp_path: Path, *, indices=(1, 2)) -> str:
 
 
 def test_mutations_killed_and_survived_end_to_end(tmp_path, monkeypatch):
+    # Make tmp_path "the invoking repo" so log paths come back repo-relative.
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
     request_path = _write_mutation_request(tmp_path)
     proposals_path = _write_mutation_proposals(tmp_path)
     _stub_mutation_runner(
@@ -5536,17 +6050,164 @@ def test_mutations_killed_and_survived_end_to_end(tmp_path, monkeypatch):
     assert by_index[1]["category"] == "constant"
     assert by_index[1]["file"] == "dut.v"
     assert by_index[1]["line"] == 2
-    assert os.path.isfile(by_index[1]["log_path"])
+    assert (tmp_path / by_index[1]["log_path"]["path"]).is_file()
 
     assert by_index[2]["status"] == "survived"
     assert by_index[2]["first_killing_test"] is None
-    assert os.path.isfile(by_index[2]["log_path"])
+    assert (tmp_path / by_index[2]["log_path"]["path"]).is_file()
 
     # The mutation seam always restores the pristine source, even though two
     # sequential mutants were applied to the same file (issue #1592's own
     # "no cross-contamination between sequential per-proposal builds" edge
     # case from the issue's own Test Plan).
     assert (tmp_path / "dut.v").read_text(encoding="utf-8") == _MUTATION_DUT_RTL
+
+
+class _WrapperFollowingRunner(_ContentAwareFakeRunner):
+    """`_ContentAwareFakeRunner` reads only the `sources` bytes, which for a
+    scoped-defines wrapper is just an `` `include`` line and hides the
+    mutation marker. This one also folds in the text of each wrapper's
+    `` `include`` target, the way a real simulator would read through it."""
+
+    def build(self, **kwargs):
+        super().build(**kwargs)
+        for source in kwargs["sources"]:
+            if Path(source).name.startswith("scoped_defines_"):
+                target = _wrapper_include_target(source)
+                self._last_sources_text += Path(target).read_text(encoding="utf-8")
+
+
+def _wrapper_include_target(wrapper: str) -> str:
+    match = re.search(r'`include "([^"]+)"', Path(wrapper).read_text())
+    assert match, wrapper
+    return match.group(1)
+
+
+def _record_mutant_variants(monkeypatch) -> list[dict]:
+    """Wrap `fv._run_isolated_variant` (called in the parent process while
+    `plan.applied(index)` has the mutant written in place -- the runner itself
+    runs in a forked child, so it cannot record into the parent) and capture
+    each call's `sources`/`includes`, plus the text each wrapper's `include`
+    resolves to at that moment."""
+    calls: list[dict] = []
+    real = fv._run_isolated_variant
+
+    def recording(**kwargs):
+        calls.append(
+            {
+                "build_dir": kwargs["build_dir"],
+                "sources": list(kwargs["sources"]),
+                "includes": list(kwargs["includes"]),
+                "included": {
+                    s: Path(_wrapper_include_target(s)).read_text(encoding="utf-8")
+                    for s in kwargs["sources"]
+                    if Path(s).name.startswith("scoped_defines_")
+                },
+            }
+        )
+        return real(**kwargs)
+
+    monkeypatch.setattr(fv, "_run_isolated_variant", recording)
+    return calls
+
+
+def _write_source_defines_mutation_request(tmp_path: Path, **options) -> str:
+    _write(tmp_path / "dut.v", _MUTATION_DUT_RTL)
+    _write(tmp_path / "other.v", "module other; endmodule\n")
+    _write(tmp_path / "test_dut.py", _TESTBENCH)
+    return _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            sources=["other.v", "dut.v"],
+            hdl_toplevel="dut",
+            testbench={"module": "test_dut", "testcase": None},
+            options={"coverage": False, **options},
+        ),
+    )
+
+
+def test_mutations_source_defines_wrapper_per_mutant(tmp_path, monkeypatch):
+    request_path = _write_source_defines_mutation_request(
+        tmp_path, source_defines={"dut.v": {"FUNCTIONAL": "1", "NO_PWR": None}}
+    )
+    proposals_path = _write_mutation_proposals(tmp_path)
+    _stub_mutation_runner(
+        monkeypatch,
+        _WrapperFollowingRunner(
+            _MUTATION_BASELINE_XML, _MUTATION_KILLED_XML, "wire a = 9;"
+        ),
+    )
+    mutant_builds = _record_mutant_variants(monkeypatch)
+
+    report = run_functional_verification_with_mutations(request_path, proposals_path)
+
+    # The wrapped file's in-place mutation reaches the fake simulator through
+    # the wrapper's `include: mutant 1 is killed, mutant 2 survives.
+    mutation_testing = report["mutation_testing"]
+    assert mutation_testing["killed_count"] == 1
+    assert mutation_testing["survived_count"] == 1
+
+    dut = str((tmp_path / "dut.v").resolve())
+    other = str((tmp_path / "other.v").resolve())
+    assert len(mutant_builds) == 2
+
+    wrappers = []
+    for build, index in zip(mutant_builds, (1, 2), strict=True):
+        mutant_dir = (
+            tmp_path
+            / ".klt"
+            / "functional-verification"
+            / "mutants"
+            / f"mutant_{index}"
+        )
+        # Same list position as `dut.v`; the un-named source is untouched.
+        assert build["sources"][0] == other
+        wrapper = Path(build["sources"][1])
+        assert wrapper.parent == mutant_dir
+        assert wrapper.name == "scoped_defines_1_dut.v"
+        assert wrapper.read_text(encoding="utf-8") == (
+            f'`define FUNCTIONAL 1\n`define NO_PWR\n`include "{dut}"\n'
+            "`undef FUNCTIONAL\n`undef NO_PWR\n"
+        )
+        assert build["includes"] == [str(tmp_path)]
+        wrappers.append(wrapper)
+
+        # The wrapper's `include resolves to the source mutated in place for
+        # *this* mutant -- not the pristine file, not another mutant's.
+        proposal = _mutation_proposals_doc()["proposals"][index - 1]
+        (included_text,) = build["included"].values()
+        assert proposal["mutated_code"] in included_text
+        assert proposal["original_code"] not in included_text
+
+    # Each mutant gets its own wrapper directory.
+    assert wrappers[0] != wrappers[1]
+    assert wrappers[0].parent != wrappers[1].parent
+    # The pristine source is restored afterwards.
+    assert (tmp_path / "dut.v").read_text(encoding="utf-8") == _MUTATION_DUT_RTL
+
+
+def test_mutations_without_source_defines_pass_sources_unchanged(tmp_path, monkeypatch):
+    request_path = _write_source_defines_mutation_request(tmp_path)
+    proposals_path = _write_mutation_proposals(tmp_path)
+    _stub_mutation_runner(
+        monkeypatch,
+        _WrapperFollowingRunner(
+            _MUTATION_BASELINE_XML, _MUTATION_KILLED_XML, "wire a = 9;"
+        ),
+    )
+    mutant_builds = _record_mutant_variants(monkeypatch)
+
+    run_functional_verification_with_mutations(request_path, proposals_path)
+
+    assert len(mutant_builds) == 2
+    expected_sources = [
+        str((tmp_path / "other.v").resolve()),
+        str((tmp_path / "dut.v").resolve()),
+    ]
+    for build in mutant_builds:
+        assert build["sources"] == expected_sources
+        assert build["includes"] == []
+        assert build["included"] == {}
 
 
 def test_mutations_baseline_must_pass_gate(tmp_path, monkeypatch):
@@ -5645,7 +6306,7 @@ def test_mutations_anchor_mismatch_is_rejected(tmp_path, monkeypatch):
     by_index = {entry["index"]: entry for entry in mutation_testing["results"]}
     assert by_index[2]["status"] == "rejected"
     assert "not found" in by_index[2]["reason"]
-    assert by_index[2]["log_path"] is None
+    assert by_index[2]["log_path"] == {"path": None, "scope": "absent"}
     assert by_index[1]["status"] == "killed"
 
 
@@ -5895,3 +6556,33 @@ def test_valueless_define_is_passed_as_build_arg_not_serialised(tmp_path):
     )
     assert captured["defines"] == {"MODE": "x"}
     assert captured["build_args"] == ["-g2012", "-DFUNCTIONAL"]
+
+
+def test_stubbed_run_paths_are_repo_relative_inside_the_repo(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    monkeypatch.chdir(tmp_path)
+
+    report = run_functional_verification(request_path, output_dir="out")
+
+    env = report["environment"]
+    assert env["results_xml"] == {"path": "out/results_icarus.xml", "scope": "repo"}
+    assert env["test_log"] == {"path": "out/test_icarus.log", "scope": "repo"}
+    assert env["build_log"] == {"path": "out/build_icarus.log", "scope": "repo"}
+    assert str(tmp_path) not in json.dumps(report)
+    assert os.path.isabs(report.local_paths["results_xml"])
+
+
+def test_cli_text_format_prints_real_paths(tmp_path, monkeypatch, capsys):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    outdir = tmp_path / "text_out"
+
+    main(["functional-verification", request_path, "--outdir", str(outdir)])
+
+    out = capsys.readouterr().out
+    assert f"results_xml: {outdir.resolve() / 'results_icarus.xml'}" in out
+    assert f"test_log: {outdir.resolve() / 'test_icarus.log'}" in out

@@ -31,6 +31,14 @@ which document `klt signoff` then hashes (including the freshness
 limitation) — lives in one place:
 [`docs/cli/yield.md` → "Deriving a sample set from two `klt sim` reports"](yield.md#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples).
 
+## Measurements outside `--measurement`
+
+A derived sample set carries a control only for the selected measurements. For
+the others, hand-edit the set to declare
+`"negative_control": {"not_applicable": true, "reason": "..."}` when the seeded
+defect cannot degrade them by construction (see
+[yield.md](yield.md#negative-control)).
+
 ## Exit codes
 
 | Exit code | Meaning |

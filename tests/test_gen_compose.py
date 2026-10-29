@@ -15,7 +15,7 @@ from itertools import pairwise
 
 import pytest
 
-from klayout_tools import extract, gen, gen_compose, pdk
+from klayout_tools import extract, gen, gen_compose, gen_layer_params, pdk
 from klayout_tools.cli import main
 from klayout_tools.decks import get_extraction_deck
 from klayout_tools.drc import run_drc
@@ -2524,6 +2524,8 @@ def test_compose_report_includes_provenance_block(tmp_path, pdk_root):
     provenance = report["provenance"]
     assert set(provenance) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",
@@ -10382,9 +10384,15 @@ _DIFF_PAIR_GAP_E = {
     "ring_gap_um": 1.0,
     # Re-centre the E/W opening on the lower device row (the source/drain
     # ports' y) rather than the ring's own mid-height. core_h grew with the
-    # gate landing pad's row-pitch bump (issue #461), so the centring offset
-    # (ring mid-height minus the device-row y) grew with it.
-    "ring_gap_offset_um": -0.83,
+    # gate landing pad's row-pitch bump (issue #461), the sky130 pad
+    # stand-off (issue #3115) and the sky130 gate-stripe top endcap
+    # (0.15, issue #2936), so the centring offset (ring mid-height minus
+    # the device-row y) grew with them. The ring's lower straight-run end
+    # would now sit only 0.41um below the device row, short of the 0.485um a
+    # 0.17um route needs inside the opening, so the ring padding is widened
+    # by 0.1um to give the opening that room.
+    "ring_padding_um": 0.6,
+    "ring_gap_offset_um": -1.13,
 }
 _DIFF_PAIR_GAP_W = dict(_DIFF_PAIR_GAP_E, ring_gap_side="W")
 
@@ -11902,13 +11910,20 @@ def test_compose_widens_stub_beside_a_wide_gate_pad_is_drc_clean(
 
 
 def test_compose_gf180mcu_gate_pad_gap_is_a_real_pre_fix_violation(
-    tmp_path, both_pdk_root
+    tmp_path, both_pdk_root, monkeypatch
 ):
     # Companion to the DRC-clean test above: proves the gf180mcu case is a
     # real, *pre-existing* violation the fix closes, not a scenario that was
     # already clean regardless -- with `_endpoint_stub_widen_um` disabled
     # (simulating pre-#496 behavior), `klt drc --deck gf180mcu` reports
     # exactly the `poly2.space.1` gap the issue describes.
+    #
+    # The blocks are generated tapless (`_tap_pads_wanted` -> False): the tap pads
+    # gf180mcu blocks now carry (issue #3648) grow the block bbox, which moves
+    # the routing jog well clear of the gate pad and so hides the gap this
+    # test exists to show. A tapless block is the pre-#3648 geometry the gap
+    # was found on; tap-distance violations of that block are not under test.
+    monkeypatch.setattr(gen_layer_params, "_tap_pads_wanted", lambda family: False)
     m1 = _gen_block_variant(
         tmp_path,
         both_pdk_root,
@@ -15441,10 +15456,11 @@ def test_compose_per_net_layer_role_wins_over_cross_block_layer_role(
 #: below: both `U0_D` ports face +x, so the fixed one-jog shape would have to
 #: reach u2's pin through u2's own body. The path lifts over the row instead
 #: and comes back down to the right of u2, approaching that pin from its own
-#: outward side. Derived from the fixture's own geometry: 1.12um-wide blocks
-#: on a 3.0um row spacing put u1 at x=[4.12, 5.24] and u2 at x=[8.24, 9.36],
-#: with both drain pads on the y=0.21 row.
-_DRAIN_BUS_LEG_WAYPOINTS_UM = [[5.6, 2.5], [9.8, 2.5], [9.8, 0.21]]
+#: outward side. Derived from the fixture's own geometry: 1.37um-wide blocks
+#: on a 3.0um row spacing put u1 at x=[4.245, 5.615] and u2 at
+#: x=[8.615, 9.985] (each block bbox includes the 0.125um sky130 S/D implant
+#: margin, issue #2934), with both drain pads on the y=0.21 row.
+_DRAIN_BUS_LEG_WAYPOINTS_UM = [[6.0, 2.5], [10.3, 2.5], [10.3, 0.21]]
 
 
 def _drain_bus_request(tmp_path, pdk_root, output, cell_name):
@@ -17077,3 +17093,445 @@ def test_compose_half_grid_backbone_midpoint_is_drc_clean(
     assert report["nets"][0]["routed"] is True
     assert not any("manufacturing grid" in n for n in report["drc_hints"]["notes"])
     assert run_drc(str(output), "sky130")["violation_count"] == 0
+
+
+def test_compose_source_path_echoes_relative_spelling_without_host_prefix(
+    tmp_path, pdk_root
+):
+    # #2935: a relative `cell.gds_path` resolves against the request's
+    # directory for reading, but the response echoes it as spelled -- no
+    # checkout/temp prefix -- while `source_digest` still pins the content.
+    blocks = []
+    for name in ("a", "b"):
+        req_dir = tmp_path / name
+        req_dir.mkdir()
+        _write_boxed_gds(req_dir / "stub.gds", "lib_inv", [(0.0, 0.0, 2.0, 1.2)])
+        report = compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {
+                        "id": "s",
+                        "cell": {"gds_path": "stub.gds", "cell_name": "lib_inv"},
+                    }
+                ],
+                "placement": {"strategy": "row", "order": ["s"], "spacing_um": 1.0},
+                "options": {
+                    "cell_name": "rel_0",
+                    "output": str(req_dir / "out.gds"),
+                },
+            },
+            request_dir=str(req_dir),
+        )
+        blocks.append(report["blocks"][0])
+
+    assert blocks[0]["source_path"] == "stub.gds"
+    assert str(tmp_path) not in blocks[0]["source_path"]
+    assert blocks[0]["source_path"] == blocks[1]["source_path"]
+    assert blocks[0]["source_digest"] == blocks[1]["source_digest"]
+    assert blocks[0]["source_digest"].startswith("sha256:")
+
+
+# --- Plane-bearing waypoints (#2930) ---------------------------------------
+
+
+def _plane_change_request(tmp_path, pdk_root, output, cell_name, waypoints):
+    """The drain-bus fixture with its u1->u2 leg steered through ``waypoints``.
+
+    The u0->u1 leg is pinned to met1 (`metal2`), the u1->u2 leg starts on met1
+    too and may change plane at a ``[x, y, "layer_role"]`` waypoint.
+    """
+    request = _drain_bus_request(tmp_path, pdk_root, output, cell_name)
+    request["connectivity"][0]["legs"] = [
+        {
+            "from_pin": {"block": "u0", "port": "U0_D"},
+            "to_pin": {"block": "u1", "port": "U0_D"},
+            "layer_role": "metal2",
+        },
+        {
+            "from_pin": {"block": "u1", "port": "U0_D"},
+            "to_pin": {"block": "u2", "port": "U0_D"},
+            "layer_role": "metal2",
+            "waypoints_um": waypoints,
+        },
+    ]
+    return request
+
+
+def test_compose_plane_bearing_waypoint_changes_plane_mid_leg(tmp_path, pdk_root):
+    # One leg, two planes, no caller-built junction GDS: the leg runs on met1
+    # up and over u1, changes to met2 at (7.0, 2.5), and comes back down to
+    # u2's li1 pad on met2. The plane change is a via1 ladder at the waypoint.
+    output = tmp_path / "plane_change.gds"
+    request = _plane_change_request(
+        tmp_path,
+        pdk_root,
+        output,
+        "plane_change",
+        [[6.0, 2.5], [7.0, 2.5, "metal3"], [10.3, 2.5], [10.3, 0.21]],
+    )
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    net = report["nets"][0]
+    assert net["routed"] is True and net["status"] == "routed"
+    # Still one leg per named leg: the plane split is not a response leg.
+    assert len(net["legs"]) == 2
+    assert all(
+        pin["block"] in {"u0", "u1", "u2"} for leg in net["legs"] for pin in leg["pins"]
+    )
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("plane_change")
+    met1_paths = [s for s in top.shapes(layout.layer(68, 20)).each() if s.is_path()]
+    met2_paths = [s for s in top.shapes(layout.layer(69, 20)).each() if s.is_path()]
+    # u0->u1 leg + the first segment of u1->u2 on met1; the second on met2.
+    assert len(met1_paths) == 2
+    assert len(met2_paths) == 1
+    # via1 at the plane change itself, plus the via1 of u2's own drop.
+    via1 = [s.bbox().center() for s in top.shapes(layout.layer(68, 44)).each()]
+    assert kdb.Point(7000, 2500) in via1
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    result = extract.run_extract(str(output), "sky130", top="plane_change")
+    drain_nets = {d["nets"]["d"] for d in result["devices"] if d["class"] == "nfet"}
+    assert drain_nets == {"DBUS"}
+
+
+def _gate_net_crossing_plane_change(layer_role):
+    """A u1.G -> u2.G net whose descent at x=9.3 crosses the met2 segment of
+    the plane-changing DBUS leg (y=2.5, x=7.0..10.3) in the fixture above."""
+    entry = {
+        "net": "GLINK",
+        "pins": [
+            {"block": "u1", "port": "U0_G"},
+            {"block": "u2", "port": "U0_G"},
+        ],
+        "waypoints_um": [[4.93, 3.5], [9.3, 3.5]],
+    }
+    if layer_role is not None:
+        entry["layer_role"] = layer_role
+    return entry
+
+
+@pytest.mark.parametrize(
+    ("layer_role", "routed"),
+    [
+        # li1 (the net's own plane): crosses the leg's met2 segment, but not
+        # on the same plane -- a plane-aware check must not call it a short.
+        (None, True),
+        # met2: the same crossing is a genuine same-plane short.
+        ("metal3", False),
+    ],
+)
+def test_compose_plane_bearing_waypoint_checks_each_segment_on_its_own_plane(
+    tmp_path, pdk_root, layer_role, routed
+):
+    output = tmp_path / "plane_change_cross.gds"
+    request = _plane_change_request(
+        tmp_path,
+        pdk_root,
+        output,
+        "plane_change_cross",
+        [[6.0, 2.5], [7.0, 2.5, "metal3"], [10.3, 2.5], [10.3, 0.21]],
+    )
+    request["connectivity"].append(_gate_net_crossing_plane_change(layer_role))
+    report = compose(request)
+
+    assert report["nets"][0]["routed"] is True
+    glink = report["nets"][1]
+    assert glink["net"] == "GLINK"
+    assert glink["routed"] is routed, glink
+    if not routed:
+        assert "crosses already-routed net 'DBUS'" in glink["legs"][0]["reason"]
+
+
+def test_compose_plane_bearing_waypoint_on_a_two_pin_net(tmp_path, pdk_root):
+    # The net-level `waypoints_um` of a 2-pin net takes the same triple: the
+    # net starts on its own plane (li1), climbs to met2 at the waypoint.
+    output = tmp_path / "plane_change_net.gds"
+    request = _drain_bus_request(tmp_path, pdk_root, output, "plane_change_net")
+    request["connectivity"] = [
+        {
+            "net": "DLINK",
+            "pins": [
+                {"block": "u1", "port": "U0_D"},
+                {"block": "u2", "port": "U0_D"},
+            ],
+            "waypoints_um": [[6.0, 2.5, "metal3"], [10.3, 2.5], [10.3, 0.21]],
+        }
+    ]
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert run_drc(str(output), "sky130")["status"] == "clean"
+    result = extract.run_extract(str(output), "sky130", top="plane_change_net")
+    d_nets = sorted(d["nets"]["d"] for d in result["devices"] if d["class"] == "nfet")
+    assert d_nets.count("DLINK") == 2
+
+
+def test_compose_plane_bearing_waypoint_unknown_role_is_an_application_error(
+    tmp_path, pdk_root
+):
+    request = _plane_change_request(
+        tmp_path,
+        pdk_root,
+        tmp_path / "bad_role.gds",
+        "bad_role",
+        [[6.0, 2.5], [7.0, 2.5, "metal99"], [10.3, 2.5], [10.3, 0.21]],
+    )
+    with pytest.raises(GenComposeError, match=r"legs\[1\]\.waypoints_um\[1\]"):
+        compose(request)
+
+
+@pytest.mark.parametrize("bad_role", ["", 3, None])
+def test_compose_plane_bearing_waypoint_rejects_a_malformed_role(
+    tmp_path, pdk_root, bad_role
+):
+    request = _plane_change_request(
+        tmp_path,
+        pdk_root,
+        tmp_path / "bad_triple.gds",
+        "bad_triple",
+        [[6.0, 2.5], [7.0, 2.5, bad_role], [10.3, 2.5], [10.3, 0.21]],
+    )
+    with pytest.raises(GenComposeError, match=r"waypoints_um\[1\]\[2\]"):
+        compose(request)
+
+
+def test_compose_plane_bearing_waypoint_rejects_a_four_element_waypoint(
+    tmp_path, pdk_root
+):
+    request = _plane_change_request(
+        tmp_path,
+        pdk_root,
+        tmp_path / "bad_len.gds",
+        "bad_len",
+        [[6.0, 2.5], [7.0, 2.5, "metal3", 1], [10.3, 2.5], [10.3, 0.21]],
+    )
+    with pytest.raises(GenComposeError, match=r"waypoints_um\[1\] must be"):
+        compose(request)
+
+
+def test_compose_ties_off_mos_array_dummy_units_without_dead_metal(tmp_path, pdk_root):
+    # #2904: with `dummy_ports` a dummy's S/D/G are tie-able, so its li1 pads
+    # join a named net instead of extracting as `dead_metal`.
+    params = {
+        "w_um": 2,
+        "l_um": 1,
+        "rows": 1,
+        "cols": 2,
+        "dummy": 1,
+        "gate_contact": True,
+        "topology": "array",
+    }
+    arr_off = _gen_block(tmp_path, pdk_root, "mos_array", "arr_off", **params)
+    assert not any(p["name"].startswith("D") for p in arr_off["ports"])
+    before = extract.run_extract(str(tmp_path / "arr_off.gds"), "sky130", top="arr_off")
+
+    arr = _gen_block(
+        tmp_path, pdk_root, "mos_array", "arr_tied", dummy_ports=True, **params
+    )
+    right = _gen_block(tmp_path, pdk_root, "resistor_strip", "rail_right")
+    output = tmp_path / "tied.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "arr", "generator_report": arr},
+                {"id": "right", "generator_report": right},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["arr", "right"],
+                "origins_um": {
+                    "arr": {"x": 0.0, "y": 0.0},
+                    "right": {"x": arr["bbox_um"]["x1"] + 6.0, "y": 0.0},
+                },
+            },
+            # D1 is the rightmost dummy; tying it to a rail block on its own
+            # side keeps the single-layer route from crossing the array.
+            "connectivity": [
+                {
+                    "net": "VSS_R",
+                    "pins": [{"block": "arr", "port": f"D1_{t}"} for t in "SDG"]
+                    + [{"block": "right", "port": "P1"}],
+                }
+            ],
+            "routing": {
+                "layer_role": "metal",
+                "width_um": 0.17,
+                "cross_block_layer_role": "metal2",
+            },
+            "options": {"cell_name": "tied_0", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == [], [
+        leg.get("reason") for n in report["nets"] for leg in n["legs"]
+    ]
+
+    # Dead metal on the tied (right) dummy is gone; the untied left dummy
+    # still extracts as floating.
+    right_x0 = min(p["x_um"] for p in arr["ports"] if p["name"].startswith("D1_"))
+    arr_right = lambda dm: dm["bbox_um"]["right"] > right_x0 - 0.5  # noqa: E731
+    after = extract.run_extract(str(output), "sky130", top="tied_0")
+    in_dummy = [
+        d
+        for d in after["dead_metal"]
+        if arr_right(d) and d["bbox_um"]["left"] < arr["bbox_um"]["x1"]
+    ]
+    assert [d for d in before["dead_metal"] if arr_right(d)], "fixture must float"
+    assert in_dummy == [], in_dummy
+
+
+def test_tap_pad_ports_are_not_mistaken_for_a_closed_guard_ring():
+    # #4143: ring-less gf180mcu arrays report `TAP_PAD<k>` ports; only the
+    # `TAP_<side>`/`COLL_<side>` ring ports mean a closed ring surrounds the block.
+    from klayout_tools.gen_compose_routing import _block_has_ring_taps
+
+    assert not _block_has_ring_taps({"port_names": ["U0_D", "TAP_PAD0", "TAP_PAD1"]})
+    assert _block_has_ring_taps({"port_names": ["U0_D", "TAP_N", "TAP_PAD0"]})
+    assert _block_has_ring_taps({"port_names": ["COLL_E"]})
+
+
+def test_compose_labels_esd_device_drain_port_via_pins(tmp_path, pdk_root):
+    """A lone `esd_device` block's drain port can be given a net name through
+    `gen-compose`'s `pins[]` (issue #4299): the label lands as a `kdb.Text`,
+    so `esd_device` needs no drain-net param of its own."""
+    import klayout.db as kdb
+
+    esd = _gen_block(tmp_path, pdk_root, "esd_device", "esd", voltage_flavor="hvi")
+    output = tmp_path / "esd_pad.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "esd", "generator_report": esd}],
+            "placement": {"strategy": "row", "order": ["esd"], "spacing_um": 1.0},
+            "pins": [{"net": "PAD", "block": "esd", "port": "M1_D"}],
+            "options": {"cell_name": "esd_pad_0", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == []
+    layout = kdb.Layout()
+    layout.read(str(output))
+    texts = [
+        s.text.string
+        for li in layout.layer_indexes()
+        for s in layout.cell("esd_pad_0").shapes(li).each()
+        if s.is_text()
+    ]
+    assert "PAD" in texts
+
+
+# --------------------------------------------------------------------------- #
+# blocks[].placed_cell_name (#4246)
+# --------------------------------------------------------------------------- #
+
+
+def _placed_cell_name_request(tmp_path, pdk_root, names, strategy="row"):
+    """Two empty library-cell blocks (``a``, ``b``) with ``names`` mapping a
+    block id to its ``placed_cell_name`` (omitted when absent)."""
+    blocks = []
+    for block_id in ("a", "b"):
+        gds = _write_empty_library_gds(tmp_path / f"{block_id}.gds", f"src_{block_id}")
+        block = {
+            "id": block_id,
+            "cell": {
+                "gds_path": gds,
+                "cell_name": f"src_{block_id}",
+                "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 2.0, "y1": 1.0},
+            },
+        }
+        if block_id in names:
+            block["placed_cell_name"] = names[block_id]
+        blocks.append(block)
+    if strategy == "array":
+        blocks = blocks[:1]
+        placement = {
+            "strategy": "array",
+            "order": ["a"],
+            "rows": 2,
+            "cols": 2,
+            "row_pitch_um": 5.0,
+            "col_pitch_um": 5.0,
+        }
+    else:
+        placement = {
+            "strategy": "row",
+            "order": [b["id"] for b in blocks],
+            "spacing_um": 1.0,
+        }
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": blocks,
+        "placement": placement,
+        "options": {"cell_name": "top", "output": str(tmp_path / "out.gds")},
+    }
+
+
+def _composed_cell_names(tmp_path):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(tmp_path / "out.gds"))
+    top = layout.cell("top")
+    children = {layout.cell(i).name for i in top.called_cells()}
+    return layout, top, children
+
+
+def test_compose_placed_cell_name_sets_sub_cell_name(tmp_path, pdk_root):
+    report = compose(
+        _placed_cell_name_request(tmp_path, pdk_root, {"a": "inv", "b": "nand"})
+    )
+    _layout, _top, children = _composed_cell_names(tmp_path)
+    assert {"inv", "nand"} <= children
+    assert [b["placed_cell_name"] for b in report["blocks"]] == ["inv", "nand"]
+    assert not any("placed_cell_name" in w for w in report["warnings"])
+
+
+def test_compose_placed_cell_name_omitted_keeps_default_name(tmp_path, pdk_root):
+    report = compose(_placed_cell_name_request(tmp_path, pdk_root, {"a": "inv"}))
+    _layout, _top, children = _composed_cell_names(tmp_path)
+    assert "inv" in children and "b__src_b" in children
+    assert report["blocks"][1]["placed_cell_name"] == "b__src_b"
+
+
+def test_compose_placed_cell_name_collision_gets_suffix_and_warning(tmp_path, pdk_root):
+    report = compose(
+        _placed_cell_name_request(tmp_path, pdk_root, {"a": "dup", "b": "dup"})
+    )
+    _layout, _top, children = _composed_cell_names(tmp_path)
+    assert {"dup", "dup$1"} <= children
+    assert [b["placed_cell_name"] for b in report["blocks"]] == ["dup", "dup$1"]
+    assert any("'dup'" in w and "'dup$1'" in w for w in report["warnings"])
+
+
+def test_compose_placed_cell_name_on_array_block(tmp_path, pdk_root):
+    report = compose(
+        _placed_cell_name_request(tmp_path, pdk_root, {"a": "unit"}, strategy="array")
+    )
+    _layout, _top, children = _composed_cell_names(tmp_path)
+    assert "unit" in children
+    assert report["blocks"][0]["placed_cell_name"] == "unit"
+
+
+@pytest.mark.parametrize("value", ["", 3])
+def test_parse_blocks_rejects_invalid_placed_cell_name(value):
+    with pytest.raises(
+        GenComposeError, match=r"blocks\[0\] \(id 'a'\).placed_cell_name"
+    ):
+        _parse_blocks(
+            [
+                {
+                    "id": "a",
+                    "generator_report": _fake_mos_block_report(),
+                    "placed_cell_name": value,
+                }
+            ]
+        )

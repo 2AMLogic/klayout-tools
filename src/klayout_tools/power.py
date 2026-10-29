@@ -158,8 +158,10 @@ from ._paths import (
     _validate_via_entries,
 )
 from ._provenance import INPUT_ROLE_LAYOUT, _content_hash, build_provenance
+from ._unionfind import UnionFind
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .ir_solver import solve_ir_drop, worst_deviation
+from .resistor_mesh import _decompose_manhattan_polygon, _rails_under_via
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -218,7 +220,13 @@ _STACKUP_KEYS = (
     "current_limit_a_per_um",
     "current_limit_source",
 )
-_VIA_EXTRA_KEYS = ("resistance_ohm", "current_limit_a", "current_limit_source")
+_VIA_EXTRA_KEYS = (
+    "resistance_ohm",
+    "current_limit_a",
+    "current_limit_source",
+    "cut_size_um",
+    "cut_space_um",
+)
 _PAD_KEYS = ("name", "net", "x_um", "y_um", "voltage_v")
 _CURRENT_MODEL_KEYS = ("supply_net", "ground_net", "vdd_v", "instances")
 _INSTANCE_KEYS = (
@@ -400,30 +408,76 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
     return entries
 
 
+def _validate_via_cut_geometry(
+    entry: dict[str, Any], spec_path: str, i: int
+) -> dict[str, float | None]:
+    """Issue #3401: optional cut geometry, both-or-neither, so a merged
+    via-array shape can be priced as ``resistance_ohm / n_cuts``."""
+    if ("cut_size_um" in entry) != ("cut_space_um" in entry):
+        raise PowerError(
+            f"spec '{spec_path}': vias[{i}] must give 'cut_size_um' and "
+            "'cut_space_um' together or neither"
+        )
+    cut_geometry: dict[str, float | None] = {
+        "cut_size_um": None,
+        "cut_space_um": None,
+    }
+    for key in cut_geometry:
+        if key not in entry:
+            continue
+        try:
+            value = float(entry[key])
+        except (TypeError, ValueError) as exc:
+            raise PowerError(
+                f"spec '{spec_path}': vias[{i}].{key} must be a number "
+                f"(got {entry[key]!r})"
+            ) from exc
+        if not value > 0:
+            raise PowerError(
+                f"spec '{spec_path}': vias[{i}].{key} must be > 0 (got {value!r})"
+            )
+        cut_geometry[key] = value
+    return cut_geometry
+
+
 def _validate_vias(
-    spec: dict[str, Any], spec_path: str, stackup_names: list[str]
+    spec: dict[str, Any],
+    spec_path: str,
+    stackup_names: list[str],
+    *,
+    deck_given: bool = False,
 ) -> list[dict[str, Any]]:
+    """``deck_given`` (issue #3400) makes ``resistance_ohm`` optional: a via
+    that omits it gets ``resistance_ohm: None`` here and is filled from the
+    parasitics deck by :func:`_apply_deck_via_resistance`. An explicit value
+    (including ``0``) is always kept as the spec's own."""
     entries: list[dict[str, Any]] = []
     for i, entry, name, layer, between in _validate_via_entries(
         spec,
         spec_path,
         stackup_names,
         PowerError,
-        required_keys=("layer", "between", "resistance_ohm"),
+        required_keys=(
+            ("layer", "between")
+            if deck_given
+            else ("layer", "between", "resistance_ohm")
+        ),
         extra_allowed_keys=_VIA_EXTRA_KEYS,
     ):
-        try:
-            resistance_ohm = float(entry["resistance_ohm"])
-        except (TypeError, ValueError) as exc:
-            raise PowerError(
-                f"spec '{spec_path}': vias[{i}].resistance_ohm must be a "
-                f"number (got {entry['resistance_ohm']!r})"
-            ) from exc
-        if resistance_ohm < 0:
-            raise PowerError(
-                f"spec '{spec_path}': vias[{i}].resistance_ohm must be >= 0 "
-                f"(got {resistance_ohm!r})"
-            )
+        resistance_ohm: float | None = None
+        if "resistance_ohm" in entry:
+            try:
+                resistance_ohm = float(entry["resistance_ohm"])
+            except (TypeError, ValueError) as exc:
+                raise PowerError(
+                    f"spec '{spec_path}': vias[{i}].resistance_ohm must be a "
+                    f"number (got {entry['resistance_ohm']!r})"
+                ) from exc
+            if resistance_ohm < 0:
+                raise PowerError(
+                    f"spec '{spec_path}': vias[{i}].resistance_ohm must be >= 0 "
+                    f"(got {resistance_ohm!r})"
+                )
 
         # `current_limit_a` (issue #846, Phase 1c): this via role's own EM
         # limit -- unlike a metal role's `current_limit_a_per_um`, a real
@@ -451,17 +505,82 @@ def _validate_vias(
         if current_limit_source is not None:
             current_limit_source = str(current_limit_source)
 
+        cut_geometry = _validate_via_cut_geometry(entry, spec_path, i)
+
         entries.append(
             {
                 "name": name,
                 "layer": layer,
                 "between": between,
                 "resistance_ohm": resistance_ohm,
+                "resistance_source": "spec",
                 "current_limit_a": current_limit_a,
                 "current_limit_source": current_limit_source,
+                **cut_geometry,
             }
         )
     return entries
+
+
+def _apply_deck_via_resistance(
+    vias: list[dict[str, Any]], deck_name: str, corner: str, spec_path: str
+) -> None:
+    """Fill each via that carries no ``resistance_ohm`` from ``deck_name``'s
+    per-cut resistance at ``corner`` (issue #3400), recording
+    ``resistance_source = "deck:<name>:<corner>"``. Mutates ``vias``.
+
+    The spec via's GDS ``layer`` is located in the extraction deck's ``vias``
+    stack; entry ``i`` there joins ``metals[i]`` to ``metals[i + 1]``, and
+    the parasitics deck's :class:`~.decks.parasitics.CutRC` with
+    ``lower_metal_index == i`` carries its resistance. A layer the deck does
+    not know, a cut level with no curated :class:`CutRC`, or a corner the
+    deck does not publish is an error -- never a silent default. A published
+    ``0.0`` passes through unchanged (an ideal short).
+    """
+    from .decks import (
+        UnknownExtractionDeckError,
+        get_extraction_deck,
+        get_parasitics_deck,
+    )
+
+    pending = [via for via in vias if via["resistance_ohm"] is None]
+    if not pending:
+        return
+    try:
+        extraction = get_extraction_deck(deck_name)
+        parasitics = get_parasitics_deck(deck_name)
+    except UnknownExtractionDeckError as exc:
+        raise PowerError(str(exc)) from exc
+
+    cuts = {cut.lower_metal_index: cut for cut in parasitics.cuts}
+    for via in pending:
+        layer = tuple(via["layer"])
+        label = f"vias[{via['name']!r}] (layer {layer[0]}/{layer[1]})"
+        try:
+            level = extraction.vias.index(layer)
+        except ValueError:
+            raise PowerError(
+                f"spec '{spec_path}': {label} has no 'resistance_ohm' and "
+                f"deck '{deck_name}' has no via layer {layer[0]}/{layer[1]} "
+                "to default it from -- set 'resistance_ohm' explicitly"
+            ) from None
+        cut = cuts.get(level)
+        if cut is None:
+            raise PowerError(
+                f"spec '{spec_path}': {label} has no 'resistance_ohm' and "
+                f"deck '{deck_name}' publishes no cut resistance for that "
+                "via level -- set 'resistance_ohm' explicitly"
+            )
+        resistance = cut.resistance(corner)
+        if resistance is None:
+            raise PowerError(
+                f"spec '{spec_path}': {label} has no 'resistance_ohm' and "
+                f"deck '{deck_name}' publishes no '{corner}' resistance for "
+                f"cut {cut.name!r} -- set 'resistance_ohm' explicitly or "
+                "pick another corner"
+            )
+        via["resistance_ohm"] = resistance
+        via["resistance_source"] = f"deck:{deck_name}:{corner}"
 
 
 def _require_number(
@@ -770,37 +889,6 @@ def _nearest_endpoint(
     return best_id
 
 
-def _rails_under_via(
-    rails: list[dict[str, Any]], via_region: kdb.Region, via_box: kdb.Box
-) -> list[dict[str, Any]]:
-    """The rails (merged polygons of one metal role, as recorded by
-    :func:`_build_island_network`) that the via shape actually lands on --
-    the scope a via tap's nearest-endpoint search is restricted to (issue
-    #2259).
-
-    Searching the whole net's rails instead is not a positional
-    approximation, it is a connectivity error: on any trunk-and-stub rail (a
-    PDN strap with drop-downs, a long rail with per-row risers) a via tapping
-    the trunk partway along is nearer some unrelated short stub's endpoint
-    than either of the trunk's own ends, so the tap is wired to the stub --
-    severing the trunk from everything it feeds and shorting two unrelated
-    segments together. The island then fragments into disconnected
-    components, and the IR solve reports ``no_pad`` on the orphans while
-    ``worst_case_droop_mv`` reads 0.
-
-    Merged polygons on one layer are disjoint, so this is normally exactly
-    one rail; a via shape spanning two of them physically bridges both, and
-    both is still the correct scope. Touching counts as landing on: a via
-    abutting a rail edge-to-edge is what joined them into this net."""
-    hits: list[dict[str, Any]] = []
-    for rail in rails:
-        if not rail["bbox"].touches(via_box):
-            continue
-        if not rail["region"].interacting(via_region).is_empty():
-            hits.append(rail)
-    return hits
-
-
 def _connected_component_count(
     nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
 ) -> int:
@@ -814,23 +902,51 @@ def _connected_component_count(
     is silent and one-directional toward "looks fine", because orphaned nodes
     drop out of ``worst_case_droop_mv`` and carry no current for the EM
     verdict."""
-    parent = {node["id"]: node["id"] for node in nodes}
-
-    def find(node_id: str) -> str:
-        root = node_id
-        while parent[root] != root:
-            root = parent[root]
-        while parent[node_id] != root:
-            parent[node_id], node_id = root, parent[node_id]
-        return root
-
-    components = len(parent)
+    node_ids = {node["id"] for node in nodes}
+    groups = UnionFind(node_ids)
+    components = len(node_ids)
     for edge in edges:
-        a, b = find(edge["from"]), find(edge["to"])
-        if a != b:
-            parent[a] = b
+        if groups.union(edge["from"], edge["to"]):
             components -= 1
     return components
+
+
+def _count_via_cuts(
+    polygon: Any,
+    via: dict[str, Any],
+    dbu: float,
+    net_name: str,
+    island_id: str,
+    warnings: list[str],
+) -> tuple[int, str]:
+    """``(n_cuts, n_cuts_source)`` for one merged via polygon (issue #3401).
+
+    Without the via's ``cut_size_um``/``cut_space_um`` the shape is one cut
+    (``"assumed"``, the flat per-shape model). With them, a rectangle holds
+    ``floor((W+s)/(c+s)) * floor((H+s)/(c+s))`` cuts at pitch ``c+s``; a
+    non-rectangular polygon falls back to ``floor(area / (c+s)^2)`` with a
+    warning. Never fewer than one."""
+    cut = via.get("cut_size_um")
+    space = via.get("cut_space_um")
+    if cut is None or space is None:
+        return 1, "assumed"
+    pitch = cut + space
+    box = polygon.bbox()
+    # Epsilon absorbs dbu rounding so an exactly-fitting array is not
+    # undercounted by a float ulp.
+    eps = 1e-9
+    if polygon.is_box():
+        cols = int((box.width() * dbu + space) / pitch + eps)
+        rows = int((box.height() * dbu + space) / pitch + eps)
+        n_cuts = cols * rows
+    else:
+        n_cuts = int(polygon.area() * dbu * dbu / (pitch * pitch) + eps)
+        warnings.append(
+            f"power net {net_name!r} island {island_id!r}: a non-rectangular "
+            f"{via['name']!r} via shape's cut count is estimated from its "
+            "area, not counted per cut"
+        )
+    return max(1, n_cuts), "spec"
 
 
 def _warn_if_network_fragmented(
@@ -863,91 +979,6 @@ def _warn_if_network_fragmented(
         "joins). Nodes on components with no pad cannot be solved, so the "
         "reported droop understates the real one"
     )
-
-
-def _polygon_cut_coordinates(polygon: kdb.Polygon) -> tuple[list[int], list[int]]:
-    """The sorted, deduplicated x/y coordinates of every vertex of a merged
-    polygon (hull **and** holes) -- the cut lines of the rectangular grid
-    :func:`_decompose_manhattan_polygon` carves it into."""
-    xs: set[int] = set()
-    ys: set[int] = set()
-    for point in polygon.each_point_hull():
-        xs.add(point.x)
-        ys.add(point.y)
-    for hole in range(polygon.holes()):
-        for point in polygon.each_point_hole(hole):
-            xs.add(point.x)
-            ys.add(point.y)
-    return sorted(xs), sorted(ys)
-
-
-def _decomposition_grid(
-    polygon: kdb.Polygon, max_cells: int
-) -> tuple[list[int] | None, list[int] | None, str | None]:
-    """``(xs, ys, None)`` for a polygon worth decomposing, or ``(None, None,
-    reason)`` when it is degenerate or would need more mesh cells than
-    ``max_cells``."""
-    xs, ys = _polygon_cut_coordinates(polygon)
-    if len(xs) < 2 or len(ys) < 2:
-        return None, None, "it has no positive-area extent"
-    cells = (len(xs) - 1) * (len(ys) - 1)
-    if cells > max_cells:
-        return (
-            None,
-            None,
-            (
-                f"decomposing it needs up to {cells} mesh cells, over this build's "
-                f"{max_cells}-mesh-cell cap (MAX_DECOMPOSITION_CELLS)"
-            ),
-        )
-    return xs, ys, None
-
-
-def _decompose_manhattan_polygon(
-    polygon: kdb.Polygon, max_cells: int
-) -> tuple[list[tuple[int, int, kdb.Box]] | None, str | None]:
-    """Cut one merged, axis-aligned polygon into the grid of rectangles
-    formed by extending every vertex's x and y coordinate across it (issue
-    #2171).
-
-    Returns ``(cells, None)`` -- each cell a ``(column, row, box)`` triple
-    keyed to that grid, so two cells sharing a boundary always share the
-    *whole* side -- or ``(None, reason)`` when the polygon cannot be
-    decomposed exactly (not Manhattan, degenerate, or over the cell cap).
-    A caller must never fall back to the bounding box on a ``reason``: that
-    is the non-conservative approximation this function exists to replace.
-    """
-    import klayout.db as kdb
-
-    xs, ys, reason = _decomposition_grid(polygon, max_cells)
-    if xs is None or ys is None:
-        return None, reason
-    columns = {x: index for index, x in enumerate(xs)}
-    poly_region = kdb.Region(polygon)
-    cells: list[tuple[int, int, kdb.Box]] = []
-    for row in range(len(ys) - 1):
-        band = kdb.Region(kdb.Box(xs[0], ys[row], xs[-1], ys[row + 1])) & poly_region
-        for part in band.merged().each():
-            if not part.is_box():
-                return None, (
-                    "it is not axis-aligned (Manhattan), so it has no exact "
-                    "decomposition into rectangles"
-                )
-            box = part.bbox()
-            left, right = columns.get(box.left), columns.get(box.right)
-            if left is None or right is None:
-                return None, "its rectangles do not land on its own vertex grid"
-            for column in range(left, right):
-                cells.append(
-                    (
-                        column,
-                        row,
-                        kdb.Box(xs[column], ys[row], xs[column + 1], ys[row + 1]),
-                    )
-                )
-    if not cells:
-        return None, "it has no positive-area extent"
-    return cells, None
 
 
 def _cell_sides(
@@ -1208,6 +1239,8 @@ def _build_island_network(
         length_um: float | None = None,
         cross_um: float | None = None,
         area_um2: float | None = None,
+        n_cuts: int | None = None,
+        n_cuts_source: str | None = None,
     ) -> None:
         edge_id = f"e{counters['edge']}"
         counters["edge"] += 1
@@ -1242,6 +1275,12 @@ def _build_island_network(
                     round(current_limit_a, 12) if current_limit_a is not None else None
                 ),
                 "current_limit_source": current_limit_source,
+                # Issue #3401: cuts this via edge's `resistance_ohm` was
+                # divided across (`null` on a metal edge); `n_cuts_source`
+                # is "spec" when `cut_size_um`/`cut_space_um` derived it,
+                # "assumed" when absent (one cut, the flat per-shape model).
+                "n_cuts": n_cuts,
+                "n_cuts_source": n_cuts_source,
             }
         )
 
@@ -1310,12 +1349,15 @@ def _build_island_network(
                     f"modelled {missing!r} segment of this net -- skipped"
                 )
                 continue
+            n_cuts, n_cuts_source = _count_via_cuts(
+                polygon, via, dbu, net_name, island_id, warnings
+            )
             add_edge(
                 "via",
                 via["name"],
                 node_a,
                 node_b,
-                via["resistance_ohm"],
+                via["resistance_ohm"] / n_cuts,
                 via["current_limit_a"],
                 via["current_limit_source"],
                 # Issue #2345: a via edge's geometry is its merged polygon's
@@ -1324,6 +1366,8 @@ def _build_island_network(
                 # "per-cut vs per-merged-polygon" caveat, now visible in
                 # data).
                 area_um2=polygon.area() * dbu * dbu,
+                n_cuts=n_cuts,
+                n_cuts_source=n_cuts_source,
             )
 
     # The connectivity model already declared these nodes one island, so the
@@ -2181,11 +2225,66 @@ def _build_net_islands(
     return islands, extents
 
 
+def _resolve_resistance_corner(deck: str | None, resistance_corner: str | None) -> str:
+    """Validate ``--resistance-corner`` against ``--deck`` (issue #3400) and
+    return the corner in force (``nominal`` unless one was given)."""
+    if deck is None and resistance_corner is not None:
+        raise PowerError(
+            "--resistance-corner needs --deck: the corner selects which of "
+            "a deck's published via resistances to use"
+        )
+    corner = resistance_corner if resistance_corner is not None else "nominal"
+    if deck is not None:
+        from .decks import RESISTANCE_CORNERS
+
+        if corner not in RESISTANCE_CORNERS:
+            raise PowerError(
+                f"unknown resistance corner '{corner}' "
+                f"(available: {', '.join(RESISTANCE_CORNERS)})"
+            )
+    return corner
+
+
+def _power_provenance(file: str, deck: str | None) -> dict[str, Any]:
+    """The shared ``provenance`` block; with ``--deck`` (issue #3400) the deck
+    that defaulted the via resistances is recorded, else ``deck`` stays
+    ``null``."""
+    if deck is None:
+        return build_provenance(input_path=file, input_role=INPUT_ROLE_LAYOUT)
+    from .decks import deck_source_path
+
+    return build_provenance(
+        deck_name=deck,
+        deck_path=deck_source_path(deck),
+        input_path=file,
+        input_role=INPUT_ROLE_LAYOUT,
+    )
+
+
+def _deck_via_report(vias: list[dict[str, Any]], corner: str) -> dict[str, Any]:
+    """The ``--deck``-only report keys (issue #3400): the corner in force and
+    each via's resolved resistance and where it came from."""
+    return {
+        "resistance_corner": corner,
+        "vias": [
+            {
+                "name": via["name"],
+                "layer": f"{via['layer'][0]}/{via['layer'][1]}",
+                "resistance_ohm": via["resistance_ohm"],
+                "resistance_source": via["resistance_source"],
+            }
+            for via in vias
+        ],
+    }
+
+
 def run_power(
     file: str,
     spec_path: str,
     *,
     top: str | None = None,
+    deck: str | None = None,
+    resistance_corner: str | None = None,
 ) -> dict[str, Any]:
     """Run ``klt power``'s resistive-network extraction (and, when the spec
     asks for one, the static IR-drop solve) end to end.
@@ -2241,6 +2340,15 @@ def run_power(
     one (required in that case, matching ``select_top_cells``'s convention
     -- see ``docs/cli/layers.md``'s ``--top``).
 
+    ``deck`` (issue #3400) names a built-in parasitics deck (``klt extract
+    --deck``'s name space) that supplies ``vias[].resistance_ohm`` for any
+    via whose spec entry omits it, at ``resistance_corner`` (``nominal``,
+    ``high`` or ``low``; default ``nominal``). An explicit spec value always
+    wins. ``resistance_corner`` without ``deck`` is an error. With ``deck``,
+    the report gains ``resistance_corner`` and a top-level ``vias`` block
+    recording each via's ``resistance_ohm`` and ``resistance_source``, and
+    ``provenance.deck`` is populated; without it the report is unchanged.
+
     Returns a dict matching the documented ``klt power`` JSON schema (see
     ``docs/cli/power.md``), including ``schema_version``.
 
@@ -2271,13 +2379,16 @@ def run_power(
     ``warnings`` rather than raised, as long as at least one net resolved
     to at least one island).
     """
+    corner = _resolve_resistance_corner(deck, resistance_corner)
     spec = _load_spec_json(spec_path, PowerError)
     _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", PowerError)
     power_net_entries = _validate_power_nets(spec, spec_path)
     power_nets = [entry["name"] for entry in power_net_entries]
     stackup = _validate_stackup(spec, spec_path)
     stackup_names = [entry["name"] for entry in stackup]
-    vias = _validate_vias(spec, spec_path, stackup_names)
+    vias = _validate_vias(spec, spec_path, stackup_names, deck_given=deck is not None)
+    if deck is not None:
+        _apply_deck_via_resistance(vias, deck, corner, spec_path)
     # The `devices[]` fragment is shared verbatim with `klt erc` (issue
     # #2260), so it lives in `_devices.py` and takes the flat list of
     # conductor role names -- `stackup` first, then `vias`.
@@ -2465,11 +2576,13 @@ def run_power(
     # the KLayout build and the cell it ran on are both part of what the
     # numbers depend on (`klayout_version` itself comes from the shared
     # block, for the same reason `klt erc` records it).
-    provenance = build_provenance(input_path=file, input_role=INPUT_ROLE_LAYOUT)
+    # Issue #3400: with `--deck`, the deck that defaulted the via
+    # resistances is recorded; without it `deck` stays `null`.
+    provenance = _power_provenance(file, deck)
     provenance["spec"] = {"content_hash": _content_hash(spec_path)}
     provenance["top_cell"] = top_cell.name
 
-    return {
+    report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "file": file,
         "spec": spec_path,
@@ -2488,3 +2601,6 @@ def run_power(
         "warnings": warnings,
         "provenance": provenance,
     }
+    if deck is not None:
+        report.update(_deck_via_report(vias, corner))
+    return report

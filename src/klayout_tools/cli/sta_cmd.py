@@ -47,6 +47,9 @@ def _print_text(report: dict) -> None:
     if "corners" in report:
         for entry in report["corners"]:
             print(f"corner: {entry['corner']}")
+            if "interconnect_corner" in entry:
+                print(f"interconnect_corner: {entry['interconnect_corner']}")
+                print(f"spef_path: {_render_input_path(entry['spef_path'])}")
             _print_slack_fields(entry, indent="  ")
             _print_spef_annotation(entry.get("spef_annotation"), indent="  ")
             print()
@@ -123,6 +126,18 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
                 f"{', '.join(propagation['clock_sinks_sample'])}"
             )
     print(f"{indent}estimated_power_mw: {fields['estimated_power_mw']}")
+    basis = fields.get("power_basis")
+    if basis is not None:
+        print(
+            f"{indent}power_basis: activity_source={basis['activity_source']} "
+            f"activity={basis['activity']} duty={basis['duty']} "
+            f"parasitics={basis['parasitics']}"
+        )
+    # Issue #2886: the per-corner SDF, only when `request.sdf` asked for one
+    # (text output for a request without it stays unchanged).
+    sdf = fields.get("sdf")
+    if sdf is not None:
+        print(f"{indent}sdf: {_render_input_path(sdf)} ({sdf['content_hash']})")
 
 
 def _print_constraint_completeness(block: dict | None, *, indent: str) -> None:
@@ -171,6 +186,14 @@ def _print_spef_annotation(annotation: dict | None, *, indent: str) -> None:
     missing_sample = annotation.get("design_nets_missing_sample")
     if missing_sample:
         print(f"{indent}missing nets (sample): {', '.join(missing_sample)}")
+    for key, label in (
+        ("unannotated_driver_sample", "unannotated drivers (sample)"),
+        ("partially_unannotated_driver_sample", "partial drivers (sample)"),
+        ("floating_driver_sample", "floating no-net drivers (sample)"),
+    ):
+        pins = annotation.get(key)
+        if pins:
+            print(f"{indent}{label}: {', '.join(pins)}")
     warning_sample = annotation.get("reader_warning_sample")
     if warning_sample:
         print(f"{indent}reader warnings (sample):")

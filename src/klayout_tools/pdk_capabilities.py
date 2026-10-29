@@ -224,9 +224,11 @@ DECISIONS: Mapping[str, Mapping[str, Decision]] = MappingProxyType(
                     "Registered FinFET extraction deck (geometry-counted nfin).",
                 ),
                 "parasitics": Decision(
-                    "unsupported",
-                    "FinFET extraction does not run the --parasitics pass; no "
-                    "ASAP7 RC coefficients are curated.",
+                    "supported",
+                    "First-order, uncalibrated metal RC/overlap/cut table "
+                    "(ASSUMED coefficients; diffusion and poly uncurated). Also "
+                    "serves `klt place-and-route` `post_route_spef` / "
+                    "`post_route_sdf` via `--def-net-names` and `--pins`.",
                 ),
                 "default_mos_model_binding": Decision(
                     "unsupported",

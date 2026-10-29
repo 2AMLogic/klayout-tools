@@ -207,6 +207,10 @@ def _unrun_corner_report(
             "process_seed": point.mc_seed["process_seed"],
             "mismatch_seed": point.mc_seed["mismatch_seed"],
         }
+        if "seed_scope" in point.mc_seed:
+            monte_carlo["seed_scope"] = point.mc_seed["seed_scope"]
+        if "seed_mode" in point.mc_seed:
+            monte_carlo["seed_mode"] = point.mc_seed["seed_mode"]
     diagnostic: dict[str, Any] = {
         "severity": "error",
         "code": code,
@@ -221,6 +225,9 @@ def _unrun_corner_report(
         "process": point.process,
         "supply_v": point.supply_v,
         "temperature_c": point.temperature_c,
+        **({"params": dict(point.params)} if point.params else {}),
+        **({"nodeset": dict(point.nodeset)} if point.nodeset else {}),
+        **({"options": dict(point.options)} if point.options else {}),
         "status": "error",
         "runtime_s": 0.0,
         "engine_exit_code": None,
@@ -229,6 +236,7 @@ def _unrun_corner_report(
         "diagnostics": [diagnostic],
         "artifacts": {"log": None, "raw": None, "waveform": None, "deck": None},
         "monte_carlo": monte_carlo,
+        **({"variant": point.variant} if point.variant is not None else {}),
     }
 
 
@@ -251,12 +259,61 @@ def _lost_shard_corner(
     return report
 
 
+def _await_shards(
+    pool: ThreadPoolExecutor,
+    future_to_index: dict[Any, int],
+    results: list[Any],
+    lost_reasons: list[str | None],
+    on_interrupt: Callable[[BaseException], str | None] | None = None,
+) -> None:
+    """Collect shard futures into ``results`` / ``lost_reasons`` as they finish.
+
+    An interrupt while waiting cancels the not-yet-started futures first: with
+    a ``max_concurrent_jobs`` cap, the pool's implicit ``shutdown(wait=True)``
+    would otherwise launch every still-queued shard as a new billable job.
+
+    ``on_interrupt`` (issue #4018) is told the interrupting exception; when it
+    returns a reason string the interrupt is *absorbed*: shards that already
+    finished keep their results, every other shard is reported lost with that
+    reason, and the caller gets a partial merge instead of an exception.
+    Returning ``None`` re-raises, as without a hook.
+    """
+    try:
+        for future in as_completed(future_to_index):
+            _collect_shard(future, future_to_index[future], results, lost_reasons)
+    except BaseException as exc:
+        pool.shutdown(wait=False, cancel_futures=True)
+        reason = None if on_interrupt is None else on_interrupt(exc)
+        if reason is None:
+            raise
+        for future, index in future_to_index.items():
+            if future.done() and not future.cancelled():
+                _collect_shard(future, index, results, lost_reasons)
+            else:
+                lost_reasons[index] = reason
+
+
+def _collect_shard(
+    future: Any,
+    index: int,
+    results: list[Any],
+    lost_reasons: list[str | None],
+) -> None:
+    try:
+        results[index] = future.result()
+        lost_reasons[index] = None
+    except Exception as exc:  # noqa: BLE001 - "shard never returned"
+        lost_reasons[index] = str(exc)
+
+
 def _run_sharded(
     *,
     shard_runner: ShardRunner,
     corner_points: list[CornerPoint],
     hosts: int,
     measurements_spec: list[dict[str, Any]],
+    max_concurrent: int | None = None,
+    on_interrupt: Callable[[BaseException], str | None] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The fleet shard/merge engine: slice ``corner_points`` into ``hosts``
     contiguous shards (:func:`_shard_corner_points`), run each shard through
@@ -275,6 +332,15 @@ def _run_sharded(
     never aborts a sibling shard, mirroring `local-parallel`'s per-corner
     failure isolation one level up. An empty shard (``hosts`` exceeds the
     unit count) is never handed to ``shard_runner`` at all.
+
+    ``max_concurrent`` (issue #3914) bounds how many shards are in flight at
+    once -- the pool size becomes ``min(hosts, max_concurrent)`` and the
+    remaining shards start as earlier ones finish; ``None`` runs every shard
+    at once, as before.
+
+    ``on_interrupt`` (issue #4018) is :func:`_await_shards`' hook: an
+    interrupt it absorbs yields the partial merge, every unfinished shard
+    reported lost with the hook's reason.
 
     ``engine_version`` is derived the same "last non-``None`` wins, in
     corner-list order" way every backend already computes it -- shards are
@@ -306,16 +372,16 @@ def _run_sharded(
     ] = [None] * len(shards)
     lost_reasons: list[str | None] = [None] * len(shards)
 
-    with ThreadPoolExecutor(max_workers=max(1, hosts)) as pool:
+    workers = max(1, hosts)
+    if max_concurrent is not None:
+        workers = min(workers, max(1, max_concurrent))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         future_to_index = {
             pool.submit(_run_one, shard): index for index, shard in enumerate(shards)
         }
-        for future in as_completed(future_to_index):
-            index = future_to_index[future]
-            try:
-                results[index] = future.result()
-            except Exception as exc:  # noqa: BLE001 - "shard never returned"
-                lost_reasons[index] = str(exc)
+        _await_shards(
+            pool, future_to_index, results, lost_reasons, on_interrupt=on_interrupt
+        )
 
     corners: list[dict[str, Any]] = []
     engine_version: str | None = None
@@ -460,6 +526,7 @@ def _run_remote(
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
     _preflight_include_closure(request, netlist_path, request_dir)
+    _assess_remote_runner_features(request, pdk, remote_spec)
 
     job_id = f"klt-sim-{uuid.uuid4().hex[:12]}"
     launcher = RemoteLauncher(
@@ -551,6 +618,35 @@ def _run_remote(
     return corners, engine_version, remote_environment
 
 
+def _points_to_push(
+    request: dict[str, Any],
+    corner_points: list[CornerPoint],
+    explicit_points: list[CornerPoint] | None,
+) -> list[CornerPoint] | None:
+    """The explicit point list to push to the job box, or ``None`` to forward
+    ``corners``/``monte_carlo`` for the box to re-expand.
+
+    A non-default ``monte_carlo.seed_scope`` (issue #2899) is resolved
+    client-side: a runner older than the field would silently drop it and
+    re-derive ``per_corner`` seeds, so the already-derived seeds are shipped
+    instead (the same wire a fleet shard uses). A declared
+    ``monte_carlo.mismatch_scale`` (issue #3942) is resolved the same way, so
+    an older runner cannot silently run an unscaled sweep. A non-default
+    ``monte_carlo.seed_mode`` (issue #4173) is shipped the same way. The default
+    forwards the request unchanged.
+    """
+    if explicit_points is not None:
+        return explicit_points
+    mc_spec = request.get("monte_carlo")
+    if isinstance(mc_spec, dict) and (
+        mc_spec.get("seed_scope", "per_corner") != "per_corner"
+        or mc_spec.get("seed_mode", "derived") != "derived"
+        or "mismatch_scale" in mc_spec
+    ):
+        return corner_points
+    return None
+
+
 def _run_remote_dispatch(
     *,
     launcher: RemoteLauncher,
@@ -595,7 +691,7 @@ def _run_remote_dispatch(
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
-        explicit_points=explicit_points,
+        explicit_points=_points_to_push(request, corner_points, explicit_points),
         max_workers=max_workers,
     )
     job = _build_remote_job_description(
@@ -632,6 +728,9 @@ def _run_remote_dispatch(
         remote_job_dir=remote_job_dir,
     )
 
+    from .sim import check_ngspice_options_echo
+
+    check_ngspice_options_echo(request, remote_report)
     corners = remote_report.get("corners", [])
     if keep_artifacts:
         _rewrite_remote_artifact_paths(
@@ -785,6 +884,7 @@ def _run_remote_fleet(
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
     _preflight_include_closure(request, netlist_path, request_dir)
+    _assess_remote_runner_features(request, pdk, remote_spec)
 
     shards = _shard_corner_points(corner_points, hosts)
     job_id_prefix = f"klt-sim-fleet-{uuid.uuid4().hex[:8]}"
@@ -930,7 +1030,7 @@ def _build_remote_job_description(
     collected artifacts directory.
 
     The include closure (issue #2485) is resolved by
-    :func:`sim_staging.stage_sim_netlist` -- the *same* call
+    :func:`sim_staging.stage_sim_job` -- the *same* call
     ``sim_batch._build_batch_job_spec`` makes, so the two independently
     built input lists cannot drift apart on include handling. Each staged
     file lands beside ``netlist.cir`` in the job directory under a flat
@@ -978,11 +1078,33 @@ def _build_remote_job_description(
             ),
         ),
         command=(
-            f"klt sim {remote_transport.REMOTE_REQUEST_FILENAME} "
+            _remote_feature_preflight(remote_request)
+            + f"klt sim {remote_transport.REMOTE_REQUEST_FILENAME} "
             "--backend local-parallel --format json"
         ),
         success_exit_codes=_REMOTE_SIM_SUCCESS_EXIT_CODES,
         artifacts_relative_dir=remote_transport.DEFAULT_ARTIFACTS_RELATIVE_DIR,
+    )
+
+
+def _remote_feature_preflight(remote_request: dict[str, Any]) -> str:
+    """Host-side refusal prefix for a request using a mandatory runner feature
+    (issue #2924); ``sim_batch`` owns the registry and imports this module,
+    hence the function-local import."""
+    from . import sim_batch
+
+    return sim_batch.remote_feature_preflight(remote_request)
+
+
+def _assess_remote_runner_features(
+    request: dict[str, Any], pdk: str | None, remote_spec: dict[str, Any]
+) -> None:
+    """Pre-launch half of the same gate; see
+    :func:`sim_batch.assess_remote_runner_features`."""
+    from . import sim_batch
+
+    sim_batch.assess_remote_runner_features(
+        request, pdk, remote_spec.get("region"), remote_spec.get("ami_manifest")
     )
 
 

@@ -64,6 +64,7 @@ import json
 import os
 from typing import Any
 
+from ._verilog_params import chparam_lines, read_verilog_line
 from .arith_gen import (
     ARCHITECTURES as ADDER_ARCHITECTURES,
 )
@@ -205,6 +206,8 @@ def _run_arithmetic_selection(
     engine_options: _EngineOptions,
     equiv_timeout_s: float | None,
     repo_root: str | None = None,
+    parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> tuple[dict[str, Any], tuple[str, ...], str | None]:
     """Resolve ``request.arithmetic`` into a concrete adder substitution.
 
@@ -265,6 +268,8 @@ def _run_arithmetic_selection(
         hdl_toplevel=hdl_toplevel,
         output_dir=arith_dir,
         min_width=config["min_width"],
+        parameters=parameters,
+        defines=defines,
     )
     report["adder_widths"] = widths
     if not widths:
@@ -324,6 +329,8 @@ def _run_arithmetic_selection(
             adder_sources=(),
             adder_techmap_path=None,
             repo_root=repo_root,
+            parameters=parameters,
+            defines=defines,
         ),
     }
     rows.append(default_row)
@@ -349,6 +356,8 @@ def _run_arithmetic_selection(
                 adder_sources=tuple(entry["sources"]),
                 adder_techmap_path=entry["techmap_path"],
                 repo_root=repo_root,
+                parameters=parameters,
+                defines=defines,
             )
         rows.append(row)
 
@@ -445,6 +454,8 @@ def _probe_add_widths(
     hdl_toplevel: str,
     output_dir: str,
     min_width: int,
+    parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> list[int]:
     """Return the sorted, distinct result widths of the ``$add`` cells the
     elaborated design contains, filtered to ``>= min_width``.
@@ -468,7 +479,8 @@ def _probe_add_widths(
 
     script_path = os.path.join(output_dir, f"probe_{hdl_toplevel}.ys")
     json_path = os.path.join(output_dir, f"probe_{hdl_toplevel}.json")
-    lines = [f"read_verilog {path}" for path in resolved_sources]
+    lines = [read_verilog_line(path, defines) for path in resolved_sources]
+    lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines += [
         f"hierarchy -check -top {hdl_toplevel}",
         "proc",
@@ -692,6 +704,8 @@ def _measure_candidate(
     adder_sources: tuple[str, ...],
     adder_techmap_path: str | None,
     repo_root: str | None = None,
+    parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> dict[str, Any] | None:
     """Run one full trial synthesis for a candidate architecture and report
     what it measured.
@@ -750,6 +764,8 @@ def _measure_candidate(
         tie_cells=engine_options.tie_cells,
         adder_sources=adder_sources,
         adder_techmap_path=adder_techmap_path,
+        parameters=parameters,
+        defines=defines,
     )
 
     try:

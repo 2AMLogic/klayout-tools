@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..lef_abstract import LefAbstractError, run_lef_abstract
 from .output import emit_error, emit_success
 
@@ -48,6 +49,7 @@ def run(args: argparse.Namespace) -> int:
             symmetry=args.symmetry.split() if args.symmetry else None,
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
+            obs_mode=args.obs_mode,
         )
     except LefAbstractError as exc:
         return emit_error("lef-abstract", str(exc), args.format)
@@ -69,7 +71,7 @@ def _default_output_path(macro_name: str) -> str:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    print(f"file: {render_path_field(report['file'])}")
     print(f"socket: {report['socket']}")
     print(f"macro_name: {report['macro_name']}")
     print(f"class: {report['class']}")
@@ -87,6 +89,7 @@ def _print_text(report: dict) -> None:
             f"{pin['layer'] or '(unresolved)'} [{pin['geometry_source']}]"
         )
 
+    print(f"obs_mode: {report['obs_mode']}")
     if report["obs"]:
         print()
         print("obs:")

@@ -1,6 +1,6 @@
 """``klt pdk`` command: discover/resolve an installed PDK.
 
-Ten subcommands, all emitting through the shared envelope helpers in
+Eleven subcommands, all emitting through the shared envelope helpers in
 :mod:`.output` (see ``docs/json-contract.md``):
 
 - ``find`` — resolve one install/variant and report its paths.
@@ -11,7 +11,9 @@ Ten subcommands, all emitting through the shared envelope helpers in
   CI gate for the "install looks complete but part of it cannot actually be
   opened" failure mode ``find``/``env`` also report but do not gate on.
 - ``cells`` — per standard-cell library device flavor(s) and nominal supply.
-- ``macros`` — per hard-macro IP library (`*_fd_ip_*`), which views it ships.
+- ``macros`` — per hard-macro IP library (`*_fd_ip_*` or lef+lib), which views it ships.
+- ``decks`` — the KLayout DRC deck files the variant ships and the ``-rd``
+  globals each consumes (issue #3816).
 - ``corners`` — per SPICE process corner, which device families skew vs.
   resolve to typical.
 - ``em-limits`` — per-layer electromigration current-density limits declared
@@ -47,6 +49,8 @@ import sys
 
 from ..pdk import (
     PdkNotFoundError,
+    alternative_variants_warning,
+    drc_decks,
     em_limits,
     find_pdk,
     list_corners,
@@ -86,15 +90,40 @@ EXIT_BROKEN_SYMLINKS = 4
 #: unavailable. See docs/cli/pdk.md.
 EXIT_PCELL_UNAVAILABLE = 5
 
+#: `klt pdk find`/`check --expect-version` exit code when the installed
+#: identity is a `mismatch` or `unknown` (fail closed) against the caller's
+#: pin (issue #3810). The normal payload is still emitted. Lower codes win:
+#: `check`'s EXIT_BROKEN_SYMLINKS (4) is returned in preference. See
+#: docs/cli/pdk.md.
+EXIT_VERSION_MISMATCH = 6
+
+
+def _version_expectation_exit(report: dict) -> int:
+    """Exit code (0 or EXIT_VERSION_MISMATCH) for ``--expect-version``; on a
+    failure writes one stderr line naming both revisions."""
+    result = report.get("version_expectation")
+    if not result or result["status"] == "match":
+        return 0
+    installed = result["installed"]
+    print(
+        f"klt: PDK version expectation {result['status']}: expected "
+        f"{result['expected']!r}, installed "
+        f"{installed if installed is not None else 'unknown'!r}",
+        file=sys.stderr,
+    )
+    return EXIT_VERSION_MISMATCH
+
 
 def run_find(args: argparse.Namespace) -> int:
     try:
-        report = find_pdk(variant=args.pdk, root=args.pdk_root)
+        report = find_pdk(
+            variant=args.pdk, root=args.pdk_root, expect_version=args.expect_version
+        )
     except PdkNotFoundError as exc:
         return emit_error("pdk find", str(exc), args.format)
 
     emit_success(report, args.format, _print_find_text)
-    return 0
+    return _version_expectation_exit(report)
 
 
 def run_list(args: argparse.Namespace) -> int:
@@ -115,15 +144,18 @@ def run_env(args: argparse.Namespace) -> int:
 
 def run_check(args: argparse.Namespace) -> int:
     try:
-        report = find_pdk(variant=args.pdk, root=args.pdk_root)
+        report = find_pdk(
+            variant=args.pdk, root=args.pdk_root, expect_version=args.expect_version
+        )
     except PdkNotFoundError as exc:
         return emit_error("pdk check", str(exc), args.format)
 
     emit_success(report, args.format, _print_check_text)
 
+    expectation_exit = _version_expectation_exit(report)
     if report["broken_symlinks"]:
         return EXIT_BROKEN_SYMLINKS
-    return 0
+    return expectation_exit
 
 
 def run_cells(args: argparse.Namespace) -> int:
@@ -148,6 +180,16 @@ def run_macros(args: argparse.Namespace) -> int:
         return emit_error("pdk macros", str(exc), args.format)
 
     emit_success(report, args.format, _print_macros_text)
+    return 0
+
+
+def run_decks(args: argparse.Namespace) -> int:
+    try:
+        report = drc_decks(variant=args.pdk, root=args.pdk_root)
+    except PdkNotFoundError as exc:
+        return emit_error("pdk decks", str(exc), args.format)
+
+    emit_success(report, args.format, _print_decks_text)
     return 0
 
 
@@ -205,6 +247,11 @@ def _print_find_text(report: dict) -> None:
     version = report["version"]
     print(f"version: {version if version is not None else '-'}")
     print(f"resolved_via: {report['resolved_via']}")
+    for shadowed in report.get("ambiguous_roots") or []:
+        print(
+            f"warning: shadowed same-variant install: {shadowed['root']} "
+            f"({shadowed['resolved_via']})"
+        )
     print("assets:")
     assets = report["assets"]
     for key in _ASSET_KEYS:
@@ -213,7 +260,15 @@ def _print_find_text(report: dict) -> None:
     broken = report.get("broken_symlinks", [])
     if broken:
         print(f"broken_symlinks: {len(broken)} (see `klt pdk check` for detail)")
+    if report.get("pcell_shim") == "missing":
+        print(
+            "pcell_shim: missing (PyCell package present but its vendored compat "
+            "shim is absent/empty; see `klt gen --list-pdk-pcells`)"
+        )
     _print_compatibility_text(report)
+    alternatives = alternative_variants_warning(report)
+    if alternatives:
+        print(alternatives, file=sys.stderr)
 
 
 def _print_check_text(report: dict) -> None:
@@ -232,6 +287,9 @@ def _print_check_text(report: dict) -> None:
 def _print_compatibility_text(report: dict) -> None:
     """Render the ``compatibility`` status; warn on stderr for mismatch or
     unknown (warning-only, issue #2759 -- never changes the exit code)."""
+    expectation = report.get("version_expectation")
+    if expectation:
+        print(f"version_expectation: {expectation['status']}")
     compat = report.get("compatibility")
     if not compat:
         return
@@ -324,7 +382,10 @@ def _print_macros_text(report: dict) -> None:
 
     print(f"pdk: {report['pdk']}")
     if not macros:
-        print("no hard-macro IP libraries found (no `_fd_ip_` entry under libs.ref)")
+        print(
+            "no hard-macro IP libraries found (no `_fd_ip_` entry or lef+lib "
+            "macro library under libs.ref)"
+        )
         return
 
     headers = ("library", "views")
@@ -334,6 +395,35 @@ def _print_macros_text(report: dict) -> None:
         rows.append((macro["name"], "/".join(present) or "-"))
 
     render_table(headers, rows, left_aligned={0, 1})
+
+
+def _print_decks_text(report: dict) -> None:
+    decks = report["decks"]
+
+    print(f"pdk: {report['pdk']}")
+    if not decks:
+        print("no DRC decks found (no `.lydrc`/`.drc` under libs.tech/klayout/drc)")
+        return
+
+    headers = ("deck", "kind", "default", "globals")
+    rows: list[tuple[str, ...]] = []
+    for deck in decks:
+        names = [
+            g["name"] if not g["required_by_caller"] else f"{g['name']}*"
+            for g in deck["globals"]
+        ]
+        rows.append(
+            (
+                deck["name"],
+                deck["kind"],
+                "yes" if deck["is_default"] else "",
+                ", ".join(names) or "-",
+            )
+        )
+
+    render_table(headers, rows, left_aligned={0, 1, 2, 3})
+    print()
+    print("* = no default detected; supply with `klt drc --deck-var name=value`")
 
 
 def _format_em_field(field: dict) -> str:

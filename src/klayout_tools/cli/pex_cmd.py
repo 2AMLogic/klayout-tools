@@ -18,7 +18,9 @@ Exit codes (see ``docs/cli/pex.md`` for the full table):
         block here rather than aborting with exit 1 (issue #1030), and a
         flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which
         reports a named ``flat_dut_mismatch`` block the same way (issue
-        #1255, Gap 2)
+        #1255, Gap 2), and a same-pins-different-order mismatch, which
+        reports a named ``pin_order_mismatch`` block the same way (issue
+        #2890)
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. Exit codes 3/4 mirror `klt sim`'s own precedent -- see
 docs/cli/sim.md's "Exit codes" section.)
@@ -26,11 +28,18 @@ docs/cli/sim.md's "Exit codes" section.)
 
 import argparse
 import shlex
+import sys
 
 from ..env_provenance import render_path_field
 from ..output_lock import OutputLockError
 from ..pex import PexError, run_pex
-from ._parsing import parse_deck_options, parse_declared_pins, parse_label_layers
+from ._parsing import (
+    parse_deck_options,
+    parse_declared_pins,
+    parse_device_models,
+    parse_label_layers,
+    parse_tie_nets,
+)
 
 # Issue #2686: the same one-line `label_layers:` text rendering `klt extract`
 # prints for its own echo, reused rather than copied.
@@ -54,6 +63,11 @@ def run(args: argparse.Namespace) -> int:
         # --label-layer` uses (issue #2656), bound to `PexError`. Role names
         # are validated by the deck during extraction, not here.
         label_layers = parse_label_layers(args.label_layers, PexError)
+        # `--tie-net` (issue #4245): `EXTRACTED=SCHEMATIC` pairs; whether the
+        # extracted half is a reported unbiased net is checked by `run_pex`.
+        tie_nets = parse_tie_nets(args.tie_nets, PexError)
+        # `--device-model` (issue #4234): shared parser, bound to `PexError`.
+        device_models = parse_device_models(args.device_models, PexError)
         # `--measure-command` (issue #2478): one shell-quoted string on the
         # command line, an argv *list* everywhere below -- `shlex.split`
         # here is the only place the string form exists. The command is
@@ -87,22 +101,41 @@ def run(args: argparse.Namespace) -> int:
             # was never given, unchanged from every call site that predates
             # it.
             rename_declared_pins=args.rename_declared_pins,
+            # `--tie-declared-pins` (issue #4383), passed to `klt extract`.
+            tie_declared_pins=args.tie_declared_pins,
             # `--label-layer` (issue #2686): which GDS purpose extraction
             # reads net/pin name text from, per label role, passed straight
             # through to `klt extract --label-layer`. `None` when the flag
             # was never given, unchanged from every call site that predates
             # it.
             label_layers=label_layers,
+            # `--tie-net` (issue #4245): merges reported-unbiased body nets
+            # into schematic nets in the simulated extracted netlist. `None`
+            # when the flag was never given, unchanged from before it.
+            tie_nets=tie_nets,
+            # `--device-model` (issue #4234): passed straight through to
+            # `klt extract --device-model`. `None` when never given.
+            device_models=device_models,
             # `--critical-net` (issue #976, Epic #709 Phase 2a): scopes the
             # lateral coupling pass onto these net names. `None` when the
             # flag was never given, unchanged from every call site that
             # predates it.
             critical_nets=args.critical_nets,
+            # Issue #2974: glob / all-nets forms of --critical-net.
+            critical_net_patterns=args.critical_net_patterns,
+            critical_net_all=args.critical_net_all,
+            critical_net_excludes=args.critical_net_excludes,
             # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
             # the star/Gamma-shunt R/C model with a distributed ladder for
             # every `--critical-net`-named net. `False` when the flag was
             # never given, unchanged from every call site that predates it.
             distributed_rc=args.distributed_rc,
+            # `--resistance-graph[-r-cut]` (issue #4037): `False`/`None` when
+            # never given, unchanged from every call site that predates them.
+            resistance_graph=args.resistance_graph,
+            resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
+            # `--substrate-tie-ohms` (issue #3089): `None` when never given.
+            substrate_tie_ohms=args.substrate_tie_ohms,
             # `--mom-rlc-net`/`--mom-rlc-resistance-ohm`/
             # `--mom-rlc-capacitance-ff`/`--mom-rlc-inductance-nh` (issue
             # #988, Epic #709 Phase 3a): substitutes a caller-supplied R/L/C
@@ -129,6 +162,13 @@ def run(args: argparse.Namespace) -> int:
             # when the flag was never given, unchanged from every call site
             # that predates it.
             flatten_schematic=args.flatten_schematic,
+            # `--device-only-leg` (issue #3298): a parasitic-free third leg
+            # splitting `delta[]` into representation and parasitic parts.
+            # `False` when the flag was never given.
+            device_only_leg=args.device_only_leg,
+            # `--extract-only` (issue #3739): extract and report, no
+            # measurement leg. `False` when the flag was never given.
+            extract_only=args.extract_only,
         )
     except PexError as exc:
         # Issue #2889: a classified error (today: `schematic_flatten_*`)
@@ -141,10 +181,30 @@ def run(args: argparse.Namespace) -> int:
     emit_success(report, args.format, _print_text)
 
     if report["status"] in {"error", "not_checked"}:
+        summary = _errored_rows_summary(report)
+        if summary:
+            print(summary, file=sys.stderr)
         return EXIT_ROW_ERRORED
     if report["status"] == "fail":
         return EXIT_ROW_FAILED
     return EXIT_PASS
+
+
+def _errored_rows_summary(report: dict) -> str | None:
+    """One stderr line for a run that exited 4 on errored ``delta[]`` rows
+    (issue #3062): the count, the first distinct cause and its stage -- so
+    the cause is visible without opening the JSON. ``None`` when no row
+    carries an ``error`` object."""
+    errored = [row for row in report.get("delta", []) if row.get("error")]
+    if not errored:
+        return None
+    first = errored[0]["error"]
+    return (
+        f"klt pex: {len(errored)} of {len(report['delta'])} delta rows errored; "
+        f"first cause ({first['side']} side, stage {first['stage']}"
+        + (f", {first['code']}" if first.get("code") else "")
+        + f"): {' '.join(str(first['message']).split())}"
+    )
 
 
 def _parse_measure_command(raw: str | None) -> list[str] | None:
@@ -168,7 +228,8 @@ def _parse_measure_command(raw: str | None) -> list[str] | None:
 
 
 def _print_mismatch(mismatch: dict | None, name: str) -> None:
-    """Print ``mismatch`` (``pin_count_mismatch`` or ``flat_dut_mismatch`` --
+    """Print ``mismatch`` (``pin_count_mismatch``, ``flat_dut_mismatch`` or
+    ``pin_order_mismatch`` --
     both share the same structured shape: ``subcircuit``, a ``schematic``
     and ``extracted`` per-side detail dict, ``ngspice_message``, and
     ``detail``) under its own ``<name>:`` heading, or nothing at all when
@@ -201,6 +262,50 @@ def _print_schematic_flatten(block: dict | None) -> None:
     )
 
 
+def _print_device_only_leg(report: dict) -> None:
+    """One ``device_only_netlist:`` line (issue #3298), or nothing when
+    ``--device-only-leg`` was not given."""
+    if "device_only_netlist" not in report:
+        return
+    print(
+        f"device_only_netlist: {render_path_field(report['device_only_netlist'])}  "
+        f"device_cards={report['device_card_count']}  "
+        f"match={report['device_cards_match']}"
+    )
+
+
+def _device_only_desc(row: dict) -> str:
+    """The ``--device-only-leg`` split of one delta row (issue #3298), or
+    nothing for a row that carries none."""
+    if "device_only_value" not in row:
+        return ""
+
+    def pct(value: float | None) -> str:
+        return f"{value:+.3f}%" if value is not None else "-"
+
+    return (
+        f"  device_only={row['device_only_value']!r}  "
+        f"representation={pct(row['representation_delta_pct'])}  "
+        f"parasitic={pct(row['parasitic_delta_pct'])}"
+    )
+
+
+def _print_measurement(measurement: dict) -> None:
+    """The text report's ``measurement:`` line(s): ``--extract-only``
+    (issue #3739) and ``--measure-command`` runs only."""
+    if measurement.get("mode") == "extract-only":
+        print("measurement: extract-only  (nothing measured; no delta rows)")
+    if measurement.get("mode") == "command":
+        print(f"measurement: command  {shlex.join(measurement['command'])}")
+        for side, entry in (measurement.get("sides") or {}).items():
+            print(
+                f"  {side}: {render_path_field(entry['netlist'])}  "
+                f"exit={entry['exit_status']}  "
+                f"corners={entry['corner_count']}  "
+                f"measurements={', '.join(entry['measurement_names'])}"
+            )
+
+
 def _print_text(report: dict) -> None:
     # Issue #1261: `layout`/`netlist`/`reference_netlist` are the
     # `{path, scope}` shape `env_provenance.repo_relative_path` defines --
@@ -212,6 +317,8 @@ def _print_text(report: dict) -> None:
     print(f"reference_netlist: {render_path_field(report['reference_netlist'])}")
     # Additive (issue #2889): only printed when --flatten-schematic was given.
     _print_schematic_flatten(report.get("schematic_flatten"))
+    # Additive (issue #3298): only printed when --device-only-leg was given.
+    _print_device_only_leg(report)
     print(f"status: {report['status']}")
     print(
         f"corners: {report['corner_count']}  "
@@ -235,6 +342,16 @@ def _print_text(report: dict) -> None:
     # Additive (issue #977): only printed when --distributed-rc was given.
     if extraction.get("distributed_rc"):
         print("distributed_rc: on")
+    # Additive (issue #4037): only printed when --resistance-graph was given.
+    resistance_graph = extraction.get("resistance_graph")
+    if resistance_graph is not None:
+        graph_nets = [
+            n for n in resistance_graph["nets"] if n["resistance_source"] == "graph"
+        ]
+        print(
+            f"resistance_graph: on  graph_nets={len(graph_nets)}/"
+            f"{len(resistance_graph['nets'])}"
+        )
     # Additive (issue #988): only printed when --mom-rlc-net was given.
     mom_rlc_override = extraction.get("mom_rlc_override")
     if mom_rlc_override is not None:
@@ -249,15 +366,7 @@ def _print_text(report: dict) -> None:
     # a testbench-mode report's `measurement` block carries no information
     # the `testbenches:` section below does not already show.
     measurement = report.get("measurement") or {}
-    if measurement.get("mode") == "command":
-        print(f"measurement: command  {shlex.join(measurement['command'])}")
-        for side, entry in (measurement.get("sides") or {}).items():
-            print(
-                f"  {side}: {render_path_field(entry['netlist'])}  "
-                f"exit={entry['exit_status']}  "
-                f"corners={entry['corner_count']}  "
-                f"measurements={', '.join(entry['measurement_names'])}"
-            )
+    _print_measurement(measurement)
 
     # Additive (issue #1030): only printed when the extracted-side deck was
     # rejected for a schematic/extracted top-level pin-list mismatch.
@@ -265,6 +374,9 @@ def _print_text(report: dict) -> None:
     # Additive (issue #1255, Gap 2): only printed when the schematic DUT is
     # flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction.
     _print_mismatch(report.get("flat_dut_mismatch"), "flat_dut_mismatch")
+    # Additive (issue #2890): only printed when both sides declare the same
+    # pins in a different order.
+    _print_mismatch(report.get("pin_order_mismatch"), "pin_order_mismatch")
 
     testbenches = report["testbenches"]
     if testbenches:
@@ -289,4 +401,5 @@ def _print_text(report: dict) -> None:
             f"  {row['spec_row']} @ {row['corner_id']}  [{row['status']}]  "
             f"schematic={row['schematic_value']!r}  "
             f"extracted={row['extracted_value']!r}  delta={delta_desc}"
+            + _device_only_desc(row)
         )

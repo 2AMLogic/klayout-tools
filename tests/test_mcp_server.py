@@ -152,8 +152,16 @@ def test_option_injection_refused(tools, policy):
         for d, p in array_tool.input_schema["properties"].items()
         if p.get("type") == "array" and d in array_tool.path_dests
     )
+    # Satisfy the tool's other required arguments so the refusal under test is
+    # the option check, not "missing required argument(s)".
+    props = array_tool.input_schema["properties"]
+    others = {
+        d: ["x"] if props[d].get("type") == "array" else "x"
+        for d in array_tool.input_schema.get("required", [])
+        if d != dest
+    }
     with pytest.raises(ToolCallRefused, match="option"):
-        build_argv(array_tool, {dest: ["a", "-x"]}, policy)
+        build_argv(array_tool, {**others, dest: ["a", "-x"]}, policy)
 
 
 def test_injection_refused_before_subprocess(tools, policy, monkeypatch):

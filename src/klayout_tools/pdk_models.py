@@ -396,13 +396,16 @@ MOS_FLAVOUR_PROPERTY = "mos_flavour"
 #: -- the derivation `decks/sg13g2.py`'s `mos_flavours` entry transcribes.
 #:
 #: sky130's 5V-gate/10.5V-drain thick-oxide pair (issue #1369) is confirmed in
-#: the same real fetched sky130A install (volare,
-#: `c6d73a35f524070e85faff4a6a9eef49553ebc2b`) the module docstring's `01v8`
-#: entry above cites -- `libs.tech/combined/continuous/models_fet.spice:15382`
-#: (`.subckt  sky130_fd_pr__nfet_g5v0d10v5  d g s b  mult=1`) and `:36917`
-#: (the `pfet` analogue), each followed by the identical
+#: the same real fetched sky130A install (ciel,
+#: `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`) the module docstring's `01v8`
+#: entry above cites --
+#: `libs.tech/combined/continuous/models_fet/sky130_fd_pr__nfet_g5v0d10v5.spice:29`
+#: (`.subckt  sky130_fd_pr__nfet_g5v0d10v5  d g s b  mult=1`) and
+#: `.../sky130_fd_pr__pfet_g5v0d10v5.spice:30` (the `pfet` analogue), each
+#: followed by the identical
 #: `.param  l = 1 w = 1 nf = 1 ad = 0 as = 0 pd = 0 ps = 0 ...` line the
-#: `01v8` pair carries at `:10037`, i.e. the same `d g s b` terminal order
+#: `01v8` pair carries at `.../sky130_fd_pr__nfet_01v8.spice:34`, i.e. the
+#: same `d g s b` terminal order
 #: and `l`/`w`/`as`/`ad`/`ps`/`pd` call-site convention
 #: :func:`create_model_binding_delegate` already writes for the default pair.
 #: Extracted under exactly those names by the PDK's own
@@ -420,7 +423,7 @@ MOS_FLAVOUR_PROPERTY = "mos_flavour"
 #: independent sources in the same install: the KLayout layer-properties
 #: file `libs.tech/klayout/tech/sky130A.lyp:3127`
 #: (`<name>hvi.drawing - 75/20</name>`) and the magic technology file
-#: `libs.tech/magic/sky130A.tech:3980` (`calma HVI 75 20`).
+#: `libs.tech/magic/sky130A.tech:3975` (`calma HVI 75 20`).
 _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
     ("gf180mcu", "gf180mcu"): {
         "06v0": {
@@ -457,6 +460,11 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
         },
     },
     ("sky130", "sky130"): {
+        # Native-Vt NMOS only (issue #3599, `sky130.lvs` L1214/1226/2081);
+        # deliberately no "pfet" entry -- there is no native PMOS.
+        "nvt": {
+            "nfet": "sky130_fd_pr__nfet_05v0_nvt",
+        },
         "hvi": {
             "nfet": "sky130_fd_pr__nfet_g5v0d10v5",
             "pfet": "sky130_fd_pr__pfet_g5v0d10v5",
@@ -636,11 +644,13 @@ def _unbound_mom_capacitor_card(
 
     **Issue #2445 -- ``feed`` is written when measured.** ``feed`` (``cap_cmomi``
     only) is the token ``none``/``same``/``double`` the extractor recovered
-    from the drawn port placement (``extract._mom_feed_variant``); it is
+    from the drawn port placement
+    (``extract_passive_regions._mom_feed_variant``); it is
     written as ``FEED=<token>`` after ``MMAX=`` and omitted entirely when
     ``None`` (a layout matching no PCell signature, or a ``cap_cmomf``), so an
     unmeasured feed still falls to the ``.subckt`` default instead of being
-    guessed. See ``extract._mom_feed_variant`` for the settled mapping.
+    guessed. See ``extract_passive_regions._mom_feed_variant`` for the settled
+    mapping.
 
     **Four of the upstream subcircuit's parameters are always written, plus
     ``feed`` when measured; ``subblock``/``mm_ok`` are never.** The
@@ -781,6 +791,32 @@ def build_subckt_to_class_map(deck_name: str) -> dict[str, str]:
     return result
 
 
+def mos_flavour_for_subckt(subckt_name: str) -> str | None:
+    """The ``_MOS_MODEL_FLAVOURS`` flavour key (e.g. ``"nvt"``, ``"hvi"``,
+    ``"06v0"``) a MOS subcircuit name belongs to, or ``None`` for a
+    default-flavour model or an unknown name (issue #3650).
+
+    The inverse of the flavour tables :func:`build_subckt_to_class_map`
+    deliberately collapses: it is what ``options.compare_mos_flavour`` uses to
+    tell a reference ``X`` call of a flavoured model apart from a default one.
+    A name shared by several decks (``sg13_hv_nmos`` in sg13g2 and
+    sg13cmos5l) resolves to the same key in each.
+    """
+    for flavours in _MOS_MODEL_FLAVOURS.values():
+        for flavour, table in flavours.items():
+            if subckt_name in table.values():
+                return flavour
+    return None
+
+
+def flavoured_mos_class_name(device_class: str, flavour: str) -> str:
+    """The device-class name a flavoured MOS device is compared under when
+    ``options.compare_mos_flavour`` is on (issue #3650), e.g. ``nfet`` +
+    ``nvt`` -> ``nfet__nvt``. Both the reference conversion and the layout-side
+    split derive the name here, so the two sides cannot disagree."""
+    return f"{device_class}__{flavour}"
+
+
 def known_mos_subckt_names() -> dict[str, tuple[str, str]]:
     """Every curated MOS device subcircuit name across *all* decks, mapped to
     the ``(deck_name, device_class)`` it resolves to (e.g.
@@ -822,8 +858,8 @@ class DeviceLookup:
     tables that are already deck-name-keyed.
 
     ``kind`` mirrors :attr:`DeviceBinding.kind`
-    (``"mos"``/``"resistor"``/``"capacitor"``/``"bipolar"``). ``device_class``
-    is the plain-element card's model-field label (``nfet``,
+    (``"mos"``/``"resistor"``/``"capacitor"``/``"bipolar"``/``"diode"``).
+    ``device_class`` is the plain-element card's model-field label (``nfet``,
     ``res_generic_po``, ...). ``length_param``/``width_param`` are the *real*
     subcircuit's own call-site parameter spellings (``l``/``w`` for sky130,
     ``r_length``/``r_width`` or ``c_length``/``c_width`` for gf180mcu) --
@@ -871,6 +907,42 @@ class DeviceLookup:
     emitter_area_um2: float | None = None
     fixed_length_um: float | None = None
     fixed_width_um: float | None = None
+
+
+#: ``(deck_name, family) -> {device-class name: subcircuit name}`` for the PDK
+#: junction-diode subcircuits (issue #4319). Each is a two-terminal
+#: ``anode cathode`` cell taking ``area``/``perim`` (``pj``) call-site
+#: parameters; the subcircuit name is ``sky130_fd_pr__`` + the deck's
+#: ``DiodeDevice`` class name (a test iterates ``EXTRACTION_DECK.diodes`` so a
+#: new class cannot be silently missed).
+_DIODE_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
+    ("sky130", "sky130"): {
+        name: f"sky130_fd_pr__{name}"
+        for name in (
+            "diode_pw2nd_05v5",
+            "diode_pw2nd_05v5_lvt",
+            "diode_pw2nd_05v5_nvt",
+            "diode_pw2nd_11v0",
+            "diode_pd2nw_05v5",
+            "diode_pd2nw_05v5_lvt",
+            "diode_pd2nw_05v5_hvt",
+            "diode_pd2nw_11v0",
+        )
+    },
+}
+
+
+def _diode_bindings(deck_name: str, family: str) -> dict[str, DeviceLookup]:
+    """``<subckt-name> -> DeviceLookup("diode", ...)`` for every junction-diode
+    :data:`_DIODE_MODEL_TABLE` curates for one ``(deck_name, family)`` pair;
+    empty for a pair the table does not cover. Like bipolar, resolved purely
+    by subcircuit name (the call carries no length/width parameter)."""
+    return {
+        subckt: DeviceLookup("diode", device_class)
+        for device_class, subckt in _DIODE_MODEL_TABLE.get(
+            (deck_name, family), {}
+        ).items()
+    }
 
 
 _BindingValue = TypeVar("_BindingValue")
@@ -999,6 +1071,10 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
     for deck_name, family in _BIPOLAR_MODEL_TABLE:
         _setdefault_bindings(
             result, _tagged_bindings(deck_name, _bipolar_bindings(deck_name, family))
+        )
+    for deck_name, family in _DIODE_MODEL_TABLE:
+        _setdefault_bindings(
+            result, _tagged_bindings(deck_name, _diode_bindings(deck_name, family))
         )
     return result
 
@@ -1131,6 +1207,7 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
             subckt, DeviceLookup("capacitor", device_class, cap_len, cap_wid)
         )
     _setdefault_bindings(result, _bipolar_bindings(deck_name, family))
+    _setdefault_bindings(result, _diode_bindings(deck_name, family))
     if res_table is None or cap_table is None:
         declared_resistors, declared_capacitors = _declared_non_mos_classes(deck_name)
         if res_table is None:
@@ -1449,8 +1526,30 @@ _CAPACITOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
         "sky130_fd_pr__model__cap_mim": "sky130_fd_pr__cap_mim_m3_1",
         "sky130_fd_pr__model__cap_mim_m4": "sky130_fd_pr__cap_mim_m3_2",
     },
+    # The `1f0`/`1f5` densities (selectable via `--deck-option mim_cap=`,
+    # issue #1151) are bound too (issue #3090): the PDK ships
+    # `.subckt cap_mim_1f0_m4m5_noshield` / `cap_mim_1f5_m4m5_noshield`
+    # (`libs.tech/ngspice/sm141064_mim.ngspice`, same `c_length`/`c_width`
+    # parameters as `2f0`), whose `mim_corner_*` params the process-corner
+    # sections scale -- a bare `C` card cannot follow those corners.
     ("gf180mcu", "gf180mcu"): {
+        "cap_mim_1f0_m4m5_noshield": "cap_mim_1f0_m4m5_noshield",
+        "cap_mim_1f5_m4m5_noshield": "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield": "cap_mim_2f0_m4m5_noshield",
+        # MOS capacitors (issue #2919): the PDK ships `.subckt cap_nmos_03v3
+        # 1 2 c_length=l c_width=w dtemp=0` (and the pmos/06v0/`_b` forms) in
+        # `libs.tech/ngspice/sm141064.ngspice`, same `c_` spellings as the
+        # MiM. The `_dn` classes have no subcircuit of their own (the runset
+        # folds them onto the plain name unless CONSIDER_DN_DW_FEATURES), so
+        # they stay unbound.
+        "cap_nmos_03v3": "cap_nmos_03v3",
+        "cap_pmos_03v3": "cap_pmos_03v3",
+        "cap_nmos_06v0": "cap_nmos_06v0",
+        "cap_pmos_06v0": "cap_pmos_06v0",
+        "cap_nmos_03v3_b": "cap_nmos_03v3_b",
+        "cap_pmos_03v3_b": "cap_pmos_03v3_b",
+        "cap_nmos_06v0_b": "cap_nmos_06v0_b",
+        "cap_pmos_06v0_b": "cap_pmos_06v0_b",
     },
     # sg13g2's two declared MIM capacitor classes (issue #1470; classes
     # recognised by issue #1456). Confirmed against a real fetched
@@ -1547,7 +1646,10 @@ _CAPACITOR_PARAM_STYLE: dict[str, tuple[str, str]] = {
 
 
 def resolve_device_bindings(
-    deck_name: str, pdk_variant: str, deck: Any
+    deck_name: str,
+    pdk_variant: str,
+    deck: Any,
+    device_models: Mapping[str, str] | None = None,
 ) -> dict[str, DeviceBinding]:
     """Resolve the full ``{device-class-name -> DeviceBinding}`` map for
     ``deck`` against ``pdk_variant`` (issue #339): MOS, plus every resistor and
@@ -1655,7 +1757,48 @@ def resolve_device_bindings(
             geometry_style=geometry_style,
         )
 
+    # Caller-supplied bipolar model (`klt extract --device-model CLASS=SUBCKT`):
+    # fills in only a class with *no* curated binding above -- never overrides
+    # curated data (the gf180mcu carve-out exists because the tool cannot guess
+    # the cell name; the caller can state it).
+    if device_models:
+        _bind_caller_bipolar_models(
+            bindings, deck_name, deck, device_models, geometry_style
+        )
+
     return bindings
+
+
+def _bind_caller_bipolar_models(
+    bindings: dict[str, DeviceBinding],
+    deck_name: str,
+    deck: Any,
+    device_models: Mapping[str, str],
+    geometry_style: str,
+) -> None:
+    """Add the caller's ``--device-model CLASS=SUBCKT`` bipolar bindings to
+    ``bindings`` in place (issue #4234)."""
+    bipolar_classes = sorted(b.class_name for b in getattr(deck, "bipolars", ()))
+    for class_name, subckt in device_models.items():
+        if class_name not in bipolar_classes:
+            available = ", ".join(bipolar_classes) or "none"
+            raise ModelBindingError(
+                f"--device-model class {class_name!r} is not a bipolar "
+                f"class of deck {deck_name!r} (bindable classes: {available})"
+            )
+        if class_name in bindings:
+            raise ModelBindingError(
+                f"--device-model class {class_name!r} already has a curated "
+                f"PDK binding for deck {deck_name!r}; it cannot be overridden"
+            )
+        bindings[class_name] = DeviceBinding(
+            "bipolar",
+            "",
+            ("C", "B", "E"),
+            variants=((0.0, subckt),),
+            dropped_params=_BIPOLAR_DROPPED_PARAMS,
+            geometry_style=geometry_style,
+        )
 
 
 def _select_bipolar_variant(

@@ -102,6 +102,8 @@ class _CellModel:
         self.async_pins: dict[str, tuple[str, int]] = {}
         #: inversion parity (0/1) when this is a pure buffer/inverter cell.
         self.passthrough_parity: int | None = None
+        #: Verilog primitive / sub-module types the model instantiates.
+        self.primitives: list[str] = []
 
 
 def _read(path: str, what: str) -> str:
@@ -114,8 +116,17 @@ def _read(path: str, what: str) -> str:
         ) from exc
 
 
+#: A net-type keyword in a port declaration (``input wire CLK``), which the
+#: real sky130 cell models carry on every port.
+_NET_TYPE_RE = re.compile(r"^(?:wire|reg|logic|tri)\s+")
+
+
 def _names(decl: str) -> list[str]:
-    return [n.strip().lstrip("\\") for n in decl.split(",") if n.strip()]
+    return [
+        _NET_TYPE_RE.sub("", n.strip()).lstrip("\\")
+        for n in decl.split(",")
+        if n.strip()
+    ]
 
 
 def _build_model(name: str, body: str) -> _CellModel:
@@ -125,6 +136,7 @@ def _build_model(name: str, body: str) -> _CellModel:
         (inputs if direction == "input" else outputs).extend(_names(decl))
     model = _CellModel(name, inputs, outputs)
     instances = [(t, n) for t, n in _STMT_RE.findall(body) if t not in _KEYWORDS]
+    model.primitives = [t for t, _ in instances]
     model.sequential = any(_SEQ_UDP_RE.search(t) for t, _ in instances)
     if model.sequential:
         for pin in inputs:
@@ -438,3 +450,78 @@ def _apply_waivers(
 
 def reason_description(code: str) -> str:
     return REASONS.get(code, code)
+
+
+# ------------------------------------------------- initial-state drive list
+
+#: Clock/enable pins of a sequential cell.
+_CAPTURE_PINS = ("CLK", "GATE", "CLK_N", "GATE_N")
+
+#: Scan pins: a scan cell's D is only captured while its scan enable is off,
+#: which the force-D drive cannot guarantee.
+_SCAN_PINS = ("SCD", "SCE")
+
+
+def sequential_elements(
+    netlist_path: str, cell_model_paths: list[str], top: str
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Every sequential instance of module ``top`` in the gate-level netlist,
+    with the pins a testbench-independent initial-state drive needs (issue
+    #2998, ``options.initial_state`` of ``klt functional-verification``).
+
+    Returns ``(drivable, unsupported)``. A ``drivable`` entry is
+    ``{"instance", "cell", "d_pin", "d_net", "capture_pin", "capture_net"}``:
+    force ``d_pin`` and let the clock/enable at ``capture_net`` capture it.
+    ``unsupported`` entries (``{"instance", "cell", "reason"}``) are state the
+    force-D drive cannot reach: a hard macro, a sequential cell whose model
+    has no ``D`` pin or no recognised clock/enable pin, or a scan cell.
+    """
+    models = load_cell_models(cell_model_paths)
+    try:
+        modules = parse_gate_level_verilog(_read(netlist_path, "netlist"))
+    except VerilogNetlistError as exc:
+        raise ResetCoverageError(
+            f"cannot parse netlist {netlist_path!r}: {exc}"
+        ) from exc
+    by_name = {str(m["name"]): m for m in modules}
+    if top not in by_name:
+        raise ResetCoverageError(
+            f"top module {top!r} not in netlist (have {sorted(by_name)})"
+        )
+    module: dict[str, Any] = by_name[top]
+    drivable: list[dict[str, Any]] = []
+    unsupported: list[dict[str, str]] = []
+    for inst in module["instances"]:
+        model = models.get(inst["cell"])
+        if model is None:
+            if inst["cell"] in by_name:
+                raise ResetCoverageError(
+                    f"instance {inst['name']!r} is of module {inst['cell']!r} "
+                    "defined in the netlist; hierarchical netlists are not "
+                    "supported -- flatten first"
+                )
+            reason = "hard_macro"
+        elif not model.sequential:
+            continue
+        else:
+            capture = [p for p in model.inputs if p in _CAPTURE_PINS]
+            if any(p in model.inputs for p in _SCAN_PINS):
+                reason = "scan_cell"
+            elif "D" not in model.inputs or len(capture) != 1:
+                reason = "no_d_or_clock_pin"
+            else:
+                drivable.append(
+                    {
+                        "instance": inst["name"],
+                        "cell": inst["cell"],
+                        "d_pin": "D",
+                        "d_net": inst["connections"].get("D"),
+                        "capture_pin": capture[0],
+                        "capture_net": inst["connections"].get(capture[0]),
+                    }
+                )
+                continue
+        unsupported.append(
+            {"instance": inst["name"], "cell": inst["cell"], "reason": reason}
+        )
+    return drivable, unsupported

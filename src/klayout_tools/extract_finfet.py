@@ -49,9 +49,12 @@ from the deck's. Each raises :class:`FinFETGeometryError` (``error.code``
 Scope
 -----
 
-Flat extraction over the top cell, like the planar path. Options that
-depend on planar-only machinery (``--parasitics``, abstract cells, DEF pin
-promotion, ``--subcircuit``, ...) are rejected up front by
+Flat extraction over the top cell, like the planar path. ``--parasitics``
+runs the shared ``_compute_parasitics`` pass over the deck's metal stack
+(issue #4558); ``--def-net-names`` and ``--pins`` reuse the planar
+reconciliation so a routed ASAP7 GDS names its nets from the DEF (issue
+#4559). Options that depend on planar-only machinery (abstract
+cells, DEF pin promotion, ``--subcircuit``, ...) are rejected up front by
 :func:`reject_unsupported_options` rather than half-applied.
 """
 
@@ -448,6 +451,41 @@ class _Layers:
             (flavour, self.polygons(flavour.marker, f"vt_{flavour.name}"))
             for flavour in deck.vt_flavours
         ]
+        self._build_passives(deck)
+
+    def _metal_index(self, deck: FinFETExtractionDeck, ld: tuple[int, int]) -> int:
+        if ld not in deck.metals:
+            raise ExtractError(
+                f"FinFET passive layer {ld} is not one of the deck's metals"
+            )
+        return deck.metals.index(ld)
+
+    def _build_passives(self, deck: FinFETExtractionDeck) -> None:
+        """Resistor bodies are cut out of their metal's connectivity (the
+        terminals are the metal beyond the marker); capacitor markers leave
+        the metal intact. ``self.resistors`` / ``self.capacitors`` hold
+        ``(entry, marker, metal_index, ...)`` tuples used by the findings and
+        the device extractors."""
+        self.raw_metals = list(self.metals)
+        self.resistors: list[tuple[Any, kdb.Region, kdb.Region, int]] = []
+        self.capacitors: list[tuple[Any, kdb.Region, int]] = []
+        for res in deck.resistors:
+            index = self._metal_index(deck, res.body)
+            marker = self.polygons(res.marker, f"{res.name}_marker")
+            body = self.metals[index] & marker
+            for ld in res.requires:
+                body &= self.polygons(ld, f"{res.name}_requires")
+            for ld in res.excludes:
+                body -= self.polygons(ld, f"{res.name}_excludes")
+            body = self.register(body.merged(), f"{res.name}_body")
+            self.metals[index] = self.register(
+                self.metals[index] - body, f"metal{index + 1}_terminals"
+            )
+            self.resistors.append((res, marker, body, index))
+        for cap in deck.passive_capacitors:
+            index = self._metal_index(deck, cap.metal)
+            marker = self.polygons(cap.marker, f"{cap.name}_marker")
+            self.capacitors.append((cap, marker, index))
 
     def polygons(self, ld: tuple[int, int], name: str) -> kdb.Region:
         return self._l2n.make_polygon_layer(self._layout.layer(*ld), name)
@@ -485,6 +523,70 @@ def _layer_findings(layers: _Layers, dbu: float) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for region, problem in checks:
         findings.extend(_region_findings(region, problem, dbu))
+    findings.extend(_passive_findings(layers, dbu))
+    return findings
+
+
+def _passive_findings(layers: _Layers, dbu: float) -> list[dict[str, Any]]:
+    """Markers the extractor cannot turn into a two-terminal device are
+    named findings, never a silent short or a silent drop (issue #4469)."""
+    import klayout.db as kdb
+
+    findings: list[dict[str, Any]] = []
+
+    def straddles(marker: kdb.Region, own: int) -> kdb.Region:
+        other = kdb.Region()
+        for i, metal in enumerate(layers.raw_metals):
+            if i != own:
+                other += marker.interacting(metal)
+        return other
+
+    for res, marker, body, index in layers.resistors:
+        name = res.name
+        findings.extend(
+            _region_findings(
+                marker.not_interacting(layers.raw_metals[index]),
+                f"{name} marker is not over its metal",
+                dbu,
+            )
+        )
+        findings.extend(
+            _region_findings(
+                straddles(marker, index),
+                f"{name} marker straddles more than one metal level",
+                dbu,
+            )
+        )
+        terminals = layers.metals[index].merged()
+        for polygon in body.each():
+            count = terminals.interacting(kdb.Region(polygon)).count()
+            if count != 2:
+                findings.append(
+                    {
+                        "problem": f"{name} body has {count} terminal(s) (expected 2)",
+                        "bbox_um": _bbox_um(polygon.bbox(), dbu),
+                    }
+                )
+    for cap, marker, index in layers.capacitors:
+        metal = layers.metals[index].merged()
+        findings.extend(
+            _region_findings(
+                straddles(marker, index),
+                f"{cap.name} marker straddles more than one metal level",
+                dbu,
+            )
+        )
+        for polygon in marker.merged().each():
+            count = metal.interacting(kdb.Region(polygon)).count()
+            if count != 2:
+                findings.append(
+                    {
+                        "problem": (
+                            f"{cap.name} marker has {count} port(s) (expected 2)"
+                        ),
+                        "bbox_um": _bbox_um(polygon.bbox(), dbu),
+                    }
+                )
     return findings
 
 
@@ -533,6 +635,70 @@ def _extract_devices(
                 _make_extractor(classes[polarity], deck, findings),
                 {"SD": sd, "G": part, "P": layers.gate, "W": body, "FIN": layers.fin},
             )
+
+
+def _make_capacitor_extractor(name: str, coefficient_f_um2: float) -> Any:
+    import klayout.db as kdb
+
+    class _PassiveCapacitorExtractor(kdb.GenericDeviceExtractor):
+        """Layers: marker (0), the metal carrying both ports (1)."""
+
+        def __init__(self) -> None:
+            self.name = name
+
+        def setup(self) -> None:
+            self.define_layer("K", "Capacitor marker")
+            self.define_layer("M", "Port metal")
+            device_class = kdb.DeviceClassCapacitor()
+            device_class.name = name
+            self.register_device_class(device_class)
+
+        def get_connectivity(self, _layout: kdb.Layout, layers: list[int]) -> Any:
+            conn = kdb.Connectivity()
+            conn.connect(layers[0], layers[1])
+            return conn
+
+        def extract_devices(self, layer_geometry: list[kdb.Region]) -> None:
+            marker, metal = layer_geometry
+            dbu = self.dbu()
+            merged = metal.merged()
+            for polygon in marker.merged().each():
+                ports = list(merged.interacting(kdb.Region(polygon)).each())
+                if len(ports) != 2:
+                    continue  # already a named finding
+                first, second = sorted(
+                    ports,
+                    key=lambda p: (
+                        p.bbox().left,
+                        p.bbox().bottom,
+                        p.bbox().right,
+                        p.bbox().top,
+                    ),
+                )
+                device = self.create_device()
+                cls = device.device_class()
+                device.set_parameter(
+                    "C", coefficient_f_um2 * polygon.area() * dbu * dbu
+                )
+                self.define_terminal(device, cls.terminal_id("A"), 1, first)
+                self.define_terminal(device, cls.terminal_id("B"), 1, second)
+
+    return _PassiveCapacitorExtractor()
+
+
+def _extract_passives(l2n: kdb.LayoutToNetlist, layers: _Layers) -> None:
+    import klayout.db as kdb
+
+    for res, _marker, body, index in layers.resistors:
+        if body.is_empty():
+            continue
+        extractor = kdb.DeviceExtractorResistor(res.name, res.sheet_rho_ohm_sq)
+        l2n.extract_devices(extractor, {"R": body, "C": layers.metals[index]})
+    for cap, marker, index in layers.capacitors:
+        if marker.is_empty():
+            continue
+        extractor = _make_capacitor_extractor(cap.name, cap.area_cap_f_um2)
+        l2n.extract_devices(extractor, {"K": marker, "M": layers.metals[index]})
 
 
 def _connect_feol(
@@ -590,9 +756,103 @@ def extract_finfet_netlist(
     """Extract ``top_cell`` (flattened) with ``deck``; return
     ``(netlist, warnings)``. Raises :class:`FinFETGeometryError` for refused
     geometry (see module docstring)."""
+    netlist, warnings, _parasitic_nets = _extract_with_parasitics(
+        layout, top_cell, deck, deck_name, None
+    )
+    return netlist, warnings
+
+
+#: ``(ground_nets, coupled_pairs)`` as ``_compute_parasitics`` returns them.
+_ParasiticNets = tuple[list[dict[str, Any]], list[dict[str, Any]]]
+
+
+def _parasitics_for(
+    l2n: kdb.LayoutToNetlist,
+    netlist: kdb.Netlist,
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: FinFETExtractionDeck,
+    layers: _Layers,
+    parasitics_deck: Any,
+    **options: Any,
+) -> _ParasiticNets:
+    """Run the shared ``_compute_parasitics`` pass over the deck's metal stack
+    while ``l2n`` still owns the per-net shapes (issue #4558). The roles it
+    reads are the registered metal/via/contact layers; ASAP7 curates no
+    diffusion or poly coefficient, so nothing planar-only is consulted."""
+    from .extract_parasitics import _compute_parasitics
+
+    return _compute_parasitics(
+        l2n,
+        netlist.circuit_by_name(top_cell.name),
+        layout.dbu,
+        deck,
+        parasitics_deck,
+        {"contact": l2n.layer_of(layers.v0)},
+        [l2n.layer_of(region) for region in layers.metals],
+        layout=layout,
+        top_cell=top_cell,
+        via_index=[l2n.layer_of(region) for region in layers.vias],
+        capacitor_top_regions={
+            cap.name: marker for cap, marker, _ in layers.capacitors
+        },
+        **options,
+    )
+
+
+def _def_net_name_warnings(
+    l2n: kdb.LayoutToNetlist,
+    metals: list[kdb.Region],
+    probes: dict[str, Any],
+    top_name: str,
+) -> list[str]:
+    """Apply ``--def-net-names`` (issue #951) to the FinFET netlist and return
+    the same loud warnings the planar path emits."""
+    from .extract import _DEF_NET_NAME_PROPERTY_ID, _apply_def_net_name_overrides
+
+    renamed, unresolved = _apply_def_net_name_overrides(l2n, metals, probes)
+    if not probes:
+        return [
+            "--def-net-names found no DEF net-name shape property "
+            f"({_DEF_NET_NAME_PROPERTY_ID}) on any routed-metal shape in "
+            f"'{top_name}' -- net names are unchanged (this flag expects a "
+            "layout produced by a LEF/DEF -> GDS merge, e.g. `klt "
+            "place-and-route`'s routed GDS)"
+        ]
+    if unresolved:
+        joined = ", ".join(unresolved[:10])
+        more = len(unresolved) - 10
+        return [
+            f"--def-net-names: renamed {renamed} net(s), but {len(unresolved)} "
+            f"DEF net name(s) resolved to no extracted net ({joined}"
+            + (f", +{more} more" if more > 0 else "")
+            + ") -- those nets keep their default names"
+        ]
+    return []
+
+
+def _extract_with_parasitics(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: FinFETExtractionDeck,
+    deck_name: str,
+    parasitics_deck: Any,
+    *,
+    def_net_names: bool = False,
+    declared_pins: frozenset[str] | None = None,
+    **parasitics_options: Any,
+) -> tuple[
+    kdb.Netlist, list[str], tuple[list[dict[str, Any]], list[dict[str, Any]]] | None
+]:
+    """:func:`extract_finfet_netlist` plus, when ``parasitics_deck`` is given,
+    the ``(ground_nets, coupled_pairs)`` pair ``_compute_parasitics`` returns."""
     import klayout.db as kdb
 
-    from .extract import _purge_preserving_named_nets
+    from .extract import (
+        _apply_declared_pins,
+        _def_net_name_probes,
+        _purge_preserving_named_nets,
+    )
 
     check_dbu(layout, deck, deck_name)
     l2n = kdb.LayoutToNetlist(kdb.RecursiveShapeIterator(layout, top_cell, []))
@@ -603,19 +863,32 @@ def extract_finfet_netlist(
     _raise_findings(findings, deck_name)
     _extract_devices(l2n, layers, deck, findings)
     _raise_findings(findings, deck_name)
+    _extract_passives(l2n, layers)
 
     _connect_feol(l2n, layers, deck)
     _connect_beol(l2n, layers, deck)
+    def_net_name_probes = (
+        _def_net_name_probes(layout, top_cell, deck.metals) if def_net_names else {}
+    )
     l2n.extract_netlist()
     netlist = l2n.netlist()
+    pin_warnings: list[str] = []
+    if def_net_names:
+        # Same ordering contract as the planar path: after `extract_netlist`
+        # (needs the live `l2n`), before pins are promoted or nets purged.
+        pin_warnings = _def_net_name_warnings(
+            l2n, layers.metals, def_net_name_probes, top_cell.name
+        )
     netlist.combine_devices()
     netlist.make_top_level_pins()
+    if declared_pins is not None:
+        _apply_declared_pins(netlist, top_cell.name, declared_pins, pin_warnings)
     _purge_preserving_named_nets(netlist)
 
     has_devices = any(
         True for circuit in netlist.each_circuit() for _ in circuit.each_device()
     )
-    warnings = (
+    warnings = pin_warnings + (
         [
             f"deck '{deck_name}': NMOS bulk terminals are tied to the synthesized "
             f"'{deck.substrate_net}' net and PMOS bulk terminals to the drawn well "
@@ -624,8 +897,22 @@ def extract_finfet_netlist(
         if has_devices
         else []
     )
+    parasitic_nets = (
+        None
+        if parasitics_deck is None
+        else _parasitics_for(
+            l2n,
+            netlist,
+            layout,
+            top_cell,
+            deck,
+            layers,
+            parasitics_deck,
+            **parasitics_options,
+        )
+    )
     # `l2n` owns the netlist; detach a copy before it is collected.
-    return netlist.dup(), warnings
+    return netlist.dup(), warnings, parasitic_nets
 
 
 # --------------------------------------------------------------------------- #
@@ -650,20 +937,16 @@ def is_finfet_deck_name(deck_name: object) -> bool:
 def refuse_run_options(
     deck_name: str,
     *,
-    parasitics: bool,
     pdk_variant: str | None,
     pdk_root: str | None,
 ) -> None:
-    """``run_extract``'s early guard: name ``--parasitics``/``--pdk`` as
-    unsupported for a FinFET deck before any PDK lookup or parasitics-deck
-    resolution reports a less precise error."""
+    """``run_extract``'s early guard: name ``--pdk`` as unsupported for a
+    FinFET deck before any PDK lookup reports a less precise error.
+    ``--parasitics`` is supported (issue #4558) and not refused."""
     if is_finfet_deck_name(deck_name):
         reject_unsupported_options(
             deck_name,
-            **{
-                "--parasitics": parasitics,
-                "--pdk": pdk_variant is not None or pdk_root is not None,
-            },
+            **{"--pdk": pdk_variant is not None or pdk_root is not None},
         )
 
 
@@ -678,18 +961,51 @@ def extract_netlist_tuple(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
     deck: FinFETExtractionDeck,
-    *_a: Any,
-    **_k: Any,
+    parasitics_deck: Any = None,
+    **options: Any,
 ) -> tuple[Any, ...]:
     """Drop-in for ``extract._extract_netlist``'s 14-tuple contract. Every
-    option it would honour was already refused by :func:`refuse_layout_options`;
-    the planar-only result slots are their documented empty values."""
+    planar-only option was already refused by :func:`refuse_layout_options`;
+    the planar-only result slots are their documented empty values. Only the
+    ``--parasitics`` pass (issue #4558) and the DEF-driven net naming
+    (``--def-net-names``, ``--pins``; issue #4559) are honoured."""
     from .extract import _extraction_deck_name
 
-    netlist, warnings = extract_finfet_netlist(
-        layout, top_cell, deck, _extraction_deck_name(deck) or "finfet"
+    parasitics_options = {
+        key: options[key]
+        for key in (
+            "parasitics_top_cell_only",
+            "resistance_graph",
+            "resistance_graph_r_cut_ohm",
+        )
+        if key in options
+    }
+    netlist, warnings, parasitic_nets = _extract_with_parasitics(
+        layout,
+        top_cell,
+        deck,
+        _extraction_deck_name(deck) or "finfet",
+        parasitics_deck,
+        def_net_names=bool(options.get("def_net_names", False)),
+        declared_pins=options.get("declared_pins"),
+        **parasitics_options,
     )
-    return (netlist, warnings, None, [], 0, [], [], [], None, {}, {}, None, None, None)
+    return (
+        netlist,
+        warnings,
+        parasitic_nets,
+        [],
+        0,
+        [],
+        [],
+        [],
+        None,
+        {},
+        {},
+        None,
+        None,
+        None,
+    )
 
 
 # --------------------------------------------------------------------------- #

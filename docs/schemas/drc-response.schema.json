@@ -1,0 +1,388 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://2amlogic.com/klayout-tools/schemas/drc-response.schema.json",
+  "title": "klt drc --format json success response, version 2",
+  "description": "Success payload of `klt drc`. Three shapes carry the top-level `schema_version`: a verdict report (3) (curated engine, or `--engine klayout`) carrying `status`/`violations`/`coverage`, and the non-verdict `--list-rules` listing (`mode: \"list_rules\"`, 2), which carries neither, and the `--engine both` cross-check (`mode: \"crosscheck\"`), which embeds two verdict reports unchanged under `reports` plus a `comparison` block. Error envelopes are governed by the shared error contract (docs/json-contract.md) and are out of scope. The `coverage` block `$ref`s coverage.schema.json (the shared work records); resolve it through the sibling file or a schema registry. See docs/cli/drc.md.",
+  "type": "object",
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [2, 3]}
+  },
+  "oneOf": [
+    {"$ref": "#/$defs/verdict_report"},
+    {"$ref": "#/$defs/list_rules_report"},
+    {"$ref": "#/$defs/crosscheck_report"}
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "verdict_report": {
+      "description": "A DRC verdict. Discriminated from the listing by the absence of `mode`.",
+      "type": "object",
+      "required": ["schema_version", "file", "deck", "dbu_um", "status", "violation_count", "rule_counts", "violations", "coverage", "provenance"],
+      "not": {"required": ["mode"]},
+      "properties": {
+        "schema_version": {"type": "integer", "const": 3},
+        "file": {
+          "type": "object",
+          "description": "Layout path as the portable `{path, scope}` envelope (issue #2659): a repo-relative POSIX path with scope `repo`, or `path: null` with scope `external` when the layout lies outside the repo.",
+          "required": ["path", "scope"],
+          "properties": {
+            "path": {"type": ["string", "null"]},
+            "scope": {"type": "string", "enum": ["repo", "external"]}
+          }
+        },
+        "deck": {"type": "string", "description": "Curated engine: the deck name (e.g. `sky130`). `--engine klayout`: the deck script's own path."},
+        "engine": {"type": "string", "enum": ["curated", "klayout"], "description": "`klayout` on a `--engine klayout` report; the curated engine omits it."},
+        "dbu_um": {"type": "number", "description": "Database unit in micrometres; violation coordinates are integers in this unit."},
+        "status": {"$ref": "#/$defs/status"},
+        "violation_count": {"type": "integer", "minimum": 0},
+        "rule_counts": {
+          "type": "object",
+          "description": "Violations per rule id (or RDB category); sums to `violation_count` (the true totals, even when `violations_truncated`).",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "metrics": {
+          "type": "object",
+          "description": "Curated engine only: METRICS2.1-style re-keying of `violation_count`.",
+          "required": ["drc__error__count"],
+          "properties": {"drc__error__count": {"type": "integer", "minimum": 0}},
+          "additionalProperties": true
+        },
+        "violations_truncated": {"const": true, "description": "`--engine klayout` with `--max-violations N` only (issue #4464): present, `true`, when more than N violations were found so `violations` holds just the first N. Absent on an uncapped or not-exceeded run."},
+        "violations_serialized": {"type": "integer", "minimum": 0, "description": "Present with `violations_truncated`: `len(violations)`. `violation_count` stays the true total."},
+        "violations": {"type": "array", "description": "Equals `violation_count` entries unless `violations_truncated`.", "items": {"$ref": "#/$defs/violation"}},
+        "coverage": {
+          "description": "The shared checked-work records (coverage.schema.json) plus this verb's layer/rule-level fields.",
+          "allOf": [
+            {"$ref": "https://2amlogic.com/klayout-tools/schemas/coverage.schema.json"},
+            {"$ref": "#/$defs/drc_coverage"}
+          ]
+        },
+        "rule_selection": {"$ref": "#/$defs/rule_selection"},
+        "tile": {"$ref": "#/$defs/tile"},
+        "engine_deck_errors": {"$ref": "#/$defs/engine_deck_errors"},
+        "coverage_assertion": {"$ref": "#/$defs/coverage_assertion"},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      },
+      "if": {"required": ["engine"], "properties": {"engine": {"const": "klayout"}}},
+      "then": {
+        "description": "Native-KLayout report: no `metrics`; `coverage` additionally lists the RDB `rule_categories`. `engine_deck_errors` appears only when --allow-deck-errors tolerated a failed deck run; `coverage_assertion` only when --expect-rule-categories(-file) was given.",
+        "properties": {
+          "coverage": {"required": ["rule_categories"]},
+          "rule_selection": false,
+          "tile": false
+        }
+      },
+      "else": {
+        "description": "Curated report: `metrics` is always present; `rule_selection` only for a `--rules` run; the klayout-only fields never appear.",
+        "required": ["metrics"],
+        "properties": {
+          "engine_deck_errors": false,
+          "coverage_assertion": false,
+          "violations_truncated": false,
+          "violations_serialized": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "crosscheck_report": {
+      "description": "`--engine both` (issue #3973): the curated and native reports embedded verbatim plus a `comparison`. `status` is `violations` if either engine found some, else the first no-verdict token (`not_checked` for a native run that did not complete), else `clean_partial`/`clean`; each embedded report keeps its own status.",
+      "type": "object",
+      "required": ["schema_version", "mode", "file", "status", "identity", "comparison", "reports"],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 2},
+        "mode": {"type": "string", "const": "crosscheck"},
+        "file": {"type": "string"},
+        "status": {"$ref": "#/$defs/status"},
+        "identity": {
+          "description": "Shared identity of the two runs; null when the native run did not complete.",
+          "type": ["object", "null"],
+          "required": ["layout_content_hash", "pdk", "klt_version", "klayout_version", "curated_deck", "native_deck"],
+          "properties": {
+            "layout_content_hash": {"type": ["string", "null"]},
+            "pdk": {"type": ["object", "null"]},
+            "klt_version": {"type": ["string", "null"]},
+            "klayout_version": {"type": ["string", "null"]},
+            "curated_deck": {"type": ["object", "null"]},
+            "native_deck": {"type": ["object", "null"]}
+          },
+          "additionalProperties": true
+        },
+        "comparison": {
+          "type": "object",
+          "required": ["state", "groups", "unmapped"],
+          "properties": {
+            "state": {"type": "string", "enum": ["agree_clean", "agree_violations", "disagreement", "not_comparable", "native_unavailable", "engine_failed"]},
+            "granularity": {"type": "string"},
+            "error": {"type": "object", "required": ["message"], "properties": {"message": {"type": "string"}}},
+            "groups": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "curated_rules", "native_categories", "state"],
+                "properties": {
+                  "id": {"type": "string"},
+                  "curated_rules": {"$ref": "#/$defs/strings"},
+                  "native_categories": {"$ref": "#/$defs/strings"},
+                  "state": {"type": "string", "enum": ["agree_clean", "agree_violations", "disagreement", "not_covered"]}
+                },
+                "additionalProperties": true
+              }
+            },
+            "unmapped": {
+              "type": "object",
+              "required": ["curated", "native"],
+              "properties": {"curated": {"$ref": "#/$defs/strings"}, "native": {"$ref": "#/$defs/strings"}},
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        },
+        "reports": {
+          "type": "object",
+          "required": ["curated", "native"],
+          "properties": {
+            "curated": {"$ref": "#/$defs/verdict_report"},
+            "native": {"oneOf": [{"$ref": "#/$defs/verdict_report"}, {"type": "null"}]}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "list_rules_report": {
+      "description": "`--list-rules`: the deck's registered rules. Non-verdict: no `status`, `violations` or `coverage`.",
+      "type": "object",
+      "required": ["schema_version", "mode", "deck", "engine", "rule_count", "groups", "rules", "provenance"],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 2},
+        "mode": {"type": "string", "const": "list_rules"},
+        "deck": {"type": "string"},
+        "engine": {"type": "string", "const": "curated"},
+        "rule_count": {"type": "integer", "minimum": 0},
+        "groups": {
+          "type": "object",
+          "required": ["check", "scope"],
+          "properties": {
+            "check": {"$ref": "#/$defs/counts"},
+            "scope": {"$ref": "#/$defs/counts"}
+          },
+          "additionalProperties": true
+        },
+        "rules": {"type": "array", "items": {"$ref": "#/$defs/listed_rule"}},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      },
+      "additionalProperties": true
+    },
+    "status": {
+      "description": "Verdict token (coverage rollup). `clean`/`clean_partial` exit 0, `violations` exits 3, `not_checked`/`coverage_unknown` exit 4. `malformed_coverage` is mapped by the rollup table but not reachable from a producer that builds its coverage block through the shared helper.",
+      "type": "string",
+      "enum": ["clean", "clean_partial", "violations", "not_checked", "coverage_unknown", "malformed_coverage"]
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "violation": {
+      "type": "object",
+      "required": ["rule", "description", "check", "layer", "cell", "source_cell", "source_path", "bbox", "polygon"],
+      "properties": {
+        "rule": {"type": "string"},
+        "description": {"type": "string"},
+        "check": {"type": "string", "description": "Check kind (`width`, `space`, ...); `external` for a native-KLayout deck finding."},
+        "layer": {"type": "string"},
+        "cell": {"type": "string"},
+        "source_cell": {"type": ["string", "null"], "description": "Placed-instance attribution; null together with `source_path`."},
+        "source_path": {"type": ["array", "null"], "items": {"type": "string"}},
+        "bbox": {
+          "type": "object",
+          "required": ["left", "bottom", "right", "top"],
+          "properties": {
+            "left": {"type": "integer"},
+            "bottom": {"type": "integer"},
+            "right": {"type": "integer"},
+            "top": {"type": "integer"}
+          },
+          "additionalProperties": true
+        },
+        "polygon": {
+          "type": ["array", "null"],
+          "items": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}
+        }
+      },
+      "additionalProperties": true
+    },
+    "drc_coverage": {
+      "type": "object",
+      "required": ["deck_layers", "layers_checked", "layers_in_stream_without_rules", "rules_checked", "rules_skipped", "voltage_domain_warnings", "deck_scope"],
+      "properties": {
+        "deck_layers": {"$ref": "#/$defs/strings"},
+        "layers_checked": {"$ref": "#/$defs/strings"},
+        "layers_in_stream_without_rules": {"$ref": "#/$defs/strings"},
+        "rules_checked": {"$ref": "#/$defs/strings"},
+        "rules_skipped": {"$ref": "#/$defs/strings"},
+        "voltage_domain_warnings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["marker", "description"],
+            "properties": {
+              "marker": {"type": "string"},
+              "description": {"type": "string"}
+            },
+            "additionalProperties": true
+          }
+        },
+        "deck_scope": {"$ref": "#/$defs/strings"},
+        "rule_categories": {"$ref": "#/$defs/strings"},
+        "isolation_only_rules": {
+          "description": "`--engine klayout` with the packaged ASAP7 deck: boundary-sensitive rules whose layer is in the stream, judged with the top cell in free space (issue #4029). Informational; does not change `status`.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["rule", "layer", "reason", "description"],
+            "properties": {
+              "rule": {"type": "string"},
+              "layer": {"type": "string"},
+              "reason": {"type": "string", "const": "isolation_only"},
+              "description": {"type": "string"}
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "tile": {
+      "description": "Curated `--tile` runs only (issue #4226): the abutment array each top cell was checked as the centre of.",
+      "type": "object",
+      "required": ["columns", "rows"],
+      "properties": {
+        "columns": {"type": "integer", "minimum": 1},
+        "rows": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": true
+    },
+    "strings": {"type": "array", "items": {"type": "string"}},
+    "rule_selection": {
+      "description": "Curated `--rules` runs only: how the selectors resolved against the full deck.",
+      "type": "object",
+      "required": ["selectors", "selected", "omitted", "deck_rule_count", "subset"],
+      "properties": {
+        "selectors": {"$ref": "#/$defs/strings"},
+        "selected": {"$ref": "#/$defs/strings"},
+        "omitted": {"$ref": "#/$defs/strings"},
+        "deck_rule_count": {"type": "integer", "minimum": 0},
+        "subset": {"type": "boolean", "description": "True exactly when `omitted` is non-empty."}
+      },
+      "additionalProperties": true
+    },
+    "engine_deck_errors": {
+      "type": "object",
+      "required": ["exit_status", "error_lines"],
+      "properties": {
+        "exit_status": {"type": "integer"},
+        "error_lines": {"$ref": "#/$defs/strings"}
+      },
+      "additionalProperties": true
+    },
+    "coverage_assertion": {
+      "description": "Opt-in rule-category assertion, discriminated on `kind`.",
+      "type": "object",
+      "required": ["kind", "satisfied"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["expected_rule_categories", "expected_rule_category_names"]},
+        "satisfied": {"type": "boolean"}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {"const": "expected_rule_categories"},
+            "expected": {"type": "integer", "minimum": 1},
+            "observed": {"type": "integer", "minimum": 0}
+          },
+          "required": ["kind", "expected", "observed", "satisfied"]
+        },
+        {
+          "properties": {
+            "kind": {"const": "expected_rule_category_names"},
+            "expected_names": {"$ref": "#/$defs/strings"},
+            "observed_names": {"$ref": "#/$defs/strings"},
+            "missing_names": {"$ref": "#/$defs/strings"},
+            "unexpected_names": {"$ref": "#/$defs/strings"}
+          },
+          "required": ["kind", "expected_names", "observed_names", "missing_names", "unexpected_names", "satisfied"]
+        }
+      ],
+      "additionalProperties": true
+    },
+    "listed_rule": {
+      "type": "object",
+      "required": ["id", "description", "check", "layer", "layer_name", "other_layer", "other_layer_name", "derived_layer", "scope"],
+      "properties": {
+        "id": {"type": "string"},
+        "description": {"type": "string"},
+        "check": {"type": "string"},
+        "layer": {"type": ["string", "null"]},
+        "layer_name": {"type": ["string", "null"]},
+        "other_layer": {"type": ["string", "null"]},
+        "other_layer_name": {"type": ["string", "null"]},
+        "derived_layer": {
+          "type": ["object", "null"],
+          "required": ["mode", "base", "intersect_with", "sized_by_um"],
+          "properties": {
+            "mode": {"type": "string"},
+            "base": {"type": ["string", "null"]},
+            "intersect_with": {"type": ["string", "null"]},
+            "sized_by_um": {"type": ["number", "null"]}
+          },
+          "additionalProperties": true
+        },
+        "scope": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "provenance": {
+      "description": "Shared reproducibility block. `klayout_version_mismatch` is emitted on verdict reports only.",
+      "type": "object",
+      "required": ["klt_version", "klayout_version", "pdk", "deck", "input"],
+      "properties": {
+        "klt_version": {"type": ["string", "null"]},
+        "klayout_version": {"type": ["string", "null"]},
+        "pdk": {
+          "type": ["object", "null"],
+          "required": ["name", "source", "version"],
+          "properties": {
+            "name": {"type": ["string", "null"]},
+            "source": {"type": ["string", "null"]},
+            "version": {"type": ["string", "null"]},
+            "ambiguous_sources": {"$ref": "#/$defs/strings"}
+          },
+          "additionalProperties": true
+        },
+        "deck": {
+          "type": ["object", "null"],
+          "required": ["name", "content_hash"],
+          "properties": {
+            "name": {"type": "string"},
+            "content_hash": {"type": "string", "pattern": "^sha256:"},
+            "released": {"type": "boolean"},
+            "options": {"type": "object", "additionalProperties": {"type": "string"}}
+          },
+          "additionalProperties": true
+        },
+        "input": {
+          "type": ["object", "null"],
+          "required": ["content_hash", "role"],
+          "properties": {
+            "content_hash": {"type": "string", "pattern": "^sha256:"},
+            "role": {"type": "string", "enum": ["layout", "netlist", "source"]}
+          },
+          "additionalProperties": true
+        },
+        "klayout_version_mismatch": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    }
+  }
+}

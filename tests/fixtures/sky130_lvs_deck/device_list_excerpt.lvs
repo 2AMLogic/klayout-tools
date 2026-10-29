@@ -1,0 +1,27 @@
+# Verbatim excerpt of sky130B libs.tech/klayout/lvs/sky130.lvs (lines 195-215 and 331),
+# ciel sky130 f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7; Apache-2.0, Copyright 2022 Efabless.
+# The rest of DEVICE_LIST is elided; the block syntax is otherwise unmodified.
+
+
+#================================================
+# --------------- CUSTOM CLASSES ----------------
+#================================================
+
+DEVICE_LIST = [
+    "sky130_fd_pr__pfet_01v8".upcase,
+    "sky130_fd_pr__pfet_01v8_lvt".upcase,
+    "sky130_fd_pr__pfet_01v8_hvt".upcase,
+    "sky130_fd_pr__pfet_g5v0d10v5".upcase,
+    "sky130_fd_pr__nfet_01v8".upcase,
+    "sky130_fd_pr__nfet_01v8_lvt".upcase,
+    "sky130_fd_pr__nfet_03v3_nvt".upcase,
+    "sky130_fd_pr__nfet_05v0_nvt".upcase,
+    "sky130_fd_pr__nfet_g5v0d10v5".upcase,
+    
+    "sky130_fd_pr__special_nfet_01v8".upcase,
+    "sky130_fd_pr__special_pfet_01v8_hvt".upcase,
+
+    "sky130_fd_pr__npn_05v5_W1p00L1p00".upcase,
+    # ... (entries elided) ...
+
+].freeze

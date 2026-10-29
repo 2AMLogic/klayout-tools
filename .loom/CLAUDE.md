@@ -251,9 +251,9 @@ readily as a dispatched one; only Curator may be skipped.
    all-clear (`--help` has it). A hand-claim is not exempt.
 1. Find issue: `gh issue list --label="loom:issue"`
 2. Claim: `gh issue edit 42 --remove-label "loom:issue" --add-label "loom:building"`, then
-   lease it: `loom-daemon lease ensure 42 --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"`.
+   lease it: `loom-daemon lease ensure 42 --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"` (the process doing the work, never a subagent's inherited `$PPID`).
    Step 3's `worktree.sh` does this itself; a lane NOT using it MUST call `lease ensure`
-   directly — a leaseless claim is invisible to other lanes and gets reclaimed (#9453)
+   directly — a leaseless claim is invisible to other lanes and gets reclaimed (#9453); `lease release 42` hands it back (#12103)
 3. Create worktree: `./.loom/scripts/worktree.sh 42 && cd .loom/worktrees/issue-42`
 4. Implement, test, commit
 5. Create PR: `git push -u origin feature/issue-42 &&
@@ -268,8 +268,11 @@ pr comment` — **not** `gh pr review --approve`; GitHub's API blocks self-revie
 ### Curator Workflow
 
 Find unlabeled issues (use `-label:` search terms, **not** `--label` — gh ANDs
-`--label` values, no negation), enhance with technical detail, then
-`gh issue edit 42 --add-label "loom:curated"`.
+`--label` values, no negation), enhance with technical detail,
+then write the standalone `<!-- loom:points=3 -->`
+marker and run `loom-daemon curation-complete --repo OWNER/REPO --issue 42 --model M
+--runtime R --completion-id $(uuidgen) --workspace-root ROOT` (it applies `loom:curated`;
+never a bare `--add-label`, #11787; recipe: `.loom/roles/curator-estimate.md`).
 
 ## Configuration
 

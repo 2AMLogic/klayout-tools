@@ -325,6 +325,16 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn has_spread_rejects_bit_identical_residue_but_keeps_tiny_real_spread() {
+        assert!(!has_spread(&vec![1.800306041; 100]));
+        assert!(!has_spread(&[1.800306041; 2]));
+        let xs: Vec<f64> = (0..100)
+            .map(|i| 1.8 * (1.0 + 1e-9 * (i % 2) as f64))
+            .collect();
+        assert!(has_spread(&xs));
+    }
+
     fn draw(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
         pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
     }

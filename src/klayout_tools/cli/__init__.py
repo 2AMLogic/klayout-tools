@@ -23,6 +23,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    # Usage checks a required mutually exclusive group cannot express (see
+    # `parser._require_one_input`): exit 2 via the subparser, before dispatch.
+    post_parse = getattr(args, "post_parse", None)
+    if post_parse is not None:
+        post_parse(args)
+
     return args.func(args)
 
 

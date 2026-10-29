@@ -139,15 +139,22 @@ class NetlistError(Exception):
     ``None`` for every local failure; the ``batch`` backend sets it so a
     caller can tell a retryable capacity refusal or a runner-version mismatch
     from a bad schematic (see :mod:`klayout_tools.netlist_batch`).
-    ``job_id`` names the batch job, when one was allocated.
+    ``job_id`` names the batch job, when one was allocated. ``details`` holds
+    extra structured fields the CLI merges into the error envelope's
+    ``error`` object (e.g. a failed batch job's ``remote_stderr_tail``).
     """
 
     def __init__(
-        self, *args: object, code: str | None = None, job_id: str | None = None
+        self,
+        *args: object,
+        code: str | None = None,
+        job_id: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(*args)
         self.code = code
         self.job_id = job_id
+        self.details = details
 
 
 def _sha256_file_hash(data: bytes) -> str:
@@ -248,8 +255,15 @@ def _build_argv(
     return argv
 
 
-def _launch_xschem(argv: list[str], timeout_s: float) -> tuple[int, str, str, float]:
+def _launch_xschem(
+    argv: list[str],
+    timeout_s: float,
+    env: dict[str, str] | None = None,
+) -> tuple[int, str, str, float]:
     """Run ``argv`` under a ``timeout_s`` wall-clock bound.
+
+    ``env`` replaces the child's environment when given; ``None`` inherits
+    klt's own.
 
     Returns ``(exit_status, stdout, stderr, duration_s)``. The exit status is
     returned for the record, **not** as a verdict -- see the module docstring's
@@ -265,6 +279,7 @@ def _launch_xschem(argv: list[str], timeout_s: float) -> tuple[int, str, str, fl
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=env,
             # The child gets its own session (and therefore its own process
             # group) so `_signal_group` has a group handle to kill -- see its
             # docstring.
@@ -462,7 +477,121 @@ def _normalize_path_comments(data: bytes) -> bytes:
     return _PATH_COMMENT_RE.sub(_basename, data)
 
 
-def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
+def _sort_subckt_comment_ports(line: bytes) -> bytes:
+    """``line`` with the port tokens of a ``**.subckt <name> <ports...>``
+    comment sorted; any other comment is returned unchanged. The comment is
+    informational (the electrical ``.subckt`` card is compared strictly), and
+    different xschem versions list its ports in different orders."""
+    tokens = line.split()
+    if len(tokens) > 2 and tokens[0] == b"**.subckt":
+        return b" ".join(tokens[:2] + sorted(tokens[2:]))
+    return line
+
+
+def _normalize_layout(data: bytes, ignore_comments: bool = False) -> bytes:
+    """``data`` with ``+`` continuation lines joined onto their predecessor and
+    whitespace runs collapsed, so a netlist re-wrapped by a post-processor
+    compares equal to the original (issue #3324).
+
+    Comment lines (``*``) are kept as their own lines with only trailing
+    whitespace (and any CR) dropped; a ``+`` line is never joined onto a
+    comment. Only line layout changes, never a token of a non-comment line,
+    so an electrical change (device card, parameter, node or pin order) still
+    compares unequal. The one comment-token normalization is the port order of
+    xschem's ``**.subckt <name> <ports...>`` comment, which varies across
+    xschem versions (:func:`_sort_subckt_comment_ports`).
+
+    ``ignore_comments=True`` (issue #4525) drops every comment line and every
+    blank line instead, so a project-added header or a rewritten
+    ``** sch_path:`` comment cannot cause drift; non-comment lines are still
+    compared token for token.
+    """
+    lines: list[bytes] = []
+    prev_joinable = False
+    for raw in data.split(b"\n"):
+        if ignore_comments and (not raw.strip() or raw.lstrip().startswith(b"*")):
+            continue
+        if raw.lstrip().startswith(b"*"):
+            lines.append(_sort_subckt_comment_ports(raw.rstrip()))
+            prev_joinable = False
+            continue
+        tokens = raw.split()
+        if tokens and tokens[0].startswith(b"+") and prev_joinable:
+            rest = [tokens[0][1:]] + tokens[1:]
+            lines[-1] = b" ".join([lines[-1]] + [t for t in rest if t])
+            continue
+        lines.append(b" ".join(tokens))
+        prev_joinable = bool(tokens)
+    return b"\n".join(lines)
+
+
+def _subckt_card(line: bytes) -> tuple[bytes, list[bytes], list[bytes]] | None:
+    """``(name, ports, params)`` of a normalized ``.subckt`` card, else ``None``.
+    ``name=value`` tokens are parameters, not ports."""
+    tokens = line.split()
+    if len(tokens) < 2 or tokens[0].lower() != b".subckt":
+        return None
+    rest = tokens[2:]
+    return (
+        tokens[1],
+        [t for t in rest if b"=" not in t],
+        [t for t in rest if b"=" in t],
+    )
+
+
+def _subckt_port_order_drift(
+    committed: bytes, fresh: bytes, ignore_comments: bool = False
+) -> list[dict[str, Any]]:
+    """The ``.subckt`` cards whose port set matches but whose port order
+    differs, when that is the *only* difference between the two netlists
+    (issue #4524); ``[]`` for any other kind of drift.
+
+    Both sides are compared after :func:`_normalize_path_comments` and
+    :func:`_normalize_layout` (with ``ignore_comments`` as in
+    :func:`_check_result`, so comment lines never count as a difference
+    beyond the port-order one). Port order is the positional contract of every
+    ``subckt-call`` and LVS reference, so this only *diagnoses* the change --
+    the status stays ``"drifted"``.
+    """
+    old = _normalize_layout(_normalize_path_comments(committed), ignore_comments).split(
+        b"\n"
+    )
+    new = _normalize_layout(_normalize_path_comments(fresh), ignore_comments).split(
+        b"\n"
+    )
+    if len(old) != len(new):
+        return []
+    entries: list[dict[str, Any]] = []
+    for a, b in zip(old, new, strict=True):
+        if a == b:
+            continue
+        card_a, card_b = _subckt_card(a), _subckt_card(b)
+        if card_a is None or card_b is None:
+            return []
+        name_a, ports_a, params_a = card_a
+        name_b, ports_b, params_b = card_b
+        if (
+            name_a != name_b
+            or params_a != params_b
+            or sorted(ports_a) != sorted(ports_b)
+        ):
+            return []
+        entries.append(
+            {
+                "subckt": name_a.decode("utf-8", "replace"),
+                "committed": [t.decode("utf-8", "replace") for t in ports_a],
+                "regenerated": [t.decode("utf-8", "replace") for t in ports_b],
+            }
+        )
+    return entries
+
+
+def _check_result(
+    output: str,
+    fresh_data: bytes,
+    ignore_comments: bool = False,
+    xschem_version: str | None = None,
+) -> tuple[str, dict[str, Any]]:
     """``check=True``'s verdict: does the committed netlist at ``output``
     still match what the schematics produce?
 
@@ -477,6 +606,20 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
     this a committed netlist would report ``"drifted"`` from every checkout
     path but the one that produced it -- including a batch runner's.
     ``path_comments_differ`` says when the two files differ *only* there.
+
+    It also ignores ``+`` continuation layout and whitespace runs
+    (:func:`_normalize_layout`, issue #3324); ``layout_differs`` is true when
+    the files match only after that normalization -- which includes a
+    different port order in the ``**.subckt`` comment line only.
+
+    ``ignore_comments=True`` (issue #4525) additionally ignores every SPICE
+    comment line (and blank line) on both sides; ``comments_differ`` is true
+    when the files match only because of that.
+
+    When the only difference is the port order of one or more electrical
+    ``.subckt`` cards, ``subckt_port_order`` names them and ``reason`` says so
+    (issue #4524); the status stays ``"drifted"``. ``xschem_version`` is the
+    local xschem's version, quoted in that reason.
     """
     if not os.path.isfile(output):
         return STATUS_DRIFTED, {
@@ -484,6 +627,9 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
             "committed_bytes": None,
             "committed_content_hash": None,
             "path_comments_differ": False,
+            "layout_differs": False,
+            "comments_differ": False,
+            "subckt_port_order": [],
             "diff": [],
             "diff_truncated": False,
             "reason": "no committed netlist at the output path",
@@ -491,30 +637,200 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
 
     with open(output, "rb") as handle:
         committed = handle.read()
-    if _normalize_path_comments(committed) == _normalize_path_comments(fresh_data):
+    committed_paths = _normalize_path_comments(committed)
+    fresh_paths = _normalize_path_comments(fresh_data)
+    if _normalize_layout(committed_paths) == _normalize_layout(fresh_paths):
         return STATUS_MATCH, {
             "committed_present": True,
             "committed_bytes": len(committed),
             "committed_content_hash": _sha256_file_hash(committed),
-            "path_comments_differ": committed != fresh_data,
+            "path_comments_differ": _normalize_layout(committed)
+            != _normalize_layout(fresh_data),
+            "layout_differs": committed_paths != fresh_paths,
+            "comments_differ": False,
+            "subckt_port_order": [],
+            "diff": [],
+            "diff_truncated": False,
+            "reason": None,
+        }
+
+    if ignore_comments and _normalize_layout(committed, True) == _normalize_layout(
+        fresh_data, True
+    ):
+        return STATUS_MATCH, {
+            "committed_present": True,
+            "committed_bytes": len(committed),
+            "committed_content_hash": _sha256_file_hash(committed),
+            "path_comments_differ": False,
+            "layout_differs": False,
+            "comments_differ": True,
+            "subckt_port_order": [],
             "diff": [],
             "diff_truncated": False,
             "reason": None,
         }
 
     diff, truncated = _unified_diff(committed, fresh_data, output)
+    port_order = _subckt_port_order_drift(committed, fresh_data, ignore_comments)
+    if port_order:
+        names = ", ".join(entry["subckt"] for entry in port_order)
+        reason = (
+            f"the .subckt port order of {names} differs from the committed "
+            f"netlist (local xschem {xschem_version or 'version unknown'}); "
+            "different xschem builds order ports differently -- recheck "
+            "positional subckt-call callers and LVS references before "
+            "re-running without --check to refresh it"
+        )
+    else:
+        reason = (
+            "the committed netlist differs from the one the schematics "
+            "produce now -- re-run without --check to refresh it"
+        )
     return STATUS_DRIFTED, {
         "committed_present": True,
         "committed_bytes": len(committed),
         "committed_content_hash": _sha256_file_hash(committed),
         "path_comments_differ": False,
+        "layout_differs": False,
+        "comments_differ": False,
+        "subckt_port_order": port_order,
         "diff": diff,
         "diff_truncated": truncated,
-        "reason": (
-            "the committed netlist differs from the one the schematics "
-            "produce now -- re-run without --check to refresh it"
-        ),
+        "reason": reason,
     }
+
+
+#: Seconds the ``xschem --version`` probe may take. Short on purpose: the probe
+#: is a courtesy, and a version that cannot be read quickly is reported as
+#: ``null`` rather than waited for.
+VERSION_PROBE_TIMEOUT_S = 10.0
+
+#: ``error.code`` of the content gate (:func:`_check_no_unevaluated_expr`).
+UNEVALUATED_EXPR_CODE = "unevaluated_expr"
+
+#: ``error.code`` of the content gate (:func:`_check_no_unresolved_symbol`).
+UNRESOLVED_SYMBOL_CODE = "unresolved_symbol"
+
+#: Oldest xschem reported (issue #3482; not verified against xschem's release
+#: notes) to evaluate a symbol's ``expr()`` attributes while netlisting.
+MIN_EXPR_XSCHEM_VERSION = "3.4.5"
+
+_UNEVALUATED_EXPR_RE = re.compile(rb"\bexpr\s*\(")
+_UNRESOLVED_SYMBOL_RE = re.compile(rb"\bIS MISSING\b")
+_XSCHEM_VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
+
+
+def _probe_xschem_version(xschem_binary: str) -> str | None:
+    """xschem's version (``"3.4.7"``), or ``None`` when it cannot be read.
+
+    Runs through :func:`_launch_xschem` (own process group, bounded, SIGKILL
+    escalation) because xschem can hang. Any failure -- missing binary,
+    timeout, unparseable output -- is ``None``, never an error.
+    """
+    try:
+        _, stdout, stderr, _ = _launch_xschem(
+            [xschem_binary, "--version"], VERSION_PROBE_TIMEOUT_S
+        )
+    except NetlistError:
+        return None
+    match = _XSCHEM_VERSION_RE.search(stdout or stderr)
+    return match.group(0) if match else None
+
+
+def _find_unevaluated_expr(data: bytes) -> tuple[int, str] | None:
+    """First ``(line, snippet)`` holding a literal ``expr(...)``, else ``None``.
+
+    Comment lines (``*``) are ignored, and ``\b`` keeps longer identifiers such
+    as ``myexpr(`` from matching.
+    """
+    for number, line in enumerate(data.split(b"\n"), start=1):
+        if line.lstrip().startswith(b"*") or not _UNEVALUATED_EXPR_RE.search(line):
+            continue
+        return number, line.decode("utf-8", errors="replace").strip()
+    return None
+
+
+def _check_no_unevaluated_expr(data: bytes, version: str | None) -> None:
+    """Fail when the netlist still holds a literal ``expr(...)`` (issue #3482).
+
+    xschem releases that do not evaluate a symbol's ``expr()`` attributes
+    still write a "fresh" ``.spice`` file, which ngspice then cannot load.
+    """
+    hit = _find_unevaluated_expr(data)
+    if hit is None:
+        return
+    number, snippet = hit
+    raise NetlistError(
+        f"the netlist has an unevaluated expr(...) at line {number}: "
+        f"{snippet!r}. xschem version: {version or 'unknown'}; releases "
+        f"older than {MIN_EXPR_XSCHEM_VERSION} are reported not to "
+        "evaluate expr() (unverified). ngspice cannot load this netlist, "
+        "so none was written; use a newer xschem.",
+        code=UNEVALUATED_EXPR_CODE,
+    )
+
+
+def _unevaluated_expr_warnings(
+    data: bytes, version: str | None, allow: bool
+) -> list[dict[str, Any]]:
+    """Gate on, or downgrade to a warning, an unevaluated ``expr(...)``.
+
+    Without ``allow`` this raises exactly like
+    :func:`_check_no_unevaluated_expr`; with it (issue #4305) the hit becomes
+    a ``warnings`` entry for the payload instead.
+    """
+    if not allow:
+        _check_no_unevaluated_expr(data, version)
+        return []
+    hit = _find_unevaluated_expr(data)
+    if hit is None:
+        return []
+    return [
+        {
+            "code": UNEVALUATED_EXPR_CODE,
+            "line": hit[0],
+            "snippet": hit[1],
+            "xschem_version": version,
+        }
+    ]
+
+
+def _pdk_env_note(rcfile: str | None, env: dict[str, str] | None) -> str:
+    """Name what klt can observe about xschem's PDK setup, for error text."""
+    if env is not None:
+        seen = f"PDK_ROOT={env['PDK_ROOT']} PDK={env['PDK']} (exported by klt)"
+    else:
+        root = os.environ.get("PDK_ROOT")
+        variant = os.environ.get("PDK")
+        seen = (
+            f"PDK_ROOT={root or 'not set'} PDK={variant or 'not set'} "
+            "(inherited, not set by klt)"
+        )
+    return f"xschem ran with --rcfile {rcfile or 'none'} and {seen}. "
+
+
+def _check_no_unresolved_symbol(
+    data: bytes, rcfile: str | None = None, env: dict[str, str] | None = None
+) -> None:
+    """Fail when xschem could not resolve a symbol (issue #3964).
+
+    xschem still writes a "fresh" ``.spice`` for an instance whose symbol does
+    not exist, marking it only with a comment line such as
+    ``*  E1 -  no_such_device  IS MISSING !!!!``. Unlike the expr gate this one
+    must match comment lines: the marker lives in one.
+    """
+    for number, line in enumerate(data.split(b"\n"), start=1):
+        if not _UNRESOLVED_SYMBOL_RE.search(line):
+            continue
+        snippet = line.decode("utf-8", errors="replace").strip()
+        raise NetlistError(
+            f"the netlist has an unresolved symbol at line {number}: "
+            f"{snippet!r}. xschem could not find a symbol an instance refers "
+            "to, so the device is missing from the netlist and none was "
+            f"written. {_pdk_env_note(rcfile, env)}"
+            "Fix the symbol path or library.",
+            code=UNRESOLVED_SYMBOL_CODE,
+        )
 
 
 def _write_output(output: str, data: bytes) -> None:
@@ -534,6 +850,10 @@ def _write_output(output: str, data: bytes) -> None:
 _BLOCK_SUBCKT_COMMENT_RE = re.compile(
     r"^([ \t]*)\*\*([ \t]*\.subckt\b.*)$", re.IGNORECASE | re.MULTILINE
 )
+#: xschem wraps a long top-sheet header onto commented continuation lines
+#: (``*+ ...``); once the header is uncommented they must become real SPICE
+#: ``+`` continuations or the port list is silently truncated (issue #3899).
+_BLOCK_CONTINUATION_COMMENT_RE = re.compile(r"^([ \t]*)\*{1,2}\+(.*)$")
 _BLOCK_ENDS_COMMENT_RE = re.compile(
     r"^([ \t]*)\*\*([ \t]*\.ends\b.*)$", re.IGNORECASE | re.MULTILINE
 )
@@ -543,6 +863,66 @@ _BLOCK_ENDS_COMMENT_RE = re.compile(
 #: testbench's own deck would terminate it early). Matches only when ``.end``
 #: is the last line of the file.
 _TRAILING_END_RE = re.compile(r"\n[ \t]*\.end[ \t]*\n?\Z", re.IGNORECASE)
+
+
+def _rejoin_header_continuations(text: str) -> str:
+    """Rewrite the commented ``*+``/``**+`` lines contiguous with the
+    just-uncommented ``.subckt`` header into real ``+`` continuations."""
+    lines = text.split("\n")
+    header = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if re.match(r"[ \t]*\.subckt\b", line, re.IGNORECASE)
+        ),
+        None,
+    )
+    if header is None:
+        return text
+    j = header + 1
+    while j < len(lines):
+        match = _BLOCK_CONTINUATION_COMMENT_RE.match(lines[j])
+        if not match:
+            break
+        lines[j] = f"{match.group(1)}+{match.group(2)}"
+        j += 1
+    return "\n".join(lines)
+
+
+_SUBCKT_HEADER_RE = re.compile(r"[ \t]*\.subckt\b", re.IGNORECASE)
+_PARAMS_RE = re.compile(r"\bparams:", re.IGNORECASE)
+
+
+def _space_separate_subckt_ports(data: bytes) -> bytes:
+    """Rewrite comma-joined bus ports in ``.subckt`` headers to spaces
+    (issue #4490).
+
+    xschem emits a bus port as ``a[1],a[0]``; ngspice mis-maps the ports of a
+    subcircuit with two or more such groups (trailing nodes silently left
+    unconnected). Only the port part of ``.subckt`` header lines and their
+    ``+`` continuations changes -- text from ``params:`` onward, comments and
+    device cards are left alone. A bus-free netlist is returned unchanged.
+    """
+    text = data.decode("utf-8", errors="replace")
+    lines = text.split("\n")
+    in_header = False
+    in_params = False
+    for i, line in enumerate(lines):
+        if _SUBCKT_HEADER_RE.match(line):
+            in_header, in_params = True, False
+        elif not (in_header and line.lstrip().startswith("+")):
+            in_header = False
+            continue
+        if in_params:
+            continue
+        match = _PARAMS_RE.search(line)
+        head, tail = (
+            (line[: match.start()], line[match.start() :]) if match else (line, "")
+        )
+        if match:
+            in_params = True
+        lines[i] = re.sub(r"[ \t]*,[ \t]*", " ", head) + tail
+    return "\n".join(lines).encode("utf-8")
 
 
 def _apply_block_mode(data: bytes) -> tuple[bytes, dict[str, Any]]:
@@ -565,6 +945,8 @@ def _apply_block_mode(data: bytes) -> tuple[bytes, dict[str, Any]]:
     text = data.decode("utf-8", errors="replace")
 
     text, n_subckt = _BLOCK_SUBCKT_COMMENT_RE.subn(r"\1\2", text, count=1)
+    if n_subckt:
+        text = _rejoin_header_continuations(text)
     text, n_ends = _BLOCK_ENDS_COMMENT_RE.subn(r"\1\2", text, count=1)
     text, n_end = _TRAILING_END_RE.subn("\n", text, count=1)
 
@@ -710,6 +1092,8 @@ def run_netlist(
     pdk: str | None = None,
     pdk_root: str | None = None,
     block: bool = False,
+    allow_unevaluated_expr: bool = False,
+    ignore_comments: bool = False,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -723,12 +1107,22 @@ def run_netlist(
     ``check``'s comparison/diff and before the normal write, so both modes
     operate on the block-shaped netlist, not xschem's raw testbench export.
 
+    ``allow_unevaluated_expr=True`` downgrades the unevaluated-``expr()`` gate
+    (issue #4305) to a ``warnings`` entry in the payload, for callers that
+    evaluate ``expr()`` downstream; ``unresolved_symbol`` stays a failure.
+
+    ``ignore_comments=True`` (issue #4525; ``check=True`` only) makes the
+    comparison ignore every comment line, for a committed netlist a project
+    post-processes (header, rewritten ``sch_path``). Never affects a write.
+
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
     missing/unlaunchable xschem, the timeout (after SIGTERM->SIGKILL
     escalation), no fresh output file, or an unwritable ``output``.
     """
     _validate_schematic(schematic)
+    if ignore_comments and not check:
+        raise NetlistError("--ignore-comments only applies with --check")
     if timeout_s <= 0:
         raise NetlistError(f"--timeout-s must be positive (got {timeout_s})")
     if rcfile is not None and not os.path.isfile(rcfile):
@@ -748,7 +1142,18 @@ def run_netlist(
         # satisfied by a file that already existed (see
         # `_resolve_produced_netlist`).
         started_at = time.time()
-        exit_status, stdout, stderr, duration_s = _launch_xschem(argv, timeout_s)
+        # Export the resolved PDK so an xschemrc reading $env(PDK_ROOT)/
+        # $env(PDK) agrees with --pdk/--pdk-root (issue #4186).
+        xschem_env: dict[str, str] | None = None
+        if pdk_block is not None:
+            xschem_env = {
+                **os.environ,
+                "PDK_ROOT": pdk_block["root"],
+                "PDK": pdk_block["variant"],
+            }
+        exit_status, stdout, stderr, duration_s = _launch_xschem(
+            argv, timeout_s, xschem_env
+        )
         produced = _resolve_produced_netlist(
             work_dir,
             stem,
@@ -763,6 +1168,13 @@ def run_netlist(
         block_info: dict[str, Any] | None = None
         if block:
             fresh_data, block_info = _apply_block_mode(fresh_data)
+        fresh_data = _space_separate_subckt_ports(fresh_data)
+
+        version = _probe_xschem_version(xschem_binary)
+        warnings = _unevaluated_expr_warnings(
+            fresh_data, version, allow_unevaluated_expr
+        )
+        _check_no_unresolved_symbol(fresh_data, rcfile, xschem_env)
 
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -771,6 +1183,7 @@ def run_netlist(
             "mode": "check" if check else "generate",
             "xschem": {
                 "binary": xschem_binary,
+                "version": version,
                 "argv": argv,
                 "forced_flags": list(FORCED_XSCHEM_FLAGS),
                 "exit_status": exit_status,
@@ -788,9 +1201,13 @@ def run_netlist(
             payload["pdk"] = pdk_block
         if block_info is not None:
             payload["block"] = block_info
+        if warnings:
+            payload["warnings"] = warnings
 
         if check:
-            status, drift = _check_result(output, fresh_data)
+            status, drift = _check_result(
+                output, fresh_data, ignore_comments, xschem_version=version
+            )
             payload["status"] = status
             payload["netlist"] = _netlist_block(None, fresh_data)
             payload["drift"] = drift

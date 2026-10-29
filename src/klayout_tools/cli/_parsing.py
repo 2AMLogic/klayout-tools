@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable
+from typing import Any
 
 ErrorFactory = Callable[[str], Exception]
 
@@ -193,6 +194,74 @@ def parse_deck_options(
     return options
 
 
+def parse_tie_nets(
+    raw: list[str] | None,
+    error_cls: ErrorFactory,
+    flag: str = "--tie-net",
+) -> list[tuple[str, str]] | None:
+    """Parse the ``--tie-net`` flag's ``EXTRACTED_NET=SCHEMATIC_NET`` entries
+    (issue #4245, repeatable) into ordered ``(extracted_net, schematic_net)``
+    pairs, or ``None`` when the flag was never given.
+
+    Several extracted nets may name one schematic net; one extracted net named
+    twice with different schematic nets is an error (the tie would be
+    ambiguous), and a verbatim repeat is collapsed. Whether the extracted net
+    is a reported unbiased net is checked by ``run_pex``, which has the
+    extraction to hand.
+    """
+    if raw is None:
+        return None
+    pairs: dict[str, str] = {}
+    for entry in raw:
+        extracted, sep, schematic = entry.partition("=")
+        extracted = extracted.strip()
+        schematic = schematic.strip()
+        if not sep or not extracted or not schematic:
+            raise error_cls(
+                f"{flag} entry {entry!r} is not EXTRACTED_NET=SCHEMATIC_NET "
+                f"-- e.g. {flag} '\\$5=VDD'"
+            )
+        if pairs.get(extracted, schematic) != schematic:
+            raise error_cls(
+                f"{flag} names extracted net {extracted!r} twice with "
+                f"different schematic nets ({pairs[extracted]!r} and "
+                f"{schematic!r})"
+            )
+        pairs[extracted] = schematic
+    return list(pairs.items())
+
+
+def parse_device_models(
+    raw: list[str] | None,
+    error_cls: ErrorFactory,
+    flag: str = "--device-model",
+) -> dict[str, str] | None:
+    """Parse the ``--device-model`` flag's ``CLASS=SUBCKT`` entries (issue
+    #4234, repeatable) into the ``{device class: PDK model name}`` mapping
+    ``run_extract``'s ``device_models`` parameter takes, or ``None`` when the
+    flag was never given. Shared by ``klt extract`` and ``klt pex``.
+
+    Raises ``error_cls`` for a malformed entry (no ``=``, blank class or blank
+    model name). A later entry for the same CLASS wins. Whether CLASS exists
+    in the deck, or already has a curated binding, is checked at binding
+    resolution, where the deck's class list can be quoted.
+    """
+    if raw is None:
+        return None
+    models: dict[str, str] = {}
+    for entry in raw:
+        name, sep, value = entry.partition("=")
+        name = name.strip()
+        value = value.strip()
+        if not sep or not name or not value:
+            raise error_cls(
+                f"{flag} entry {entry!r} is not CLASS=SUBCKT -- e.g. "
+                f"{flag} bjt=pnp_05p00x05p00"
+            )
+        models[name] = value
+    return models
+
+
 #: The spelling :func:`parse_label_layers` accepts for "this role reads no
 #: label layer at all" -- compared case-insensitively against the value half
 #: of a ``ROLE=VALUE`` entry.
@@ -261,6 +330,108 @@ def parse_label_layers(
             )
         overrides[role] = (int(layer_raw.strip()), int(datatype_raw.strip()))
     return overrides
+
+
+#: The keys a ``--probe`` spec (and a request document's ``probes[]`` object)
+#: must carry -- every one is required, none may repeat.
+PROBE_KEYS = ("name", "layer", "x", "y")
+
+
+def _probe_fields(entry: Any, error_cls: ErrorFactory, flag: str) -> dict[str, Any]:
+    """One probe entry (a spec string or a mapping) as raw ``{key: value}``
+    fields, checked for unknown/repeated/missing keys."""
+    if isinstance(entry, dict):
+        fields = dict(entry)
+        unknown = sorted(set(fields) - set(PROBE_KEYS))
+        if unknown:
+            raise error_cls(
+                f"{flag} entry has unknown key(s) {', '.join(unknown)} "
+                f"(expected {', '.join(PROBE_KEYS)})"
+            )
+    elif isinstance(entry, str):
+        fields = {}
+        for part in entry.split(","):
+            key, sep, value = part.partition("=")
+            key = key.strip()
+            if not sep or key not in PROBE_KEYS:
+                raise error_cls(
+                    f"{flag} entry {entry!r} is not "
+                    f"name=<id>,layer=<role>,x=<um>,y=<um> -- bad "
+                    f"segment {part!r}"
+                )
+            if key in fields:
+                raise error_cls(f"{flag} entry {entry!r} repeats key {key!r}")
+            fields[key] = value.strip()
+    else:
+        raise error_cls(f"{flag} entry must be a string or object, got {entry!r}")
+    missing = [key for key in PROBE_KEYS if key not in fields]
+    if missing:
+        raise error_cls(
+            f"{flag} entry {entry!r} is missing key(s) {', '.join(missing)} "
+            "(need name, layer, x and y)"
+        )
+    return fields
+
+
+def _probe_coordinate(
+    value: Any, axis: str, entry: Any, error_cls: ErrorFactory, flag: str
+) -> float:
+    """A probe's ``x``/``y`` as a finite float (micrometres)."""
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        number = float(value)
+    except (TypeError, ValueError):
+        raise error_cls(
+            f"{flag} entry {entry!r}: {axis}={value!r} is not a number (micrometres)"
+        ) from None
+    if number != number or number in (float("inf"), float("-inf")):
+        raise error_cls(f"{flag} entry {entry!r}: {axis}={value!r} is not finite")
+    return number
+
+
+def parse_probes(
+    raw: list[Any] | None,
+    error_cls: ErrorFactory,
+    flag: str = "--probe",
+) -> list[dict[str, Any]]:
+    """Parse the ``--probe`` flag's ``name=<id>,layer=<role>,x=<um>,y=<um>``
+    entries (issue #2986, repeatable) into the ``[{"name", "layer", "x",
+    "y"}, ...]`` list ``run_extract``'s own ``probes`` parameter takes,
+    in the order given. ``[]`` when the flag was never given.
+
+    An entry may also be an already-decoded mapping with those four keys --
+    the request document's ``probes`` array -- so both forms share one
+    validation path and cannot drift.
+
+    The ``layer`` role is deliberately **not** validated here: the set
+    depends on the deck (see :attr:`~klayout_tools.decks.ExtractionDeck.
+    label_layer_roles`), which the extractor resolves and quotes in its own
+    error. Raises ``error_cls`` for a malformed spec, a missing/unknown/
+    repeated key, non-numeric coordinates, or a duplicate probe ``name``.
+    """
+    probes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in raw or []:
+        fields = _probe_fields(entry, error_cls, flag)
+        name, layer = fields["name"], fields["layer"]
+        if not isinstance(name, str) or not name.strip():
+            raise error_cls(f"{flag} entry {entry!r} has an empty or non-string name")
+        if not isinstance(layer, str) or not layer.strip():
+            raise error_cls(f"{flag} entry {entry!r} has an empty or non-string layer")
+        name = name.strip()
+        if name in seen:
+            raise error_cls(f"{flag} name {name!r} is given more than once")
+        seen.add(name)
+        probes.append(
+            {
+                "name": name,
+                "layer": layer.strip(),
+                "x": _probe_coordinate(fields["x"], "x", entry, error_cls, flag),
+                "y": _probe_coordinate(fields["y"], "y", entry, error_cls, flag),
+            }
+        )
+    return probes
 
 
 def parse_declared_pins(

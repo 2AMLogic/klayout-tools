@@ -385,6 +385,67 @@ cleanly.
   (e.g. two blocks whose actual pads happen to sit at the same coordinate
   by coincidence), which only a real netlist diff can distinguish.
 
+## Requested port coordinates (`pins[].request`, #3971)
+
+By default a `pins[]` entry is promoted exactly where the block drew its
+port. A `pins[]` entry may instead carry an optional `request` to place the
+pin at a coordinate the caller chose:
+
+```json
+"pins": [{"net": "A", "block": "U0", "port": "A_in",
+          "request": {"x_um": 3.17, "layer_role": "metal"}}]
+```
+
+`gen-compose` draws one short stub on the port's own layer from the port's
+attach point to the requested coordinate, writes the pin label at that
+coordinate, and reports the coordinate in the composed `ports[]`.
+
+- **Units / frame.** `x_um` / `y_um` are micrometres in the *composed* frame
+  (after placement and orientation). Naming one axis keeps the port's own
+  coordinate on the other; naming both draws an L (horizontal, then vertical).
+- **Grid.** A requested value must sit on the layer's manufacturing grid and
+  be representable on the layout database unit. It is **never snapped or
+  moved** — that is the difference from "Manufacturing-grid snapping" below,
+  which nudges a *routed* port by less than one grid step.
+- **Layer role.** `layer_role` is optional and, when given, must resolve (same
+  role table as `routing.layer_role`) to the layer the port is drawn on. The
+  stub is drawn on the port's own layer with no via-drop and no layer change;
+  anything else is `port_request_unsupported_layer`.
+- **Width.** The port's reported width, floored by the PDK deck's minimum
+  width for the layer. The stub's last segment runs half a width past the
+  coordinate so the label sits inside the metal.
+- **Obstacles and spacing.** The stub (grown by the deck's minimum same-layer
+  spacing) must not touch any other drawn shape on that layer — other blocks,
+  the same block's shapes other than the port's own pad, already-routed
+  `connectivity[]` nets, or another pin's stub. The error names the conflict.
+- **Not a router.** No search, no detour, no vias. A request that the straight
+  stub cannot satisfy fails; pick a different coordinate (or place the block
+  differently) rather than expecting the tool to route around.
+- **Not on `connectivity[]` ports.** A `request` on a port that a
+  `connectivity[]` net routes is rejected (`port_request_on_connectivity_port`):
+  the router owns that port's position.
+
+Response: the `pins[]` and composed `ports[]` entry gain
+`requested` (`{x_um?, y_um?, layer}` — only the axes you asked for) and
+`achieved` (`{x_um, y_um, layer}`). Both coordinates are equal on every
+requested axis: success means the coordinate was honoured exactly.
+
+Failures use the shared error envelope (exit `1`) with a distinct
+`error.code`:
+
+| `error.code` | Meaning |
+| ------------ | ------- |
+| `port_request_invalid` | Malformed `request` (not an object, unknown key, non-numeric / non-finite value, neither axis named) or the port reports no geometry. |
+| `port_request_unsupported_layer` | `layer_role` resolves to a layer other than the port's own. `error.layer_role` and `error.port_layer` are set. |
+| `port_request_off_grid` | A coordinate is off the manufacturing grid (`error.grid_um`) or not representable on the dbu (`error.dbu_um`). |
+| `port_request_out_of_bounds` | The coordinate lies outside the composed placement bounding box (`error.bbox_um`). |
+| `port_request_conflict` | The stub overlaps or is closer than the minimum spacing to other metal; `error.conflicts_with` names the `block`, `net` or `pin`. |
+| `port_request_on_connectivity_port` | `request` on a `(block, port)` that `connectivity[]` routes. |
+
+Only sky130 fixtures cover this today; the stub is checked against the same
+deck spacing/width rules `klt drc` uses, but no PDK-wide DRC claim is made
+beyond those fixtures.
+
 ## Manufacturing-grid snapping of routed ports (#2932)
 
 Generators report a terminal port at the *midpoint* of its pad. When the pad's
@@ -1722,7 +1783,8 @@ adding a second one:
 - **An explicit plane wins over the automatic fallback.** A net that names its
   own `layer_role` is never retried onto `routing.cross_block_layer_role`; a
   net that names none keeps that fallback (and the #1393/#1680 retries)
-  exactly as before. A net that genuinely needs two planes says so per leg.
+  exactly as before. A net that genuinely needs two planes says so per leg — and
+  a leg that changes plane *mid-route* says so per waypoint (below).
 - **Per-leg overrides** (`connectivity[].legs[].layer_role`/`.width_um`) do
   the same for one named leg of any net, overriding the net's own choice.
   `layer_role` is the part that takes control of a plane: a leg that names one
@@ -1744,6 +1806,59 @@ adding a second one:
 - **Purely additive.** Omitting both fields reproduces today's behaviour
   byte-for-byte (the test suite asserts the composed GDS bytes are identical),
   so there is no `schema_version` bump.
+
+### Changing plane mid-leg (plane-bearing waypoints, #2930)
+
+A leg's `waypoints_um` entry may carry a third element, a layer role:
+`[x_um, y_um, "layer_role"]`. The route **changes plane at that point** and
+continues on the named plane — so a two-layer H/V channel route is expressible
+from JSON alone, with no caller-built junction GDS:
+
+```json
+{
+  "net": "DBUS",
+  "pins": [ /* ... */ ],
+  "legs": [{
+    "from_pin": { "block": "u1", "port": "U0_D" },
+    "to_pin":   { "block": "u2", "port": "U0_D" },
+    "layer_role": "metal2",
+    "waypoints_um": [[5.6, 2.5], [7.0, 2.5, "metal3"], [9.8, 2.5], [9.8, 0.21]]
+  }]
+}
+```
+
+The leg starts on its own plane (`layer_role`, else the net's), runs to
+`(7.0, 2.5)` on met1, takes a via ladder there, and finishes on met2. A 2-pin
+net's own `waypoints_um` accepts the same triple (the net then starts on its
+own plane). A role equal to the plane already being drawn on is just a plain
+waypoint; the two-number form is unchanged.
+
+- **Per segment, per plane.** The leg is routed as one same-plane segment per
+  plane. Every routability check — obstacles, guard rings, own-block shorts —
+  and the route-vs-route check run for each segment on the plane it is drawn
+  on: two same-plane segments of different nets that cross are still
+  rejected, segments on different planes are not compared as a short.
+- **The via ladder is the existing one.** The plane change is drawn by the
+  same #454/#1567 ladder (via square plus enclosure-sized landing pads on both
+  planes) a block pin gets, so it is DRC-legal by the same sizing. A plane
+  with no via ladder to the adjacent plane rejects that leg
+  (`reason: "plane change at waypoints_um[k] (x, y): …"`), never a
+  disconnected stub.
+- **Pinned like a layer-pinned leg.** No cross-block retry, and no automatic
+  re-pickup of the pin pair if a segment is rejected.
+- **Width** is the leg's `width_um` (else the net's), floored against *each*
+  plane's own deck minimum; an inherited width that is too narrow for the new
+  plane is an application error naming `legs[i].width_um`.
+- **Errors** (application errors, exit 1, the usual `error.message`): a
+  non-string or empty role (`...waypoints_um[k][2] must be a non-empty layer
+  role string`), a waypoint of more than three elements, an unknown role or a
+  role with no layer in the family's deck (named `legs[i].waypoints_um[k]`).
+- **Purely additive**; no `schema_version` bump. The response is unchanged —
+  one `legs[]` entry per named leg.
+
+The design record, including the rejected alternatives (a net-level H/V mode
+and a hand-placed junction block), is
+[`docs/design/gen-compose-plane-bearing-waypoints.md`](../design/gen-compose-plane-bearing-waypoints.md).
 
 ### What this does *not* do
 
@@ -1945,6 +2060,7 @@ exit codes).
 | `blocks[].cell.bbox_um` | object | Optional. The cell's own (pre-placement) `{x0, y0, x1, y1}` footprint. **When omitted it is read from the stream** — `kdb.Cell.dbbox()`, i.e. the same box [`klt cells`](cells.md) reports under its `{left, bottom, right, top}` field names, translated here so the caller never has to. Declare it explicitly when the placement footprint should differ from the drawn extent (e.g. a standard cell's row-abutment box), or when the cell draws no geometry at all (an empty cell has no readable bbox — that is an application error, exit 1, naming this field as the fix). |
 | `blocks[].generator_report.navigable_regions[]` / `blocks[].cell.navigable_regions[]` | array\<object\> | Optional, defaults to `[]` (issues #1531/#1835). A list of `{"x0_um", "y0_um", "x1_um", "y1_um"}` rectangles, in the block's own pre-placement coordinate frame — metal-free space the block's own generator has deliberately reserved for a route (e.g. [`klt gen mos_array`](gen.md)'s `interior_channel_um`). Subtracted from that block's own obstacle bbox before the obstacle-overlap check below runs, so a `waypoints_um` backbone that stays inside a declared region is not rejected as crossing its own block. Absent or empty leaves that check byte-for-byte unchanged — see "A block's own declared interior routing channel is no longer treated as its own obstacle" below. |
 | `blocks[].orientation` | string | Optional, default `"none"` (#1166). `"none"`, `"mirror_x"`, `"mirror_y"`, or `"rotate_180"` — this block's own mirror/rotation, applied about its own local origin *before* placement translates it. See "Block orientation (mirror/rotate, #1166)" below for the exact transform and the same-facing-port case it unblocks. An unrecognised value is an application error (exit 1). |
+| `blocks[].placed_cell_name` | string | Optional (#4246). Non-empty name for the sub-cell this block is instantiated under in the composed GDS, replacing the default `"<id>__<cell_name>"` — lets a composed hierarchy carry a schematic's subcircuit names. On a real collision (another block asking for the same name, or the top `options.cell_name`) KLayout's native `$n` suffix is applied (`name`, `name$1`) and a `warnings[]` entry names the requested and actual names. A non-string or empty value is an application error (exit 1). Omitted: output is unchanged. |
 | `blocks[].abuts[]` | array\<string\> | Optional, defaults to `[]` (#2638). Other `blocks[].id`s this block is intentionally placed **against, or inside the footprint of** — a declaration that the pair's proximity is by construction, not by mistake. Suppresses the `"explicit"`-placement clearance advisory (#692, below) for each declared pair, and only for that pair: every other pair is still checked. Suppression is **symmetric** (either side may declare it; the pair goes quiet in both directions) and never silent — each suppressed pair is reported as a `drc_hints.notes[]` entry and the declaration itself is echoed back as `blocks[].abuts` in the response. Naming an `id` the request does not declare, or this block's own `id`, is an application error (exit 1) — a typo must not silently suppress nothing. Only read under `strategy: "explicit"` (no other strategy emits that advisory); harmlessly present otherwise. |
 | `placement.strategy` | string | `"row"` (single horizontal row, left to right in `order`, spaced by `spacing_um`), `"explicit"` (#321 — each block placed at its own declared `origins_um[id]`), or `"array"` (#1053 — the one `blocks[]` entry named in `order` repeated on a `rows` x `cols` grid). Any other value (e.g. `"grid"`, reserved by the spike for a different, still-unimplemented feature) is an application error (exit 1). |
 | `placement.order` | array\<string\> | Block `id`s in placement order. Every `id` in `blocks[]` must appear exactly once — a missing or extra/unknown `id` is an application error. **Under `strategy: "array"`, `blocks[]`/`order` must contain exactly one entry** — the single block repeated at every tile; more than one is an application error. Response `blocks[]` ordering follows `order` under every strategy. |
@@ -1964,6 +2080,7 @@ exit codes).
 | `pins[].net` | string | Caller-chosen net name written as the `kdb.Text` label on the port, and echoed in the response. Required and non-empty. |
 | `pins[].block` | string | A `blocks[].id`. Referencing an unknown `id` is an application error (exit 1). |
 | `pins[].port` | string | A port name from that block's own `generator_report.ports[]`. An unknown port is an application error (exit 1). A `(block, port)` that also appears in any `connectivity[]` entry is rejected (exit 1) — the router already labels that shape. The label lands at the port's own composed-frame position on the label layer paired with the port's own drawn layer; a port on a layer with no label convention is not labelled (a `drc_hints.notes[]` partial-success note, not an error). |
+| `pins[].request` | object | Optional (#3971). Ask for the pin at a caller-selected coordinate instead of where the block drew the port — see "Requested port coordinates" below. Absent ⇒ behaviour is byte-identical to a request without the field. Keys: `x_um` and/or `y_um` (number, composed frame, µm; at least one), `layer_role` (string, optional). Unknown keys are rejected. |
 | `routing` | object | Optional (#1188). **Absent or `{}`** with a non-empty `connectivity[]` is a **declare-only** request: every net's `pins[]` is still validated, but no metal is drawn — each net comes back in `nets[]` with `status: "unrouted"` and `reason: "routing not requested"`, and its label lands in `unrouted_nets[]` (partial-success exit code `3`; see "Response" below). Supplying **any** key of `routing` opts into routing instead, and both `routing.layer_role`/`routing.width_um` become required at that point (a `routing` object with only one of the two set is an application error, exit 1 — there is no unambiguous partial routing spec). A request with an empty `connectivity[]` ignores `routing` either way. |
 | `routing.layer_role` | string | A layer *role* (e.g. `"metal"`) resolved through the **same** per-PDK-family role→layer table every [`klt gen`](gen.md) generator uses — never a raw `{layer, datatype}` pair. **Required** (and must name a role the resolved PDK family actually has a layer for) once any `routing` key is supplied with `connectivity[]` non-empty; omit `routing` entirely for a declare-only request instead (see above). `"metal2"` (#454) runs the backbone on the family's second routing-metal level instead, via-dropping back to each pin's own `"metal"`-role pad through the connecting `"via1"` role — see "Via-drop routing (metal2/via, #454)" below. |
 | `routing.width_um` | number | Route wire width. **Required and must be `> 0`** once any `routing` key is supplied with `connectivity[]` non-empty; omit `routing` entirely for a declare-only request instead (see above). |
@@ -2001,7 +2118,7 @@ exit codes).
       "source": "generator_report",
       "generator": "diff_pair",
       "cell_name": "diff_pair_0",
-      "source_path": "/work/diff_pair_0.gds",
+      "source_path": "diff_pair_0.gds",
       "source_digest": "sha256:9f2c1ab0…",
       "offset_um": { "x": 0.0, "y": 0.0 },
       "bbox_um": { "x0": -0.92, "y0": -0.92, "x1": 3.56, "y1": 2.16 },
@@ -2074,7 +2191,7 @@ exit codes).
 | `nets[]` | array\<object\> | One entry per `connectivity[]` net: an echo of `net`/`pins`, plus `routed` (boolean — `true` only when *every* pin joined one component), `route_length_um` (summed wire length in um across the net's **drawn** legs, or `null` when zero legs were drawn — for a caller doing a first-order parasitic estimate before extraction), `status` (below), and `legs[]` (below). Present for every net including unroutable ones (with `routed: false`). Under a declare-only request (`routing` absent/`{}`, #1188), every net reports `routed: false`, `status: "unrouted"`, `route_length_um: null`, and every leg's `reason: "routing not requested"` — validated against the blocks' own ports, but never drawn. |
 | `nets[].status` | string | One of `"routed"` (every pin connected into one component), `"partial"` (at least one leg drawn, but the net is not fully connected), or `"unrouted"` (no leg was ever accepted, including every net under a declare-only request, #1188) — issue #1169. Distinguishes a partially-drawn net from a fully-undrawn one: both report `routed: false`, so a caller must read `status` (not just count `legs[].routed`) to tell them apart. |
 | `nets[].legs[]` | array\<object\> | The two-pin legs the net was routed as (#1073): `pins` (the leg's own two `{block, port}` entries), `routed`, `route_length_um`, `reason` (`null` when routed, otherwise why this leg was not drawn — `"routing not requested"` for every leg under a declare-only request, #1188, as opposed to a geometry-based rejection reason), and `channel_track` (#1467, present only when `routed: true` — which channel track this leg's backbone landed on; `0` is the untracked/default fixed shape, `>0` means the router offset it to clear an already-routed net contending for the same channel; see "Channel track assignment (#1467)" above). A 2-pin net has exactly one leg; an N-pin net has N−1 when fully routed (fewer when the same `{block, port}` is listed more than once — a repeated pin is the same physical point and needs no leg of its own). **`routed: true` means this leg's metal is in the output.** Since #1169, a net that could not be *fully* connected still draws every leg the spanning-tree search accepted — only the legs reaching a stranded pin (plus any candidate rejected on the way) report `routed: false`, each with its own `reason`. For a `status: "routed"` net, legs the router tried and rejected on the way to a working spanning tree are dropped from the list entirely; for a `status: "partial"`/`"unrouted"` net, every attempted leg (drawn or not) is kept, so the caller can see the full search, not just the winning subtree. A leg the caller named via `connectivity[].legs[]` (#1529) is reported in this exact same shape — no distinct field marks a leg as caller-steered versus auto-selected — with one behavioural difference: a **rejected named leg is kept even on a `status: "routed"` net** (an auto-selected candidate's rejection is a router detail; a named leg's is the caller's own path not being drawn, and must not be silent). Check `legs[].routed`, not just `nets[].routed`, when supplying `legs[]`. |
-| `pins[]` | array\<object\> | One entry per request `pins[]` item (#210), in request order: `net`, `block`, `port` (all echoed) plus `labelled` (boolean — `true` when a label was placed, `false` when the port's layer has no label convention, matching a `drc_hints.notes[]` entry). Always present; **empty when the request supplied no `pins[]`** (backward compatible). |
+| `pins[]` | array\<object\> | One entry per request `pins[]` item (#210), in request order: `net`, `block`, `port` (all echoed) plus `labelled` (boolean — `true` when a label was placed, `false` when the port's layer has no label convention, matching a `drc_hints.notes[]` entry); entries whose request carried `request` also carry `requested` / `achieved` (#3971, see below). Always present; **empty when the request supplied no `pins[]`** (backward compatible). |
 | `unrouted_nets[]` | array\<string\> | Net labels the router could not *fully* connect — an unroutable 2-pin net, or a bundle net whose pins could not all be joined into one spanning tree (#1073), including a `status: "partial"` net that drew some but not all of its legs (#1169; see `nets[].status` to tell partial from fully-unrouted). Under a declare-only request (#1188), **every** `connectivity[]` net lands here (nothing was routed by request, not by failure — see `nets[].legs[].reason`). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. A listed net's *drawn* legs (if any — `nets[].legs[]`/`nets[].status` say which) are still real, DRC-checked metal; only the stranded pins are left for the caller to wire themselves. |
 | `drc_hints` | object | Advisory, same "not authoritative" semantics as `klt gen`'s own `drc_hints` — `klt drc` remains the actual authority on rule compliance. See fields below. |
 | `warnings[]` | array\<string\> | Non-fatal notes. Always present, empty when there is nothing to report. **A gateable signal** (#2638): the `"explicit"`-placement clearance advisory below no longer fires on the two placements that violate a declared minimum *legitimately* — an intra-array pitch a generator reported as its own `drc_hints.min_spacing_um`, and a pair the request declares via `blocks[].abuts` — so a downstream flow can assert `warnings[] == []` rather than asserting a count it has to re-baseline every time a block moves. |
@@ -2096,11 +2213,12 @@ exit codes).
 | `source` | string | Which request form sourced this block's geometry (#1189): `"generator_report"` (a `klt` verb's own response) or `"cell"` (an existing cell in a stream). |
 | `generator` | string \| null | Echoed from that block's own `generator_report.generator`; **`null`** for a `source: "cell"` block (#1189), which no generator produced. |
 | `cell_name` | string | The source cell's own name (#1189) — from `generator_report.cell_name` or `cell.cell_name`. This is the cell copied into the composed output (instantiated there under a `"<id>__<cell_name>"` sub-cell). |
-| `source_path` | string | The stream this block's geometry was read from (#2065), exactly as this run resolved it — `cell.gds_path` (already resolved against the request file's own directory) for a `source: "cell"` block, `generator_report.gds_path` for a `source: "generator_report"` one. Present for both block kinds: a composition is a *snapshot* of inputs that keep moving under it, so the report says what it was built from rather than leaving a consumer to re-derive it from the request. |
+| `source_path` | string | The stream this block's geometry was read from (#2065), exactly as the request spelled it (#2935) — `cell.gds_path` verbatim (a relative path stays relative, resolved against the request file's own directory only for reading, so no host/checkout prefix leaks into a committed response) for a `source: "cell"` block, `generator_report.gds_path` verbatim for a `source: "generator_report"` one. Present for both block kinds: a composition is a *snapshot* of inputs that keep moving under it, so the report says what it was built from rather than leaving a consumer to re-derive it from the request. |
 | `source_digest` | string \| null | A `"sha256:<hex>"` digest of `source_path`'s **decoded geometry** (#2065), or `null` when it cannot be computed (the stream moved or became unreadable between resolve time and report time, or no `klayout` engine is importable — never a fabricated value, matching the `provenance` block's own convention). Deliberately **not** a raw-byte file hash: re-writing geometrically identical output produces different bytes every time (the GDS `BGNLIB`/`BGNSTR` records carry the write time, and element order within a cell follows whatever order the writer emitted), so a byte hash reports drift on every input re-run and cannot distinguish a re-write from a real change. This digest covers the database unit, every cell (sorted by name), and within each cell every shape (keyed by layer/datatype) and every child-cell instance (keyed by the placed cell's *name*, with a regular array's two axes sorted), each rendered canonically and then sorted — so two streams holding the same geometry hash identically regardless of timestamps, element order, cell-table indices, or container format (GDS vs OASIS), while any real geometry or hierarchy change shows up as a different digest. Equality therefore answers "is this composition still built from what its inputs publish today?" without re-deriving geometry. Two blocks read out of the same stream report the same digest (it pins the stream, not the one cell). |
 | `offset_um` | object | `{x, y}` — the translation applied to place this block. Under `"row"`, the first block always has `offset_um: {x: 0.0, y: 0.0}`; every subsequent block is translated along `x` only (row placement never translates `y`) so its bbox sits exactly `placement.spacing_um` past the previous (already translated) block's right edge — regardless of that block's own `bbox_um.x0` (which need not be `0`; a guard-ringed block's bbox can extend to negative coordinates). Under `"explicit"` (#321), `offset_um` is exactly the request's own `placement.origins_um[id]`, verbatim — a block's own `bbox_um` plays no role in computing it (an explicit origin translates a block's bbox by that amount; it does not force the bbox's own `(x0, y0)` corner to land exactly on the declared origin unless that block's own `bbox_um.x0`/`y0` is already `0`). Under `"array"` (#1053), `offset_um` is exactly `placement.origin_um` (the base, row-0/col-0 tile) — every *other* tile's own position is implied by `rows`/`cols`/`row_pitch_um`/`col_pitch_um` rather than reported as a separate `blocks[]` entry (there is still exactly one `blocks[]` entry for an `"array"`-placed block, echoing this base tile). |
 | `bbox_um` | object | That block's own `generator_report.bbox_um`, transformed by `orientation` (#1166, about the block's own local origin) then translated by `offset_um`, in the composed cell's coordinate frame — **except under `"array"`** (#1053), where `bbox_um` is instead the union bounding box of *every* placed tile (all `rows * cols` instances), matching the top-level `bbox_um` field above when this is the only block in the request. |
 | `orientation` | string | Echo of the request's `blocks[].orientation` (#1166), `"none"` when omitted. |
+| `placed_cell_name` | string | The sub-cell name actually written to the composed GDS (#4246): the request's `blocks[].placed_cell_name` (after any `$n` collision suffix), or `"<id>__<cell_name>"` when omitted. |
 | `abuts[]` | array\<string\> | Echo of the request's `blocks[].abuts` (#2638), sorted; `[]` when omitted. An accepted clearance advisory must stay visible in the report, not only in the request that declared it — a reviewer reading the response alone can see which pairs were consciously exempted and cross-check them against the `drc_hints.notes[]` entries. |
 
 ### Semantics and guarantees
@@ -2156,7 +2274,7 @@ matched_groups:
 | Exit code | Meaning |
 | --------- | ------- |
 | `0` | Every block placed and every net routed; `gds_path` was written and the report above is on stdout. |
-| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, an unsupported `blocks[].orientation` value (#1166), a `blocks[].abuts` entry that is not an array of non-empty strings, names this block's own `id`, or names an `id` the request never declares (#2638), `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
+| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, an unsupported `blocks[].orientation` value (#1166), a `blocks[].abuts` entry that is not an array of non-empty strings, names this block's own `id`, or names an `id` the request never declares (#2638), `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, an infeasible `pins[].request` (distinct `error.code`s, see "Requested port coordinates" #3971), a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
 | `2` | Usage error — missing `<request.json>` argument, or a bad `--format` value (from argparse). |
 | `3` | **Partial success** — every block placed, but `unrouted_nets[]` is non-empty (a net could not be routed). The full success payload above is still on stdout, mirroring `klt drc`'s own `3` for "ran clean but found violations" (spike section 2, "Proposed exit codes"). |
 
@@ -2680,6 +2798,88 @@ mirror/rotate values, and there is no *per-tile* orientation override under
 alternate rows so adjacent rows share a power rail; expressing that today
 means one `blocks[]` entry per row, each with its own `orientation`, rather
 than one array. That is a placement question, tracked separately.
+
+## Ports derived from in-cell labels (`ports_from_labels`, #2927)
+
+A hand-drawn macro usually names its ports only by text labels sitting on its
+own routing, not by a caller-written `ports[]` table. `blocks[].cell` accepts
+an opt-in `ports_from_labels` object that derives those ports (and, optionally,
+finds a legal via-stack landing for each one):
+
+```json
+{
+  "id": "adc",
+  "cell": {
+    "gds_path": "adc.gds",
+    "cell_name": "adc_core",
+    "ports_from_labels": {
+      "layers": [{"layer": 68, "datatype": 5}],
+      "names": ["VIN", {"name": "VREF", "access": {"up_to": "metal4"}}],
+      "access": {
+        "up_to": "metal3",
+        "keepout_layers": [{"layer": 89, "datatype": 44}]
+      }
+    }
+  }
+}
+```
+
+- `layers[]` -- the label layers (pin- or drawing-purpose) whose text shapes
+  are searched. A name found only on an unlisted layer is an error.
+- `names[]` -- label strings, or `{name, access}` objects whose `access`
+  overrides the shared top-level `access`.
+- A name that is also declared in `ports[]` is rejected as ambiguous; derived
+  and hand-declared ports otherwise mix freely. Omitting the option changes
+  nothing.
+
+**Label to net.** The macro is extracted with `LayoutToNetlist` over the
+resolved PDK extraction deck's `metals`/`vias` stack (the connectivity model
+`klt extract` and `landed_on_block` use). The port takes the metal the label
+sits on (a label on the deck's `metal_labels` purpose maps to its metal), its
+`net` is the label name, and `layer` is that metal. A name matching no text,
+a label on no conductor, or one name on two different nets is a hard error
+naming the label.
+
+**Landing search (`access`).** Without `access` the port sits at the label
+position. With it, the port net's own shapes on the label's metal are searched
+for the nearest grid point where the via ladder up to `access.up_to` (a
+routing layer role such as `metal4`, as in `routing.layer_role`) is legal. The
+ladder and every pad/cut size are exactly what the router draws at a pin
+(the via-drop ladder of #454/#1567 and its #1501/#2072/#2074/#2585 sizing),
+and the rules come from the active deck:
+
+| Check | Rejection category |
+|---|---|
+| any footprint overlaps a `keepout_layers` shape | `keep_out` |
+| a cut is closer than the via layer's `space` rule to an existing cut | `via_spacing` |
+| a pad is closer than its metal's `space` rule to a *different* net | `clearance` |
+
+The port is reported on the net's own layer at the chosen point, so the
+router's existing via-drop draws the stack there. Candidates are ranked by
+distance to the label (ties by `x`, then `y`), so the result is deterministic.
+`access` keys: `up_to` (required), `via_array` (`[rows, cols]`, default
+`[1, 1]`, each side at most 16), `keepout_layers`, `grid_um` (default a quarter of the pad side,
+snapped to the manufacturing grid; points are enumerated per net polygon, so long thin
+nets are fine, and a polygon the grid misses still gets one fallback point near its centre) and `max_candidates` (default 20000; a hit
+cap adds a `warnings[]` entry and `truncated: true`). When no point is legal
+the request fails (exit 1) with the per-category rejection counts and example
+candidates.
+
+**Cut arrays (`via_array`).** `[rows, cols]` makes every hop of the ladder a
+rows x cols cut array centred on the landing point, at a pitch of the cut side
+plus the via layer's `space` rule (rounded up to twice the manufacturing grid so
+the cuts stay on grid). Every pad grows by `(max(rows, cols) - 1) * pitch` so it
+still encloses the outer cuts, and the search checks that larger, square-bounded
+footprint, so a tight spot that fits one cut can be rejected for an array. The
+pitch is carried on the port (`ports[].via_array = {rows, cols, pitch_um}`, keyed
+by via layer `"layer/datatype"`) and the router draws the same array.
+
+**Response (additive).** Blocks that used the option carry
+`blocks[].derived_ports[]`:
+`{name, label_um: {x, y}, layer, landing: null | {x_um, y_um, layer, up_to,
+via_count, via_array, candidates_evaluated, truncated}}` (`via_count` is the
+total number of cuts: hops x rows x cols; `via_array` is `[rows, cols]`).
+`schema_version` is unchanged.
 
 ## Worked example
 

@@ -28,11 +28,12 @@ document" section for the schema.
 
 ``--check <report>`` (issue #1149) switches ``klt extract`` from running a
 fresh extraction into *verifying a previously committed* ``--format json``
-report still reproduces -- see ``docs/cli/extract.md``, "--check" -- and is
-mutually exclusive with the positional ``file`` argument (the input path is
-read from the committed report itself). Cheap mode (default): re-hash the
-input/deck named in the report and compare against its own recorded
-``content_hash`` values, no extraction engine re-run. Full mode (``--check
+report still reproduces -- see ``docs/cli/extract.md``, "--check". The input
+path is read from the committed report itself unless the positional ``file``
+is also given (issue #2699), which then overrides it unconditionally. Cheap
+mode (default): re-hash the input/deck named in the report and compare
+against its own recorded ``content_hash`` values, no extraction engine re-run. Full
+mode (``--check
 <report> --rerun``): actually re-run the extraction the report describes
 and diff verdict-bearing fields. Both reuse ``status: "match"`` /
 ``"drifted"`` and the same 0/3 exit-code split described above (see
@@ -40,8 +41,11 @@ and diff verdict-bearing fields. Both reuse ``status: "match"`` /
 """
 
 import argparse
+import sys
+from typing import Any
 
 from .._paths import looks_like_request_document
+from ..env_provenance import render_path_field
 from ..extract import (
     REQUEST_SCHEMA,
     ExtractError,
@@ -52,8 +56,20 @@ from ..extract import (
     run_extract,
 )
 from . import _request_document as reqdoc
-from ._parsing import parse_deck_options, parse_declared_pins, parse_label_layers
-from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_rerun_drift
+from ._parsing import (
+    parse_deck_options,
+    parse_declared_pins,
+    parse_device_models,
+    parse_label_layers,
+    parse_probes,
+)
+from .output import (
+    EXIT_USAGE_ERROR,
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+)
 
 EXIT_OK = 0
 EXIT_DRIFTED = 3
@@ -79,6 +95,12 @@ def _parse_label_layers(
     flag was never given -- this command's :class:`ExtractError` binding of
     the shared :func:`.._parsing.parse_label_layers` helper."""
     return parse_label_layers(raw, ExtractError)
+
+
+def _parse_device_models(raw: list[str] | None) -> dict[str, str] | None:
+    """``--device-model`` (issue #4234, repeatable) as the ``{class: model}``
+    mapping ``run_extract`` takes, or ``None`` when the flag was never given."""
+    return parse_device_models(raw, ExtractError)
 
 
 def _parse_declared_pins(raw: str | None) -> frozenset[str] | None:
@@ -192,6 +214,21 @@ def _parse_resistance_paths(
             ) from None
         queries.append((net_id, source, target))
     return queries
+
+
+def _request_probes(request: dict) -> list[Any] | None:
+    """The request document's ``probes`` -- an array of ``--probe`` spec
+    strings and/or ``{"name", "layer", "x", "y"}`` objects (issue #2986),
+    handed to the shared :func:`.._parsing.parse_probes` unchanged."""
+    value = request.get("probes")
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ExtractError(
+            "`klt extract` request field 'probes' must be an array of probe "
+            f"objects or spec strings (got {type(value).__name__})"
+        )
+    return value
 
 
 def _request_resistance_paths(request: dict) -> list[list[str]] | None:
@@ -326,6 +363,7 @@ _REQUEST_FIELD_DESTS = {
         "deck",
         "output",
         "no_netlist",
+        "progress",
         "top",
         "pdk",
         "pdk_root",
@@ -335,9 +373,17 @@ _REQUEST_FIELD_DESTS = {
         "spef",
         "critical_nets",
         "parasitics_nets",
+        "critical_net_patterns",
+        "critical_net_all",
+        "critical_net_excludes",
+        "parasitics_net_patterns",
+        "strict_net_patterns",
         "parasitic_variants",
         "parasitics_top_cell_only",
+        "resistance_graph",
+        "resistance_graph_r_cut",
         "distributed_rc",
+        "substrate_tie_ohms",
         "resistance_paths",
         "resistance_path_max_nodes",
         "resistance_path_max_resistors",
@@ -351,9 +397,12 @@ _REQUEST_FIELD_DESTS = {
         "pins",
         "def_pins",
         "rename_declared_pins",
+        "tie_declared_pins",
         "pin_source_cells",
         "deck_options",
         "label_layers",
+        "device_models",
+        "probes",
         "defer_resistor_fixed_offset",
         "abstract_cells",
         "abstract_cell_lef",
@@ -427,6 +476,9 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "deck": _str("deck"),
             "output": _path("output"),
             "no_netlist": _bool("no_netlist"),
+            # Tri-state like the flag: absent keeps the stderr-is-not-a-TTY
+            # auto default (issue #3181).
+            "progress": _bool("progress") if "progress" in request else None,
             "top": _str("top"),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
@@ -436,9 +488,17 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "spef": _path("spef"),
             "critical_nets": _str_list("critical_nets"),
             "parasitics_nets": _str_list("parasitics_nets"),
+            "critical_net_patterns": _str_list("critical_net_patterns"),
+            "critical_net_all": _bool("critical_net_all"),
+            "critical_net_excludes": _str_list("critical_net_excludes"),
+            "parasitics_net_patterns": _str_list("parasitics_net_patterns"),
+            "strict_net_patterns": _bool("strict_net_patterns"),
             "parasitic_variants": _str_list("parasitic_variants"),
             "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
+            "resistance_graph": _bool("resistance_graph"),
+            "resistance_graph_r_cut": _number("resistance_graph_r_cut"),
             "distributed_rc": _bool("distributed_rc"),
+            "substrate_tie_ohms": _number("substrate_tie_ohms"),
             "resistance_paths": _request_resistance_paths(request),
             "resistance_path_max_nodes": _request_int(
                 request, "resistance_path_max_nodes"
@@ -456,6 +516,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "pins": _comma_joined("pins"),
             "def_pins": _path("def_pins"),
             "rename_declared_pins": _bool("rename_declared_pins"),
+            "tie_declared_pins": _bool("tie_declared_pins"),
             "pin_source_cells": _comma_joined("pin_source_cells"),
             "deck_options": reqdoc.get_str_map_as_pairs(
                 request,
@@ -471,6 +532,14 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
                 flag="--label-layer",
                 error_cls=ExtractError,
             ),
+            "device_models": reqdoc.get_str_map_as_pairs(
+                request,
+                "device_models",
+                verb="extract",
+                flag="--device-model",
+                error_cls=ExtractError,
+            ),
+            "probes": _request_probes(request),
             "defer_resistor_fixed_offset": _bool("defer_resistor_fixed_offset"),
             "abstract_cells": _str_list("abstract_cells"),
             "abstract_cell_lef": _str_list("abstract_cell_lef", paths=True),
@@ -489,9 +558,10 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> int:
-    # `file` and `--check` are a required, mutually exclusive argparse group
-    # (parser.py) -- omitting both, or giving both, is already a usage error
-    # (exit 2) by the time `run()` is ever called.
+    # `file` or `--check` is required -- omitting both is a usage error
+    # (exit 2) enforced by `parser._require_one_input` before `run()` is ever
+    # called. `file` may accompany `--check` (issue #2699) as an explicit
+    # input override.
     if args.check is not None:
         return _run_check(args)
 
@@ -522,6 +592,8 @@ def run(args: argparse.Namespace) -> int:
         hierarchical_cells = _parse_hierarchical_cells(args.hierarchical_cells)
         deck_options = _parse_deck_options(args.deck_options)
         label_layers = _parse_label_layers(args.label_layers)
+        device_models = _parse_device_models(args.device_models)
+        probes = parse_probes(args.probes, ExtractError)
         def_net_connections = _parse_def_net_connections(
             args.def_net_connections, spef_output=args.spef
         )
@@ -532,6 +604,16 @@ def run(args: argparse.Namespace) -> int:
             args.deck,
             output=args.output,
             no_netlist=args.no_netlist,
+            # `--progress` (issue #3181): stage lines + heartbeat on stderr.
+            # Unset means "heartbeat only, and only when stderr is not a
+            # TTY": an agent or CI run gets liveness on a long extraction,
+            # while a short run keeps stderr clean (the error envelope lives
+            # there) and an interactive shell stays quiet.
+            progress=(
+                args.progress
+                if args.progress is not None
+                else ("heartbeat" if not sys.stderr.isatty() else False)
+            ),
             top=args.top,
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
@@ -554,6 +636,12 @@ def run(args: argparse.Namespace) -> int:
             # curated default. `None` when the flag was never given,
             # unchanged from every call site that predates it.
             label_layers=label_layers,
+            # `--device-model` (issue #4234): caller-named PDK model for a
+            # bipolar class with no curated binding. `None` when never given.
+            device_models=device_models,
+            # `--probe` (issue #2986): point-to-net queries answered on this
+            # run's own extraction. `[]` when the flag was never given.
+            probes=probes,
             # `--abstract-cells`/`--abstract-cell-lef` (issue #620): cell-
             # level black-box abstraction. `()` when the flag(s) were never
             # given, unchanged from every call site that predates them.
@@ -588,6 +676,13 @@ def run(args: argparse.Namespace) -> int:
             # every net in the design. `None` when the flag was never given,
             # unchanged from every call site that predates it.
             parasitics_nets=args.parasitics_nets,
+            # Issue #2974: glob / all-nets selectors resolved against the
+            # extracted nets. Defaults leave every earlier call unchanged.
+            critical_net_patterns=args.critical_net_patterns,
+            critical_net_all=args.critical_net_all,
+            critical_net_excludes=args.critical_net_excludes,
+            parasitics_net_patterns=args.parasitics_net_patterns,
+            strict_net_patterns=args.strict_net_patterns,
             # `--parasitic-variant` (issue #3056): drops R/C elements at
             # injection time. `None` when the flag was never given,
             # unchanged from every call site that predates it.
@@ -597,11 +692,21 @@ def run(args: argparse.Namespace) -> int:
             # drawn share. `False` when the flag was never given, unchanged
             # from every call site that predates it.
             parasitics_top_cell_only=args.parasitics_top_cell_only,
+            # `--resistance-graph` (issue #2982): additive opt-in
+            # `parasitics.nets[].resistance_graph`. `False` when the flag
+            # was never given, unchanged from every call site before it.
+            resistance_graph=args.resistance_graph,
+            # `--resistance-graph-r-cut` (issue #2983): per-cut via
+            # resistance for the graph; `None` when never given.
+            resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
             # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
             # the star/Gamma-shunt R/C model with a distributed ladder for
             # every `--critical-net`-named net. `False` when the flag was
             # never given, unchanged from every call site that predates it.
             distributed_rc=args.distributed_rc,
+            # `--substrate-tie-ohms` (issue #3089): `None` when the flag was
+            # never given -- the default 1e12 tie.
+            substrate_tie_ohms=args.substrate_tie_ohms,
             # `--resistance-path` (issue #2765): shortest series path
             # resistance queries over --distributed-rc ladders. `None` when
             # the flags were never given, unchanged from every call site
@@ -642,6 +747,8 @@ def run(args: argparse.Namespace) -> int:
             # `False` when the flag was never given, unchanged from every
             # call site that predates it.
             rename_declared_pins=args.rename_declared_pins,
+            # `--tie-declared-pins` (issue #4383).
+            tie_declared_pins=args.tie_declared_pins,
             # `--pin-source-cells` (issue #1513): the positional, probe-based
             # declared-pin mechanism for a `klt gen-compose`d assembly with
             # no governing top-level DEF -- derives the declared top-level
@@ -677,16 +784,27 @@ def run(args: argparse.Namespace) -> int:
 def _run_check(args: argparse.Namespace) -> int:
     try:
         if args.rerun:
-            result = rerun_extract_report(args.check)
+            result = rerun_extract_report(args.check, input_path=args.file)
         else:
-            result = check_extract_report(args.check)
+            result = check_extract_report(args.check, input_path=args.file)
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
+
+
+def _print_device_models(device_models: dict | None) -> None:
+    """One ``device_models: CLASS=SUBCKT, ...`` line (issue #4234); silent
+    when ``--device-model`` was never given."""
+    if not device_models:
+        return
+    rendered = ", ".join(
+        f"{name}={model}" for name, model in sorted(device_models.items())
+    )
+    print(f"device_models: {rendered}")
 
 
 def _print_label_layers(label_layers: dict | None) -> None:
@@ -707,6 +825,17 @@ def _print_label_layers(label_layers: dict | None) -> None:
         for role, layer in sorted(label_layers.items())
     )
     print(f"label_layers: {rendered}")
+
+
+def _print_probes(probes: list | None) -> None:
+    """One human-readable line per ``--probe`` result (issue #2986), or
+    nothing when none was given."""
+    for probe in probes or []:
+        where = f"{probe['layer']} ({probe['x_um']}, {probe['y_um']})"
+        if probe["found"]:
+            print(f"probe {probe['name']}: {where} -> {probe['net']}")
+        else:
+            print(f"probe {probe['name']}: {where} -> not found")
 
 
 def _print_substrate_spreading(block: dict | None) -> None:
@@ -732,7 +861,12 @@ def _print_substrate_spreading(block: dict | None) -> None:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    # `file` is the `{path, scope}` object `env_provenance.repo_relative_path`
+    # defines (issue #2659) -- rendered through the same courtesy helper
+    # `klt sim`/`klt pex` use, so the absolute path is never printed even in
+    # text mode (`<outside repo>`/`<unresolved>` instead). `netlist_path`
+    # below is an output path, still a plain string, and prints as-is.
+    print(f"file: {render_path_field(report['file'])}")
     print(f"deck: {report['deck']}")
     # Present whenever this deck declares a caller-selectable option at all
     # (issues #595, #2394) -- mirrors `provenance.deck.options` in the JSON
@@ -761,6 +895,8 @@ def _print_text(report: dict) -> None:
     # this line adds no branch to an already long function -- the same shape
     # `_print_substrate_spreading` below already uses.
     _print_label_layers(report.get("label_layers"))
+    _print_device_models(report.get("device_models"))
+    _print_probes(report.get("probes"))
     print(f"top: {report['top']}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"status: {report['status']}")
@@ -977,14 +1113,3 @@ def _print_subcircuit_text(subcircuit: dict | None) -> None:
             f"{excluded['capacitance_ff']} fF  "
             f"{excluded['resistance_ohm']} ohm"
         )
-
-
-def _print_check_text(result: dict) -> None:
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")

@@ -1,0 +1,13 @@
+{
+  "def": "top.def",
+  "spef": "top.spef",
+  "pdk": {
+    "cell_library": "sky130_fd_sc_hd",
+    "corner": "ff_n40C_1v95"
+  },
+  "constraints": {
+    "clock_port": "clk",
+    "clock_period_ns": 2.0,
+    "input_delay_ns": 0.0
+  }
+}
