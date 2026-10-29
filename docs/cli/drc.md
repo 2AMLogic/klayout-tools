@@ -1880,7 +1880,7 @@ re-derived from a real fetched install's own
 (`ciel enable --pdk gf180mcu f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`;
 re-verified against that tree 2026-10-16, thresholds unchanged from the
 earlier `c6d73a3` build's `drc/rule_decks/{contact,via1,via2,via3,via4}.drc`.
-gf180mcu's LVS-derived extraction deck still cites `c6d73a3` until #3540), and each cites both its DRM rule id and the executable
+gf180mcu's LVS-derived extraction deck was re-verified against the same tree in #3540 and now cites `f6eeac7`), and each cites both its DRM rule id and the executable
 statement it was re-derived from. The same install's `comp.drc` (issue
 #1110's `_LV`/`_MV` voltage-split rules) and `{nplus,pplus}.drc` (issue
 #2369's `NP.3a`/`NP.5a`/`NP.5b` and `PP.*` mirrors, whose `PCOMP`/`NCOMP`/
