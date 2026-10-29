@@ -3029,18 +3029,19 @@ and `partial_coverage` is an existing reason.
 #### Item 6's evidence needs a from-source toolchain (issue #2466)
 
 Item 6 accepts only a `yield` envelope, and `klt yield` requires the
-`klt_yield_native` Rust extension — published as the prebuilt
-`klt-yield-native` wheel (Linux x86_64, macOS arm64) and reached by
-`pip install 'klayout-tools[yield]'`. A bare `pip install klayout-tools`
-and the git-pinned (`@git+…`) form do not include it, and a release that
-predates the first `klt-yield-native` publication (or another platform)
-needs a full repo checkout with a Rust toolchain (see
+`klt_yield_native` Rust extension. Today that means a full repo checkout
+with a Rust toolchain: the prebuilt `klt-yield-native` wheel behind
+`pip install 'klayout-tools[yield]'` is not yet on PyPI, so the extra does
+not resolve for any release to date (0.6.0 and 0.7.0 included) and will only
+resolve for releases published after the wheel is. A bare
+`pip install klayout-tools` and the git-pinned (`@git+…`) form do not
+include it either (see
 [`yield.md`](yield.md)'s "What the extra does and does not reach"
 callout for the full statement and the build steps). Every *other* T1
 item's evidence verb — `drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
 `functional-verification`, `erc`, `place-and-route` — is reachable from a
 published release, so item 6 is the one row that additionally needs the
-`[yield]` extra (or a from-source build) to produce evidence for, or to
+from-source build (the `[yield]` extra once published) to produce evidence for, or to
 re-derive an already-committed report for, from a pinned release. Worth knowing *before* planning a T1
 campaign around it.
 
