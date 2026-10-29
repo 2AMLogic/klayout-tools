@@ -10620,13 +10620,18 @@ def test_gf180mcu_unmodeled_voltage_marker_registry_no_longer_claims_mos_gap():
 
 
 def test_gf180mcu_deck_declares_dualgate_mos_flavour():
-    """The gf180mcu extraction deck declares one `mos_flavours` entry keyed
-    on `Dualgate` (55/0) -- the deck-data half of issue #1111."""
+    """The gf180mcu extraction deck declares a `mos_flavours` entry keyed
+    on `Dualgate` (55/0) -- the deck-data half of issue #1111 -- after the two
+    drain-extended LDMOS entries (issue #4570), which must come first because
+    the LDMOS sits inside `Dualgate` and the first matching flavour claims."""
     deck = get_extraction_deck("gf180mcu")
-    assert len(deck.mos_flavours) == 1
-    flavour = deck.mos_flavours[0]
+    assert [f.flavour for f in deck.mos_flavours] == [
+        "10v0_asym_n",
+        "10v0_asym_p",
+        "06v0",
+    ]
+    flavour = deck.mos_flavours[-1]
     assert flavour.marker == (55, 0)
-    assert flavour.flavour == "06v0"
 
 
 def _make_gf180mcu_straddling_dualgate_mos_layout() -> kdb.Layout:

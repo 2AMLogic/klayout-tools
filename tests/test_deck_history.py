@@ -854,9 +854,12 @@ def test_deck_devices_marks_markerless_classes_as_such():
     # `pfet` is honestly predicate-gated: a PMOS is not recognised outside
     # the well.
     assert _device_class("gf180mcu", "pfet")["predicate_gated"] is True
-    # gf180mcu's `Dualgate` MOS flavour marker is reported alongside.
+    # gf180mcu's drain-extended LDMOS markers (`MVSD`/`MVPSD`, issue #4570) and
+    # its `Dualgate` MOS flavour marker are reported alongside.
     assert _layer_pairs([flavour["marker"] for flavour in nfet["flavours"]]) == [
-        (55, 0)
+        (210, 0),
+        (11, 39),
+        (55, 0),
     ]
 
 

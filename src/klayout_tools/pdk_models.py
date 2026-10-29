@@ -430,6 +430,16 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
             "nfet": "nfet_06v0",
             "pfet": "pfet_06v0",
         },
+        # Drain-extended LDMOS (issue #4570); the PDK's own `mos_extraction.lvs`
+        # extracts them as `mos4('nfet_10v0_asym')` / `mos4('pfet_10v0_asym')`.
+        "10v0_asym_n": {
+            "nfet": "nfet_10v0_asym",
+            "pfet": "pfet_10v0_asym",
+        },
+        "10v0_asym_p": {
+            "nfet": "nfet_10v0_asym",
+            "pfet": "pfet_10v0_asym",
+        },
     },
     ("sg13g2", "sg13g2"): {
         "hv": {
