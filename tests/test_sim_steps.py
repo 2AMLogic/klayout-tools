@@ -1401,6 +1401,182 @@ def test_invalid_spectrum_references_are_refused(expr, match):
         _resolve(request)
 
 
+# --------------------------------------------------------------------------- #
+# Derived sweep windows and unreported intermediates (issue #3055)
+# --------------------------------------------------------------------------- #
+
+
+def _coarse_fine_request(**fine_overrides) -> dict:
+    """A coarse DC sweep locates the last grid point where v(out) < 1 V
+    (1.0 V, since v(out) = 2/3 * vin); a fine sweep is centred on it."""
+    fine = {
+        "name": "fine",
+        "analysis": {
+            "kind": "dc",
+            "args": "VIN ${coarse.edge - 0.5} ${coarse.edge + 0.5} 0.25",
+        },
+        "measurements": [
+            {"name": "first", "expr": "v(in)[0]"},
+            {"name": "last", "expr": "vecmax(v(in))"},
+        ],
+    }
+    fine.update(fine_overrides)
+    return {
+        "netlist": "body.spice",
+        "analysis_steps": [
+            {
+                "name": "coarse",
+                "analysis": {"kind": "dc", "args": "VIN 0 6 0.5"},
+                "measurements": [
+                    {
+                        "name": "edge",
+                        "expr": "vecmax(v(in) * (v(out) lt 1.0))",
+                    }
+                ],
+            },
+            fine,
+        ],
+        "measurements": [{"name": "span", "expr": "fine.last - fine.first"}],
+    }
+
+
+def test_arg_reference_becomes_a_scalar_let_read_with_dollar_ampersand():
+    analysis, specs = _resolve(_coarse_fine_request())
+    lines = sim_steps.control_lines(analysis, specs)
+    fine = lines[lines.index("echo klt_step_begin 1 $curplot") - 3 :]
+    assert fine[:5] == [
+        "setplot new",
+        "let klt_arg_1_0 = {$klt_plot_0}.edge - 0.5",
+        "let klt_arg_1_1 = {$klt_plot_0}.edge + 0.5",
+        "echo klt_step_begin 1 $curplot",
+        "dc VIN $&klt_arg_1_0 $&klt_arg_1_1 0.25",
+    ]
+    assert analysis["steps"][1]["arg_inputs"] == ["coarse.edge"]
+    # The report-facing args stay the request's own text.
+    assert analysis["steps"][1]["args"].startswith("VIN ${coarse.edge")
+
+
+def test_steps_without_placeholders_keep_their_exact_shape():
+    analysis, _ = _resolve(_two_point_request())
+    for step in analysis["steps"]:
+        assert set(step) == {"name", "kind", "args", "alter"}
+    assert set(analysis) == {"kind", "args", "steps"}
+
+
+@pytest.mark.parametrize(
+    "args,match",
+    [
+        ("VIN ${fine.x} 1 0.1", "not an earlier step"),
+        ("VIN ${later.x} 1 0.1", "not an earlier step"),
+        ("VIN ${coarse.nope} 1 0.1", "declares no measurement"),
+        ("VIN ${1 + 2} 1 0.1", "references no earlier step"),
+        ("VIN ${coarse.edge 1 0.1", "unterminated"),
+    ],
+)
+def test_bad_arg_references_are_refused_naming_step_and_reference(args, match):
+    request = _coarse_fine_request()
+    request["analysis_steps"][1]["analysis"]["args"] = args
+    request["analysis_steps"].append(
+        {"name": "later", "analysis": {"kind": "op", "args": ""}}
+    )
+    with pytest.raises(sim.SimError, match=match) as excinfo:
+        _resolve(request)
+    assert "fine" in str(excinfo.value)
+
+
+def test_arg_reference_to_an_intermediate_is_refused():
+    request = _coarse_fine_request()
+    request["analysis_steps"][0]["measurements"][0]["intermediate"] = True
+    with pytest.raises(sim.SimError, match="intermediate"):
+        _resolve(request)
+
+
+def test_unavailable_window_input_fails_the_step_without_a_stale_run():
+    request = _coarse_fine_request()
+    # The upstream measurement printed nothing; ngspice still "ran" the fine
+    # step (markers show a new plot), but Python must refuse its result.
+    log = _step_log(steps=2, values={"fine__first": 1.0, "fine__last": 2.0})
+    results, diagnostics, extra = _grade(request, log)
+    by_name = {r["name"]: r for r in results}
+    assert by_name["fine.first"]["value"] is None
+    assert by_name["fine.first"]["status"] == "error"
+    assert by_name["span"]["status"] == "error"
+    assert [d["code"] for d in diagnostics].count("derived_input_unavailable") >= 1
+    unavailable = next(d for d in diagnostics if "was not run against" in d["message"])
+    assert "fine" in unavailable["message"] and "coarse.edge" in unavailable["message"]
+    assert [s["status"] for s in extra["steps"]] == ["ok", "error"]
+
+
+def test_failed_upstream_step_blocks_the_dependent_window():
+    log = _step_log(
+        steps=2, failed=(0,), values={"coarse__edge": 1.0, "fine__first": 1.0}
+    )
+    _, diagnostics, extra = _grade(_coarse_fine_request(), log)
+    assert [s["status"] for s in extra["steps"]] == ["error", "error"]
+    assert [d["code"] for d in diagnostics][:2] == [
+        "step_failed",
+        "derived_input_unavailable",
+    ]
+
+
+def _intermediate_request() -> dict:
+    return {
+        "netlist": "body.spice",
+        "analysis_steps": [
+            {
+                "name": "sweep",
+                "analysis": {"kind": "dc", "args": "VIN 0 3 0.5"},
+                "measurements": [
+                    {"name": "slope", "expr": "v(out)", "intermediate": True},
+                    {"name": "top", "expr": "vecmax(slope)"},
+                ],
+            }
+        ],
+        "measurements": [
+            {"name": "gain", "expr": "sweep.top / 3", "intermediate": True},
+            {"name": "twice", "expr": "gain * 2", "limits": {"min": 1.0}},
+        ],
+    }
+
+
+def test_intermediate_is_let_only_and_not_a_reported_measurement():
+    analysis, specs = _resolve(_intermediate_request())
+    assert [s["name"] for s in specs] == ["sweep.top", "twice"]
+    lines = sim_steps.control_lines(analysis, specs)
+    assert "let slope = v(out)" in lines
+    assert "let gain = {$klt_plot_0}.top / 3" in lines
+    assert not any(
+        line.startswith("print") and ("slope" in line or "gain" in line)
+        for line in lines
+    )
+    assert lines.index("let slope = v(out)") < lines.index("let top = vecmax(slope)")
+    assert specs[1]["derived_from"] == ["sweep.top"]
+
+
+def test_intermediate_is_graded_nowhere():
+    log = _step_log(steps=1, values={"sweep__top": 2.0, "twice": 1.3333333})
+    results, diagnostics, _ = _grade(_intermediate_request(), log)
+    assert [r["name"] for r in results] == ["sweep.top", "twice"]
+    assert diagnostics == []
+    assert results[1]["status"] == "pass"
+
+
+@pytest.mark.parametrize(
+    "mutate,match",
+    [
+        (lambda m: m.update(limits={"min": 0}), "cannot declare 'limits'"),
+        (lambda m: m.update(plausible_range={"min": 0, "max": 1}), "plausible_range"),
+        (lambda m: m.update(intermediate="yes"), "boolean"),
+        (lambda m: (m.pop("expr"), m.update(spice="meas dc x max v(out)")), "'expr'"),
+    ],
+)
+def test_invalid_intermediates_are_refused(mutate, match):
+    request = _intermediate_request()
+    mutate(request["analysis_steps"][0]["measurements"][0])
+    with pytest.raises(sim.SimError, match=match):
+        _resolve(request)
+
+
 def test_spectrum_reference_is_a_valid_sole_input_of_a_derived_measurement():
     # No `<step>.<meas>` reference at all: the spectrum read alone qualifies.
     request = _noise_request()
@@ -1462,3 +1638,50 @@ def test_real_ngspice_reset_step_drops_earlier_alter_keeps_supply(tmp_path):
     assert values["fresh.vout"] == pytest.approx(2.2, rel=1e-6)
     assert values["drop"] == pytest.approx(2 / 3, rel=1e-6)
     assert [s["status"] for s in corner["steps"]] == ["ok", "ok"]
+
+
+def test_intermediate_is_refused_on_the_scalar_analysis_form():
+    request = {
+        "analysis": {"kind": "op", "args": ""},
+        "measurements": [{"name": "v", "expr": "v(out)", "intermediate": True}],
+    }
+    with pytest.raises(sim.SimError, match="only supported with analysis_steps"):
+        sim._resolve_analysis_and_measurements(request)
+
+
+def test_remote_forwards_placeholders_and_intermediates_verbatim():
+    request = _coarse_fine_request()
+    request["analysis_steps"][0]["measurements"].append(
+        {"name": "tmp", "expr": "v(out)", "intermediate": True}
+    )
+    forwarded = json.loads(json.dumps(request))
+    assert forwarded["analysis_steps"][1]["analysis"]["args"].startswith("VIN ${")
+    # The worker re-resolves the same document into the same deck text.
+    a1, s1 = _resolve(forwarded)
+    a2, s2 = _resolve(request)
+    assert sim_steps.control_lines(a1, s1) == sim_steps.control_lines(a2, s2)
+
+
+@_SKIP_NO_NGSPICE
+def test_real_ngspice_fine_sweep_is_centred_on_the_coarse_result(tmp_path):
+    _write_body(tmp_path)
+    report = sim.run_sim(str(_write_request(tmp_path, _coarse_fine_request())))
+    corner = report["corners"][0]
+    values = {m["name"]: m["value"] for m in corner["measurements"]}
+    assert values["coarse.edge"] == pytest.approx(1.0)
+    assert values["fine.first"] == pytest.approx(0.5)
+    assert values["fine.last"] == pytest.approx(1.5)
+    assert values["span"] == pytest.approx(1.0)
+    assert [s["status"] for s in corner["steps"]] == ["ok", "ok"]
+
+
+@_SKIP_NO_NGSPICE
+def test_real_ngspice_intermediate_feeds_later_exprs_unreported(tmp_path):
+    _write_body(tmp_path)
+    report = sim.run_sim(str(_write_request(tmp_path, _intermediate_request())))
+    corner = report["corners"][0]
+    values = {m["name"]: m["value"] for m in corner["measurements"]}
+    assert sorted(values) == ["sweep.top", "twice"]
+    assert values["sweep.top"] == pytest.approx(2.0)
+    assert values["twice"] == pytest.approx(4 / 3)
+    assert not any("slope" in d["message"] for d in corner["diagnostics"])

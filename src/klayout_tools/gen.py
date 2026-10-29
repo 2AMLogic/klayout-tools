@@ -125,6 +125,7 @@ from .gen_layer_params import (
     _MAX_CAP_TOP_PLATE_REQUIRES,
     _MAX_RES_FLAVOR_LAYERS,
     CAP_BOTTOM_PLATE_MARGIN_UM,
+    CAP_PARALLEL_VIA_EDGE_INSET_UM,
     CAP_TOP_ESCAPE_CLEARANCE_UM,
     GUARD_RING_DEFAULT_CONTACTS_PER_SIDE,
     GUARD_RING_DEFAULT_PADDING_UM,
@@ -2206,6 +2207,8 @@ def _cap_array_layout(
     top_via_min_w_um: float = 0.0,
     bottom_plate_margin_min_um: float = 0.0,
     min_spacing_um: float = 0.0,
+    connect: str = "independent",
+    top_via_pitch_um: float = 0.0,
 ) -> dict[str, Any]:
     """``num`` matched unit MiM capacitors (see :func:`_cap_unit_layout`) in
     a single row, spaced ``spacing_um`` apart -- the capacitor sibling of
@@ -2227,7 +2230,12 @@ def _cap_array_layout(
     draw a guaranteed violation is widened instead of rejected (the effective
     spacing is what :func:`_cap_array_describe` reports as
     ``drc_hints.min_spacing_um``, alongside a note). ``0.0`` -- every family
-    but gf180mcu -- leaves the requested spacing exactly as asked."""
+    but gf180mcu -- leaves the requested spacing exactly as asked.
+
+    ``connect="parallel"`` (issue #3022) additionally returns a ``"parallel"``
+    entry: the same ``num`` unit cells wired into *one* two-terminal
+    capacitor by :func:`_cap_parallel_layout`. ``"independent"`` (the default)
+    returns exactly the dict it always did."""
     unit = _cap_unit_layout(
         plate_w_um,
         plate_h_um,
@@ -2238,11 +2246,109 @@ def _cap_array_layout(
     effective_spacing_um = max(spacing_um, min_spacing_um)
     pitch = unit["total_w_um"] + effective_spacing_um
     cells = [{"idx": i, "x0_um": i * pitch, "y0_um": 0.0} for i in range(num)]
-    return {
+    result: dict[str, Any] = {
         "unit": unit,
         "pitch_um": pitch,
         "cells": cells,
         "spacing_um": effective_spacing_um,
+    }
+    if connect == "parallel":
+        result["parallel"] = _cap_parallel_layout(
+            plate_w_um,
+            plate_h_um,
+            unit,
+            cells,
+            top_via_metal_min_w_um,
+            top_via_min_w_um,
+            bottom_plate_margin_min_um,
+            top_via_pitch_um,
+        )
+    return result
+
+
+def _cap_parallel_layout(
+    plate_w_um: float,
+    plate_h_um: float,
+    unit: dict[str, Any],
+    cells: list[dict[str, Any]],
+    top_via_metal_min_w_um: float,
+    top_via_min_w_um: float,
+    bottom_plate_margin_min_um: float,
+    top_via_pitch_um: float,
+) -> dict[str, Any]:
+    """Boxes (absolute ``cap_array`` coordinates, um) wiring ``cells`` into one
+    two-terminal capacitor (issue #3022): a single bottom plate under every
+    unit, each unit's own top plate carrying a grid of top-plate vias, and one
+    top-plate-metal strap over all the via grids that also runs a stub north
+    to a landing pad clear of the bottom plate -- the bank's one routable top
+    terminal, the parallel analogue of :func:`_cap_unit_layout`'s escape pad.
+
+    The via grid is ``top_via_pitch_um`` apart (``0.0`` = twice the drawn via
+    side), inset :data:`CAP_PARALLEL_VIA_EDGE_INSET_UM` from the plate edge and
+    centred on the plate, so every unit has the same grid and the strap is one
+    rectangle at the plate's mid-height."""
+    margin = max(CAP_BOTTOM_PLATE_MARGIN_UM, bottom_plate_margin_min_um)
+    via_side = max(CONTACT_SIZE_UM, top_via_min_w_um)
+    pad_side = max(via_side + 2 * ENCLOSURE_MARGIN_UM, top_via_metal_min_w_um)
+    enc = (pad_side - via_side) / 2.0
+    pitch = top_via_pitch_um if top_via_pitch_um > 0.0 else 2.0 * via_side
+    room_x = plate_w_um - 2 * CAP_PARALLEL_VIA_EDGE_INSET_UM - via_side
+    room_y = plate_h_um - 2 * CAP_PARALLEL_VIA_EDGE_INSET_UM - via_side
+    nx = max(1, int(room_x / pitch + 1e-9) + 1)
+    ny = max(1, int(room_y / pitch + 1e-9) + 1)
+
+    bank_w = cells[-1]["x0_um"] + unit["total_w_um"]
+    bottom_h = unit["total_h_um"]
+    cy = bottom_h / 2.0
+    half = via_side / 2.0
+    vias: list[tuple[float, float, float, float]] = []
+    top_plates: list[tuple[float, float, float, float]] = []
+    for c in cells:
+        ucx = c["x0_um"] + unit["total_w_um"] / 2.0
+        top_plates.append(
+            (
+                c["x0_um"] + margin,
+                margin,
+                c["x0_um"] + margin + plate_w_um,
+                margin + plate_h_um,
+            )
+        )
+        for ix in range(nx):
+            for iy in range(ny):
+                vx = ucx + (ix - (nx - 1) / 2.0) * pitch
+                vy = cy + (iy - (ny - 1) / 2.0) * pitch
+                vias.append(_snap_square_box_um(vx, vy, half, _GRID_DBU_UM))
+    first_cx = cells[0]["x0_um"] + unit["total_w_um"] / 2.0
+    last_cx = cells[-1]["x0_um"] + unit["total_w_um"] / 2.0
+    grid_half_w = ((nx - 1) * pitch) / 2.0 + half + enc
+    grid_half_h = ((ny - 1) * pitch) / 2.0 + half + enc
+    strap = (
+        first_cx - grid_half_w,
+        cy - grid_half_h,
+        last_cx + grid_half_w,
+        cy + grid_half_h,
+    )
+
+    cxb = bank_w / 2.0
+    pad_half = pad_side / 2.0
+    escape_pad_cy = bottom_h + CAP_TOP_ESCAPE_CLEARANCE_UM + pad_half
+    escape_pad_box = _snap_square_box_um(cxb, escape_pad_cy, pad_half, _GRID_DBU_UM)
+    escape_stub_box = (cxb - pad_half, strap[3], cxb + pad_half, escape_pad_box[1])
+
+    return {
+        "boxes_um": {
+            "bottom_plate": [(0.0, 0.0, bank_w, bottom_h)],
+            "top_plate": top_plates,
+            "top_via": vias,
+            "top_via_metal": [strap, escape_stub_box, escape_pad_box],
+        },
+        "total_w_um": bank_w,
+        "total_h_um": bottom_h,
+        "vias_per_unit": nx * ny,
+        "top_via_pitch_um": pitch,
+        "top_pad_w_um": pad_side,
+        "bot_xy": (0.0, cy),
+        "top_escape_xy": (cxb, escape_pad_cy),
     }
 
 
@@ -3842,6 +3948,7 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
         "navigable_regions": described.get("navigable_regions", []),
         "drc_hints": described["drc_hints"],
         "warnings": described["warnings"],
+        **({"expected": described["expected"]} if "expected" in described else {}),
         # Issue #2035: the shared `provenance` block every other verb's
         # report already carries -- see this function's docstring. A `gen`
         # request involves no rule/model deck and no single input layout

@@ -93,6 +93,24 @@ CAP_BOTTOM_PLATE_MARGIN_UM = 0.5
 #: plate).
 CAP_TOP_ESCAPE_CLEARANCE_UM = CAP_BOTTOM_PLATE_MARGIN_UM
 
+#: Distance (um) `cap_array`'s ``connect="parallel"`` top-plate via grid
+#: (issue #3022) keeps between the plate edge and the nearest via's edge.
+#: Exceeds sky130's `capm.enclosing.via3.1` (0.14um) with margin; an
+#: implementation choice for the one family parallel mode is verified on
+#: (:data:`_PDK_CAP_PARALLEL_UNIT_RANGE_UM`), not a transcribed rule.
+CAP_PARALLEL_VIA_EDGE_INSET_UM = 0.3
+
+#: Families `cap_array`'s ``connect="parallel"`` is verified on (issue #3022,
+#: DRC-clean + one extracted capacitor, see `tests/test_gen.py`), mapped to
+#: the unit plate side range (um, inclusive) the PDK characterises -- sky130's
+#: own `sky130_fd_pr__cap_mim_m3_1` device generator offers 2-30um per side.
+#: Every other family is rejected: gf180mcu's oversized virtual bottom plate
+#: and 1.2um `mim.space.1`, and sg13g2's coarse `TopMetal1` width, are not
+#: verified for a shared-plate bank.
+_PDK_CAP_PARALLEL_UNIT_RANGE_UM: dict[str, tuple[float, float]] = {
+    "sky130": (2.0, 30.0),
+}
+
 #: Guard ring sizing `diff_pair` uses for its own, automatically-generated
 #: ring. `GUARD_RING_DEFAULT_PADDING_UM` is the default for `diff_pair`'s own
 #: `ring_padding_um` param (issue #484) -- the ring's thickness itself
