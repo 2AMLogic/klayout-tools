@@ -22,7 +22,6 @@ default)::
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -33,6 +32,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import env_provenance
+from ._provenance import sha256_file
 
 SCHEMA = "evidence-record/1"
 
@@ -115,11 +115,10 @@ def _git(root: str, *args: str) -> str:
 
 
 def _sha256_file(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 16), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    digest = sha256_file(path)
+    if digest is None:
+        raise FileNotFoundError(path)
+    return digest
 
 
 def _load_json(path: str, what: str) -> Any:
