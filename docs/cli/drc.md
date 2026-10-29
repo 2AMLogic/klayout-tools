@@ -1085,6 +1085,11 @@ comp.not_interacting(v5_xtor).not_interacting(dualgate)`):
   rather than skipping the rule (the `"overlapping"` halves do skip, and
   appear in `coverage.rules_skipped`).
 
+The curated gf180mcu deck has no rules for the 10 V module's LDMOS layers
+(`LDMOS_XTOR` 226/0 and 210/0): a layout using them is not checked there, and
+the layers appear in `coverage.layers_in_stream_without_rules`
+(issue #4568).
+
 Only these two rule pairs are voltage-scoped today. Every other gf180mcu
 rule still encodes the 3.3 V column, which is what
 [`coverage.voltage_domain_warnings`](#coveragevoltage_domain_warnings) now

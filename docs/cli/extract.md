@@ -2754,6 +2754,13 @@ entry (`kind`, `marker`, `count`, `bbox_um`, `description`) plus a prose line in
 the field. A marker component that *was* recognised as a capacitor is not
 reported.
 
+gf180mcu also registers `LDMOS_XTOR` (226/0, issue #4568), the marker on the
+10 V module's drain-extended `nfet_10v0_asym`/`pfet_10v0_asym` devices. The
+curated deck has no LDMOS extraction class, so any 226/0 shape yields an
+`unsupported_devices[]` entry with `kind: "ldmos"` (and a `warnings[]` line)
+instead of dropping the device silently. The LDMOS marker (226/0) and its
+drift-region layer (210/0) are not otherwise extracted by this deck.
+
 **What this field does and does not guarantee**: for a marker with no
 `mos_flavours` coverage, it only flags that the bound model name may be
 wrong — it does not correct the binding. For a marker `mos_flavours` *does*
