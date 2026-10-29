@@ -44,23 +44,21 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s)
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported
-- **#4548**: lvs: hierarchical reference vs flat extracted layout reports only 'circuit could not be matched', with no pointer to options.flatten_reference
+- **#4558**: extract: ASAP7 first-order parasitics deck and FinFET --parasitics (part of #4557)
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
 - **#3625**: klt sim: engine_version pin is silently ignored on deck-list (decks) requests
-- **#4221**: signoff --attest: support T1 item 2 (Layout) anchored generic envelope
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
-- **#4542**: klt erc --check --rerun reports drift across klt versions on provenance and inapplicable coverage
+- **#4508**: ASAP7: trim protruding VIA_* M1 pad tips to clear M1.S.2-5 (follow-up to #4495)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
-- **#4544**: docs: document erc --rerun exclusions and pin coverage drift
 
 ## Approved (Awaiting Merge)
 
@@ -105,7 +103,6 @@ Issues carrying `loom:curated`.
 - **#4128**: Trim oversized module docstrings in signoff, place_and_route, erc, size, equiv, pdk_models (2,746 lines of phase/issue narration) *(curated)*
 - **#4161**: klt sim batch: all jobs exit 87 within seconds on the current fleet image; no runner stderr surfaced *(curated)*
 - **#4191**: place-and-route: absolute paths in report, silent mount gap, late core_margin error, no pin plan *(curated)*
-- **#4221**: signoff --attest: support T1 item 2 (Layout) anchored generic envelope *(curated)*
 - **#4276**: klt sta (verilog mode): netlist path in generated Tcl is repo-root-relative, so run fails unless cwd is repo root *(curated)*
 - **#4277**: Live-verify klt synthesize sv_frontend=sv2v against a real sv2v (follow-up to #4228) *(curated)*
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267) *(curated)*
@@ -115,8 +112,8 @@ Issues carrying `loom:curated`.
 - **#4424**: klt lvs: custom-class cap_cmomi/resistor LVS regresses from match to mismatch between daf06a51afaf and 0.8.0 (sg13cmos5l) *(curated)*
 - **#4440**: Friction: klt's OpenROAD steps need Docker, which fleet workers can't use; no fleet executor for OpenROAD regeneration *(curated)*
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
-- **#4542**: klt erc --check --rerun reports drift across klt versions on provenance and inapplicable coverage *(curated)*
-- **#4548**: lvs: hierarchical reference vs flat extracted layout reports only 'circuit could not be matched', with no pointer to options.flatten_reference *(curated)*
+- **#4508**: ASAP7: trim protruding VIA_* M1 pad tips to clear M1.S.2-5 (follow-up to #4495) *(curated)*
+- **#4558**: extract: ASAP7 first-order parasitics deck and FinFET --parasitics (part of #4557) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -142,10 +139,10 @@ Issues carrying `loom:curated`.
 | Very important | 1 |
 | Important | 1 |
 | Ready (`loom:issue`) | 18 |
-| In Progress (`loom:building`) | 4 |
-| PRs awaiting review | 2 |
+| In Progress (`loom:building`) | 3 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 3 |
-| Curated | 43 |
+| Curated | 42 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->

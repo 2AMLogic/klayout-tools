@@ -4,6 +4,9 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-29
 
+- **PR #4556**: feat(pex): carry measurement-document message into delta error rows
+- **Issue #4555** (closed): klt pex --measure-command: let a measurement carry a diagnostic message that surfaces on its errored delta[] row
+- **Issue #4221** (closed): signoff --attest: support T1 item 2 (Layout) anchored generic envelope
 - **PR #4553**: feat(lvs): warn when a flat layout is compared to a hierarchical reference
 - **Issue #4548** (closed): lvs: hierarchical reference vs flat extracted layout reports only 'circuit could not be matched', with no pointer to options.flatten
 
