@@ -111,6 +111,18 @@ _PDK_CAP_PARALLEL_UNIT_RANGE_UM: dict[str, tuple[float, float]] = {
     "sky130": (2.0, 30.0),
 }
 
+#: Families `cap_array`'s ``stack: 2`` (issue #3332) is verified on, mapped to
+#: the second level's geometry floors (um), all read off sky130A's
+#: `via4.width.1` (fixed 0.8um cut), `met5.width.1` (1.6um) and
+#: `met5.enclosing.via4.1` (0.31um). Every other family is rejected.
+_PDK_CAP_STACK_GEOMETRY_UM: dict[str, dict[str, float]] = {
+    "sky130": {
+        "cap2_via_side_um": 0.8,
+        "cap2_metal_min_w_um": 1.6,
+        "cap2_metal_via_enclosure_um": 0.31,
+    },
+}
+
 #: Guard ring sizing `diff_pair` uses for its own, automatically-generated
 #: ring. `GUARD_RING_DEFAULT_PADDING_UM` is the default for `diff_pair`'s own
 #: `ring_padding_um` param (issue #484) -- the ring's thickness itself
@@ -267,6 +279,14 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "cap_bottom_plate": (70, 20),  # met3.drawing
         "cap_top_via": (70, 44),  # via3.drawing (met3<->met4)
         "cap_top_via_metal": (71, 20),  # met4.drawing
+        # Second MiM level of the stacked capacitor (issue #3332,
+        # `cap_array` `stack: 2`): the same layer/datatype pairs as
+        # `EXTRACTION_DECK.capacitors[1]` (`sky130_fd_pr__model__cap_mim_m4`)
+        # -- `capm2` (97/44) on the met4 middle plate, landed on `met5`
+        # (72/20) through `via4` (71/44).
+        "cap2_top_plate": (97, 44),  # capm2.drawing
+        "cap2_top_via": (71, 44),  # via4.drawing (met4<->met5)
+        "cap2_top_via_metal": (72, 20),  # met5.drawing
         # Second routing-metal role + its connecting via (issue #454, follow-up
         # to #433): sky130's curated *extraction* deck already declares a
         # second metal level and the via that lands on it

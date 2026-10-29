@@ -423,6 +423,16 @@ _HIDDEN_PARAMS = {
     "cap_top_via_min_w_um",
     "cap_top_via_metal_min_w_um",
     "cap_min_spacing_um",
+    # `cap_array`'s second (capm2/met5) MiM level for `stack: 2` (issue
+    # #3332) -- harness-computed from the resolved PDK family, never part of
+    # the request schema.
+    "cap2_top_plate_layer",
+    "cap2_top_via_layer",
+    "cap2_top_via_metal_layer",
+    "cap2_present",
+    "cap2_via_side_um",
+    "cap2_metal_min_w_um",
+    "cap2_metal_via_enclosure_um",
     # `guard_ring`/`mos_array`/`diff_pair`/`bjt_array`/`esd_device`'s own
     # tap/collector-ring implant (issue #1580, follow-up to #1577's
     # unit-device-only `sd_implant_*` fix) -- harness-computed exactly like
@@ -2209,6 +2219,8 @@ def _cap_array_layout(
     min_spacing_um: float = 0.0,
     connect: str = "independent",
     top_via_pitch_um: float = 0.0,
+    stack: int = 1,
+    stack_geometry: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """``num`` matched unit MiM capacitors (see :func:`_cap_unit_layout`) in
     a single row, spaced ``spacing_um`` apart -- the capacitor sibling of
@@ -2235,7 +2247,10 @@ def _cap_array_layout(
     ``connect="parallel"`` (issue #3022) additionally returns a ``"parallel"``
     entry: the same ``num`` unit cells wired into *one* two-terminal
     capacitor by :func:`_cap_parallel_layout`. ``"independent"`` (the default)
-    returns exactly the dict it always did."""
+    returns exactly the dict it always did. ``stack=2`` (issue #3332, needs
+    ``connect="parallel"`` and the family's ``stack_geometry``) additionally
+    returns a ``"stack"`` entry: the second MiM level over the same footprint
+    (:func:`~klayout_tools.gen_cap_stack._cap_stack_layout`)."""
     unit = _cap_unit_layout(
         plate_w_um,
         plate_h_um,
@@ -2263,6 +2278,18 @@ def _cap_array_layout(
             bottom_plate_margin_min_um,
             top_via_pitch_um,
         )
+        if stack == 2 and stack_geometry is not None:
+            from .gen_cap_stack import _cap_stack_layout
+
+            result["stack"] = _cap_stack_layout(
+                plate_w_um,
+                plate_h_um,
+                unit,
+                cells,
+                result["parallel"],
+                top_via_min_w_um,
+                stack_geometry,
+            )
     return result
 
 
