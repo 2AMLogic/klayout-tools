@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -245,6 +246,21 @@ def test_changed_request_is_refused(tmp_path, shard_reports):
     (tmp_path / "ss.json").write_text(json.dumps({"shard": "ss", "edited": True}))
     paths = [_write(tmp_path, f"{k}.report", r) for k, r in shard_reports.items()]
     _expect_refusal(manifest, paths, "request_mismatch", 9)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="file permissions are not enforced for root",
+)
+def test_unreadable_request_is_refused(tmp_path, shard_reports):
+    manifest = _plan(tmp_path, shard_reports, pin=True)
+    request = tmp_path / "ss.json"
+    request.chmod(0)
+    try:
+        paths = [_write(tmp_path, f"{k}.report", r) for k, r in shard_reports.items()]
+        _expect_refusal(manifest, paths, "request_mismatch", 9)
+    finally:
+        request.chmod(0o644)
 
 
 def test_pinned_requests_that_match_are_accepted(tmp_path, shard_reports):

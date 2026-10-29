@@ -172,11 +172,17 @@ def _check_requests(manifest: dict[str, Any], manifest_path: str) -> list[str]:
         pinned = shard.get("request_sha256")
         if pinned is None:
             continue
-        actual = sha256_file(os.path.join(base, shard["request"]))
+        try:
+            actual = sha256_file(os.path.join(base, shard["request"]))
+        except OSError as exc:
+            actual = None
+            detail = exc.strerror or str(exc)
+        else:
+            detail = "not an existing file"
         if actual is None:
             problems.append(
                 f"shard {shard['id']!r}: planned request unreadable "
-                f"({shard['request']}): not an existing file"
+                f"({shard['request']}): {detail}"
             )
             continue
         if actual != pinned:
