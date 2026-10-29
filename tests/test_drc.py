@@ -11050,6 +11050,25 @@ def test_runset_correspondence_only_for_firing_rules_with_a_note():
     assert _runset_correspondence(get_deck("sky130"), fired, []) == []
 
 
+def test_runset_correspondence_names_sram_marker_for_nwell_nsram_rules():
+    from klayout_tools.decks import get_deck
+    from klayout_tools.drc import _runset_correspondence
+
+    deck = get_deck("sg13cmos5l")
+    fired = [
+        {"rule": "nwell.enclosing.pactiv.1"},
+        {"rule": "nwell.space.nactiv.1"},
+        {"rule": "nwell.enclosing.pactiv.hv.1"},
+    ]
+    notes = {n["rule"]: n["note"] for n in _runset_correspondence(deck, fired, [])}
+
+    for rule in ("nwell.enclosing.pactiv.1", "nwell.space.nactiv.1"):
+        assert "25/0" in notes[rule] and "NWell_Nsram" in notes[rule]
+        assert "--disable_extra_rules" in notes[rule]
+    assert "25/0" in notes["nwell.enclosing.pactiv.hv.1"]
+    assert "NWell_Nsram" not in notes["nwell.enclosing.pactiv.hv.1"]
+
+
 def test_without_waivers_report_has_no_waiver_fields(tmp_path):
     report = run_drc(_hier_gds(tmp_path), "sky130")
 
