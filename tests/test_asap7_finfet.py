@@ -188,10 +188,11 @@ def test_asap7_family_and_extraction_deck_registered():
     assert isinstance(get_extraction_deck("asap7"), FinFETExtractionDeck)
 
 
-def test_asap7_capabilities_advertise_extraction_only():
+def test_asap7_capabilities_advertise_extraction_and_parasitics():
     decisions = pdk_capabilities.DECISIONS["asap7"]
     supported = {name for name, d in decisions.items() if d.status == "supported"}
-    assert supported == {"extraction"}
+    assert supported == {"extraction", "parasitics"}
+    assert "uncalibrated" in decisions["parasitics"].reason
     # DRC stays a separate rule table (#2760).
     assert "#2760" in decisions["curated_drc"].reason
 
@@ -482,7 +483,6 @@ def test_cli_json_success_uses_shared_envelope(tmp_path, capsys):
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"parasitics": True},
         {"abstract_cell_patterns": ("X*",)},
         {"pdk_variant": "asap7"},
         # Issue #2722: hierarchical emission is planar-only in increment 1.
@@ -493,6 +493,74 @@ def test_planar_only_options_are_refused_by_name(tmp_path, kwargs):
     path = _write(_draw_device(), tmp_path)
     with pytest.raises(ExtractError, match="FinFET extraction deck"):
         run_extract(path, "asap7", output=str(tmp_path / "o.spice"), **kwargs)
+
+
+def test_asap7_parasitics_deck_is_registered_and_index_aligned():
+    from klayout_tools.decks import get_parasitics_deck
+    from klayout_tools.extract_report import _describe_parasitics_overlap_gaps
+
+    deck = get_parasitics_deck("asap7")
+    assert len(deck.metals) == len(EXTRACTION_DECK.metals) == 9
+    assert all(rc is not None and rc.sheet_res_ohm_sq > 0 for rc in deck.metals)
+    assert len(deck.metal_overlaps) == len(deck.metals) - 1
+    assert [cut.lower_metal_index for cut in deck.cuts] == list(range(8))
+    assert not _describe_parasitics_overlap_gaps(EXTRACTION_DECK, deck)
+
+
+def test_parasitics_run_on_a_finfet_layout(tmp_path):
+    path = _write(_draw_device(fins=2), tmp_path)
+    report = run_extract(
+        path, "asap7", output=str(tmp_path / "p.spice"), parasitics=True
+    )
+    parasitics = report["parasitics"]
+    assert parasitics["nets"], parasitics
+    for entry in parasitics["nets"]:
+        assert entry["resistance_ohm"] >= 0
+        assert entry["capacitance_ff"] >= 0
+    assert report["device_counts"] == {"nmos_rvt": 1}
+
+
+def test_parasitics_cli_json_shape_matches_planar(tmp_path, capsys):
+    path = _write(_draw_device(fins=2), tmp_path)
+    rc = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "asap7",
+            "--parasitics",
+            "-o",
+            str(tmp_path / "o.spice"),
+            "--format",
+            "json",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert {"nets", "r_count", "c_count", "total_capacitance_ff"} <= set(
+        report["parasitics"]
+    )
+    assert report["parasitics"]["metals_without_coefficient"] == []
+
+
+def test_parasitics_spef_is_written_for_a_finfet_layout(tmp_path):
+    path = _write(_draw_device(fins=2), tmp_path)
+    spef = tmp_path / "dev.spef"
+    rc = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "asap7",
+            "--parasitics",
+            "--spef",
+            str(spef),
+            "-o",
+            str(tmp_path / "o.spice"),
+        ]
+    )
+    assert rc == 0
+    assert "*D_NET" in spef.read_text()
 
 
 @pytest.fixture(autouse=True)
