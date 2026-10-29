@@ -298,7 +298,8 @@ A failing entry (including the public-repo gate refusing a non-public repo)
 is reported, the remaining entries still run, and the exit status is non-zero.
 Re-running over unchanged upstream content leaves no `blocks/` diff.
 [`refresh-canaries.yml`](../.github/workflows/refresh-canaries.yml) runs this
-weekly and opens a PR (never a direct push) when `blocks/` changes;
+on manual trigger only (Actions → "Refresh canary blocks" → Run workflow;
+no schedule) and opens a PR (never a direct push) when `blocks/` changes;
 `deploy-site.yml` redeploys when it merges.
 
 Content rules:

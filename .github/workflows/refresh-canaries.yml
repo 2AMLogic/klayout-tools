@@ -2,8 +2,9 @@ name: Refresh canary blocks
 
 # Issue #4565: `blocks/canaries.json` is the single source of truth for which
 # public canary repos the klayout-tools.org gallery presents. This job re-runs
-# `scripts/ingest-canary.py --manifest` weekly and, if `blocks/` changed,
-# opens a PR with the diff. It never pushes to main: content drift is
+# `scripts/ingest-canary.py --manifest` when someone triggers it (Actions ->
+# "Refresh canary blocks" -> Run workflow; there is no schedule) and, if
+# `blocks/` changed, opens a PR with the diff. It never pushes to main: content drift is
 # reviewed, and `deploy-site.yml` redeploys when that PR merges.
 #
 # Ingestion is fail-closed on repo visibility (`assert_public_repo()`), so a
@@ -16,9 +17,6 @@ name: Refresh canary blocks
 
 on:
   workflow_dispatch:
-  schedule:
-    # Weekly, Monday, off the hour.
-    - cron: "23 6 * * 1"
 
 permissions:
   contents: write
@@ -74,7 +72,7 @@ jobs:
           if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')" ]; then
             gh pr create --base main --head "$branch" \
               --title "chore(blocks): refresh canary blocks from manifest" \
-              --body "Automated weekly re-ingest of \`blocks/canaries.json\` (scripts/ingest-canary.py --manifest). Review the \`blocks/\` diff; merging redeploys the site. Content rules: blocks/README.md."
+              --body "Manually triggered re-ingest of \`blocks/canaries.json\` (scripts/ingest-canary.py --manifest). Review the \`blocks/\` diff; merging redeploys the site. Content rules: blocks/README.md."
           fi
 
       - name: Fail if any manifest entry failed
