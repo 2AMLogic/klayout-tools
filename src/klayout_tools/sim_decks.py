@@ -921,6 +921,8 @@ def run_deck_unit(
     if engine_version is None and spawn.exit_code is not None:
         engine_version = _probe_engine_version("ngspice", ngspice_binary)
     status = _unit_status(spawn, diagnostics)
+    if status == "error" and spawn.exit_code is not None:
+        diagnostics.extend(_engine_failure_diagnostics(spawn))
     outputs, missing_outputs = _resolve_declared_outputs(unit, unit_dir=unit_dir)
     result = {
         "id": unit["id"],
@@ -1235,6 +1237,47 @@ def _unit_status(spawn: _EngineSpawn, diagnostics: list[dict[str, str]]) -> str:
             }
         )
     return "error"
+
+
+#: Bytes of each captured stream read for failure classification, and the
+#: size of the fallback tail when nothing classifies (issue #4603).
+_ENGINE_FAILURE_HEAD_BYTES = 256 * 1024
+_ENGINE_FAILURE_TAIL_LINES = 12
+_ENGINE_FAILURE_TAIL_CHARS = 1500
+
+
+def _engine_failure_diagnostics(spawn: _EngineSpawn) -> list[dict[str, str]]:
+    """Evidence for a non-zero engine exit (issue #4603): the ngspice
+    deck-abort diagnostics ``_classify_diagnostics`` finds in the captured
+    streams, else a bounded tail of stderr (then stdout) so the cause is
+    never only in ``stderr.bin``. Evidence only -- grading is unchanged."""
+    from .sim import _NGSPICE_FATAL_CODES, _classify_diagnostics
+
+    def decode(payload: bytes) -> str:
+        return payload[:_ENGINE_FAILURE_HEAD_BYTES].decode("utf-8", errors="replace")
+
+    stderr_text, stdout_text = decode(spawn.stderr), decode(spawn.stdout)
+    combined = f"{stderr_text}\n{stdout_text}"
+    fatal = [
+        d
+        for d in _classify_diagnostics(combined)
+        if d.get("code") in _NGSPICE_FATAL_CODES
+    ]
+    if fatal:
+        return fatal
+    for label, text in (("stderr", stderr_text), ("stdout", stdout_text)):
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        if lines:
+            tail = "\n".join(lines[-_ENGINE_FAILURE_TAIL_LINES:])
+            tail = tail[-_ENGINE_FAILURE_TAIL_CHARS:]
+            return [
+                {
+                    "severity": "error",
+                    "code": "engine_output_tail",
+                    "message": f"ngspice {label} tail: {tail}",
+                }
+            ]
+    return []
 
 
 def _resolve_declared_outputs(

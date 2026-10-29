@@ -78,6 +78,9 @@ def main() -> int:
             elif directive == "emit-stderr":
                 sys.stderr.buffer.write(bytes(int(rest)))
                 sys.stderr.buffer.flush()
+            elif directive == "emit-stderr-text":
+                sys.stderr.write(rest.replace("\\n", "\n") + "\n")
+                sys.stderr.flush()
             elif directive == "copy-input":
                 source, _, dest = rest.partition(" ")
                 shutil_copy(source, dest)
@@ -583,6 +586,42 @@ class TestLocalRunner:
         assert unit["exit_code"] == 3
         assert (Path(report["outdir"]) / "u0" / "stderr.bin").read_bytes() == bytes(5)
         assert any(d["code"] == "engine_exit" for d in unit["diagnostics"])
+
+    def test_library_parse_error_is_classified_from_stderr(self, tmp_path):
+        request = deck_request(tmp_path, decks=[{"id": "u0", "deck": "deck.spice"}])
+        (tmp_path / "deck.spice").write_text(
+            "* stub-exit: 1\n* stub-emit-stderr-text: Error in netlist line no. "
+            "7557, new internal line no. 22:\\nUndefined parameter [expr]"
+            "\\nExpression err: expr((int((@nf+1)/2)*@w/@nf*0.29))\n",
+            encoding="utf-8",
+        )
+        unit = run_local(tmp_path, request)["units"][0]
+        codes = [d["code"] for d in unit["diagnostics"]]
+        assert "engine_exit" in codes
+        fatal = next(d for d in unit["diagnostics"] if d["code"] == "ngspice_fatal")
+        assert "Undefined parameter [expr]" in fatal["message"]
+        assert "line no. 7557" in fatal["message"]
+        assert "engine_output_tail" not in codes
+
+    def test_unrecognised_stderr_falls_back_to_tail(self, tmp_path):
+        request = deck_request(tmp_path, decks=[{"id": "u0", "deck": "deck.spice"}])
+        (tmp_path / "deck.spice").write_text(
+            "* stub-exit: 1\n* stub-emit-stderr-text: something odd happened\n",
+            encoding="utf-8",
+        )
+        unit = run_local(tmp_path, request)["units"][0]
+        tail = next(d for d in unit["diagnostics"] if d["code"] == "engine_output_tail")
+        assert "something odd happened" in tail["message"]
+
+    def test_pass_unit_gains_no_failure_diagnostics(self, tmp_path):
+        request = deck_request(tmp_path, decks=[{"id": "u0", "deck": "deck.spice"}])
+        (tmp_path / "deck.spice").write_text(
+            "* stub-emit-stderr-text: Error in netlist line no. 1:\n",
+            encoding="utf-8",
+        )
+        unit = run_local(tmp_path, request)["units"][0]
+        assert unit["status"] == "pass"
+        assert unit["diagnostics"] == []
 
     def test_timeout_kills_unit_and_keeps_partial_streams(self, tmp_path):
         request = deck_request(
