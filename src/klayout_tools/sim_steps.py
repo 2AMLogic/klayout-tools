@@ -180,6 +180,17 @@ def _refuse_crossings(spec: dict[str, Any]) -> None:
         )
 
 
+def _refuse_stress(spec: dict[str, Any]) -> None:
+    """Issue #4592: a ``stress`` window reads one transient plot's rawfile;
+    no per-step equivalent is implemented."""
+    if spec.get("stress") is not None:
+        raise SimError(
+            f"measurement {spec.get('name')!r}: 'stress' is not supported "
+            "with analysis_steps -- use the scalar analysis "
+            '(kind "tran") for a windowed node-pair voltage stress'
+        )
+
+
 def _refuse_search(spec: dict[str, Any]) -> None:
     """Issue #4121: a ``search`` bisection loop is emitted into the scalar
     analysis' deck; search inside a step is not implemented."""
@@ -543,6 +554,7 @@ def _resolve_step_measurements(
     for spec in specs:
         _validate_measurement_form(spec)
         _refuse_crossings(spec)
+        _refuse_stress(spec)
         _refuse_search(spec)
         _refuse_optional(spec)
         _refuse_cycle_mean(spec)
@@ -818,6 +830,7 @@ def _resolve_derived_measurements(
     for position, spec in enumerate(specs):
         name = spec["name"]
         _refuse_crossings(spec)
+        _refuse_stress(spec)
         _refuse_search(spec)
         _refuse_optional(spec)
         _refuse_cycle_mean(spec)

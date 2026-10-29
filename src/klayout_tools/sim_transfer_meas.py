@@ -85,7 +85,7 @@ _SELECTOR_RE = re.compile(r"^[vV]\(([^\s\x00-\x1f\x7f,()]+)\)$")
 
 _VECTOR_PREFIX = "__klt_xfer_"
 
-_FORMS = ("spice", "expr", "crossings", "cycle_mean", "energy")
+_FORMS = ("spice", "expr", "crossings", "cycle_mean", "energy", "stress")
 
 
 def is_transfer(spec: dict[str, Any]) -> bool:
