@@ -15,7 +15,8 @@ Attribution limit: ``klt drc`` only attributes a violation to a cell
 (``source_cell``) on engines with per-instance attribution; the RDB engine
 reports ``source_cell: null``. Grading therefore compares the block's
 per-rule counts to the summed exception counts (and, where a violation does
-carry a ``source_cell``, requires it to be an excepted cell). Paths resolve
+carry a ``source_cell``, requires it to be an excepted cell or lie beneath
+one, i.e. an excepted cell appears in its ``source_path``). Paths resolve
 against the working directory, like every other evidence path.
 """
 
@@ -131,7 +132,11 @@ def evaluate(
     cells = {exc["cell"] for exc in exceptions}
     for violation in envelope.get("violations") or []:
         source = violation.get("source_cell") if isinstance(violation, dict) else None
-        if source is not None and source not in cells:
+        if source is None:
+            continue
+        path = violation.get("source_path")
+        chain = {source, *(path if isinstance(path, list) else [])}
+        if not any(isinstance(c, str) and c in cells for c in chain):
             lapses.append(LAPSE_OUTSIDE_CELL)
             break
     if lapses:

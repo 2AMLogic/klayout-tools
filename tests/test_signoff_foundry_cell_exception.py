@@ -142,6 +142,64 @@ def test_violation_attributed_to_other_cell_is_unmet(tmp_path):
     )
 
 
+def _with_violations(tmp_path, violations):
+    report, exc = _setup(tmp_path)
+    data = json.loads(report.read_text())
+    data["violations"] = violations
+    report.write_text(json.dumps(data))
+    return _item3(report, [exc])
+
+
+def test_violation_beneath_excepted_cell_is_met(tmp_path):
+    item = _with_violations(
+        tmp_path,
+        [
+            {"rule": "met4.2", "source_cell": "B", "source_path": ["PAD", "A", "B"]},
+            {
+                "rule": "met4.2",
+                "source_cell": "B",
+                "source_path": ["BLK", "PAD", "A", "B"],
+            },
+        ],
+    )
+    assert item["status"] == "met"
+
+
+def test_source_path_without_excepted_cell_is_unmet(tmp_path):
+    item = _with_violations(
+        tmp_path,
+        [{"rule": "met4.2", "source_cell": "X", "source_path": ["MY_BLOCK", "X"]}],
+    )
+    assert item["status"] == "unmet"
+    assert (
+        "violation_outside_excepted_cell"
+        in item["detail"]["foundry_cell_exceptions"]["lapsed"]
+    )
+
+
+def test_null_source_path_falls_back_to_source_cell(tmp_path):
+    (tmp_path / "ok").mkdir()
+    (tmp_path / "bad").mkdir()
+    ok = _with_violations(
+        tmp_path / "ok",
+        [{"rule": "met4.2", "source_cell": "PAD", "source_path": None}],
+    )
+    assert ok["status"] == "met"
+    bad = _with_violations(
+        tmp_path / "bad",
+        [{"rule": "met4.2", "source_cell": "X", "source_path": None}],
+    )
+    assert bad["status"] == "unmet"
+
+
+def test_malformed_source_path_lapses_without_crashing(tmp_path):
+    item = _with_violations(
+        tmp_path,
+        [{"rule": "met4.2", "source_cell": "X", "source_path": "PAD"}],
+    )
+    assert item["status"] == "unmet"
+
+
 def test_stale_bare_cell_report_is_unmet(tmp_path):
     report, exc = _setup(tmp_path)
     bare_report = json.loads(open(exc["bare_cell_report"]).read())
