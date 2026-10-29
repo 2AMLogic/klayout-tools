@@ -226,7 +226,9 @@ DECISIONS: Mapping[str, Mapping[str, Decision]] = MappingProxyType(
                 "parasitics": Decision(
                     "supported",
                     "First-order, uncalibrated metal RC/overlap/cut table "
-                    "(ASSUMED coefficients; diffusion and poly uncurated).",
+                    "(ASSUMED coefficients; diffusion and poly uncurated). Also "
+                    "serves `klt place-and-route` `post_route_spef` / "
+                    "`post_route_sdf` via `--def-net-names` and `--pins`.",
                 ),
                 "default_mos_model_binding": Decision(
                     "unsupported",

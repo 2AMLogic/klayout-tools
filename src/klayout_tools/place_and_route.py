@@ -943,6 +943,7 @@ _EXTRACT_DECK_FOR_CELL_LIBRARY: dict[str, str] = {
     "sky130_fd_sc_hd": "sky130",
     "gf180mcu_fd_sc_mcu9t5v0": "gf180mcu",
     "sg13g2_stdcell": "sg13g2",
+    "asap7sc7p5t_rvt": "asap7",
 }
 
 

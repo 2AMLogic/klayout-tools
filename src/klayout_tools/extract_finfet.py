@@ -51,7 +51,9 @@ Scope
 
 Flat extraction over the top cell, like the planar path. ``--parasitics``
 runs the shared ``_compute_parasitics`` pass over the deck's metal stack
-(issue #4558). Options that depend on planar-only machinery (abstract
+(issue #4558); ``--def-net-names`` and ``--pins`` reuse the planar
+reconciliation so a routed ASAP7 GDS names its nets from the DEF (issue
+#4559). Options that depend on planar-only machinery (abstract
 cells, DEF pin promotion, ``--subcircuit``, ...) are rejected up front by
 :func:`reject_unsupported_options` rather than half-applied.
 """
@@ -798,12 +800,46 @@ def _parasitics_for(
     )
 
 
+def _def_net_name_warnings(
+    l2n: kdb.LayoutToNetlist,
+    metals: list[kdb.Region],
+    probes: dict[str, Any],
+    top_name: str,
+) -> list[str]:
+    """Apply ``--def-net-names`` (issue #951) to the FinFET netlist and return
+    the same loud warnings the planar path emits."""
+    from .extract import _DEF_NET_NAME_PROPERTY_ID, _apply_def_net_name_overrides
+
+    renamed, unresolved = _apply_def_net_name_overrides(l2n, metals, probes)
+    if not probes:
+        return [
+            "--def-net-names found no DEF net-name shape property "
+            f"({_DEF_NET_NAME_PROPERTY_ID}) on any routed-metal shape in "
+            f"'{top_name}' -- net names are unchanged (this flag expects a "
+            "layout produced by a LEF/DEF -> GDS merge, e.g. `klt "
+            "place-and-route`'s routed GDS)"
+        ]
+    if unresolved:
+        joined = ", ".join(unresolved[:10])
+        more = len(unresolved) - 10
+        return [
+            f"--def-net-names: renamed {renamed} net(s), but {len(unresolved)} "
+            f"DEF net name(s) resolved to no extracted net ({joined}"
+            + (f", +{more} more" if more > 0 else "")
+            + ") -- those nets keep their default names"
+        ]
+    return []
+
+
 def _extract_with_parasitics(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
     deck: FinFETExtractionDeck,
     deck_name: str,
     parasitics_deck: Any,
+    *,
+    def_net_names: bool = False,
+    declared_pins: frozenset[str] | None = None,
     **parasitics_options: Any,
 ) -> tuple[
     kdb.Netlist, list[str], tuple[list[dict[str, Any]], list[dict[str, Any]]] | None
@@ -812,7 +848,11 @@ def _extract_with_parasitics(
     the ``(ground_nets, coupled_pairs)`` pair ``_compute_parasitics`` returns."""
     import klayout.db as kdb
 
-    from .extract import _purge_preserving_named_nets
+    from .extract import (
+        _apply_declared_pins,
+        _def_net_name_probes,
+        _purge_preserving_named_nets,
+    )
 
     check_dbu(layout, deck, deck_name)
     l2n = kdb.LayoutToNetlist(kdb.RecursiveShapeIterator(layout, top_cell, []))
@@ -827,16 +867,28 @@ def _extract_with_parasitics(
 
     _connect_feol(l2n, layers, deck)
     _connect_beol(l2n, layers, deck)
+    def_net_name_probes = (
+        _def_net_name_probes(layout, top_cell, deck.metals) if def_net_names else {}
+    )
     l2n.extract_netlist()
     netlist = l2n.netlist()
+    pin_warnings: list[str] = []
+    if def_net_names:
+        # Same ordering contract as the planar path: after `extract_netlist`
+        # (needs the live `l2n`), before pins are promoted or nets purged.
+        pin_warnings = _def_net_name_warnings(
+            l2n, layers.metals, def_net_name_probes, top_cell.name
+        )
     netlist.combine_devices()
     netlist.make_top_level_pins()
+    if declared_pins is not None:
+        _apply_declared_pins(netlist, top_cell.name, declared_pins, pin_warnings)
     _purge_preserving_named_nets(netlist)
 
     has_devices = any(
         True for circuit in netlist.each_circuit() for _ in circuit.each_device()
     )
-    warnings = (
+    warnings = pin_warnings + (
         [
             f"deck '{deck_name}': NMOS bulk terminals are tied to the synthesized "
             f"'{deck.substrate_net}' net and PMOS bulk terminals to the drawn well "
@@ -915,7 +967,8 @@ def extract_netlist_tuple(
     """Drop-in for ``extract._extract_netlist``'s 14-tuple contract. Every
     planar-only option was already refused by :func:`refuse_layout_options`;
     the planar-only result slots are their documented empty values. Only the
-    ``--parasitics`` pass (issue #4558) is honoured, with its scoping knobs."""
+    ``--parasitics`` pass (issue #4558) and the DEF-driven net naming
+    (``--def-net-names``, ``--pins``; issue #4559) are honoured."""
     from .extract import _extraction_deck_name
 
     parasitics_options = {
@@ -933,6 +986,8 @@ def extract_netlist_tuple(
         deck,
         _extraction_deck_name(deck) or "finfet",
         parasitics_deck,
+        def_net_names=bool(options.get("def_net_names", False)),
+        declared_pins=options.get("declared_pins"),
         **parasitics_options,
     )
     return (
