@@ -2935,7 +2935,7 @@ only `sim` for item 5 and declaring no margin row now grades `unmet`.
 Every list-form item also carries `citations_graded` (per-citation status).
 Without `spec_rows`, several passing citations grade `met` as the union of
 their verdicts. A single string/dict entry with no `spec_rows` renders
-exactly as before. The list form applies to items 5 and 6 (item 6:
+exactly as before. The `spec_rows` list form applies to items 5 and 6 (item 6:
 #2908, below).
 
 Item 4 (LVS clean) also accepts a list (issue #4354): one `klt lvs` report per
@@ -2946,6 +2946,22 @@ non-`lvs` member is `wrong_kind`, and a malformed member or empty list is
 `invalid_evidence`. `spec_rows` has no meaning for LVS and is ignored for
 item 4. The manifest is the record of which cells were cited; `klt signoff`
 does not check they cover the partition.
+
+Item 7 (post-layout verification) accepts a list the same way (issue #4562):
+one `klt pex` report per cell of a hierarchical design (objects or bare
+paths). It grades `met` only if every member is `pass`, of an accepted kind
+for the partition (see "Item 7 is kind-restricted, per block kind") and fresh;
+a failing or stale member makes it `unmet` with that member's reason and
+`detail.failed_citations` naming it, a wrong-kind member is `wrong_kind`, an
+unannotated digital `functional-verification` member is `not_post_layout`, and
+a malformed member or empty list is `invalid_evidence`. `spec_rows` is ignored
+for item 7. The manifest is the record of which cells were cited; `klt
+signoff` does not check they cover the hierarchy. A single string/object
+entry renders exactly as before.
+
+`invalid_evidence` on the list-accepting items (4, 5, 6, 7) carries a
+`detail.problem` string naming the cause, e.g. `member 2 is not a string or
+an object with 'file'/'command'`.
 
 #### Partition-qualified `spec_rows` keys (issue #3768)
 
