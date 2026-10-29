@@ -7001,11 +7001,14 @@ def _build_tier_item(
         # Issue #4354: item 4 may cite one ``klt lvs`` report per cell;
         # ``spec_rows`` has no meaning for LVS, so it is ignored there.
         # Issue #4562: likewise item 7, one ``klt pex`` report per cell.
+        multi_rows, multi_rows_invalid = _multi_citation_rows(
+            report_list, spec_rows, spec_rows_invalid
+        )
         status, reason, citation, failure_detail, extra = _grade_multi_citation(
             raw_entry,
             grade_spec,
-            spec_rows=None if report_list else spec_rows,
-            spec_rows_invalid=False if report_list else spec_rows_invalid,
+            spec_rows=multi_rows,
+            spec_rows_invalid=multi_rows_invalid,
             met_envelopes=met_envelopes,
             required_kind_pair=required_kind_pair,
         )
@@ -7013,8 +7016,7 @@ def _build_tier_item(
         spec = _normalize_evidence_entry(raw_entry)
         if spec is None:
             reason = _REASON_INVALID_EVIDENCE
-            if item_id in _REPORT_LIST_ITEMS:
-                failure_detail = {"problem": _entry_problem(raw_entry)}
+            failure_detail = _report_list_problem(item_id, raw_entry)
         else:
             status, reason, citation, failure_detail = grade_spec(spec)
 
@@ -7209,16 +7211,9 @@ def _grade_multi_citation(
     ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]]:
         return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, {}
 
-    if spec_rows_invalid:
-        return invalid("'spec_rows' for this item is malformed")
-    # Issue #4190: no evidence entry -> zero members; only ``spec_rows`` grade.
-    members, problem = (
-        ([], None) if raw_entry is None else _parse_multi_members(raw_entry)
-    )
+    members, problem = _checked_multi_members(raw_entry, spec_rows, spec_rows_invalid)
     if members is None:
         return invalid(problem or "malformed evidence entry")
-    if not _members_rows_declared(members, spec_rows):
-        return invalid("a member names a row that is undeclared or a declared gap")
 
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
     failed = [g for g in graded if g[2][0] != "met"]
@@ -7270,6 +7265,27 @@ def _grade_multi_citation(
         return "unmet", _REASON_NO_EVIDENCE, None, {}, extra
     extra["citations"] = [g[2] for _, _, g in graded]
     return "met", None, graded[0][2][2], {}, extra
+
+
+def _checked_multi_members(
+    raw_entry: Any,
+    spec_rows: list[dict[str, Any]] | None,
+    spec_rows_invalid: bool,
+) -> tuple[list[tuple[dict[str, Any], list[str] | None]] | None, str | None]:
+    """The parsed ``(spec, rows)`` members of a multi-citation entry, or
+    ``(None, <problem>)`` when ``spec_rows``, a member, or a member's row
+    naming is invalid."""
+    if spec_rows_invalid:
+        return None, "'spec_rows' for this item is malformed"
+    # Issue #4190: no evidence entry -> zero members; only ``spec_rows`` grade.
+    members, problem = (
+        ([], None) if raw_entry is None else _parse_multi_members(raw_entry)
+    )
+    if members is None:
+        return None, problem
+    if not _members_rows_declared(members, spec_rows):
+        return None, "a member names a row that is undeclared or a declared gap"
+    return members, None
 
 
 def _grade_required_kinds(
@@ -7393,6 +7409,24 @@ def _row_margin_lacking_corners(envelope: dict[str, Any] | None, row: str) -> li
         if best is None or len(lacking) < len(best):
             best = lacking
     return best or []
+
+
+def _multi_citation_rows(
+    report_list: bool,
+    spec_rows: list[dict[str, Any]] | None,
+    spec_rows_invalid: bool,
+) -> tuple[list[dict[str, Any]] | None, bool]:
+    """``(spec_rows, spec_rows_invalid)`` as :func:`_grade_multi_citation`
+    sees them: a plain per-cell report list ignores ``spec_rows`` entirely."""
+    return (None, False) if report_list else (spec_rows, spec_rows_invalid)
+
+
+def _report_list_problem(item_id: int, raw: Any) -> dict[str, Any]:
+    """``detail`` naming why a report-list item's single entry was rejected
+    (issue #4562); empty for every other item."""
+    if item_id not in _REPORT_LIST_ITEMS:
+        return {}
+    return {"problem": _entry_problem(raw)}
 
 
 def _entry_problem(raw: Any) -> str:
