@@ -45,3 +45,16 @@ def test_ldmos_and_mos_cap_both_reported(tmp_path):
         "ldmos",
         "mos_capacitor",
     }
+
+
+def test_bare_marker_beside_recognised_ldmos_still_reported(tmp_path):
+    from helpers.gf180mcu_ldmos import make_ldmos_layout
+
+    layout = make_ldmos_layout("n")
+    top = layout.top_cell()
+    top.shapes(layout.layer(226, 0)).insert(kdb.Box(-90000, -90000, -80000, -80000))
+    report = _run(layout, tmp_path)
+    assert report["device_counts"] == {"nfet": 1}
+    (entry,) = report["unsupported_devices"]
+    assert entry["kind"] == "ldmos"
+    assert entry["count"] == 1

@@ -2349,10 +2349,10 @@ The gf180mcu 10 V module's drain-extended (LDMOS) transistors are drawn with
 the PDK's own PCells instead:
 `klt gen --pdk-pcell gf180mcu_klayoutapi/nfet_10v0_asym` (or `pfet_10v0_asym`).
 The result has no ports (`ports: []`, as for every `--pdk-pcell` result), and
-the curated gf180mcu deck neither checks nor recognises it: `klt drc` lists
-`226/0` and `210/0` under `coverage.layers_in_stream_without_rules`, and
-`klt extract` reports the 226/0 marker in `unsupported_devices[]`
-(`kind: "ldmos"`).
+the curated gf180mcu deck does not check it: `klt drc` lists `226/0` and
+`210/0` under `coverage.layers_in_stream_without_rules`. `klt extract`
+extracts it as `nfet_10v0_asym`/`pfet_10v0_asym`; only an unrecognised 226/0
+shape lands in `unsupported_devices[]` (`kind: "ldmos"`).
 
 ### Phase 1 scope: packages that import with no extra compat layer
 

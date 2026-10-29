@@ -8117,6 +8117,45 @@ def _resolve_mos_capacitors(
     return capacitors, remaining, recognised, dropped
 
 
+def _recognised_drain_flavour_islands(
+    layout: kdb.Layout, top_cell: kdb.Cell, deck: ExtractionDeck
+) -> kdb.Region:
+    """Active islands a ``drain_marker`` flavour (gf180mcu LDMOS, issue #4570)
+    claims and gates, using the same claim test as the extraction pass.
+
+    Such a device is in the netlist, so its marker shapes (issue #4568's
+    ``226/0``) must not be reported as unsupported.
+    """
+    import klayout.db as kdb
+
+    recognised = kdb.Region()
+    flavours = [f for f in deck.mos_flavours if f.drain_marker is not None]
+    if not flavours:
+        return recognised
+    active = _region(layout, top_cell, deck.active)
+    poly = _region(layout, top_cell, deck.poly)
+    nwell = _region(layout, top_cell, deck.nwell)
+    if active.is_empty() or poly.is_empty():
+        return recognised
+    for flavour in flavours:
+        marker = _region(layout, top_cell, flavour.marker)
+        if marker.is_empty():
+            continue
+        and_regions = [_region(layout, top_cell, m) for m in flavour.and_markers]
+        not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
+        for component in active.merged().each():
+            comp = kdb.Region(component)
+            if (
+                not comp.interacting(marker).is_empty()
+                and all(not comp.interacting(r).is_empty() for r in and_regions)
+                and all(comp.interacting(r).is_empty() for r in not_regions)
+                and not (flavour.nfet_only and not comp.interacting(nwell).is_empty())
+                and not (comp & poly).is_empty()
+            ):
+                recognised += comp
+    return recognised
+
+
 def _detect_unsupported_devices(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -8156,6 +8195,8 @@ def _detect_unsupported_devices(
             _region(layout, top_cell, deck.nwell),
             kdb.Region(),
         )[2]
+    if deck.unsupported_device_markers:
+        recognised += _recognised_drain_flavour_islands(layout, top_cell, deck)
     for spec in deck.unsupported_device_markers:
         region = _region(layout, top_cell, spec.marker).merged()
         if not recognised.is_empty():
