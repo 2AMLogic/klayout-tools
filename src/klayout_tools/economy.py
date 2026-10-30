@@ -485,6 +485,27 @@ def _row_utilization(kdb: Any, top_cell: Any, dbu: float) -> dict[str, Any] | No
     }
 
 
+def _margin_edges(gap_bbox: Any, bbox: Any) -> list[str]:
+    """Top-bbox edges the gap component touches, in fixed order."""
+    checks = (
+        ("bottom", gap_bbox.bottom <= bbox.bottom),
+        ("left", gap_bbox.left <= bbox.left),
+        ("right", gap_bbox.right >= bbox.right),
+        ("top", gap_bbox.top >= bbox.top),
+    )
+    return [edge for edge, hit in checks if hit]
+
+
+def _single_neighbour_position(gap_bbox: Any, name: str, ibox: Any) -> str:
+    if gap_bbox.left >= ibox.right:
+        return f"right_of:{name}"
+    if gap_bbox.right <= ibox.left:
+        return f"left_of:{name}"
+    if gap_bbox.bottom >= ibox.top:
+        return f"above:{name}"
+    return f"below:{name}"
+
+
 def _gap_position(gap_bbox: Any, bbox: Any, placed: list[tuple[str, Any]]) -> str:
     """Deterministic position label for one gap component.
 
@@ -493,15 +514,7 @@ def _gap_position(gap_bbox: Any, bbox: Any, placed: list[tuple[str, Any]]) -> st
     when it abuts two or more instance bboxes (names sorted), or
     ``left_of|right_of|above|below:<inst>`` when it abuts exactly one.
     """
-    edges = []
-    if gap_bbox.bottom <= bbox.bottom:
-        edges.append("bottom")
-    if gap_bbox.left <= bbox.left:
-        edges.append("left")
-    if gap_bbox.right >= bbox.right:
-        edges.append("right")
-    if gap_bbox.top >= bbox.top:
-        edges.append("top")
+    edges = _margin_edges(gap_bbox, bbox)
     if edges:
         return "margin:" + "+".join(edges)
 
@@ -515,15 +528,8 @@ def _gap_position(gap_bbox: Any, bbox: Any, placed: list[tuple[str, Any]]) -> st
     )
     if len(neighbours) >= 2:
         return "between:" + ",".join(n for n, _ in neighbours)
-    if len(neighbours) == 1:
-        name, ibox = neighbours[0]
-        if gap_bbox.left >= ibox.right:
-            return f"right_of:{name}"
-        if gap_bbox.right <= ibox.left:
-            return f"left_of:{name}"
-        if gap_bbox.bottom >= ibox.top:
-            return f"above:{name}"
-        return f"below:{name}"
+    if neighbours:
+        return _single_neighbour_position(gap_bbox, *neighbours[0])
     return "interior"
 
 
