@@ -1,47 +1,71 @@
 // @vitest-environment jsdom
+/**
+ * Landing-page content tests (issue #4597): the release badge, verb list and
+ * deck list come from the generated `cliData`, not hand-written copy, and the
+ * quick start's sample GDS is one this site actually serves.
+ */
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { IndexPage } from "./IndexPage";
-import type { Layout } from "@/data/types";
+import { cliData } from "@/data/cliData";
 
-vi.mock("@/components/em", () => ({ EmGallerySection: () => null }));
-vi.mock("@/components/LayoutCard", () => ({
-  LayoutCard: ({ layout }: { layout: Layout }) => <div data-testid="card">{layout.slug}</div>,
-}));
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
-const src = { repo: "2AMLogic/x", ref: "r", path: "." };
-const mk = (slug: string, extra: Partial<Layout> = {}): Layout =>
-  ({ schema_version: 1, generated_at: "t", slug, name: slug, status: "ok", ...extra }) as Layout;
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
-const layouts = [
-  mk("sky130-a", { source: src, pdk: "sky130" }),
-  mk("gf180-b", { source: src, status: "partial" }),
-  mk("asap7-c", { source: src, status: "in design — simulation evidence" }),
-  mk("sky130_fd_sc_hd__inv_1"),
-];
+function renderPage() {
+  // The Solver Validation entries fetch their exports; keep them pending.
+  vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+  return render(<IndexPage layouts={[]} />);
+}
 
-afterEach(cleanup);
-
-describe("IndexPage gallery", () => {
-  it("shows canaries as cards and moves corpus cells to a footnote", () => {
-    render(<IndexPage layouts={layouts} />);
-    expect(screen.getAllByTestId("card").map((c) => c.textContent)).toEqual([
-      "sky130-a",
-      "gf180-b",
-      "asap7-c",
-    ]);
-    expect(screen.getByRole("region", { name: "Test corpus" })).toBeTruthy();
+describe("IndexPage", () => {
+  it("shows the latest release from the generated CLI data", () => {
+    renderPage();
+    expect(screen.getByTestId("release-badge")).toHaveTextContent(
+      `v${cliData.release.version} on PyPI`,
+    );
   });
 
-  it("filters by PDK, deriving it from the slug when layout.pdk is absent", () => {
-    render(<IndexPage layouts={layouts} />);
-    fireEvent.click(screen.getByRole("button", { name: "asap7" }));
-    expect(screen.getAllByTestId("card").map((c) => c.textContent)).toEqual(["asap7-c"]);
+  it("lists every generated verb exactly once", () => {
+    renderPage();
+    const groups = screen.getByTestId("capability-groups");
+    const all = cliData.groups.flatMap((g) => g.verbs.map((v) => v.name));
+    expect(all.length).toBe(cliData.verb_count);
+    for (const name of all) {
+      const hits = Array.from(groups.querySelectorAll("a, code")).filter(
+        (el) => el.textContent === `klt ${name}`,
+      );
+      expect(hits, name).toHaveLength(1);
+    }
   });
 
-  it("filters by status", () => {
-    render(<IndexPage layouts={layouts} />);
-    fireEvent.click(screen.getByRole("button", { name: "Partial" }));
-    expect(screen.getAllByTestId("card").map((c) => c.textContent)).toEqual(["gf180-b"]);
+  it("names every built-in deck", () => {
+    renderPage();
+    for (const deck of cliData.decks) {
+      expect(screen.getAllByText(deck).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("no longer presents the CLI as unbuilt scaffolding", () => {
+    renderPage();
+    expect(screen.queryByText(/scaffold/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/building toward/i)).not.toBeInTheDocument();
+  });
+
+  it("points the quick start at a GDS the gallery build publishes", () => {
+    renderPage();
+    const pre = screen.getByLabelText("first session");
+    const match = pre.textContent?.match(/klayout-tools\.org\/blocks\/([^/]+)\/([^\s]+\.gds)/);
+    expect(match).not.toBeNull();
+    const [, slug, file] = match!;
+    // copy-renders.mjs serves blocks/<slug>/output/<file> at /blocks/<slug>/<file>.
+    expect(existsSync(resolve(REPO_ROOT, "blocks", slug, "output", file))).toBe(true);
   });
 });
