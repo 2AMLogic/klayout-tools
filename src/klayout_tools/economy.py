@@ -720,6 +720,26 @@ def _area_eff_block(
     return {"checks": checks, "status": overall}
 
 
+def _what_if_block(
+    kdb: Any, layout: Any, top_cell: Any, what_if: str | None
+) -> dict[str, Any] | None:
+    """Apply the ``what_if`` moves spec (if any) to the in-memory layout and
+    return the report's ``what_if`` block, or ``None`` when not requested.
+
+    Edits land on the in-memory copy ``load_layout`` just read; nothing is
+    ever written back (issue #4661).
+    """
+    if what_if is None:
+        return None
+    # Imported lazily, matching load_layout()'s own lazy `klayout.db` import
+    # convention (`_layout.py`'s module docstring).
+    from .economy_whatif import apply_what_if, load_what_if_spec
+
+    return apply_what_if(
+        kdb, layout, top_cell, load_what_if_spec(what_if, EconomyError), EconomyError
+    )
+
+
 def economy_report(
     path: str,
     top: str | None = None,
@@ -787,19 +807,7 @@ def economy_report(
     top_cell = resolve_top_cell(layout, top, EconomyError)
     dbu = layout.dbu
 
-    what_if_block: dict[str, Any] | None = None
-    if what_if is not None:
-        # Edits land on the in-memory copy `load_layout` just read; nothing is
-        # ever written back (issue #4661).
-        from .economy_whatif import apply_what_if, load_what_if_spec
-
-        what_if_block = apply_what_if(
-            kdb,
-            layout,
-            top_cell,
-            load_what_if_spec(what_if, EconomyError),
-            EconomyError,
-        )
+    what_if_block = _what_if_block(kdb, layout, top_cell, what_if)
 
     bbox = top_cell.bbox()
     if bbox.empty():
