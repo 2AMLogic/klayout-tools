@@ -7286,3 +7286,148 @@ def test_integration_real_yosys_library_cell_instance_needs_no_stub(
     assert report["instance_count"] == 1
     assert report["area_um2"] > 0
     assert report["blackbox_modules"] == []
+
+
+# --- constraints.abc_constr (issue #4662) ------------------------------------
+
+
+def _abc_constr_text(report: dict, tmp_path: Path) -> str:
+    script = _abs_path(report["script_path"], tmp_path)
+    return (Path(script).parent / "gcd_abc.constr").read_text(encoding="utf-8")
+
+
+def test_request_abc_constr_enables_constr_on_a_library_without_one(
+    tmp_path, monkeypatch
+):
+    """`constraints.abc_constr` gives a library with no built-in entry
+    `-constr`, and the capability warning no longer claims it was skipped."""
+    cell_library = "asap7sc7p5t_rvt"
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "asap7A",
+        cell_library=cell_library,
+        corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            pdk={"cell_library": cell_library, "corner": "tt_025C_1v80"},
+            constraints={
+                "abc_constr": {"driving_cell": "BUFx2_ASAP7_75t_R", "load_ff": 3.5}
+            },
+        ),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    assert cell_library not in synthesize._ABC_CONSTR_INPUTS
+    report = run_synthesize(request_path)
+
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
+    assert "-constr " in abc_line
+    assert _abc_constr_text(report, tmp_path) == (
+        "set_driving_cell BUFx2_ASAP7_75t_R\nset_load 3.5\n"
+    )
+    assert report["abc_constr"] == {
+        "source": "request",
+        "driving_cell": "BUFx2_ASAP7_75t_R",
+        "load_ff": 3.5,
+    }
+    assert "ABC -constr" not in json.dumps(report["warnings"])
+
+
+def test_request_abc_constr_overrides_the_builtin_entry(tmp_path, monkeypatch):
+    request_path = _setup_dont_use_env(
+        tmp_path,
+        monkeypatch,
+        {
+            "abc_constr": {
+                "driving_cell": "sky130_fd_sc_hd__o21a_2",
+                "load_ff": 12,
+            }
+        },
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert _abc_constr_text(report, tmp_path) == (
+        "set_driving_cell sky130_fd_sc_hd__o21a_2\nset_load 12\n"
+    )
+    assert report["abc_constr"]["source"] == "request"
+
+
+def test_abc_constr_absent_reports_builtin_source(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    driving_cell, load_ff = synthesize._ABC_CONSTR_INPUTS["sky130_fd_sc_hd"]
+    assert report["abc_constr"] == {
+        "source": "builtin",
+        "driving_cell": driving_cell,
+        "load_ff": load_ff,
+    }
+    assert _abc_constr_text(report, tmp_path) == (
+        f"set_driving_cell {driving_cell}\nset_load {load_ff:g}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("abc_constr", "message"),
+    [
+        ("BUFx2", r"abc_constr must be a JSON object"),
+        ({"load_ff": 3}, r"abc_constr\.driving_cell is required"),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2"},
+            r"abc_constr\.load_ff is required",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": 1, "x": 1},
+            r"abc_constr has unknown key",
+        ),
+        (
+            {"driving_cell": "no_such_cell", "load_ff": 1},
+            r"abc_constr\.driving_cell 'no_such_cell' is not a cell",
+        ),
+        ({"driving_cell": "", "load_ff": 1}, r"abc_constr\.driving_cell must be"),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": 0},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": -2},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": float("nan")},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": float("inf")},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": True},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": "3"},
+            r"abc_constr\.load_ff must be",
+        ),
+    ],
+)
+def test_request_abc_constr_rejects_invalid_values(
+    tmp_path, monkeypatch, abc_constr, message
+):
+    request_path = _setup_dont_use_env(
+        tmp_path, monkeypatch, {"abc_constr": abc_constr}
+    )
+    _stub_yosys_success(monkeypatch)
+
+    with pytest.raises(SynthesizeError, match=message):
+        run_synthesize(request_path)
