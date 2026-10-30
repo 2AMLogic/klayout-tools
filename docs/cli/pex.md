@@ -561,7 +561,9 @@ and `detail`):
 }
 ```
 
-Exit code `4`, same as `pin_count_mismatch`. Fix by wrapping the schematic
+Exit code `4`, same as `pin_count_mismatch`. With `--flatten-schematic` a
+fragment DUT is wrapped for you (see "Flattening a hierarchical schematic
+DUT"); otherwise fix by wrapping the schematic
 DUT in a matching `.SUBCKT ... .ENDS` (with the same top-level pin list
 `klt extract` produces), so the testbench's own instantiation line can be
 reused unmodified on both sides — the same convention `pin_count_mismatch`
@@ -943,8 +945,8 @@ Flattening rules:
   line, `.ic`/`.nodeset`/`.include` inside a subcircuit, an `m=` multiplier
   over a source), or unbalanced `.subckt`/`.ends` fail the run before
   anything simulates, with `error.code` `schematic_flatten_cycle`,
-  `schematic_flatten_pin_count_mismatch`, `schematic_flatten_unsupported_card`
-  or `schematic_flatten_malformed`.
+  `schematic_flatten_pin_count_mismatch`, `schematic_flatten_unsupported_card`,
+  `schematic_flatten_wrapper_pin_unconnected` or `schematic_flatten_malformed`.
 
 The response reports it: `flatten_schematic: true` and
 
@@ -956,9 +958,20 @@ The response reports it: `flatten_schematic: true` and
   "inlined_instances": 2,
   "inlined_subckts": ["INV"],
   "external_subckts": ["sky130_fd_pr__nfet_01v8", "sky130_fd_pr__pfet_01v8"],
-  "already_flat": false
+  "already_flat": false,
+  "wrapper": null
 }
 ```
+
+A DUT netlisted as a *fragment* (devices at file level, helper cells as
+`.subckt`s, no `.subckt <top>`) is wrapped automatically: its file-level
+element cards and `.model`/`.param` cards move into a synthesized
+`.subckt <top> <pins> ... .ends`, with `<pins>` taken from the extracted
+netlist's own header (so the order always matches) and `wrapper` reporting
+`{"synthesized": true, "pins": [...]}`. A wrapper pin with no net of that
+name in the fragment fails before anything simulates with
+`error.code` `schematic_flatten_wrapper_pin_unconnected`. A DUT that already
+defines `.subckt <top>` is unchanged (`wrapper: null`).
 
 An already-flat DUT is still copied, run and reported (`already_flat:
 true`, `inlined_instances: 0`). Without the flag, `flatten_schematic` is
@@ -1437,7 +1450,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `pin_order_mismatch` | object \| null    | `null` unless both sides declare the top subcircuit with the same pin set in a different order (issue #2890 — additive field). Same shape as `flat_dut_mismatch` (`ngspice_message` always `null`); mutually exclusive with `pin_count_mismatch`/`flat_dut_mismatch`; `null` in `--measure-command` mode. The extracted leg is skipped and the run exits `4`. See "Pin order must match" above. |
 | `model_mismatch`     | object \| null    | `null` when the reference (schematic) and extracted netlists' `M`/`X`/`Q`/`D` device cards instantiate the same models/`.subckt`s the same number of times (issue #2402 — additive field). Non-`null` names the divergence: `kind` (`model_set` or `count_only`, issue #3054), `reference_only`/`extracted_only` (model names unique to one side, by instance count), `counts` (each side's full per-model instance count), and a human-readable `detail`. Unlike `pin_count_mismatch`/`flat_dut_mismatch`, computed unconditionally (independent of whether the top-level pin lists match) and never skips the extracted-side simulation — it never changes `status`. See "A device-model divergence invalidates the comparison too" above. |
 | `flatten_schematic`  | boolean           | Issue #2889 (additive, always present). Echo of `--flatten-schematic` — `false` when not given. |
-| `schematic_flatten`  | object \| null    | Issue #2889 (additive). `null` unless `--flatten-schematic` was given. Otherwise the flattened schematic DUT the schematic leg ran: `netlist` (`{path, scope}`), `netlist_sha256` (`sha256:<hex>` of its exact bytes), `subckts` (root `.subckt` names kept), `inlined_instances`, `inlined_subckts`, `external_subckts` (undefined `X` targets kept as leaf devices — audit these) and `already_flat`. See "Flattening a hierarchical schematic DUT" above. |
+| `schematic_flatten`  | object \| null    | Issue #2889 (additive). `null` unless `--flatten-schematic` was given. Otherwise the flattened schematic DUT the schematic leg ran: `netlist` (`{path, scope}`), `netlist_sha256` (`sha256:<hex>` of its exact bytes), `subckts` (root `.subckt` names kept), `inlined_instances`, `inlined_subckts`, `external_subckts` (undefined `X` targets kept as leaf devices — audit these) and `already_flat`, `wrapper` (`null`, or `{synthesized, pins}` when a fragment DUT was wrapped in `.subckt <top>`). See "Flattening a hierarchical schematic DUT" above. |
 | `device_only_netlist` | object            | Issue #3298 (additive, `--device-only-leg` only — absent otherwise). `{path, scope}` of the parasitic-free extraction the third leg ran. |
 | `device_only_netlist_sha256` | string \| null | Issue #3298 (additive, `--device-only-leg` only). `sha256:<hex>` of its exact bytes. |
 | `device_card_count`  | integer           | Issue #3298 (additive, `--device-only-leg` only). Device cards (non-`R`/`C`) in the device-only netlist. |

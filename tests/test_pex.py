@@ -5792,6 +5792,7 @@ def test_run_pex_flatten_schematic_runs_the_flattened_dut(
         "inlined_subckts": ["HALF"],
         "external_subckts": [],
         "already_flat": False,
+        "wrapper": None,
     }
     # No hierarchy-caused model_mismatch any more.
     assert report["model_mismatch"] is None
@@ -5802,6 +5803,66 @@ def test_run_pex_flatten_schematic_runs_the_flattened_dut(
     assert report["testbenches"][0]["schematic_netlist_sha256"] == (
         "sha256:" + _sha256_hex(dut)
     )
+
+
+def test_run_pex_flatten_schematic_wraps_a_fragment_dut(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4625: a fragment DUT (file-level devices, helper `.subckt`, no
+    `.subckt <top>`) gets a synthesized wrapper with the extracted pins."""
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(
+        ".SUBCKT HALF A B\nR1 A B 144.6\n.ENDS HALF\n"
+        ".model res_generic_po r\n"
+        "X1 RA M HALF\nX2 M RB HALF\n"
+    )
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    _install_recording_fake_run_sim(monkeypatch)
+    outdir = tmp_path / "pex"
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(outdir),
+        flatten_schematic=True,
+    )
+
+    block = report["schematic_flatten"]
+    assert block["wrapper"] == {"synthesized": True, "pins": ["RA", "RB"]}
+    assert block["subckts"] == ["RES"]
+    flat = (outdir / "schematic-dut.flat.spice").read_text()
+    assert ".subckt RES RA RB" in flat
+    assert flat.index(".subckt RES") < flat.index("R.X1.R1") < flat.index(".ends RES")
+    assert flat.index(".subckt RES") < flat.index(".model res_generic_po")
+    assert report["flat_dut_mismatch"] is None
+    assert report["pin_count_mismatch"] is None
+
+
+def test_run_pex_flatten_schematic_fragment_missing_pin_net_is_coded(
+    tmp_path, resistor_layout, monkeypatch
+):
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text("R1 RA MID 289.2\n")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("run_sim must not be called")
+
+    import klayout_tools.pex as pex_module
+
+    monkeypatch.setattr(pex_module, "run_sim", _boom)
+    with pytest.raises(PexError) as excinfo:
+        run_pex(
+            resistor_layout,
+            [str(request)],
+            "sky130",
+            artifacts_dir=str(tmp_path / "pex"),
+            flatten_schematic=True,
+        )
+    assert excinfo.value.code == "schematic_flatten_wrapper_pin_unconnected"
 
 
 def test_run_pex_flatten_schematic_already_flat_dut_is_reported(
