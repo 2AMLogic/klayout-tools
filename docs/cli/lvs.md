@@ -501,9 +501,12 @@ suspecting extraction.
   and `--top-cell-pins` / `--def-pins` are refused on `--deck asap7` (see
   [`extract.md`](extract.md)), so a merged routed stream extracts a top cell
   with no signal pins. The compare still matches by topology, but
-  `net_correspondence`-style pin counts will be low: draw `<metal>/251` text on the port metal (`--pins` and
-  `--def-net-names` are the supported asap7 pin options; their use on a routed
-  stream was not exercised here).
+  `net_correspondence`-style pin counts will be low: draw `<metal>/251` text
+  on the port metal. `--pins` does not create pins; it only reconciles
+  labelled nets, and on a stream with no pin text it reports
+  `N declared pin names ... matched no promoted net in the layout: IN, OUT`
+  (pinned in `test_declared_pins_do_not_create_pins_but_name_the_missing_labels`).
+  Read that warning as "the labels are missing", not as a layout verdict.
 - **A well label and a rail label with one name stay two nets** at extraction
   (`VDD` and `VDD$1`); `finfet_bulk` is what ties them for the compare, in
   each cell, before the flatten.
