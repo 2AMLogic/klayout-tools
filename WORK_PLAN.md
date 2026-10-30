@@ -7,10 +7,8 @@ Current work from GitHub labels. Long-term direction lives in [ROADMAP.md](ROADM
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#3310**: fix(release): guard unpublished klt-*-native extra pins and correct [yield] install docs
-- **#3467**: ci: fetch the PDK with ciel pinned to open_pdks f6eeac7
-- **#4172**: chore(deps): bump astral-sh/setup-uv from 10.2.0 to 10.3.0 in the github-actions group across 1 directory
 - **#4566**: feat(blocks): add canary manifest, --manifest ingest mode and weekly refresh PR
+- **#4606**: chore(loom): resync installed Loom to v0.19.1236
 
 ## Very Important
 
@@ -30,43 +28,43 @@ Human-approved issues ready for implementation (`loom:issue`).
 
 - **#2340**: signoff: input_verified is always null for drc/extract envelopes that recorded an absolute host path
 - **#2812**: ASAP7 FEOL/MOL gap tracker: mechanism-specific rule increments
-- **#2900**: Friction: documented 'klayout-tools[yield]' install path does not resolve (klt-yield-native not on PyPI)
 - **#2912**: Friction: sky130 native-Vt NMOS (nfet_05v0_nvt) cannot be drawn by klt gen or compared by klt lvs
 - **#3057**: klt sim --backend batch: -o FILE not written when --format json (report goes to stdout)
 - **#3094**: decks/sg13cmos5l: poly resistors assume coincident GatPoly/PolyRes, same as sg13g2 before #2679
 - **#3289**: signoff: generator-command evidence for T1 items 1/2 (klt executes and byte-compares) — needs trust-model ruling
 - **#3440**: gf180mcu MIM option A: live verification against PDK pcell and runset (follow-up to #2920 / PR #3358)
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin
-- **#3930**: Live-verify klt place-and-route io.pin_constraints against real OpenROAD (N/E/S/W)
 - **#4128**: Trim oversized module docstrings in signoff, place_and_route, erc, size, equiv, pdk_models (2,746 lines of phase/issue narration)
 - **#4161**: klt sim batch: all jobs exit 87 within seconds on the current fleet image; no runner stderr surfaced
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s)
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported
+- **#4610**: asap7: routed gate-level block fails drc/lvs/erc together; extraction does not connect it
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
+- **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4565**: site: present the public chip design work on klayout-tools.org
-- **#4596**: Explore: an agent-facing library of known-good verified designs (AnalogScout, arXiv:2610.37319) and existing FOSS design libraries
+- **#4619**: klt pex: no grid sharding or async submit/attach for --backend batch
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
-- **#4598**: docs: survey verified analog design libraries and recommend a klt record format
+- **#4600**: site: refresh the klayout-tools.org landing page, generated from the CLI registry
+- **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
+- **#4633**: feat(pex): add --submit-only/--attach for async batch runs
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#3310**: fix(release): guard unpublished klt-*-native extra pins and correct [yield] install docs
-- **#3467**: ci: fetch the PDK with ciel pinned to open_pdks f6eeac7
-- **#4172**: chore(deps): bump astral-sh/setup-uv from 10.2.0 to 10.3.0 in the github-actions group across 1 directory
 - **#4566**: feat(blocks): add canary manifest, --manifest ingest mode and weekly refresh PR
+- **#4606**: chore(loom): resync installed Loom to v0.19.1236
 
 ## Proposed
 
@@ -80,16 +78,14 @@ Issues carrying `loom:curated`.
 - **#2812**: ASAP7 FEOL/MOL gap tracker: mechanism-specific rule increments *(curated)*
 - **#2835**: sky130 DRC: enforce licon1/mcon maximum size without rejecting compound-layer exceptions *(curated)*
 - **#2840**: Friction: klt yield reports carry no seed / corner-matrix / spec-row provenance for T1 item 6's recorded-seed requirement *(curated)*
-- **#2900**: Friction: documented 'klayout-tools[yield]' install path does not resolve (klt-yield-native not on PyPI) *(curated)*
 - **#2912**: Friction: sky130 native-Vt NMOS (nfet_05v0_nvt) cannot be drawn by klt gen or compared by klt lvs *(curated)*
 - **#3057**: klt sim --backend batch: -o FILE not written when --format json (report goes to stdout) *(curated)*
 - **#3147**: ASAP7 DRC deck: BEOL rules needing track, net, corner or grid predicates *(curated)*
 - **#3289**: signoff: generator-command evidence for T1 items 1/2 (klt executes and byte-compares) — needs trust-model ruling *(curated)*
-- **#3426**: Re-pin CI, AMI script and install docs to open_pdks f6eeac7 via ciel 2.6.1 *(curated)*
+- **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3 *(curated)*
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin *(curated)*
 - **#3516**: klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249) *(curated)*
 - **#3522**: Verify OMP_NUM_THREADS pinning on the batch fleet (follow-up to #3502) *(curated)*
-- **#3930**: Live-verify klt place-and-route io.pin_constraints against real OpenROAD (N/E/S/W) *(curated)*
 - **#3998**: Emit a real prBoundary (235/4) from a chip-level assembly step, the precondition the operator set for boundary-scoped density (#1991) *(curated)*
 - **#3999**: Add a metal/poly/diffusion fill insertion verb driven by the PDK's density window *(curated)*
 - **#4000**: Seal-ring / scribe conformance check against the PDK's seal-ring rules (ring-check only checks continuity) *(curated)*
@@ -111,7 +107,8 @@ Issues carrying `loom:curated`.
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
 - **#4508**: ASAP7: trim protruding VIA_* M1 pad tips to clear M1.S.2-5 (follow-up to #4495) *(curated)*
 - **#4565**: site: present the public chip design work on klayout-tools.org *(curated)*
-- **#4596**: Explore: an agent-facing library of known-good verified designs (AnalogScout, arXiv:2610.37319) and existing FOSS design libraries *(curated)*
+- **#4610**: asap7: routed gate-level block fails drc/lvs/erc together; extraction does not connect it *(curated)*
+- **#4619**: klt pex: no grid sharding or async submit/attach for --backend batch *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -133,14 +130,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 4 |
+| Operator merge-risk holds | 2 |
 | Very important | 1 |
 | Important | 1 |
-| Ready (`loom:issue`) | 15 |
-| In Progress (`loom:building`) | 3 |
-| PRs awaiting review | 2 |
-| Approved PRs awaiting merge | 4 |
-| Curated | 40 |
+| Ready (`loom:issue`) | 14 |
+| In Progress (`loom:building`) | 4 |
+| PRs awaiting review | 4 |
+| Approved PRs awaiting merge | 2 |
+| Curated | 39 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
