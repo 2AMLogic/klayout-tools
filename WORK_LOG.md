@@ -4,6 +4,12 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-30
 
+- **PR #4655**: docs: add gm/ID characterization table design spike
+- **PR #4651**: docs: survey OPERA expert-taught agent flow and index it in the resource library
+- **PR #4600**: site: refresh the klayout-tools.org landing page, generated from the CLI registry
+- **Issue #4648** (closed): Spike: persisted gm/ID characterization tables (Id/W, fT, gm*ro, C vs gm/ID over L and corners)
+- **Issue #4644** (closed): Explore: OPERA (arXiv:2610.39395), expert-taught gm/ID sizing plus layout-generator agent flow; which techniques belong in klt?
+- **Issue #4597** (closed): site: refresh the klayout-tools.org landing page (stale scaffold copy, verb list, install, MCP)
 - **PR #4640**: refactor: consolidate sim_steps unsupported-key refusals into one table-driven check
 - **Issue #4639** (closed): Consolidate seven _refuse_* helpers in sim_steps.py into one table-driven check
 - **PR #4638**: docs: state --attest never skips local_only commands; point blocked hosts at skew fixes
