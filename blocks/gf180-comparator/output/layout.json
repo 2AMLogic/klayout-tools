@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:07:56.372146+00:00",
+  "slug": "gf180-comparator",
+  "name": "Gf180 Comparator",
+  "description": "Dynamic latched comparator on GF180MCU \u2014 agent-built, open-tool verified",
+  "pdk": "gf180mcu",
+  "layer_count": 16,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "comparator.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Nwell": "renders/21_0.png",
+    "Comp": "renders/22_0.png",
+    "Poly2": "renders/30_0.png",
+    "Pplus": "renders/31_0.png",
+    "Nplus": "renders/32_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "layer_34_10": "renders/34_10.png",
+    "Via1": "renders/35_0.png",
+    "Metal2": "renders/36_0.png",
+    "Via2": "renders/38_0.png",
+    "Metal3": "renders/42_0.png",
+    "layer_42_10": "renders/42_10.png",
+    "SAB": "renders/49_0.png",
+    "Resistor": "renders/62_0.png",
+    "RES_MK": "renders/110_5.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Offset sigma",
+        "target": "\u2264 15 mV, 3\u03c3 (input-referred, post-calibration-free)",
+        "stretch": "\u2264 8 mV, 3\u03c3",
+        "basis": "Monte Carlo via gf180mcu's `sw_stat_mismatch` local-mismatch models: N = 200 mismatch-only draws per corner, `setseed 20260909` common across all 45 corners, 1\u03c3 reported alongside 3\u03c3, precision 1/\u221a(2N) = 5.0 %; bound matches the sg13g2/sky130 twin set. **Verdict \u2014 meets target and stretch at every corner** (2.796\u20132.807 mV 3\u03c3; nominal 2.80063 mV). Scope: DC-sweep, preamp-only (a lower bound). **Whole-comparator total** (additive bench `sim/comparator-offset-tran/`, #157): transient MC on the full 45-point PVT grid (tt/ss/ff/fs/sf \u00d7 \u221240/27/125 \u00b0C \u00d7 2.97/3.30/3.63 V), N = 200 draws per point, seed 20260909, with the latch measured and a conservative load-R hand budget (derived, not simulated). The scored total is **3.146 mV 3\u03c3 at nominal `tt_27c_3.30v` and 2.994\u20133.795 mV across all 45 points (binding corner `ff_125c_3.63v`); meets target and stretch at 45/45**. The purely simulated whole-comparator mismatch alone is 2.808\u20133.515 mV 3\u03c3; the load-R term is added on top as a derived budget. The latch adds a paired 0.184\u20130.659 mV 1\u03c3. Schematic DUT, single seed; no extracted-layout or layout-systematic offset is claimed. The earlier nine-point reduced-grid run (3.146\u20133.725 mV, 9/9) is history. Record, methodology provenance and negative control: [ledger](spec/evidence-ledger.md#offset-sigma)."
+      },
+      {
+        "parameter": "Input-referred noise",
+        "target": "\u2264 1.0 mV rms, differential",
+        "stretch": "\u2264 0.6 mV rms, differential",
+        "basis": "ngspice `.noise` on the preamplifier with the latch held in reset, total integrated output noise **divided by measured DC gain** (the `gf180-sar-adc` `sim/comparator-preamp-noise/` methodology and units caution). **Verdict \u2014 meets target and stretch at every corner** (91.25 \u00b5V rms nominal, 128.8 \u00b5V rms worst case; worst case clears target 7.8\u00d7 and stretch 4.7\u00d7; scoring pass [#75](https://github.com/2AMLogic/gf180-comparator/issues/75)). Records and provenance: [ledger](spec/evidence-ledger.md#input-referred-noise)."
+      },
+      {
+        "parameter": "Decision time vs. overdrive",
+        "target": "\u2264 1.5 ns at 50 mV overdrive, 3.3 V",
+        "stretch": "\u2264 0.8 ns at 50 mV overdrive",
+        "basis": "Transient decision-time-vs-overdrive sweep mirroring `gf180-sar-adc`'s `sim/comparator-regeneration/` (schematic, plus extracted post-layout). **Verdict \u2014 misses the ratified target at 7 of 45 post-layout corners (worst 2.034 ns); recorded miss, accepted as known at ratification** per [DR-0002](spec/decision-records/DR-0002-target-spec-ratification.md) Option A (schematic meets target at all 45 corners, worst 1.237 ns; stretch missed at 16 of 45 schematic and 44 of 45 post-layout corners; scoring pass [#75](https://github.com/2AMLogic/gf180-comparator/issues/75)). Relaxes nothing. Records and delta detail: [ledger](spec/evidence-ledger.md#decision-time-vs-overdrive)."
+      },
+      {
+        "parameter": "Kickback",
+        "target": "\u2264 5 mV disturbance into a 1 k\u03a9 source impedance at the input nodes, single decision edge",
+        "stretch": "\u2264 2 mV",
+        "basis": "Floating high-impedance bias through a realistic RC, never an ideal source (`gf180-sar-adc` `sim/comparator-kickback/` methodology). **Verdict \u2014 misses the ratified target at every post-layout corner (and at 44 of 45 schematic corners); recorded miss, accepted as known at ratification** per [DR-0002](spec/decision-records/DR-0002-target-spec-ratification.md) Option A (post-layout 8.49\u201314.58 mV, nominal 10.03 mV; schematic 4.53\u201310.01 mV, nominal 7.60 mV; stretch missed everywhere in both records; scoring pass [#75](https://github.com/2AMLogic/gf180-comparator/issues/75)). Relaxes nothing. Records and delta detail: [ledger](spec/evidence-ledger.md#kickback)."
+      },
+      {
+        "parameter": "Supply / power",
+        "target": "3.3 V \u00b110% (`nfet_03v3`/`pfet_03v3`); \u2264 1 mW average, one decision per clock edge at a stated clock rate (TBD)",
+        "stretch": "\u2264 500 \u00b5W average",
+        "basis": "Rail settled against the installed model file (only `nfet_03v3`/`pfet_03v3`, `_05v0`, `_06v0` flavors (plus `_dss`/`_nvt` variants) exist; no sub-3.3 V core flavor); power bound is first-principles judgment matching the twin set. **Verdict \u2014 static power meets target and stretch at every corner; the average-power bound as written is not fully scored** (28.5 \u00b5A mean static current, \u2248 93.9 \u00b5W nominal; the clock rate is still TBD and no rate is invented here \u2014 choosing one needs a decision record per [`spec/README.md`](spec/README.md); scoring pass [#75](https://github.com/2AMLogic/gf180-comparator/issues/75)). Records and provenance: [ledger](spec/evidence-ledger.md#supply--power)."
+      }
+    ],
+    "status_note": "ratified via DR-0002"
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-comparator",
+    "ref": "d422f66e32e5f3dcb1c8da50178d130ae7ba3fc8",
+    "path": "layout/comparator.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

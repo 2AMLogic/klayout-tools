@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:07:32.720454+00:00",
+  "slug": "asap7-riscv-core",
+  "name": "Asap7 Riscv Core",
+  "description": "RISC-V core place-and-route on ASAP7 (predictive, never fabricated) \u2014 2AM Logic canary block",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Core",
+        "target": "RV32IMC, Ibex/CVE2-class, unmodified",
+        "fallback": "RV32EC"
+      },
+      {
+        "parameter": "Standard cells",
+        "target": "ASAP7 7.5-track library"
+      },
+      {
+        "parameter": "Predicted clock (post-route STA, slow corner)",
+        "target": "1 GHz",
+        "fallback": "500 MHz",
+        "stretch": "1.5 GHz"
+      },
+      {
+        "parameter": "DRC",
+        "target": "clean against the ratified ASAP7 rule deck under `klt`",
+        "fallback": "clean with every waiver recorded"
+      },
+      {
+        "parameter": "LVS",
+        "target": "clean"
+      }
+    ],
+    "status_note": "ratified in [`spec/core.md`](spec/core.md"
+  },
+  "source": {
+    "repo": "2AMLogic/asap7-riscv-core",
+    "ref": "da4e1f2bbad141064788a28473b698c134b90896",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

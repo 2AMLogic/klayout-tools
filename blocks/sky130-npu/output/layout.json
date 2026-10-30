@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:12:37.013317+00:00",
+  "slug": "sky130-npu",
+  "name": "Sky130 Npu",
+  "description": "INT8 MAC-array NPU with banked SRAM on sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "MAC array",
+        "target": "8 x 8 (64 MACs), INT8 x INT8 \u2192 INT32",
+        "fallback": "4 x 4",
+        "stretch": "16 x 16"
+      },
+      {
+        "parameter": "Dataflow",
+        "target": "output-stationary ([decision](spec/decisions/0001-dataflow.md))",
+        "fallback": "same",
+        "stretch": "same"
+      },
+      {
+        "parameter": "On-chip SRAM",
+        "target": "4 banks, 16 KB total",
+        "fallback": "2 banks, 4 KB",
+        "stretch": "8 banks, 64 KB"
+      },
+      {
+        "parameter": "Operations",
+        "target": "matrix multiply, 2-D convolution via im2col (host-side), bias, requantize, ReLU",
+        "fallback": "matrix multiply",
+        "stretch": "depthwise convolution (deferred)"
+      },
+      {
+        "parameter": "Signoff clock (post-route STA, slow corner)",
+        "target": "50 MHz",
+        "fallback": "25 MHz",
+        "stretch": "100 MHz"
+      },
+      {
+        "parameter": "Numerical correctness",
+        "target": "bit-exact against the integer golden model"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean, STA closed at every ratified corner that has all its views; the 50 MHz target is not met until the slow-corner macro view exists (spec G1)"
+      }
+    ],
+    "status_note": "ratified \u2014 see [spec/npu.md](spec/npu.md"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-npu",
+    "ref": "ac2db3ea7f184187b55d1d4aa0bfb860fd2ac89e",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

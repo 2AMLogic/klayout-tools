@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:07:35.101102+00:00",
+  "slug": "asap7-stdcells",
+  "name": "Asap7 Stdcells",
+  "description": "FinFET standard-cell library on predictive ASAP7, layout/DRC only \u2014 2AM Logic canary block",
+  "layer_count": 16,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "AND2x1_A7S_75t_R.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "layer_1_0": "renders/1_0.png",
+    "layer_2_0": "renders/2_0.png",
+    "layer_7_0": "renders/7_0.png",
+    "layer_10_0": "renders/10_0.png",
+    "layer_11_0": "renders/11_0.png",
+    "layer_12_0": "renders/12_0.png",
+    "layer_13_0": "renders/13_0.png",
+    "layer_16_0": "renders/16_0.png",
+    "layer_17_0": "renders/17_0.png",
+    "layer_18_0": "renders/18_0.png",
+    "layer_19_0": "renders/19_0.png",
+    "layer_19_251": "renders/19_251.png",
+    "layer_20_0": "renders/20_0.png",
+    "layer_21_0": "renders/21_0.png",
+    "layer_88_0": "renders/88_0.png",
+    "layer_100_0": "renders/100_0.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "source": {
+    "repo": "2AMLogic/asap7-stdcells",
+    "ref": "5efd783d8f6de2d15c1100404048d2385d787d63",
+    "path": "layout/AND2x1_A7S_75t_R.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

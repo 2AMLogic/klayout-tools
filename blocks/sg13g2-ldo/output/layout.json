@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:10:55.841615+00:00",
+  "slug": "sg13g2-ldo",
+  "name": "Sg13G2 Ldo",
+  "description": "Canary \u2014 IHP SG13G2 low-dropout regulator. AI-designed, open-source.",
+  "pdk": "sg13g2",
+  "layer_count": 14,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "npn13G2.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Activ.drawing": "renders/1_0.png",
+    "Activ.mask": "renders/1_20.png",
+    "Cont.drawing": "renders/6_0.png",
+    "nSD.block": "renders/7_21.png",
+    "Metal1.drawing": "renders/8_0.png",
+    "layer_8_2": "renders/8_2.png",
+    "Metal2.drawing": "renders/10_0.png",
+    "layer_10_2": "renders/10_2.png",
+    "pSD.drawing": "renders/14_0.png",
+    "Via1.drawing": "renders/19_0.png",
+    "layer_26_0": "renders/26_0.png",
+    "layer_33_0": "renders/33_0.png",
+    "layer_51_0": "renders/51_0.png",
+    "layer_63_0": "renders/63_0.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "source": {
+    "repo": "2AMLogic/sg13g2-ldo",
+    "ref": "e3b2d1dc010103739c7068defea03fdb02b10ba1",
+    "path": "layout/hbt-probe/npn13G2.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}
