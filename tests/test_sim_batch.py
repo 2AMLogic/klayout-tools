@@ -6203,6 +6203,23 @@ def test_dry_run_check_passes_when_the_manifest_supports_the_feature(
     assert sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0) is None
 
 
+def test_dry_run_check_reports_the_published_runner_whatever_the_status(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    request = _dry_run_request(tmp_path)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.1")])
+    out: dict = {}
+    sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0, runner_out=out)
+    assert out["status"] == "match"
+    assert out["images"][0]["klt_version"] == "0.7.1"
+    _publish_manifest(tmp_path, monkeypatch, [_image()])
+    out = {}
+    sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0, runner_out=out)
+    assert out["status"] == "unknown"
+    assert out["client_klt_version"] == _PRELAUNCH_CLIENT
+
+
 def test_dry_run_check_warn_mode_returns_the_diagnostic(tmp_path, monkeypatch):
     _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
     _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
