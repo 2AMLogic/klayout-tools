@@ -39,7 +39,6 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s)
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported
-- **#4610**: asap7: routed gate-level block fails drc/lvs/erc together; extraction does not connect it
 
 ## In Progress
 
@@ -48,7 +47,6 @@ Issues currently being built (`loom:building`).
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4565**: site: present the public chip design work on klayout-tools.org
-- **#4619**: klt pex: no grid sharding or async submit/attach for --backend batch
 
 ## PRs Awaiting Review
 
@@ -57,7 +55,6 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
 - **#4600**: site: refresh the klayout-tools.org landing page, generated from the CLI registry
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
-- **#4633**: feat(pex): add --submit-only/--attach for async batch runs
 
 ## Approved (Awaiting Merge)
 
@@ -107,8 +104,6 @@ Issues carrying `loom:curated`.
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
 - **#4508**: ASAP7: trim protruding VIA_* M1 pad tips to clear M1.S.2-5 (follow-up to #4495) *(curated)*
 - **#4565**: site: present the public chip design work on klayout-tools.org *(curated)*
-- **#4610**: asap7: routed gate-level block fails drc/lvs/erc together; extraction does not connect it *(curated)*
-- **#4619**: klt pex: no grid sharding or async submit/attach for --backend batch *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -133,11 +128,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 2 |
 | Very important | 1 |
 | Important | 1 |
-| Ready (`loom:issue`) | 14 |
-| In Progress (`loom:building`) | 4 |
-| PRs awaiting review | 4 |
+| Ready (`loom:issue`) | 13 |
+| In Progress (`loom:building`) | 3 |
+| PRs awaiting review | 3 |
 | Approved PRs awaiting merge | 2 |
-| Curated | 39 |
+| Curated | 37 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
