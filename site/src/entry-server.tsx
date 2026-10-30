@@ -56,7 +56,7 @@ export function renderPage(data: PageData): string {
 export const INDEX_META = {
   title: "klayout-tools — IC layout for AI agents",
   description:
-    "Standalone tools that let AI agents parse, check, and edit chip layouts. The kicad-tools playbook, one layer down the stack. In progress, in the open.",
+    "Headless, JSON-first tools that let AI agents parse, check, generate and verify chip layouts on open PDKs: a klt CLI and an MCP server built on KLayout. The kicad-tools playbook, one layer down the stack.",
 };
 
 export function detailMeta(layout: Layout): { title: string; description?: string } {

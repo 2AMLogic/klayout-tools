@@ -22,7 +22,7 @@ export interface FooterProps {
 
 export function Footer({ repoUrl, buildSha, buildUrl, year }: FooterProps) {
   return (
-    <footer className="mx-auto w-full max-w-[44rem] border-t border-border px-6 py-6 pb-8 text-[0.8rem] leading-relaxed text-fog-dim">
+    <footer className="mx-auto w-full max-w-[72rem] border-t border-border px-6 py-6 pb-8 text-[0.8rem] leading-relaxed text-fog-dim">
       <p className="my-1.5">
         Build:{" "}
         <a
