@@ -2807,6 +2807,26 @@ def _device_only_result_fields(
     }
 
 
+def _load_testbench_request(testbench_path: str) -> dict[str, Any]:
+    """``load_request`` with a :class:`SimError` re-raised as a
+    :class:`PexError` naming the testbench."""
+    try:
+        return load_request(testbench_path)
+    except SimError as exc:
+        raise PexError(f"testbench '{testbench_path}': {exc}", code=exc.code) from exc
+
+
+def _require_single_dut(dut_paths: Sequence[str]) -> None:
+    """Every testbench in one run must ``.include`` the same schematic DUT."""
+    if len(set(dut_paths)) > 1:
+        raise PexError(
+            "testbenches reference different schematic DUT netlists "
+            f"({sorted(set(dut_paths))!r}) -- klt pex expects every "
+            "testbench in one run to `.include` the same block's schematic "
+            "netlist, so a single reference_netlist can be reported"
+        )
+
+
 @output_lock.owns_run
 def run_pex(
     layout_path: str,
@@ -3283,12 +3303,7 @@ def run_pex(
         label = f"{index:02d}-{os.path.splitext(os.path.basename(testbench_path))[0]}"
         labels.append(label)
 
-        try:
-            request = load_request(testbench_path)
-        except SimError as exc:
-            raise PexError(
-                f"testbench '{testbench_path}': {exc}", code=exc.code
-            ) from exc
+        request = _load_testbench_request(testbench_path)
 
         request_dir = os.path.dirname(os.path.abspath(testbench_path))
         schematic_body_path = _resolve_relative(request["netlist"], request_dir)
@@ -3317,13 +3332,7 @@ def run_pex(
         dut_paths.append(dut_path)
         input_identity[-1]["schematic_netlist_sha256"] = _content_id(dut_path)
 
-    if len(set(dut_paths)) > 1:
-        raise PexError(
-            "testbenches reference different schematic DUT netlists "
-            f"({sorted(set(dut_paths))!r}) -- klt pex expects every "
-            "testbench in one run to `.include` the same block's schematic "
-            "netlist, so a single reference_netlist can be reported"
-        )
+    _require_single_dut(dut_paths)
     # Issue #4619: an `--attach` manifest must match this run's inputs.
     request_shas = {
         label: identity["request_sha256"]

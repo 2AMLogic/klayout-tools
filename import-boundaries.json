@@ -403,6 +403,7 @@
       "modules": [
         "klayout_tools.cli.pex_cmd",
         "klayout_tools.pex",
+        "klayout_tools.pex_async",
         "klayout_tools.spice_flatten"
       ]
     },

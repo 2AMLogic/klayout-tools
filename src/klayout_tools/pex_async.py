@@ -114,7 +114,7 @@ class AsyncLegs:
         return manifest
 
     def verify(
-        self, *, extracted_netlist_sha256: str, request_sha256: Mapping[str, str]
+        self, *, extracted_netlist_sha256: str | None, request_sha256: Mapping[str, str]
     ) -> None:
         """Attach only: refuse a manifest recorded for different inputs than
         this invocation extracted/loaded (the sim ``--attach`` precedent)."""
@@ -192,7 +192,7 @@ class AsyncLegs:
     def finish_submit(
         self,
         *,
-        extracted_netlist_sha256: str,
+        extracted_netlist_sha256: str | None,
         request_sha256: Mapping[str, str],
     ) -> dict[str, Any]:
         """Write the manifest and return the ``submitted`` status payload."""
