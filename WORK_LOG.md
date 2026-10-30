@@ -4,6 +4,12 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-30
 
+- **PR #4656**: feat: add --op-lint-corner all per-corner saturation margin table
+- **Issue #4650** (closed): Check: per-corner saturation-margin table from klt sim --op-lint
+- **PR #4657**: kb: add telescopic OTA entry with sky130 netlist and measured figures
+- **Issue #4647** (closed): KB: add telescopic OTA entry (sky130)
+- **PR #4653**: docs: add numeric OTA starting-point chain to design-sizing and KB
+- **Issue #4646** (closed): Skill/KB: numeric gm/ID sizing chain (spec to gm to role gm/ID to L to W, headroom check) for OTA sizing
 - **PR #4655**: docs: add gm/ID characterization table design spike
 - **PR #4651**: docs: survey OPERA expert-taught agent flow and index it in the resource library
 - **PR #4600**: site: refresh the klayout-tools.org landing page, generated from the CLI registry
