@@ -64,6 +64,12 @@ BATCH_JOB_ID_INVALID_CODE = "batch_job_id_invalid"
 #: ``status.json`` (not booted yet) -- a normal condition, not an error.
 PENDING_STATE = "pending"
 
+#: A non-terminal job whose ``updated_at`` is older than this many seconds is
+#: reported ``stale: true`` (three :data:`~klayout_tools.sim_batch.
+#: BATCH_HEARTBEAT_INTERVAL_S` periods): a live runner that has not rewritten
+#: its status in that long is far likelier lost with its instance than slow.
+STALE_AFTER_S = 900.0
+
 #: ``status.json`` fields passed through to the status payload verbatim
 #: (absent ones are dropped, not nulled). ``progress`` (issue #4291) is an
 #: object the runner may publish while a job runs, e.g.
@@ -241,11 +247,30 @@ def _job_exists(
     )
 
 
+def _stale_seconds(state: str, updated_at: Any, now: datetime | None) -> float | None:
+    """Age in seconds of ``updated_at`` for a running job past
+    :data:`STALE_AFTER_S`, else ``None`` (terminal, pending, missing or
+    unparseable ``updated_at`` -- never a stale claim without evidence)."""
+    if state in BATCH_TERMINAL_STATES or state == PENDING_STATE:
+        return None
+    if not isinstance(updated_at, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age = ((now or datetime.now(timezone.utc)) - parsed).total_seconds()
+    return round(age, 1) if age > STALE_AFTER_S else None
+
+
 def read_job_status(
     request: dict[str, Any],
     job_id: str,
     *,
     runner: remote_transport.CommandRunner | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """One status read for ``job_id``: ``status.json`` fields as JSON.
 
@@ -256,6 +281,11 @@ def read_job_status(
     :data:`BATCH_JOB_NOT_FOUND_CODE`. Submits nothing and re-launches
     nothing, whatever the state (an ``interrupted`` job is the fleet's own
     reconcile to relaunch).
+
+    A non-terminal job whose ``updated_at`` is older than
+    :data:`STALE_AFTER_S` additionally carries ``stale: true`` and
+    ``stale_seconds`` (the age of ``updated_at``); ``state`` stays the
+    runner's own value. ``now`` is for tests.
     """
     from .sim import SimError
 
@@ -297,6 +327,10 @@ def read_job_status(
     for key in _STATUS_PASSTHROUGH:
         if key in document:
             payload[key] = document[key]
+    stale_seconds = _stale_seconds(state, document.get("updated_at"), now)
+    if stale_seconds is not None:
+        payload["stale"] = True
+        payload["stale_seconds"] = stale_seconds
     instance = {k: document[k] for k in _STATUS_INSTANCE_FIELDS if k in document}
     if instance:
         payload["instance"] = instance

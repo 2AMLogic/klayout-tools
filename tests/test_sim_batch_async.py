@@ -5,6 +5,7 @@ runner from `test_sim_batch.py`; nothing here reaches `aws` or S3."""
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -538,3 +539,68 @@ def test_attach_pending_job_emits_the_note_end_to_end(tmp_path, monkeypatch, cap
     sim.run_sim(str(path), attach_job_id=job_id)
 
     assert "was never started" in capsys.readouterr().err
+
+
+# --- issue #4616: staleness verdict on a frozen non-terminal status ---
+
+_UPDATED_AT = datetime(2026, 9, 18, 0, 5, 0, tzinfo=timezone.utc)
+
+
+def _read_at(tmp_path, monkeypatch, status_text, age_s):
+    runner = _FakeRunner()
+    runner.default = fake_completed(status_text)
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    return sba.read_job_status(
+        _batch_request(tmp_path),
+        "klt-sim-deadbeef",
+        now=_UPDATED_AT + timedelta(seconds=age_s),
+    )
+
+
+def test_job_status_old_running_job_is_marked_stale(tmp_path, monkeypatch):
+    status = _read_at(tmp_path, monkeypatch, _status("running"), 2700)
+
+    assert status["stale"] is True
+    assert status["stale_seconds"] == 2700.0
+    assert status["state"] == "running"
+
+
+def test_job_status_fresh_running_job_is_not_stale(tmp_path, monkeypatch):
+    status = _read_at(tmp_path, monkeypatch, _status("running"), 60)
+
+    assert "stale" not in status
+    assert "stale_seconds" not in status
+
+
+@pytest.mark.parametrize("state", ["done", "failed", "timeout"])
+def test_job_status_terminal_job_is_never_stale(tmp_path, monkeypatch, state):
+    status = _read_at(tmp_path, monkeypatch, _status(state), 86400)
+
+    assert "stale" not in status
+    assert status["state"] == state
+
+
+@pytest.mark.parametrize("updated_at", ["not-a-date", None])
+def test_job_status_bad_updated_at_makes_no_stale_claim(
+    tmp_path, monkeypatch, updated_at
+):
+    status = _read_at(
+        tmp_path, monkeypatch, _status("running", updated_at=updated_at), 86400
+    )
+
+    assert "stale" not in status
+
+
+def test_job_status_pending_is_not_stale(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.queue("status.json", fake_completed("", returncode=1))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    status = sba.read_job_status(
+        _batch_request(tmp_path),
+        "klt-sim-deadbeef",
+        now=_UPDATED_AT + timedelta(days=2),
+    )
+
+    assert status["state"] == "pending"
+    assert "stale" not in status

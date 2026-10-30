@@ -6794,3 +6794,36 @@ def test_cli_pex_resistance_graph_extract_only_json(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out)
     (net,) = report["extraction"]["resistance_graph"]["nets"]
     assert net["resistance_source"] == "graph"
+
+
+def test_run_pex_forwards_batch_sharding_flags_to_every_run_sim(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4616: `--max-units-per-job` / `--max-concurrent-jobs` reach both
+    the schematic-side and extracted-side `run_sim`; omitted, neither kwarg is
+    passed (the call shape of before the flags existed)."""
+    import klayout_tools.pex as pex_module
+
+    def _run(**flags):
+        seen = []
+
+        def _fake_run_sim(*_args, **kwargs):
+            seen.append(kwargs)
+            return _two_corner_schematic_report()
+
+        monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+        dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+        tb = _write_testbench(tmp_path / "testbench.spice", dut)
+        request = _write_request(tmp_path / "request.json", tb)
+        run_pex(resistor_layout, [str(request)], "sky130", **flags)
+        return seen
+
+    seen = _run(max_units_per_job=5, max_concurrent_jobs=2)
+    assert len(seen) == 2
+    for kwargs in seen:
+        assert kwargs["max_units_per_job"] == 5
+        assert kwargs["max_concurrent_jobs"] == 2
+
+    for kwargs in _run():
+        assert "max_units_per_job" not in kwargs
+        assert "max_concurrent_jobs" not in kwargs
