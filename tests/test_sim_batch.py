@@ -5843,6 +5843,15 @@ def test_log_with_missing_include_classifies_naming_the_file(target):
     assert target in found["message"]
 
 
+def test_fatal_log_diagnostic_surfaces_model_cause():
+    found = sb._fatal_log_diagnostic(
+        "warning, can't find model 'nfet'\nfatal error in ngspice, exit(1)\n"
+    )
+    assert found is not None
+    assert found["code"] == "ngspice_fatal"
+    assert "can't find model 'nfet'" in found["message"]
+
+
 def test_exit_4_batch_job_surfaces_missing_include_from_retrieved_log(
     tmp_path, monkeypatch
 ):
