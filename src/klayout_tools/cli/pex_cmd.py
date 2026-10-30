@@ -173,6 +173,9 @@ def run(args: argparse.Namespace) -> int:
             # `--extract-only` (issue #3739): extract and report, no
             # measurement leg. `False` when the flag was never given.
             extract_only=args.extract_only,
+            # `--submit-only` / `--attach` (issue #4619): async batch runs.
+            submit_only=args.submit_only,
+            attach=args.attach_manifest,
         )
     except PexError as exc:
         # Issue #2889: a classified error (today: `schematic_flatten_*`)
@@ -181,6 +184,11 @@ def run(args: argparse.Namespace) -> int:
         return emit_error("pex", str(exc), args.format, code=exc.code)
     except OutputLockError as exc:
         return emit_error("pex", str(exc), args.format, code=exc.code)
+
+    if report["status"] == "submitted":
+        # Issue #4619: submitted, not run -- there is no verdict to grade.
+        emit_success(report, args.format, _print_submitted_text)
+        return EXIT_PASS
 
     emit_success(report, args.format, _print_text)
 
@@ -192,6 +200,12 @@ def run(args: argparse.Namespace) -> int:
     if report["status"] == "fail":
         return EXIT_ROW_FAILED
     return EXIT_PASS
+
+
+def _print_submitted_text(report: dict) -> None:
+    print(f"submitted: {report['leg_count']} legs  manifest: {report['manifest_path']}")
+    for leg in report["legs"]:
+        print(f"  {leg['testbench']} {leg['side']}: {leg['attach']}")
 
 
 def _errored_rows_summary(report: dict) -> str | None:

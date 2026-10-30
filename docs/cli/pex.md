@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--hosts <n>] [--resume] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--hosts <n>] [--resume] [--submit-only | --attach <pex-submit.json>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -70,11 +70,34 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   `<outdir>/<testbench>/<leg>/batch-shards.json`. **Recovery:** if the client
   is interrupted (`batch_client_interrupted`; the fleet has no cancel), re-run
   the *same* `klt pex` command with `--resume` and each leg re-attaches to its
-  recorded jobs instead of re-submitting. There is no pex `--attach JOB_ID`: a
-  pex run has at least two jobs per testbench, so a single id cannot address
-  it. Shard-job re-attach is recorded only for sharded legs, so rely on it with
+  recorded jobs instead of re-submitting. For a run that must not block its
+  caller use `--submit-only` / `--attach MANIFEST` below instead; a bare job id
+  cannot address a pex run, which has at least two jobs per testbench. Shard-job re-attach is recorded only for sharded legs, so rely on it with
   `--hosts >= 2`; a plain single-job leg is not guaranteed to re-attach. Omitted, the flags are not passed and behavior is unchanged
   ([#4624](https://github.com/2AMLogic/klayout-tools/issues/4624)).
+- `--submit-only`, `--attach MANIFEST` — asynchronous batch runs, the pex
+  counterpart of `klt sim --submit-only` / `--attach`
+  ([#4619](https://github.com/2AMLogic/klayout-tools/issues/4619)).
+  `--submit-only` extracts as usual, then submits every testbench's schematic
+  and extracted `klt sim` leg (`run_sim(submit_only=True)`, honoring the
+  sharding flags above) without polling, writes `<outdir>/pex-submit.json`,
+  and exits 0 with a `submitted` payload instead of a report:
+  `{schema_version: 1, status: "submitted", manifest_path, leg_count, legs[]}`,
+  each leg `{testbench, side, sharded, attach, unit_count}` (`attach` is the
+  leg's job id, or its `batch-shards.json` path when sharded). The manifest
+  adds `extracted_netlist_sha256` and each testbench's `request_sha256`.
+  `--attach MANIFEST` re-runs the *same* `klt pex` command: extraction and
+  diagnostics run again, but each leg collects its recorded job(s)
+  (`run_sim(attach_job_id=...)`) and the normal pex report is built by the
+  same delta builder, so `delta[]` pairs schematic and extracted results by
+  corner exactly as a blocking run does. A failed extracted leg on attach is
+  reported as error rows as in a blocking run. Refusals, by name:
+  `pex_async_unsupported` for `--submit-only` with `--attach`, a non-`batch`
+  backend, `--resume`, `--measure-command`, `--extract-only` or
+  `--device-only-leg`; `pex_manifest_invalid` for an unreadable manifest;
+  `pex_attach_leg_missing` for a leg the manifest lacks;
+  `resume_fingerprint_mismatch` when the extracted netlist or a testbench
+  request changed since the submit. Omitted, the report is unchanged.
 - `--deck-option` — repeatable `<key>=<value>`, passed through verbatim to
   `klt extract --deck-option` (issue #1558); see
   [`extract.md`](extract.md)'s "Selecting a shared-geometry resistor
