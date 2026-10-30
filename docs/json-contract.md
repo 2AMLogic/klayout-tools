@@ -1409,6 +1409,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `gen-compose` | `gds_path` (top-level and per-block) | 1 |
 | `draw` | `gds_path` | 1 |
 | `layout-plan-execute` | `gds_path` | 1 |
+| `layout-plan-check` | `gds_path` | 1 |
 | `lef-abstract` | `output`, `socket` | 2 |
 | `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
 | `functional-verification` | `info_path`, `options.trace.path` | 2 (`log_path` moved to the envelope table) |

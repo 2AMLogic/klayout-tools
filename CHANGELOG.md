@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt layout-plan check`** (issue #4649, documented in
+  [`docs/cli/layout-plan-check.md`](docs/cli/layout-plan-check.md)): read-only
+  verification of a finished layout against its `klt.layout_plan.request/1`
+  (group presence, row order/stacking/spacing/align, abutment gaps). Emits a
+  `kind: generic` evidence envelope `klt signoff` accepts; exit 3 on
+  violations. Additive.
 - **`klt extract --deck gf180mcu` extracts the drain-extended LDMOS devices**
   (issue #4570, documented in [`docs/cli/extract.md`](docs/cli/extract.md)):
   `nfet_10v0_asym` (`MVSD` 210/0 + `LDMOS_XTOR` 226/0) and `pfet_10v0_asym`
