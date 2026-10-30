@@ -8,7 +8,15 @@ defaulting to ``text``. New subcommands register themselves here and point their
 import argparse
 import sys
 
-from .. import arith_gen, artifact_store, netlist, netlist_batch, pdk_stackup, pex
+from .. import (
+    arith_gen,
+    artifact_store,
+    extract_batch,
+    netlist,
+    netlist_batch,
+    pdk_stackup,
+    pex,
+)
 from ..equiv import SUPPORTED_ENGINES as SUPPORTED_EQUIV_ENGINES
 from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..extract_parasitics import parse_parasitic_variants
@@ -3131,8 +3139,76 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "Requires --check; a clean error (exit 1) otherwise"
         ),
     )
+    extract_parser.add_argument(
+        "--backend",
+        choices=extract_batch.SUPPORTED_BACKENDS,
+        default=None,
+        help=(
+            "where the extraction runs: 'local' (this host) or 'batch' (the "
+            "batch runner, through the same S3 job contract as `klt sim "
+            "--backend batch`). Default: $KLT_EXTRACT_BACKEND, else 'local'. "
+            "A batch failure is an error (exit 1), never a fallback to a "
+            "local run. Fresh extractions only (not --check). See "
+            "docs/cli/extract.md's 'Batch backend'"
+        ),
+    )
+    extract_parser.add_argument(
+        "--timeout-s",
+        dest="timeout_s",
+        type=float,
+        default=extract_batch.DEFAULT_TIMEOUT_S,
+        help=(
+            "--backend batch only: wall-clock bound on the runner's "
+            f"extraction in seconds (default: {extract_batch.DEFAULT_TIMEOUT_S:g}). "
+            "The job's timeout is this plus the batch overhead and is not "
+            "capped client-side; one above the fleet's max_job_seconds is "
+            "refused before submission"
+        ),
+    )
+    extract_parser.add_argument(
+        "--batch-root",
+        dest="batch_root",
+        default=None,
+        help=(
+            "--backend batch only: the directory whose git-tracked files are "
+            "uploaded as the job's input tree (default: the layout's git "
+            "checkout). The layout must be a tracked file under it; the "
+            f"uncompressed total is capped at "
+            f"{netlist_batch.MAX_BATCH_TREE_BYTES // (1024 * 1024)} MiB"
+        ),
+    )
+    extract_parser.add_argument(
+        "--batch-include",
+        dest="batch_include",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "--backend batch only, repeatable: upload only the git-tracked "
+            "files under the batch root matching this root-relative glob "
+            "(a bare directory name selects everything under it)"
+        ),
+    )
+    extract_parser.add_argument(
+        "--batch-exclude",
+        dest="batch_exclude",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "--backend batch only, repeatable: leave the files matching this "
+            "root-relative glob out of the upload (applied after "
+            "--batch-include)"
+        ),
+    )
     _add_format_arg(extract_parser)
-    _record_request_argv_flags(extract_parser)
+    # Where the run executes is not request content: these flags may
+    # accompany a request document.
+    _record_request_argv_flags(
+        extract_parser,
+        exclude=_REQUEST_ARGV_FLAG_EXCLUDE
+        + ("backend", "timeout_s", "batch_root", "batch_include", "batch_exclude"),
+    )
     extract_parser.set_defaults(
         func=extract_cmd.run,
         post_parse=_require_one_input(extract_parser, "file", "check"),

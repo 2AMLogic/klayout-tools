@@ -41,9 +41,11 @@ and diff verdict-bearing fields. Both reuse ``status: "match"`` /
 """
 
 import argparse
+import os
 import sys
 from typing import Any
 
+from .. import extract_batch
 from .._paths import looks_like_request_document
 from ..env_provenance import render_path_field
 from ..extract import (
@@ -563,12 +565,25 @@ def run(args: argparse.Namespace) -> int:
     # called. `file` may accompany `--check` (issue #2699) as an explicit
     # input override.
     if args.check is not None:
+        if getattr(args, "backend", None) == "batch":
+            return emit_error(
+                "extract",
+                "--backend batch only runs fresh extractions; --check "
+                "re-verifies a committed report on this host",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
         return emit_error("extract", "--rerun requires --check <report>", args.format)
 
     try:
+        # `--backend` > $KLT_EXTRACT_BACKEND > local (issue #4613). `batch`
+        # never falls back to a local run: every batch failure is exit 1.
+        if extract_batch.resolve_backend(getattr(args, "backend", None)) == "batch":
+            report = _run_batch(args)
+            emit_success(report, args.format, _print_text)
+            return EXIT_OK
         # Issue #1867: the positional slot carries either a layout path or a
         # request document; `_apply_request` normalizes the latter into the
         # same namespace fields the argv form produces, so everything below
@@ -773,12 +788,74 @@ def run(args: argparse.Namespace) -> int:
         # FinFET geometry refusals); every other error keeps the two-field
         # envelope byte-for-byte.
         return emit_error(
-            "extract", str(exc), args.format, code=getattr(exc, "code", None)
+            "extract",
+            str(exc),
+            args.format,
+            code=getattr(exc, "code", None),
+            details=getattr(exc, "details", None),
         )
 
     emit_success(report, args.format, _print_text)
 
     return EXIT_OK
+
+
+def _run_batch(args: argparse.Namespace) -> dict[str, Any]:
+    """The ``--backend batch`` run (issue #4613): the request document is
+    forwarded whole; the argv form forwards ``extract_batch.ARGV_FORWARDED``
+    plus ``--deck-option`` and refuses any other flag, since the runner's
+    request is built from exactly what is shipped."""
+    if args.file is not None and looks_like_request_document(args.file):
+        request, base_dir = load_request_arg(args.file)
+        reqdoc.check_schema(
+            request, expected=REQUEST_SCHEMA, verb="extract", error_cls=ExtractError
+        )
+        reqdoc.check_known_fields(
+            request,
+            tuple(_REQUEST_FIELD_DESTS),
+            verb="extract",
+            error_cls=ExtractError,
+        )
+        reqdoc.reject_argv_flags(args, verb="extract", error_cls=ExtractError)
+        output = reqdoc.get_path(
+            request, "output", base_dir=base_dir, verb="extract", error_cls=ExtractError
+        )
+    else:
+        flags = getattr(args, "request_argv_flags", None) or {}
+        unsupported = sorted(
+            option
+            for dest, (option, default) in flags.items()
+            if getattr(args, dest, default) != default
+            and dest not in extract_batch.ARGV_FORWARDED
+            and dest not in ("deck_options", "output", "progress")
+        )
+        if unsupported:
+            raise ExtractError(
+                f"{', '.join(unsupported)} cannot be forwarded by --backend "
+                "batch from the command line; put the run in a request "
+                "document (docs/cli/extract.md, 'Request document'), or use "
+                "--backend local"
+            )
+        if not args.deck:
+            raise ExtractError("argument --deck is required")
+        request = extract_batch.argv_request(
+            {
+                **vars(args),
+                "deck_options": _parse_deck_options(args.deck_options),
+            }
+        )
+        base_dir, output = os.getcwd(), args.output
+    if not request.get("deck"):
+        raise ExtractError("argument --deck is required")
+    return extract_batch.run_extract_batch(
+        request,
+        base_dir,
+        output=output,
+        timeout_s=args.timeout_s,
+        batch_root=args.batch_root,
+        batch_include=args.batch_include or (),
+        batch_exclude=args.batch_exclude or (),
+    )
 
 
 def _run_check(args: argparse.Namespace) -> int:
