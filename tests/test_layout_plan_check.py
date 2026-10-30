@@ -166,3 +166,56 @@ def test_missing_layout_is_error(plan, tmp_path):
         main(["layout-plan", "check", str(req_path), "--layout", str(tmp / "nope.gds")])
         == 1
     )
+
+
+def _move_y(prefixes, dy_um):
+    def fn(layout, top):
+        for inst in list(top.each_inst()):
+            if inst.cell.name.startswith(prefixes):
+                inst.transform(kdb_trans_xy(layout, 0.0, dy_um))
+
+    return fn
+
+
+def kdb_trans_xy(layout, dx_um, dy_um):
+    import klayout.db as kdb
+
+    return kdb.ICplxTrans(
+        1.0,
+        0,
+        False,
+        int(round(dx_um / layout.dbu)),
+        int(round(dy_um / layout.dbu)),
+    )
+
+
+def _execute(request, tmp_path, name):
+    request = {**request, "options": {"output": str(tmp_path / name)}}
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+    return request, response["gds_path"]
+
+
+@pytest.mark.parametrize("align", ["bottom", "top", "center"])
+def test_row_align_violation(plan, align):
+    request, _, tmp = plan
+    rows = [{"order": ["a", "b", "c"], "spacing_um": 1.0, "align": align}]
+    request, gds = _execute({**request, "rows": rows}, tmp, f"{align}.gds")
+    ok = check_layout_plan_document(request, gds, request_dir=str(tmp))
+    assert ok["compliant"], ok["violations"]
+    bad = _mutate(gds, str(tmp / f"{align}_bad.gds"), _move_y(("a__",), 5.0))
+    response = check_layout_plan_document(request, bad, request_dir=str(tmp))
+    assert [v["check"] for v in response["violations"]] == ["row_align"]
+
+
+def test_row_stack_violation(plan):
+    request, _, tmp = plan
+    rows = [
+        {"order": ["a", "b"], "spacing_um": 1.0, "align": "bottom"},
+        {"order": ["c", "ring"], "spacing_um": 1.0, "align": "bottom"},
+    ]
+    request, gds = _execute({**request, "rows": rows, "abutment": []}, tmp, "stack.gds")
+    ok = check_layout_plan_document(request, gds, request_dir=str(tmp))
+    assert ok["compliant"], ok["violations"]
+    bad = _mutate(gds, str(tmp / "stack_bad.gds"), _move_y(("c__", "ring__"), -50.0))
+    response = check_layout_plan_document(request, bad, request_dir=str(tmp))
+    assert [v["check"] for v in response["violations"]] == ["row_stack"]

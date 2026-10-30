@@ -140,80 +140,78 @@ def _skip(check: str, subject: dict, reason: str) -> dict[str, Any]:
     return _row(check, "skipped", subject, reason=reason)
 
 
-def _check_rows(
-    rows: list[dict[str, Any]],
-    bboxes: dict[str, dict[str, float]],
-    abutted: set[str],
-    tol: float,
+def _row_order_checks(
+    subject: dict, order: list[str], live: list[str], bboxes: dict, tol: float
 ) -> list[dict[str, Any]]:
-    """Row checks over the *active* groups of each row -- those present in the
-    layout and not named in ``abutment[]``. An inactive group is skipped
-    individually (``group_missing`` / ``abutment_overrides_row``); the rest of
-    its row is still held to the plan."""
-
-    def active(order: list[str]) -> list[str]:
-        return [g for g in order if g in bboxes and g not in abutted]
-
-    out: list[dict[str, Any]] = []
-    for index, row in enumerate(rows):
-        subject = {"row": index}
-        order = row["order"]
-        live = active(order)
-        for gid in order:
-            if gid not in live:
-                reason = (
-                    "group_missing" if gid not in bboxes else "abutment_overrides_row"
-                )
-                out.append(_skip(CHECK_ROW_ORDER, {**subject, "group": gid}, reason))
-
-        if len(live) >= 2:
-            observed_order = sorted(live, key=lambda g: bboxes[g]["x0"])
-            xs = [bboxes[g]["x0"] for g in live]
-            in_order = all(b >= a - tol for a, b in zip(xs, xs[1:], strict=False))
-            out.append(
-                _row(
-                    CHECK_ROW_ORDER,
-                    "pass" if in_order else "violation",
-                    subject,
-                    expected=live,
-                    observed=live if in_order else observed_order,
-                )
+    out = []
+    for gid in order:
+        if gid not in live:
+            reason = "group_missing" if gid not in bboxes else "abutment_overrides_row"
+            out.append(_skip(CHECK_ROW_ORDER, {**subject, "group": gid}, reason))
+    if len(live) >= 2:
+        observed_order = sorted(live, key=lambda g: bboxes[g]["x0"])
+        xs = [bboxes[g]["x0"] for g in live]
+        in_order = all(b >= a - tol for a, b in zip(xs, xs[1:], strict=False))
+        out.append(
+            _row(
+                CHECK_ROW_ORDER,
+                "pass" if in_order else "violation",
+                subject,
+                expected=live,
+                observed=live if in_order else observed_order,
             )
+        )
+    return out
 
-        for left, right in zip(order, order[1:], strict=False):
-            if left not in live or right not in live:
-                continue
-            gap = bboxes[right]["x0"] - bboxes[left]["x1"]
-            ok = abs(gap - row["spacing_um"]) <= tol
-            out.append(
-                _row(
-                    CHECK_ROW_SPACING,
-                    "pass" if ok else "violation",
-                    {**subject, "pair": [left, right]},
-                    expected=_num(row["spacing_um"]),
-                    observed=_num(gap),
-                )
+
+def _row_spacing_checks(
+    subject: dict, row: dict, live: list[str], bboxes: dict, tol: float
+) -> list[dict[str, Any]]:
+    out = []
+    for left, right in zip(row["order"], row["order"][1:], strict=False):
+        if left not in live or right not in live:
+            continue
+        gap = bboxes[right]["x0"] - bboxes[left]["x1"]
+        ok = abs(gap - row["spacing_um"]) <= tol
+        out.append(
+            _row(
+                CHECK_ROW_SPACING,
+                "pass" if ok else "violation",
+                {**subject, "pair": [left, right]},
+                expected=_num(row["spacing_um"]),
+                observed=_num(gap),
             )
+        )
+    return out
 
-        if len(live) >= 2:
-            align = row["align"]
-            if align == "bottom":
-                values = [bboxes[g]["y0"] for g in live]
-            elif align == "top":
-                values = [bboxes[g]["y1"] for g in live]
-            else:
-                values = [(bboxes[g]["y0"] + bboxes[g]["y1"]) / 2 for g in live]
-            spread = max(values) - min(values)
-            out.append(
-                _row(
-                    CHECK_ROW_ALIGN,
-                    "pass" if spread <= tol else "violation",
-                    subject,
-                    expected=f"{align}-aligned (spread <= {tol}um)",
-                    observed=f"spread {_num(spread)}um",
-                )
-            )
 
+def _row_align_checks(
+    subject: dict, align: str, live: list[str], bboxes: dict, tol: float
+) -> list[dict[str, Any]]:
+    if len(live) < 2:
+        return []
+    if align == "bottom":
+        values = [bboxes[g]["y0"] for g in live]
+    elif align == "top":
+        values = [bboxes[g]["y1"] for g in live]
+    else:
+        values = [(bboxes[g]["y0"] + bboxes[g]["y1"]) / 2 for g in live]
+    spread = max(values) - min(values)
+    return [
+        _row(
+            CHECK_ROW_ALIGN,
+            "pass" if spread <= tol else "violation",
+            subject,
+            expected=f"{align}-aligned (spread <= {tol}um)",
+            observed=f"spread {_num(spread)}um",
+        )
+    ]
+
+
+def _row_stack_checks(
+    rows: list[dict[str, Any]], active: Any, bboxes: dict, tol: float
+) -> list[dict[str, Any]]:
+    out = []
     for index in range(1, len(rows)):
         below, above = active(rows[index - 1]["order"]), active(rows[index]["order"])
         subject = {"row": index}
@@ -232,6 +230,30 @@ def _check_rows(
             )
         )
     return out
+
+
+def _check_rows(
+    rows: list[dict[str, Any]],
+    bboxes: dict[str, dict[str, float]],
+    abutted: set[str],
+    tol: float,
+) -> list[dict[str, Any]]:
+    """Row checks over the *active* groups of each row -- those present in the
+    layout and not named in ``abutment[]``. An inactive group is skipped
+    individually (``group_missing`` / ``abutment_overrides_row``); the rest of
+    its row is still held to the plan."""
+
+    def active(order: list[str]) -> list[str]:
+        return [g for g in order if g in bboxes and g not in abutted]
+
+    out: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        subject = {"row": index}
+        live = active(row["order"])
+        out += _row_order_checks(subject, row["order"], live, bboxes, tol)
+        out += _row_spacing_checks(subject, row, live, bboxes, tol)
+        out += _row_align_checks(subject, row["align"], live, bboxes, tol)
+    return out + _row_stack_checks(rows, active, bboxes, tol)
 
 
 def _abutment_gap(edge: str, a: dict[str, float], b: dict[str, float]) -> float:
