@@ -283,6 +283,37 @@ recipe for adding the next block**, including the `--dry-run` bundle search
 that needs no solver checkout. Nothing on the site renders these yet; the
 detail-page field panel is Phase 3b.
 
+## Adding a canary / what the site shows
+
+[`canaries.json`](canaries.json) is the single source of truth for which
+canary repos the gallery presents: a list of `{repo, slug, pdk, ref}` entries
+(`ref` is `null` for default-branch HEAD, or a pinned sha). To add a canary,
+open a PR adding one entry; do not auto-discover repos.
+
+```bash
+python scripts/ingest-canary.py --manifest blocks/canaries.json [--dry-run]
+```
+
+A failing entry (including the public-repo gate refusing a non-public repo)
+is reported, the remaining entries still run, and the exit status is non-zero.
+Re-running over unchanged upstream content leaves no `blocks/` diff.
+[`refresh-canaries.yml`](../.github/workflows/refresh-canaries.yml) runs this
+on manual trigger only (Actions → "Refresh canary blocks" → Run workflow;
+no schedule) and opens a PR (never a direct push) when `blocks/` changes;
+`deploy-site.yml` redeploys when it merges.
+
+Content rules:
+
+- Only content already public in the source repo. The ingest gate enforces
+  repo visibility at run time.
+- Show what the repo itself records: layout renders, the ratified spec table,
+  sim-evidence `signals`, and the honest status (`in_design` until a layout
+  exists). No claims beyond what the repo's own evidence says.
+- Disclosure: site copy and ingested content follow the "Disclosure tiers"
+  section of `POSITIONING.md` in the marketing repo (`marketing/POSITIONING.md`);
+  that file is authoritative and is deliberately not restated here. Anything
+  it classes as Tier 2 or Tier 3 never appears on the site.
+
 ## License note
 
 `layout.json` metrics here are derived from the #4 corpus GDS files, which
