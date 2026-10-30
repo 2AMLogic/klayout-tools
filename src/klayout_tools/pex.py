@@ -2750,6 +2750,7 @@ def _run_device_only_sim(
     work_dir: str,
     label: str,
     backend: Any,
+    batch_shard: Mapping[str, int | None] | None = None,
 ) -> dict[str, Any] | None:
     """One testbench re-run against the parasitic-free netlist (issue #3298),
     or ``None`` without the leg. A failure here costs only the device-only
@@ -2768,6 +2769,7 @@ def _run_device_only_sim(
             ),
             artifacts_dir=os.path.join(work_dir, label, "device-only"),
             backend=backend,
+            **(batch_shard or {}),
         )
     except SimError:
         return None
@@ -2804,6 +2806,8 @@ def run_pex(
     pdk_root: str | None = None,
     artifacts_dir: str | None = None,
     backend: str | None = None,
+    max_units_per_job: int | None = None,
+    max_concurrent_jobs: int | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -2925,7 +2929,10 @@ def run_pex(
     byte-identical to before this feature existed. ``backend`` is passed
     through to every :func:`~klayout_tools.sim.run_sim` call (schematic and
     extracted side, every testbench) -- see ``docs/cli/sim.md``'s
-    "Execution backends". ``artifacts_dir`` overrides where this command
+    "Execution backends". ``max_units_per_job`` / ``max_concurrent_jobs``
+    (issue #4616) are likewise passed to each of those calls, so each side's
+    batch grid is sharded on its own; ``None`` leaves the request's own
+    ``batch`` block in force. ``artifacts_dir`` overrides where this command
     writes its own generated artifacts (the extracted-side testbench body/
     request copies, see :func:`_prepare_extracted_request`, and each `klt
     sim` call's own ``options.keep_artifacts`` output, namespaced per
@@ -3428,6 +3435,16 @@ def run_pex(
     # The diff itself is still computed here, by the same
     # `_build_delta_rows` testbench mode uses.
     measurement_sides: dict[str, Any] | None = None
+    # Issue #4616: the sharding flags ride to every `run_sim` call. Only the
+    # given ones are passed, so omitting both is the call shape of before.
+    batch_shard = {
+        key: value
+        for key, value in (
+            ("max_units_per_job", max_units_per_job),
+            ("max_concurrent_jobs", max_concurrent_jobs),
+        )
+        if value is not None
+    }
     if command is not None:
         command_rows, measurement_sides = _measure_both_sides(
             command,
@@ -3462,6 +3479,7 @@ def run_pex(
                 schematic_request_path,
                 artifacts_dir=os.path.join(work_dir, label, "schematic"),
                 backend=backend,
+                **batch_shard,
             )
         except SimError as exc:
             # Issue #2990: keep `SimError.code` (e.g. `batch_no_capacity`)
@@ -3502,6 +3520,7 @@ def run_pex(
                     extracted_request_path,
                     artifacts_dir=os.path.join(work_dir, label, "extracted"),
                     backend=backend,
+                    **batch_shard,
                 )
             except SimError as exc:
                 # Issue #1030: a pin-count mismatch reported through the
@@ -3586,6 +3605,7 @@ def run_pex(
             work_dir=work_dir,
             label=label,
             backend=backend,
+            batch_shard=batch_shard,
         )
 
         rows = _build_delta_rows(
