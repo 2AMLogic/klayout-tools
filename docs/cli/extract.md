@@ -7,8 +7,8 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--substrate-tie-ohms <ohms>] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--tie-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--device-model <class>=<subckt> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--format text|json]
-klt extract <request.json>|-|'{...}' [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--substrate-tie-ohms <ohms>] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--tie-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--device-model <class>=<subckt> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--backend local|batch] [--timeout-s <s>] [--batch-root <dir>] [--batch-include <glob> ...] [--batch-exclude <glob> ...] [--format text|json]
+klt extract <request.json>|-|'{...}' [--backend local|batch] [--timeout-s <s>] [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
 
@@ -241,9 +241,71 @@ two disagree, this document (and the code) win.
   `options.combine_devices_per_circuit` have layout-side circuits to key on.
   Unlike `--subcircuit` this *is* the primary deck, not a second artifact.
   See "Hierarchical output" below.
+- `--backend` — where the extraction runs: `local` (this host) or `batch`
+  (the batch runner). Default: `$KLT_EXTRACT_BACKEND`, else `local`. Fresh
+  extractions only. See [Batch backend](#batch-backend).
+- `--timeout-s` — `--backend batch` only: wall-clock bound on the runner's
+  extraction (default 3000 s). Local runs are unbounded, as before.
+- `--batch-root` / `--batch-include <glob>` / `--batch-exclude <glob>` —
+  `--backend batch` only: choose which git-tracked files are uploaded
+  (default: the layout's git checkout), exactly as for
+  [`klt netlist`](netlist.md#batch-backend).
 - `--format` — `text` (default, a human-readable summary) or `json`. The
   extracted **netlist** always goes to `--output`; `--format` governs only
   the summary report.
+
+## Batch backend
+
+`--backend batch` runs a long whole-layout extraction on the batch runner
+(issue #4613) through the same S3 job contract and transport as
+`klt sim --backend batch` and `klt netlist --backend batch`: the same
+`KLT_BATCH_PROVISION_SCRIPT` / `KLT_BATCH_JOB_BUCKET` / `KLT_BATCH_REGION` /
+`KLT_BATCH_PROFILE` / `batch-fleet.env` resolution and the same runner-version
+preflight (see [`klt sim`'s "Batch backend"](sim.md)).
+
+```bash
+klt extract layout/top.gds --deck sky130 --pdk sky130A -o top.spice \
+    --backend batch --timeout-s 5400
+```
+
+- **Host default.** `--backend` > `$KLT_EXTRACT_BACKEND` > `local`. A
+  dedicated variable, not `$KLT_SIM_BACKEND`: a blanket sim default would
+  reroute every short extraction (including ones with no `--pdk`) to the
+  fleet. `--backend local` is byte-identical to a run with no backend set.
+- **What is uploaded.** The git-tracked files under the layout's checkout
+  (narrow with `--batch-root` / `--batch-include` / `--batch-exclude`; capped
+  at 64 MiB uncompressed) plus a generated `request.json` the runner executes
+  as `klt extract request.json`. The layout and any `def_pins`,
+  `def_net_connections` or `abstract_cell_lef` input must be tracked files
+  under the root. `--pdk` is required (it selects the runner image and its
+  PDK).
+- **What is forwarded.** A [request document](#request-document) is forwarded
+  whole. From the command line only the layout, `--deck`, `--top`, `--pdk`,
+  `--parasitics`, `--no-netlist`, `--deck-option` and `-o` are forwarded; any
+  other flag is refused (exit `1`) — put the run in a request document.
+  `pdk_root`, `spef` and `subcircuit_output` name host paths whose content
+  does not come back, and are refused.
+- **What comes back.** The netlist is written to `-o` (checked against the
+  runner's `netlist_sha256`) and the runner's report becomes the JSON report,
+  with runner scratch paths rewritten to your checkout and
+  `environment.remote` added (`job_id`, `state`, instance, `timeout_s`,
+  `job_ceiling`, and `stderr_tail`).
+- **stderr / progress.** The runner always runs with `--progress`; its stage
+  lines and heartbeat are returned (`stderr.log`), echoed to this host's
+  stderr on success, and quoted in the error on failure.
+- **Timeout and ceiling.** The job's `timeout_seconds` is `--timeout-s` plus
+  the batch overhead (120 s) and is never capped client-side; the runner wraps
+  the extraction in `timeout` for `--timeout-s`. If that exceeds the fleet's
+  `max_job_seconds` (default 3600 s; `$KLT_BATCH_MAX_JOB_SECONDS` / the fleet
+  env) the job would be killed at the ceiling, so before any S3 write the
+  client warns on stderr — or refuses with
+  `batch_job_ceiling_exceeded` under `job_ceiling_check: enforce` — naming the
+  setting to raise. Raising the ceiling is a fleet/worker change, not this
+  repo's.
+- **No local fallback.** Every batch failure is an error (exit `1`) naming the
+  job id, with the same `batch_*` `error.code` values as `klt netlist`, never
+  a silent local run. `--check` re-verifies on this host only; combining it
+  with an explicit `--backend batch` is refused.
 
 ## Request document
 

@@ -32,7 +32,24 @@ class ExtractError(Exception):
 
     The CLI turns this into a clean stderr message + exit code 1, never a
     traceback.
+
+    ``code`` / ``job_id`` / ``details`` are optional and set only by the
+    ``--backend batch`` path (:mod:`klayout_tools.extract_batch`), exactly as
+    :class:`klayout_tools.netlist.NetlistError` carries them: ``code`` becomes
+    the error envelope's ``error.code``, ``details`` is merged into it.
     """
+
+    def __init__(
+        self,
+        *args: object,
+        code: str | None = None,
+        job_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.code = code
+        self.job_id = job_id
+        self.details = details
 
 
 #: Standard Parasitic Exchange Format version this writer declares in its
