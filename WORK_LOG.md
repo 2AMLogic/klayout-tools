@@ -2,8 +2,30 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-30
+
+- **PR #4617**: feat: shard klt pex batch grids and flag stale job status
+- **PR #4615**: test: pin --pins behaviour on a label-less routed ASAP7 stream
+- **PR #4614**: feat: add --backend batch to klt extract for long extractions
+- **PR #4612**: test: routed two-cell ASAP7 block through extract/LVS/ERC with documented coverage
+- **PR #4611**: docs: pin the peeled commit for annotated release tags
+- **PR #4607**: fix: quote unquoted .include paths before reading a reference netlist
+- **PR #4598**: docs: survey verified analog design libraries and recommend a klt record format
+- **Issue #4616** (closed): klt pex: no way to shard a multi-corner batch grid, and a stalled job's status never advances
+- **Issue #4613** (closed): Friction: klt extract has no remote/batch backend, so long extractions can't be offloaded
+- **Issue #4609** (closed): erc: --omit-antenna-tables now requires --findings-only (undocumented flag dependency)
+- **Issue #4608** (closed): docs: pin the peeled commit for an annotated release tag; uvx rejects the tag-object sha
+- **Issue #4605** (closed): klt lvs: .include path containing a hyphen is truncated when reading the reference netlist
+- **Issue #4596** (closed): Explore: an agent-facing library of known-good verified designs (AnalogScout, arXiv:2610.37319) and existing FOSS design libraries
+
 ### 2026-10-29
 
+- **PR #4172**: chore(deps): bump astral-sh/setup-uv from 10.2.0 to 10.3.0 in the github-actions group across 1 directory
+- **PR #3467**: ci: fetch the PDK with ciel pinned to open_pdks f6eeac7
+- **PR #3310**: fix(release): guard unpublished klt-*-native extra pins and correct [yield] install docs
+- **Issue #4601** (closed): signoff: item 7 (digital) rejects a list of functional-verification reports that items 5 and 11 accept
+- **Issue #3426** (closed): Re-pin CI, AMI script and install docs to open_pdks f6eeac7 via ciel 2.6.1
+- **Issue #2900** (closed): Friction: documented 'klayout-tools[yield]' install path does not resolve (klt-yield-native not on PyPI)
 - **PR #4593**: feat(sim): add measurements[].stress for windowed worst node-pair voltage
 - **PR #4589**: fix(extract): stop reporting recognised gf180mcu LDMOS as unsupported
 - **PR #4588**: refactor: share _provenance.sha256_file across five modules
