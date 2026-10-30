@@ -22,6 +22,7 @@ def run(args: argparse.Namespace) -> int:
                 args.area_eff_max_empty_region_fraction
             ),
             area_eff_require_bbox_tightness=args.area_eff_require_bbox_tightness,
+            attribute=args.attribute,
         )
     except EconomyError as exc:
         return emit_error("economy", str(exc), args.format)
@@ -34,6 +35,23 @@ def _fmt_bbox(bbox: dict) -> str:
     return (
         f"({bbox['left']:g}, {bbox['bottom']:g}) - ({bbox['right']:g}, {bbox['top']:g})"
     )
+
+
+def _print_attribution(attribution: dict | None) -> None:
+    if attribution is None:
+        return
+    print(
+        f"attribution: sums_to_total={attribution['sums_to_total']} "
+        f"unattributed={attribution['unattributed_um2']:.3f} um2 "
+        f"overlap={attribution['instance_overlap_um2']:.3f} um2"
+    )
+    attr_rows: list[tuple[str, ...]] = []
+    for c in attribution["children"]:
+        attr_rows.append(("child", str(c["name"]), f"{c['bbox_area_um2']:.3f}"))
+    for g in attribution["gap_components"]:
+        attr_rows.append(("gap", str(g["position"]), f"{g['area_um2']:.3f}"))
+    render_table(("kind", "name", "area_um2"), attr_rows, left_aligned={0, 1})
+    print()
 
 
 def _print_text(report: dict) -> None:
@@ -119,6 +137,8 @@ def _print_text(report: dict) -> None:
         if "bbox_tightness" in checks:
             c = checks["bbox_tightness"]
             print(f"  bbox_tightness: {c['status']} (actual={c['actual']:.4f})")
+
+    _print_attribution(report.get("attribution"))
 
     cells = report["cells"]
     if not cells:
