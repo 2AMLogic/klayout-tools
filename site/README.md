@@ -65,6 +65,25 @@ Until the workflow is live and green, `main` and the deployed site can drift;
 run one manual `scripts/deploy-site.sh` (with the env file sourced) to catch the
 live site up to `main`.
 
+### Generated landing-page data
+
+The landing page's release badge, verb list, MCP tool count and deck list
+come from [`src/data/cli.generated.json`](src/data/cli.generated.json), never
+from hand-written copy. [`../scripts/gen_site_cli_data.py`](../scripts/gen_site_cli_data.py)
+builds it from the `klt` CLI registry, the MCP bridge, the deck registry and
+the newest release heading in `CHANGELOG.md`. The file is committed, so the
+site build stays Node-only, and
+[`../tests/test_site_cli_data.py`](../tests/test_site_cli_data.py) fails when
+it drifts from the code. After adding a verb, changing a verb's help text or
+cutting a release, run:
+
+```
+uv run python scripts/gen_site_cli_data.py
+```
+
+Because the file lives under `site/`, committing it also triggers the deploy
+workflow.
+
 ## Vite + React gallery project
 
 Self-contained npm project: it has its own `package.json` and does **not**
