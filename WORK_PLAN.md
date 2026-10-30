@@ -50,23 +50,14 @@ Issues currently being built (`loom:building`).
 
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4565**: site: present the public chip design work on klayout-tools.org
-- **#4568**: gen: no generator for gf180mcu drain-extended 10 V (LDMOS) devices; PDK pcell library not loaded
-- **#4569**: drc: curated gf180mcu deck has no rules for the 10 V LDMOS module (ldnmos/ldpmos)
-- **#4570**: extract: gf180mcu deck does not recognise nfet_10v0_asym / pfet_10v0_asym LDMOS devices
-- **#4571**: extract --abstract-cells: LEF substrate pin binds to an arbitrary signal net via box-centre probe
-- **#4574**: drc(sg13cmos5l): deck does not apply the PDK runset's SRAM-marker scoping to NW.c/NW.d-family rules
-- **#4575**: extract --pdk: MOS cards narrower than the scalable model's smallest bin are written with a subckt that has no bin
+- **#4596**: Explore: an agent-facing library of known-good verified designs (AnalogScout, arXiv:2610.37319) and existing FOSS design libraries
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
-- **#4572**: feat(extract): report gf180mcu LDMOS_XTOR (226/0) as an unsupported device
-- **#4573**: fix(extract): bind LEF-merged substrate pins to the substrate net without probing
-- **#4576**: feat(drc): add gf180mcu 10V LDMOS layers and exact MDN/MDP rules, disclose the rest
-- **#4577**: feat(extract): extract gf180mcu drain-extended LDMOS devices
-- **#4578**: docs(drc): name SRAM marker 25/0 in sg13cmos5l NW.c/NW.d runset notes
+- **#4598**: docs: survey verified analog design libraries and recommend a klt record format
 
 ## Approved (Awaiting Merge)
 
@@ -120,12 +111,7 @@ Issues carrying `loom:curated`.
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
 - **#4508**: ASAP7: trim protruding VIA_* M1 pad tips to clear M1.S.2-5 (follow-up to #4495) *(curated)*
 - **#4565**: site: present the public chip design work on klayout-tools.org *(curated)*
-- **#4568**: gen: no generator for gf180mcu drain-extended 10 V (LDMOS) devices; PDK pcell library not loaded *(curated)*
-- **#4569**: drc: curated gf180mcu deck has no rules for the 10 V LDMOS module (ldnmos/ldpmos) *(curated)*
-- **#4570**: extract: gf180mcu deck does not recognise nfet_10v0_asym / pfet_10v0_asym LDMOS devices *(curated)*
-- **#4571**: extract --abstract-cells: LEF substrate pin binds to an arbitrary signal net via box-centre probe *(curated)*
-- **#4574**: drc(sg13cmos5l): deck does not apply the PDK runset's SRAM-marker scoping to NW.c/NW.d-family rules *(curated)*
-- **#4575**: extract --pdk: MOS cards narrower than the scalable model's smallest bin are written with a subckt that has no bin *(curated)*
+- **#4596**: Explore: an agent-facing library of known-good verified designs (AnalogScout, arXiv:2610.37319) and existing FOSS design libraries *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -151,10 +137,10 @@ Issues carrying `loom:curated`.
 | Very important | 1 |
 | Important | 1 |
 | Ready (`loom:issue`) | 15 |
-| In Progress (`loom:building`) | 8 |
-| PRs awaiting review | 6 |
+| In Progress (`loom:building`) | 3 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 4 |
-| Curated | 45 |
+| Curated | 40 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
