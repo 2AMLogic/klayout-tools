@@ -36,12 +36,13 @@ from .sim_batch import (
     BATCH_WAITING_STATES,
     BatchConfig,
     BatchError,
+    _apply_job_split,
     _assess_job_ceiling,
     _aws_argv,
-    _enforce_job_ceiling,
     _prepare_batch_job_spec,
     _read_status,
     _resolve_batch_config,
+    _submit_batch_shards,
     _write_batch_receipt,
     job_uri,
     launch_job,
@@ -119,6 +120,7 @@ def submit_only(
     request_dir: str | None = None,
     artifacts_dir: str | None = None,
     runner: remote_transport.CommandRunner | None = None,
+    shard_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Upload and launch one batch job, then return its identity at once.
 
@@ -131,6 +133,13 @@ def submit_only(
     blocking path writes (issue #3065) is written after ``launch`` with
     ``state: null``, so the job id survives the caller. The receipt is
     best-effort: a write failure is a stderr warning, never a failed submit.
+
+    A request the batch config splits (``max_units_per_job`` / ``split``
+    ceiling check) submits **every shard** instead (issue #4620): the payload
+    adds ``sharded: true``, ``shards[]`` (job id, unit slice) and
+    ``manifest_path`` -- the ``batch-shards.json`` shard map under
+    ``artifacts_dir`` that ``--attach`` takes -- and has no single
+    ``job_id``. It needs ``artifacts_dir`` and ``shard_fingerprint``.
     """
     from .sim import SimError
 
@@ -140,7 +149,23 @@ def submit_only(
     job_ceiling = _assess_job_ceiling(
         unit_count=len(corner_points), per_unit_timeout_s=timeout_s, config=config
     )
-    _enforce_job_ceiling(job_ceiling)
+    job_ceiling, hosts = _apply_job_split(job_ceiling, config)
+    if hosts > 1:
+        return _submit_sharded(
+            request=request,
+            config=config,
+            corner_points=corner_points,
+            netlist_path=netlist_path,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            request_dir=request_dir,
+            artifacts_dir=artifacts_dir,
+            runner=runner,
+            shard_fingerprint=shard_fingerprint,
+            hosts=hosts,
+            job_ceiling=job_ceiling,
+        )
     try:
         spec = _prepare_batch_job_spec(
             request,
@@ -163,6 +188,66 @@ def submit_only(
         artifacts_dir=artifacts_dir,
         runner=runner,
     )
+
+
+def _submit_sharded(
+    *,
+    request: dict[str, Any],
+    config: BatchConfig,
+    corner_points: list[Any],
+    netlist_path: str,
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    request_dir: str | None,
+    artifacts_dir: str | None,
+    runner: remote_transport.CommandRunner | None,
+    shard_fingerprint: str | None,
+    hosts: int,
+    job_ceiling: dict[str, Any],
+) -> dict[str, Any]:
+    """The sharded ``--submit-only`` payload (issue #4620)."""
+    from .sim import SimError
+
+    if artifacts_dir is None or shard_fingerprint is None:
+        raise SimError(
+            "--submit-only on a sharded request needs an artifacts dir and a "
+            "request fingerprint to write the shard map",
+            code=SUBMIT_ONLY_UNSUPPORTED_CODE,
+        )
+    digest = request_sha256(request)
+    try:
+        shards, manifest_path = _submit_batch_shards(
+            config=config,
+            request=request,
+            corner_points=corner_points,
+            netlist_path=netlist_path,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            artifacts_dir=artifacts_dir,
+            hosts=hosts,
+            shard_fingerprint=shard_fingerprint,
+            request_sha256=digest,
+            request_dir=request_dir,
+            runner=runner,
+        )
+    except BatchError as exc:
+        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+    return {
+        "schema_version": ASYNC_SCHEMA_VERSION,
+        "status": "submitted",
+        "sharded": True,
+        "shards": shards,
+        "manifest_path": manifest_path,
+        "bucket": config.bucket,
+        "region": config.region,
+        "jobs_prefix": config.jobs_prefix,
+        "launched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "request_sha256": digest,
+        "unit_count": len(corner_points),
+        "job_ceiling": job_ceiling,
+    }
 
 
 def launch_prepared_job(

@@ -783,11 +783,13 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
     sim_parser.add_argument(
         "--attach",
         dest="attach_job_id",
-        metavar="JOB_ID",
+        metavar="JOB_ID_OR_SHARD_MAP",
         default=None,
         help=(
             "re-attach to an already-submitted batch job (the id `klt sim` "
-            "prints on stderr at launch) instead of submitting a new one: "
+            "prints on stderr at launch), or to the shards of a sharded "
+            "--submit-only (the batch-shards.json path it reports), instead "
+            "of submitting a new one: "
             "waits for it (bounded by the request's `batch.poll_timeout_s`) "
             "and reports it, never re-launching. Pass the same request the "
             "job was submitted from, with --backend batch. See "

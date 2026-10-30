@@ -4851,6 +4851,35 @@ def _poll_and_collect(
 # --------------------------------------------------------------------------- #
 
 
+def _apply_job_split(
+    job_ceiling: dict[str, Any], config: BatchConfig
+) -> tuple[dict[str, Any], int]:
+    """Decide whether the request is split into several batch jobs (issues
+    #3446, #4620): returns the assessment annotated with ``split`` /
+    ``effective_hosts`` and the shard count (``1`` = one job, in which case an
+    ``enforce`` ceiling is applied here). Shared by the blocking backend and
+    ``--submit-only``, so both split identically."""
+    effective_hosts = 1
+    if config.job_ceiling_check == "split" or config.max_units_per_job is not None:
+        effective_hosts = _plan_job_split(job_ceiling, config)
+        job_ceiling = {
+            **job_ceiling,
+            "split": effective_hosts > 1,
+            "effective_hosts": effective_hosts,
+        }
+        if effective_hosts > 1:
+            print(
+                f"klt sim: notice: splitting {job_ceiling['unit_count']} units "
+                f"into {effective_hosts} batch jobs of at most "
+                f"{math.ceil(job_ceiling['unit_count'] / effective_hosts)} units "
+                "each (request.batch.job_ceiling_check / max_units_per_job)",
+                file=sys.stderr,
+            )
+    else:
+        _enforce_job_ceiling(job_ceiling)
+    return job_ceiling, effective_hosts
+
+
 def _run_batch(
     *,
     corner_points: list[CornerPoint],
@@ -4927,6 +4956,20 @@ def _run_batch(
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
+    if attach_job_id is not None and attach_job_id.endswith(".json"):
+        return _attach_batch_shards(
+            manifest_path=attach_job_id,
+            config=config,
+            corner_points=corner_points,
+            netlist_path=netlist_path,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            request=request,
+            measurements_spec=measurements_spec,
+            request_dir=request_dir,
+            shard_fingerprint=shard_fingerprint,
+        )
     if attach_job_id is not None:
         try:
             return _run_batch_job(
@@ -4951,24 +4994,7 @@ def _run_batch(
     job_ceiling = _assess_job_ceiling(
         unit_count=len(corner_points), per_unit_timeout_s=timeout_s, config=config
     )
-    effective_hosts = 1
-    if config.job_ceiling_check == "split" or config.max_units_per_job is not None:
-        effective_hosts = _plan_job_split(job_ceiling, config)
-        job_ceiling = {
-            **job_ceiling,
-            "split": effective_hosts > 1,
-            "effective_hosts": effective_hosts,
-        }
-        if effective_hosts > 1:
-            print(
-                f"klt sim: notice: splitting {job_ceiling['unit_count']} units "
-                f"into {effective_hosts} batch jobs of at most "
-                f"{math.ceil(job_ceiling['unit_count'] / effective_hosts)} units "
-                "each (request.batch.job_ceiling_check / max_units_per_job)",
-                file=sys.stderr,
-            )
-    else:
-        _enforce_job_ceiling(job_ceiling)
+    job_ceiling, effective_hosts = _apply_job_split(job_ceiling, config)
     if effective_hosts > 1:
         try:
             corners, engine_version, environment = _run_batch_fleet(
@@ -5040,6 +5066,7 @@ def _open_shard_manifest(
     *,
     resume: bool,
     config: BatchConfig,
+    request_sha256: str | None = None,
 ) -> _ShardManifest | None:
     """Open the run's shard map, recording where the jobs live (issue #3896);
     ``None`` when the request has no fingerprint to key it by."""
@@ -5054,6 +5081,8 @@ def _open_shard_manifest(
             "jobs_prefix": getattr(config, "jobs_prefix", None),
             "region": getattr(config, "region", None),
             "profile": getattr(config, "profile", None),
+            # Only a sharded --submit-only records it (issue #4620).
+            **({} if request_sha256 is None else {"request_sha256": request_sha256}),
         },
     )
 
@@ -5283,7 +5312,9 @@ class _BatchFleetRun:
         request: dict[str, Any],
         measurements_spec: list[dict[str, Any]],
         request_dir: str | None,
+        attach_only: bool = False,
     ) -> None:
+        self.attach_only = attach_only
         self.config = config
         self.manifest = manifest
         self.shard_indexes = shard_indexes
@@ -5410,6 +5441,22 @@ class _BatchFleetRun:
         digest = _units_digest(shard_points)
         prior = manifest.prior.get(str(index)) if manifest is not None else None
         job_id = None if manifest is None else manifest.planned_job_id(index)
+        if self.attach_only:
+            if prior is None or prior["units_sha256"] != digest:
+                raise BatchError(
+                    f"--attach: the shard map has no job for shard {index} "
+                    "(its units differ from the submitted ones)",
+                    code=BATCH_SHARD_MANIFEST_CODE,
+                )
+            result = self._run_job(
+                shard_points,
+                str(prior["job_id"]),
+                attach=True,
+                index=index,
+                launch_if_unlaunched=prior.get("state") == "submitted",
+            )
+            _mark_collected(manifest, index, result)
+            return _mark_resumed(result, True)
         if prior is not None and prior["units_sha256"] == digest:
             result = _try_reattach_shard(
                 lambda: self._run_job(
@@ -5462,6 +5509,7 @@ def _run_batch_fleet(
     config: BatchConfig | None = None,
     shard_fingerprint: str | None = None,
     resume: bool = False,
+    attach_only: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend's ``hosts > 1`` dispatch: one **job** per shard.
 
@@ -5495,6 +5543,10 @@ def _run_batch_fleet(
     different request is refused (:data:`BATCH_SHARD_MANIFEST_CODE`) before
     any S3 write. Every ``environment.remote.fleet[]`` entry carries
     ``resumed: true|false``.
+
+    ``attach_only`` (issue #4620; ``--attach <shard map>``) only re-attaches:
+    every shard must be in the manifest (a shard it cannot reach is reported
+    lost, never submitted again), and nothing is staged or pre-recorded.
     """
     from .sim import SimError
 
@@ -5517,20 +5569,9 @@ def _run_batch_fleet(
         for index, points in enumerate(_shard_corner_points(corner_points, hosts))
         if points
     }
-    # Stage (and discard) the whole job closure once, before any shard's
-    # first S3 write: an unstageable include or model input (issue #2668)
-    # must refuse the submit, not surface as K lost shards after some of
-    # them already uploaded.
-    sim_staging.stage_sim_job(
-        request,
-        netlist_path,
-        request_dir=request_dir,
-        netlist_staged_name=BATCH_NETLIST_FILENAME,
-        reserved_names=(BATCH_REQUEST_FILENAME,),
-        backend="batch",
-    )
-
-    _prerecord_shards(manifest, shard_indexes)
+    if not attach_only:
+        _stage_job_closure_once(request, netlist_path, request_dir)
+        _prerecord_shards(manifest, shard_indexes)
 
     fleet = _BatchFleetRun(
         config=config,
@@ -5544,6 +5585,7 @@ def _run_batch_fleet(
         request=request,
         measurements_spec=measurements_spec,
         request_dir=request_dir,
+        attach_only=attach_only,
     )
 
     prev_handlers: dict[int, Any] = {}
@@ -5571,6 +5613,167 @@ def _run_batch_fleet(
         if in_main:
             _signal_handlers_restore(prev_handlers)
         _warn_unlaunched(manifest, hosts)
+
+
+def _stage_job_closure_once(
+    request: dict[str, Any], netlist_path: str, request_dir: str | None
+) -> None:
+    """Stage (and discard) the whole job closure once, before any shard's
+    first S3 write: an unstageable include or model input (issue #2668) must
+    refuse the submit, not surface as K lost shards after some uploaded."""
+    sim_staging.stage_sim_job(
+        request,
+        netlist_path,
+        request_dir=request_dir,
+        netlist_staged_name=BATCH_NETLIST_FILENAME,
+        reserved_names=(BATCH_REQUEST_FILENAME,),
+        backend="batch",
+    )
+
+
+def _submit_batch_shards(
+    *,
+    config: BatchConfig,
+    request: dict[str, Any],
+    corner_points: list[CornerPoint],
+    netlist_path: str,
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    artifacts_dir: str,
+    hosts: int,
+    shard_fingerprint: str,
+    request_sha256: str,
+    request_dir: str | None = None,
+    runner: remote_transport.CommandRunner | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Submit and launch every shard of a split request without waiting
+    (issue #4620): the submit half of :func:`_run_batch_fleet`. Each shard is
+    recorded in the ``batch-shards.json`` shard map (with the request digest)
+    as it advances, so ``--attach <map>`` can wait for and merge them later.
+    Returns the per-shard identities and the map's path. A failed submit or
+    launch raises :class:`BatchError`; shards already launched stay recorded
+    and keep running."""
+    manifest = _open_shard_manifest(
+        artifacts_dir,
+        shard_fingerprint,
+        hosts,
+        resume=False,
+        config=config,
+        request_sha256=request_sha256,
+    )
+    assert manifest is not None
+    shards = _shard_corner_points(corner_points, hosts)
+    shard_indexes = {
+        _units_digest(points): index for index, points in enumerate(shards) if points
+    }
+    _stage_job_closure_once(request, netlist_path, request_dir)
+    _prerecord_shards(manifest, shard_indexes)
+    identities: list[dict[str, Any]] = []
+    unit_start = 0
+    for index, points in enumerate(shards):
+        if not points:
+            continue
+        job_id = manifest.planned_job_id(index)
+        assert job_id is not None
+        spec = _prepare_batch_job_spec(
+            request,
+            netlist_path,
+            config=config,
+            corner_count=len(points),
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            explicit_points=_points_to_push(request, points, points),
+            request_dir=request_dir,
+        )
+        submit_job(config, job_id, spec, runner=runner)
+        manifest.mark(index, "submitted")
+        manifest.mark(index, "launching")
+        try:
+            launch_job(config, job_id, runner=runner)
+        except BatchError:
+            manifest.unlaunch(index)
+            raise
+        manifest.mark(index, "launched")
+        identities.append(
+            {
+                "index": index,
+                "job_id": job_id,
+                "job_uri": job_uri(config, job_id),
+                "unit_start": unit_start,
+                "unit_count": len(points),
+            }
+        )
+        unit_start += len(points)
+    return identities, manifest.path
+
+
+def _attach_batch_shards(
+    *,
+    manifest_path: str,
+    config: BatchConfig,
+    corner_points: list[CornerPoint],
+    netlist_path: str,
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    request: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    request_dir: str | None,
+    shard_fingerprint: str | None,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """``--attach <shard map>`` (issue #4620): wait for every shard a
+    sharded ``--submit-only`` recorded and merge them exactly as the blocking
+    sharded run does. The map must belong to this request (digest and
+    fingerprint); a shard whose job is gone is reported lost, never
+    resubmitted."""
+    from . import sim_batch_async
+    from .sim import SimError
+
+    if os.path.basename(manifest_path) != BATCH_SHARDS_FILENAME:
+        raise SimError(
+            f"--attach {manifest_path}: expected a job id or a "
+            f"{BATCH_SHARDS_FILENAME} shard map",
+            code=BATCH_SHARD_MANIFEST_CODE,
+        )
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        hosts = int(document["hosts"])
+        fingerprint = str(document["fingerprint"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SimError(
+            f"--attach: shard map {manifest_path} is unreadable ({exc})",
+            code=BATCH_SHARD_MANIFEST_CODE,
+        ) from exc
+    recorded = document.get("request_sha256")
+    if recorded is not None and recorded != sim_batch_async.request_sha256(request):
+        raise SimError(
+            f"--attach: shard map {manifest_path} was submitted from a "
+            "different request (request_sha256 mismatch); pass the request "
+            "the shards were submitted from",
+            code=BATCH_SHARD_MANIFEST_CODE,
+        )
+    try:
+        return _run_batch_fleet(
+            corner_points=corner_points,
+            netlist_path=netlist_path,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            artifacts_dir=os.path.dirname(os.path.abspath(manifest_path)),
+            request=request,
+            hosts=hosts,
+            measurements_spec=measurements_spec,
+            request_dir=request_dir,
+            config=config,
+            shard_fingerprint=shard_fingerprint or fingerprint,
+            resume=True,
+            attach_only=True,
+        )
+    except BatchError as exc:
+        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
 
 
 def _mark_collected(
