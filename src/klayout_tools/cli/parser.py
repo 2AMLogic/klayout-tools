@@ -1000,7 +1000,9 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "corner_id from this request's own corner matrix to bias the "
             "--op-lint operating point at (default: the first expanded "
-            "corner). Ignored without --op-lint."
+            "corner), or 'all' to also bias every other corner and report "
+            "the worst Vds-Vdsat margin per corner in corner_margins. "
+            "Ignored without --op-lint."
         ),
     )
     _add_format_arg(sim_parser)
