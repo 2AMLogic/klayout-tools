@@ -122,20 +122,9 @@ def _abs(path: str, base_dir: str) -> str:
     return path if os.path.isabs(path) else os.path.join(base_dir, path)
 
 
-def package(
-    request: dict[str, Any],
-    base_dir: str,
-    *,
-    batch_root: str | None,
-    include: Sequence[str],
-    exclude: Sequence[str],
-    max_bytes: int | None = None,
-) -> tuple[_nb.BatchTree, dict[str, Any]]:
-    """Validate ``request`` and select the input tree, **without** building
-    the archive. Returns the tree and the runner request: ``request`` with
-    every input path made root-relative, the output pinned to the runner's
-    ``netlist.spice`` (or absent under ``no_netlist``) and ``progress`` on.
-    """
+def _checked_layout(request: dict[str, Any], base_dir: str) -> str:
+    """The request's layout as an absolute path, after refusing host-path
+    outputs and a missing input."""
     refused = [key for key in _REFUSED_PATH_FIELDS if request.get(key) is not None]
     if refused:
         raise ExtractError(
@@ -149,36 +138,43 @@ def package(
     layout = _abs(layout, base_dir)
     if not os.path.isfile(layout):
         raise ExtractError(f"layout file not found: {layout}")
-    try:
-        root = _nb._resolve_root(layout, batch_root)
-        files = _nb._tracked_files(root)
-        tracked = set(files)
-        selected = set(_nb._select_files(files, include, exclude))
-        runner_request = dict(request)
+    return layout
 
-        def _input(path: str, what: str) -> str:
-            rel = _nb._relative_tracked(
-                _abs(path, base_dir), root, tracked, what=what, flag=""
-            )
-            _nb._require_selected(rel, selected, what=what)
-            return rel
 
-        rel_layout = _input(layout, "layout")
-        runner_request["file"] = rel_layout
-        for key in _INPUT_FILE_FIELDS:
-            if request.get(key) is not None:
-                runner_request[key] = _input(request[key], key)
-        for key in _INPUT_FILE_LIST_FIELDS:
-            if request.get(key):
-                runner_request[key] = [_input(item, key) for item in request[key]]
-    except NetlistError as exc:
-        raise _translate(exc) from exc
+def _root_relative_request(
+    request: dict[str, Any],
+    base_dir: str,
+    layout: str,
+    root: str,
+    tracked: set[str],
+    selected: set[str],
+) -> dict[str, Any]:
+    """``request`` with the layout and every input-file field made
+    root-relative; each must be a tracked, selected file under ``root``."""
+    runner_request = dict(request)
 
-    runner_request.pop("output", None)
-    if not request.get("no_netlist"):
-        runner_request["output"] = BATCH_NETLIST_FILENAME
-    runner_request["progress"] = True
+    def _input(path: str, what: str) -> str:
+        rel = _nb._relative_tracked(
+            _abs(path, base_dir), root, tracked, what=what, flag=""
+        )
+        _nb._require_selected(rel, selected, what=what)
+        return rel
 
+    runner_request["file"] = _input(layout, "layout")
+    for key in _INPUT_FILE_FIELDS:
+        if request.get(key) is not None:
+            runner_request[key] = _input(request[key], key)
+    for key in _INPUT_FILE_LIST_FIELDS:
+        if request.get(key):
+            runner_request[key] = [_input(item, key) for item in request[key]]
+    return runner_request
+
+
+def _measure_tree(
+    root: str, files: Sequence[str], selected: set[str]
+) -> tuple[list[str], int]:
+    """The selected files that exist on disk (directories skipped) and their
+    total uncompressed size."""
     present: list[str] = []
     total = 0
     for rel in files:
@@ -193,6 +189,40 @@ def package(
             continue
         present.append(rel)
         total += info.st_size
+    return present, total
+
+
+def package(
+    request: dict[str, Any],
+    base_dir: str,
+    *,
+    batch_root: str | None,
+    include: Sequence[str],
+    exclude: Sequence[str],
+    max_bytes: int | None = None,
+) -> tuple[_nb.BatchTree, dict[str, Any]]:
+    """Validate ``request`` and select the input tree, **without** building
+    the archive. Returns the tree and the runner request: ``request`` with
+    every input path made root-relative, the output pinned to the runner's
+    ``netlist.spice`` (or absent under ``no_netlist``) and ``progress`` on.
+    """
+    layout = _checked_layout(request, base_dir)
+    try:
+        root = _nb._resolve_root(layout, batch_root)
+        files = _nb._tracked_files(root)
+        selected = set(_nb._select_files(files, include, exclude))
+        runner_request = _root_relative_request(
+            request, base_dir, layout, root, set(files), selected
+        )
+    except NetlistError as exc:
+        raise _translate(exc) from exc
+
+    runner_request.pop("output", None)
+    if not request.get("no_netlist"):
+        runner_request["output"] = BATCH_NETLIST_FILENAME
+    runner_request["progress"] = True
+
+    present, total = _measure_tree(root, files, selected)
     cap = max_bytes if max_bytes is not None else _nb.MAX_BATCH_TREE_BYTES
     if total > cap:
         raise ExtractError(
@@ -206,7 +236,7 @@ def package(
         root=root,
         files=tuple(present),
         total_bytes=total,
-        schematic=rel_layout,
+        schematic=runner_request["file"],
         rcfile_arg=None,
         rcfile_pdk_relative=False,
     )
@@ -581,7 +611,7 @@ def run_extract_batch(
         collected = os.path.join(scratch, "outputs")
         _collect(config, job_id, status, collected, runner=runner)
         report = _read_report(collected, job_id)
-        if not no_netlist:
+        if output is not None and not no_netlist:
             _write_collected_netlist(collected, report, output, job_id)
         runner_roots = _batch_common.read_runner_roots(collected)
         report = _rewrite(report, runner_roots, tree.root)
