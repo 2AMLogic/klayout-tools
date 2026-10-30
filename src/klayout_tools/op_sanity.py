@@ -421,7 +421,7 @@ _MAX_EXPANDED_INSTANCES = 20000
 
 _SUBCKT_CARD_RE = re.compile(r"^\.subckt\b", re.IGNORECASE)
 _ENDS_CARD_RE = re.compile(r"^\.(ends|eom)\b", re.IGNORECASE)
-_INCLUDE_CARD_RE = re.compile(r"^\.(include|inc)\s+(.+)$", re.IGNORECASE)
+INCLUDE_CARD_RE = re.compile(r"^\.(include|inc)\s+(.+)$", re.IGNORECASE)
 
 
 class _SubcktDef:
@@ -438,7 +438,7 @@ class _SubcktDef:
         self.from_include = from_include
 
 
-class _IncludeState:
+class IncludeState:
     """Bookkeeping for one parse's include expansion."""
 
     __slots__ = ("seen", "base_dir")
@@ -448,8 +448,8 @@ class _IncludeState:
         self.base_dir = base_dir
 
 
-def _expand_includes(
-    lines: list[str], base_dir: str | None, state: _IncludeState
+def expand_includes(
+    lines: list[str], base_dir: str | None, state: IncludeState
 ) -> list[str]:
     """Replace each resolvable ``.include``/``.inc`` card with the logical
     lines of the file it names (recursively, relative to that file's own
@@ -458,7 +458,7 @@ def _expand_includes(
     never assumes more than it can read."""
     out: list[str] = []
     for line in lines:
-        card = _INCLUDE_CARD_RE.match(line)
+        card = INCLUDE_CARD_RE.match(line)
         if card is None:
             out.append(line)
             continue
@@ -479,7 +479,7 @@ def _expand_includes(
                 text = handle.read()
         except OSError:
             continue
-        out.extend(_expand_includes(_logical_lines(text), os.path.dirname(path), state))
+        out.extend(expand_includes(_logical_lines(text), os.path.dirname(path), state))
     return out
 
 
@@ -534,17 +534,17 @@ def parse_netlist(
     """
     parsed = ParsedNetlist()
     model_kinds: dict[str, str] = {}
-    state = _IncludeState(base_dir)
+    state = IncludeState(base_dir)
 
     body_lines = _logical_lines(text)
     defs: dict[str, _SubcktDef] = {}
     # Definitions in the body win over same-named ones from an include.
     top_lines = _split_subckts(body_lines, defs, from_include=False)
-    top_lines = _expand_includes(top_lines, base_dir, state)
+    top_lines = expand_includes(top_lines, base_dir, state)
     # Includes can also sit inside a subckt body; expand those before the
     # definitions are used so the flat DUT file is visible to the walk.
     for definition in list(defs.values()):
-        definition.lines = _expand_includes(definition.lines, base_dir, state)
+        definition.lines = expand_includes(definition.lines, base_dir, state)
     top_lines = _split_subckts(top_lines, defs, from_include=True)
     for definition in list(defs.values()):
         if any(_SUBCKT_CARD_RE.match(entry) for entry in definition.lines):

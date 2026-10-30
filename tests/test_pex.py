@@ -7080,3 +7080,75 @@ def test_cli_pex_submit_only_emits_submitted_payload_exit_0(
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "submitted"
     assert payload["leg_count"] == 2
+
+
+def _write_wrapper_pair(tmp_path, *, included_model, extracted_model, subdir=""):
+    base = tmp_path / subdir if subdir else tmp_path
+    base.mkdir(exist_ok=True)
+    (base / "devs.spice").write_text(
+        f"Xm1 Y A VSS VSS {included_model} l=0.15 w=0.42\n"
+        f"Xm2 Y A VDD VDD {included_model} l=0.15 w=0.84\n"
+    )
+    reference = base / "ref.spice"
+    reference.write_text('.subckt INV A Y VDD VSS\n.include "devs.spice"\n.ends INV\n')
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(
+        ".SUBCKT INV A Y VDD VSS\n"
+        f"Xm1 Y A VSS VSS {extracted_model} l=0.15 w=0.42\n"
+        f"Xm2 Y A VDD VDD {extracted_model} l=0.15 w=0.84\n"
+        ".ENDS INV\n"
+    )
+    return str(reference), str(extracted)
+
+
+def test_model_mismatch_expands_include_wrapper_match(tmp_path, monkeypatch):
+    reference, extracted = _write_wrapper_pair(
+        tmp_path,
+        included_model="sky130_fd_pr__nfet_01v8",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+        subdir="sub",
+    )
+    monkeypatch.chdir(tmp_path)  # includes resolve against the file, not CWD
+    assert (
+        _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+        is None
+    )
+
+
+def test_model_mismatch_expands_include_wrapper_divergence(tmp_path):
+    reference, extracted = _write_wrapper_pair(
+        tmp_path,
+        included_model="sky130_fd_pr__nfet_g5v0",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+    )
+    mismatch = _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+    assert mismatch["kind"] == "model_set"
+    assert mismatch["counts"]["reference"] == {"sky130_fd_pr__nfet_g5v0": 2}
+    assert "could not be resolved" not in mismatch["detail"]
+
+
+def test_model_mismatch_include_cycle_terminates(tmp_path):
+    reference, extracted = _write_wrapper_pair(
+        tmp_path,
+        included_model="sky130_fd_pr__nfet_01v8",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+    )
+    with open(tmp_path / "devs.spice", "a") as handle:
+        handle.write(".inc devs.spice\n.include ref.spice\n")
+    assert (
+        _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+        is None
+    )
+
+
+def test_model_mismatch_unresolvable_include_says_so(tmp_path):
+    reference, extracted = _write_wrapper_pair(
+        tmp_path,
+        included_model="sky130_fd_pr__nfet_01v8",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+    )
+    (tmp_path / "devs.spice").unlink()
+    mismatch = _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+    assert mismatch["counts"]["reference"] == {}
+    assert "`.include` that could not be resolved" in mismatch["detail"]
+    assert "electrically unrelated" not in mismatch["detail"]
