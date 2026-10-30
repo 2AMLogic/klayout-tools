@@ -132,6 +132,50 @@ out) and asks for that `loop_a_history` to be attached to #310. If your
 loop meets it, that is the evidence — file it rather than freehanding
 around a missing tool.
 
+## Numeric starting-point chain (OTA)
+
+Loop A pass 1 needs a first candidate. Rather than guessing, seed it with
+this hand chain (the OPERA-style spec → gm → gm/ID → L → W flow; arXiv
+reference only — no repo survey is cited here). It only picks the *starting
+point*; it does not replace Loop A.
+
+1. **gm1 from UGF.** `gm1 = 2π · UGF · C_L` (single-stage) or
+   `2π · UGF · C_c` (two-stage, `C_c` = compensation cap).
+2. **gm2 from PM** (two-stage only). Place the non-dominant pole
+   `p2 ≈ gm2 / C_L` at ≥ ~2.2× UGF, so `gm2 ≳ 2.2 · 2π · UGF · C_L`.
+3. **Tail current from slew.** `I_tail = SR · C` (`C` = `C_L` single-stage,
+   `C_c` for the first stage of a two-stage). Check `I_tail/2 · (gm/ID)`
+   against the gm1 from step 1; take the larger current.
+4. **gm/ID per role.** Pick one per device role: input pair high (~15–20,
+   efficiency/noise), mirror/load and tail low (~5–10, matching and ro),
+   cascodes sized for headroom rather than gain.
+5. **L from the gain budget.** Pick the shortest L whose `gm·ro` meets the
+   per-stage share of the DC-gain spec; lengthen the tail and mirror devices
+   first.
+6. **W from Id and gm/ID.** `W = Id / (Id/W)` where `Id/W` is read from a
+   gm/ID–Id/W sweep (or a one-off `klt sim` DC sweep) at the chosen gm/ID and
+   L. Round to a whole number of fingers.
+7. **Headroom check.** Each saturated device needs roughly
+   `Vdsat ≈ 2 / (gm/ID)`; sum the Vdsat along every supply-to-supply path
+   and compare with `VDD` minus the required output swing. If it fails,
+   lower gm/ID on the offenders and redo steps 5–6.
+
+**The hand equations over-estimate phase margin** (about 18° in OPERA's
+reported results) because they ignore parasitic poles, mirror poles and
+finite ro. `klt sim` stays the arbiter: use the chain only to seed pass 1,
+then let the corner feedback drive every later change.
+
+Process notes:
+
+- Run `klt sim <request.json> --op-lint` (and lint small generator pieces)
+  early, before spending corner runs on a candidate with a device out of
+  saturation.
+- At escalation points present 2–3 simulated options with their measured
+  tradeoffs rather than a single recommendation.
+
+Topology-specific variants of the chain are in each KB entry's
+`sizing_approach` (`klt kb show <id>`).
+
 ## Loop A convergence / stuck-loop checklist
 
 Per design doc §1. Track margins and worst-case-offender measurements across
