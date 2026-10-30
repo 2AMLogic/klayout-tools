@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:07:30.620392+00:00",
+  "slug": "asap7-npu",
+  "name": "Asap7 Npu",
+  "description": "Large INT8 MAC array on ASAP7 (predictive, never fabricated) \u2014 2AM Logic canary block",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Architecture",
+        "target": "`sky130-npu`'s, unmodified except the array parameter"
+      },
+      {
+        "parameter": "MAC array",
+        "target": "32 x 32 (1,024 MACs), INT8 x INT8 \u2192 INT32",
+        "fallback": "16 x 16",
+        "stretch": "64 x 64"
+      },
+      {
+        "parameter": "On-chip memory",
+        "target": "abstract macro views, banking scaled from the origin"
+      },
+      {
+        "parameter": "Predicted clock (post-route STA, slow corner)",
+        "target": "1 GHz",
+        "fallback": "500 MHz",
+        "stretch": "1.5 GHz"
+      },
+      {
+        "parameter": "Numerical correctness",
+        "target": "bit-exact against the origin's golden model"
+      },
+      {
+        "parameter": "DRC",
+        "target": "clean against the pinned ASAP7 deck, full chip, flat and hierarchical",
+        "fallback": "hierarchical only, recorded"
+      },
+      {
+        "parameter": "LVS",
+        "target": "clean"
+      },
+      {
+        "parameter": "Tool scaling",
+        "target": "DRC/LVS runtime and peak memory recorded per array size"
+      }
+    ],
+    "status_note": "DRAFT \u2014 engineering to ratify; see [`spec/npu.md`](spec/npu.md"
+  },
+  "source": {
+    "repo": "2AMLogic/asap7-npu",
+    "ref": "1b504582d88bdefa6ab449c44643c2f4f3e47f29",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

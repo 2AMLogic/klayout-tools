@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:08:19.466263+00:00",
+  "slug": "gf180-io-ring",
+  "name": "Gf180 Io Ring",
+  "description": "5 V I/O ring with ESD on gf180mcu, port of sky130-io-ring \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "layer_count": 26,
+  "cell_count": 9,
+  "instance_count": 28,
+  "layout_file": "gf180_io_ring.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "layer_0_0": "renders/0_0.png",
+    "Nwell": "renders/21_0.png",
+    "Comp": "renders/22_0.png",
+    "ESD": "renders/24_0.png",
+    "Poly2": "renders/30_0.png",
+    "Pplus": "renders/31_0.png",
+    "Nplus": "renders/32_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "layer_34_10": "renders/34_10.png",
+    "Via1": "renders/35_0.png",
+    "Metal2": "renders/36_0.png",
+    "layer_36_10": "renders/36_10.png",
+    "Pad": "renders/37_0.png",
+    "Via2": "renders/38_0.png",
+    "Via3": "renders/40_0.png",
+    "Via4": "renders/41_0.png",
+    "Metal3": "renders/42_0.png",
+    "layer_42_10": "renders/42_10.png",
+    "Metal4": "renders/46_0.png",
+    "layer_46_10": "renders/46_10.png",
+    "Dualgate": "renders/55_0.png",
+    "Metal5": "renders/81_0.png",
+    "layer_81_10": "renders/81_10.png",
+    "diode_mk": "renders/115_5.png",
+    "MOS_CAP_MK": "renders/166_5.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Cell set",
+        "target": "GPIO, `DVDD` pad, `DVSS` pad, core-supply pad, corner, fillers"
+      },
+      {
+        "parameter": "I/O supply `DVDD`",
+        "target": "5 V \u00b110 % (fallback 3.3 V \u00b110 %)"
+      },
+      {
+        "parameter": "Core interface",
+        "target": "3.3 V \u00b110 % `VDD`, level-shifted in the pad"
+      },
+      {
+        "parameter": "Pad-side devices",
+        "target": "5/6 V thick-oxide (`nfet_06v0`, `pfet_06v0`, `diode_nd2ps_06v0`, `diode_pd2nw_06v0`)"
+      },
+      {
+        "parameter": "Output drive, 5 V",
+        "target": "VOL \u2264 0.4 V at 4 mA sink; VOH \u2265 `DVDD` \u2212 0.5 V at 4 mA source"
+      },
+      {
+        "parameter": "Rise/fall (10\u201390 %)",
+        "target": "\u2264 5 ns into 15 pF at 5 V; \u2264 8 ns at 3.3 V"
+      },
+      {
+        "parameter": "Input thresholds",
+        "target": "VIL \u2264 0.3\u00b7`DVDD`, VIH \u2265 0.7\u00b7`DVDD`; hysteresis \u2265 0.4 V at 5 V"
+      },
+      {
+        "parameter": "Pad capacitance",
+        "target": "\u2264 3 pF added by the pad, input mode"
+      },
+      {
+        "parameter": "Geometry",
+        "target": "75 \u00b5m pitch, 350 \u00b5m depth, 355 \u00d7 355 \u00b5m corner"
+      },
+      {
+        "parameter": "ESD network",
+        "target": "pad diodes to `DVDD`/`DVSS` plus a rail clamp; HBM 2 kV is a design target only"
+      },
+      {
+        "parameter": "PVT",
+        "target": "5 process \u00d7 \u221240/25/125 \u00b0C \u00d7 `DVDD` \u00b110 %; 5/6 V devices have no process skew in the open models"
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-io-ring",
+    "ref": "4975f86c01af9cb53845ece3aaaa49a49e7d4e25",
+    "path": "layout/gf180_io_ring.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

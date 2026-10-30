@@ -1,0 +1,1180 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:08:52.130248+00:00",
+  "slug": "gf180-pll",
+  "name": "Gf180 Pll",
+  "description": "Integer-N ring-oscillator PLL on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "layer_count": 12,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "cp_array.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Nwell": "renders/21_0.png",
+    "Comp": "renders/22_0.png",
+    "Poly2": "renders/30_0.png",
+    "Pplus": "renders/31_0.png",
+    "Nplus": "renders/32_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "layer_34_10": "renders/34_10.png",
+    "Via1": "renders/35_0.png",
+    "Metal2": "renders/36_0.png",
+    "Via2": "renders/38_0.png",
+    "Metal3": "renders/42_0.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "signals": {
+    "schema_version": 1,
+    "engine": "ngspice",
+    "engine_version": "46",
+    "status": "fail",
+    "corner_count": 20,
+    "default_corner_id": "cp-compliance/typical_27c_2.97v_x0.9",
+    "passed": 17,
+    "failed": 3,
+    "errored": 0,
+    "measurements": [
+      {
+        "name": "Cp Compliance",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Devchar Cp",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Devchar Delay",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Devchar Passives",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Divider Ratio Cell",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Divider Ratio Chain",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Divider Ratio Dff",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Harness Selftest",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Lock Detector",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Lock Window Bisection",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Lock Window Proxy",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Lock Window Sizing",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Lock Window Trim",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Output Driver",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Period Jitter",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Pfd Deadzone",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Pll Top Smoke",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Reference Phase Transfer",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Reference Spur",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Vco Bias Current",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      }
+    ],
+    "corners": [
+      {
+        "corner_id": "cp-compliance/typical_27c_2.97v_x0.9",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "wup",
+            "value": 4.292214e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "wdn",
+            "value": 4.616353e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "wskew",
+            "value": -3.24139e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "devchar-cp/typical_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "isat_ns",
+            "value": 2.10058e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "imid_ns",
+            "value": 2.028165e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "gain_ns",
+            "value": 1.01408,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ilo30_ns",
+            "value": 1.998852e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ihi30_ns",
+            "value": 1.999942e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ro30_ns",
+            "value": 1834740.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ilo50_ns",
+            "value": 2.027719e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ihi50_ns",
+            "value": 2.02861e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "devchar-delay/typical_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "r1_fosc",
+            "value": 2083270000.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r1_period",
+            "value": 4.80015e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r1_tstage",
+            "value": 4.80015e-11,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r1_iavg",
+            "value": -0.0003032612,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r1_t0",
+            "value": 5.09819e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r1_t1",
+            "value": 4.34994e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "devchar-passives/typical_27c_3.30v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "t_v030",
+            "value": 9.26446e-08,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_v330",
+            "value": 9.19091e-07,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dvdt",
+            "value": 3630000.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "divider-ratio-cell/typical_27c_2.97v_f200",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "ta1",
+            "value": 1.04788e-08,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ta3",
+            "value": 3.04788e-08,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "na",
+            "value": 2.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tb1",
+            "value": 1.54788e-08,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tb3",
+            "value": 4.54788e-08,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "nb",
+            "value": 3.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tc1",
+            "value": 1.04788e-08,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tc3",
+            "value": 3.04788e-08,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "divider-ratio-chain/typical_27c_2.97v_f200n04",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "tfb1",
+            "value": 3.03203e-08,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tfb2",
+            "value": 5.03203e-08,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "n_fb",
+            "value": 4.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tdo1",
+            "value": 2.64628e-08,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tdo2",
+            "value": 4.64628e-08,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ndo",
+            "value": 4.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_arr",
+            "value": 1.41279e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_rtcq",
+            "value": 2.70348e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "divider-ratio-dff/typical_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "cqa0",
+            "value": 2.57569e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cqa1",
+            "value": 2.57836e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cqa2",
+            "value": 2.58718e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cqa3",
+            "value": 2.60309e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cqa4",
+            "value": 2.66779e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cqa5",
+            "value": 2.84398e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cqa6",
+            "value": 6.08231e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cqb0",
+            "value": 2.21871e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "harness-selftest/typical_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "idsat_n",
+            "value": -0.000878682,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "idsat_p",
+            "value": 0.000408736,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "res_tau",
+            "value": 3.82724e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "lock-detector/typical_27c_2.97v_e4.0n_c7",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "twin_r",
+            "value": 1.46321e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "twin_f",
+            "value": 1.44464e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tb_asrt",
+            "value": 1.25792e-06,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "te_asrt",
+            "value": 1.25792e-06,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "la_lvl",
+            "value": 5.22003e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "lb_lvl",
+            "value": 2.97,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "lc_lvl",
+            "value": 5.28306e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ld_lvl",
+            "value": 4.83641e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "lock-window-bisection/typical_27c_3.30v_c7v2p168_d0000",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "lock_pre",
+            "value": 3.3,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "lock_min",
+            "value": 3.3,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "lock_post",
+            "value": 3.3,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "deasserted",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "delta_s",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "delta_meas",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "delta_err",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "lock-window-proxy/typical_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "twin_c0",
+            "value": 1.10193e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "twin_c1",
+            "value": 1.15318e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "twin_c2",
+            "value": 1.19985e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "twin_c3",
+            "value": 1.25215e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "twin_c4",
+            "value": 1.29614e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "twin_c5",
+            "value": 1.34922e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "twin_c6",
+            "value": 1.39773e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "twin_c7",
+            "value": 1.45137e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "lock-window-sizing/typical_27c_2.97v_w08",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "twin_r",
+            "value": 1.2352e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "twin_f",
+            "value": 1.23453e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "lock-window-trim/typical_27c_2.97v_c0",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "twin_r",
+            "value": 1.10193e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "twin_f",
+            "value": 1.10004e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "output-driver/typical_27c_2.97v_lo",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "t_r1",
+            "value": 1.56723e-06,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_r2",
+            "value": 1.79109e-06,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_f1",
+            "value": 1.44638e-06,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_f2",
+            "value": 1.66915e-06,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tperiod",
+            "value": 2.23868e-07,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "fosc",
+            "value": 4466920.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "voh",
+            "value": 3.06484,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vol",
+            "value": -0.0932248,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "period-jitter/ff_27c_2.97v_vs1p638",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "temp_c",
+            "value": 27.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vdd_v",
+            "value": 2.97,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "fout_hz",
+            "value": 150006000.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "n_cycles",
+            "value": 314.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tj_rms_s",
+            "value": 1.5674e-11,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tj_rms_pct",
+            "value": 0.2351,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tj_pp_s",
+            "value": 6.9814e-11,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "c2c_rms_s",
+            "value": 2.7854e-11,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "pfd-deadzone/typical_27c_2.97v_v0p90_d-1n",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "qnet",
+            "value": -1.03047e-14,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "qnet2",
+            "value": -2.06095e-14,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "width_up",
+            "value": 1.75681e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "width_dn",
+            "value": 2.78281e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "pll-top-smoke/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "reference-phase-transfer/typical_27c_3.30v_vs1p795",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "phi_shift",
+            "value": 3.8295e-11,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tracking_ratio",
+            "value": 1.03829,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "measured_gain",
+            "value": 6.22977,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "measured_gain_db",
+            "value": 15.8894,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "target_gain_db",
+            "value": 15.563,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "transfer_error_db",
+            "value": 0.326415,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "reference-spur/typical_27c_3.30v_vs1p795",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "temp_c",
+            "value": 27.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vdd_v",
+            "value": 3.3,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vstart_v",
+            "value": 1.795,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "fout_hz",
+            "value": 150010000.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "carrier_v",
+            "value": 2.0947,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spur_lsb_dbc",
+            "value": -58.85,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spur_usb_dbc",
+            "value": -58.36,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spur_dbc",
+            "value": -58.36,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "vco-bias-current/typical_27c_2.97v_band0",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "r3k_cg",
+            "value": 18188.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r3k_off",
+            "value": 103985.9,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ru_cg",
+            "value": 2191.03,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ru_off",
+            "value": 12294.6,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "rsh_ratio",
+            "value": 8.3011,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-pll",
+    "ref": "064092b1e5f0a67e30e13e5dfa3282a12e96d833",
+    "path": "layout/evidence/cp-array-proof/cp_array.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}
