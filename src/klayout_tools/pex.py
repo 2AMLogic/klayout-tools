@@ -229,7 +229,7 @@ from .coverage import (
     work_id,
 )
 from .extract import ExtractError, run_extract
-from .op_sanity import _INCLUDE_CARD_RE, _expand_includes, _IncludeState
+from .op_sanity import INCLUDE_CARD_RE, IncludeState, expand_includes
 from .sim import SimError, load_request, run_sim
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
@@ -1184,7 +1184,7 @@ def _reference_is_hierarchical(netlist_text: str) -> bool:
 
 def _has_include_card(netlist_text: str) -> bool:
     return any(
-        _INCLUDE_CARD_RE.match(line.strip()) for line in _logical_lines(netlist_text)
+        INCLUDE_CARD_RE.match(line.strip()) for line in _logical_lines(netlist_text)
     )
 
 
@@ -1195,9 +1195,7 @@ def _expand_reference_includes(netlist_text: str, netlist_path: str) -> str:
     real devices. Unresolvable includes are dropped, never raised."""
     base_dir = os.path.dirname(os.path.abspath(netlist_path))
     return "\n".join(
-        _expand_includes(
-            _logical_lines(netlist_text), base_dir, _IncludeState(base_dir)
-        )
+        expand_includes(_logical_lines(netlist_text), base_dir, IncludeState(base_dir))
     )
 
 
