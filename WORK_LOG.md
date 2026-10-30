@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-30
 
+- **PR #4604**: feat(sim): classify deck unit stderr on engine failure
+- **Issue #4603** (closed): klt sim batch: runner ngspice rejects model-library expr() parameters that local ngspice-42 accepts; failure only visible in stderr.bin
 - **PR #4617**: feat: shard klt pex batch grids and flag stale job status
 - **PR #4615**: test: pin --pins behaviour on a label-less routed ASAP7 stream
 - **PR #4614**: feat: add --backend batch to klt extract for long extractions
