@@ -5064,6 +5064,35 @@ def _add_layout_plan_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_format_arg(execute_parser)
     execute_parser.set_defaults(func=layout_plan_cmd.run_execute)
 
+    check_parser = layout_plan_sub.add_parser(
+        "check",
+        help="verify a finished layout against its layout-plan request",
+        description=(
+            "Read-only: compare a finished GDS against the plan's group "
+            "presence, row order/stacking/spacing/align and abutment gaps. "
+            "Exit 3 on any violation. The JSON output is a `kind: generic` "
+            "evidence envelope `klt signoff` accepts. See "
+            "docs/cli/layout-plan-check.md."
+        ),
+    )
+    check_parser.add_argument(
+        "request", help="path to a klt.layout_plan.request/1 JSON file"
+    )
+    check_parser.add_argument(
+        "--layout", required=True, help="path to the finished GDS/OASIS layout"
+    )
+    check_parser.add_argument(
+        "--cell", help="top cell name (default: the layout's only top cell)"
+    )
+    check_parser.add_argument(
+        "--tolerance-um",
+        type=float,
+        default=0.01,
+        help="compliance tolerance in um (default: 0.01)",
+    )
+    _add_format_arg(check_parser)
+    check_parser.set_defaults(func=layout_plan_cmd.run_check)
+
 
 def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``wave`` verb with nested ``build``/``query``
