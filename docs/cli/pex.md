@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--hosts <n>] [--resume] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -63,6 +63,18 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   of which must fit the fleet's whole-job ceiling on its own). Omitted, each
   testbench request's own `batch` block applies, unchanged
   ([#4616](https://github.com/2AMLogic/klayout-tools/issues/4616)).
+- `--hosts`, `--resume` — backend `batch` fleet sharding and re-attach, same
+  semantics as the `klt sim` flags of the same name, forwarded to every
+  `klt sim` call (schematic, extracted and device-only legs). With
+  `--hosts >= 2` each leg writes its shard job ids to
+  `<outdir>/<testbench>/<leg>/batch-shards.json`. **Recovery:** if the client
+  is interrupted (`batch_client_interrupted`; the fleet has no cancel), re-run
+  the *same* `klt pex` command with `--resume` and each leg re-attaches to its
+  recorded jobs instead of re-submitting. There is no pex `--attach JOB_ID`: a
+  pex run has at least two jobs per testbench, so a single id cannot address
+  it. Shard-job re-attach is recorded only for sharded legs, so rely on it with
+  `--hosts >= 2`; a plain single-job leg is not guaranteed to re-attach. Omitted, the flags are not passed and behavior is unchanged
+  ([#4624](https://github.com/2AMLogic/klayout-tools/issues/4624)).
 - `--deck-option` — repeatable `<key>=<value>`, passed through verbatim to
   `klt extract --deck-option` (issue #1558); see
   [`extract.md`](extract.md)'s "Selecting a shared-geometry resistor

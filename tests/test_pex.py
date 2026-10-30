@@ -6827,3 +6827,29 @@ def test_run_pex_forwards_batch_sharding_flags_to_every_run_sim(
     for kwargs in _run():
         assert "max_units_per_job" not in kwargs
         assert "max_concurrent_jobs" not in kwargs
+        assert "hosts" not in kwargs
+        assert "resume" not in kwargs
+
+    seen = _run(hosts=3, resume=True)
+    assert len(seen) == 2
+    for kwargs in seen:
+        assert kwargs["hosts"] == 3
+        assert kwargs["resume"] is True
+
+
+def test_run_pex_invalid_hosts_surfaces_as_pex_error(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4624: a `hosts < 1` rejection from `run_sim` is a PexError."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    def _fake_run_sim(*_args, **_kwargs):
+        raise SimError("remote.hosts must be a positive integer")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    with pytest.raises(PexError, match="positive integer"):
+        run_pex(resistor_layout, [str(request)], "sky130", hosts=0)

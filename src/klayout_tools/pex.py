@@ -2750,7 +2750,7 @@ def _run_device_only_sim(
     work_dir: str,
     label: str,
     backend: Any,
-    batch_shard: Mapping[str, int | None] | None = None,
+    batch_shard: Mapping[str, int | bool | None] | None = None,
 ) -> dict[str, Any] | None:
     """One testbench re-run against the parasitic-free netlist (issue #3298),
     or ``None`` without the leg. A failure here costs only the device-only
@@ -2808,6 +2808,8 @@ def run_pex(
     backend: str | None = None,
     max_units_per_job: int | None = None,
     max_concurrent_jobs: int | None = None,
+    hosts: int | None = None,
+    resume: bool | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -2932,7 +2934,9 @@ def run_pex(
     "Execution backends". ``max_units_per_job`` / ``max_concurrent_jobs``
     (issue #4616) are likewise passed to each of those calls, so each side's
     batch grid is sharded on its own; ``None`` leaves the request's own
-    ``batch`` block in force. ``artifacts_dir`` overrides where this command
+    ``batch`` block in force. ``hosts`` / ``resume`` (issue #4624) ride the same path:
+    each leg re-attaches from its own ``batch-shards.json`` on a re-run.
+    ``artifacts_dir`` overrides where this command
     writes its own generated artifacts (the extracted-side testbench body/
     request copies, see :func:`_prepare_extracted_request`, and each `klt
     sim` call's own ``options.keep_artifacts`` output, namespaced per
@@ -3442,6 +3446,8 @@ def run_pex(
         for key, value in (
             ("max_units_per_job", max_units_per_job),
             ("max_concurrent_jobs", max_concurrent_jobs),
+            ("hosts", hosts),
+            ("resume", resume),
         )
         if value is not None
     }
