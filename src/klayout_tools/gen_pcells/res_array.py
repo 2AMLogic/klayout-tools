@@ -154,7 +154,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             )
             self.param(
                 "short_length",
-                self.TypeString,
+                kdb.PCellParameterDeclaration.TypeString,
                 "Poly-body only: what to do when the (snapped) length_um is "
                 "below the deck's SAB/implant minimum mask width -- 'refuse' "
                 "(default, error naming the floor) or 'lengthen' (raise to "
