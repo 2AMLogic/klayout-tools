@@ -642,6 +642,13 @@ silently indistinguishable from one reached by topology alone.
 
 ## Netlist form: the schematic-equivalent, plain-element form
 
+A reference netlist's `.include`/`.inc` lines are read as written, with one
+convenience (issue #4605): an *unquoted* path is rewritten to a single-quoted
+absolute path before reading (a relative path resolves against the reference
+file's directory), because KLayout's SPICE reader would otherwise truncate it
+at a `-`. Already-quoted paths are untouched and the file on disk is never
+modified. `.include` targets are not followed for subcircuit-name detection.
+
 The reference (and any pre-extracted layout) netlist must use the same
 **schematic-equivalent** device form `klt extract` writes: a plain element
 line whose leading letter names the device class and whose parameters are
