@@ -143,6 +143,26 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=0,
             )
             self.param(
+                "snap",
+                kdb.PCellParameterDeclaration.TypeBoolean,
+                "Poly-body only: round length_um to the nearest multiple of "
+                "the PDK manufacturing grid before drawing (default True; "
+                "the requested/realised lengths and the resistance delta are "
+                "reported in drc_hints.length_snap). False draws length_um "
+                "verbatim and only warns (issue #4666)",
+                default=True,
+            )
+            self.param(
+                "short_length",
+                self.TypeString,
+                "Poly-body only: what to do when the (snapped) length_um is "
+                "below the deck's SAB/implant minimum mask width -- 'refuse' "
+                "(default, error naming the floor) or 'lengthen' (raise to "
+                "the smallest on-grid length >= the floor and report the "
+                "delta). Ignored when snap is False (issue #4666)",
+                default="refuse",
+            )
+            self.param(
                 "poly_layer",
                 self.TypeLayer,
                 "Resistor body drawing layer",
