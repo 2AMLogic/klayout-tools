@@ -2044,6 +2044,64 @@ def _rewrite_m_card_model(line: str, sim_model_classes: dict[str, str]) -> str:
     return " ".join(tokens)
 
 
+def _deck_plain_resistor_classes(deck: str | None) -> dict[str, str]:
+    """``deck``'s lower-cased resistor model name -> canonical device class,
+    used to give a valueless foundry-style ``R`` card its value token (issue
+    #4670). Empty without ``deck`` or for an unresolvable deck."""
+    if deck is None:
+        return {}
+    from .decks import (
+        InvalidDeckOptionError,
+        UnknownExtractionDeckError,
+        get_extraction_deck,
+    )
+    from .netlist_capacitor_recovery import resistor_classes_for_deck
+
+    try:
+        resolved = get_extraction_deck(deck)
+    except (UnknownExtractionDeckError, InvalidDeckOptionError):
+        return {}
+    return {
+        name.lower(): canonical
+        for name, canonical in resistor_classes_for_deck(resolved).items()
+    }
+
+
+def _convert_plain_r_card(
+    line: str,
+    resistor_classes: dict[str, str],
+    geometry_style: str | None,
+    resistor_values: dict[str, Callable[[float, float], float]],
+    placeholder_value_classes: dict[str, str],
+) -> str:
+    """Give a foundry-style ``R<name> n1 n2 [n3] <model> W=.. L=..`` card (no
+    value token) the ``R... <value> <class> L= W=`` shape KLayout's reader
+    needs, through the same value/placeholder logic as the ``X``-call route
+    (issue #4670). A card with a value token, or whose model names no deck
+    resistor class, is returned unchanged."""
+    tokens = _tokenize(line.strip())
+    positional, params = _split_params(tokens)
+    # name + 2 or 3 terminals + model
+    if len(positional) not in (4, 5):
+        return line
+    device_class = resistor_classes.get(positional[-1].lower())
+    if device_class is None:
+        return line
+    lookup = DeviceLookup("resistor", device_class, "l", "w")
+    card, is_placeholder = _convert_geometry_card(
+        positional[0],
+        positional[1:-1],
+        positional[-1],
+        lookup,
+        params,
+        geometry_style=geometry_style,
+        resistor_value=resistor_values.get(device_class.lower()),
+    )
+    if is_placeholder:
+        placeholder_value_classes[device_class] = "resistor"
+    return card
+
+
 def convert_reference_netlist(
     text: str,
     *,
@@ -2118,6 +2176,7 @@ def convert_reference_netlist(
     geometry_style = geometry_style_for_family(deck) if deck is not None else None
     custom_device_classes = _resolve_custom_device_classes(deck)
     sim_model_classes = _sim_model_classes(deck)
+    plain_resistor_classes = _deck_plain_resistor_classes(deck)
     logical_lines = _fold_spice_continuations(text.splitlines())
     param_scopes = _collect_param_scopes(logical_lines)
     call_overrides = _collect_call_overrides(logical_lines, param_scopes)
@@ -2161,6 +2220,16 @@ def convert_reference_netlist(
                 out.append(line)
         elif sim_model_classes and first and first[0] in "Mm":
             out.append(_rewrite_m_card_model(line, sim_model_classes))
+        elif plain_resistor_classes and first and first[0] in "Rr":
+            out.append(
+                _convert_plain_r_card(
+                    line,
+                    plain_resistor_classes,
+                    geometry_style,
+                    resistor_values,
+                    placeholder_value_classes,
+                )
+            )
         else:
             out.append(line)
     if unknown_subckts:

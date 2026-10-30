@@ -4848,9 +4848,15 @@ def _read_reference_netlist(
     try:
         netlist.read(read_path, reader)
     except Exception as exc:
-        raise _ReferenceNetlistParseError(
-            f"could not parse reference netlist '{path}': {exc}"
-        ) from exc
+        message = f"could not parse reference netlist '{path}': {exc}"
+        if "Can't find a value for a R, C or L device" in str(exc):
+            message += (
+                " (hint: a foundry-style resistor card with a model name and "
+                'W/L but no value token needs `reference.form: "subckt-call"` '
+                "together with `reference.deck`, which rewrites it for the "
+                "deck's resistor classes)"
+            )
+        raise _ReferenceNetlistParseError(message) from exc
     finally:
         if tmp_path is not None:
             try:
