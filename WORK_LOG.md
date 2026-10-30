@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-30
 
+- **PR #4633**: feat(pex): add --submit-only/--attach for async batch runs
+- **Issue #4619** (closed): klt pex: no grid sharding or async submit/attach for --backend batch
 - **PR #4631**: fix: expand reference includes in klt pex model_mismatch tally
 - **PR #4628**: feat(pex): wrap fragment schematic DUTs in .subckt <top> under --flatten-schematic
 - **Issue #4630** (closed): Friction: klt pex model_mismatch reference tally does not follow .include, so a wrapper-form reference netlist reports an empty reference side
