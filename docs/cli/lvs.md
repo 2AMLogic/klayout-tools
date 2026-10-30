@@ -482,6 +482,34 @@ hierarchical compare still does not match (sub-cell circuits are not paired
 with differently-named reference `.SUBCKT`s), so the flattened recipe is the
 supported path.
 
+##### Routed multi-cell blocks (issue #4610)
+
+Measured on `tests/test_asap7_routed_block.py`: two abutted `INVx1` cells
+wired `Y -> A` with a hand-drawn M1 bar, or an M2 bar on two V1 vias, reach
+`match` under the recipe above (`finfet_bulk` + `flatten_layout` +
+`flatten_reference`), with or without top-cell pin labels. Remove the wire
+and the compare fails with `device.unmatched`, which is the layout's fault,
+not the tooling's. So a routed ASAP7 block that mismatches should be bisected
+the same way (cells only, then +M1/V0, then +V1/M2, then labels) before
+suspecting extraction.
+
+- **Cell rails must abut.** The fixture's cells share the 648-dbu (0.162 um)
+  pitch of the cell's `100/0` boundary so the M1 rails touch; with a gap the
+  supplies are separate nets.
+- **Pins exist only where text sits on the deck's label layers**
+  (`<metal>/251`, `1/251`, `7/251`). The P&R DEF-to-GDS merge writes no text,
+  and `--top-cell-pins` / `--def-pins` are refused on `--deck asap7` (see
+  [`extract.md`](extract.md)), so a merged routed stream extracts a top cell
+  with no signal pins. The compare still matches by topology, but
+  `net_correspondence`-style pin counts will be low: draw `<metal>/251` text on the port metal (`--pins` and
+  `--def-net-names` are the supported asap7 pin options; their use on a routed
+  stream was not exercised here).
+- **A well label and a rail label with one name stay two nets** at extraction
+  (`VDD` and `VDD$1`); `finfet_bulk` is what ties them for the compare, in
+  each cell, before the flatten.
+- **M2 is `20/0`, M3 is `30/0`** in this deck, with V1 at `21/0`; a wire
+  drawn on the wrong layer number is invisible to extraction.
+
 #### Pinned ASAP7 RVT corpus
 
 Pinned inputs (lambdapdk v0.2.17, `scripts/fetch-pdks.sh`):
