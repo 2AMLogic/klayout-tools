@@ -746,6 +746,12 @@ Before this diagnostic existed, the only way to notice was reading the
 extracted `.spice` snapshot by hand and comparing model tokens (issue
 #2402).
 
+A reference that is a thin `.subckt` wrapper around `.include`/`.inc` cards
+is tallied through those includes (resolved relative to the including file;
+nested and cyclic includes terminate). If an include cannot be read and the
+reference tally is empty, `detail` says so instead of asserting a model-set
+divergence.
+
 `model_mismatch` compares the **multiset** of device model/`.subckt` names
 the reference and extracted netlists' `M`/`X`/`Q`/`D` cards instantiate —
 the same instance count per model matters too, not just which names appear,

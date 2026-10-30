@@ -229,6 +229,7 @@ from .coverage import (
     work_id,
 )
 from .extract import ExtractError, run_extract
+from .op_sanity import _INCLUDE_CARD_RE, _expand_includes, _IncludeState
 from .sim import SimError, load_request, run_sim
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
@@ -1181,6 +1182,25 @@ def _reference_is_hierarchical(netlist_text: str) -> bool:
     return False
 
 
+def _has_include_card(netlist_text: str) -> bool:
+    return any(
+        _INCLUDE_CARD_RE.match(line.strip()) for line in _logical_lines(netlist_text)
+    )
+
+
+def _expand_reference_includes(netlist_text: str, netlist_path: str) -> str:
+    """``netlist_text`` with each resolvable ``.include``/``.inc`` card
+    replaced by the included file's lines (issue #4630), so a thin
+    ``.subckt`` wrapper around an included device file is tallied by its
+    real devices. Unresolvable includes are dropped, never raised."""
+    base_dir = os.path.dirname(os.path.abspath(netlist_path))
+    return "\n".join(
+        _expand_includes(
+            _logical_lines(netlist_text), base_dir, _IncludeState(base_dir)
+        )
+    )
+
+
 def _model_mismatch(
     *, reference_netlist: str, extracted_netlist: str
 ) -> dict[str, Any] | None:
@@ -1234,7 +1254,9 @@ def _model_mismatch(
     each with its own ``detail`` wording.
     """
     reference_text = _read_text(reference_netlist) or ""
-    reference_counts = _device_model_counts(reference_text)
+    reference_counts = _device_model_counts(
+        _expand_reference_includes(reference_text, reference_netlist)
+    )
     extracted_counts = _device_model_counts(_read_text(extracted_netlist) or "")
 
     reference_multiset = {
@@ -1259,7 +1281,15 @@ def _model_mismatch(
 
     kind = "model_set" if reference_only or extracted_only else "count_only"
     hierarchical_reference = _reference_is_hierarchical(reference_text)
-    if hierarchical_reference:
+    if not reference_counts and _has_include_card(reference_text):
+        unrelated_clause = (
+            "the reference netlist yielded no device cards, and it contains "
+            "an `.include` that could not be resolved or read (missing "
+            "file, `$VAR` path, or include cap), so this divergence may "
+            "only reflect the unread include rather than a genuine "
+            "model-set mismatch. "
+        )
+    elif hierarchical_reference:
         unrelated_clause = (
             "the reference netlist is hierarchical (it instantiates at "
             "least one locally-defined `.subckt`), while `klt extract`'s "
