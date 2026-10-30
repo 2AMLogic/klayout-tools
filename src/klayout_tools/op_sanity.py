@@ -105,6 +105,7 @@ never be confused with "the analysis never ran".
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import subprocess
@@ -328,6 +329,10 @@ class ParsedNetlist:
         self.expanded_instances = 0
         #: set once the expansion cap was hit; later subckt calls are skipped
         self.expansion_truncated = False
+
+
+#: ``--op-lint-corner`` sentinel: bias every expanded corner (issue #4650).
+ALL_CORNERS = "all"
 
 
 def _strip_comment(line: str) -> str:
@@ -1332,6 +1337,124 @@ def _refuse_param_axis(point: Any) -> None:
         )
 
 
+def _corner_margin_entry(
+    corner_id: str,
+    devices: list[MosInstance],
+    diagnostics: list[dict[str, str]],
+) -> dict[str, Any]:
+    """One ``corner_margins`` row: the worst ``|Vds| - |Vdsat|`` over the MOS
+    devices that answered both values (``null`` when none did -- never a
+    fabricated margin), the device owning it, and how many sit in triode."""
+    worst_device: str | None = None
+    worst_margin: float | None = None
+    triode_count = 0
+    for device in devices:
+        vds = device.values.get("vds_v")
+        vdsat = device.values.get("vdsat_v")
+        if vds is None or vdsat is None:
+            continue
+        margin = abs(vds) - abs(vdsat)
+        if margin < 0:
+            triode_count += 1
+        if worst_margin is None or margin < worst_margin:
+            worst_margin = margin
+            worst_device = device.name
+    return {
+        "corner_id": corner_id,
+        "worst_device": worst_device,
+        "worst_margin_v": None if worst_margin is None else round(worst_margin, 6),
+        "triode_count": triode_count,
+        "diagnostics": [d for d in diagnostics if d["severity"] == "error"],
+    }
+
+
+def _other_corner_entry(
+    other: Any,
+    *,
+    pristine_devices: list[MosInstance],
+    netlist_path: str,
+    models_lib: str | None,
+    probe_nodes: Any,
+    timeout_s: Any,
+    osdi_preload: Any,
+) -> dict[str, Any]:
+    """Bias one additional expanded corner and return its ``corner_margins`` row."""
+    other_devices = copy.deepcopy(pristine_devices)
+    other_log, _, _, other_launch = _run_op(
+        netlist_path=netlist_path,
+        models_lib=models_lib if _needs_models_lib(other) else None,
+        point=other,
+        devices=other_devices,
+        probe_nodes=probe_nodes,
+        timeout_s=timeout_s,
+        osdi_preload=osdi_preload,
+    )
+    other_resolved, other_voltages = _parse_op_log(other_log, other_devices)
+    other_diagnostics = list(other_launch)
+    other_diagnostics.extend(_classify_diagnostics(other_log, netlist_path))
+    produced = bool(other_voltages or other_resolved)
+    if produced and not _SIMULATION_ABORTED_RE.search(other_log):
+        for diagnostic in other_diagnostics:
+            if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
+                diagnostic["severity"] = "warning"
+    if other_devices and not produced:
+        other_diagnostics.append(
+            {
+                "severity": "error",
+                "code": "op_point_unavailable",
+                "message": "the operating point produced no values",
+            }
+        )
+    return _corner_margin_entry(other.corner_id, other_devices, other_diagnostics)
+
+
+def _margin_sort_key(entry: dict[str, Any]) -> tuple[bool, float, str]:
+    margin = entry["worst_margin_v"]
+    return (margin is None, 0.0 if margin is None else margin, entry["corner_id"])
+
+
+def _corner_margins_table(
+    points: list[Any],
+    first: Any,
+    first_devices: list[MosInstance],
+    first_diagnostics: list[dict[str, str]],
+    **bias: Any,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Build the ``corner_margins`` table (worst margin first) and report
+    whether any corner other than the first raised an error diagnostic."""
+    table = [_corner_margin_entry(first.corner_id, first_devices, first_diagnostics)]
+    other_error = False
+    for other in points:
+        if other is first:
+            continue
+        entry = _other_corner_entry(other, **bias)
+        table.append(entry)
+        other_error = other_error or bool(entry["diagnostics"])
+    table.sort(key=_margin_sort_key)
+    return table, other_error
+
+
+def _select_points(points: list[Any], corner: str | None) -> tuple[Any, list[Any]]:
+    """Pick the first-reported point and the points to bias (all of them for
+    ``corner="all"``), refusing a ``params`` axis on any biased point."""
+    all_corners = corner == ALL_CORNERS
+    if corner is not None and not all_corners:
+        selected = [point for point in points if point.corner_id == corner]
+        if not selected:
+            available = ", ".join(point.corner_id for point in points)
+            raise OpSanityError(
+                f"corner '{corner}' is not in this request's matrix "
+                f"(available: {available})"
+            )
+        point = selected[0]
+    else:
+        point = points[0]
+    biased_points = points if all_corners else [point]
+    for biased in biased_points:
+        _refuse_param_axis(biased)
+    return point, biased_points
+
+
 def run_op_sanity(
     request_path: str,
     *,
@@ -1344,7 +1467,10 @@ def run_op_sanity(
     ``corners`` matrix to bias at, by ``corner_id``; the first expanded
     point is used when omitted. Exactly one corner is run -- this is a
     diagnostic meant to be cheap enough to run on every Loop A miss, not a
-    second corner sweep.
+    second corner sweep -- except for ``corner="all"`` (:data:`ALL_CORNERS`),
+    which additionally biases every other expanded corner, sequentially, to
+    fill the report's ``corner_margins`` table (issue #4650). The top-level
+    ``corner``/``devices``/``findings`` still describe the first corner.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/sim.md``'s "Operating-point lint"). Raises
@@ -1387,18 +1513,8 @@ def run_op_sanity(
             "this request's `exclude` rules leave no corner to bias the "
             "operating point at"
         )
-    if corner is not None:
-        selected = [point for point in points if point.corner_id == corner]
-        if not selected:
-            available = ", ".join(point.corner_id for point in points)
-            raise OpSanityError(
-                f"corner '{corner}' is not in this request's matrix "
-                f"(available: {available})"
-            )
-        point = selected[0]
-    else:
-        point = points[0]
-    _refuse_param_axis(point)
+    all_corners = corner == ALL_CORNERS
+    point, biased_points = _select_points(points, corner)
 
     models = request.get("models") or {}
     models_lib: str | None = None
@@ -1407,11 +1523,12 @@ def run_op_sanity(
         # library this point's bundle names, then the request's own
         # `models.lib` -- needed only when some selected section actually
         # reads from it (`_needs_models_lib`).
-        _resolve_corner_section_libs([point], models, request_dir)
-        if _needs_models_lib(point):
+        _resolve_corner_section_libs(biased_points, models, request_dir)
+        if any(_needs_models_lib(biased) for biased in biased_points):
             models_lib = _resolve_models_lib(models, request_dir)
     except SimError as exc:
         raise OpSanityError(str(exc)) from exc
+    point_models_lib = models_lib if _needs_models_lib(point) else None
 
     provenance_pdk: dict[str, Any] | None = None
     if models.get("pdk") or models.get("pdk_root"):
@@ -1437,9 +1554,12 @@ def run_op_sanity(
     )
 
     probe_nodes = sorted(node for node in parsed.nodes if node != "0")
+    # Corners other than the first are biased on pristine device copies,
+    # since `_parse_op_log` fills `values` in place.
+    pristine_devices = copy.deepcopy(parsed.devices) if all_corners else []
     log_text, engine_version, runtime_s, launch_diagnostics = _run_op(
         netlist_path=netlist_path,
-        models_lib=models_lib,
+        models_lib=point_models_lib,
         point=point,
         devices=parsed.devices,
         probe_nodes=probe_nodes,
@@ -1561,6 +1681,23 @@ def run_op_sanity(
         for index, device in enumerate(parsed.devices)
     ]
 
+    corner_margins: list[dict[str, Any]] | None = None
+    if all_corners:
+        corner_margins, other_error = _corner_margins_table(
+            points,
+            point,
+            parsed.devices,
+            diagnostics,
+            pristine_devices=pristine_devices,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            probe_nodes=probe_nodes,
+            timeout_s=timeout_s,
+            osdi_preload=osdi_preload,
+        )
+        if other_error:
+            status = "error"
+
     return {
         "schema_version": SCHEMA_VERSION,
         "status": status,
@@ -1571,6 +1708,7 @@ def run_op_sanity(
             "supply_v": dict(point.supply_v),
             "temperature_c": point.temperature_c,
         },
+        "corner_margins": corner_margins,
         "device_count": len(parsed.devices),
         "finding_count": len(findings),
         "error_count": error_count,

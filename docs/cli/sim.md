@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>|all]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -103,7 +103,7 @@ this document (and the code) win.
 - `--op-lint` — **run the per-device operating-point sanity lint instead of
   the corner sweep**, on the same request document: every MOS instance's
   off/triode region, wiring smells, and netlist hygiene. Run it first when a
-  measurement misses. `--op-lint-corner` picks which corner to bias at. See
+  measurement misses. `--op-lint-corner` picks which corner to bias at (`all` tabulates the worst margin per corner). See
   "Operating-point lint" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
@@ -7617,13 +7617,26 @@ never writes artifacts, and emits its own envelope (below) instead of the
 sweep response.
 
 ```
-klt sim <request.json> --op-lint [--op-lint-corner <corner_id>] [--format text|json]
+klt sim <request.json> --op-lint [--op-lint-corner <corner_id>|all] [--format text|json]
 ```
 
 - `--op-lint-corner` — which expanded `corner_id` from the request's own
   matrix to bias at. Defaults to the **first** expanded corner. Exactly one
   corner is run either way: this is a diagnostic meant to be cheap enough to
   run on every miss, not a second sweep.
+- `--op-lint-corner all` — also biases every other expanded corner and adds a
+  `corner_margins` array (`null` without `all`): one entry per corner with
+  `corner_id`, `worst_device`, `worst_margin_v` (min over MOS of
+  `|Vds| - |Vdsat|`; devices lacking either value are skipped, and the margin
+  is `null` — never fabricated — when none answered or the `.op` failed),
+  `triode_count` (devices with a negative margin) and the corner's error
+  `diagnostics`. Entries are sorted worst margin first (text output prints
+  the same table). The top-level `corner`, `devices` and `findings` still
+  describe the **first** corner; the exit code follows that report plus any
+  corner-level error. A corner naming `corners.params`/`corners.options` is
+  refused, as for a single corner. Corners run **sequentially**, one short
+  `ngspice -b` `.op` each, locally (op-lint never uses the batch backend), so
+  cost scales with the corner count.
 
 ### What it checks
 

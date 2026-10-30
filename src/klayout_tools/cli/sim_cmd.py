@@ -380,6 +380,21 @@ def _print_op_lint_text(report: dict) -> None:
                 f"{'  ' + detail if detail else ''}"
             )
 
+    corner_margins = report.get("corner_margins")
+    if corner_margins:
+        print()
+        print("corner margins (|Vds| - |Vdsat|, worst first):")
+        for entry in corner_margins:
+            margin = entry["worst_margin_v"]
+            shown = "n/a" if margin is None else f"{margin * 1000:.1f} mV"
+            print(
+                f"  {entry['corner_id']}  {shown}  "
+                f"device={entry['worst_device'] or '-'}  "
+                f"triode={entry['triode_count']}"
+            )
+            for diagnostic in entry["diagnostics"]:
+                print(f"      {diagnostic['code']}: {diagnostic['message']}")
+
     findings = report["findings"]
     if findings:
         print()
