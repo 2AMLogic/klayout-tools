@@ -91,7 +91,9 @@ from .gen_describe import (
     _guard_ring_validate,
     _mos_array_describe,
     _mos_array_validate,
+    _res_array_apply_snap_report,
     _res_array_describe,
+    _res_array_snap_length,
     _res_array_validate,
     _resistor_strip_describe,
     _resistor_strip_validate,
@@ -3942,6 +3944,11 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
 
     resolved_params = _resolve_params(spec, raw_params)
     spec.validate(resolved_params)
+    length_snap = (
+        _res_array_snap_length(resolved_params, pdk_info)
+        if generator_name == "res_array"
+        else None
+    )
 
     layout, top_cell = _produce(spec, cell_name, resolved_params, pdk_info)
 
@@ -3957,6 +3964,8 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
     }
 
     described = spec.describe(resolved_params, dbu, pdk_info)
+    if length_snap is not None:
+        _res_array_apply_snap_report(described, length_snap)
 
     return {
         "schema_version": SCHEMA_VERSION,

@@ -1136,7 +1136,7 @@ def test_resolved_group_origins_snap_up_onto_mfg_grid(
             "id": "r1",
             "devices": [],
             "generator": "res_array",
-            "params": {"width_um": 4.0, "length_um": 0.343},
+            "params": {"width_um": 4.0, "length_um": 0.343, "snap": False},
         },
         {"id": "m1", "devices": [], "generator": "mos_array"},
     ]
@@ -1155,6 +1155,33 @@ def test_resolved_group_origins_snap_up_onto_mfg_grid(
         for value in offset.values():
             assert round(value / 0.005) * 0.005 == pytest.approx(value, abs=1e-9)
     assert any("snapped by" in w and "'m1'" in w for w in response["warnings"])
+
+
+# Issue #4666: a group's `snap`/`short_length` overrides reach `generate()`.
+def test_res_array_group_forwards_snap_and_short_length(
+    tmp_path, gf180mcu_pdk_root, empty_netlist
+):
+    def run(params):
+        groups = [
+            {
+                "id": "r1",
+                "devices": [],
+                "generator": "res_array",
+                "params": {"width_um": 4.0, **params},
+            }
+        ]
+        request = _geometry_request(
+            tmp_path, gf180mcu_pdk_root, empty_netlist, groups, [{"order": ["r1"]}]
+        )
+        request["pdk"] = _gf180mcu_pdk_spec(gf180mcu_pdk_root)
+        return execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert exit_code_for(run({"length_um": 1.343})) == 0
+    # snap=false skips the refuse path (verbatim draw, warning only).
+    assert exit_code_for(run({"length_um": 0.3, "snap": False})) == 0
+    with pytest.raises(LayoutPlanExecuteError, match="minimum mask width"):
+        run({"length_um": 0.3})
+    assert exit_code_for(run({"length_um": 0.3, "short_length": "lengthen"})) == 0
 
 
 def test_on_grid_origins_are_left_unchanged_and_unwarned(
