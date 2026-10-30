@@ -312,6 +312,7 @@
       "modules": [
         "klayout_tools.cli.layout_plan_cmd",
         "klayout_tools.layout_plan",
+        "klayout_tools.layout_plan_check",
         "klayout_tools.layout_plan_execute"
       ]
     },
