@@ -984,3 +984,79 @@ def test_what_if_cli_json(tmp_path, capsys):
     rc = main(["economy", str(gds), "--what-if", moves])
     assert rc == 0
     assert "what_if:" in capsys.readouterr().out
+
+
+# --- attribution (--attribute) ------------------------------------------
+
+
+def _make_attribution_layout(overlap: bool = False, children: bool = True):
+    layout = kdb.Layout()
+    li = layout.layer(1, 0)
+    top = layout.create_cell("TOP")
+    if not children:
+        top.shapes(li).insert(kdb.Box(0, 0, 4000, 2000))
+        return layout
+    sub = layout.create_cell("SUB")
+    sub.shapes(li).insert(kdb.Box(0, 0, 1000, 1000))
+    sub.shapes(li).insert(kdb.Box(0, 0, 500, 500))
+    xs = [0, 1500, 3000] if not overlap else [0, 800, 3000]
+    for x in xs:
+        top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans(kdb.Vector(x, 0))))
+    # Stretch the top bbox so there is a margin above the instances.
+    top.shapes(li).insert(kdb.Box(0, 1900, 10, 2000))
+    return layout
+
+
+def test_attribution_absent_by_default(tmp_path):
+    path = tmp_path / "a.gds"
+    _make_attribution_layout().write(str(path))
+    assert "attribution" not in economy_report(str(path))
+
+
+def test_attribution_sums_and_labels(tmp_path):
+    path = tmp_path / "a.gds"
+    _make_attribution_layout().write(str(path))
+    attr = economy_report(str(path), attribute=True)["attribution"]
+    assert attr["sums_to_total"] is True
+    assert attr["unattributed_um2"] == 0
+    assert attr["instance_overlap_um2"] == 0
+    assert [c["name"] for c in attr["children"]] == ["SUB[0]", "SUB[1]", "SUB[2]"]
+    total = sum(c["bbox_area_um2"] for c in attr["children"]) + sum(
+        g["area_um2"] for g in attr["gap_components"]
+    )
+    assert total == pytest.approx(4.0 * 2.0)
+    positions = {g["position"] for g in attr["gap_components"]}
+    assert any(p.startswith("margin:") for p in positions)
+    assert attr["children"][0]["own_whitespace_um2"] == pytest.approx(0.0)
+
+
+def test_attribution_overlap_not_double_counted(tmp_path):
+    path = tmp_path / "a.gds"
+    _make_attribution_layout(overlap=True).write(str(path))
+    attr = economy_report(str(path), attribute=True)["attribution"]
+    assert attr["instance_overlap_um2"] == pytest.approx(0.2 * 1.0)
+    assert attr["sums_to_total"] is True
+
+
+def test_attribution_no_children(tmp_path):
+    path = tmp_path / "a.gds"
+    _make_attribution_layout(children=False).write(str(path))
+    attr = economy_report(str(path), attribute=True)["attribution"]
+    assert attr["children"] == []
+    assert len(attr["gap_components"]) == 1
+    assert attr["gap_components"][0]["position"] == "margin:bottom+left+right+top"
+    assert attr["sums_to_total"] is True
+
+
+def test_attribution_cli_deterministic(tmp_path, capsys):
+    path = tmp_path / "a.gds"
+    _make_attribution_layout().write(str(path))
+    outs = []
+    for fmt in ("json", "text"):
+        for _ in range(2):
+            assert main(["economy", str(path), "--attribute", "--format", fmt]) == 0
+            outs.append(capsys.readouterr().out)
+    assert outs[2] == outs[3]
+    first = json.loads(outs[0])
+    assert "attribution" in first
+    assert "attribution:" in outs[2]

@@ -14,6 +14,10 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt economy --attribute`** (issue #4660, documented in
+  [`docs/cli/economy.md`](docs/cli/economy.md)): opt-in additive `attribution`
+  block partitioning the top bbox into direct-child instance bboxes and
+  labelled gap components, with `sums_to_total`. No `schema_version` bump.
 - **`klt layout-plan check`** (issue #4649, documented in
   [`docs/cli/layout-plan-check.md`](docs/cli/layout-plan-check.md)): read-only
   verification of a finished layout against its `klt.layout_plan.request/1`

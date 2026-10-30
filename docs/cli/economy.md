@@ -226,6 +226,27 @@ cluster's placed footprint area does not exceed its row's own bounding area
 would need `utilization > 1.0` to describe it is not a genuine row and is
 silently discarded rather than reported as an impossible density).
 
+### Attribution block (`--attribute`)
+
+Opt-in (issue #4660). With `--attribute`, the report gains a top-level
+`attribution` object that partitions the top bbox into direct-child
+instance bboxes and the gaps between them; absent without the flag.
+Array instances contribute one child per element.
+
+| Field | Meaning |
+| ----- | ------- |
+| `children[]` | One entry per direct instance: `name` (`<cell>[<n>]`, ordinal by position), `cell`, `bbox_um`, `bbox_area_um2`, `own_whitespace_um2` (instance bbox area minus the child's flattened drawn area). Sorted by `bbox_area_um2` descending, then name. |
+| `gap_components[]` | Connected pieces of the top bbox not covered by any instance bbox: `position`, `bbox_um`, `area_um2`. Zero-area gaps are dropped. Sorted by area descending. |
+| `unattributed_um2` | `bbox_area - (sum(children) - overlap) - sum(gaps)`; expected `0`. |
+| `instance_overlap_um2` | Area double-covered by overlapping instance bboxes (counted once in the partition). |
+| `top_level_drawn_area_um2` | Drawn area of shapes placed directly in the top cell (not an extra partition term). |
+| `sums_to_total` | `true` when `unattributed_um2` is exactly zero (integer dbu² arithmetic). |
+
+`position` is `margin:<edges>` (edges joined by `+`, order bottom, left,
+right, top) when the gap touches the top bbox boundary; otherwise
+`between:<a>,<b>` (names sorted) when it abuts two or more instances, or
+`left_of|right_of|above|below:<inst>` for one; `interior` if it abuts none.
+
 ### Budget and reference blocks
 
 With `--budget-um2 <area>`, `budget` is added:

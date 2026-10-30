@@ -287,6 +287,15 @@ reports `"unconstrained"` alongside it, and neither command's
 `schema_version` moved. See `docs/cli/place-and-route.md`'s "I/O timing
 constraints ... and `timing_status`" section for the full derivation.
 
+`klt gen res_array` additionally reports `drc_hints.length_snap` (issue #4666;
+additive, absent unless a poly-body `length_um` was changed): `{requested_um,
+realised_um, grid_um, resistance_delta_pct, reasons}`, where `reasons` is a
+subset of `snapped_to_grid` / `lengthened_to_floor` (the latter only with
+`params.short_length="lengthen"`). `realised_um` is the length actually drawn,
+for comparing against the schematic/netlist `L`; `resistance_delta_pct` is
+`(realised / requested - 1) * 100`. `params.snap=false` omits it and keeps the
+#4203 warnings. No `schema_version` bump.
+
 **Disambiguating an overloaded numeric field follows the same rule — add the
 sibling, never retype or redefine the original.** `klt gen`'s
 `drc_hints.min_spacing_um` carries two different quantities depending on the

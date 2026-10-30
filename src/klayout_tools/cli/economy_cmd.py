@@ -23,6 +23,7 @@ def run(args: argparse.Namespace) -> int:
             ),
             area_eff_require_bbox_tightness=args.area_eff_require_bbox_tightness,
             what_if=args.what_if,
+            attribute=args.attribute,
         )
     except EconomyError as exc:
         return emit_error("economy", str(exc), args.format)
@@ -59,6 +60,23 @@ def _print_what_if(what_if: dict | None) -> None:
             f"  broken: {bc['kind']}{label} on {bc['layer']}/{bc['datatype']} "
             f"from {bc['instance']['cell']}#{bc['instance']['index']}"
         )
+
+
+def _print_attribution(attribution: dict | None) -> None:
+    if attribution is None:
+        return
+    print(
+        f"attribution: sums_to_total={attribution['sums_to_total']} "
+        f"unattributed={attribution['unattributed_um2']:.3f} um2 "
+        f"overlap={attribution['instance_overlap_um2']:.3f} um2"
+    )
+    attr_rows: list[tuple[str, ...]] = []
+    for c in attribution["children"]:
+        attr_rows.append(("child", str(c["name"]), f"{c['bbox_area_um2']:.3f}"))
+    for g in attribution["gap_components"]:
+        attr_rows.append(("gap", str(g["position"]), f"{g['area_um2']:.3f}"))
+    render_table(("kind", "name", "area_um2"), attr_rows, left_aligned={0, 1})
+    print()
 
 
 def _print_text(report: dict) -> None:
@@ -146,6 +164,7 @@ def _print_text(report: dict) -> None:
             print(f"  bbox_tightness: {c['status']} (actual={c['actual']:.4f})")
 
     _print_what_if(report.get("what_if"))
+    _print_attribution(report.get("attribution"))
 
     cells = report["cells"]
     if not cells:

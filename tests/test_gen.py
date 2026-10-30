@@ -12272,7 +12272,7 @@ def _gen_res(tmp_path, root, tag, variant="gf180mcuD", **params):
 
 
 def test_res_array_off_mfg_grid_length_warns(tmp_path, both_pdk_root):
-    report = _gen_res(tmp_path, both_pdk_root, "off", length_um=3.343)
+    report = _gen_res(tmp_path, both_pdk_root, "off", length_um=3.343, snap=False)
     (warning,) = _mfg_grid_warnings_of(report)
     assert "params.length_um=3.343um" in warning
     assert "0.005um" in warning
@@ -12298,9 +12298,9 @@ def test_res_array_off_grid_warning_leaves_geometry_unchanged(
 ):
     from klayout_tools import gen_describe
 
-    warned = _gen_res(tmp_path, both_pdk_root, "warned", length_um=3.343)
+    warned = _gen_res(tmp_path, both_pdk_root, "warned", length_um=3.343, snap=False)
     monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
-    silent = _gen_res(tmp_path, both_pdk_root, "silent", length_um=3.343)
+    silent = _gen_res(tmp_path, both_pdk_root, "silent", length_um=3.343, snap=False)
     assert _mfg_grid_warnings_of(warned) and not _mfg_grid_warnings_of(silent)
     assert (tmp_path / "res_warned.gds").read_bytes() == (
         tmp_path / "res_silent.gds"
@@ -12308,7 +12308,7 @@ def test_res_array_off_grid_warning_leaves_geometry_unchanged(
 
 
 def test_res_array_short_length_warns_on_gf180mcu(tmp_path, both_pdk_root):
-    short = _gen_res(tmp_path, both_pdk_root, "short", length_um=0.3)
+    short = _gen_res(tmp_path, both_pdk_root, "short", length_um=0.3, snap=False)
     assert any("minimum mask width" in w for w in short["warnings"])
     long = _gen_res(tmp_path, both_pdk_root, "long", length_um=3.0)
     assert not any("minimum mask width" in w for w in long["warnings"])
@@ -12317,3 +12317,76 @@ def test_res_array_short_length_warns_on_gf180mcu(tmp_path, both_pdk_root):
 def test_res_array_sky130_has_no_short_length_warning(tmp_path, pdk_root):
     report = _gen_res(tmp_path, pdk_root, "sky", variant="sky130A", length_um=0.5)
     assert not any("minimum mask width" in w for w in report["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4666: res_array length_um snap + minimum drawable length
+# --------------------------------------------------------------------------- #
+
+
+def test_res_array_off_grid_length_snaps_and_reports(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "snap", length_um=3.343)
+    snap = report["drc_hints"]["length_snap"]
+    assert snap["requested_um"] == 3.343
+    assert snap["realised_um"] == 3.345
+    assert snap["grid_um"] == 0.005
+    assert snap["resistance_delta_pct"] == pytest.approx(0.0598, abs=1e-3)
+    assert snap["reasons"] == ["snapped_to_grid"]
+    assert _mfg_grid_warnings_of(report) == []
+    assert any("was drawn as 3.345um" in w for w in report["warnings"])
+    _gen_res(tmp_path, both_pdk_root, "ongrid", length_um=3.345)
+    assert (tmp_path / "res_snap.gds").read_bytes() == (
+        tmp_path / "res_ongrid.gds"
+    ).read_bytes()
+
+
+def test_res_array_on_grid_length_has_no_snap_record(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "noop", length_um=3.345)
+    assert "length_snap" not in report["drc_hints"]
+
+
+def test_res_array_snap_false_draws_verbatim(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "verb", length_um=3.343, snap=False)
+    assert "length_snap" not in report["drc_hints"]
+    assert len(_mfg_grid_warnings_of(report)) == 1
+
+
+def test_res_array_snap_rounds_half_up(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "half", length_um=3.3425)
+    assert report["drc_hints"]["length_snap"]["realised_um"] == 3.345
+
+
+def test_res_array_below_floor_refuses_by_default(tmp_path, both_pdk_root):
+    with pytest.raises(GenError, match="minimum mask width"):
+        _gen_res(tmp_path, both_pdk_root, "refuse", length_um=0.3)
+
+
+def test_res_array_below_floor_lengthens_on_opt_in(tmp_path, both_pdk_root):
+    report = _gen_res(
+        tmp_path, both_pdk_root, "lengthen", length_um=0.3, short_length="lengthen"
+    )
+    snap = report["drc_hints"]["length_snap"]
+    assert "lengthened_to_floor" in snap["reasons"]
+    assert snap["realised_um"] > snap["requested_um"]
+    assert snap["resistance_delta_pct"] > 0
+    assert not any("minimum mask width" in w for w in report["warnings"])
+    again = _gen_res(tmp_path, both_pdk_root, "again", length_um=snap["realised_um"])
+    assert "length_snap" not in again["drc_hints"]
+
+
+def test_res_array_invalid_short_length_value(tmp_path, both_pdk_root):
+    with pytest.raises(GenError, match="short_length"):
+        _gen_res(tmp_path, both_pdk_root, "bad", length_um=3.0, short_length="x")
+
+
+def test_res_array_no_ongrid_rule_does_not_snap(tmp_path, both_pdk_root, monkeypatch):
+    from klayout_tools import gen_describe
+
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    report = _gen_res(tmp_path, both_pdk_root, "g0", length_um=3.343)
+    assert "length_snap" not in report["drc_hints"]
+
+
+def test_res_array_metal_level_is_not_snapped(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "met", length_um=3.343, metal_level=1)
+    assert "length_snap" not in report["drc_hints"]
