@@ -4582,6 +4582,31 @@ def _resolve_layout(
     return netlist, layout_spec["netlist"], layout_netlist_path, None, {}, None, []
 
 
+def _quote_includes_for_read(
+    text: str, path: str, form: str
+) -> tuple[str, str, str | None]:
+    """Issue #4605: KLayout's SPICE reader truncates an unquoted `.include`
+    path at a `-`; quote (and absolutize) it, via a temp copy so the caller's
+    file is never modified. Returns ``(text, read_path, tmp_path)``.
+    """
+    from klayout_tools.netlist_normalize import quote_spice_includes
+
+    if form == "gate-level-verilog":
+        return text, path, None
+    quoted = quote_spice_includes(text, os.path.dirname(os.path.abspath(path)))
+    if quoted is text:
+        return text, path, None
+    if form == "subckt-call":
+        return quoted, path, None
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".spice", delete=False, encoding="utf-8"
+    ) as tmp:
+        tmp.write(quoted)
+    return quoted, tmp.name, tmp.name
+
+
 def _read_reference_netlist(
     path: str,
     *,
@@ -4689,7 +4714,6 @@ def _read_reference_netlist(
         NormalizeError,
         convert_reference_netlist,
         detect_subckt_call_devices,
-        quote_spice_includes,
     )
 
     try:
@@ -4703,24 +4727,7 @@ def _read_reference_netlist(
     except OSError as exc:
         raise LvsError(f"could not read reference netlist '{path}': {exc}") from exc
 
-    read_path = path
-    tmp_path: str | None = None
-    # Issue #4605: KLayout's SPICE reader truncates an unquoted `.include`
-    # path at a `-`; quote (and absolutize) it, via a temp copy so the
-    # caller's file is never modified.
-    if form != "gate-level-verilog":
-        quoted = quote_spice_includes(text, os.path.dirname(os.path.abspath(path)))
-        if quoted is not text:
-            text = quoted
-            if form != "subckt-call":
-                import tempfile
-
-                with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".spice", delete=False, encoding="utf-8"
-                ) as tmp:
-                    tmp.write(text)
-                    tmp_path = tmp.name
-                read_path = tmp_path
+    text, read_path, tmp_path = _quote_includes_for_read(text, path, form)
     # Issue #1876: the recovery scan below runs over whichever text is
     # actually handed to `NetlistSpiceReader` -- the original file for the
     # default (already-plain-element) form, or the *converted* text for the
