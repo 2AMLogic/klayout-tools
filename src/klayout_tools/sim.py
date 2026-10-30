@@ -12836,12 +12836,48 @@ def _with_netlist_error_cause(message: str, log_text: str, start: int) -> str:
     ngspice puts the cause (``Undefined parameter [expr]``) on the line after
     the location. Any other message is returned unchanged.
     """
+    if "fatal error in ngspice" in message.lower():
+        return _with_fatal_error_cause(message, log_text)
     if not message.lower().startswith("error in netlist line no."):
         return message
     following = log_text[start:].splitlines()[1:2]
     if following and following[0].strip():
         return f"{message} {following[0].strip()}"
     return message
+
+
+#: A log line that names the cause behind a bare ``fatal error in ngspice``
+#: (issue #4623): a missing model, an undefined parameter, or any ``Error`` /
+#: ``warning`` line.
+_FATAL_CAUSE_LINE_RE = re.compile(
+    r"can't find model|undefined parameter|^\s*(?:error|warning)\b", re.IGNORECASE
+)
+_FATAL_CAUSE_MAX_LINES = 2
+_FATAL_CAUSE_MAX_CHARS = 200
+
+
+def _with_fatal_error_cause(message: str, log_text: str) -> str:
+    """Append the first few cause lines to a bare ``fatal error in ngspice``.
+
+    That line carries no cause; ngspice prints it on other log lines. The
+    result is bounded to ``_FATAL_CAUSE_MAX_LINES`` lines of at most
+    ``_FATAL_CAUSE_MAX_CHARS`` chars each. A log with no cause line leaves the
+    message unchanged.
+    """
+    causes: list[str] = []
+    for line in log_text.splitlines():
+        text = line.strip()
+        if not text or text in causes or "fatal error in ngspice" in text.lower():
+            continue
+        if "simulation interrupted" in text.lower():
+            continue
+        if _FATAL_CAUSE_LINE_RE.search(text):
+            causes.append(text[:_FATAL_CAUSE_MAX_CHARS])
+            if len(causes) == _FATAL_CAUSE_MAX_LINES:
+                break
+    if not causes:
+        return message
+    return f"{message} [cause: {' | '.join(causes)}]"
 
 
 #: Width, in micrometres, above which a single MOS instance's total width

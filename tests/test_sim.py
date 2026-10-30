@@ -3827,6 +3827,28 @@ _PARSE_ABORT_LOG = (
 )
 
 
+def test_bare_fatal_error_message_carries_cause_lines():
+    """Issue #4623: a bare `fatal error in ngspice` gets the log's cause
+    lines, bounded in count and length, wherever they sit relative to it."""
+    log = (
+        "warning, can't find model 'nfet' from line x1\r\n"
+        "Undefined parameter [r_w]\n"
+        "Error: third " + "x" * 500 + "\n"
+        "fatal error in ngspice, exit(1)\n"
+    )
+    (diag,) = sim._classify_diagnostics(log)
+    assert diag["code"] == "ngspice_fatal"
+    assert diag["message"].startswith("fatal error in ngspice, exit(1)")
+    assert "can't find model 'nfet'" in diag["message"]
+    assert "Undefined parameter [r_w]" in diag["message"]
+    assert "third" not in diag["message"]
+
+
+def test_bare_fatal_error_without_cause_is_unchanged():
+    (diag,) = sim._classify_diagnostics("fatal error in ngspice, exit(1)\n")
+    assert diag["message"] == "fatal error in ngspice, exit(1)"
+
+
 def test_corner_deck_parse_abort_gets_one_ngspice_fatal_cause(tmp_path, monkeypatch):
     """Issue #3879: a generic deck abort is classified, quotes the first error
     line verbatim, says no analysis started, and collapses the measurement
