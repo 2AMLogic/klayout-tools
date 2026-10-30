@@ -13,10 +13,9 @@ import type { EmProvenance } from "./types";
  * validated textbook benchmark.
  *
  * Names the connection to the field-solver backend epics this issue's own
- * acceptance criteria require: the MoM epic (#701, parasitic extraction)
- * and the FEM epic (#708) this result previews the intended output of, and
- * the PEX epic (#709) a future canary's post-layout sim would consume this
- * kind of extracted capacitance from.
+ * acceptance criteria require: the MoM epic (#701, shipped as `klt mom`),
+ * the PEX epic (#709, shipped as `klt pex`) and the FEM epic (#708, still
+ * open). Copy updated in issue #4597 once #701 and #709 had closed.
  */
 export function InterconnectCouplingGalleryEntry() {
   const [provenance, setProvenance] = useState<EmProvenance | null>(null);
@@ -28,20 +27,20 @@ export function InterconnectCouplingGalleryEntry() {
     >
       <header>
         <h3 className="font-mono text-[1.05rem] text-orange">
-          On-chip power/ground coupling — a real fleet block
+          On-chip power/ground coupling — a real gallery block
         </h3>
         <p className="mt-1 text-[0.85rem] leading-[1.6] text-fog-dim">
           The real VGND/VPWR <code>met1</code> power-rail pair of a gallery block, extracted
           straight from its committed GDS — not a hand-drawn shape. A DC multi-conductor
           electrostatic FEM solve (geode-fem) computes the self- and mutual/coupling
           capacitance between the two rails, cross-checked against the sky130 open PDK&rsquo;s
-          own published parasitic-capacitance model. This previews the output the MoM (
-          <a href="https://github.com/2AMLogic/klayout-tools/issues/701">#701</a>) and FEM (
-          <a href="https://github.com/2AMLogic/klayout-tools/issues/708">#708</a>) field-solver
-          backend epics intend to produce for any real layout, and the kind of parasitic a
-          future canary&rsquo;s post-layout simulation (
-          <a href="https://github.com/2AMLogic/klayout-tools/issues/709">#709</a>) would consume
-          alongside its netlist.
+          own published parasitic-capacitance model. <code>klt mom</code> now computes this
+          kind of capacitance matrix from a layout and a stackup (
+          <a href="https://github.com/2AMLogic/klayout-tools/issues/701">#701</a>), and{" "}
+          <code>klt pex</code> feeds extracted parasitics back into post-layout simulation (
+          <a href="https://github.com/2AMLogic/klayout-tools/issues/709">#709</a>). A
+          full-field FEM backend for <code>klt</code> is still in progress (
+          <a href="https://github.com/2AMLogic/klayout-tools/issues/708">#708</a>).
         </p>
       </header>
 
