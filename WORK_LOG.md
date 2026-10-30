@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-30
 
+- **PR #4665**: feat(synthesize): add constraints.abc_constr to enable abc -constr for any cell library
+- **Issue #4662** (closed): synthesize: no way to enable buffering/sizing for a library without a built-in ABC constraint entry; --restructure-timing unavailable from the published package
+- **PR #4654**: feat: add klt layout-plan check for plan compliance of finished layouts
+- **Issue #4649** (closed): Check: verify a finished layout against its klt.layout_plan.request/1 document and feed klt signoff
 - **PR #4656**: feat: add --op-lint-corner all per-corner saturation margin table
 - **Issue #4650** (closed): Check: per-corner saturation-margin table from klt sim --op-lint
 - **PR #4657**: kb: add telescopic OTA entry with sky130 netlist and measured figures
