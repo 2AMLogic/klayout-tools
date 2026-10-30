@@ -70,7 +70,7 @@ Rules (each one is a documented contract, tested in
 from __future__ import annotations
 
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 
 from ._paths import fold_spice_continuations
@@ -101,6 +101,9 @@ class FlattenResult:
     inlined_subckts: list[str] = field(default_factory=list)
     #: `X` targets with no local definition, emitted as leaf cards, sorted.
     external_subckts: list[str] = field(default_factory=list)
+    #: Pins of the `.subckt <top>` synthesized around a fragment's file-level
+    #: device cards (``wrap_pins``), else ``None``.
+    wrapper_pins: list[str] | None = None
 
 
 _GROUND_NODES = frozenset({"0", "gnd"})
@@ -740,6 +743,7 @@ def flatten_spice(
     top: str | None = None,
     leaf_subckts: Collection[str] | None = None,
     banner: str | None = None,
+    wrap_pins: Sequence[str] | None = None,
 ) -> FlattenResult:
     """Inline every locally defined subcircuit of ``text`` (see the module
     docstring for the full rule set). ``top`` names a subcircuit to keep as
@@ -747,6 +751,14 @@ def flatten_spice(
     ``leaf_subckts``, when given, turns an `X` target that is neither
     defined locally nor in that set into a hard ``undefined_subckt`` error.
     ``banner`` is emitted as a leading ``*`` comment line.
+
+    ``wrap_pins`` (with ``top``) handles a *fragment*: when the text defines
+    no `.subckt <top>`, the file-level element cards plus `.model`/`.param`
+    cards are moved into a synthesized ``.subckt <top> <wrap_pins> ...
+    .ends`` (other file-level cards, e.g. `.include`/`.lib`, stay outside).
+    A wrapper pin that no element card references raises
+    ``wrapper_pin_unconnected``. A text that already defines `<top>` is
+    emitted exactly as without ``wrap_pins``.
 
     Raises :class:`SpiceFlattenError` rather than ever returning a partial
     flatten.
@@ -763,13 +775,33 @@ def flatten_spice(
 
     # File-level cards outside any `.subckt` are one pseudo-root, emitted in
     # place; each kept `.subckt` is emitted flattened where it was defined.
+    wrap = (
+        wrap_pins is not None and top is not None and top.lower() not in parsed.subckts
+    )
+    inside: list[str] = []
+
+    def emit_file_level(cards: list[str]) -> list[str]:
+        emitted = flattener.emit_root(None, cards)
+        if not wrap:
+            return emitted
+        outside: list[str] = []
+        for card in emitted:
+            head = card.split(None, 1)[0].lower() if card.split() else ""
+            if head and (
+                not head.startswith((".", "*")) or head in (".model", ".param")
+            ):
+                inside.append(card)
+            else:
+                outside.append(card)
+        return outside
+
     file_level: list[str] = []
     for kind, value in parsed.items:
         if kind == "line":
             file_level.append(value)
             continue
         if file_level:
-            lines += flattener.emit_root(None, file_level)
+            lines += emit_file_level(file_level)
             file_level = []
         if value not in keep:
             continue
@@ -779,7 +811,28 @@ def flatten_spice(
         lines += flattener.emit_root(value, subckt.body)
         lines.append(f".ends {subckt.name}")
     if file_level:
-        lines += flattener.emit_root(None, file_level)
+        lines += emit_file_level(file_level)
+
+    wrapper_pins: list[str] | None = None
+    if wrap and wrap_pins is not None and top is not None:
+        used = {
+            token.lower()
+            for card in inside
+            if not card.startswith(".")
+            for token in _split_tokens(card)[1:]
+        }
+        missing = [pin for pin in wrap_pins if pin.lower() not in used]
+        if missing:
+            raise SpiceFlattenError(
+                f"fragment has no net named {', '.join(missing)} for the "
+                f"`.subckt {top}` wrapper pins ({' '.join(wrap_pins)})",
+                code="wrapper_pin_unconnected",
+            )
+        wrapper_pins = list(wrap_pins)
+        lines.append(f".subckt {top} {' '.join(wrapper_pins)}")
+        lines += inside
+        lines.append(f".ends {top}")
+        roots.append(top)
 
     return FlattenResult(
         text="\n".join(lines) + "\n",
@@ -787,4 +840,5 @@ def flatten_spice(
         inlined_instances=flattener.inlined_instances,
         inlined_subckts=sorted(flattener.inlined, key=str.lower),
         external_subckts=sorted(flattener.external.values(), key=str.lower),
+        wrapper_pins=wrapper_pins,
     )
