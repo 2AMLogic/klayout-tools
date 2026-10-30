@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-30
 
+- **PR #4631**: fix: expand reference includes in klt pex model_mismatch tally
+- **PR #4628**: feat(pex): wrap fragment schematic DUTs in .subckt <top> under --flatten-schematic
+- **Issue #4630** (closed): Friction: klt pex model_mismatch reference tally does not follow .include, so a wrapper-form reference netlist reports an empty reference side
+- **Issue #4625** (closed): klt pex: unwrapped or flattened DUT fragment gives all-rows-errored instead of an auto-wrapper
 - **PR #4627**: fix(sim): add cause lines to bare ngspice fatal-error diagnostics
 - **PR #4626**: feat(pex): add --hosts and --resume batch sharding flags
 - **PR #4622**: test(place-and-route): live OpenROAD check of ordered pin constraints with range_um
