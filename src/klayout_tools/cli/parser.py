@@ -3760,6 +3760,32 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--hosts",
+        dest="hosts",
+        type=int,
+        default=None,
+        help=(
+            "backend `batch`: shard each side's expanded corner/Monte-Carlo "
+            "unit list across this many hosts (applied to the schematic and "
+            "the extracted `klt sim` call of every testbench separately); "
+            "each leg records its shard job ids in its own "
+            "`batch-shards.json` so `--resume` can re-attach. Same semantics "
+            "as `klt sim --hosts` (default: each request's `remote.hosts`)."
+        ),
+    )
+    pex_parser.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        default=None,
+        help=(
+            "re-run after an interrupted batch run: every `klt sim` call "
+            "re-attaches to the shard jobs recorded in its own leg "
+            "directory instead of re-submitting. Same semantics as `klt sim "
+            "--resume`; there is no `--attach` (see docs/cli/pex.md)."
+        ),
+    )
+    pex_parser.add_argument(
         "--deck-option",
         dest="deck_options",
         action="append",

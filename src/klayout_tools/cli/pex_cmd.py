@@ -86,6 +86,8 @@ def run(args: argparse.Namespace) -> int:
             backend=args.backend,
             max_units_per_job=args.max_units_per_job,
             max_concurrent_jobs=args.max_concurrent_jobs,
+            hosts=args.hosts,
+            resume=args.resume,
             # `--deck-option` (issue #1558): selects a caller-visible flavour
             # of a shared-geometry device family (e.g. gf180mcu's
             # `poly_res`/`mim_cap`), passed straight through to `klt extract
