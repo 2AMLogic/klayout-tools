@@ -7,10 +7,9 @@
   "scripts": {
     "copy-renders": "node scripts/copy-renders.mjs",
     "stage-models": "node scripts/stage-models.mjs",
-    "stage-em-data": "node scripts/stage-em-data.mjs",
-    "predev": "npm run copy-renders && npm run stage-models && npm run stage-em-data",
+    "predev": "npm run copy-renders && npm run stage-models",
     "dev": "vite",
-    "prebuild": "npm run copy-renders && npm run stage-models && npm run stage-em-data",
+    "prebuild": "npm run copy-renders && npm run stage-models",
     "build": "tsc -b && node scripts/prerender.mjs",
     "preview": "vite preview",
     "check": "tsc -b",
