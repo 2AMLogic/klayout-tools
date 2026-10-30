@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-30
 
+- **PR #4667**: feat: snap res_array length_um to the mfg grid and enforce a minimum length
+- **Issue #4666** (closed): res_array: snap length_um to the manufacturing grid and enforce a minimum drawable length (beyond #4203's warning)
+- **PR #4663**: feat(economy): add --attribute bbox area attribution
+- **Issue #4660** (closed): klt economy: no partition of the top bbox into child-instance, inter-instance gap and margin area
 - **PR #4665**: feat(synthesize): add constraints.abc_constr to enable abc -constr for any cell library
 - **Issue #4662** (closed): synthesize: no way to enable buffering/sizing for a library without a built-in ABC constraint entry; --restructure-timing unavailable from the published package
 - **PR #4654**: feat: add klt layout-plan check for plan compliance of finished layouts
