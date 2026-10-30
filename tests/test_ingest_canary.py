@@ -854,15 +854,16 @@ def test_repo_and_manifest_are_exclusive(tmp_path):
         ic.main([])
 
 
-def test_shipped_manifest_is_valid_and_lists_ingested_canaries():
+def test_shipped_manifest_is_valid_and_forge_derived():
     entries = ic.load_manifest(
         Path(__file__).parent.parent / "blocks" / "canaries.json"
     )
-    assert sorted(e["slug"] for e in entries) == [
-        "gf180-bandgap",
-        "sky130-bandgap",
-        "sky130-ota-5t",
-    ]
+    slugs = [e["slug"] for e in entries]
+    assert {"gf180-bandgap", "sky130-bandgap"} <= set(slugs)
+    assert slugs == sorted(slugs)
+    for e in entries:
+        assert e["repo"] == f"2AMLogic/{e['slug']}"
+        assert e["slug"].startswith(tuple(ic.CANARY_PDK_PREFIXES))
 
 
 def test_rewrite_over_unchanged_content_keeps_file(tmp_path, monkeypatch):
@@ -880,3 +881,52 @@ def test_rewrite_over_unchanged_content_keeps_file(tmp_path, monkeypatch):
     before = (blocks / "x/output/layout.json").read_text()
     ic.ingest("2AMLogic/x", blocks_dir=blocks, cache_dir=tmp_path / "c")
     assert (blocks / "x/output/layout.json").read_text() == before
+
+
+# --------------------------------------------------------------------------- #
+# Manifest drift check / sync (issue #4642)
+# --------------------------------------------------------------------------- #
+
+
+def test_check_manifest_clean(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ic, "list_public_repos", lambda *a: ["sky130-a", "docs"])
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a")])
+    assert ic.main(["--check-manifest", "--manifest", str(manifest)]) == 0
+
+
+def test_check_manifest_missing_public_canary(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ic, "list_public_repos", lambda *a: ["sky130-a", "sky130-b"])
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a")])
+    assert ic.main(["--check-manifest", "--manifest", str(manifest)]) == 1
+    assert "2AMLogic/sky130-b is not in the manifest" in capsys.readouterr().err
+
+
+def test_check_manifest_listed_repo_no_longer_public(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ic, "list_public_repos", lambda *a: ["sky130-a"])
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a"), _entry("sky130-b")])
+    assert ic.main(["--check-manifest", "--manifest", str(manifest)]) == 1
+    assert "2AMLogic/sky130-b is no longer public" in capsys.readouterr().err
+
+
+def test_check_manifest_forge_failure_is_not_a_pass(tmp_path, monkeypatch):
+    def boom(*a):
+        raise ic.IngestError("gh failed")
+
+    monkeypatch.setattr(ic, "list_public_repos", boom)
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a")])
+    assert ic.main(["--check-manifest", "--manifest", str(manifest)]) == 1
+
+
+def test_sync_manifest_keeps_pins_and_maps_pdk(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        ic,
+        "list_public_repos",
+        lambda *a: ["sky130-a", "asap7-x", "gf180-y", "sg13cmos5l-z", "other"],
+    )
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a", "abc")])
+    assert ic.main(["--sync-manifest", "--manifest", str(manifest)]) == 0
+    got = {e["slug"]: e for e in json.loads(manifest.read_text())}
+    assert set(got) == {"sky130-a", "asap7-x", "gf180-y", "sg13cmos5l-z"}
+    assert got["sky130-a"]["ref"] == "abc"
+    assert got["gf180-y"]["pdk"] == "gf180mcu"
+    assert got["asap7-x"]["pdk"] is None

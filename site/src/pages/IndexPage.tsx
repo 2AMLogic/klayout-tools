@@ -1,4 +1,13 @@
+import { useState } from "react";
 import type { Layout } from "@/data/types";
+import {
+  filterLayouts,
+  isCanary,
+  pdksIn,
+  statusGroup,
+  type PdkFilter,
+  type StatusFilter,
+} from "@/lib/gallery";
 import { LayoutCard } from "@/components/LayoutCard";
 import { EmGallerySection } from "@/components/em";
 
@@ -27,7 +36,26 @@ export interface IndexPageProps {
 }
 
 export function IndexPage({ layouts }: IndexPageProps) {
-  const withData = layouts.filter((l) => l.status !== "no_artifacts").length;
+  const [pdk, setPdk] = useState<PdkFilter>("all");
+  const [status, setStatus] = useState<StatusFilter>("all");
+  // Canary blocks lead the gallery; the standard-cell test corpus is a footnote.
+  const canaries = layouts.filter(isCanary);
+  const corpus = layouts.filter((l) => !isCanary(l));
+  const withData = canaries.filter((l) => l.status !== "no_artifacts").length;
+  const shown = filterLayouts(canaries, pdk, status);
+  const pdks = pdksIn(canaries);
+  const statuses = (
+    [
+      ["layout", "Layout"],
+      ["partial", "Partial"],
+      ["in-design", "In design"],
+      ["no-artifacts", "No artifacts"],
+    ] as const
+  ).filter(([key]) => canaries.some((l) => statusGroup(l) === key));
+  const chip = (active: boolean) =>
+    `rounded-full border px-[0.7rem] py-[0.1rem] text-[0.8rem] ${
+      active ? "border-orange text-orange" : "border-border text-fog-dim"
+    }`;
 
   return (
     <main className="mx-auto max-w-[72rem] flex-1 px-6 py-12">
@@ -90,9 +118,41 @@ export function IndexPage({ layouts }: IndexPageProps) {
         <code>klt layout-metrics</code> output.
       </p>
       <p className="text-[0.85rem] text-fog-dim">
-        {layouts.length} block{layouts.length === 1 ? "" : "s"}
+        {canaries.length} canary block{canaries.length === 1 ? "" : "s"}
         {withData > 0 && ` · ${withData} with generated artifacts`}
+        {shown.length !== canaries.length && ` · showing ${shown.length}`}
       </p>
+
+      {canaries.length > 0 && (
+        <div className="mt-3 flex flex-col gap-2" aria-label="Gallery filters">
+          <div role="group" aria-label="Filter by PDK" className="flex flex-wrap gap-2">
+            {(["all", ...pdks] as const).map((p) => (
+              <button
+                key={p}
+                type="button"
+                aria-pressed={pdk === p}
+                className={chip(pdk === p)}
+                onClick={() => setPdk(p)}
+              >
+                {p === "all" ? "All PDKs" : p}
+              </button>
+            ))}
+          </div>
+          <div role="group" aria-label="Filter by status" className="flex flex-wrap gap-2">
+            {([["all", "Any status"], ...statuses] as const).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                aria-pressed={status === key}
+                className={chip(status === key)}
+                onClick={() => setStatus(key)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {layouts.length === 0 && (
         <p className="my-[1.1rem] max-w-[44rem] leading-[1.7] text-fog-dim">
@@ -101,8 +161,12 @@ export function IndexPage({ layouts }: IndexPageProps) {
         </p>
       )}
 
+      {canaries.length > 0 && shown.length === 0 && (
+        <p className="my-[1.1rem] text-fog-dim">No blocks match these filters.</p>
+      )}
+
       <ul role="list" className="mt-5 grid list-none grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-5 p-0 max-[480px]:grid-cols-1">
-        {layouts.map((layout) => (
+        {shown.map((layout) => (
           <li key={layout.slug} className="flex">
             <div className="w-full">
               <LayoutCard layout={layout} />
@@ -110,6 +174,23 @@ export function IndexPage({ layouts }: IndexPageProps) {
           </li>
         ))}
       </ul>
+
+      {corpus.length > 0 && (
+        <section aria-label="Test corpus" className="mt-10">
+          <h3 className="font-mono text-[1rem] text-fog-dim">Test corpus</h3>
+          <p className="my-2 max-w-[44rem] text-[0.85rem] leading-[1.7] text-fog-dim">
+            Standard cells from the <code>tests/corpus</code> demo set — the
+            loader's test fixtures, not 2AM designs.
+          </p>
+          <ul role="list" className="flex list-none flex-wrap gap-x-4 gap-y-1 p-0 text-[0.85rem]">
+            {corpus.map((l) => (
+              <li key={l.slug}>
+                <a href={`/${l.slug}/`}>{l.name}</a>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <EmGallerySection />
     </main>
