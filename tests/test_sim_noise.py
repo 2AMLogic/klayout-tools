@@ -88,7 +88,7 @@ def test_noise_is_refused_with_analysis_steps():
     from klayout_tools import sim_steps
 
     with pytest.raises(sim.SimError, match="analysis_steps"):
-        sim_steps._refuse_noise(_spec(at_hz=1e3))
+        sim_steps._refuse_unsupported(_spec(at_hz=1e3))
 
 
 def test_suffixed_sweep_args_are_parsed():
