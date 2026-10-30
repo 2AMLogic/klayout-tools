@@ -2195,6 +2195,35 @@ def defined_subckt_names(text: str) -> set[str]:
     return defined
 
 
+_INCLUDE_LINE_RE = re.compile(r"^(\s*\.(?:include|inc)\s+)(\S.*?)\s*$", re.IGNORECASE)
+
+
+def quote_spice_includes(text: str, base_dir: str) -> str:
+    """Single-quote the path of every unquoted ``.include``/``.inc`` line.
+
+    KLayout's SPICE reader parses an unquoted include path as an expression, so
+    a ``-`` in any component truncates it (``/tmp/a-b/c.spice`` -> ``/tmp//a``).
+    Relative paths are joined to ``base_dir`` (the reference file's directory)
+    so the rewritten text can be read from a temp file elsewhere. Already-
+    quoted lines are left untouched; returns ``text`` itself when unchanged.
+    """
+    import os
+
+    changed = False
+    out: list[str] = []
+    for line in text.splitlines(keepends=True):
+        stripped = line.rstrip("\r\n")
+        ending = line[len(stripped) :]
+        match = _INCLUDE_LINE_RE.match(stripped)
+        if match and match.group(2)[0] not in "'\"":
+            target = os.path.normpath(os.path.join(base_dir, match.group(2)))
+            if "'" not in target:
+                line = f"{match.group(1)}'{target}'{ending}"
+                changed = True
+        out.append(line)
+    return "".join(out) if changed else text
+
+
 def detect_subckt_call_devices(text: str) -> list[str]:
     """Return the curated PDK device subcircuit names an ``X`` card in ``text``
     instantiates *without* a matching ``.subckt`` definition in the same file.
