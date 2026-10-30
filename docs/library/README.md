@@ -272,3 +272,15 @@ Survey: [`docs/design/sico-survey.md`](../design/sico-survey.md).
 | Resource | Provenance & licensing | Informs | Landing spot(s) |
 | --- | --- | --- | --- |
 | [opencad-abu/SiCo](https://github.com/opencad-abu/SiCo) — "Silicon Copilot", a Codex-CLI-based assistant for Cadence Virtuoso, with a pure-Python DSPF analyzer and a static code-governance gate | Public GitHub repo, read directly (shallow clone at `3d38bb5`). **GPL-3.0**: this repo is MIT, so findings are ideas only, re-implemented clean-room, and no code was ported. Its design-agent packages (`cadai`, `aivw`) are unpublished, so no analog design content was available. | Parasitic RC network analysis (`klt pex`/`extract`), CI governance for AI-written code, DRC loop speed, LEF output checks, concurrent agent runs | **No landing spot yet.** Follow-ups filed: [#2764](https://github.com/2AMLogic/klayout-tools/issues/2764), [#2765](https://github.com/2AMLogic/klayout-tools/issues/2765), [#2766](https://github.com/2AMLogic/klayout-tools/issues/2766), [#2767](https://github.com/2AMLogic/klayout-tools/issues/2767), [#2768](https://github.com/2AMLogic/klayout-tools/issues/2768), [#2769](https://github.com/2AMLogic/klayout-tools/issues/2769), [#2770](https://github.com/2AMLogic/klayout-tools/issues/2770). |
+
+### 4.13 OPERA — expert-taught gm/ID sizing and layout-generator agent flow
+
+Survey: [`docs/design/opera-expert-taught-agent-survey.md`](../design/opera-expert-taught-agent-survey.md)
+([#4644](https://github.com/2AMLogic/klayout-tools/issues/4644); companion to
+the [#4596](https://github.com/2AMLogic/klayout-tools/issues/4596) survey,
+[`verified-design-library-survey.md`](../design/verified-design-library-survey.md)).
+
+| Resource | Provenance & licensing | Informs | Landing spot(s) |
+| --- | --- | --- | --- |
+| Saxena, Mandal — "OPERA: OPamp Design by an Expert-Taught Reasoning Agent, from Specifications to Layout," [arXiv:2610.39395](https://arxiv.org/abs/2610.39395), 2026-10-29 | Public preprint, read from the arXiv HTML rendering on 2026-10-30 via a summarizing fetch (the layout-intent schema and Tian bench detail were not stated in what was fetched). Ideas only, own words. | Analog sizing procedure, layout-plan compliance, per-corner saturation margin | **No landing spot yet.** Follow-ups filed: [#4646](https://github.com/2AMLogic/klayout-tools/issues/4646), [#4647](https://github.com/2AMLogic/klayout-tools/issues/4647), [#4648](https://github.com/2AMLogic/klayout-tools/issues/4648), [#4649](https://github.com/2AMLogic/klayout-tools/issues/4649), [#4650](https://github.com/2AMLogic/klayout-tools/issues/4650). |
+| [AMPICLab/AMPICBench](https://github.com/AMPICLab/AMPICBench) — OPERA's released benchmark netlists and testbenches | **CC BY-NC 4.0**, read from the repo's `LICENSE` file on 2026-10-30. Incompatible with this MIT repo: not vendored, not adapted. | Benchmarking (#1719-style), verified-design records (#4596 option b) | **doc** — declined as a dependency, kept as an external pointer: survey §5. |
