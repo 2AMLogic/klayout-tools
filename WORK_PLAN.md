@@ -7,8 +7,9 @@ Current work from GitHub labels. Long-term direction lives in [ROADMAP.md](ROADM
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#4566**: feat(blocks): add canary manifest, --manifest ingest mode and weekly refresh PR
 - **#4606**: chore(loom): resync installed Loom to v0.19.1236
+- **#4645**: refactor(site): remove geode-fem Solver Validation and Field Data presentation
+- **#4652**: feat: forge-derived canary manifest, drift check and PDK/status gallery filters
 
 ## Very Important
 
@@ -46,22 +47,25 @@ Issues currently being built (`loom:building`).
 
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
-- **#4565**: site: present the public chip design work on klayout-tools.org
+- **#4641**: site: drop the geode-fem solver results from klayout-tools.org (Solver Validation strip, Field Data panels)
+- **#4642**: site: present every public canary block on klayout-tools.org, not three (fill blocks/canaries.json from the forge)
+- **#4661**: klt economy: no what-if mode to evaluate moved or re-shaped instances without regenerating the layout
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
-- **#4600**: site: refresh the klayout-tools.org landing page, generated from the CLI registry
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#4566**: feat(blocks): add canary manifest, --manifest ingest mode and weekly refresh PR
 - **#4606**: chore(loom): resync installed Loom to v0.19.1236
+- **#4645**: refactor(site): remove geode-fem Solver Validation and Field Data presentation
+- **#4652**: feat: forge-derived canary manifest, drift check and PDK/status gallery filters
+- **#4664**: feat: add --what-if floorplan estimate to klt economy
 
 ## Proposed
 
@@ -103,7 +107,9 @@ Issues carrying `loom:curated`.
 - **#4440**: Friction: klt's OpenROAD steps need Docker, which fleet workers can't use; no fleet executor for OpenROAD regeneration *(curated)*
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
 - **#4508**: ASAP7: trim protruding VIA_* M1 pad tips to clear M1.S.2-5 (follow-up to #4495) *(curated)*
-- **#4565**: site: present the public chip design work on klayout-tools.org *(curated)*
+- **#4641**: site: drop the geode-fem solver results from klayout-tools.org (Solver Validation strip, Field Data panels) *(curated)*
+- **#4642**: site: present every public canary block on klayout-tools.org, not three (fill blocks/canaries.json from the forge) *(curated)*
+- **#4661**: klt economy: no what-if mode to evaluate moved or re-shaped instances without regenerating the layout *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -125,14 +131,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 2 |
+| Operator merge-risk holds | 3 |
 | Very important | 1 |
 | Important | 1 |
 | Ready (`loom:issue`) | 13 |
-| In Progress (`loom:building`) | 3 |
-| PRs awaiting review | 3 |
-| Approved PRs awaiting merge | 2 |
-| Curated | 37 |
+| In Progress (`loom:building`) | 5 |
+| PRs awaiting review | 2 |
+| Approved PRs awaiting merge | 4 |
+| Curated | 39 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
