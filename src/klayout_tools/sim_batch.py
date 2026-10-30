@@ -5448,15 +5448,15 @@ class _BatchFleetRun:
                     "(its units differ from the submitted ones)",
                     code=BATCH_SHARD_MANIFEST_CODE,
                 )
-            result = self._run_job(
+            attached = self._run_job(
                 shard_points,
                 str(prior["job_id"]),
                 attach=True,
                 index=index,
                 launch_if_unlaunched=prior.get("state") == "submitted",
             )
-            _mark_collected(manifest, index, result)
-            return _mark_resumed(result, True)
+            _mark_collected(manifest, index, attached)
+            return _mark_resumed(attached, True)
         if prior is not None and prior["units_sha256"] == digest:
             result = _try_reattach_shard(
                 lambda: self._run_job(
