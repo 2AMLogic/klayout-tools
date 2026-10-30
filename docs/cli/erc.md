@@ -2398,6 +2398,28 @@ spec file takes an optional top-level `antenna_limits` array.
   skipped with `missing_antenna_pdk`. With `--findings-only` the antenna
   accumulation is still skipped; `antenna_limits` is accepted and ignored.
 
+### ASAP7: `erc.floating_gate` and `erc.unconnected_net` are not meaningful yet (issue #4610)
+
+Measured on a routed two-`INVx1` block (`tests/test_asap7_routed_block.py`)
+with a stackup of `7/0` (gate), `16/0` (LIG), `19/0` (M1), `20/0` (M2) and
+vias `18/0` (V0), `21/0` (V1):
+
+- A spec can only join layers through a `vias[]` layer, and ASAP7 lands LIG on
+  the gate by direct overlap, so every gate poly reads `erc.floating_gate`
+  (6 findings for two inverters, dummy poly included). That is a limit of the
+  spec model, not a layout defect.
+- Declaring the LIG layer itself as a gate-to-LIG "via" clears the finding but
+  the spec cannot subtract the gate-cut (`10/0`): the dummy poly bridges the
+  LIG supply rails, and all gates collapse to one net carrying the supply and
+  signal names.
+- `erc.unconnected_net` counts labelled islands, so it is only as good as the
+  `<metal>/251` text in the stream; a stream with no such text resolves zero
+  islands.
+
+Until the spec can model the gate cut and direct LIG-on-gate contact, do not
+read these two rules on ASAP7 as a layout verdict; use `klt lvs` for
+connectivity.
+
 ## Antenna-violation fix guidance (Phase 3, issue #908)
 
 Every `levels[]` entry with `verdict: "violate"` gains a `remedy` object
