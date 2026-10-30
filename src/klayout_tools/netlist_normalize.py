@@ -2067,6 +2067,15 @@ def _deck_plain_resistor_classes(deck: str | None) -> dict[str, str]:
     }
 
 
+def _is_r_value_token(token: str) -> bool:
+    """Whether ``token`` is an ``R`` card's value (a SPICE number or a
+    ``{expr}``/``'expr'`` expression) rather than a third terminal. The bare
+    ``0`` stays a node name: it is ground, a plausible bulk terminal."""
+    if token == "0":
+        return False
+    return token[:1] in "{'" or spice_number.parse(token) is not None
+
+
 def _convert_plain_r_card(
     line: str,
     resistor_classes: dict[str, str],
@@ -2083,6 +2092,9 @@ def _convert_plain_r_card(
     positional, params = _split_params(tokens)
     # name + 2 or 3 terminals + model
     if len(positional) not in (4, 5):
+        return line
+    if len(positional) == 5 and _is_r_value_token(positional[3]):
+        # `R<name> n1 n2 <value> <model>`: a valued card, left byte-identical
         return line
     device_class = resistor_classes.get(positional[-1].lower())
     if device_class is None:

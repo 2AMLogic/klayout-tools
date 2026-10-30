@@ -36,6 +36,15 @@ def test_valued_card_unchanged():
     assert convert_reference_netlist(text, deck="gf180mcu").text == text
 
 
+def test_valued_card_with_model_unchanged():
+    for text in (
+        "R1 a b 1k ppolyf_u_3k W=1u L=5u\n",
+        "R2 B C 60000 ppolyf_u_3k L=24.1U W=1U\n",
+        "R3 a b {rval} ppolyf_u_3k W=1u L=5u\n",
+    ):
+        assert convert_reference_netlist(text, deck="gf180mcu").text == text
+
+
 def test_unknown_model_unchanged():
     text = "R1 a b c mymodel W=1u L=5u\n"
     assert convert_reference_netlist(text, deck="gf180mcu").text == text
