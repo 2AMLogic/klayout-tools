@@ -587,6 +587,7 @@ def economy_report(
     area_eff_min_utilization: float | None = None,
     area_eff_max_empty_region_fraction: float | None = None,
     area_eff_require_bbox_tightness: bool = False,
+    what_if: str | None = None,
 ) -> dict[str, Any]:
     """Compute the layout-economy report for one top cell of a GDSII/OASIS
     stream.
@@ -612,6 +613,13 @@ def economy_report(
     ``False`` is simply not checked; the ``area_eff`` block is omitted
     entirely when none of them are given (same optional-block convention as
     ``budget``/``reference``).
+
+    ``what_if`` is the path to a ``moves.json`` (issue #4661; schema in
+    :mod:`klayout_tools.economy_whatif`): its instance translations and cell
+    reshapes are applied to the in-memory copy of the layout before
+    measuring, and the report gains an additive ``what_if`` block. It is an
+    area/overlap estimate only -- no file is written, no DRC runs, and the
+    block's ``legality`` is always ``"not_checked"``.
     """
     if grid_cols <= 0 or grid_rows <= 0:
         raise EconomyError(f"grid must be positive, got {grid_cols}x{grid_rows}")
@@ -628,6 +636,20 @@ def economy_report(
 
     top_cell = resolve_top_cell(layout, top, EconomyError)
     dbu = layout.dbu
+
+    what_if_block: dict[str, Any] | None = None
+    if what_if is not None:
+        # Edits land on the in-memory copy `load_layout` just read; nothing is
+        # ever written back (issue #4661).
+        from .economy_whatif import apply_what_if, load_what_if_spec
+
+        what_if_block = apply_what_if(
+            kdb,
+            layout,
+            top_cell,
+            load_what_if_spec(what_if, EconomyError),
+            EconomyError,
+        )
 
     bbox = top_cell.bbox()
     if bbox.empty():
@@ -729,6 +751,9 @@ def economy_report(
     )
     if area_eff is not None:
         report["area_eff"] = area_eff
+
+    if what_if_block is not None:
+        report["what_if"] = what_if_block
 
     report["provenance"] = build_provenance(input_path=path)
 
