@@ -6516,6 +6516,15 @@ def _add_economy_parser(subparsers: argparse._SubParsersAction) -> None:
             "'bbox_tightness' PASS/FAIL check"
         ),
     )
+    economy_parser.add_argument(
+        "--attribute",
+        action="store_true",
+        help=(
+            "add an 'attribution' block partitioning the top cell's bbox "
+            "into direct child instance bboxes and labelled gap components "
+            "(issue #4660)"
+        ),
+    )
     _add_format_arg(economy_parser)
     economy_parser.set_defaults(func=economy_cmd.run)
 
