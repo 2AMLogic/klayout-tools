@@ -1192,6 +1192,60 @@ def ingest_manifest(
     return results
 
 
+def _run_manifest_maintenance(args: argparse.Namespace) -> int:
+    """Handle --sync-manifest / --check-manifest (no ingest)."""
+    manifest_path = args.manifest or DEFAULT_MANIFEST
+    try:
+        public = list_public_repos()
+        if args.sync_manifest:
+            synced = sync_manifest(load_manifest(manifest_path), public)
+            manifest_path.write_text(
+                "[\n" + ",\n".join("  " + json.dumps(e) for e in synced) + "\n]\n"
+            )
+            print(f"ingest-canary: wrote {len(synced)} entries to {manifest_path}")
+        if args.check_manifest:
+            problems = check_manifest(load_manifest(manifest_path), public)
+            for problem in problems:
+                print(f"ingest-canary: {problem}", file=sys.stderr)
+            if problems:
+                return 1
+            print(f"ingest-canary: manifest {manifest_path} matches the forge")
+    except IngestError as exc:
+        print(f"ingest-canary: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_manifest_ingest(args: argparse.Namespace) -> int:
+    """Ingest every entry of --manifest; a failing entry does not stop the rest."""
+    try:
+        entries = load_manifest(args.manifest)
+    except IngestError as exc:
+        print(f"ingest-canary: {exc}", file=sys.stderr)
+        return 1
+    failed = 0
+    for entry, layout, error in ingest_manifest(
+        entries,
+        blocks_dir=args.blocks_dir,
+        cache_dir=args.cache_dir,
+        dry_run=args.dry_run,
+    ):
+        if error is not None:
+            failed += 1
+            print(f"{entry['slug']}: FAILED: {error}", file=sys.stderr)
+        else:
+            assert layout is not None
+            verb = "would write" if args.dry_run else "ok"
+            print(f"{entry['slug']}: {verb} (status={layout['status']!r})")
+    if failed:
+        print(
+            f"ingest-canary: {failed}/{len(entries)} entries failed",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0] if __doc__ else ""
@@ -1260,55 +1314,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.check_manifest or args.sync_manifest:
         if args.repo:
             parser.error("--check-manifest/--sync-manifest take no --repo")
-        manifest_path = args.manifest or DEFAULT_MANIFEST
-        try:
-            public = list_public_repos()
-            if args.sync_manifest:
-                synced = sync_manifest(load_manifest(manifest_path), public)
-                manifest_path.write_text(
-                    "[\n" + ",\n".join("  " + json.dumps(e) for e in synced) + "\n]\n"
-                )
-                print(f"ingest-canary: wrote {len(synced)} entries to {manifest_path}")
-            if args.check_manifest:
-                problems = check_manifest(load_manifest(manifest_path), public)
-                for problem in problems:
-                    print(f"ingest-canary: {problem}", file=sys.stderr)
-                if problems:
-                    return 1
-                print(f"ingest-canary: manifest {manifest_path} matches the forge")
-        except IngestError as exc:
-            print(f"ingest-canary: {exc}", file=sys.stderr)
-            return 1
-        return 0
+        return _run_manifest_maintenance(args)
     if args.manifest is not None:
         if args.repo:
             parser.error("--manifest and --repo are mutually exclusive")
-        try:
-            entries = load_manifest(args.manifest)
-        except IngestError as exc:
-            print(f"ingest-canary: {exc}", file=sys.stderr)
-            return 1
-        failed = 0
-        for entry, layout, error in ingest_manifest(
-            entries,
-            blocks_dir=args.blocks_dir,
-            cache_dir=args.cache_dir,
-            dry_run=args.dry_run,
-        ):
-            if error is not None:
-                failed += 1
-                print(f"{entry['slug']}: FAILED: {error}", file=sys.stderr)
-            else:
-                assert layout is not None
-                verb = "would write" if args.dry_run else "ok"
-                print(f"{entry['slug']}: {verb} (status={layout['status']!r})")
-        if failed:
-            print(
-                f"ingest-canary: {failed}/{len(entries)} entries failed",
-                file=sys.stderr,
-            )
-            return 1
-        return 0
+        return _run_manifest_ingest(args)
     if not args.repo:
         parser.error("one of --repo or --manifest is required")
 
