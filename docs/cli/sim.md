@@ -1976,6 +1976,12 @@ minor from your client, either:
    `environment.remote.runner_compatibility` and
    `runner_compatibility_warning` in the result.
 
+Neither option 1 nor option 3 relaxes `klt signoff --attest`: it still runs
+every `local_only` command at mint time, and there is no flag to skip one
+(see "Toolchain-free runners: `local_only` commands" in
+[`signoff.md`](signoff.md)). A blocked host fixes the skew; it does not skip
+the attested check.
+
 ### Worker-observed environment (`worker_environment`, [#2834](https://github.com/2AMLogic/klayout-tools/issues/2834))
 
 `environment.remote` (and every `environment.remote.fleet[]` entry for

@@ -1961,6 +1961,17 @@ visible, never a pass; `skipped_checks` is `[]` when nothing was skipped.
 Run a plain `--attest --check` (no `local_only` commands) on a runner that
 has the toolchain to re-verify them.
 
+**`--attest` has no skip.** Minting always runs every `local_only` command,
+and there is no `--skip-local-only` flag or `status: "partial"` envelope. An
+attested item-9 `cold_start` that did not run is not evidence, and T1 item 9
+depends on it. A host that cannot run the toolchain (for example, one blocked
+by a `batch_runner_version_mismatch` when a `local_only` check submits a
+`klt sim --backend batch` request) must be unblocked, not bypassed. See
+"When the client is newer than the runner" in [`sim.md`](sim.md) for the two
+existing paths: rebuilding the runner image at the client's minor, and
+`request.batch.runner_version_check: "warn"`. Neither relaxes `--attest`:
+the `local_only` command still runs and gates at mint time.
+
 **Item 10 ordering: `checks[]` gate the envelope at mint time.** Every item-10
 `checks[]` command runs under `--attest` against the working tree as it is at
 that moment, and any failure gives `status: "fail"`, exit `3`, and no envelope
