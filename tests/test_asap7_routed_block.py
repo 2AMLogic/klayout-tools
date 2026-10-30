@@ -172,3 +172,28 @@ def test_erc_gate_contact_workaround_shorts_all_gates_through_lig_rails(tmp_path
     report = _erc(tmp_path, spec)
     assert report["gate_count"] == 1
     assert {"VDD", "VSS"} <= set(report["gates"][0]["net"].split(","))
+
+
+def _extract_warnings(tmp_path: Path, gds: str, pins: str) -> list[str]:
+    from klayout_tools.extract import run_extract
+
+    report = run_extract(
+        gds,
+        "asap7",
+        output=str(tmp_path / "out.sp"),
+        top="TOP",
+        declared_pins=frozenset(pins.split(",")),
+    )
+    return report["warnings"]
+
+
+def test_declared_pins_do_not_create_pins_but_name_the_missing_labels(tmp_path):
+    """``--pins`` only reconciles labelled nets: on a stream with no pin text
+    it creates nothing, and the report says which declared names matched no
+    net -- the cheap, detectable form of the 'few pins' symptom."""
+    labelled = _extract_warnings(tmp_path, _routed(tmp_path, route="m1"), "IN,OUT")
+    assert not any("matched no promoted net" in w for w in labelled)
+    bare = _extract_warnings(
+        tmp_path, _routed(tmp_path, route="m1", top_labels=False), "IN,OUT"
+    )
+    assert any("matched no promoted net" in w and "IN, OUT" in w for w in bare)
