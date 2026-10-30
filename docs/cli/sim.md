@@ -913,10 +913,29 @@ collects:
 | `unit_count` | Corners × Monte Carlo samples in the job (the number of `decks` for a deck-list request) |
 | `job_ceiling` | The pre-submit whole-job-ceiling assessment (same object as `environment.remote.job_ceiling`); `null` for a deck-list request, which does not assess one |
 
-It is one job only. Anything it cannot represent as one job fails **before any
-S3 write** with `error.code: "submit_only_unsupported"`: a non-`batch`
-backend, `--hosts`/`remote.hosts` > 1 (a sharded run would need one job id per
-shard), or `--plot`. `--resume` is already refused on the batch backend.
+Anything it cannot represent fails **before any S3 write** with
+`error.code: "submit_only_unsupported"`: a non-`batch` backend,
+`--hosts`/`remote.hosts` > 1 (client-chosen shards), `--resume`, or `--plot`.
+
+**Sharded form** ([#4620](https://github.com/2AMLogic/klayout-tools/issues/4620)).
+When the batch config splits the request (`--max-units-per-job N` /
+`batch.max_units_per_job`, or `job_ceiling_check: "split"`), `--submit-only`
+submits and launches **every shard** and exits `0` with a different payload
+(an unsharded run's payload is unchanged):
+
+| Field | Description |
+| ----- | ----------- |
+| `sharded` | `true` (absent for a one-job submit) |
+| `shards[]` | One entry per shard: `index`, `job_id`, `job_uri`, `unit_start`, `unit_count` (its contiguous slice of the unit list) |
+| `manifest_path` | The `batch-shards.json` shard map written under the artifacts dir (the `--resume` shard map, plus the top-level `request_sha256`) |
+| `request_sha256`, `unit_count`, `job_ceiling`, `bucket`, `region`, `jobs_prefix`, `launched_at` | As above; there is no single `job_id` |
+
+`klt sim request.json --backend batch --attach <manifest_path>` waits for all
+shards and merges them exactly as the blocking sharded run does. The request
+must be the one submitted (a `request_sha256` or fingerprint mismatch is
+`error.code: "resume_fingerprint_mismatch"`). `--attach` only re-attaches: a
+shard whose job is gone is reported as lost, other shards are still reported,
+and nothing is resubmitted.
 
 A **deck-list request** (`decks`, [#3958](https://github.com/2AMLogic/klayout-tools/issues/3958))
 is one job with one job id, so it supports the same flow: `--submit-only`

@@ -2912,9 +2912,11 @@ def _refuse_unsupported_submit_only(
     backend: str, hosts: int, resume: bool | None, plot_dir: str | None
 ) -> None:
     """``--submit-only`` is one batch job: refuse everything else by name,
-    before the first S3 write (issue #3073). A sharded run would need one
-    job id per shard and a merge on fetch -- not represented, so refused
-    rather than silently submitting only part of the request."""
+    before the first S3 write (issue #3073). ``--hosts > 1`` would need one
+    job per shard chosen by the client -- not represented, so refused rather
+    than silently submitting only part of the request. A ``max_units_per_job``
+    split is decided by the batch config and submitted shard by shard (issue
+    #4620)."""
     reason = None
     if backend != "batch":
         reason = f"requires backend 'batch' (resolved backend: '{backend}')"
@@ -4087,6 +4089,7 @@ def _run_sim_corners(
             want_waveforms=want_waveforms,
             request_dir=request_dir,
             artifacts_dir=artifacts_dir,
+            shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
     if hosts == 1:

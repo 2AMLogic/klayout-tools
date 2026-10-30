@@ -1058,8 +1058,10 @@ def _flat_dut_mismatch(
             "source/probe the testbench wires to the flat DUT's own nodes "
             "is left disconnected from the extracted netlist's `.SUBCKT` "
             "body on the extracted-side run, which may simulate to "
-            "completion and report a spurious value rather than error. Wrap "
-            "the schematic DUT in a matching `.SUBCKT ... .ENDS` (with the "
+            "completion and report a spurious value rather than error. Under "
+            "`--flatten-schematic` klt pex wraps a fragment DUT for you; "
+            "otherwise wrap the schematic DUT in a matching "
+            "`.SUBCKT ... .ENDS` (with the "
             "same top-level pin list `klt extract` produces) so the "
             "testbench's own instantiation line can be reused unmodified "
             "on both sides, the same convention `pin_count_mismatch` "
@@ -2597,6 +2599,7 @@ def _flatten_schematic_dut(
     work_dir: str,
     top: str,
     repo_root: str | None,
+    wrap_pins: Sequence[str] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Flatten the schematic DUT ``reference_netlist_path`` to PDK leaf
     devices (issue #2889, ``klt pex --flatten-schematic``) and write it to
@@ -2615,6 +2618,10 @@ def _flatten_schematic_dut(
     cannot rename safely, unbalanced `.subckt`/`.ends`) is a
     :class:`PexError` with ``code="schematic_flatten_<reason>"`` -- never a
     partially flattened netlist.
+
+    A *fragment* DUT (no ``.subckt <top>``) is wrapped in one whose pins are
+    ``wrap_pins`` -- the extracted netlist's own header order (issue #4625);
+    ``schematic_flatten["wrapper"]`` then lists those pins (else ``None``).
     """
     text = _read_text(reference_netlist_path)
     if text is None:
@@ -2627,6 +2634,7 @@ def _flatten_schematic_dut(
         result = flatten_spice(
             text,
             top=top,
+            wrap_pins=wrap_pins,
             banner=(
                 "flattened by klt pex --flatten-schematic from "
                 f"{os.path.basename(reference_netlist_path)} (issue #2889)"
@@ -2654,6 +2662,11 @@ def _flatten_schematic_dut(
         "inlined_subckts": result.inlined_subckts,
         "external_subckts": result.external_subckts,
         "already_flat": result.inlined_instances == 0,
+        "wrapper": (
+            {"synthesized": True, "pins": result.wrapper_pins}
+            if result.wrapper_pins is not None
+            else None
+        ),
     }
 
 
@@ -3348,6 +3361,11 @@ def run_pex(
             work_dir=work_dir,
             top=extract_report["top"],
             repo_root=repo_root,
+            wrap_pins=(
+                _subckt_interfaces(_read_text(extracted_netlist_path) or "").get(
+                    extract_report["top"].lower(), (None, None)
+                )[1]
+            ),
         )
 
     # Gap 2 (issue #1255): a schematic DUT netlisted flat (no `.SUBCKT`
