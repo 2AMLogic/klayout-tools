@@ -189,6 +189,36 @@ commit is recoverable (tarball install, `X.Y.Z.dev0+unknown`) and stays
 populated on a dirty tree; `klt_reinstall_spec` is `null` when the tree is
 dirty or the commit is unrecoverable.
 
+### Pinning a release tag: use the peeled commit
+
+An annotated release tag (`vX.Y.Z`) is its own git object. `git ls-remote`
+lists the **tag-object** sha on the `refs/tags/vX.Y.Z` line and the commit it
+points at on the `refs/tags/vX.Y.Z^{}` line:
+
+```
+$ git ls-remote origin 'refs/tags/v0.8.0*'
+01c67a95a23c…  refs/tags/v0.8.0        # tag object — do not pin this
+c572046be644…  refs/tags/v0.8.0^{}     # peeled commit — pin this
+```
+
+Pin the **peeled commit** (`git rev-parse vX.Y.Z^{commit}`, or the `^{}` line
+above). Pinning the tag-object sha fails:
+
+```
+$ uvx --from "git+https://github.com/2AMLogic/klayout-tools@01c67a95a23c…" klt --version
+error: Failed to resolve `--with` requirement
+  cause: Exact Git revision `01c67a95a23c...` does not match precise commit `c572046be644...`
+```
+
+A lightweight tag has no tag object (its sha already is the commit), so
+nothing needs peeling.
+
+A `git+…@<commit>` install of a release commit still reports a
+`X.Y.(Z+1).devN+g<sha>` version, not `X.Y.Z`: the package manager's scratch
+clone carries no tags (see the route table under "These fields describe the
+install" below). The release identity is `klayout-tools==X.Y.Z` from PyPI;
+use the git pin only to reproduce an exact commit.
+
 ## How the identity is determined
 
 Two sources, in priority order:
