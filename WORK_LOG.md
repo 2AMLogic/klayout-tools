@@ -4,6 +4,7 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-30
 
+- **Issue #4610** (closed): asap7: routed gate-level block fails drc/lvs/erc together; extraction does not connect it
 - **PR #4633**: feat(pex): add --submit-only/--attach for async batch runs
 - **Issue #4619** (closed): klt pex: no grid sharding or async submit/attach for --backend batch
 - **PR #4631**: fix: expand reference includes in klt pex model_mismatch tally
