@@ -3784,7 +3784,35 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "re-run after an interrupted batch run: every `klt sim` call "
             "re-attaches to the shard jobs recorded in its own leg "
             "directory instead of re-submitting. Same semantics as `klt sim "
-            "--resume`; there is no `--attach` (see docs/cli/pex.md)."
+            "--resume`. For a non-blocking run use `--submit-only` / "
+            "`--attach` (see docs/cli/pex.md)."
+        ),
+    )
+    pex_parser.add_argument(
+        "--submit-only",
+        dest="submit_only",
+        action="store_true",
+        default=False,
+        help=(
+            "backend `batch`: extract, submit every testbench's schematic "
+            "and extracted `klt sim` leg without polling, write "
+            "`<outdir>/pex-submit.json` and exit 0 with a `submitted` "
+            "status. Collect later with `--attach`. Refused with "
+            "`--attach`, `--resume`, `--measure-command`, `--extract-only`, "
+            "`--device-only-leg` or a non-batch backend (issue #4619)."
+        ),
+    )
+    pex_parser.add_argument(
+        "--attach",
+        dest="attach_manifest",
+        metavar="MANIFEST",
+        default=None,
+        help=(
+            "collect a `--submit-only` run: re-run the same `klt pex` "
+            "command with this `pex-submit.json`; each leg attaches to its "
+            "recorded job(s) and the normal pex report is produced. A "
+            "manifest recorded for different inputs is refused "
+            "(`resume_fingerprint_mismatch`) (issue #4619)."
         ),
     )
     pex_parser.add_argument(

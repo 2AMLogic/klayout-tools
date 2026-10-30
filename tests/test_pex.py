@@ -6853,3 +6853,169 @@ def test_run_pex_invalid_hosts_surfaces_as_pex_error(
     request = _write_request(tmp_path / "request.json", tb)
     with pytest.raises(PexError, match="positive integer"):
         run_pex(resistor_layout, [str(request)], "sky130", hosts=0)
+
+
+def _async_inputs(tmp_path):
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    return str(_write_request(tmp_path / "request.json", tb))
+
+
+def _fake_async_sim(monkeypatch, calls, sharded=False):
+    import klayout_tools.pex as pex_module
+
+    def _fake_run_sim(request_path, **kwargs):
+        calls.append(kwargs)
+        side = os.path.basename(kwargs["artifacts_dir"])
+        if kwargs.get("submit_only"):
+            if sharded:
+                return {
+                    "status": "submitted",
+                    "sharded": True,
+                    "manifest_path": f"/shards/{side}/batch-shards.json",
+                    "unit_count": 2,
+                }
+            return {"status": "submitted", "job_id": f"job-{side}", "unit_count": 2}
+        return _two_corner_schematic_report()
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+
+def test_run_pex_submit_only_writes_manifest_without_polling(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4619: every side/testbench is submitted, none is collected."""
+    calls: list = []
+    _fake_async_sim(monkeypatch, calls)
+    request = _async_inputs(tmp_path)
+    outdir = tmp_path / "art"
+    report = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=str(outdir),
+        backend="batch",
+        submit_only=True,
+    )
+    assert report["status"] == "submitted"
+    assert [(leg["side"], leg["attach"]) for leg in report["legs"]] == [
+        ("schematic", "job-schematic"),
+        ("extracted", "job-extracted"),
+    ]
+    assert all(call["submit_only"] for call in calls)
+    manifest = json.loads((outdir / "pex-submit.json").read_text())
+    assert manifest["legs"] == report["legs"]
+    assert "delta" not in report
+
+
+def test_run_pex_attach_delta_equals_synchronous_run(
+    tmp_path, resistor_layout, monkeypatch
+):
+    calls: list = []
+    _fake_async_sim(monkeypatch, calls, sharded=True)
+    request = _async_inputs(tmp_path)
+    outdir = str(tmp_path / "art")
+    sync = run_pex(resistor_layout, [request], "sky130", artifacts_dir=outdir)
+    submitted = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        backend="batch",
+        submit_only=True,
+    )
+    calls.clear()
+    attached = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        backend="batch",
+        attach=submitted["manifest_path"],
+    )
+    assert attached["delta"] == sync["delta"]
+    assert [c["attach_job_id"] for c in calls] == [
+        "/shards/schematic/batch-shards.json",
+        "/shards/extracted/batch-shards.json",
+    ]
+
+
+def test_run_pex_attach_refuses_changed_request(tmp_path, resistor_layout, monkeypatch):
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    outdir = str(tmp_path / "art")
+    submitted = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        submit_only=True,
+    )
+    with open(request, "a", encoding="utf-8") as handle:
+        handle.write("\n")
+    with pytest.raises(PexError) as err:
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            artifacts_dir=outdir,
+            attach=submitted["manifest_path"],
+        )
+    assert err.value.code == "resume_fingerprint_mismatch"
+
+
+@pytest.mark.parametrize(
+    "flags, match",
+    [
+        ({"submit_only": True, "attach": "m.json"}, "mutually exclusive"),
+        ({"submit_only": True, "backend": "local"}, "requires backend 'batch'"),
+        ({"attach": "m.json", "backend": "local"}, "requires backend 'batch'"),
+        ({"submit_only": True, "resume": True}, "--resume"),
+        ({"submit_only": True, "extract_only": True}, "--extract-only"),
+        ({"submit_only": True, "device_only_leg": True}, "--device-only-leg"),
+        ({"submit_only": True, "measure_command": ["x"]}, "--measure-command"),
+    ],
+)
+def test_run_pex_async_refusals_by_name(tmp_path, resistor_layout, flags, match):
+    with pytest.raises(PexError, match=match):
+        run_pex(resistor_layout, [], "sky130", artifacts_dir=str(tmp_path), **flags)
+
+
+def test_run_pex_attach_missing_manifest_is_named_error(tmp_path, resistor_layout):
+    request = _async_inputs(tmp_path)
+    with pytest.raises(PexError) as err:
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            artifacts_dir=str(tmp_path / "art"),
+            attach=str(tmp_path / "nope.json"),
+        )
+    assert err.value.code == "pex_manifest_invalid"
+
+
+def test_cli_pex_submit_only_emits_submitted_payload_exit_0(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    code = main(
+        [
+            "pex",
+            str(resistor_layout),
+            request,
+            "--deck",
+            "sky130",
+            "--backend",
+            "batch",
+            "--submit-only",
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "submitted"
+    assert payload["leg_count"] == 2

@@ -218,7 +218,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from . import env_provenance, output_lock
+from . import env_provenance, output_lock, pex_async
 from ._paths import _fold_spice_continuations, _resolve_relative
 from ._provenance import sha256_file
 from .coverage import (
@@ -2836,6 +2836,8 @@ def run_pex(
     flatten_schematic: bool = False,
     device_only_leg: bool = False,
     extract_only: bool = False,
+    submit_only: bool = False,
+    attach: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Extract ``layout_path`` (with lumped-RC parasitics) and re-run every
@@ -3080,6 +3082,16 @@ def run_pex(
     while this run holds the root. ``_ownership`` is internal: the exit
     stack that releases the lock when the run ends.
     """
+    # Issue #4619: refuse unrepresentable async combinations before any I/O.
+    pex_async.validate_async_flags(
+        submit_only=submit_only,
+        attach=attach,
+        backend=backend,
+        resume=resume,
+        measure_command=measure_command,
+        extract_only=extract_only,
+        device_only_leg=device_only_leg,
+    )
     _own_pex_root(_ownership, artifacts_dir, layout_path)
     # Issue #2478: exactly one of `testbench_paths` / `measure_command`.
     # `command` is the measurement command's argv in `--measure-command`
@@ -3209,6 +3221,10 @@ def run_pex(
         else os.path.join(os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex")
     )
     os.makedirs(work_dir, exist_ok=True)
+    # Issue #4619: routes each `run_sim` leg (blocking / submit / attach).
+    legs = pex_async.AsyncLegs(
+        submit_only=submit_only, attach=attach, work_dir=work_dir
+    )
 
     # Every testbench's schematic- and extracted-side `klt sim` call gets its
     # own `keep_artifacts` output directory, explicitly namespaced under
@@ -3295,6 +3311,14 @@ def run_pex(
             "testbench in one run to `.include` the same block's schematic "
             "netlist, so a single reference_netlist can be reported"
         )
+    # Issue #4619: an `--attach` manifest must match this run's inputs.
+    request_shas = {
+        label: identity["request_sha256"]
+        for label, identity in zip(labels, input_identity, strict=True)
+    }
+    legs.verify(
+        extracted_netlist_sha256=extracted_netlist_sha256, request_sha256=request_shas
+    )
     # One `reference_netlist` for the whole run either way: every testbench's
     # single `.include` target in testbench mode, the caller's own
     # `--reference-netlist` in `--measure-command` mode (issue #2478).
@@ -3481,8 +3505,11 @@ def run_pex(
                 if flatten_schematic
                 else testbench_path
             )
-            schematic_report = run_sim(
+            schematic_report = legs.run(
+                run_sim,
                 schematic_request_path,
+                testbench=label,
+                side="schematic",
                 artifacts_dir=os.path.join(work_dir, label, "schematic"),
                 backend=backend,
                 **batch_shard,
@@ -3522,8 +3549,11 @@ def run_pex(
                     work_dir=work_dir,
                     label=label,
                 )
-                extracted_report = run_sim(
+                extracted_report = legs.run(
+                    run_sim,
                     extracted_request_path,
+                    testbench=label,
+                    side="extracted",
                     artifacts_dir=os.path.join(work_dir, label, "extracted"),
                     backend=backend,
                     **batch_shard,
@@ -3551,6 +3581,10 @@ def run_pex(
                 else:
                     pin_count_mismatch = pin_count_mismatch or mismatch
                 extracted_failure = (str(exc), exc.code)
+
+        if legs.submitting:
+            # Issue #4619: submitted, not run -- nothing to grade yet.
+            continue
 
         spec_row_prefix = (
             None
@@ -3636,6 +3670,12 @@ def run_pex(
                 ],
                 **_project_testbench_sides(schematic_report, extracted_report),
             }
+        )
+
+    if legs.submitting:
+        return legs.finish_submit(
+            extracted_netlist_sha256=extracted_netlist_sha256,
+            request_sha256=request_shas,
         )
 
     corner_count = len({row["corner_id"] for row in delta})
