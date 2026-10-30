@@ -1111,13 +1111,16 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         # The generic shapes of an ngspice deck abort (issue #3879): `Error
         # on line N ...` followed by `Simulation interrupted due to error!`,
-        # or `fatal error in ngspice`. Last on purpose: every specific
+        # or `fatal error in ngspice`, or the library-parse form `Error in
+        # netlist line no. N, new internal line no. M:` (issue #4603).
+        # Last on purpose: every specific
         # pattern above names a cause, so this one is only the fallback cause
         # (`_classify_diagnostics` drops it when a specific fatal code was
         # already classified). The message is the first matching log line.
         "ngspice_fatal",
         re.compile(
-            r"^\s*Error on line \d+"
+            r"^[ \t]*Error on line \d+"
+            r"|^[ \t]*Error in netlist line no\. \d+"
             r"|Simulation interrupted due to error"
             r"|fatal error in ngspice",
             re.IGNORECASE | re.MULTILINE,
@@ -12821,8 +12824,24 @@ def _classify_diagnostics(
             d["code"] in _NGSPICE_FATAL_CODES for d in diagnostics
         ):
             continue
+        if code == "ngspice_fatal":
+            message = _with_netlist_error_cause(message, log_text, match.start())
         diagnostics.append({"severity": "error", "code": code, "message": message})
     return diagnostics
+
+
+def _with_netlist_error_cause(message: str, log_text: str, start: int) -> str:
+    """Append the next log line to an ``Error in netlist line no. N`` message.
+
+    ngspice puts the cause (``Undefined parameter [expr]``) on the line after
+    the location. Any other message is returned unchanged.
+    """
+    if not message.lower().startswith("error in netlist line no."):
+        return message
+    following = log_text[start:].splitlines()[1:2]
+    if following and following[0].strip():
+        return f"{message} {following[0].strip()}"
+    return message
 
 
 #: Width, in micrometres, above which a single MOS instance's total width
