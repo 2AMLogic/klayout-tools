@@ -222,6 +222,7 @@ from __future__ import annotations
 import fnmatch
 import importlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -1219,6 +1220,7 @@ def run_synthesize(
     dont_use_validated = _validate_dont_use_against_liberty(
         dont_use_requested, liberty_path
     )
+    abc_constr_request = _resolve_abc_constr_request(constraints, liberty_path)
 
     # Issue #2635: a declared macro's LEF/liberty/blackbox/GDS are *declared
     # inputs* to this run exactly as the RTL sources and the standard-cell
@@ -1291,7 +1293,17 @@ def run_synthesize(
     netlist_path = os.path.join(output_dir, f"{hdl_toplevel}_synth.v")
     stats_path = os.path.join(output_dir, f"{hdl_toplevel}_stats.json")
 
-    constr_inputs = _ABC_CONSTR_INPUTS.get(cell_library)
+    # Issue #4662: a request-supplied `constraints.abc_constr` wins over the
+    # built-in per-library entry and is the only way a library without one
+    # gets `-constr` (sizing/buffering/`stime`).
+    constr_inputs = abc_constr_request or _ABC_CONSTR_INPUTS.get(cell_library)
+    constr_source = (
+        "request"
+        if abc_constr_request is not None
+        else "builtin"
+        if constr_inputs is not None
+        else None
+    )
     constr_path: str | None = None
     abc_log_path: str | None = None
     if constr_inputs is not None:
@@ -1440,7 +1452,7 @@ def run_synthesize(
     warnings_summary = _summarize_warnings(
         yosys_log,
         capability_warnings={
-            **_library_capability_warnings(cell_library),
+            **_library_capability_warnings(cell_library, constr_inputs is not None),
             **_missing_timing_warning(abc_log_path, timing),
             **_dont_use_unsupported_warning(cell_exclusions),
             **_macro_area_warning(
@@ -1594,6 +1606,15 @@ def run_synthesize(
         # Always present (like `structural`/`warnings`); additive field, no
         # `schema_version` bump (docs/json-contract.md).
         "cell_exclusions": cell_exclusions,
+        # Issue #4662: where the `abc -constr` inputs came from -- `request`
+        # (`constraints.abc_constr`), `builtin` (`_ABC_CONSTR_INPUTS`), or
+        # `null` when no `-constr` was passed. Additive field, no
+        # `schema_version` bump.
+        "abc_constr": {
+            "source": constr_source,
+            "driving_cell": constr_inputs[0] if constr_inputs else None,
+            "load_ff": constr_inputs[1] if constr_inputs else None,
+        },
         "warnings": warnings_summary,
         # Issue #2745: whether inferred memories were lowered to logic,
         # optimized away before lowering, or survived mapping -- per module
@@ -2395,6 +2416,57 @@ def _describe_clock_targets(
         "delay_target_basis": basis,
         "per_clock_enforced": False,
     }
+
+
+def _resolve_abc_constr_request(
+    constraints: dict[str, Any] | None, liberty_path: str
+) -> tuple[str, float] | None:
+    """The validated ``constraints.abc_constr`` as ``(driving_cell, load_ff)``,
+    or ``None`` when the request does not supply one (issue #4662).
+
+    Supplies the ``abc -constr`` inputs for any ``cell_library`` and overrides
+    the built-in :data:`_ABC_CONSTR_INPUTS` entry when both exist. Any shape
+    problem, an unknown key, a ``driving_cell`` absent from the resolved
+    liberty (skipped only when the liberty's cell list cannot be established,
+    as for ``dont_use``), or a non-positive/non-finite ``load_ff`` is a
+    :class:`SynthesizeError` naming the field.
+    """
+    if not constraints or constraints.get("abc_constr") is None:
+        return None
+    raw = constraints["abc_constr"]
+    where = "request.constraints.abc_constr"
+    if not isinstance(raw, dict):
+        raise SynthesizeError(f"{where} must be a JSON object")
+    unknown = sorted(set(raw) - {"driving_cell", "load_ff"})
+    if unknown:
+        raise SynthesizeError(
+            f"{where} has unknown key(s) {unknown}; allowed: driving_cell, load_ff"
+        )
+    for key in ("driving_cell", "load_ff"):
+        if key not in raw:
+            raise SynthesizeError(f"{where}.{key} is required")
+    driving_cell = raw["driving_cell"]
+    if not isinstance(driving_cell, str) or not driving_cell:
+        raise SynthesizeError(f"{where}.driving_cell must be a non-empty string")
+    load_ff = raw["load_ff"]
+    if (
+        isinstance(load_ff, bool)
+        or not isinstance(load_ff, (int, float))
+        or not math.isfinite(load_ff)
+        or load_ff <= 0
+    ):
+        raise SynthesizeError(
+            f"{where}.load_ff must be a finite number greater than zero "
+            f"(femtofarads), got {load_ff!r}"
+        )
+    cell_names = _liberty_cell_names(liberty_path)
+    if cell_names is not None and driving_cell not in cell_names:
+        raise SynthesizeError(
+            f"{where}.driving_cell '{driving_cell}' is not a cell in the "
+            f"resolved liberty '{os.path.basename(liberty_path)}' "
+            f"({len(cell_names)} cells)"
+        )
+    return driving_cell, float(load_ff)
 
 
 def _write_constr(constr_path: str, driving_cell: str, load_ff: float) -> None:
@@ -3955,15 +4027,23 @@ def _categorize_warning(message: str) -> str:
     return "other"
 
 
-def _library_capability_warnings(cell_library: str) -> dict[str, str]:
+def _library_capability_warnings(
+    cell_library: str, has_constr: bool | None = None
+) -> dict[str, str]:
     """Disclose skipped synthesis capabilities without guessing library data.
 
     Combine missing capabilities into one representative so neither is
     hidden by warning aggregation. An absent ``dont_use`` entry is not a
     missing capability: e.g. gf180 intentionally allows minimum-drive cells.
+
+    ``has_constr`` says whether this run passed ``-constr`` at all (a request
+    ``constraints.abc_constr`` supplies it for a library with no built-in
+    entry, issue #4662); ``None`` falls back to the built-in table.
     """
+    if has_constr is None:
+        has_constr = cell_library in _ABC_CONSTR_INPUTS
     skipped = []
-    if cell_library not in _ABC_CONSTR_INPUTS:
+    if not has_constr:
         skipped.append(
             "ABC -constr (driving cell/output load), load-driven sizing/buffering "
             "and ABC timing (timing is null)"
