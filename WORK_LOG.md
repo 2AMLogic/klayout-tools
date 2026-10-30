@@ -4,6 +4,13 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-30
 
+- **PR #4640**: refactor: consolidate sim_steps unsupported-key refusals into one table-driven check
+- **Issue #4639** (closed): Consolidate seven _refuse_* helpers in sim_steps.py into one table-driven check
+- **PR #4638**: docs: state --attest never skips local_only commands; point blocked hosts at skew fixes
+- **Issue #4211** (closed): klt sim --backend batch: no way to submit when fleet runner klt version lags the client; --attest cold_start then cannot pass
+- **Issue #4287** (closed): klt sim batch: runner/client skew, no eye reduction, expr limits, no progress signal
+- **PR #4566**: feat(blocks): add canary manifest, --manifest ingest mode and weekly refresh PR
+- **Issue #4565** (closed): site: present the public chip design work on klayout-tools.org
 - **Issue #4610** (closed): asap7: routed gate-level block fails drc/lvs/erc together; extraction does not connect it
 - **PR #4633**: feat(pex): add --submit-only/--attach for async batch runs
 - **Issue #4619** (closed): klt pex: no grid sharding or async submit/attach for --backend batch
