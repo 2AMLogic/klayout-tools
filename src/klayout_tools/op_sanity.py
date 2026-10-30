@@ -1368,6 +1368,93 @@ def _corner_margin_entry(
     }
 
 
+def _other_corner_entry(
+    other: Any,
+    *,
+    pristine_devices: list[MosInstance],
+    netlist_path: str,
+    models_lib: str | None,
+    probe_nodes: Any,
+    timeout_s: Any,
+    osdi_preload: Any,
+) -> dict[str, Any]:
+    """Bias one additional expanded corner and return its ``corner_margins`` row."""
+    other_devices = copy.deepcopy(pristine_devices)
+    other_log, _, _, other_launch = _run_op(
+        netlist_path=netlist_path,
+        models_lib=models_lib if _needs_models_lib(other) else None,
+        point=other,
+        devices=other_devices,
+        probe_nodes=probe_nodes,
+        timeout_s=timeout_s,
+        osdi_preload=osdi_preload,
+    )
+    other_resolved, other_voltages = _parse_op_log(other_log, other_devices)
+    other_diagnostics = list(other_launch)
+    other_diagnostics.extend(_classify_diagnostics(other_log, netlist_path))
+    produced = bool(other_voltages or other_resolved)
+    if produced and not _SIMULATION_ABORTED_RE.search(other_log):
+        for diagnostic in other_diagnostics:
+            if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
+                diagnostic["severity"] = "warning"
+    if other_devices and not produced:
+        other_diagnostics.append(
+            {
+                "severity": "error",
+                "code": "op_point_unavailable",
+                "message": "the operating point produced no values",
+            }
+        )
+    return _corner_margin_entry(other.corner_id, other_devices, other_diagnostics)
+
+
+def _margin_sort_key(entry: dict[str, Any]) -> tuple[bool, float, str]:
+    margin = entry["worst_margin_v"]
+    return (margin is None, 0.0 if margin is None else margin, entry["corner_id"])
+
+
+def _corner_margins_table(
+    points: list[Any],
+    first: Any,
+    first_devices: list[MosInstance],
+    first_diagnostics: list[dict[str, str]],
+    **bias: Any,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Build the ``corner_margins`` table (worst margin first) and report
+    whether any corner other than the first raised an error diagnostic."""
+    table = [_corner_margin_entry(first.corner_id, first_devices, first_diagnostics)]
+    other_error = False
+    for other in points:
+        if other is first:
+            continue
+        entry = _other_corner_entry(other, **bias)
+        table.append(entry)
+        other_error = other_error or bool(entry["diagnostics"])
+    table.sort(key=_margin_sort_key)
+    return table, other_error
+
+
+def _select_points(points: list[Any], corner: str | None) -> tuple[Any, list[Any]]:
+    """Pick the first-reported point and the points to bias (all of them for
+    ``corner="all"``), refusing a ``params`` axis on any biased point."""
+    all_corners = corner == ALL_CORNERS
+    if corner is not None and not all_corners:
+        selected = [point for point in points if point.corner_id == corner]
+        if not selected:
+            available = ", ".join(point.corner_id for point in points)
+            raise OpSanityError(
+                f"corner '{corner}' is not in this request's matrix "
+                f"(available: {available})"
+            )
+        point = selected[0]
+    else:
+        point = points[0]
+    biased_points = points if all_corners else [point]
+    for biased in biased_points:
+        _refuse_param_axis(biased)
+    return point, biased_points
+
+
 def run_op_sanity(
     request_path: str,
     *,
@@ -1427,20 +1514,7 @@ def run_op_sanity(
             "operating point at"
         )
     all_corners = corner == ALL_CORNERS
-    if corner is not None and not all_corners:
-        selected = [point for point in points if point.corner_id == corner]
-        if not selected:
-            available = ", ".join(point.corner_id for point in points)
-            raise OpSanityError(
-                f"corner '{corner}' is not in this request's matrix "
-                f"(available: {available})"
-            )
-        point = selected[0]
-    else:
-        point = points[0]
-    biased_points = points if all_corners else [point]
-    for biased in biased_points:
-        _refuse_param_axis(biased)
+    point, biased_points = _select_points(points, corner)
 
     models = request.get("models") or {}
     models_lib: str | None = None
@@ -1609,51 +1683,20 @@ def run_op_sanity(
 
     corner_margins: list[dict[str, Any]] | None = None
     if all_corners:
-        corner_margins = [
-            _corner_margin_entry(point.corner_id, parsed.devices, diagnostics)
-        ]
-        for other in points:
-            if other is point:
-                continue
-            other_devices = copy.deepcopy(pristine_devices)
-            other_log, _, _, other_launch = _run_op(
-                netlist_path=netlist_path,
-                models_lib=models_lib if _needs_models_lib(other) else None,
-                point=other,
-                devices=other_devices,
-                probe_nodes=probe_nodes,
-                timeout_s=timeout_s,
-                osdi_preload=osdi_preload,
-            )
-            other_resolved, other_voltages = _parse_op_log(other_log, other_devices)
-            other_diagnostics = list(other_launch)
-            other_diagnostics.extend(_classify_diagnostics(other_log, netlist_path))
-            if (other_voltages or other_resolved) and not _SIMULATION_ABORTED_RE.search(
-                other_log
-            ):
-                for diagnostic in other_diagnostics:
-                    if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
-                        diagnostic["severity"] = "warning"
-            if other_devices and not (other_voltages or other_resolved):
-                other_diagnostics.append(
-                    {
-                        "severity": "error",
-                        "code": "op_point_unavailable",
-                        "message": "the operating point produced no values",
-                    }
-                )
-            corner_margins.append(
-                _corner_margin_entry(other.corner_id, other_devices, other_diagnostics)
-            )
-            if any(d["severity"] == "error" for d in other_diagnostics):
-                status = "error"
-        corner_margins.sort(
-            key=lambda entry: (
-                entry["worst_margin_v"] is None,
-                entry["worst_margin_v"] if entry["worst_margin_v"] is not None else 0.0,
-                entry["corner_id"],
-            )
+        corner_margins, other_error = _corner_margins_table(
+            points,
+            point,
+            parsed.devices,
+            diagnostics,
+            pristine_devices=pristine_devices,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            probe_nodes=probe_nodes,
+            timeout_s=timeout_s,
+            osdi_preload=osdi_preload,
         )
+        if other_error:
+            status = "error"
 
     return {
         "schema_version": SCHEMA_VERSION,
