@@ -934,6 +934,7 @@ the exit code describes the read, `state` describes the job:
 | `state` | `pending` (no `status.json` yet — the instance has not booted; not an error), `running`, `interrupted`, `done`, `failed` or `timeout` |
 | `terminal` | `true` for `done`/`failed`/`timeout` |
 | `detail`, `started_at`, `updated_at`, `elapsed_seconds`, `exit_code`, `tool` | As written by the fleet harness; absent ones are omitted |
+| `stale`, `stale_seconds` | Derived by `klt`, present only when a non-terminal job's `updated_at` is more than 900 s old (`STALE_AFTER_S`, three heartbeat periods): `stale: true` and the age of `updated_at` in seconds. A job that old is far likelier lost with its instance (e.g. a Spot reclaim) than slow. `state` is never rewritten — it stays the runner's own value. Absent for terminal and `pending` jobs and when `updated_at` is missing or unparseable; additive, so callers must treat both as optional ([#4616](https://github.com/2AMLogic/klayout-tools/issues/4616)) |
 | `progress` | Optional object the runner publishes into `status.json` while a job runs, e.g. `{"sim_time_s": 1.5e-6, "stop_time_s": 1e-5}` (simulated time reached, and the target stop time when known). Passed through verbatim and additive: omitted when the runner publishes none, so callers must treat it as optional ([#4291](https://github.com/2AMLogic/klayout-tools/issues/4291)) |
 | `instance` | `instance_id`, `instance_type`, `availability_zone`, `lifecycle`, `spot`, ... when published |
 
