@@ -2899,6 +2899,7 @@ def run_pex(
     extract_only: bool = False,
     submit_only: bool = False,
     attach: str | None = None,
+    submit_request: Mapping[str, Any] | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Extract ``layout_path`` (with lumped-RC parasitics) and re-run every
@@ -3284,7 +3285,10 @@ def run_pex(
     os.makedirs(work_dir, exist_ok=True)
     # Issue #4619: routes each `run_sim` leg (blocking / submit / attach).
     legs = pex_async.AsyncLegs(
-        submit_only=submit_only, attach=attach, work_dir=work_dir
+        submit_only=submit_only,
+        attach=attach,
+        work_dir=work_dir,
+        request=submit_request,
     )
 
     # Every testbench's schematic- and extracted-side `klt sim` call gets its
