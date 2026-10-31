@@ -212,7 +212,10 @@ def _attach_spec_rows(payload: dict[str, Any], row_by_name: dict[str, str]) -> N
     """
     for out_entry in payload.get("measurements") or []:
         if isinstance(out_entry, dict):
-            out_entry["spec_row"] = row_by_name.get(out_entry.get("name"))
+            name = out_entry.get("name")
+            out_entry["spec_row"] = (
+                row_by_name.get(name) if isinstance(name, str) else None
+            )
 
 
 def _spec_rows_for(
