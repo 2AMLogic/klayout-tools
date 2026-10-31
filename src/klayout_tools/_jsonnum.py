@@ -13,15 +13,15 @@ and message wording, since those are part of the JSON contract's ``error`` text.
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, TypeGuard
 
 
-def is_number(value: Any) -> bool:
+def is_number(value: Any) -> TypeGuard[int | float]:
     """True for a JSON number (int/float), excluding ``bool`` (a Python int)."""
     return not isinstance(value, bool) and isinstance(value, (int, float))
 
 
-def is_finite_number(value: Any) -> bool:
+def is_finite_number(value: Any) -> TypeGuard[int | float]:
     """True for a JSON number that is neither ``bool``, NaN, nor +/-infinity."""
     if not is_number(value):
         return False
