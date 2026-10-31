@@ -212,17 +212,7 @@ class _Parser:
             name = self._next()
             follower = self._next()
             if follower == ":":
-                value_tokens: list[str] = []
-                value_start = self.pos
-                while self._peek() not in (";", "}", "{", None):
-                    value_tokens.append(self._next())
-                if self._peek() == "{":
-                    # Missing ';' before a child group: hand the group header
-                    # (name + parenthesised args) back to the next iteration.
-                    header = _trailing_group_header(value_tokens)
-                    if header:
-                        del value_tokens[-header:]
-                        self.pos = value_start + len(value_tokens)
+                value_tokens = self._attribute_value_tokens()
                 if self._peek() == ";":
                     self.pos += 1
                 group.attributes[name] = _unquote(" ".join(value_tokens))
@@ -242,6 +232,24 @@ class _Parser:
                     f"'{self.path}': expected ':' or '(' after '{name}', got "
                     f"'{follower}'"
                 )
+
+    def _attribute_value_tokens(self) -> list[str]:
+        """Read a simple attribute's value tokens, stopping at ``;``/``}``/``{``.
+
+        On ``{`` (a missing ``;`` before a child group) the trailing
+        ``name ( args )`` group header is handed back to the caller's next
+        iteration rather than swallowed into the value.
+        """
+        value_tokens: list[str] = []
+        value_start = self.pos
+        while self._peek() not in (";", "}", "{", None):
+            value_tokens.append(self._next())
+        if self._peek() == "{":
+            header = _trailing_group_header(value_tokens)
+            if header:
+                del value_tokens[-header:]
+                self.pos = value_start + len(value_tokens)
+        return value_tokens
 
     def _args(self) -> list[str]:
         args: list[str] = []
