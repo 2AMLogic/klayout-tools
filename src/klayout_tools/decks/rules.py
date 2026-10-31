@@ -218,6 +218,12 @@ class DerivedLayer:
     validated like it (``context2`` and ``context2_layers`` set together).
     Absent layers contribute an empty region (``near`` yields nothing,
     ``far`` keeps everything) and never cause the rule to be skipped.
+
+    **``exclude_holed`` (issue #2835).** Valid only for ``"not_interacting"``:
+    additionally drops every merged ``base`` polygon that has at least one
+    hole (a ring), the shape sky130's ``ct.1`` carves out of the ordinary
+    mcon rule for its separate ring rules ``ct.3``/``ct.3_a``. Defaults to
+    ``False`` (no change for any other rule).
     """
 
     base: tuple[int, int]
@@ -230,6 +236,7 @@ class DerivedLayer:
     context2_layers: tuple[tuple[int, int], ...] = ()
     context2_sized_by_um: float = 0.0
     context2: str | None = None
+    exclude_holed: bool = False
 
 
 @dataclass(frozen=True)

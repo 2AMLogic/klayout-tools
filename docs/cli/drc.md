@@ -961,7 +961,7 @@ identity (`violations[].layer`, `coverage`), independent of
 | --- | --- | --- |
 | `"sized_intersection"` (default) | `intersect_with.interacting(base) & base.sized(sized_by_um)` — only shapes of `intersect_with` that already touch the *unsized* `base` region somewhere, clipped to `base`'s outline oversized by `sized_by_um` | gf180mcu `mim.enclosing.via4.1`, `mim.space.1` |
 | `"overlapping"` | `base.overlapping(intersect_with.sized(sized_by_um))` — whole `base` polygons that share **area** with the (optionally guard-banded) second layer | gf180mcu `comp.width.mv.1`, `comp.space.mv.1` |
-| `"not_interacting"` | `base.not_interacting(intersect_with.sized(sized_by_um))` — whole `base` polygons that do not touch it at all | gf180mcu `comp.width.1`, `comp.space.1` |
+| `"not_interacting"` | `base.not_interacting(intersect_with.sized(sized_by_um))` — whole `base` polygons that do not touch it at all | gf180mcu `comp.width.1`, `comp.space.1`; with `exclude_holed=True` (also drops ring-shaped `base` polygons, issue #2835) sky130 `mcon.width.1` |
 | `"union"` | `base + intersect_with` — the boolean join of both layers (`sized_by_um` unused); the rule is skipped only when **both** inputs are absent, so geometry on either layer alone is still checked | sg13g2 `activ.enclosing.cont.1` |
 
 An unknown `mode` is a `DrcError` naming the rule id, not a silent fallback
@@ -1159,11 +1159,22 @@ no width rule of **any** kind on `licon1` (66/44) or `mcon` (67/44), so the
 0.22 µm cut the generators drew there was invisible to `klt drc --deck
 sky130` even in principle. That issue adds the minimum halves
 (`licon1.width.1`/`mcon.width.1`, both 0.17 µm) and clamps the generator side
-via `_PDK_CUT_FIXED_SIZE_UM` — the maximum halves stay deferred to #2388
-exactly like `via.width.1`'s, and are additionally gated on the compound-layer
-narrowings this engine cannot evaluate (`licon.1`'s precision-poly-resistor
-exemption, whose licons are 0.19/2.0 µm per `licon.1b/c`; `ct.1_a`/`ct.1_b`'s
-`areaid:ce` scoping and separate ring-shaped-mcon rules `ct.3`/`ct.3_a`).
+via `_PDK_CUT_FIXED_SIZE_UM`. Issue #2835 then added the maximum halves:
+`licon1.width.1`/`mcon.width.1` now carry `threshold_max_dbu=170` and are
+evaluated on a `DerivedLayer(mode="not_interacting")` region that mirrors the
+upstream narrowing. `licon1.width.1` checks only licon1 cuts touching no
+`rpm` (86/20) / `urpm` (79/20) marker (upstream `licon.not(prec_resistor)`;
+the 0.19/2.0 µm `licon.1b/c` precision-resistor cuts are exempt, including
+from the minimum, as upstream; `urpm` joins `rpm` through the derived layer's
+`context="far"` partition). `mcon.width.1` checks only hole-free mcon
+polygons touching no `areaid:ce` (81/2) marker (upstream
+`mcon.not(ring-shaped).outside(areaid_ce)`; rings are `ct.3`/`ct.3_a`'s); the
+new `DerivedLayer.exclude_holed` field (valid for `not_interacting` only)
+drops ring-shaped polygons. Residual, unenforced behavior: the exemptions are
+slightly lenient (any licon touching `rpm`/`urpm` is exempt, without
+requiring `psdm` and `poly.interacting(poly_rs)`; an mcon merely touching
+`areaid:ce` is exempt where upstream `outside` requires no overlap), ring
+mcon (`ct.3`/`ct.3_a`) has no rule here, and rectangularity is not enforced.
 
 `met2.width.1` was considered for the same backfill and found *not* to need
 it: its own upstream rule (`m2.1`, in both `sky130A_mr.drc` and the resolved
@@ -1620,15 +1631,13 @@ the DRC-DSL script runner does. `li1.enclosing.licon1.1` and
 enclosure rules (`li.5`, `licon.7`) at their unconditional zero-margin
 floor, the one positive-margin transcription that provably flags no
 correct-by-construction geometry. `licon1.width.1` and `mcon.width.1` (issue
-#2594) carry only the *minimum* half of the two fixed-size cut rules
+#2594) carry both halves (as of issue #2835) of the two fixed-size cut rules
 `licon.1` ("min/max. licon length : 0.17um") and `ct.1`
-("minimum/maximum width of mcon : 0.17um") — the same deliberate, temporary
-`threshold_max_dbu` deferral `via.width.1` has since resolved, plus the same
-permanent rectangularity residue (`licon.1_c`, `ct.1`'s own "non-ring mcon
-should be rectangular"); `licon.1`'s precision-poly-resistor exemption
-(`licon.1b/c`, 0.19/2.0 µm edges) and `ct.1_a`/`ct.1_b`'s `areaid:ce`
-narrowing are compound-layer expressions this engine does not evaluate,
-harmless for a minimum of 0.17 µm since every exempt size exceeds it. Three
+("minimum/maximum width of mcon : 0.17um"), scoped by `not_interacting`
+derived layers to exclude the precision-resistor licon (`rpm`/`urpm`) and
+ring-shaped / `areaid:ce` mcon exceptions; the permanent rectangularity
+residue (`licon.1_c`, `ct.1`'s "non-ring mcon should be rectangular") and the
+lenient exemption approximations described above remain. Three
 more (`via.width.1` — rectangularity only —
 `met1.enclosing.via.1`, `met2.enclosing.via.1`) approximate an official rule
 that additionally bounds a max length/rectangularity or a periphery-scoped/

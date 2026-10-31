@@ -2081,7 +2081,9 @@ def test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean(
     top = layout.top_cell()
     dbu = layout.dbu
     licon = layout.layer(66, 44)
-    half = CONTACT_SIZE_UM / 2.0
+    half = (
+        gen._cut_fixed_size_um("sky130", (66, 44)) / 2.0
+    )  # sky130 licon.1 fixed size (#2835)
     gx, gy = gate["x_um"], gate["y_um"]
     top.shapes(licon).insert(
         kdb.Box(
@@ -2438,7 +2440,9 @@ def test_mos_array_series_fingers_gate_contacts_are_drc_clean(tmp_path, pdk_root
     top = layout.top_cell()
     dbu = layout.dbu
     licon = layout.layer(66, 44)
-    half = gen.CONTACT_SIZE_UM / 2.0
+    half = (
+        gen._cut_fixed_size_um("sky130", (66, 44)) / 2.0
+    )  # sky130 licon.1 fixed size (#2835)
     for port in report["ports"]:
         if not port["name"].startswith("U0_G"):
             continue
@@ -7246,7 +7250,13 @@ def test_cut_fixed_size_table_agrees_with_every_curated_deck():
                 if rule.check == "width"
                 and rule.layer == layer
                 and rule.other_layer is None
-                and rule.derived_layer is None
+                and (
+                    rule.derived_layer is None
+                    or (
+                        rule.derived_layer.mode == "not_interacting"
+                        and rule.derived_layer.base == layer
+                    )
+                )
             ]
             assert minima, (family, layer)
             assert max(minima) == size_um, (family, layer, minima)

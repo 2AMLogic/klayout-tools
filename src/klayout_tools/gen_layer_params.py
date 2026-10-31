@@ -1443,7 +1443,16 @@ def _deck_cut_max_size_um(family: str, layer: tuple[int, int]) -> float | None:
         if rule.check == "width"
         and rule.layer == layer
         and rule.other_layer is None
-        and rule.derived_layer is None
+        and (
+            rule.derived_layer is None
+            # A `not_interacting` exemption narrowing (#2835: licon1/mcon
+            # minus precision-resistor / ring / areaid:ce exceptions) still
+            # bounds the *ordinary* cut this generator draws.
+            or (
+                rule.derived_layer.mode == "not_interacting"
+                and rule.derived_layer.base == layer
+            )
+        )
         and rule.threshold_max_dbu is not None
     ]
     return round(min(bounds), 6) if bounds else None

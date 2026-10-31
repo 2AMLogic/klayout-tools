@@ -700,6 +700,10 @@ def _derived_region_unscoped(
             return base_region.overlapping(marker_region)
         # Whole `base` polygons touching no marker geometry at all -- the
         # unmarked ("_LV") half of the pair.
+        if derived.exclude_holed:
+            # Ring-shaped polygons are governed by separate rules (#2835);
+            # merge first so a ring drawn as abutting bars still counts.
+            base_region = base_region.merged().with_holes(0, 1, False)
         return base_region.not_interacting(marker_region)
     # "sized_intersection" (the default, issue #345): shapes of
     # `intersect_with` that already touch the *unsized* `base` region
@@ -1087,6 +1091,7 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
                     "base": _fmt_layer(derived.base),
                     "intersect_with": _fmt_layer(derived.intersect_with),
                     "sized_by_um": derived.sized_by_um,
+                    **({"exclude_holed": True} if derived.exclude_holed else {}),
                     **(
                         {}
                         if derived.context is None
@@ -3165,6 +3170,15 @@ def _validate_derived_layer(rule: DrcRule) -> None:
     ):
         raise DrcError(
             f"rule '{rule.id}': derived_layer mode 'union' requires intersect_with"
+        )
+    if (
+        derived is not None
+        and derived.exclude_holed
+        and derived.mode != "not_interacting"
+    ):
+        raise DrcError(
+            f"rule '{rule.id}': derived_layer exclude_holed is only supported "
+            "for mode 'not_interacting'"
         )
     if derived is not None and derived.context not in _DERIVED_CONTEXTS:
         raise DrcError(
