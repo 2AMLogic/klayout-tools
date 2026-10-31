@@ -1507,28 +1507,32 @@ def test_unsupported_pdk_raises_before_any_s3_write(tmp_path, monkeypatch):
     message = str(excinfo.value)
     assert "unsupported PDK 'sky130B'" in message
     assert "batch backend" in message
-    for supported in rl.SUPPORTED_PDKS:  # names the whole supported set
+    for supported in sb.BATCH_PUBLISHED_PDKS:  # names the whole supported set
         assert supported in message
     assert runner.calls == []  # not one byte uploaded, nothing launched
 
 
-def test_unsupported_pdk_is_refused_even_when_the_fleet_is_unconfigured(tmp_path):
+def test_unsupported_pdk_is_refused_even_when_the_fleet_is_unconfigured():
     """The PDK is a property of the *request*, not of this host's fleet
-    configuration, so it is reported first -- an operator with no provision
-    script yet still learns the request could never have run.
-
-    `ihp-sg13cmos5l` (not `ihp-sg13g2`, registered by #2573) is used here:
-    its family classifies (via `pdk_families.pdk_variant_family`) but is not
-    a member of `_AMI_PDK_FAMILIES`, so it is still refused."""
-    with pytest.raises(sim.SimError, match="unsupported PDK 'ihp-sg13cmos5l'"):
+    configuration, so it is reported first."""
+    with pytest.raises(sim.SimError, match="unsupported PDK 'not-a-pdk'"):
         sb._resolve_batch_config(
-            {"models": {"pdk": "ihp-sg13cmos5l"}}, corner_count=1, timeout_s=30.0
+            {"models": {"pdk": "not-a-pdk"}}, corner_count=1, timeout_s=30.0
         )
 
 
 @pytest.mark.parametrize(
     "variant",
-    ["gf180mcuA", "gf180mcuC", "gf180mcu", "sky130A", "ihp-sg13g2", "sg13g2"],
+    [
+        "gf180mcuA",
+        "gf180mcuC",
+        "gf180mcu",
+        "sky130A",
+        "ihp-sg13g2",
+        "sg13g2",
+        "ihp-sg13cmos5l",
+        "sg13cmos5l",
+    ],
 )
 def test_a_variant_reducible_to_a_published_family_is_accepted(
     tmp_path, monkeypatch, variant
@@ -1675,21 +1679,13 @@ def test_a_request_naming_no_pdk_at_all_is_not_refused(tmp_path, monkeypatch):
     ).bucket
 
 
-@pytest.mark.parametrize("unsupported", ["sky130B", "ihp-sg13cmos5l", "not-a-pdk"])
-def test_remote_and_batch_reject_the_same_unsupported_pdk_identically(
-    tmp_path, unsupported
-):
-    """Issue #2523: the two off-host backends must agree by construction.
-
-    `remote` refuses in `resolve_ami` before its `run-instances` call; `batch`
-    refuses in `_resolve_batch_config` before its first S3 write. Both go
-    through the *same* `remote_launcher.ami_pdk_key`, so the messages differ
-    only in the backend name -- this test fails if either side ever grows its
-    own copy of the supported-PDK rule.
-    """
-    with pytest.raises(rl.RemoteLaunchError) as remote_exc:
+@pytest.mark.parametrize("unsupported", ["sky130B", "not-a-pdk"])
+def test_remote_and_batch_reject_a_pdk_neither_publishes(tmp_path, unsupported):
+    """A PDK in neither published set is refused by both off-host backends;
+    the messages differ in the backend name and the supported list."""
+    with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK"):
         rl.resolve_ami(unsupported, "us-east-1")
-    with pytest.raises(sim.SimError) as batch_exc:
+    with pytest.raises(sim.SimError, match=f"unsupported PDK '{unsupported}'") as exc:
         sb._resolve_batch_config(
             {
                 "models": {"pdk": unsupported},
@@ -1701,21 +1697,31 @@ def test_remote_and_batch_reject_the_same_unsupported_pdk_identically(
             corner_count=1,
             timeout_s=30.0,
         )
-    remote_message = str(remote_exc.value)
-    assert "unsupported PDK" in remote_message
-    assert remote_message.replace("the remote backend", "the batch backend") == str(
-        batch_exc.value
-    )
+    assert "batch backend" in str(exc.value)
 
 
-def test_narrowing_supported_pdks_narrows_both_backends_together(tmp_path, monkeypatch):
-    """The anti-divergence guarantee, exercised directly: drop `sky130A` from
-    the single supported-PDK declaration and *both* backends must start
-    refusing it. A `batch`-side copy of the list would leave this test's
-    `batch` half passing `sky130A` while `remote` refuses it."""
-    monkeypatch.setattr(rl, "SUPPORTED_PDKS", ("gf180mcu",))
-    with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK 'sky130A'"):
-        rl.resolve_ami("sky130A", "us-east-1")
+@pytest.mark.parametrize("pdk", ["ihp-sg13cmos5l", "sg13cmos5l", "ihp-sg13g2"])
+def test_batch_set_is_independent_of_the_remote_ami_set(pdk):
+    """Issue #2727: batch bakes sg13cmos5l in its runner image, while `remote`
+    (which needs a published AMI per PDK) still refuses it."""
+    if pdk in ("ihp-sg13cmos5l", "sg13cmos5l"):
+        with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK"):
+            rl.ami_pdk_key(pdk)
+    assert sb.batch_pdk_key(pdk) in sb.BATCH_PUBLISHED_PDKS
+
+
+def test_batch_pdk_key_reduces_variants_and_rejects_sky130b():
+    assert sb.batch_pdk_key("gf180mcuC") == "gf180mcu"
+    assert sb.batch_pdk_key("ihp-sg13cmos5l") == "sg13cmos5l"
+    with pytest.raises(sim.SimError, match="unsupported PDK 'sky130B'"):
+        sb.batch_pdk_key("sky130B")
+
+
+def test_narrowing_batch_published_pdks_narrows_batch_only(tmp_path, monkeypatch):
+    """The batch set is its own declaration: dropping `sky130A` from it refuses
+    `sky130A` on batch without touching `remote`."""
+    monkeypatch.setattr(sb, "BATCH_PUBLISHED_PDKS", ("gf180mcu",))
+    assert rl.ami_pdk_key("sky130A") == "sky130A"
     with pytest.raises(sim.SimError, match="unsupported PDK 'sky130A'"):
         sb._resolve_batch_config(
             {
@@ -1730,16 +1736,16 @@ def test_narrowing_supported_pdks_narrows_both_backends_together(tmp_path, monke
         )
 
 
-def test_batch_pdk_validation_delegates_to_ami_pdk_key(tmp_path, monkeypatch):
-    """Named-callsite guard: the batch path must call `ami_pdk_key` itself
-    (with its own backend label), never re-implement the mapping."""
-    seen: list[tuple[str, str]] = []
+def test_batch_pdk_validation_uses_batch_pdk_key_not_ami_pdk_key(tmp_path, monkeypatch):
+    """Named-callsite guard (#2727): validation goes through `batch_pdk_key`."""
+    seen: list[str] = []
+    real = sb.batch_pdk_key
 
-    def _spy(pdk: str, *, backend: str = "remote") -> str:
-        seen.append((pdk, backend))
-        return pdk
+    def _spy(pdk: str) -> str:
+        seen.append(pdk)
+        return real(pdk)
 
-    monkeypatch.setattr(sb, "ami_pdk_key", _spy)
+    monkeypatch.setattr(sb, "batch_pdk_key", _spy)
     sb._resolve_batch_config(
         {
             "models": {"pdk": "gf180mcuC"},
@@ -1751,7 +1757,7 @@ def test_batch_pdk_validation_delegates_to_ami_pdk_key(tmp_path, monkeypatch):
         corner_count=1,
         timeout_s=30.0,
     )
-    assert seen == [("gf180mcuC", "batch")]
+    assert seen == ["gf180mcuC"]
 
 
 def test_no_credential_key_path_or_bucket_name_is_baked_into_source():

@@ -637,7 +637,7 @@ implements against.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `models.pdk` | string, required for `remote` | Selects which baked-AMI PDK to provision (`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`, `sg13g2`). The remote host resolves its own baked model library from this field the same way a local run resolves one (`pdk.find_pdk`, via the AMI's own `$PDK_ROOT`) — do not pair it with an operator-local absolute `models.pdk_root`, which only exists on the caller's own machine. Validated up front by `remote_launcher.ami_pdk_key` — the *same* check the `batch` backend applies, see "Both off-host backends validate `models.pdk` up front" below. `sg13g2` is registered (#2573) but no AMI has been built/published for it yet (#2574) — a request will fail at `resolve_ami` with a "no published AMI" error until an operator runs `scripts/aws/build-remote-sim-ami.sh --pdk sg13g2` for the target region. |
+| `models.pdk` | string, required for `remote` | Selects which baked-AMI PDK to provision (`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`, `sg13g2`). The remote host resolves its own baked model library from this field the same way a local run resolves one (`pdk.find_pdk`, via the AMI's own `$PDK_ROOT`) — do not pair it with an operator-local absolute `models.pdk_root`, which only exists on the caller's own machine. Validated up front by `remote_launcher.ami_pdk_key`; the `batch` backend has its own, wider published set (`sim_batch.BATCH_PUBLISHED_PDKS`), see "Both off-host backends validate `models.pdk` up front" below. `sg13g2` is registered (#2573) but no AMI has been built/published for it yet (#2574) — a request will fail at `resolve_ami` with a "no published AMI" error until an operator runs `scripts/aws/build-remote-sim-ami.sh --pdk sg13g2` for the target region. |
 | `remote.region` | string, required | AWS region to provision in. No default — an unset region is a usage error, not an inferred one (`RemoteLaunchError` from `remote_launcher.require_cost_config`, mirroring `repo:remote`'s "no silent defaults for cost-relevant fields" discipline). |
 | `remote.key_name` | string, required | AWS EC2 keypair name attached to the provisioned instance, so `remote.ssh_key_path`'s private key can authenticate. |
 | `remote.ssh_key_path` | string, required | Local path to the private key matching `remote.key_name`, used for every SSH/SCP call the transport makes. |
@@ -1450,20 +1450,26 @@ recovered (the harness never writes an incremental report).
 
 ### Both off-host backends validate `models.pdk` up front
 
-`remote` and `batch` (`sim._OFFHOST_BACKENDS`) both run on images the same
-AMI pipeline publishes, so both accept exactly the same PDK set
-(`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`, `sg13g2`) and both
-refuse an unsupported one **before spending anything** — `remote` before its
-`run-instances` call, `batch` before its first S3 write
+`remote` and `batch` (`sim._OFFHOST_BACKENDS`) each validate against the set
+of PDKs *their* image publishes, and both refuse an unsupported one **before
+spending anything** — `remote` before its `run-instances` call, `batch`
+before its first S3 write
 ([#2523](https://github.com/2AMLogic/klayout-tools/issues/2523)):
 
+- `remote` provisions from the AMI manifest: `remote_launcher.SUPPORTED_PDKS`
+  (`sky130A`, `gf180mcu`, `sg13g2`), checked by `remote_launcher.ami_pdk_key`.
+- `batch` runs on the EDA batch-runner image 2am publishes, which bakes more
+  PDKs than the `remote` AMIs: `sim_batch.BATCH_PUBLISHED_PDKS` (`sky130A`,
+  `gf180mcu`, `sg13g2`, `sg13cmos5l`), checked by `sim_batch.batch_pdk_key`
+  ([#2727](https://github.com/2AMLogic/klayout-tools/issues/2727)). So
+  `ihp-sg13cmos5l` is accepted on `batch` but still refused on `remote`.
+
 ```
-unsupported PDK 'sky130B' for the batch backend (supported: sky130A, gf180mcu). ...
+unsupported PDK 'sky130B' for the batch backend (supported: sky130A, gf180mcu, sg13g2, sg13cmos5l). ...
 ```
 
-The check is one function, `remote_launcher.ami_pdk_key`, called by both
-paths rather than restated per backend, so the two can never disagree about
-what is supported. Consequences worth knowing:
+Both use the same variant → family reduction
+(`pdk_families.pdk_variant_family`). Consequences worth knowing:
 
 - **A variant reducible to a published family is accepted** on both, on the
   same terms: `models.pdk: "gf180mcuC"` → family `gf180mcu`, or
