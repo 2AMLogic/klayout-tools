@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-31
 
+- **PR #4719**: feat: add placement density and global-route congestion request fields
+- **Issue #4716** (closed): place-and-route: no request control over placement density or global-route congestion
+- **PR #4717**: fix: escape macro instance for define_pdn_grid -instances glob/list parsing
+- **Issue #4715** (closed): place-and-route: macro instance with escaped brackets still has no value that works for both place_macro and the macro PDN grid
 - **PR #4712**: refactor: trim _paths docstring and drop fold_spice_continuations alias
 - **Issue #3956** (closed): Trim _paths.py: 90-line refactor-history docstring and a one-line alias
 - **PR #4713**: refactor: call env_provenance directly instead of per-module path wrappers
