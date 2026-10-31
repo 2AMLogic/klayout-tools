@@ -2,7 +2,6 @@ import type { ReactNode } from "react";
 import type { Layout } from "@/data/types";
 import { cliData } from "@/data/cliData";
 import { LayoutCard } from "@/components/LayoutCard";
-import { EmGallerySection } from "@/components/em";
 
 /**
  * klayout-tools.org landing page (ported from `index.astro` in issue #92's
@@ -13,8 +12,7 @@ import { EmGallerySection } from "@/components/em";
  * a runnable first session against a GDS this site serves, MCP, CI),
  * Capabilities (every `klt` verb, grouped), Gallery (one card per block
  * discovered at build time by `loadLayouts()`, issue #63, each linking to
- * its `/<slug>/` detail page, issue #64), Solver Validation
- * (`EmGallerySection`, Epic #840) and Docs.
+ * its `/<slug>/` detail page, issue #64) and Docs.
  *
  * Everything that drifts with the code — the release version, the verb
  * list and summaries, the MCP tool count and the built-in deck names —
@@ -296,8 +294,6 @@ export function IndexPage({ layouts }: IndexPageProps) {
           ))}
         </ul>
       </Section>
-
-      <EmGallerySection />
 
       <Section id="docs" title="Docs">
         <ul role="list" className="mt-4 grid list-none grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-x-6 gap-y-2 p-0 text-[0.9rem] leading-[1.6]">

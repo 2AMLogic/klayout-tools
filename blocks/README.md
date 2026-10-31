@@ -280,8 +280,9 @@ Generation is reproducible from a committed script,
 [`../examples/em/block_coupling/generate.py`](../examples/em/block_coupling/generate.py) —
 **that directory's [`README.md`](../examples/em/block_coupling/README.md) is the
 recipe for adding the next block**, including the `--dry-run` bundle search
-that needs no solver checkout. Nothing on the site renders these yet; the
-detail-page field panel is Phase 3b.
+that needs no solver checkout. These exports are solver fixtures and
+evidence; klayout-tools.org does not render or stage them (the solver's
+validation story belongs with the solver, issue #4641).
 
 ## Adding a canary / what the site shows
 
