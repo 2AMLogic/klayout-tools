@@ -9804,6 +9804,21 @@ def _worker_env_kwargs(threads_per_worker: int | None) -> dict[str, Any]:
     return {"env": {**os.environ, "OMP_NUM_THREADS": str(threads_per_worker)}}
 
 
+def _with_thread_pin(
+    ngspice_init: tuple[str, ...], threads_per_worker: int | None, engine: str
+) -> tuple[str, ...]:
+    """Also pin the thread count through ``.spiceinit`` (issue #3619).
+
+    ``OMP_NUM_THREADS`` alone did not stop ngspice-46 from oversubscribing
+    on the batch fleet, while ``set num_threads=1`` did. The pin line goes
+    first so a user ``options.ngspice_init`` line still wins; a netlist
+    ``.control`` ``set num_threads`` runs later still.
+    """
+    if threads_per_worker is None or engine == "xyce":
+        return ngspice_init
+    return (f"set num_threads={threads_per_worker}", *ngspice_init)
+
+
 def _threads_environment(effective: int | None) -> dict[str, int]:
     """Additive/optional ``environment.threads_per_worker`` (issue #2970): the
     OpenMP thread count each ngspice worker actually ran with. Absent when the
@@ -9964,7 +9979,7 @@ def _run_corner(
         want_waveforms=want_waveforms,
         engine=engine,
         ngspice_binary=ngspice_binary,
-        ngspice_init=ngspice_init,
+        ngspice_init=_with_thread_pin(ngspice_init, threads_per_worker, engine),
         osdi_preload=osdi_preload,
         save_mode=save_mode,
         save_vectors=save_vectors,
