@@ -7,7 +7,7 @@ Current work from GitHub labels. Long-term direction lives in [ROADMAP.md](ROADM
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#4679**: ci: move native macOS arm64 runner from macos-14 to macos-15
+_None._
 
 ## Very Important
 
@@ -46,9 +46,7 @@ Issues currently being built (`loom:building`).
 
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
-- **#4677**: CI: move macos-14 runner pins to macos-15 before the 2026-11-02 image retirement
-- **#4696**: klt pex --submit-only writes complete:true manifest with only the schematic leg when the extracted leg cannot be submitted
-- **#4698**: synthesize/signoff: submodule parameter override, attest PATH scrubbing, recorded freshness in release
+- **#4721**: klt pex --backend batch: --attach on a killed client loses the shard map, and a sharded leg can come back lost_shard for every unit
 
 ## PRs Awaiting Review
 
@@ -56,13 +54,13 @@ PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
-- **#4697**: fix: refuse pex --submit-only when a pre-flight mismatch skips the extracted leg
+- **#4722**: fix: keep shard maps through sharded attach and name map/request differences
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#4679**: ci: move native macOS arm64 runner from macos-14 to macos-15
+_None._
 
 ## Proposed
 
@@ -102,9 +100,7 @@ Issues carrying `loom:curated`.
 - **#4424**: klt lvs: custom-class cap_cmomi/resistor LVS regresses from match to mismatch between daf06a51afaf and 0.8.0 (sg13cmos5l) *(curated)*
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
 - **#4508**: ASAP7: trim protruding VIA_* M1 pad tips to clear M1.S.2-5 (follow-up to #4495) *(curated)*
-- **#4677**: CI: move macos-14 runner pins to macos-15 before the 2026-11-02 image retirement *(curated)*
-- **#4696**: klt pex --submit-only writes complete:true manifest with only the schematic leg when the extracted leg cannot be submitted *(curated)*
-- **#4698**: synthesize/signoff: submodule parameter override, attest PATH scrubbing, recorded freshness in release *(curated)*
+- **#4721**: klt pex --backend batch: --attach on a killed client loses the shard map, and a sharded leg can come back lost_shard for every unit *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -112,7 +108,6 @@ Issues carrying `loom:curated`.
 - **#520**: Epic: the Tiny Tapeout corpus as a regression and optimization benchmark *(architect)*
 - **#708**: Epic: finite-element full-field solver for klt (Rust) — volumetric fields, electrothermal, MoM cross-validation *(architect)*
 - **#3873**: asap7_bsimcmg adapters have no runtime caller: wire into klt sim or demote to test helper *(hermit)*
-- **#3956**: Trim _paths.py: 90-line refactor-history docstring and a one-line alias *(hermit)*
 - **#3962**: Split cli/parser.py: move per-verb parser registration into verb modules (190 commits / 20 conflict merges in 5 weeks) *(hermit)*
 - **#4065**: Split sim_batch.py (5232 lines, 117 commits / 44 merges in 5 weeks) along its existing section seams *(hermit)*
 - **#4126**: Simplify run_lvs: split the 2,047-line orchestrator in lvs.py into stage helpers *(hermit)*
@@ -127,14 +122,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 1 |
+| Operator merge-risk holds | 0 |
 | Very important | 1 |
 | Important | 1 |
 | Ready (`loom:issue`) | 14 |
-| In Progress (`loom:building`) | 5 |
+| In Progress (`loom:building`) | 3 |
 | PRs awaiting review | 3 |
-| Approved PRs awaiting merge | 1 |
-| Curated | 37 |
-| Architect / Hermit proposals | 10 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 35 |
+| Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
