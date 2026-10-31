@@ -479,7 +479,7 @@ def _probe_add_widths(
 
     script_path = os.path.join(output_dir, f"probe_{hdl_toplevel}.ys")
     json_path = os.path.join(output_dir, f"probe_{hdl_toplevel}.json")
-    lines = [read_verilog_line(path, defines) for path in resolved_sources]
+    lines = [read_verilog_line(path, defines, parameters) for path in resolved_sources]
     lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines += [
         f"hierarchy -check -top {hdl_toplevel}",

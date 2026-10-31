@@ -11,6 +11,7 @@ import pytest
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import (
     AttestationError,
+    attach_output_tails,
     build_attestation,
     check_attestation,
     render_envelope,
@@ -264,3 +265,52 @@ def test_report_cited_as_evidence_is_refused(tmp_path):
 
     with pytest.raises(AttestationError):
         _attest(repo, inventory)
+
+
+def _failing_inventory(text: str) -> dict:
+    inventory = _analog_inventory()
+    inventory["envelope_checks"]["evidence/sim_ss.json"] = {
+        "argv": [sys.executable, "-c", f"import sys; print({text!r}); sys.exit(2)"]
+    }
+    return inventory
+
+
+def test_failing_command_tail_is_live_only_and_never_in_built_envelope(tmp_path):
+    repo = _repo(tmp_path)
+    envelope = _attest(repo, _failing_inventory("boom"))
+    checks = envelope["attestation"]["checks"]
+    assert all("output_tail" not in c for c in checks)
+
+    attach_output_tails(envelope)
+
+    failed = [c for c in checks if c["check"] == "command" and not c["passed"]]
+    assert [c["output_tail"] for c in failed] == ["boom"]
+    assert all(
+        "output_tail" not in c
+        for c in checks
+        if c["check"] == "command" and c["passed"]
+    )
+
+
+def test_host_specific_tail_text_does_not_change_the_envelope_bytes(
+    tmp_path, monkeypatch
+):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    inventory["envelope_checks"]["evidence/sim_ss.json"] = {
+        "argv": [
+            sys.executable,
+            "-c",
+            "import os, sys; print(os.environ['TAIL_X']); sys.exit(2)",
+        ]
+    }
+    rendered = []
+    for host_text in ("host-a-text", "host-b-text"):
+        monkeypatch.setenv("TAIL_X", host_text)
+        envelope = _attest(repo, inventory)
+        rendered.append(render_envelope(envelope))
+        attach_output_tails(envelope)
+        assert host_text in render_envelope(envelope)  # live result only
+
+    assert rendered[0] == rendered[1]
+    assert "host-" not in rendered[0]

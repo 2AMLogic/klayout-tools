@@ -1729,8 +1729,12 @@ not have (xschem, a PDK): see "CI usage" below.
 a string, boolean, non-positive, non-finite or larger value is refused, exit
 `1`). It raises or lowers that one command's time limit; omitted, the command
 gets the default `1800` s, the same as command-backed manifest evidence.
-`argv` is run directly, never through a shell, with stdin closed and output
-discarded. `cwd` defaults to the repository root. A command that cannot
+`argv` is run directly, never through a shell, with stdin closed. A failing
+command's merged stdout+stderr is kept as a bounded tail (last 20 lines, at most
+2048 bytes) and emitted as the failing check's additive `output_tail` string in
+the live `--format json` result (issue #4698) -- never in an `--output` file,
+nor in the `--check` diff, so the envelope and its content hash stay
+reproducible across hosts; passing, skipped and unlaunchable checks omit it. `cwd` defaults to the repository root. A command that cannot
 be launched or times out fails its check with `exit_status: null` and
 `error: "launch_failed"`/`"timeout"`.
 
