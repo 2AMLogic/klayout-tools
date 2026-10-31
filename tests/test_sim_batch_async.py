@@ -678,6 +678,66 @@ def test_sharded_submit_only_lists_every_shard_and_the_manifest(tmp_path, monkey
     ]
 
 
+def _launch_dies_on(monkeypatch, nth):
+    """Make the `nth` (1-based) launch_job call raise, as a kill would."""
+    real = sb.launch_job
+    seen = {"n": 0}
+
+    def _launch(config, job_id, **kwargs):
+        seen["n"] += 1
+        if seen["n"] == nth:
+            raise sb.BatchError("killed during launch", code="batch_launch_failed")
+        return real(config, job_id, **kwargs)
+
+    monkeypatch.setattr(sb, "launch_job", _launch)
+
+
+@pytest.mark.parametrize("state", ["submitted", "launching"])
+def test_sharded_resubmit_reuses_recorded_job_ids(tmp_path, monkeypatch, state):
+    """Issue #4686: an interrupt after `submit_job` (and in `launching`)
+    leaves a shard map; re-running submit never mints a second id."""
+    runner, _ = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    submits: list = []
+    real_submit = sb.submit_job
+
+    def _spy(config, job_id, spec, **kwargs):
+        submits.append(job_id)
+        return real_submit(config, job_id, spec, **kwargs)
+
+    monkeypatch.setattr(sb, "submit_job", _spy)
+    _launch_dies_on(monkeypatch, nth=2)
+    with pytest.raises(sim.SimError):
+        _submit_shards(tmp_path)
+    path = tmp_path / "artifacts" / sb.BATCH_SHARDS_FILENAME
+    entries = json.loads(path.read_text())["shards"]
+    assert [e["state"] for e in entries] == ["launched", "submitted", "pending"]
+    first_ids = [e["job_id"] for e in entries]
+    if state == "launching":
+        # The kill landed after launch_job started: outcome unknown.
+        entries[1]["state"] = "launching"
+        document = json.loads(path.read_text())
+        document["shards"] = entries
+        path.write_text(json.dumps(document))
+
+    monkeypatch.undo()
+    runner, _ = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    monkeypatch.setattr(sb, "submit_job", _spy)
+    # The pending shard was killed before its job.json upload.
+    monkeypatch.setattr(sb, "job_exists", lambda *_a, **_k: False)
+    _, payload = _submit_shards(tmp_path)
+
+    assert [s["job_id"] for s in payload["shards"]] == first_ids
+    assert sorted(submits) == sorted(set(submits))
+    assert len(submits) == 3
+    launches = len(runner.argvs_matching("launch", "--apply"))
+    # shard 0 launched earlier; shard 1 launched here only if it never started.
+    assert launches == (2 if state == "submitted" else 1)
+    document = json.loads(path.read_text())
+    assert [e["job_id"] for e in document["shards"]] == first_ids
+
+
 def test_unsharded_submit_only_payload_is_unchanged(tmp_path, monkeypatch):
     runner = _FakeRunner()
     path = _setup(tmp_path, monkeypatch, runner)

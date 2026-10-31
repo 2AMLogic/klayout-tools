@@ -96,8 +96,25 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   backend, `--resume`, `--measure-command`, `--extract-only` or
   `--device-only-leg`; `pex_manifest_invalid` for an unreadable manifest;
   `pex_attach_leg_missing` for a leg the manifest lacks;
+  `pex_manifest_incomplete` for an `--attach` of a manifest whose submit was
+  interrupted (the error names the missing legs);
   `resume_fingerprint_mismatch` when the extracted netlist or a testbench
   request changed since the submit. Omitted, the report is unchanged.
+  **Incremental manifest and re-running a submit**
+  ([#4686](https://github.com/2AMLogic/klayout-tools/issues/4686)):
+  `pex-submit.json` is rewritten atomically after every leg is submitted, with
+  `"complete": false` until the last leg is in (then `true`), so a caller cut
+  off mid-submit still leaves a record of the jobs already running. Re-run the
+  *same* `klt pex --submit-only` command to finish: legs already in the
+  manifest are skipped (no new job), the rest are submitted, and a sharded leg
+  reuses its `batch-shards.json` -- `launched`/`collected` shards are left
+  alone, a `submitted` shard is launched under its recorded job id, and no
+  shard that already has an id is given a new one. A shard whose launch was
+  in progress when the earlier run stopped (`launching`, outcome unknown) is
+  not launched again, to avoid billing it twice; `--attach` reports it if it
+  never started. A manifest or shard map written for different inputs is
+  refused (`resume_fingerprint_mismatch`; submit into a fresh `--outdir`
+  instead).
 - `--deck-option` — repeatable `<key>=<value>`, passed through verbatim to
   `klt extract --deck-option` (issue #1558); see
   [`extract.md`](extract.md)'s "Selecting a shared-geometry resistor

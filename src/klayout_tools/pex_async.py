@@ -26,6 +26,7 @@ ASYNC_SCHEMA_VERSION = 1
 MANIFEST_INVALID_CODE = "pex_manifest_invalid"
 FINGERPRINT_MISMATCH_CODE = "resume_fingerprint_mismatch"
 LEG_MISSING_CODE = "pex_attach_leg_missing"
+MANIFEST_INCOMPLETE_CODE = "pex_manifest_incomplete"
 ASYNC_UNSUPPORTED_CODE = "pex_async_unsupported"
 
 
@@ -89,14 +90,25 @@ class AsyncLegs:
         self._legs: list[dict[str, Any]] = []
         self._recorded: dict[tuple[str, str], dict[str, Any]] = {}
         self._manifest: dict[str, Any] = {}
-        if self.mode == "attach":
-            self._manifest = self._load(self.manifest_path)
+        self._extracted_netlist_sha256: str | None = None
+        self._request_sha256: dict[str, str] = {}
+        # Issue #4686: a re-run of an interrupted --submit-only replays the
+        # legs the earlier run recorded instead of submitting them again.
+        if self.mode == "attach" or (
+            self.submitting and os.path.isfile(self.manifest_path or "")
+        ):
+            self._manifest = self._load(self.manifest_path, flag=self._flag())
             self._recorded = {
                 (leg["testbench"], leg["side"]): leg for leg in self._manifest["legs"]
             }
+            if self.submitting:
+                self._legs = list(self._manifest["legs"])
+
+    def _flag(self) -> str:
+        return "--submit-only" if self.submitting else "--attach"
 
     @staticmethod
-    def _load(path: str | None) -> dict[str, Any]:
+    def _load(path: str | None, *, flag: str = "--attach") -> dict[str, Any]:
         from .pex import PexError
 
         try:
@@ -108,7 +120,7 @@ class AsyncLegs:
             manifest["testbenches"], manifest["extracted_netlist_sha256"]  # noqa: B018
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise PexError(
-                f"--attach: cannot read pex submit manifest '{path}': {exc!r}",
+                f"{flag}: cannot read pex submit manifest '{path}': {exc!r}",
                 code=MANIFEST_INVALID_CODE,
             ) from exc
         return manifest
@@ -116,11 +128,14 @@ class AsyncLegs:
     def verify(
         self, *, extracted_netlist_sha256: str | None, request_sha256: Mapping[str, str]
     ) -> None:
-        """Attach only: refuse a manifest recorded for different inputs than
-        this invocation extracted/loaded (the sim ``--attach`` precedent)."""
+        """Refuse a manifest recorded for different inputs than this
+        invocation extracted/loaded (the sim ``--attach`` precedent), and an
+        ``--attach`` of a manifest whose submit never finished."""
         from .pex import PexError
 
-        if self.mode != "attach":
+        self._extracted_netlist_sha256 = extracted_netlist_sha256
+        self._request_sha256 = dict(request_sha256)
+        if not self._manifest:
             return
         recorded = {
             tb["label"]: tb["request_sha256"] for tb in self._manifest["testbenches"]
@@ -129,11 +144,26 @@ class AsyncLegs:
             "extracted_netlist_sha256"
         ] != extracted_netlist_sha256 or recorded != dict(request_sha256):
             raise PexError(
-                f"--attach: manifest '{self.manifest_path}' was submitted for "
+                f"{self._flag()}: manifest '{self.manifest_path}' was submitted for "
                 "different inputs (extracted netlist or testbench requests "
                 "changed); re-run the same klt pex command that produced it, "
-                "or submit again",
+                "or submit again into a fresh --outdir",
                 code=FINGERPRINT_MISMATCH_CODE,
+            )
+        if self.mode == "attach" and not self._manifest.get("complete", True):
+            missing = [
+                f"{label}/{side}"
+                for label in request_sha256
+                for side in ("schematic", "extracted")
+                if (label, side) not in self._recorded
+            ]
+            raise PexError(
+                f"--attach: manifest '{self.manifest_path}' is incomplete -- the "
+                "--submit-only run that wrote it was interrupted before every "
+                "leg was submitted (missing legs: "
+                f"{', '.join(missing) or 'unknown'}); re-run the same "
+                "`klt pex --submit-only` command to finish submitting",
+                code=MANIFEST_INCOMPLETE_CODE,
             )
 
     def run(
@@ -166,6 +196,10 @@ class AsyncLegs:
                 attach_job_id=leg["attach"],
                 **kwargs,
             )
+        replayed = self._recorded.get((testbench, side))
+        if replayed is not None:
+            # Already submitted by an earlier, interrupted run: no new job.
+            return replayed
         try:
             report = run_sim(
                 request_path, artifacts_dir=artifacts_dir, submit_only=True, **kwargs
@@ -187,7 +221,28 @@ class AsyncLegs:
                 "unit_count": report.get("unit_count"),
             }
         )
+        # Issue #4686: persist before the next leg, so a caller killed
+        # mid-submit leaves a manifest a re-run can pick up.
+        self._write(complete=False)
         return report
+
+    def _write(self, *, complete: bool) -> None:
+        payload = {
+            "schema_version": ASYNC_SCHEMA_VERSION,
+            "complete": complete,
+            "extracted_netlist_sha256": self._extracted_netlist_sha256,
+            "testbenches": [
+                {"label": label, "request_sha256": sha}
+                for label, sha in self._request_sha256.items()
+            ],
+            "legs": self._legs,
+        }
+        path = self.manifest_path or ""
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+        os.replace(tmp_path, path)
 
     def finish_submit(
         self,
@@ -195,19 +250,11 @@ class AsyncLegs:
         extracted_netlist_sha256: str | None,
         request_sha256: Mapping[str, str],
     ) -> dict[str, Any]:
-        """Write the manifest and return the ``submitted`` status payload."""
-        payload = {
-            "schema_version": ASYNC_SCHEMA_VERSION,
-            "extracted_netlist_sha256": extracted_netlist_sha256,
-            "testbenches": [
-                {"label": label, "request_sha256": sha}
-                for label, sha in request_sha256.items()
-            ],
-            "legs": self._legs,
-        }
-        with open(self.manifest_path or "", "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
-            handle.write("\n")
+        """Write the final (``complete``) manifest and return the
+        ``submitted`` status payload."""
+        self._extracted_netlist_sha256 = extracted_netlist_sha256
+        self._request_sha256 = dict(request_sha256)
+        self._write(complete=True)
         return {
             "schema_version": ASYNC_SCHEMA_VERSION,
             "status": "submitted",

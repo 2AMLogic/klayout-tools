@@ -5676,11 +5676,13 @@ def _submit_batch_shards(
     Returns the per-shard identities and the map's path. A failed submit or
     launch raises :class:`BatchError`; shards already launched stay recorded
     and keep running."""
+    # Issue #4686: a re-run reuses the shard map of the same request, so a
+    # shard that already has a job id never gets a second one.
     manifest = _open_shard_manifest(
         artifacts_dir,
         shard_fingerprint,
         hosts,
-        resume=False,
+        resume=True,
         config=config,
         request_sha256=request_sha256,
     )
@@ -5697,27 +5699,49 @@ def _submit_batch_shards(
         if not points:
             continue
         job_id = manifest.planned_job_id(index)
-        assert job_id is not None
-        spec = _prepare_batch_job_spec(
-            request,
-            netlist_path,
-            config=config,
-            corner_count=len(points),
-            timeout_s=timeout_s,
-            keep_artifacts=keep_artifacts,
-            want_waveforms=want_waveforms,
-            explicit_points=_points_to_push(request, points, points),
-            request_dir=request_dir,
-        )
-        submit_job(config, job_id, spec, runner=runner)
-        manifest.mark(index, "submitted")
-        manifest.mark(index, "launching")
-        try:
-            launch_job(config, job_id, runner=runner)
-        except BatchError:
-            manifest.unlaunch(index)
-            raise
-        manifest.mark(index, "launched")
+        if job_id is not None:
+            state = "pending"
+        else:
+            # Recorded by an earlier run; maps without a state predate the
+            # lifecycle and are treated as launched (never resubmitted).
+            prior = manifest.prior[str(index)]
+            job_id = str(prior["job_id"])
+            state = str(prior.get("state") or "launched")
+            if state == "pending" and job_exists(config, job_id, runner=runner):
+                # Killed between submit_job and the "submitted" mark.
+                state = "submitted"
+                manifest.mark(index, "submitted")
+        if state == "pending":
+            spec = _prepare_batch_job_spec(
+                request,
+                netlist_path,
+                config=config,
+                corner_count=len(points),
+                timeout_s=timeout_s,
+                keep_artifacts=keep_artifacts,
+                want_waveforms=want_waveforms,
+                explicit_points=_points_to_push(request, points, points),
+                request_dir=request_dir,
+            )
+            submit_job(config, job_id, spec, runner=runner)
+            manifest.mark(index, "submitted")
+            state = "submitted"
+        if state == "submitted":
+            manifest.mark(index, "launching")
+            try:
+                launch_job(config, job_id, runner=runner)
+            except BatchError:
+                manifest.unlaunch(index)
+                raise
+            manifest.mark(index, "launched")
+        elif state == "launching":
+            # Outcome unknown: launching again could bill the shard twice.
+            print(
+                f"klt sim: notice: shard {index} (job {job_id}) was being "
+                "launched when an earlier submit stopped; not launching it "
+                "again -- --attach will report it if it never started",
+                file=sys.stderr,
+            )
         identities.append(
             {
                 "index": index,
