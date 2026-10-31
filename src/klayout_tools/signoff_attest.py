@@ -732,9 +732,11 @@ def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
     return check
 
 
-# Bounded tail of a failing command's captured output (issue #4698): kept here
-# for the text renderer and surfaced as the failing check's additive
-# ``output_tail`` field in the JSON envelope.
+# Bounded tail of a failing command's captured output (issue #4698). Held out
+# of band (never in a check dict built here) because it is host-specific and
+# the envelope -- and its content hash -- must stay reproducible. The CLI adds
+# it to the live ``--format json`` result via :func:`attach_output_tails`,
+# after any ``--output`` write and ``--check`` diff.
 _OUTPUT_TAIL_MAX_LINES = 20
 _OUTPUT_TAIL_MAX_BYTES = 2048
 _failed_output: dict[tuple[tuple[str, ...], str], str] = {}
@@ -756,6 +758,17 @@ def failed_output_tail(check: Mapping[str, Any]) -> str:
     return _failed_output.get(
         (tuple(check.get("argv") or ()), check.get("cwd", "")), ""
     )
+
+
+def attach_output_tails(envelope: Mapping[str, Any]) -> None:
+    """Add the additive ``output_tail`` string to each failing command check of
+    ``envelope`` (in place). Live-result only: call after the envelope has
+    been written or diffed, never before."""
+    for check in (envelope.get("attestation") or {}).get("checks") or []:
+        if check.get("check") == "command" and not check.get("passed"):
+            tail = failed_output_tail(check)
+            if tail:
+                check["output_tail"] = tail
 
 
 def _command_env() -> dict[str, str]:
@@ -820,9 +833,6 @@ def _command_check(
     }
     if error is not None:
         check["error"] = error
-    tail = failed_output_tail(check)
-    if tail:
-        check["output_tail"] = tail
     if spec.get("local_only"):
         check["local_only"] = True
     return check

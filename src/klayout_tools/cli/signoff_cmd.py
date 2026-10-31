@@ -131,6 +131,7 @@ from ..signoff import (
 )
 from ..signoff_attest import (
     STREAM_ATTESTABLE_ITEM,
+    attach_output_tails,
     build_attestation,
     build_stream_attestation,
     check_attestation,
@@ -401,6 +402,7 @@ def _run_attest(
         return emit_error("signoff", str(exc), args.format)
 
     if committed is not None:
+        attach_output_tails(result.get("fresh") or {})
         emit_success(result, args.format, _print_attestation_check_text)
         ok = result["status"] == "match" and result["fresh_status"] == "pass"
         return EXIT_PASS if ok else EXIT_FAIL
@@ -412,6 +414,7 @@ def _run_attest(
             return emit_error(
                 "signoff", f"could not write --output '{output}': {exc}", args.format
             )
+    attach_output_tails(result)
     emit_success(result, args.format, _print_attestation_text)
     return EXIT_PASS if result["status"] == "pass" else EXIT_FAIL
 
