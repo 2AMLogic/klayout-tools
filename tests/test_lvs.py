@@ -1437,12 +1437,19 @@ def test_pure_width_change_reports_device_property_on_both_request_shapes(tmp_pa
         ("pre-extracted", preextracted_report),
     ):
         assert report["status"] == "mismatch", label
-        # Five parameter entries on both shapes: `w_um`, plus the deck-
-        # measured `as`/`ad`/`ps`/`pd` against the reader's implicit zeros
-        # (the reference declares only L/W). Same category, same count.
-        assert report["category_counts"]["device.property"] == 5, label
+        # One parameter entry on both shapes (issue #4729): `w_um`, with the
+        # deck-measured `as`/`ad`/`ps`/`pd` (against the reader's implicit
+        # zeros -- the reference declares only L/W) grouped under it as
+        # `details.derived`. Same category, same count.
+        assert report["category_counts"]["device.property"] == 1, label
         errors = [m for m in report["mismatches"] if m["severity"] == "error"]
-        assert [m["category"] for m in errors] == ["device.property"] * 5, label
+        assert [m["category"] for m in errors] == ["device.property"], label
+        assert [d["name"] for d in errors[0]["details"]["derived"]] == [
+            "as",
+            "ad",
+            "ps",
+            "pd",
+        ], label
         # The recovery fired on this shape: the unmatched device pair and
         # the nets it dragged in are collateral warnings, not errors.
         collateral = [
@@ -5906,7 +5913,9 @@ def test_multifinger_device_mismatches_without_combine_devices(tmp_path):
     report = run_lvs(path)
 
     assert report["status"] == "mismatch"
-    assert report["category_counts"].get("device.unmatched", 0) >= 1
+    # Issue #4729: the unmerged fingers are reported as one grouped finding
+    # naming the summed width, rather than as per-finger `device.unmatched`.
+    assert report["category_counts"].get("device.unmerged_fingers", 0) == 1
     assert report["counts"]["devices"]["layout"] == 3
     assert report["counts"]["devices"]["reference"] == 2
 
@@ -6302,7 +6311,7 @@ def test_neither_global_combine_devices_setting_satisfies_both_composed_macros(
     )
     report_false = run_lvs(path_false)
     assert report_false["status"] == "mismatch"
-    assert report_false["category_counts"].get("device.unmatched", 0) >= 1
+    assert report_false["category_counts"].get("device.unmerged_fingers", 0) >= 1
 
     path_true = _write_request(
         tmp_path / "request_true.json",
