@@ -4,6 +4,12 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-31
 
+- **PR #4683**: docs(sim): state dry-run published_runner is absent for an enforced mismatch
+- **Issue #4680** (closed): sim dry-run: published_runner absent when version mismatch is refused under enforce
+- **PR #4681**: fix: stop Liberty attribute values at '{' to avoid cell-list truncation
+- **Issue #4678** (closed): synthesize: Liberty cell-list reader silently truncates at an unterminated statement
+- **PR #4673**: feat(lvs): rewrite valueless foundry-style R cards under subckt-call + deck
+- **Issue #4670** (closed): klt lvs: reference SPICE reader rejects foundry-style 3-terminal resistors with no value token
 - **PR #4676**: feat(sim): report published batch runner in dry-run, state ceiling formula
 - **PR #4645**: refactor(site): remove geode-fem Solver Validation and Field Data presentation
 - **PR #4664**: feat: add --what-if floorplan estimate to klt economy
