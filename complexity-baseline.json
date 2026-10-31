@@ -840,13 +840,13 @@
     },
     {
       "file": "src/klayout_tools/yield_analysis.py",
-      "function": "_sampling_from",
-      "complexity": 12
-    },
-    {
-      "file": "src/klayout_tools/yield_analysis.py",
       "function": "run_yield",
       "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/yield_sampling_fields.py",
+      "function": "_sampling_from",
+      "complexity": 12
     },
     {
       "file": "tests/helpers/extract_klayout_oracle.py",
