@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-31
 
+- **PR #4709**: fix(extract): refuse header-only SPEF; give ASAP7 test PDK a layer map
+- **Issue #4705** (closed): place-and-route: ASAP7 post_route_spef writes an empty SPEF (no *D_NET) that OpenSTA rejects
+- **PR #4708**: fix(pnr): connect macro P/G pins on non-strap layers to the next strap above
+- **Issue #4703** (closed): place-and-route: macro halo forces a core strap on the macro's pin layer, which breaks pdngen channel repair
 - **PR #4707**: test: real-OpenROAD ASAP7 post_route_spef/sdf end-to-end test
 - **Issue #4702** (closed): place-and-route: end-to-end test that a routed ASAP7 block emits post-route SPEF and SDF (follow-up to #4557)
 - **Issue #4557** (closed): place-and-route: post_route_spef/post_route_sdf for ASAP7 needs an extract deck
