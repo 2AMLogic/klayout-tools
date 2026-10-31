@@ -46,7 +46,6 @@ Issues currently being built (`loom:building`).
 
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
-- **#4721**: klt pex --backend batch: --attach on a killed client loses the shard map, and a sharded leg can come back lost_shard for every unit
 
 ## PRs Awaiting Review
 
@@ -54,7 +53,6 @@ PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
-- **#4722**: fix: keep shard maps through sharded attach and name map/request differences
 
 ## Approved (Awaiting Merge)
 
@@ -100,7 +98,6 @@ Issues carrying `loom:curated`.
 - **#4424**: klt lvs: custom-class cap_cmomi/resistor LVS regresses from match to mismatch between daf06a51afaf and 0.8.0 (sg13cmos5l) *(curated)*
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
 - **#4508**: ASAP7: trim protruding VIA_* M1 pad tips to clear M1.S.2-5 (follow-up to #4495) *(curated)*
-- **#4721**: klt pex --backend batch: --attach on a killed client loses the shard map, and a sharded leg can come back lost_shard for every unit *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -126,10 +123,10 @@ Issues carrying `loom:curated`.
 | Very important | 1 |
 | Important | 1 |
 | Ready (`loom:issue`) | 14 |
-| In Progress (`loom:building`) | 3 |
-| PRs awaiting review | 3 |
+| In Progress (`loom:building`) | 2 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 35 |
+| Curated | 34 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
