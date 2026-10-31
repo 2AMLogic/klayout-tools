@@ -732,9 +732,9 @@ def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
     return check
 
 
-# Bounded tail of a failing command's captured output, for the text renderer
-# only. Held out of band (never in a check dict) because it is host-specific
-# and the envelope -- and its content hash -- must stay reproducible.
+# Bounded tail of a failing command's captured output (issue #4698): kept here
+# for the text renderer and surfaced as the failing check's additive
+# ``output_tail`` field in the JSON envelope.
 _OUTPUT_TAIL_MAX_LINES = 20
 _OUTPUT_TAIL_MAX_BYTES = 2048
 _failed_output: dict[tuple[tuple[str, ...], str], str] = {}
@@ -752,8 +752,7 @@ def _bounded_tail(text: str) -> str:
 def failed_output_tail(check: Mapping[str, Any]) -> str:
     """Bounded tail of the captured stdout+stderr of the failing command
     ``check`` in the most recent attestation run, or ``""`` (a passing,
-    skipped or unlaunchable check has none). Render-only: never part of the
-    envelope."""
+    skipped or unlaunchable check has none)."""
     return _failed_output.get(
         (tuple(check.get("argv") or ()), check.get("cwd", "")), ""
     )
@@ -821,6 +820,9 @@ def _command_check(
     }
     if error is not None:
         check["error"] = error
+    tail = failed_output_tail(check)
+    if tail:
+        check["output_tail"] = tail
     if spec.get("local_only"):
         check["local_only"] = True
     return check

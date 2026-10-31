@@ -2991,7 +2991,9 @@ def _write_script(
     # `read_verilog` of a legacy stub for the same cell still works.
     lines = [f"read_liberty -lib {liberty_text}"]
     lines += [
-        read_verilog_line(_script_path_text(path, repo_root=repo_root), defines)
+        read_verilog_line(
+            _script_path_text(path, repo_root=repo_root), defines, parameters
+        )
         for path in sources
     ]
     # Issue #2635: every declared hard macro's blackbox declaration, before

@@ -264,3 +264,22 @@ def test_report_cited_as_evidence_is_refused(tmp_path):
 
     with pytest.raises(AttestationError):
         _attest(repo, inventory)
+
+
+def test_failing_command_check_carries_output_tail(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    inventory["envelope_checks"]["evidence/sim_ss.json"] = {
+        "argv": [sys.executable, "-c", "import sys; print('boom'); sys.exit(2)"]
+    }
+
+    envelope = _attest(repo, inventory)
+
+    checks = envelope["attestation"]["checks"]
+    failed = [c for c in checks if c["check"] == "command" and not c["passed"]]
+    assert [c["output_tail"] for c in failed] == ["boom"]
+    assert all(
+        "output_tail" not in c
+        for c in checks
+        if c["check"] == "command" and c["passed"]
+    )

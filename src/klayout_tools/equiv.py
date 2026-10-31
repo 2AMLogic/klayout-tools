@@ -924,7 +924,9 @@ def _side_prep_lines(
         # it.
         lines.append(f"read_liberty -ignore_miss_func {side['liberty']}")
     for path in side["sources"]:
-        lines.append(read_verilog_line(path, side.get("defines") or {}))
+        lines.append(
+            read_verilog_line(path, side.get("defines") or {}, side.get("parameters"))
+        )
     # Issue #3466: optional top-level parameter overrides for this side.
     lines += chparam_lines(side.get("parameters") or {}, side["top"])
     lines += [

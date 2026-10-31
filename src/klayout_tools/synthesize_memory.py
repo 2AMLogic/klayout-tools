@@ -131,7 +131,7 @@ def memory_evidence_script_text(
             lines.append(
                 f"tee -q -o {rel(library_cells_path)} select -list =A:blackbox"
             )
-    lines += [read_verilog_line(rel(path), defines) for path in sources]
+    lines += [read_verilog_line(rel(path), defines, parameters) for path in sources]
     for macro_input in macro_inputs:
         reader = (
             "read_liberty -lib"
