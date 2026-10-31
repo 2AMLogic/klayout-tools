@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-31
 
+- **PR #4712**: refactor: trim _paths docstring and drop fold_spice_continuations alias
+- **Issue #3956** (closed): Trim _paths.py: 90-line refactor-history docstring and a one-line alias
+- **PR #4713**: refactor: call env_provenance directly instead of per-module path wrappers
+- **Issue #4706** (closed): Remove 7 duplicated _report_path forwarding wrappers (and _report_repo_root copies)
 - **PR #4709**: fix(extract): refuse header-only SPEF; give ASAP7 test PDK a layer map
 - **Issue #4705** (closed): place-and-route: ASAP7 post_route_spef writes an empty SPEF (no *D_NET) that OpenSTA rejects
 - **PR #4708**: fix(pnr): connect macro P/G pins on non-strap layers to the next strap above
