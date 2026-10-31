@@ -49,6 +49,16 @@ import os
 from typing import Any
 
 from ._native import _load_native_extension
+from .yield_provenance import (
+    _attach_spec_rows,
+    _provenance_from,
+    _request_without_spec_rows,
+    _spec_row_from,
+    _spec_rows_for,
+    nominal_provenance,
+    spec_rows_from_limits,
+)
+from .yield_sampling_fields import _analytic_cross_check_from, _sampling_from
 
 #: Mirrors ``native/yield/src/contract.rs``'s ``SCHEMA_VERSION`` -- kept in
 #: sync manually, the same convention ``mom.py`` uses for the constants it
@@ -142,96 +152,6 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
             )
         limits[key] = value
     return limits
-
-
-def _spec_row_from(raw: Any, name: str, where: str) -> str | None:
-    """Validate an optional per-measurement ``spec_row`` (issue #2840).
-
-    Echoed verbatim on the report entry; never graded.
-    """
-    if raw is None:
-        return None
-    if not isinstance(raw, str):
-        raise YieldError(f"{where}: measurement '{name}' spec_row must be a string")
-    return raw
-
-
-def _is_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _provenance_from(raw: Any, where: str) -> dict[str, Any] | None:
-    """Validate the optional run-level ``provenance`` block (issue #2840).
-
-    Types are checked, values are never interpreted; the block is echoed
-    verbatim (unknown keys included) into ``source.provenance``. Named
-    ``provenance`` rather than ``campaign`` because ``klt yield-campaign``
-    already emits a differently-shaped top-level ``campaign`` object.
-    """
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise YieldError(f"{where}: 'provenance' must be an object")
-    seed = raw.get("seed")
-    if seed is not None and not _is_int(seed):
-        raise YieldError(f"{where}: provenance.seed must be an integer")
-    rng = raw.get("rng")
-    if rng is not None and not isinstance(rng, str):
-        raise YieldError(f"{where}: provenance.rng must be a string")
-    draws = raw.get("draws_per_population")
-    if draws is not None and (not _is_int(draws) or draws <= 0):
-        raise YieldError(
-            f"{where}: provenance.draws_per_population must be a positive integer"
-        )
-    crn = raw.get("common_random_numbers")
-    if crn is not None and not isinstance(crn, bool):
-        raise YieldError(f"{where}: provenance.common_random_numbers must be a boolean")
-    matrix = raw.get("corner_matrix")
-    if matrix is not None and (
-        not isinstance(matrix, list) or not all(isinstance(c, str) for c in matrix)
-    ):
-        raise YieldError(
-            f"{where}: provenance.corner_matrix must be an array of strings"
-        )
-    return dict(raw)
-
-
-def _request_without_spec_rows(
-    entries: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Strip ``spec_row`` from request measurements: it is Python-side
-    provenance, echoed onto the report afterwards, and never reaches the
-    native core (issue #2840).
-    """
-    return [{k: v for k, v in m.items() if k != "spec_row"} for m in entries]
-
-
-def _attach_spec_rows(payload: dict[str, Any], row_by_name: dict[str, str]) -> None:
-    """Echo each measurement's resolved ``spec_row`` onto its report entry
-    (`null` where unset -- issue #2840).
-    """
-    for out_entry in payload.get("measurements") or []:
-        if isinstance(out_entry, dict):
-            name = out_entry.get("name")
-            out_entry["spec_row"] = (
-                row_by_name.get(name) if isinstance(name, str) else None
-            )
-
-
-def _spec_rows_for(
-    entries: list[dict[str, Any]], limits_rows: dict[str, str]
-) -> dict[str, str]:
-    """Resolve each measurement's ``spec_row``: a ``--limits`` row wins over
-    the sample document's own (issue #2840). Only measurements that produced
-    a request entry appear here, and the result never reaches the native
-    core -- it is echoed onto the report afterwards.
-    """
-    rows: dict[str, str] = {}
-    for entry in entries:
-        row = limits_rows.get(entry["name"], entry.get("spec_row"))
-        if row is not None:
-            rows[entry["name"]] = row
-    return rows
 
 
 def _read_qualification_keys(
@@ -385,120 +305,6 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         "censored": censored,
         "description": description,
     }
-
-
-#: Which fields each `analytic_cross_check.kind` accepts, mirroring
-#: `native/yield/src/contract.rs`'s `AnalyticCrossCheckRequest` variants.
-_ANALYTIC_CROSS_CHECK_FIELDS = {
-    "ktc_noise": {"capacitance_f", "temperature_k", "analytic_mean"},
-    "mismatch_offset": {"sigma", "mean"},
-}
-
-
-def _analytic_cross_check_from(
-    raw: Any, name: str, where: str
-) -> dict[str, Any] | None:
-    """Normalise one measurement's ``analytic_cross_check`` object (issue
-    #817's closed-form cross-check), or ``None`` when absent.
-    """
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise YieldError(
-            f"{where}: measurement '{name}' has a non-object analytic_cross_check"
-        )
-    kind = raw.get("kind")
-    if kind not in _ANALYTIC_CROSS_CHECK_FIELDS:
-        raise YieldError(
-            f"{where}: measurement '{name}' analytic_cross_check.kind must be one of "
-            f"{sorted(_ANALYTIC_CROSS_CHECK_FIELDS)} (got {kind!r})"
-        )
-    allowed = _ANALYTIC_CROSS_CHECK_FIELDS[kind]
-    out: dict[str, Any] = {"kind": kind}
-    for key, value in raw.items():
-        if key == "kind":
-            continue
-        if key not in allowed:
-            raise YieldError(
-                f"{where}: measurement '{name}' analytic_cross_check.{key} is not "
-                f"valid for kind '{kind}' (allowed: {sorted(allowed)})"
-            )
-        if value is None:
-            continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise YieldError(
-                f"{where}: measurement '{name}' analytic_cross_check.{key} must be "
-                "a number"
-            )
-        out[key] = float(value)
-    return out
-
-
-#: Which fields each `sampling.strategy` accepts, mirroring
-#: `native/yield/src/contract.rs`'s `SamplingRequest` variants (issue #907,
-#: Phase 2b of the statistical/yield epic #710).
-_SAMPLING_STRATEGY_FIELDS = {
-    "plain_random": set(),
-    "latin_hypercube": {"replicates"},
-    "importance": {"weights"},
-}
-
-
-def _sampling_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
-    """Normalise one measurement's ``sampling`` object (issue #907's
-    variance-reduction sampling strategies), or ``None`` when absent -- in
-    which case the native core treats it as Phase 1's plain random Monte
-    Carlo, unaffected by any of this.
-    """
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise YieldError(f"{where}: measurement '{name}' has a non-object sampling")
-    strategy = raw.get("strategy")
-    if strategy not in _SAMPLING_STRATEGY_FIELDS:
-        raise YieldError(
-            f"{where}: measurement '{name}' sampling.strategy must be one of "
-            f"{sorted(_SAMPLING_STRATEGY_FIELDS)} (got {strategy!r})"
-        )
-    allowed = _SAMPLING_STRATEGY_FIELDS[strategy]
-    for key in raw:
-        if key not in {"strategy", *allowed}:
-            raise YieldError(
-                f"{where}: measurement '{name}' sampling.{key} is not valid for "
-                f"strategy '{strategy}' (allowed: {sorted(allowed)})"
-            )
-
-    if strategy == "latin_hypercube":
-        replicates = raw.get("replicates")
-        if (
-            isinstance(replicates, bool)
-            or not isinstance(replicates, int)
-            or replicates < 2
-        ):
-            raise YieldError(
-                f"{where}: measurement '{name}' sampling.replicates must be an "
-                f"integer >= 2 (got {replicates!r})"
-            )
-        return {"strategy": strategy, "replicates": replicates}
-
-    if strategy == "importance":
-        raw_weights = raw.get("weights")
-        if not isinstance(raw_weights, list) or not raw_weights:
-            raise YieldError(
-                f"{where}: measurement '{name}' sampling.weights must be a "
-                "non-empty array"
-            )
-        weights: list[float] = []
-        for value in raw_weights:
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise YieldError(
-                    f"{where}: measurement '{name}' sampling.weights entries must "
-                    "be numbers"
-                )
-            weights.append(float(value))
-        return {"strategy": strategy, "weights": weights}
-
-    return {"strategy": strategy}
 
 
 def _draw_from_mc_corners(
@@ -825,15 +631,7 @@ def _read_spec(
         name: _limits_from(value, name, f"limits '{path}'")
         for name, value in raw.items()
     }
-    spec_rows: dict[str, str] = {}
-    for name, value in raw.items():
-        row = _spec_row_from(
-            value.get("spec_row") if isinstance(value, dict) else None,
-            name,
-            f"limits '{path}'",
-        )
-        if row is not None:
-            spec_rows[name] = row
+    spec_rows = spec_rows_from_limits(raw, f"limits '{path}'")
     return limits, defaults, spec_rows
 
 
@@ -1265,19 +1063,10 @@ def derive_sample_set(
         out_measurements.append(entry)
         disclosures.append(disclosure)
 
+    prov = nominal_provenance(nominal_report)
     doc: dict[str, Any] = {"schema_version": SAMPLE_SET_SCHEMA_VERSION}
-    # Issue #2840: carry the nominal campaign's RNG provenance so the seed
-    # survives the two-step flow. Only well-typed fields are lifted.
-    env = nominal_report.get("environment")
-    mc = env.get("monte_carlo") if isinstance(env, dict) else None
-    if isinstance(mc, dict):
-        prov: dict[str, Any] = {}
-        if _is_int(mc.get("seed")):
-            prov["seed"] = mc["seed"]
-        if _is_int(mc.get("n")) and mc["n"] > 0:
-            prov["draws_per_population"] = mc["n"]
-        if prov:
-            doc["provenance"] = prov
+    if prov:
+        doc["provenance"] = prov
     return {
         **doc,
         "measurements": out_measurements,
