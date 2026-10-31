@@ -44,6 +44,7 @@
       "78/44",
       "79/20",
       "80/20",
+      "81/2",
       "81/125",
       "82/64",
       "86/20",
@@ -879,7 +880,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:029ef177c1f4e872c13cc81093f94a02a9bbfe1f51939a88194a83532d60bf7c",
+      "content_hash": "sha256:45194b6b29b1e6879f8fc40d63fa1a4b8cc56d5b8bc3c8e83cac91413bffd270",
       "released": null
     },
     "input": {
