@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-31
 
+- **PR #4727**: fix(ci): harden curl retries in fetch-cell-netlists.sh
+- **Issue #4726** (closed): test flake: Fetch real gallery-cell SPICE netlists fails on Tests (Python 3.12)
 - **PR #4722**: fix: keep shard maps through sharded attach and name map/request differences
 - **Issue #4721** (closed): klt pex --backend batch: --attach on a killed client loses the shard map, and a sharded leg can come back lost_shard for every unit
 - **PR #4719**: feat: add placement density and global-route congestion request fields
