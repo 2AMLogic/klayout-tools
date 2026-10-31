@@ -4267,8 +4267,18 @@ def _run_sim_corners(
     # field) -- see docs/cli/sim.md's report schema.
     diagnostic_counts = _diagnostic_counts(corners)
 
-    if backend == "batch" and corners_skipped == 0 and corners_lost == 0:
-        # Issue #3300: nothing left to re-attach to.
+    sharded_attach = attach_job_id is not None and attach_job_id.endswith(".json")
+    if (
+        backend == "batch"
+        and corners_skipped == 0
+        and corners_lost == 0
+        and not sharded_attach
+    ):
+        # Issue #3300: nothing left to re-attach to. A sharded `--attach`
+        # keeps its map (issue #4721): a multi-leg caller (`klt pex
+        # --attach`) can be interrupted after this leg collected but before
+        # the others did, and the next attach still needs this leg's map.
+        # That caller removes the maps once its whole run succeeded.
         _remove_shard_manifest(artifacts_dir)
 
     if checkpoint is not None:

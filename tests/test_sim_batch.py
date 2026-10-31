@@ -7304,6 +7304,41 @@ def test_resume_submits_only_the_shard_whose_job_is_gone(tmp_path, monkeypatch):
     assert rewritten["shards"][1]["job_id"] != gone
 
 
+def test_resume_refusal_names_fingerprint_difference(tmp_path, monkeypatch):
+    """Issue #4721: the refusal says what it compared."""
+    _, fleet, _ = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    with pytest.raises(sim.SimError) as err:
+        fleet(resume=True, shard_fingerprint="fp-2")
+    assert err.value.code == sb.BATCH_SHARD_MANIFEST_CODE
+    assert "fingerprint: map fp-1, request fp-2" in str(err.value)
+    assert "hosts:" not in str(err.value)
+
+
+def test_resume_refusal_names_hosts_difference(tmp_path, monkeypatch):
+    _, fleet, _ = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    with pytest.raises(sim.SimError) as err:
+        fleet(resume=True, hosts=1)
+    assert "hosts: map has 2, request has 1" in str(err.value)
+    assert "fingerprint:" not in str(err.value)
+
+
+@pytest.mark.parametrize(
+    "status, label",
+    [
+        ({"state": "done"}, "finished"),
+        ({"state": "failed"}, "failed"),
+        ({"state": "running"}, "running"),
+        (None, "unknown"),
+    ],
+)
+def test_remote_state_note_reports_job_state(monkeypatch, status, label):
+    """Issue #4721: a lost shard's reason says where the remote job is."""
+    monkeypatch.setattr(sb, "_read_status", lambda *_args: status)
+    assert sb._remote_state_note(None, "job-1") == f" [remote job job-1: {label}]"
+
+
 _SET_MEASUREMENT = {
     "name": "vout",
     "expr": "v(out)",

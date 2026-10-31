@@ -249,6 +249,26 @@ class AsyncLegs:
         self._write(complete=False)
         return report
 
+    def remove_collected_shard_maps(self) -> None:
+        """After a fully successful ``--attach`` (issue #4721): drop every
+        sharded leg's ``batch-shards.json``. ``run_sim`` keeps the map of a
+        sharded attach so an interrupted multi-leg attach can be re-run;
+        only now is nothing left to re-attach to. A no-op outside attach."""
+        if self.mode != "attach":
+            return
+        for leg in self._legs_to_clean():
+            try:
+                os.remove(leg)
+            except OSError:
+                pass
+
+    def _legs_to_clean(self) -> list[str]:
+        return [
+            str(leg["attach"])
+            for leg in (self._manifest.get("legs") or [])
+            if leg.get("sharded") and str(leg.get("attach", "")).endswith(".json")
+        ]
+
     def _write(self, *, complete: bool) -> None:
         payload: dict[str, Any] = {
             "schema_version": ASYNC_SCHEMA_VERSION,

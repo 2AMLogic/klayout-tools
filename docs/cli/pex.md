@@ -78,7 +78,8 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   `<outdir>/<testbench>/<leg>/batch-shards.json`. **Recovery:** if the client
   is interrupted (`batch_client_interrupted`; the fleet has no cancel), re-run
   the *same* `klt pex` command with `--resume` and each leg re-attaches to its
-  recorded jobs instead of re-submitting. For a run that must not block its
+  recorded jobs instead of re-submitting. An interrupted `--attach` keeps every
+  leg's `batch-shards.json`; they are removed only after the whole attach succeeds. For a run that must not block its
   caller use `--submit-only` / `--attach MANIFEST` below instead; a bare job id
   cannot address a pex run, which has at least two jobs per testbench. Shard-job re-attach is recorded only for sharded legs, so rely on it with
   `--hosts >= 2`; a plain single-job leg is not guaranteed to re-attach. Omitted, the flags are not passed and behavior is unchanged

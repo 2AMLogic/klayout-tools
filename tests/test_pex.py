@@ -7175,6 +7175,64 @@ def test_run_pex_attach_refuses_changed_request(tmp_path, resistor_layout, monke
     assert err.value.code == "resume_fingerprint_mismatch"
 
 
+def test_attach_removes_sharded_leg_maps_only_after_full_success(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4721: leg 1 collects, leg 2 is interrupted -> leg 1's map stays
+    (run_sim keeps it on a sharded attach); a completed attach removes both."""
+    import klayout_tools.pex as pex_module
+
+    request = _async_inputs(tmp_path)
+    outdir = str(tmp_path / "art")
+    _fake_async_sim(monkeypatch, [], sharded=True)
+    submitted = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        submit_only=True,
+    )
+    maps = [leg["attach"] for leg in submitted["legs"]]
+    assert len(maps) == 2
+    # Real files at the recorded paths, as the fleet run would leave them.
+    real = [tmp_path / f"leg{i}" / "batch-shards.json" for i in range(2)]
+    for path in real:
+        path.parent.mkdir()
+        path.write_text("{}")
+    manifest = json.loads(open(submitted["manifest_path"], encoding="utf-8").read())
+    for leg, path in zip(manifest["legs"], real, strict=True):
+        leg["attach"] = str(path)
+    with open(submitted["manifest_path"], "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle)
+
+    def _interrupted(request_path, **kwargs):
+        raise PexError("interrupted", code="batch_client_interrupted")
+
+    monkeypatch.setattr(pex_module, "run_sim", _interrupted)
+    with pytest.raises(PexError):
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            artifacts_dir=outdir,
+            attach=submitted["manifest_path"],
+        )
+    assert all(path.exists() for path in real)
+
+    def _collect(request_path, **kwargs):
+        return _two_corner_schematic_report()
+
+    monkeypatch.setattr(pex_module, "run_sim", _collect)
+    run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        attach=submitted["manifest_path"],
+    )
+    assert not any(path.exists() for path in real)
+
+
 @pytest.mark.parametrize(
     "flags, match",
     [
