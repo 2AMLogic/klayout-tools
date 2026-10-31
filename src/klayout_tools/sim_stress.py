@@ -37,6 +37,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ._jsonnum import is_number
 from .sim_errors import SimError
 
 #: Keys a ``stress`` object may carry. Anything else is refused by name.
@@ -117,7 +118,7 @@ def _window_bound(name: Any, body: dict[str, Any], key: str) -> float | None:
     if raw is None:
         return None
     seconds: float | None = None
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+    if is_number(raw):
         seconds = float(raw)
     elif isinstance(raw, str):
         seconds = _parse_spice_seconds(raw)

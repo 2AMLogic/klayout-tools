@@ -180,6 +180,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import layout_plan
+from ._jsonnum import is_number
 from ._paths import _resolve_relative
 from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
 from .gen_compose import GenComposeError, _translate_bbox, compose
@@ -373,8 +374,8 @@ def _netlist_derived_size_params(
     resolved: dict[str, float] = {}
     for digest_key, gen_param in targets.items():
         value = device_params.get(digest_key)
-        is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
-        if is_number and value > 0:
+        value_is_number = is_number(value)
+        if value_is_number and value > 0:
             resolved[gen_param] = float(value)
     return resolved
 

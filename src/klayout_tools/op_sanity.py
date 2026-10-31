@@ -115,6 +115,7 @@ from typing import Any
 
 from . import _spice_number as spice_number
 from . import env_provenance
+from ._jsonnum import is_number
 from ._paths import (
     _fold_spice_continuations,
     _load_request_json,
@@ -979,7 +980,7 @@ def _triode_margin_v(temperature_c: float, thresholds: dict[str, Any]) -> float:
     comment for why the thermal voltage is the right scale.
     """
     explicit = thresholds.get("triode_margin_v")
-    if isinstance(explicit, (int, float)) and not isinstance(explicit, bool):
+    if is_number(explicit):
         return float(explicit)
     multiple = thresholds.get("triode_margin_kt", _DEFAULT_TRIODE_MARGIN_KT)
     if not isinstance(multiple, (int, float)) or isinstance(multiple, bool):

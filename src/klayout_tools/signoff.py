@@ -51,6 +51,7 @@ from typing import (
 )
 
 from . import signoff_foundry_cell as foundry_cell
+from ._jsonnum import is_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
 from ._report_verify import (
     LIST_ITEM,
@@ -2518,7 +2519,7 @@ def _sta_worst_corner(envelope: dict[str, Any]) -> dict[str, Any]:
 
     def sort_key(entry: dict[str, Any]) -> tuple[int, float]:
         value = entry.get("worst_slack_ns")
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if is_number(value):
             return (0, float(value))
         return (-1, 0.0)
 

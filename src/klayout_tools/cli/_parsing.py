@@ -33,6 +33,8 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from .._jsonnum import is_number
+
 ErrorFactory = Callable[[str], Exception]
 
 
@@ -143,9 +145,7 @@ def load_region(
     if (
         not isinstance(data, list)
         or len(data) != 4
-        or not all(
-            isinstance(v, (int, float)) and not isinstance(v, bool) for v in data
-        )
+        or not all(is_number(v) for v in data)
     ):
         raise error_cls(
             f"{flag} must be a JSON array of four numbers "

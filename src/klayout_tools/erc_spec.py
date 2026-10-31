@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from ._jsonnum import is_number
 from ._paths import (
     _parse_layer_datatype,
     _reject_unknown_keys,
@@ -786,9 +787,7 @@ def _parse_um_boxes(
         if (
             not isinstance(value, list)
             or len(value) != 4
-            or not all(
-                isinstance(v, (int, float)) and not isinstance(v, bool) for v in value
-            )
+            or not all(is_number(v) for v in value)
         ):
             raise ErcError(
                 f"spec '{spec_path}': {field} must be a 4-number "

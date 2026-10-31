@@ -51,6 +51,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import sim_supply_relative
+from ._jsonnum import is_number
 from .sim_errors import SimError
 
 #: The ``crossings.edge`` values: a rising crossing, a falling one, or both.
@@ -202,7 +203,7 @@ def _window_bound(name: Any, body: dict[str, Any], key: str) -> float | None:
     if raw is None:
         return None
     seconds: float | None = None
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+    if is_number(raw):
         seconds = float(raw)
     elif isinstance(raw, str):
         seconds = _parse_spice_seconds(raw)
