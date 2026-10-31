@@ -4,6 +4,18 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-31
 
+- **PR #4707**: test: real-OpenROAD ASAP7 post_route_spef/sdf end-to-end test
+- **Issue #4702** (closed): place-and-route: end-to-end test that a routed ASAP7 block emits post-route SPEF and SDF (follow-up to #4557)
+- **Issue #4557** (closed): place-and-route: post_route_spef/post_route_sdf for ASAP7 needs an extract deck
+- **PR #4704**: fix(place-and-route): brace-quote place_macro instance for bracketed macro names
+- **Issue #4701** (closed): place-and-route: macros[].instance with escaped brackets cannot satisfy both place_macro and the macro PDN grid
+- **PR #4700**: feat(synthesize,signoff): module-qualified parameter overrides and attest output_tail
+- **Issue #4698** (closed): synthesize/signoff: submodule parameter override, attest PATH scrubbing, recorded freshness in release
+- **PR #4697**: fix: refuse pex --submit-only when a pre-flight mismatch skips the extracted leg
+- **Issue #4696** (closed): klt pex --submit-only writes complete:true manifest with only the schematic leg when the extracted leg cannot be submitted
+- **PR #4679**: ci: move native macOS arm64 runner from macos-14 to macos-15
+- **Issue #4677** (closed): CI: move macos-14 runner pins to macos-15 before the 2026-11-02 image retirement
+- **Issue #3878** (closed): Batch fleet runner image predates corners.params/options.nodeset (live parity unmeasured)
 - **PR #4695**: refactor: use shared is_number for remaining inline JSON-number checks
 - **Issue #4687** (closed): Finish _jsonnum consolidation: replace 15 inline number-not-bool checks with is_number
 - **PR #4694**: feat(pex): add --envelope-out, structured lock owner, bare --attach
