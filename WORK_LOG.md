@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-31
 
+- **PR #4722**: fix: keep shard maps through sharded attach and name map/request differences
+- **Issue #4721** (closed): klt pex --backend batch: --attach on a killed client loses the shard map, and a sharded leg can come back lost_shard for every unit
 - **PR #4719**: feat: add placement density and global-route congestion request fields
 - **Issue #4716** (closed): place-and-route: no request control over placement density or global-route congestion
 - **PR #4717**: fix: escape macro instance for define_pdn_grid -instances glob/list parsing
