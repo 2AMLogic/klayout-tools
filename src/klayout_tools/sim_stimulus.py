@@ -40,6 +40,7 @@ from typing import Any
 
 from . import _spice_number as spice_number
 from . import sim_steps, sim_supply_relative
+from ._jsonnum import is_number
 
 #: Request key that carries the declaration, and the report key that echoes it.
 REQUEST_KEY = "stimulus"
@@ -77,7 +78,7 @@ class StimulusError(Exception):
 
 def _number(value: Any, field: str, *, minimum: float | None = None) -> float:
     """``value`` as a finite float; a bool or non-number is refused by name."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise StimulusError(f"{field} must be a number (got {value!r})")
     number = float(value)
     if not math.isfinite(number):

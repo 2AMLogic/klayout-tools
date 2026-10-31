@@ -21,6 +21,7 @@ import json
 import os
 from typing import Any
 
+from ._jsonnum import is_number
 from ._layout import load_layout, resolve_top_cell, write_layout
 
 #: Request-envelope schema identifier (see ``docs/cli/draw.md``).
@@ -98,11 +99,6 @@ def _reject_unknown_keys(
         f" (keys beginning with '{ANNOTATION_KEY_PREFIX}' are reserved for "
         "caller annotations and ignored)"
     )
-
-
-def _is_number(value: Any) -> bool:
-    """True for a JSON number (int/float), excluding ``bool`` (a Python int)."""
-    return not isinstance(value, bool) and isinstance(value, (int, float))
 
 
 class DrawError(Exception):
@@ -453,7 +449,7 @@ def _parse_erase(raw: Any) -> list[tuple[tuple[float, float, float, float], Any]
         if (
             not isinstance(rect, list)
             or len(rect) != 4
-            or any(not _is_number(v) for v in rect)
+            or any(not is_number(v) for v in rect)
         ):
             raise DrawError(
                 f"erase_um[{i}].rect_um must be [x0, y0, x1, y1] of numbers"
@@ -513,7 +509,7 @@ def _erase(top, layout, window, scope, to_dbu, kdb) -> tuple[int, int]:
 def _resolve_dbu(value: Any) -> float:
     if value is None:
         return DEFAULT_DBU_UM
-    if not _is_number(value):
+    if not is_number(value):
         raise DrawError("params.dbu_um must be a positive number")
     if value <= 0:
         raise DrawError("params.dbu_um must be a positive number")
@@ -567,7 +563,7 @@ def _build_shape_geometry(shape: dict[str, Any], index: int, to_dbu, kdb) -> Any
         if (
             not isinstance(rect, list)
             or len(rect) != 4
-            or any(not _is_number(v) for v in rect)
+            or any(not is_number(v) for v in rect)
         ):
             raise DrawError(
                 f"shape[{index}].rect_um must be [x0, y0, x1, y1] of numbers"
@@ -589,7 +585,7 @@ def _build_shape_geometry(shape: dict[str, Any], index: int, to_dbu, kdb) -> Any
         if (
             not isinstance(point, list)
             or len(point) != 2
-            or any(not _is_number(v) for v in point)
+            or any(not is_number(v) for v in point)
         ):
             raise DrawError(f"shape[{index}].polygon_um[{j}] must be an [x, y] pair")
         kdb_points.append(kdb.Point(to_dbu(point[0]), to_dbu(point[1])))
@@ -621,7 +617,7 @@ def _parse_array(
     if (
         not isinstance(pitch, list)
         or len(pitch) != 2
-        or any(not _is_number(v) for v in pitch)
+        or any(not is_number(v) for v in pitch)
     ):
         raise DrawError(f"shape[{index}].array.pitch_um must be [dx, dy] of numbers")
 
@@ -646,7 +642,7 @@ def _build_label(label: dict[str, Any], index: int, to_dbu, kdb) -> Any:
         raise DrawError(f"label[{index}].text must be a non-empty string")
 
     at = label.get("at_um")
-    if not isinstance(at, list) or len(at) != 2 or any(not _is_number(v) for v in at):
+    if not isinstance(at, list) or len(at) != 2 or any(not is_number(v) for v in at):
         raise DrawError(f"label[{index}].at_um must be an [x, y] pair of numbers")
 
     return kdb.Text(text, kdb.Trans(kdb.Vector(to_dbu(at[0]), to_dbu(at[1]))))

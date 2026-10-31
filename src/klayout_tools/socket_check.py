@@ -42,6 +42,7 @@ from typing import Any
 from ._check_result import finish as _finish
 from ._check_result import fmt_layer as _fmt_layer
 from ._check_result import skipped as _skipped
+from ._jsonnum import is_number
 from ._layout import cells_in_hierarchy, load_layout
 from ._layout import select_top_cells as _select_top_cells
 
@@ -233,7 +234,7 @@ def run_socket_check(
         }
 
     descriptor = _load_descriptor(descriptor_path)
-    if edge_band_um is not None and (not _is_number(edge_band_um) or edge_band_um < 0):
+    if edge_band_um is not None and (not is_number(edge_band_um) or edge_band_um < 0):
         raise SocketCheckError("edge_band_um must be a non-negative number")
 
     power_ports_block, power_ports_check = _power_ports(
@@ -267,11 +268,6 @@ def run_socket_check(
         "budgets": _budgets_report(descriptor["budgets"]),
         "power_ports": power_ports_block,
     }
-
-
-def _is_number(value: Any) -> bool:
-    """True for a JSON number (int/float), excluding ``bool`` (a Python int)."""
-    return not isinstance(value, bool) and isinstance(value, (int, float))
 
 
 def _is_layer_pair(value: Any) -> bool:
@@ -359,7 +355,7 @@ def _validate_outline(outline: Any) -> dict[str, float]:
             "x0/y0/x1/y1 (micrometres)"
         )
     for key in ("x0", "y0", "x1", "y1"):
-        if not _is_number(outline.get(key)):
+        if not is_number(outline.get(key)):
             raise SocketCheckError(
                 f"socket descriptor 'outline.{key}' is required and must be a number"
             )
@@ -396,21 +392,21 @@ def _validate_pins(pins: Any) -> list[dict[str, Any]]:
                 "pair of integers"
             )
         for key in ("x", "y"):
-            if not _is_number(pin.get(key)):
+            if not is_number(pin.get(key)):
                 raise SocketCheckError(
                     f"socket descriptor 'pins[{i}].{key}' is required and must be "
                     "a number"
                 )
         tolerance_um = pin.get("tolerance_um")
         if tolerance_um is not None:
-            if not _is_number(tolerance_um) or tolerance_um < 0:
+            if not is_number(tolerance_um) or tolerance_um < 0:
                 raise SocketCheckError(
                     f"socket descriptor 'pins[{i}].tolerance_um' must be a "
                     "non-negative number"
                 )
         for key in ("width_um", "height_um"):
             value = pin.get(key)
-            if value is not None and not _is_number(value):
+            if value is not None and not is_number(value):
                 raise SocketCheckError(
                     f"socket descriptor 'pins[{i}].{key}' must be a number"
                 )
@@ -475,7 +471,7 @@ def _validate_power_ports(power_ports: Any) -> dict[str, Any] | None:
             + ", ".join(sorted(unknown))
         )
     band = power_ports.get("edge_band_um")
-    if band is not None and (not _is_number(band) or band < 0):
+    if band is not None and (not is_number(band) or band < 0):
         raise SocketCheckError(
             "socket descriptor 'power_ports.edge_band_um' must be a non-negative number"
         )
@@ -537,7 +533,7 @@ def _validate_budgets(budgets: Any) -> list[dict[str, Any]]:
                 f"socket descriptor 'budgets[{i}].name' is required and must be "
                 "a non-empty string"
             )
-        if not _is_number(budget.get("value")):
+        if not is_number(budget.get("value")):
             raise SocketCheckError(
                 f"socket descriptor 'budgets[{i}].value' is required and must "
                 "be a number"

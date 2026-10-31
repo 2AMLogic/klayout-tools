@@ -133,6 +133,7 @@ from . import (
 from . import remote_fleet as remote_fleet
 from . import remote_transport as remote_transport
 from . import sim_staging as sim_staging
+from ._jsonnum import is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -6141,10 +6142,6 @@ _CORNER_UNIT_KEYS = ("process", "temperature_c", "supply_v")
 _CORNER_UNIT_CROSSED_KEYS = ("process", "supply_v", "temperature_c", "variants")
 
 
-def _is_plain_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
 def _expand_corner_units(
     corners_spec: dict[str, Any], exclude_spec: list[dict[str, Any]]
 ) -> list[CornerPoint]:
@@ -6207,7 +6204,7 @@ def _parse_corner_unit(record: Any, where: str) -> CornerPoint:
         (None, None, None) if raw_process is None else _parse_process_entry(raw_process)
     )
     temperature_c = record.get("temperature_c", 27)
-    if not _is_plain_number(temperature_c):
+    if not is_number(temperature_c):
         raise SimError(f"{where}.temperature_c must be a number")
     return CornerPoint(
         process,
@@ -6223,7 +6220,7 @@ def _parse_unit_supply_v(supply_v: Any, where: str) -> dict[str, Any]:
     if not isinstance(supply_v, dict):
         raise SimError(f"{where}.supply_v must be an object of scalar numbers")
     for rail, value in supply_v.items():
-        if not _is_plain_number(value):
+        if not is_number(value):
             raise SimError(
                 f"{where}.supply_v.{rail} must be a scalar number "
                 "(arrays are only valid in the crossed corners.supply_v form)"
@@ -6524,7 +6521,7 @@ def _normalize_nodeset_values(raw: Any, where: str) -> dict[str, float]:
                 f"{where} names node {lowered!r} more than once "
                 "(node names are case-insensitive)"
             )
-        if not _is_plain_number(volts) or not math.isfinite(volts):
+        if not is_number(volts) or not math.isfinite(volts):
             raise SimError(f"{where}.{node} must be a finite number of volts")
         values[lowered] = float(volts)
     return dict(sorted(values.items()))
@@ -6537,7 +6534,7 @@ def _nodeset_match_process(value: Any, where: str) -> str:
 
 
 def _nodeset_match_number(value: Any, where: str) -> Any:
-    if not _is_plain_number(value) or not math.isfinite(value):
+    if not is_number(value) or not math.isfinite(value):
         raise SimError(f"{where} must be a finite number")
     return value
 
