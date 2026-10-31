@@ -1,10 +1,11 @@
-# ASAP7 DRC deck for KLayout (klayout-tools, issue #2760) -- phase 1: FEOL + MOL
+# ASAP7 DRC deck for KLayout (klayout-tools, issues #2760 / #2810)
+# -- FEOL + MOL (phase 1) and BEOL M1-M9 / V0-V9 (phase 2)
 #
 # Run headless through klt:
 #
 #   klt drc <layout.gds> --engine klayout \
 #       --deck-file src/klayout_tools/decks/asap7.drc \
-#       --expect-rule-categories 106 --format json
+#       --expect-rule-categories 267 --format json
 #
 # or directly:
 #
@@ -38,13 +39,30 @@
 #
 # SCOPE. Phase 1 covers FEOL (Tables 3.1.1-3.8.1) and the MOL layers LISD,
 # LIG (Tables 3.9.1-3.10.3) and V0 width/connectivity (Tables 3.11.1-2).
-# DRM rules not implemented here, and rules only approximated, are listed
-# with reasons in asap7_rules.py and docs/cli/drc.md.
+# Phase 2 (#2810) adds the BEOL stack: V0.LIG.A.1 (Table 3.11.2), M1-M3
+# (Table 3.12.1), V1-V3 (Table 3.13.1), M4-M7 (Tables 3.14.1-3.14.2,
+# 3.16.1-3.16.2), V4-V7 (Tables 3.15.1, 3.17.1), M8-M9 (Tables
+# 3.18.1-3.18.2) and V8-V9 (Table 3.19.1), and applies
+# GEOMETRY.NONORTHOGONAL to every BEOL drawing layer. The four FEOL/MOL
+# "not on the same net" spacings (ACTIVE.S.2A, LIG.LISD.S.6 / S.7,
+# LIG.SDT.S.8, #3084) run on a minimal conductor-connectivity model. Rules
+# that need routing-track assignment, the via-level net comparison (V4-V7
+# S.2), mask colouring or the PAD layer are not checked. DRM rules not implemented here, and rules only
+# approximated, are listed with reasons in asap7_rules.py and
+# docs/cli/drc.md.
+#
+# DENSITY. The DRM states no density rule (no density rule type in Table
+# 1.2.1, no density threshold in sections 3.1-3.19), so none is checked and
+# no threshold is invented (#2811; asap7_rules.DENSITY_DISPOSITION).
+#
+# GRID ORIGIN. The M4-M7 grid and track rules (M4.AUX.1 / AUX.2 and their
+# M5-M7 counterparts) use the DRM's default metal-grid offset of 0 nm
+# (Tables 3.14.2 / 3.16.2, note 1).
 #
 # The whole layout is checked flat.
 
 source($input)
-report("ASAP7 DRC (klayout-tools deck, DRM release 1p7; phase 1: FEOL/MOL)", $report)
+report("ASAP7 DRC (klayout-tools deck, DRM release 1p7; FEOL/MOL, BEOL M1-M9/V0-V9)", $report)
 
 # --------------------------------------------------------------------------
 # Layers (asap7.lyp; DRM Tables 2.1.1 / 2.2.1 / 2.3.1 / 2.4.1)
@@ -60,11 +78,34 @@ lig     = input(16, 0)
 lisd    = input(17, 0)
 v0      = input(18, 0)
 m1      = input(19, 0)
+m2      = input(20, 0)
+v1      = input(21, 0)
+v2      = input(25, 0)
+m3      = input(30, 0)
+v3      = input(35, 0)
+m4      = input(40, 0)
+v4      = input(45, 0)
+m5      = input(50, 0)
+v5      = input(55, 0)
+m6      = input(60, 0)
+v6      = input(65, 0)
+m7      = input(70, 0)
+v7      = input(75, 0)
+m8      = input(80, 0)
+v8      = input(85, 0)
+m9      = input(90, 0)
+v9      = input(95, 0)
+pad     = input(96, 0)
 sdt     = input(88, 0)
 slvt    = input(97, 0)
 lvt     = input(98, 0)
 sramdrc = input(99, 0)
 sramvt  = input(110, 0)
+# THICKOX is NOT a DRM layer: the pinned asap7.lyp / asap7.layermap / DRM 1p7
+# have no thick-oxide (I/O) marker. 111/0 is an assumed, unused stream number
+# (97/98/99/110 are SLVT/LVT/SRAMDRC/SRAMVT) and the THICKOX.* rules below are
+# predictive, not foundry rules (#4465).
+thickox = input(111, 0)
 
 # --------------------------------------------------------------------------
 # Derived layers and direction helpers
@@ -76,6 +117,11 @@ channel = active & gate
 # DRM 1.2.2 note 7: rules apply to geometry not interacting with SRAMDRC
 # unless stated otherwise.
 active_ns = active.not_interacting(sramdrc)
+# ... and the SRAM-variant rules (SRAM.*) apply to ACTIVE interacting with it.
+# "Interacting" is overlap or touch, so exactly one of active_ns / active_s
+# holds for every polygon; SRAM.ACTIVE.AUX.2 reports the touch-only polygons
+# the DRM forbids.
+active_s = active.interacting(sramdrc)
 
 # DRM 1.2.2 note 5: "horizontal"/"vertical" restrict the direction in which a
 # distance is measured. A horizontal width/space is measured between
@@ -104,6 +150,47 @@ def vspace(l, d)
   horz(l).space(d, projection)
 end
 
+# "Vertical width increment is an integer multiple of <step>" (ACTIVE.W.2,
+# SDT.W.3). A bounding-box height is wrong for a stepped polygon, so the
+# local vertical width is measured: every merged rectilinear polygon is cut
+# at each x where one of its vertices lies, and inside such a strip the
+# cross-section is a stack of rectangles whose heights are the vertical
+# widths there. Any rectangle whose height is not a whole multiple of <step>
+# (compared in integer database units) is reported. Non-rectilinear shapes
+# are GEOMETRY.NONORTHOGONAL's business and are skipped.
+def vwidth_not_multiple(l, step)
+  step_dbu = (step / dbu).round
+  out = RBA::Region.new
+  l.data.merged.each do |p|
+    next unless p.is_rectilinear?
+    if p.is_box?
+      out.insert(p) unless p.bbox.height % step_dbu == 0
+      next
+    end
+    xs = []
+    p.each_point_hull { |pt| xs << pt.x }
+    p.holes.times { |h| p.each_point_hole(h) { |pt| xs << pt.x } }
+    xs = xs.uniq.sort
+    bb = p.bbox
+    xs.each_cons(2) do |x0, x1|
+      strip = RBA::Region.new(p) & RBA::Region.new(RBA::Box.new(x0, bb.bottom, x1, bb.top))
+      strip.merged.each do |r|
+        out.insert(r) unless r.bbox.height % step_dbu == 0
+      end
+    end
+  end
+  DRC::DRCLayer::new(self, out.merged)
+end
+
+# "Minimum enclosure of <via> by <metal> on at least two opposite sides":
+# a via violates when its enclosure is short on the left/right pair AND on
+# the top/bottom pair. A coincident edge is a 0 nm enclosure and counts.
+def two_side_enclosure_violation(via, metal, d)
+  short_h = via.interacting(vert(metal).enclosing(vert(via), d, projection).second_edges)
+  short_v = via.interacting(horz(metal).enclosing(horz(via), d, projection).second_edges)
+  short_h & short_v
+end
+
 # Area thresholds are given in nm^2; KLayout areas are in um^2.
 def nm2(v)
   v * 1.0e-6
@@ -118,10 +205,12 @@ end
 # --------------------------------------------------------------------------
 # Table 3.1.1 -- Geometry check
 # --------------------------------------------------------------------------
-# GEOMETRY.NONORTHOGONAL: non-orthogonal shapes are not allowed (phase 1
-# applies it to the FEOL/MOL layers this deck reads).
-[well, fin, gate, gcut, active, nselect, pselect, slvt, lvt, sramvt,
- sdt, lisd, lig, v0].map { |l| l.non_rectilinear }.inject(:+)
+# GEOMETRY.NONORTHOGONAL: non-orthogonal shapes are not allowed. Applied to
+# every drawing layer this deck reads, FEOL through V9 (SRAMDRC is a marker,
+# not a mask; PAD is read only by the V9 rules below).
+[well, fin, gate, gcut, active, nselect, pselect, slvt, lvt, sramvt, thickox,
+ sdt, lisd, lig, v0, m1, v1, m2, v2, m3, v3, m4, v4, m5, v5, m6, v6,
+ m7, v7, m8, v8, m9, v9].map { |l| l.non_rectilinear }.inject(:+)
   .output("GEOMETRY.NONORTHOGONAL", "Table 3.1.1: non-orthogonal shapes are not allowed")
 
 # --------------------------------------------------------------------------
@@ -184,6 +273,8 @@ vert(gate_nc.not_interacting(active)).separation(vert(active), 9.nm, projection)
 horz(active).enclosing(horz(fin), 10.nm, projection)
   .output("ACTIVE.FIN.EX.1", "Table 3.5.1: min vertical extension of ACTIVE past FIN 10 nm")
 vwidth(active, 27.nm).output("ACTIVE.W.1", "Table 3.5.1: min vertical ACTIVE width 27 nm")
+vwidth_not_multiple(active, 27.nm)
+  .output("ACTIVE.W.2", "Table 3.5.1: ACTIVE vertical width increment is an integer multiple of 27 nm")
 hwidth(active, 16.nm).output("ACTIVE.W.3", "Table 3.5.1: min horizontal ACTIVE width 16 nm")
 vspace(active, 27.nm).output("ACTIVE.S.1", "Table 3.5.1: min vertical ACTIVE spacing 27 nm")
 hspace(active, 38.nm).output("ACTIVE.S.2B", "Table 3.5.1: min horizontal ACTIVE spacing 38 nm")
@@ -193,6 +284,17 @@ well.enclosing(active_ns.interacting(well), 27.nm)
   .output("ACTIVE.WELL.EN.1", "Table 3.5.1: min enclosure of ACTIVE (outside SRAMDRC) by WELL 27 nm")
 active_ns.with_area(nil, nm2(864)).output("ACTIVE.A.1A", "Table 3.5.2: min ACTIVE area 864 nm^2")
 active_ns.holes.with_area(nil, nm2(864)).output("ACTIVE.A.1B", "Table 3.5.2: min ACTIVE enclosed area 864 nm^2")
+# SRAMDRC-marked variants (DRM 1.2.2 note 7 "unless stated otherwise"): the
+# same measurements on ACTIVE interacting with SRAMDRC, at the SRAM values.
+active_s.separation(well, 13.5.nm)
+  .output("SRAM.ACTIVE.WELL.S.5", "Table 3.5.1: min spacing ACTIVE (interacting with SRAMDRC) to WELL 13.5 nm")
+well.enclosing(active_s.interacting(well), 13.5.nm)
+  .output("SRAM.ACTIVE.WELL.EN.2", "Table 3.5.1: min enclosure of ACTIVE (interacting with SRAMDRC) by WELL 13.5 nm")
+active_s.with_area(nil, nm2(432)).output("SRAM.ACTIVE.A.2A", "Table 3.5.2: min ACTIVE area (interacting with SRAMDRC) 432 nm^2")
+active_s.holes.with_area(nil, nm2(432)).output("SRAM.ACTIVE.A.2B", "Table 3.5.2: min ACTIVE enclosed area (interacting with SRAMDRC) 432 nm^2")
+# SRAM.ACTIVE.AUX.2: ACTIVE that shares no area with SRAMDRC may not touch it.
+active.not_overlapping(sramdrc).interacting(sramdrc)
+  .output("SRAM.ACTIVE.AUX.2", "Table 3.5.2: ACTIVE not belonging to an SRAM cell may not touch SRAMDRC")
 # ACTIVE.AUX.1: enclosed by NSELECT or by PSELECT with no coincident edge.
 # Shrinking each select by one database unit (0.25 nm) turns a coincident
 # edge into an "outside" one.
@@ -231,6 +333,11 @@ gcut.interacting(channel).output("GCUT.AUX.3", "Table 3.6.1: GCUT may not intera
     .output("#{name}.ACTIVE.EN.1", "Table 3.7.1: min horizontal enclosure of ACTIVE (not interacting with SRAMDRC) by #{name} 46 nm")
   horz(sel).enclosing(horz(inner), 27.nm, projection)
     .output("#{name}.ACTIVE.EN.2", "Table 3.7.1: min vertical enclosure of ACTIVE (not interacting with SRAMDRC) by #{name} 27 nm")
+  inner_s = active_s.inside(sel)
+  vert(sel).enclosing(vert(inner_s), 13.5.nm, projection)
+    .output("SRAM.#{name}.ACTIVE.EN.3", "Table 3.7.1: min horizontal enclosure of ACTIVE (interacting with SRAMDRC) by #{name} 13.5 nm")
+  horz(sel).enclosing(horz(inner_s), 13.5.nm, projection)
+    .output("SRAM.#{name}.ACTIVE.EN.4", "Table 3.7.1: min vertical enclosure of ACTIVE (interacting with SRAMDRC) by #{name} 13.5 nm")
   vert(sel).enclosing(vert(gate_nc), 7.nm, projection)
     .output("#{name}.GATE.EX.1", "Table 3.7.1: min horizontal extension of #{name} past GATE (not cut by GCUT) 7 nm")
   horz(sel).enclosing(horz(gate_nc), 7.nm, projection)
@@ -241,11 +348,39 @@ end
   .output("VT.AUX.2", "Table 3.7.1: VT layers (LVT, SLVT, SRAMVT) may not overlap")
 
 # --------------------------------------------------------------------------
+# THICKOX -- thick-oxide (I/O) device marker. PREDICTIVE / ASSUMED: the DRM
+# has no thick-oxide layer or rule (#4465). The cited table is Table 3.7.1,
+# the select-layer table these rules are modelled on; every threshold below
+# is an assumption (basis stated per rule), never a foundry value.
+# --------------------------------------------------------------------------
+# A marked device is ACTIVE crossed by a GATE and interacting with THICKOX.
+thickox_active = active.interacting(thickox)
+thickox_channel = channel & thickox
+thickox_gate = gate.interacting(thickox_channel)
+thickox_device_active = thickox_active.interacting(gate)
+# Assumed: marker encloses ACTIVE by 27 nm (core NSELECT.ACTIVE.EN.2). Shrinking
+# the marker by 27 nm and requiring ACTIVE inside it (coincident edges allowed)
+# is that enclosure; ACTIVE only partly covered, or merely touching, fails too.
+thickox_active.not_inside(thickox.sized(-27.nm))
+  .output("THICKOX.ACTIVE.EN", "Table 3.7.1: min enclosure of ACTIVE by THICKOX 27 nm (assumed, not a DRM rule)")
+# Assumed: 54 nm (core NSELECT.W.2); abutting or overlapping markers merge.
+thickox.space(54.nm, projection)
+  .output("THICKOX.S", "Table 3.7.1: min THICKOX spacing 54 nm (assumed, not a DRM rule)")
+# Assumed: 30 nm minimum Lg on a marked gate (1.5x the 20 nm core GATE.W.1).
+hwidth(thickox_gate, 30.nm)
+  .output("THICKOX.GATE.L", "Table 3.7.1: min horizontal GATE width (Lg) on a THICKOX device 30 nm (assumed, not a DRM rule)")
+# Assumed: 54 nm minimum channel width (two 27 nm ACTIVE.W.2 steps).
+vwidth(thickox_device_active, 54.nm)
+  .output("THICKOX.ACTIVE.W", "Table 3.7.1: min vertical ACTIVE width on a THICKOX device 54 nm (assumed, not a DRM rule)")
+
+# --------------------------------------------------------------------------
 # Table 3.8.1 -- SDT
 # --------------------------------------------------------------------------
 sdt_ns = sdt.not_interacting(sramdrc)
 hwidth(sdt, 24.nm).output("SDT.W.1", "Table 3.8.1: min horizontal SDT width 24 nm")
 vwidth(sdt_ns, 27.nm).output("SDT.W.2", "Table 3.8.1: min vertical SDT width (not interacting with SRAMDRC) 27 nm")
+vwidth_not_multiple(sdt_ns, 27.nm)
+  .output("SDT.W.3", "Table 3.8.1: SDT (not interacting with SRAMDRC) vertical width increment is an integer multiple of 27 nm")
 hspace(sdt, 30.nm).output("SDT.S.1", "Table 3.8.1: min horizontal SDT spacing 30 nm")
 vert(sdt).separation(vert(gate), 5.nm, projection)
   .output("SDT.GATE.S.2", "Table 3.8.1: min horizontal spacing SDT to GATE 5 nm")
@@ -253,6 +388,17 @@ horz(sdt_ns & active).width(27.nm, projection)
   .output("SDT.ACTIVE.OV.1", "Table 3.8.1: min vertical overlap SDT and ACTIVE 27 nm")
 horz(sdt_ns & lisd).width(27.nm, projection)
   .output("SDT.LISD.OV.2", "Table 3.8.1: min vertical overlap SDT and LISD 27 nm")
+# SRAMDRC variants (DRM Table 3.8.1): the same vertical widths and overlaps
+# with the relaxed 17 nm minimum, for SDT that touches or overlaps SRAMDRC
+# ("interacting"; a polygon abutting the marker edge is in scope). They are
+# the exact complement of SDT.W.2 / SDT.ACTIVE.OV.1 / SDT.LISD.OV.2, which
+# take only SDT not interacting with SRAMDRC.
+sdt_s = sdt.interacting(sramdrc)
+vwidth(sdt_s, 17.nm).output("SRAM.SDT.W.4", "Table 3.8.1: min vertical SDT width (interacting with SRAMDRC) 17 nm")
+horz(sdt_s & active).width(17.nm, projection)
+  .output("SRAM.SDT.ACTIVE.OV.3", "Table 3.8.1: min vertical overlap SDT (interacting with SRAMDRC) and ACTIVE 17 nm")
+horz(sdt_s & lisd).width(17.nm, projection)
+  .output("SRAM.SDT.LISD.OV.4", "Table 3.8.1: min vertical overlap SDT (interacting with SRAMDRC) and LISD 17 nm")
 sdt.interacting(gate).output("SDT.GATE.AUX.1", "Table 3.8.1: SDT and GATE may not overlap or touch")
 # "Coincide" is read as "lies on, and overlaps, an ACTIVE horizontal edge":
 # the shipped cells draw SDT 4 nm past ACTIVE's vertical edge (SDT x 42..66
@@ -279,6 +425,16 @@ lisd_short.separation(lisd_long, 25.nm, projection)
   .output("LISD.S.2", "Table 3.9.1: min tip-to-side LISD spacing (one edge <= 36 nm, other > 36 nm) 25 nm")
 lisd_tip.space(27.nm, projection)
   .output("LISD.S.3", "Table 3.9.1: min tip-to-tip LISD spacing (outside SRAMDRC, both edges 24..36 nm) 27 nm")
+# SRAM.LISD.S.4: tip-to-tip spacing for LISD interacting with SRAMDRC, edges
+# of any length up to 36 nm. Both polygons must interact with SRAMDRC (the DRM
+# says "two LISD polygons (interacting with SRAMDRC)"); a pair with only one
+# of them in scope is covered by neither this rule nor LISD.S.3.
+lisd_sram_short = lisd.interacting(sramdrc).edges.with_length(nil, 36.25.nm)
+lisd_sram_short.space(27.nm, projection)
+  .output("SRAM.LISD.S.4", "Table 3.9.1: min tip-to-tip LISD spacing (both polygons interacting with SRAMDRC, both edges <= 36 nm) 27 nm")
+# SRAM.LISD.AUX.1: a LISD that does not overlap SRAMDRC may not touch it.
+lisd.not_overlapping(sramdrc).interacting(sramdrc)
+  .output("SRAM.LISD.AUX.1", "Table 3.9.1: LISD not overlapping SRAMDRC may not touch SRAMDRC")
 lisd.with_area(nil, nm2(648)).output("LISD.A.1", "Table 3.9.1: min LISD area 648 nm^2")
 
 # --------------------------------------------------------------------------
@@ -313,6 +469,17 @@ lig.with_area(nil, nm2(324)).output("LIG.A.1", "Table 3.10.2: min LIG area 324 n
   .output("LIG.LISD.A.2", "Table 3.10.2: min area of overlap LIG and LISD 128 nm^2")
 (lig_ns & gate_nc).with_area(nil, nm2(320))
   .output("LIG.GATE.A.3", "Table 3.10.2: min area of overlap LIG (outside SRAMDRC) and GATE (not cut by GCUT) 320 nm^2")
+# SRAMDRC variants (DRM Tables 3.10.2 / 3.10.3) for LIG interacting with
+# SRAMDRC, the complement of LIG.GATE.A.3. SRAM.LIG.GATE.OV.2 is the
+# horizontal overlap across the gate (Fig. 3.10.2(c) draws its arrow across
+# the gate width), measured on the LIG/GATE intersection.
+lig_s = lig.interacting(sramdrc)
+(lig_s & gate_nc).with_area(nil, nm2(240))
+  .output("SRAM.LIG.GATE.A.4", "Table 3.10.2: min area of overlap LIG (interacting with SRAMDRC) and GATE (not cut by GCUT) 240 nm^2")
+hwidth(lig_s & gate_nc, 15.nm)
+  .output("SRAM.LIG.GATE.OV.2", "Table 3.10.3: min horizontal overlap LIG (interacting with SRAMDRC) and GATE (not cut by GCUT) 15 nm")
+lig.not_overlapping(sramdrc).interacting(sramdrc)
+  .output("SRAM.LIG.AUX.2", "Table 3.10.3: LIG not overlapping SRAMDRC may not touch SRAMDRC")
 # LIG.LISD.OV.1 is stated for LIG and LISD "connected together"; any overlap
 # connects them, so the overlap region itself is measured.
 (lig & lisd).width(8.nm)
@@ -323,7 +490,102 @@ vert(lig_ns).enclosing(vert(gate_nc), 1.nm, projection)
   .output("LIG.GATE.EX.1", "Table 3.10.3: min extension of LIG (outside SRAMDRC) over GATE (not cut by GCUT) on both sides 1 nm")
 
 # --------------------------------------------------------------------------
-# Tables 3.11.1 / 3.11.2 -- V0 (phase 1: width and connectivity only)
+# Net-aware spacing (#3084): ACTIVE.S.2A, LIG.LISD.S.6/S.7, LIG.SDT.S.8
+# --------------------------------------------------------------------------
+# The minimum conductor model these four "not on the same net" rules need.
+# Two shapes are on one net when a chain of overlapping (or touching) shapes
+# joins them through these layers, and through nothing else:
+#
+#   transistor source/drain ACTIVE -- SDT -- LISD -- LIG -- GATE (not cut)
+#   LISD, LIG -- V0 -- M1 -- V1 -- M2 -- ... -- M9 -- V9
+#
+# A source/drain region is ACTIVE of a transistor (ACTIVE the GATE crosses)
+# minus the GATE, so a channel never joins the regions on either side of it;
+# GATE touches only LIG. ACTIVE polygons no GATE crosses (taps) are not
+# source/drain regions and are left out. Layers that merely overlap with no
+# contact between them (M1 over LISD without a V0, LIG over ACTIVE, ...) make
+# no connection. The substrate and WELL are not modelled, and a shape that
+# reaches no other conductor is a net of its own, so it counts as "different".
+xtor_active = active.interacting(active & gate_nc)
+sd_active = xtor_active - gate_nc
+connect(sd_active, sdt)
+connect(sdt, lisd)
+connect(lisd, lig)
+connect(lig, gate_nc)
+connect(lisd, v0)
+connect(lig, v0)
+connect(v0, m1)
+connect(m1, v1)
+connect(v1, m2)
+connect(m2, v2)
+connect(v2, m3)
+connect(m3, v3)
+connect(v3, m4)
+connect(m4, v4)
+connect(v4, m5)
+connect(m5, v5)
+connect(v5, m6)
+connect(m6, v6)
+connect(v6, m7)
+connect(m7, v7)
+connect(v7, m8)
+connect(m8, v8)
+connect(v8, m9)
+connect(m9, v9)
+sd_active_nets = sd_active.nets
+sdt_nets = sdt.nets
+lisd_nets = lisd.nets
+lig_nets = lig.nets
+
+# ACTIVE.S.2A: horizontal spacing between the source/drain regions of two
+# different transistors on different nets. The gap is measured between
+# ACTIVE polygons like ACTIVE.S.2B (Fig. 3.5.2): a facing pair is kept only
+# when nothing of ACTIVE lies between the two edges, which drops the pair of
+# regions either side of one GATE (a single transistor, drawn in one ACTIVE).
+# Each pair's marker is judged on its own (raw): merged, the markers of the
+# pairs either side of a GATE would touch a real gap's and hide it.
+# Note 2 says the foundry deck also checks vertical spacing in error; only
+# horizontal spacing is checked here.
+s2a_pairs = sd_active_nets.space(92.nm, projection, props_ne).with_angle(90)
+s2a_pairs.polygons.raw.not_overlapping(active)
+  .output("ACTIVE.S.2A", "Table 3.5.1: min horizontal spacing between ACTIVE forming source/drain regions (of different transistors) on different nets 92 nm")
+
+# LIG.LISD.S.6 / LIG.SDT.S.8: spacing in any direction between a LIG polygon
+# and a LISD (SDT) polygon on a different net.
+#
+# A two-layer net separation with props_ne SIGSEGVs KLayout 0.28 when the
+# second operand has no shapes (#3811: a tap or filler cell draws LIG but no
+# LISD or SDT). With an empty second layer there is nothing to separate LIG
+# from, so the result is the (empty) edge pairs of that layer. The rule is
+# still declared via output(), so the coverage count is unchanged.
+#
+# The same net separation also aborts KLayout 0.28 ("m_type == Polygon was not
+# true in Region::separation_check", #4340) when its operands are non-empty
+# but no pair lies within the distance: a tie or tap cell whose LIG sits
+# near, but not within, the LISD/SDT. The net-aware result is always a subset
+# of the plain one (props_ne only drops pairs on one net), so an empty plain
+# separation is already the answer and the net-aware call is skipped; the
+# rule is still declared via output().
+lig_net_separation = lambda do |other, other_nets, *args|
+  if other.is_empty?
+    other.space(1.nm)
+  else
+    plain = lig.separation(other, *args)
+    plain.is_empty? ? plain : lig_nets.separation(other_nets, *args, props_ne)
+  end
+end
+lig_net_separation.call(lisd, lisd_nets, 14.nm, euclidian)
+  .output("LIG.LISD.S.6", "Table 3.10.1: min spacing between LIG and LISD not on the same net 14 nm")
+lig_net_separation.call(sdt, sdt_nets, 14.nm, euclidian)
+  .output("LIG.SDT.S.8", "Table 3.10.1: min spacing between LIG and SDT not on the same net 14 nm")
+# LIG.LISD.S.7: the corner-to-corner case, with the longer 15 nm distance.
+# As for M1.S.6, "corner-to-corner" is Euclidean spacing between edges whose
+# projections onto each other overlap by less than one database unit.
+lig_net_separation.call(lisd, lisd_nets, 15.nm, euclidian, projection_limits(nil, 0.25.nm))
+  .output("LIG.LISD.S.7", "Table 3.10.1: min corner-to-corner spacing between LISD and LIG not on the same net 15 nm")
+
+# --------------------------------------------------------------------------
+# Tables 3.11.1 / 3.11.2 -- V0 (width, connectivity and LIG overlap area)
 # --------------------------------------------------------------------------
 # V0.W.1 is stated along the M1 length; it is APPROXIMATED in both
 # directions. V0.M1.AUX.3 makes V0 as wide as M1 across the track, and the
@@ -332,3 +594,278 @@ vert(lig_ns).enclosing(vert(gate_nc), 1.nm, projection)
 v0.width(18.nm).output("V0.W.1", "Table 3.11.1: min V0 width 18 nm (approximated: checked in both directions)")
 (v0.not_interacting(m1) + v0.not_interacting(lisd + lig))
   .output("V0.AUX.1", "Table 3.11.2: V0 must always interact with M1 and LISD or LIG")
+# V0.LIG.A.1: the V0 that land on LIG rather than inside LISD must overlap
+# LIG by at least 288 nm^2 (V0 18 x 18 nm = 324 nm^2).
+v0_lig = v0.interacting(lig).not_inside(lisd)
+(v0_lig & lig).with_area(nil, nm2(288))
+  .output("V0.LIG.A.1", "Table 3.11.2: min area of overlap V0 (interacting with LIG, not inside LISD) and LIG 288 nm^2")
+
+# --------------------------------------------------------------------------
+# Table 3.12.1 -- M1-M3
+# --------------------------------------------------------------------------
+# Section 3.12: rules stated for M1 apply to M2 and M3 as well. The spacing
+# rules are conditioned on the lengths of the two facing edges, like LISD
+# and LIG: "> 36 nm" long, "<= 36 nm" short, "24..36 nm" tip, "< 24 nm"
+# narrow tip.
+{ "M1" => m1, "M2" => m2, "M3" => m3 }.each do |name, m|
+  m_long = m.edges.with_length(36.25.nm, nil)
+  m_short = m.edges.with_length(nil, 36.25.nm)
+  m_tip = m.edges.with_length(24.nm, 36.25.nm)
+  m_narrow_tip = m.edges.with_length(nil, 24.nm)
+  m.width(18.nm).output("#{name}.W.1", "Table 3.12.1: min #{name} width 18 nm")
+  m_long.space(18.nm, projection)
+    .output("#{name}.S.1", "Table 3.12.1: min side-to-side #{name} spacing (both edges > 36 nm) 18 nm")
+  m_short.separation(m_long, 25.nm, projection)
+    .output("#{name}.S.2", "Table 3.12.1: min tip-to-side #{name} spacing (one edge <= 36 nm, other > 36 nm) 25 nm")
+  m_tip.space(27.nm, projection)
+    .output("#{name}.S.3", "Table 3.12.1: min tip-to-tip #{name} spacing (both edges 24..36 nm) 27 nm")
+  m_narrow_tip.space(31.nm, projection)
+    .output("#{name}.S.4", "Table 3.12.1: min tip-to-tip #{name} spacing (both edges < 24 nm) 31 nm")
+  m_tip.separation(m_narrow_tip, 31.nm, projection)
+    .output("#{name}.S.5", "Table 3.12.1: min tip-to-tip #{name} spacing (one edge 24..36 nm, other < 24 nm) 31 nm")
+  # Corner-to-corner: Euclidean spacing between edges whose projections onto
+  # each other do not overlap (projected length below one database unit).
+  # Facing edges that do overlap are the side/tip rules above.
+  m.space(20.nm, euclidian, projection_limits(nil, 0.25.nm))
+    .output("#{name}.S.6", "Table 3.12.1: min corner-to-corner #{name} spacing 20 nm")
+  m.with_area(nil, nm2(504)).output("#{name}.A.1", "Table 3.12.1: min #{name} area 504 nm^2")
+end
+
+# --------------------------------------------------------------------------
+# Table 3.13.1 -- V1-V3 (width, connectivity, two-sided enclosure)
+# --------------------------------------------------------------------------
+# Section 3.13: rules stated for V1 (with M1 / M2) apply to V2 (with M2 / M3)
+# and V3 (with M3 / M4). V(x).W.1 is stated along the length of the upper
+# metal; like V0.W.1 it is APPROXIMATED in both directions (V(x).M(x+1).AUX.2
+# makes the via as wide as the upper metal across the track, and the shipped
+# cells draw 18 x 18 nm V1).
+{ "V1" => [v1, m1, m2], "V2" => [v2, m2, m3], "V3" => [v3, m3, m4] }.each do |name, (via, lower, upper)|
+  via.width(18.nm)
+    .output("#{name}.W.1", "Table 3.13.1: min #{name} width 18 nm (approximated: checked in both directions)")
+  via.not_inside(lower & upper)
+    .output("#{name}.AUX.1", "Table 3.13.1: #{name} must be inside the metal below and the metal above it")
+end
+# Enclosure "on at least two opposite sides" (5 nm by the lower metal for V2
+# and V3 -- note 2 states V3.M3.EN.1 by reference to V2.M2.EN.1 -- and 11 nm
+# by M4 for V3). V1.M1.EN.1 ("5 & 2") and V(x).M(x+1).EN.2 ("(5 & 5) |
+# (5 & 0)") are per-side rules and are not checked yet (asap7_rules.py).
+two_side_enclosure_violation(v2, m2, 5.nm)
+  .output("V2.M2.EN.1", "Table 3.13.1: min enclosure of V2 by M2 on at least two opposite sides 5 nm")
+two_side_enclosure_violation(v3, m3, 5.nm)
+  .output("V3.M3.EN.1", "Table 3.13.1: min enclosure of V3 by M3 on at least two opposite sides 5 nm (note 2)")
+two_side_enclosure_violation(v3, m4, 11.nm)
+  .output("V3.M4.EN.2", "Table 3.13.1: min enclosure of V3 by M4 on at least two opposite sides 11 nm")
+
+# --------------------------------------------------------------------------
+# Tables 3.14.1-3.14.2 / 3.16.1-3.16.2 -- M4-M7
+# --------------------------------------------------------------------------
+# Sections 3.14 / 3.16: rules stated for M4 apply to M5, and rules for M6 to
+# M7, "perpendicular" for the vertically routed M5 and M7. M4 and M6 route
+# horizontally, so their width "across the track" is vertical. Per layer:
+# routing direction, minimum width (= track width = grid, W.1 / S.1 /
+# AUX.1), maximum width (W.2). W.5 (44 nm) and S.2 (40 nm) are shared.
+#
+# Not checked here (asap7_rules.py): W.4, S.3-S.5 and AUX.4, which need
+# routing-track assignment. Same-mask/different-mask spacing does not
+# arise: S.1 and S.2 hold "regardless of the edge lengths and mask colors".
+def across_width(m, dir, d)
+  dir == :h ? vwidth(m, d) : hwidth(m, d)
+end
+
+def along_width(m, dir, d)
+  dir == :h ? hwidth(m, d) : vwidth(m, d)
+end
+
+def across_space(m, dir, d)
+  dir == :h ? vspace(m, d) : hspace(m, d)
+end
+
+def along_space(m, dir, d)
+  dir == :h ? hspace(m, d) : vspace(m, d)
+end
+
+# Edges whose distance apart is the width across the track (horizontal
+# edges for a horizontally routed layer).
+def track_edges(m, dir)
+  dir == :h ? horz(m) : vert(m)
+end
+
+# Off-grid vertices, checking only the coordinate across the track.
+def across_ongrid(l, dir, g)
+  dir == :h ? l.ongrid(0.25.nm, g) : l.ongrid(g, 0.25.nm)
+end
+
+{ "M4" => [m4, :h, 24, 480], "M5" => [m5, :v, 24, 480],
+  "M6" => [m6, :h, 32, 640], "M7" => [m7, :v, 32, 640] }.each do |name, (m, dir, g, wmax)|
+  t = (name == "M4" || name == "M5") ? "3.14" : "3.16"
+  across = dir == :h ? "vertical" : "horizontal"
+  along = dir == :h ? "horizontal" : "vertical"
+  across_width(m, dir, g.nm)
+    .output("#{name}.W.1", "Table #{t}.1: min #{across} #{name} width #{g} nm")
+  # A width above wmax survives shrinking each side by wmax / 2.
+  (dir == :h ? m.sized(0, -(wmax / 2).nm) : m.sized(-(wmax / 2).nm, 0))
+    .output("#{name}.W.2", "Table #{t}.1: max #{across} #{name} width #{wmax} nm")
+  # Even integer multiples of the minimum width up to the W.2 maximum (wider
+  # shapes are W.2 violations): 2g, 4g, ..., wmax.
+  (2 * g).step(wmax, 2 * g).map do |w|
+    track_edges(m, dir).width((w + 0.25).nm, projection).with_distance(w.nm, (w + 0.25).nm)
+  end.inject(:+)
+    .output("#{name}.W.3", "Table #{t}.1: #{across} #{name} width may not be an even integer multiple of #{g} nm")
+  along_width(m, dir, 44.nm)
+    .output("#{name}.W.5", "Table #{t}.1: min #{along} #{name} width 44 nm")
+  across_space(m, dir, g.nm)
+    .output("#{name}.S.1", "Table #{t}.1: min #{across} #{name} spacing #{g} nm (any edge length and mask colour)")
+  along_space(m, dir, 40.nm)
+    .output("#{name}.S.2", "Table #{t}.1: min #{along} #{name} spacing 40 nm (any edge length and mask colour)")
+  across_ongrid(m, dir, g.nm)
+    .output("#{name}.AUX.1", "Table #{t}.2: #{name} #{along} edges must be on a #{g} nm grid (offset 0)")
+  # Minimum-width tracks start at 2N x g (offset 0). Stretching a g-wide
+  # rectangle to 2g from its lower/left edge puts both its edges on the 2g
+  # grid exactly when it sits on a track.
+  min_w = dir == :h ? m.rectangles.with_bbox_height(g.nm) : m.rectangles.with_bbox_width(g.nm)
+  stretched = dir == :h ? min_w.sized(0, (g / 2).nm).moved(0, (g / 2).nm) :
+                          min_w.sized((g / 2).nm, 0).moved((g / 2).nm, 0)
+  across_ongrid(stretched, dir, (2 * g).nm)
+    .output("#{name}.AUX.2", "Table #{t}.2: minimum-width #{name} must lie on a routing track (2N x #{g} nm, offset 0)")
+  m.non_rectangles.output("#{name}.AUX.3", "Table #{t}.2: #{name} may not bend")
+end
+
+# --------------------------------------------------------------------------
+# Tables 3.15.1 / 3.17.1 -- V4-V7
+# --------------------------------------------------------------------------
+# Sections 3.15 / 3.17: rules for V4 (with M4 / M5) apply to V5 (M5 / M6),
+# rules for V6 (M6 / M7) to V7 (M7 / M8). The same-net (S.1) and
+# different-net (S.2) spacings share one threshold, so S.1 is checked
+# between any two vias, whatever their nets; S.3 is corner-to-corner, like
+# M1.S.6.
+{ "V4" => [v4, m4, m5, 33], "V5" => [v5, m5, m6, 33],
+  "V6" => [v6, m6, m7, 45], "V7" => [v7, m7, m8, 45] }.each do |name, (via, lower, upper, s)|
+  t = (name == "V4" || name == "V5") ? "3.15.1" : "3.17.1"
+  via.space(s.nm, projection)
+    .output("#{name}.S.1", "Table #{t}: min #{name} spacing #{s} nm (checked for any two vias, whatever their nets)")
+  via.space(s.nm, euclidian, projection_limits(nil, 0.25.nm))
+    .output("#{name}.S.3", "Table #{t}: min corner-to-corner #{name} spacing #{s} nm")
+  via.not_inside(lower & upper)
+    .output("#{name}.AUX.1", "Table #{t}: #{name} must be inside the metal below and the metal above it")
+end
+# W.1 is the exact via size along the upper metal's length: vertical for
+# M5 / M7, horizontal for M6. (Table 3.17.1 says "along the length of M5"
+# for V6; V6 lands on M7, as V6.M7.AUX.2 states.) M8's routing direction is
+# not stated (Table 3.18.1), so V7.W.1 is not checked.
+v4.without_bbox_height(24.nm).output("V4.W.1", "Table 3.15.1: exact V4 width along the M5 length (vertical) 24 nm")
+v5.without_bbox_width(24.nm).output("V5.W.1", "Table 3.15.1: exact V5 width along the M6 length (horizontal) 24 nm")
+v6.without_bbox_height(32.nm).output("V6.W.1", "Table 3.17.1: exact V6 width along the M7 length (vertical) 32 nm")
+# AUX.2: the via is exactly as wide as the upper metal across its length,
+# i.e. its edges along the metal lie on the metal's edges. Vias that do not
+# overlap the upper metal at all are V(x).AUX.1 only.
+(vert(v4.overlapping(m5)) - vert(m5))
+  .output("V4.M5.AUX.2", "Table 3.15.1: V4 must be exactly as wide as M5 across the M5 length")
+(horz(v5.overlapping(m6)) - horz(m6))
+  .output("V5.M6.AUX.2", "Table 3.15.1: V5 must be exactly as wide as M6 across the M6 length")
+(vert(v6.overlapping(m7)) - vert(m7))
+  .output("V6.M7.AUX.2", "Table 3.17.1: V6 must be exactly as wide as M7 across the M7 length")
+# Enclosure 11 nm "on (at least) two opposite sides".
+two_side_enclosure_violation(v4, m4, 11.nm)
+  .output("V4.M4.EN.1", "Table 3.15.1: min enclosure of V4 by M4 on two opposite sides 11 nm")
+two_side_enclosure_violation(v4, m5, 11.nm)
+  .output("V4.M5.EN.2", "Table 3.15.1: min enclosure of V4 by M5 on at least two opposite sides 11 nm")
+two_side_enclosure_violation(v5, m5, 11.nm)
+  .output("V5.M5.EN.1", "Table 3.15.1: min enclosure of V5 by M5 on two opposite sides 11 nm")
+two_side_enclosure_violation(v5, m6, 11.nm)
+  .output("V5.M6.EN.2", "Table 3.15.1: min enclosure of V5 by M6 on at least two opposite sides 11 nm")
+two_side_enclosure_violation(v6, m6, 11.nm)
+  .output("V6.M6.EN.1", "Table 3.17.1: min enclosure of V6 by M6 on at least two opposite sides 11 nm")
+two_side_enclosure_violation(v6, m7, 11.nm)
+  .output("V6.M7.EN.2", "Table 3.17.1: min enclosure of V6 by M7 on two opposite sides 11 nm")
+two_side_enclosure_violation(v7, m7, 11.nm)
+  .output("V7.M7.EN.1", "Table 3.17.1: min enclosure of V7 by M7 on at least two opposite sides 11 nm")
+two_side_enclosure_violation(v7, m8, 11.nm)
+  .output("V7.M8.EN.2", "Table 3.17.1: min enclosure of V7 by M8 on two opposite sides 11 nm")
+
+# --------------------------------------------------------------------------
+# Tables 3.18.1 / 3.18.2 -- M8-M9
+# --------------------------------------------------------------------------
+# Section 3.18: rules stated for M8 apply to M9. A shape's "length" (W.2-W.4)
+# is the longer side of its bounding box. The spacing rules are conditioned
+# on the facing edges' lengths: ">= 80 nm" long, "< 80 nm" short. S.4-S.8
+# are not checked (asap7_rules.py).
+{ "M8" => m8, "M9" => m9 }.each do |name, m|
+  m_long = m.edges.with_length(80.nm, nil)
+  m_short = m.edges.with_length(nil, 80.nm)
+  m.width(40.nm).output("#{name}.W.1", "Table 3.18.1: min #{name} width 40 nm")
+  m.with_bbox_max(400.nm, 1200.nm).width(60.nm)
+    .output("#{name}.W.2", "Table 3.18.1: min #{name} width 60 nm when its length is >= 400 nm and < 1200 nm")
+  m.with_bbox_max(1200.nm, 1800.nm).width(80.nm)
+    .output("#{name}.W.3", "Table 3.18.1: min #{name} width 80 nm when its length is >= 1200 nm and < 1800 nm")
+  m.with_bbox_max(1800.nm, nil).width(120.nm)
+    .output("#{name}.W.4", "Table 3.18.1: min #{name} width 120 nm when its length is >= 1800 nm")
+  # The DRM prints the operator as ">="; a maximum is read as "<=".
+  m.sized(-1000.nm).output("#{name}.W.5", "Table 3.18.1: max #{name} width 2000 nm")
+  m_long.space(40.nm, projection)
+    .output("#{name}.S.1", "Table 3.18.1: min side-to-side #{name} spacing (both edges >= 80 nm) 40 nm")
+  m_short.separation(m_long, 43.nm, projection)
+    .output("#{name}.S.2", "Table 3.18.1: min tip-to-side #{name} spacing (one edge < 80 nm, other >= 80 nm) 43 nm")
+  m_short.space(46.nm, projection)
+    .output("#{name}.S.3", "Table 3.18.1: min tip-to-tip #{name} spacing (both edges < 80 nm) 46 nm")
+  m.with_area(nil, nm2(7520)).output("#{name}.A.1", "Table 3.18.2: min #{name} area 7520 nm^2")
+  m.edges.with_length(nil, 40.nm)
+    .output("#{name}.L.1", "Table 3.18.2: min #{name} feature (edge) length 40 nm")
+end
+
+# --------------------------------------------------------------------------
+# Table 3.19.1 -- V8-V9
+# --------------------------------------------------------------------------
+# Section 3.19: rules for V8 (with M8 / M9) apply to V9 (with M9 / PAD).
+# PAD (DRM mask 96, Table 2.3.1) is not in the pinned asap7.lyp, so it is read
+# by number, like every other layer here. The DRM has no rule for PAD itself, so
+# shapes on PAD are unchecked beyond the V9 rules below and `klt drc` reports
+# that in coverage.unchecked_rules (asap7_rules.PAD_DISPOSITION, #3807); the V8.M9.EN.2 / V8.AUX.1 rules
+# for "V8 in conjunction with M9" carry over to "V9 in conjunction with PAD".
+{ "V8" => [v8, m8], "V9" => [v9, m9] }.each do |name, (via, lower)|
+  r = via.rectangles
+  sizes = r.with_bbox_width(40.nm).with_bbox_height(40.nm) +
+          r.with_bbox_width(40.nm).with_bbox_height(120.nm) +
+          r.with_bbox_width(120.nm).with_bbox_height(40.nm)
+  (via - sizes).output("#{name}.W.1", "Table 3.19.1: #{name} must be exactly 40x40, 40x120 or 120x40 nm")
+  via.space(57.nm, projection)
+    .output("#{name}.S.1", "Table 3.19.1: min #{name} spacing 57 nm")
+  via.space(57.nm, euclidian, projection_limits(nil, 0.25.nm))
+    .output("#{name}.S.2", "Table 3.19.1: min corner-to-corner #{name} spacing 57 nm")
+end
+two_side_enclosure_violation(v8, m8, 20.nm)
+  .output("V8.M8.EN.1", "Table 3.19.1: min enclosure of V8 by M8 on at least two opposite sides 20 nm")
+two_side_enclosure_violation(v8, m9, 20.nm)
+  .output("V8.M9.EN.2", "Table 3.19.1: min enclosure of V8 by M9 on at least two opposite sides 20 nm")
+two_side_enclosure_violation(v9, m9, 20.nm)
+  .output("V9.M9.EN.1", "Table 3.19.1: min enclosure of V9 by M9 on at least two opposite sides 20 nm")
+two_side_enclosure_violation(v9, pad, 20.nm)
+  .output("V9.PAD.EN.2", "Table 3.19.1: min enclosure of V9 by PAD on at least two opposite sides 20 nm")
+v8.not_inside(m8 & m9)
+  .output("V8.AUX.1", "Table 3.19.1: V8 must be inside M8 and M9")
+v9.not_inside(m9 & pad)
+  .output("V9.AUX.1", "Table 3.19.1: V9 must be inside M9 and PAD")
+
+# --------------------------------------------------------------------------
+# Opt-in absolute grid origin (#4082) -- NOT part of the 263 default ids
+# --------------------------------------------------------------------------
+# FIN.S.1 / GATE.S.1 above only look at neighbour spacing, so a whole cell
+# moved off the grid still passes. When the caller declares an origin with
+# --deck-var, the lower edge of every FIN is held to the 27 nm vertical
+# pitch (DRM Table 3.3.1) and the left edge of every GATE to the 54 nm
+# horizontal pitch (DRM Table 3.4.1), counted from that origin. The DRM states
+# the pitches only, not an absolute origin, so the origin is the caller's.
+$fin_y_origin_nm = nil unless defined? $fin_y_origin_nm
+$gate_x_origin_nm = nil unless defined? $gate_x_origin_nm
+
+# Edges of `m` that bound it from below / the left: the horizontal (vertical)
+# edges that are not inside the layer shifted up (right) by one dbu.
+if $fin_y_origin_nm
+  fy = $fin_y_origin_nm.to_f
+  horz(fin).outside(fin.moved(0, 0.25.nm)).extended(:in => 27.nm).moved(0, -fy.nm).ongrid(0.25.nm, 27.nm)
+    .output("FIN.GRID.1", "DRM Table 3.3.1 (opt-in fin_y_origin_nm): FIN lower edge must be on the 27 nm vertical pitch from the declared origin")
+end
+if $gate_x_origin_nm
+  gx = $gate_x_origin_nm.to_f
+  vert(gate).outside(gate.moved(0.25.nm, 0)).extended(:in => 54.nm).moved(-gx.nm, 0).ongrid(54.nm, 0.25.nm)
+    .output("GATE.GRID.1", "DRM Table 3.4.1 (opt-in gate_x_origin_nm): GATE left edge must be on the 54 nm horizontal pitch from the declared origin")
+end

@@ -124,7 +124,9 @@ klt yield mc.json --limits spec-limits.json --format json
   always grades without one. To grade a control from a second, known-bad
   campaign, derive a sample set from both reports with
   [`klt yield-samples`](#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples)
-  — never by hand-editing a committed response.
+  — never by hand-editing a committed response. A
+  [`klt yield-campaign`](yield-campaign.md#negative-control) spec can declare
+  the control itself (`negative_control`) and run both campaigns in one call.
 
 ### Sample-set document
 
@@ -321,6 +323,51 @@ Exit codes: `0` derived (document on stdout); `1` could not derive (any
 error above; JSON error envelope on stderr under `--format json`, stdout
 empty); `2` usage error (argparse — e.g. `--negative-control` missing).
 
+### Deriving a sample set from a per-draw CSV (`klt yield-csv`)
+
+A Monte Carlo harness that is not a `klt sim` request (a shell-driven ngspice
+campaign, say) usually persists one CSV row per draw. `klt yield-csv` turns
+that file into the sample-set document above, so nobody hand-writes (and
+quietly diverges on) the converter
+([#2931](https://github.com/2AMLogic/klayout-tools/issues/2931)). **Shape
+chosen: a derive step, mirroring `klt yield-samples`** — `klt yield`'s input
+contract is unchanged, the sample-set document stays the single internal shape
+into the estimator, and the ingest needs no native extension.
+
+```bash
+klt yield-csv trials.csv --group-by metric --value result \
+    --status-col status --pass-value ok --draw-col draw_index \
+    --unit V --min 1.15 --max 1.25 --format json > samples.json
+klt yield samples.json --format json > yield.json
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--group-by COL` | Each distinct value becomes one measurement (named after it), in first-seen order. |
+| `--value COL` | The draw's value. |
+| `--status-col COL --pass-value V` | Given together. A row whose status is not `V` counts `errored`; its value cell is not read. |
+| `--draw-col COL` | Optional. A repeated (group, draw) pair is rejected. Without it duplicates are accepted as separate draws. |
+| `--unit U`, `--min`, `--max`, `--target-yield` | Optional, applied to every measurement (`--limits` on `klt yield` still wins). |
+
+Rules: the file is read once and the same bytes are hashed and parsed (UTF-8,
+BOM and CRLF accepted). A passing row whose value is empty, non-numeric or
+non-finite (`nan`, `inf`) counts `errored` — never dropped, never a sample.
+Samples keep file order; the counts `klt yield` grades do not depend on it. A
+missing column, empty file, header-only file or a group with no usable draw is
+exit `1` with the JSON error envelope on stderr and stdout empty.
+
+The `--format json` output is the sample-set document plus `schema_version` and
+a `derivation.csv` block: `path` (as given; pass a repo-relative path if the
+document is committed), `content_hash` (`sha256:` of the CSV bytes), `rows`,
+and the column mapping used.
+
+**What `klt signoff` hashes.** Same as the two-report flow above: the pin is
+the hash of the **derived `samples.json`**, not the CSV. Re-deriving after the
+CSV changes moves the pin; editing the CSV without re-deriving is not
+re-checked (`derivation.csv.content_hash` is an audit trail, not live
+verification). Re-run `klt yield-csv` whenever the CSV changes. A runnable
+example lives in [`examples/yield/`](../../examples/yield/README.md).
+
 ### Spec-limits file (`--limits`)
 
 The statement of what the design is being held to. It **wins** over whatever
@@ -344,6 +391,12 @@ limits the sample document carried — it is the caller's explicit spec.
 - The four run-level keys are defaults; a CLI flag beats the file, which
   beats the documented default. A run-level `target_yield` applies to every
   measurement that does not state its own.
+- `target_sigma` and `min_converged_samples` (optional; per measurement or
+  run-level default, per-measurement wins) declare a parametric qualification
+  criterion and a minimum converged-sample count — see
+  ["Sigma target and converged-N"](#sigma-target-and-converged-n). Invalid
+  values (non-number or boolean, `target_sigma <= 0`, a negative or
+  non-integer `min_converged_samples`) are an error (exit `1`).
 - A measurement present in the sample document but **not** in this file keeps
   whatever limits it already had. A measurement that ends up with neither
   `min` nor `max` is skipped with a warning — unless it was named explicitly
@@ -374,7 +427,7 @@ value `0.787`:
 | `consistent` | The sample set is not inconsistent with a normal. |
 | `rejected` | `A2*` exceeds the critical value — a warning says so, and the parametric estimate and Cpk should be treated as indicative only. |
 | `insufficient_samples` | `N < 8`, below where the critical values apply; normality was **not** tested. |
-| `degenerate` | Zero sample spread; the statistic is undefined. |
+| `degenerate` | Zero sample spread; the statistic is undefined. A bit-identical sample set, or one whose sample standard deviation is at or below `1e-12 * max(abs(mean), tiny)` (a floating-point rounding residue, e.g. 100 copies of `1.800306041`), counts as zero spread. A genuine relative spread of `1e-9` does not. |
 
 ### Two yield estimates, side by side
 
@@ -406,7 +459,7 @@ past where it is informative.
 | `sigma_to_spec_confidence_interval` | `3 ×` the `cpk` interval. |
 | `limiting_side` | `"lower"` or `"upper"` — which limit `cpk` is measured against. |
 
-All are `null` when the sample spread is zero (the fit is degenerate).
+All are `null` when the sample spread is zero (the fit is degenerate), using the same relative floor (`stddev <= 1e-12 * max(abs(mean), tiny)`) as the `degenerate` normality verdict.
 
 ### Sample-size verdict
 
@@ -433,7 +486,80 @@ A measurement that declares a `target_yield` **passes only if the lower
 confidence bound reaches it** — a claim at the stated confidence, not a point
 estimate that happened to clear the bar. A measurement with no `target_yield`
 is `reported`: it can never fail, exactly as an unlimited measurement in `klt
-sim` is reported and never failed.
+sim` is reported and never failed. A measurement may additionally declare a
+[`target_sigma` and/or `min_converged_samples`](#sigma-target-and-converged-n),
+which can fail it or leave it `insufficient_evidence`.
+
+### Sigma target and converged-N
+
+Two optional, append-only criteria (issue #2873). A spec that declares
+neither produces a byte-identical envelope to one from before they existed:
+the `limits` echo, the `sigma_target`/`converged_n` blocks and the changed
+statuses below appear **only when the corresponding key is declared**.
+
+**`target_sigma: k`** — the sample mean ± `k` sample standard deviations must
+lie inside `[min, max]`, which is exactly `capability.sigma_to_spec >= k`
+(one-sided limits work: the limiting side is the declared one). It is a
+comparison against an existing statistic, not a new one. The measurement
+gains:
+
+```json
+"sigma_target": {
+  "k": 4.0, "sigma_to_spec": 4.31, "lower_bound": 3.92,
+  "gate": "lower_bound", "met": false
+}
+```
+
+- **Gate rule: the lower bound, not the point estimate.** `met` is
+  `capability.sigma_to_spec_confidence_interval.low >= k`, consistent with how
+  `target_yield` gates on its lower bound — a claim at the stated confidence.
+  Both numbers are reported so a consumer can see the point estimate cleared
+  `k` while the bound did not (`gate` names the quantity judged on). The
+  bound is the lower end of the two-sided `confidence` interval (Bissell's
+  Cpk interval × 3).
+- **Not evaluable ⇒ `met: null` plus a `reason`, never a pass.**
+  `"degenerate_fit"` (zero sample spread: `sigma_to_spec` is `null`, not
+  infinity) and `"importance_sampled"` (`capability` is computed from the
+  unweighted draws, which are not a sample of the target distribution, so the
+  criterion does not apply to importance-weighted measurements). A declared
+  but non-evaluable criterion makes the measurement `insufficient_evidence`.
+- `met: false` makes the measurement `fail` even when its `target_yield` is
+  met or absent.
+
+**`min_converged_samples: N`** — distinct from `min_samples` (a hard floor
+that makes the run exit `1`). The measurement gains:
+
+```json
+"converged_n": {
+  "n_requested": 120, "n_converged": 100,
+  "min_converged_samples": 110, "verdict": "insufficient"
+}
+```
+
+`n_requested` is the full draw, `n + errored + failed_unmeasurable +
+censored + inconclusive`; `n_converged` is `n` (numeric-valued samples).
+`errored`/`censored`/`inconclusive`/`failed_unmeasurable` draws therefore
+reduce `n_converged` but never `n_requested`. `n_converged < N` ⇒
+`verdict: "insufficient"` (`"sufficient"` otherwise) and the measurement is
+`insufficient_evidence`. This reuses the `sufficient`/`insufficient`
+vocabulary of [`sample_size.verdict`](#sample-size-verdict).
+
+**Status precedence** (per measurement and for the run):
+`fail` > `insufficient_evidence` > `pass` > `reported`. A definite failure is
+never masked by a shortfall of evidence elsewhere. `insufficient_evidence`
+means "nothing failed, but the evidence cannot decide" — it is **not** a pass
+and **not** an error (exit `1`): the report is written and exits `4`.
+
+**Schema policy: no `schema_version` bump.** Every new input key and output
+field is additive-optional and absent unless declared. The two outcomes a
+consumer can newly see — `status: "insufficient_evidence"` (exit `4`) and
+`status: "fail"` caused by a `target_sigma` — can only occur for a spec that
+opted in by declaring a new key, so no pre-existing spec changes verdict.
+Consumers gate on `status` (see [Exit codes](#exit-codes)); `klt signoff`
+treats `insufficient_evidence` as not passing (reason `undersized_sample`).
+`klt yield-campaign` accepts both keys in per-measurement `limits` (run-level
+defaults are `klt yield --limits` only). `klt yield-samples` output feeds
+`klt yield` unchanged and needs no change.
 
 ### Errored samples and conditional yield
 
@@ -603,6 +729,26 @@ point estimate:
 | --- | --- |
 | `detected` | The negative control's empirical yield is lower **and** its exact (Clopper-Pearson) confidence interval does not overlap the nominal measurement's — a difference too large to be sampling noise. |
 | `not_detected` | The point estimates may differ, but the intervals overlap (or the control isn't even lower) — the deliberate defect did not show up as a statistically distinguishable degradation. |
+
+| `not_applicable` | Not computed: the measurement **declared** that the seeded defect cannot degrade it by construction (see below). |
+
+**Declaring "control not applicable"** ([#4523](https://github.com/2AMLogic/klayout-tools/issues/4523)):
+a measurement the seeded defect can only *improve* (a one-sided defect applied
+to a measurement it pushes the other way) can say so instead of carrying a
+control that reads `not_detected`:
+
+```json
+"negative_control": {"not_applicable": true, "reason": "defect is one-sided; it can only improve this measurement"}
+```
+
+`reason` is required and must be a non-empty string, and `samples` cannot be
+given alongside `not_applicable` — either is a `YieldError` (exit 1). The
+report's `negative_control` for that measurement is then
+`{"verdict": "not_applicable", "reason": "..."}` (no `yield`, `n` or
+`nominal_empirical_estimate` keys — consumers that only match `detected` /
+`not_detected` must handle this third value). `klt yield` does not judge
+whether the reason is valid; `klt signoff` discloses it (see
+[signoff.md](signoff.md)).
 
 To build this block from a second `klt sim` campaign rather than by hand, see
 ["Deriving a sample set from two `klt sim` reports"](#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples).
@@ -1054,7 +1200,7 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `confidence` | number | Effective two-sided confidence level. |
 | `target_ci_halfwidth` | number | Effective sample-size target. |
 | `min_samples` | integer | Effective per-measurement minimum. |
-| `status` | string | `"pass"`, `"fail"`, or `"reported"` (no measurement declared a `target_yield`). `fail` wins over `pass`. |
+| `status` | string | `"pass"`, `"fail"`, `"insufficient_evidence"` or `"reported"` (no measurement declared a `target_yield`, `target_sigma` or `min_converged_samples`). Precedence `fail` > `insufficient_evidence` > `pass` > `reported`. |
 | `measurement_count` | integer | `== len(measurements)`. |
 | `measurements` | array\<object\> | One entry per analysed measurement, in input order. |
 | `warnings` | array\<string\> | Run-level warnings (skipped measurements, no `target_yield` declared, no measurement declared a `negative_control`, one that did not detect degradation, one that [excluded errored samples](#errored-samples-and-conditional-yield) from its denominator, one that [counted `failed_unmeasurable` draws as failures](#errored-samples-and-conditional-yield), or one that [excluded `censored` or `inconclusive` draws](#errored-samples-and-conditional-yield) from its denominator), followed by the core's own. |
@@ -1078,7 +1224,7 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `failed_unmeasurable` | integer | Draws that left the measurement's regime and produced no value (a design failure, not a tooling one). **Counted as failures** in `yield.empirical`'s numerator's complement and denominator — `yield.empirical.n == n + failed_unmeasurable` — while still excluded from `distribution`/`capability` like `errored`. Non-zero adds a per-measurement warning and a matching run-level one — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
 | `censored` | integer | Draws whose measurement precondition was never satisfied inside the analysis window (neither a tooling failure nor a design failure charged to this row). **Gets `errored`'s denominator treatment**: excluded from both the numerator and denominator of `yield.empirical` (unlike `failed_unmeasurable`), and excluded from `distribution`/`capability` like both other categories. Non-zero adds its own distinct per-measurement warning (naming the rate against the full draw) and a matching run-level one — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
 | `inconclusive` | integer | Draws whose value *existed* but was not trustworthy — `klt sim` graded the measurement, or its whole corner, `"inconclusive"` (a plausibility-bound violation, or an `options.fail_on_diagnostic` disqualification). The only category here that is not a missing value, and the only one derived from the input report rather than supplied by the caller (on the sim-report path). **Gets `errored`'s denominator treatment**: excluded from both the numerator and denominator of `yield.empirical`, and from `distribution`/`capability` — the same exclusion `klt sim`'s own Monte Carlo rollup applies to the same draw, so the two verbs report the same population. Non-zero adds its own distinct per-measurement warning (naming the rate against the full draw) and a matching run-level one — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
-| `limits` | object | The **merged** limits actually used (`min`/`max`/`target_yield`, each present only when set; `exclusive_min`/`exclusive_max` are echoed back only when `true` — the default `false` is omitted). |
+| `limits` | object | The **merged** limits actually used (`min`/`max`/`target_yield`/`target_sigma`/`min_converged_samples`, each present only when set; `exclusive_min`/`exclusive_max` are echoed back only when `true` — the default `false` is omitted). |
 | `source_corners` | array\<string\> | Originating corners the draw was pooled from. |
 | `distribution` | object | See "Distribution fit" above. |
 | `yield` | object | `empirical` (always present -- its own `n` is `n + failed_unmeasurable`, not `n` alone, once `failed_unmeasurable` is non-zero; `censored`/`inconclusive` never change it), `normal` (`null` when the fit is degenerate), and `variance_reduced` (`null` unless `sampling.strategy` is `latin_hypercube`/`importance`) — see "Two yield estimates" and "Sampling strategies (variance reduction)". |
@@ -1087,7 +1233,9 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `negative_control` | object \| null | `null` unless the input declared one — see "Negative control" above. |
 | `analytic_cross_check` | object \| null | `null` unless the input declared one — see "Analytic cross-check" above. |
 | `sampling` | object | Always present, even for the `plain_random` default — see "Sampling strategies (variance reduction)" above. |
-| `status` | string | `"pass"`, `"fail"`, or `"reported"`. |
+| `sigma_target` | object | **Only when `limits.target_sigma` is declared:** `k`, `sigma_to_spec`, `lower_bound`, `gate` (`"lower_bound"`), `met` (`true`/`false`/`null`) and, when `met` is `null`, `reason` — see ["Sigma target and converged-N"](#sigma-target-and-converged-n). |
+| `converged_n` | object | **Only when `limits.min_converged_samples` is declared:** `n_requested`, `n_converged`, `min_converged_samples`, `verdict` (`"sufficient"`/`"insufficient"`). |
+| `status` | string | `"pass"`, `"fail"`, `"insufficient_evidence"` or `"reported"`. |
 | `warnings` | array\<string\> | Per-measurement warnings (non-normal fit, a one-sided interval, an insufficient `n`, [excluded errored samples and the conditional yield](#errored-samples-and-conditional-yield), [`failed_unmeasurable` draws counted as failures](#errored-samples-and-conditional-yield), [`censored`/`inconclusive` draws excluded from the denominator](#errored-samples-and-conditional-yield), pooled corners, a negative control that did not degrade, an inconsistent analytic cross-check). |
 
 ## Why Rust
@@ -1116,25 +1264,29 @@ crate (standardized-regression/correlation numerics, still dependency-free).
 
 ## Building the native extension
 
-`klt yield` requires the `klt_yield_native` extension. It is published as
-the prebuilt `klt-yield-native` wheel for Linux x86_64 and macOS arm64
-(issue #2531; release pipeline in [`docs/releasing-native.md`](../releasing-native.md)):
+`klt yield` requires the `klt_yield_native` extension. **The supported route
+today is the from-source build below** (a full repo checkout and a Rust
+toolchain).
 
-```bash
-pip install 'klayout-tools[yield]'          # or: uv tool install 'klayout-tools[yield]'
-```
-
-No Rust toolchain is needed on those platforms. Building from source needs one
-(`cargo`/`rustc`) — which is why the extension is an **extra**, not a hard
-dependency: every other `klt` verb stays installable with no Rust in sight.
+A prebuilt `klt-yield-native` wheel for Linux x86_64 and macOS arm64 is
+planned (issue #2531; release pipeline in
+[`docs/releasing-native.md`](../releasing-native.md)) but **has not been
+published to PyPI yet** (issue #2900). Until it is,
+`pip install 'klayout-tools[yield]'` / `uv tool install 'klayout-tools[yield]'`
+fails with "no matching distribution" for every released klayout-tools,
+0.6.0 and 0.7.0 included. The extra resolves **only for klayout-tools releases
+published after `klt-yield-native` is on PyPI**; `publish.yml` now refuses to
+release otherwise. Once such a release exists, no Rust toolchain is needed on
+those platforms. The extension is an **extra**, not a hard dependency, so
+every other `klt` verb stays installable with no Rust in sight.
 
 > **What the extra does and does not reach.** A bare `uv tool install
 > klayout-tools`/`pip install klayout-tools` and the git-pinned form (`uv
 > tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<ref>"`)
-> install only the pure-Python package; add `[yield]` to get the wheel. The
-> extra only resolves once `klt-yield-native` has been published to PyPI: on a
-> release that predates its first publication, `[yield]` fails with "no
-> matching distribution", and other platforms (Linux aarch64, Windows, Intel
+> install only the pure-Python package; add `[yield]` to get the wheel once
+> one exists. The extra only resolves once `klt-yield-native` has been
+> published to PyPI: on a release that predates its first publication (every
+> release to date), `[yield]` fails with "no matching distribution", and other platforms (Linux aarch64, Windows, Intel
 > macOS) have no wheel yet. In those cases use the **full repo checkout**
 > build shown below. `klt yield`, `klt yield-campaign`, and
 > `klt yield-sensitivity` all share this requirement (same crate). `klt mom` and
@@ -1388,10 +1540,11 @@ whole epic:
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | Analysis ran; every measurement with a declared `target_yield` met it at the stated confidence (or none declared one). |
+| `0` | Analysis ran; every declared criterion (`target_yield`, `target_sigma`, `min_converged_samples`) was met at the stated confidence (or none was declared). |
 | `1` | Failed to run: input file not found/unreadable, an unrecognised document shape, no measurement with spec limits, a sample set too small to carry a confidence interval, a degenerate `--confidence`, or the `klt_yield_native` extension is not installed. |
 | `2` | Usage error (argparse) — missing/invalid arguments. |
-| `3` | Analysis ran; at least one measurement's yield claim was not supported at the stated confidence. |
+| `3` | Analysis ran; at least one measurement's yield or sigma claim was not supported at the stated confidence (`status: "fail"`). |
+| `4` | Analysis ran; nothing failed but the evidence cannot decide (`status: "insufficient_evidence"` — fewer converged samples than `min_converged_samples`, or a `target_sigma` that is not evaluable). Only emitted for a spec that declares one of those keys. |
 
 Exit `3` matches [`klt sim`](sim.md#exit-codes)'s "ran successfully, a limit
 was missed" precedent rather than inventing a new number.

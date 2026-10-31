@@ -1,0 +1,2696 @@
+{
+  "schema_version": 1,
+  "source_root": "src",
+  "package": "klayout_tools",
+  "groups": {
+    "arith_gen": {
+      "kind": "verb",
+      "description": "`klt arith_gen` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.arith_gen",
+        "klayout_tools.cli.arith_gen_cmd"
+      ]
+    },
+    "artifact": {
+      "kind": "verb",
+      "description": "`klt artifact` implementation: fleet artifact-store client (issue #4063) plus CLI adapter.",
+      "modules": [
+        "klayout_tools.artifact_store",
+        "klayout_tools.cli.artifact_cmd"
+      ]
+    },
+    "cells": {
+      "kind": "verb",
+      "description": "`klt cells` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cells",
+        "klayout_tools.cli.cells_cmd"
+      ]
+    },
+    "characterize": {
+      "kind": "verb",
+      "description": "`klt characterize` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.characterize",
+        "klayout_tools.characterize_arcs",
+        "klayout_tools.cli.characterize_cmd",
+        "klayout_tools.liberty_compare",
+        "klayout_tools.liberty_writer"
+      ]
+    },
+    "cli-infra": {
+      "kind": "infrastructure",
+      "description": "CLI wiring: parser, shared argument/output helpers, entry points. May import every verb adapter.",
+      "modules": [
+        "klayout_tools.cli",
+        "klayout_tools.cli.__main__",
+        "klayout_tools.cli._parsing",
+        "klayout_tools.cli._request_document",
+        "klayout_tools.cli.color",
+        "klayout_tools.cli.output",
+        "klayout_tools.cli.parser"
+      ],
+      "public_import_any": true
+    },
+    "clip": {
+      "kind": "verb",
+      "description": "`klt clip` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.clip_cmd",
+        "klayout_tools.clip"
+      ]
+    },
+    "components": {
+      "kind": "verb",
+      "description": "`klt components` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.components_cmd",
+        "klayout_tools.components"
+      ]
+    },
+    "corner_matrix": {
+      "kind": "verb",
+      "description": "`klt corner-matrix` implementation: core module plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.corner_matrix_cmd",
+        "klayout_tools.corner_matrix"
+      ]
+    },
+    "congestion": {
+      "kind": "verb",
+      "description": "`klt congestion` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.congestion"
+      ]
+    },
+    "deck": {
+      "kind": "verb",
+      "description": "`klt deck` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.deck_cmd",
+        "klayout_tools.decks.history"
+      ]
+    },
+    "design_centering": {
+      "kind": "verb",
+      "description": "`klt design_centering` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.design_centering_cmd",
+        "klayout_tools.design_centering"
+      ]
+    },
+    "draw": {
+      "kind": "verb",
+      "description": "`klt draw` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.draw_cmd",
+        "klayout_tools.draw"
+      ]
+    },
+    "diff": {
+      "kind": "verb",
+      "description": "`klt diff` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.diff_cmd",
+        "klayout_tools.layout_diff"
+      ]
+    },
+    "drc": {
+      "kind": "verb",
+      "description": "`klt drc` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.drc_cmd",
+        "klayout_tools.drc",
+        "klayout_tools.drc_crosscheck",
+        "klayout_tools.drc_klayout_engine"
+      ]
+    },
+    "economy": {
+      "kind": "verb",
+      "description": "`klt economy` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.economy_cmd",
+        "klayout_tools.economy",
+        "klayout_tools.economy_whatif"
+      ]
+    },
+    "env_provenance": {
+      "kind": "verb",
+      "description": "`klt env_provenance` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.env_provenance_cmd",
+        "klayout_tools.env_provenance"
+      ]
+    },
+    "equiv": {
+      "kind": "verb",
+      "description": "`klt equiv` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.equiv_cmd",
+        "klayout_tools.equiv",
+        "klayout_tools.equiv_errors",
+        "klayout_tools.equiv_replay",
+        "klayout_tools.equiv_sequential",
+        "klayout_tools.equiv_stage"
+      ]
+    },
+    "erc": {
+      "kind": "verb",
+      "description": "`klt erc` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.erc_cmd",
+        "klayout_tools.erc",
+        "klayout_tools.erc_spec"
+      ]
+    },
+    "eval": {
+      "kind": "verb",
+      "description": "`klt eval` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.eval_cmd",
+        "klayout_tools.eval"
+      ]
+    },
+    "evidence": {
+      "kind": "verb",
+      "description": "`klt evidence` implementation: CLI adapter for the evidence-record/1 writer plus the evidence lint.",
+      "modules": [
+        "klayout_tools.cli.evidence_cmd",
+        "klayout_tools.evidence_lint"
+      ]
+    },
+    "extract": {
+      "kind": "verb",
+      "description": "`klt extract` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.extract_cmd",
+        "klayout_tools.extract",
+        "klayout_tools.extract_abstract",
+        "klayout_tools.extract_batch",
+        "klayout_tools.extract_finfet",
+        "klayout_tools.extract_hierarchy",
+        "klayout_tools.extract_parasitics",
+        "klayout_tools.extract_netselect",
+        "klayout_tools.extract_passive_regions",
+        "klayout_tools.extract_progress",
+        "klayout_tools.extract_report",
+        "klayout_tools.extract_resistance_graph",
+        "klayout_tools.extract_spef",
+        "klayout_tools.extract_subcircuit",
+        "klayout_tools.parasitic_integrity",
+        "klayout_tools.resistance_path",
+        "klayout_tools.substrate_resistance"
+      ]
+    },
+    "formal": {
+      "kind": "verb",
+      "description": "`klt formal` implementation: core module plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.formal_cmd",
+        "klayout_tools.formal"
+      ]
+    },
+    "functional_verification": {
+      "kind": "verb",
+      "description": "`klt functional_verification` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.functional_verification_cmd",
+        "klayout_tools.functional_verification",
+        "klayout_tools.functional_verification_initial_state",
+        "klayout_tools.functional_verification_sdf",
+        "klayout_tools.functional_verification_sdf_rename"
+      ]
+    },
+    "gen": {
+      "kind": "verb",
+      "description": "`klt gen` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.gen_cmd",
+        "klayout_tools.gen",
+        "klayout_tools.gen_cap_vpp",
+        "klayout_tools.gen_cap_stack",
+        "klayout_tools.gen_describe",
+        "klayout_tools.gen_diode",
+        "klayout_tools.gen_layer_params",
+        "klayout_tools.gen_layer_tables",
+        "klayout_tools.gen_pcells",
+        "klayout_tools.gen_pcells.bjt_array",
+        "klayout_tools.gen_pcells.bond_pad",
+        "klayout_tools.gen_pcells.cap_array",
+        "klayout_tools.gen_pcells.cap_vpp_array",
+        "klayout_tools.gen_pcells.diff_pair",
+        "klayout_tools.gen_pcells.diode",
+        "klayout_tools.gen_pcells.esd_device",
+        "klayout_tools.gen_pcells.guard_ring",
+        "klayout_tools.gen_pcells.mos_array",
+        "klayout_tools.gen_pcells.res_array",
+        "klayout_tools.gen_pcells.resistor_strip",
+        "klayout_tools.gen_pcells.well_island"
+      ]
+    },
+    "gen_compose": {
+      "kind": "verb",
+      "description": "`klt gen_compose` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.gen_compose_cmd",
+        "klayout_tools.gen_compose",
+        "klayout_tools.gen_compose_port_access",
+        "klayout_tools.gen_compose_port_request",
+        "klayout_tools.gen_compose_routing"
+      ]
+    },
+    "interface_check": {
+      "kind": "verb",
+      "description": "`klt interface_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.interface_check_cmd",
+        "klayout_tools.interface_check"
+      ]
+    },
+    "kb": {
+      "kind": "verb",
+      "description": "`klt kb` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.kb_cmd",
+        "klayout_tools.kb"
+      ]
+    },
+    "array_check": {
+      "kind": "verb",
+      "description": "`klt array_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.array_check",
+        "klayout_tools.cli.array_check_cmd"
+      ]
+    },
+    "keepout_check": {
+      "kind": "verb",
+      "description": "`klt keepout_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.keepout_check_cmd",
+        "klayout_tools.keepout_check"
+      ]
+    },
+    "layers": {
+      "kind": "verb",
+      "description": "`klt layers` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.layers_cmd",
+        "klayout_tools.layers"
+      ]
+    },
+    "layout_metrics": {
+      "kind": "verb",
+      "description": "`klt layout_metrics` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.layout_metrics_cmd",
+        "klayout_tools.layout_metrics"
+      ]
+    },
+    "layout_plan": {
+      "kind": "verb",
+      "description": "`klt layout_plan` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.layout_plan_cmd",
+        "klayout_tools.layout_plan",
+        "klayout_tools.layout_plan_check",
+        "klayout_tools.layout_plan_execute"
+      ]
+    },
+    "lef_abstract": {
+      "kind": "verb",
+      "description": "`klt lef_abstract` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.lef_abstract_cmd",
+        "klayout_tools.lef_abstract"
+      ]
+    },
+    "lvs": {
+      "kind": "verb",
+      "description": "`klt lvs` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.lvs_cmd",
+        "klayout_tools.lvs",
+        "klayout_tools.lvs_combine",
+        "klayout_tools.lvs_finfet",
+        "klayout_tools.lvs_gate_level",
+        "klayout_tools.lvs_mismatch",
+        "klayout_tools.lvs_netgen",
+        "klayout_tools.lvs_power",
+        "klayout_tools.lvs_runset",
+        "klayout_tools.lvs_supply",
+        "klayout_tools.lvs_timeout"
+      ]
+    },
+    "mcp": {
+      "kind": "verb",
+      "description": "`klt mcp` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.mcp_cmd",
+        "klayout_tools.mcp_server",
+        "klayout_tools.mcp_tools"
+      ]
+    },
+    "mom": {
+      "kind": "verb",
+      "description": "`klt mom` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.mom_cmd",
+        "klayout_tools.mom"
+      ]
+    },
+    "netlist": {
+      "kind": "verb",
+      "description": "`klt netlist` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.netlist_cmd",
+        "klayout_tools.netlist",
+        "klayout_tools.netlist_batch",
+        "klayout_tools.netlist_capacitor_recovery",
+        "klayout_tools.netlist_digest",
+        "klayout_tools.netlist_normalize"
+      ]
+    },
+    "pdk": {
+      "kind": "shared",
+      "description": "PDK resolution and rule decks -- the documented exception to verb self-containment (docs/ARCHITECTURE.md).",
+      "modules": [
+        "klayout_tools.cli.pdk_cmd",
+        "klayout_tools.decks",
+        "klayout_tools.decks.asap7",
+        "klayout_tools.decks.asap7_rules",
+        "klayout_tools.decks.extraction",
+        "klayout_tools.decks.finfet",
+        "klayout_tools.decks.gf180mcu",
+        "klayout_tools.decks.parasitics",
+        "klayout_tools.decks.rules",
+        "klayout_tools.decks.sg13cmos5l",
+        "klayout_tools.decks.sg13g2",
+        "klayout_tools.decks.sky130",
+        "klayout_tools.liberty_merge",
+        "klayout_tools.pdk",
+        "klayout_tools.pdk_capabilities",
+        "klayout_tools.pdk_cells",
+        "klayout_tools.pdk_compat",
+        "klayout_tools.pdk_descriptor",
+        "klayout_tools.pdk_families",
+        "klayout_tools.pdk_models",
+        "klayout_tools.pdk_pcell",
+        "klayout_tools.pdk_stackup"
+      ]
+    },
+    "pex": {
+      "kind": "verb",
+      "description": "`klt pex` implementation: core modules (including the SPICE-text subckt flattener behind --flatten-schematic) plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.pex_cmd",
+        "klayout_tools.pex",
+        "klayout_tools.pex_async",
+        "klayout_tools.spice_flatten"
+      ]
+    },
+    "place_and_route": {
+      "kind": "verb",
+      "description": "`klt place_and_route` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.place_and_route_cmd",
+        "klayout_tools.place_and_route",
+        "klayout_tools.place_and_route_batch",
+        "klayout_tools.place_and_route_gds_merge",
+        "klayout_tools.place_and_route_min_area",
+        "klayout_tools.place_and_route_pdn_fit",
+        "klayout_tools.place_and_route_pins",
+        "klayout_tools.place_and_route_portable",
+        "klayout_tools.place_and_route_power_audit",
+        "klayout_tools.place_and_route_reports",
+        "klayout_tools.place_and_route_request",
+        "klayout_tools.place_and_route_resume",
+        "klayout_tools.place_and_route_script",
+        "klayout_tools.place_and_route_sta",
+        "klayout_tools.place_and_route_via_pad"
+      ]
+    },
+    "power": {
+      "kind": "verb",
+      "description": "`klt power` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.power_cmd",
+        "klayout_tools.ir_solver",
+        "klayout_tools.power"
+      ]
+    },
+    "precheck": {
+      "kind": "verb",
+      "description": "`klt precheck` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.precheck_cmd",
+        "klayout_tools.precheck"
+      ]
+    },
+    "render": {
+      "kind": "verb",
+      "description": "`klt render` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.render_cmd",
+        "klayout_tools.render"
+      ]
+    },
+    "report": {
+      "kind": "verb",
+      "description": "`klt report` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.report_cmd",
+        "klayout_tools.report"
+      ]
+    },
+    "ring_check": {
+      "kind": "verb",
+      "description": "`klt ring_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.ring_check_cmd",
+        "klayout_tools.ring_check"
+      ]
+    },
+    "seam_check": {
+      "kind": "verb",
+      "description": "`klt seam_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.seam_check_cmd",
+        "klayout_tools.seam_check"
+      ]
+    },
+    "tap_distance": {
+      "kind": "verb",
+      "description": "`klt tap_distance` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.tap_distance_cmd",
+        "klayout_tools.tap_distance"
+      ]
+    },
+    "shared-core": {
+      "kind": "shared",
+      "description": "Cross-verb helper modules (underscore-prefixed internals, provenance, build identity, shared layout/report helpers). Public API is importable by every group.",
+      "modules": [
+        "klayout_tools",
+        "klayout_tools._annotation",
+        "klayout_tools._batch_common",
+        "klayout_tools._check_result",
+        "klayout_tools._devices",
+        "klayout_tools._jsonnum",
+        "klayout_tools._layout",
+        "klayout_tools._native",
+        "klayout_tools._openroad_engine",
+        "klayout_tools._paths",
+        "klayout_tools._provenance",
+        "klayout_tools._report_verify",
+        "klayout_tools._spice_number",
+        "klayout_tools._text",
+        "klayout_tools._unionfind",
+        "klayout_tools._vendor",
+        "klayout_tools._vendor.mutation_variants",
+        "klayout_tools._version_scheme",
+        "klayout_tools._verilog_params",
+        "klayout_tools.build_identity",
+        "klayout_tools.coverage",
+        "klayout_tools.design_evidence_tiers",
+        "klayout_tools.evidence_record",
+        "klayout_tools.lef_header",
+        "klayout_tools.macros",
+        "klayout_tools.metrics",
+        "klayout_tools.op_sanity",
+        "klayout_tools.output_lock",
+        "klayout_tools.resistor_mesh",
+        "klayout_tools.routing_pitch",
+        "klayout_tools.touchstone",
+        "klayout_tools.verilog_netlist"
+      ]
+    },
+    "signoff": {
+      "kind": "verb",
+      "description": "`klt signoff` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.signoff_cmd",
+        "klayout_tools.signoff",
+        "klayout_tools.signoff_attest",
+        "klayout_tools.signoff_envelopes",
+        "klayout_tools.signoff_foundry_cell",
+        "klayout_tools.signoff_generator_batch",
+        "klayout_tools.signoff_power_delivery",
+        "klayout_tools.signoff_runset"
+      ]
+    },
+    "sim": {
+      "kind": "verb",
+      "description": "`klt sim` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.asap7_bsimcmg",
+        "klayout_tools.cli.sim_cmd",
+        "klayout_tools.cli.sim_merge_cmd",
+        "klayout_tools.cli.sim_plan_cmd",
+        "klayout_tools.digital_fleet",
+        "klayout_tools.remote_fleet",
+        "klayout_tools.remote_launcher",
+        "klayout_tools.remote_transport",
+        "klayout_tools.sim",
+        "klayout_tools.sim_batch",
+        "klayout_tools.sim_batch_async",
+        "klayout_tools.sim_commands",
+        "klayout_tools.sim_complex_vectors",
+        "klayout_tools.sim_crossings",
+        "klayout_tools.sim_cycle_mean",
+        "klayout_tools.sim_decks",
+        "klayout_tools.sim_energy",
+        "klayout_tools.sim_errors",
+        "klayout_tools.sim_eye",
+        "klayout_tools.sim_injected",
+        "klayout_tools.sim_merge",
+        "klayout_tools.sim_mismatch_gate",
+        "klayout_tools.sim_noise",
+        "klayout_tools.sim_passes",
+        "klayout_tools.sim_plan",
+        "klayout_tools.sim_plot",
+        "klayout_tools.sim_portable",
+        "klayout_tools.sim_raw",
+        "klayout_tools.sim_remote",
+        "klayout_tools.sim_search",
+        "klayout_tools.sim_set",
+        "klayout_tools.sim_snm",
+        "klayout_tools.sim_snm_meas",
+        "klayout_tools.sim_staging",
+        "klayout_tools.sim_steps",
+        "klayout_tools.sim_stimulus",
+        "klayout_tools.sim_stress",
+        "klayout_tools.sim_subckt_override",
+        "klayout_tools.sim_supply_relative",
+        "klayout_tools.sim_supply_waveform",
+        "klayout_tools.sim_tian",
+        "klayout_tools.sim_transfer",
+        "klayout_tools.sim_transfer_meas",
+        "klayout_tools.sim_twoport",
+        "klayout_tools.sim_validate"
+      ]
+    },
+    "size": {
+      "kind": "verb",
+      "description": "`klt size` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.size_cmd",
+        "klayout_tools.size",
+        "klayout_tools.size_topology"
+      ]
+    },
+    "power_intent": {
+      "kind": "verb",
+      "description": "`klt power_intent` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.power_intent_cmd",
+        "klayout_tools.power_intent"
+      ]
+    },
+    "reset_coverage": {
+      "kind": "verb",
+      "description": "`klt reset_coverage` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.reset_coverage_cmd",
+        "klayout_tools.reset_coverage"
+      ]
+    },
+    "socket_check": {
+      "kind": "verb",
+      "description": "`klt socket_check` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.socket_check_cmd",
+        "klayout_tools.socket_check"
+      ]
+    },
+    "sta": {
+      "kind": "verb",
+      "description": "`klt sta` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.sta_cmd",
+        "klayout_tools.post_route_sta"
+      ]
+    },
+    "stats": {
+      "kind": "verb",
+      "description": "`klt stats` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.stats_cmd",
+        "klayout_tools.stats"
+      ]
+    },
+    "synthesize": {
+      "kind": "verb",
+      "description": "`klt synthesize` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools._sv2v",
+        "klayout_tools.cli.synthesize_cmd",
+        "klayout_tools.restructure",
+        "klayout_tools.sta",
+        "klayout_tools.synthesize",
+        "klayout_tools.synthesize_arithmetic",
+        "klayout_tools.synthesize_memory"
+      ]
+    },
+    "techmap": {
+      "kind": "verb",
+      "description": "`klt techmap` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.techmap_cmd",
+        "klayout_tools.techmap"
+      ]
+    },
+    "trajectory": {
+      "kind": "verb",
+      "description": "`klt trajectory` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.trajectory_cmd",
+        "klayout_tools.trajectory"
+      ]
+    },
+    "version": {
+      "kind": "verb",
+      "description": "`klt version` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.version_cmd"
+      ]
+    },
+    "wave": {
+      "kind": "verb",
+      "description": "`klt wave` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.wave_cmd",
+        "klayout_tools.wave"
+      ]
+    },
+    "yield": {
+      "kind": "verb",
+      "description": "`klt yield` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.yield_cmd",
+        "klayout_tools.yield_analysis"
+      ]
+    },
+    "yield_campaign": {
+      "kind": "verb",
+      "description": "`klt yield_campaign` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.yield_campaign_cmd",
+        "klayout_tools.yield_campaign"
+      ]
+    },
+    "yield_csv": {
+      "kind": "verb",
+      "description": "`klt yield_csv` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.yield_csv_cmd"
+      ]
+    },
+    "yield_samples": {
+      "kind": "verb",
+      "description": "`klt yield_samples` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.yield_samples_cmd"
+      ]
+    },
+    "yield_sensitivity": {
+      "kind": "verb",
+      "description": "`klt yield_sensitivity` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.yield_sensitivity_cmd",
+        "klayout_tools.yield_sensitivity"
+      ]
+    },
+    "yield_threshold": {
+      "kind": "verb",
+      "description": "`klt yield-threshold` implementation: probit threshold fit plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.yield_threshold_cmd",
+        "klayout_tools.probit"
+      ]
+    }
+  },
+  "allowed_group_edges": [
+    {
+      "consumer": "artifact",
+      "exporter": "cli-infra",
+      "reason": "`klt artifact` adapter uses the shared CLI output envelope helpers (emit_success/emit_error), like every verb adapter."
+    },
+    {
+      "consumer": "corner_matrix",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope, as every verb does (issue #4045)."
+    },
+    {
+      "consumer": "corner_matrix",
+      "exporter": "sim",
+      "reason": "Issue #4045: `klt corner-matrix` must check the grid exactly as `klt sim` expands it, so it calls sim's expander and catches SimError rather than duplicating the expansion."
+    },
+    {
+      "consumer": "array_check",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --layers parser, as every verb does."
+    },
+    {
+      "consumer": "keepout_check",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --region/--layers parsers, as every verb does."
+    },
+    {
+      "consumer": "tap_distance",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --region parser, as every verb does."
+    },
+    {
+      "consumer": "layout_plan",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope, as every verb does."
+    },
+    {
+      "consumer": "tap_distance",
+      "exporter": "erc",
+      "reason": "Issue #3009: the optional tap net filter reuses ERC's connectivity extraction helpers instead of a second extraction."
+    },
+    {
+      "consumer": "arith_gen",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "cells",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "characterize",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "characterize",
+      "exporter": "env_provenance",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "characterize",
+      "exporter": "sim",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "characterize",
+      "exporter": "synthesize",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "clip",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "components",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "deck",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "design_centering",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "draw",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "drc",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "drc",
+      "exporter": "layers",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "drc",
+      "exporter": "env_provenance",
+      "reason": "`klt drc` echoes its input file as env_provenance's committable {path, scope} envelope (issue #2659)."
+    },
+    {
+      "consumer": "economy",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "env_provenance",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "formal",
+      "exporter": "cli-infra",
+      "reason": "Verb CLI adapter uses the shared output envelope helpers (docs/json-contract.md), as equiv does."
+    },
+    {
+      "consumer": "equiv",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "erc",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "erc",
+      "exporter": "extract",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "eval",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "eval",
+      "exporter": "drc",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "eval",
+      "exporter": "functional_verification",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "eval",
+      "exporter": "layout_metrics",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "eval",
+      "exporter": "lvs",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "eval",
+      "exporter": "place_and_route",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "eval",
+      "exporter": "sim",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "eval",
+      "exporter": "synthesize",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "eval",
+      "exporter": "trajectory",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "evidence",
+      "exporter": "cli-infra",
+      "reason": "`klt evidence` adapter uses the shared CLI output envelope helpers (emit_success/emit_error), like every verb adapter."
+    },
+    {
+      "consumer": "evidence",
+      "exporter": "sim",
+      "reason": "Issue #4043: `klt evidence lint` must re-derive result.status exactly as `klt sim` grades corners, so it calls sim's grader (lazily imported) rather than duplicating the grading rules."
+    },
+    {
+      "consumer": "extract",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "extract",
+      "exporter": "env_provenance",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "extract",
+      "exporter": "layers",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "extract",
+      "exporter": "mom",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "extract",
+      "exporter": "place_and_route",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "extract",
+      "exporter": "power",
+      "reason": "Issue #2981: the terminal-pair effective-resistance adapter in extract_resistance_graph is deliberately built on the public ir_solver.solve_ir_drop, so extraction and klt power share one resistor-network solver."
+    },
+    {
+      "consumer": "functional_verification",
+      "exporter": "reset_coverage",
+      "reason": "options.initial_state derives the gate-level flop list from reset_coverage's netlist/cell-model classification instead of re-parsing (issue #2998)."
+    },
+    {
+      "consumer": "functional_verification",
+      "exporter": "env_provenance",
+      "reason": "`klt functional-verification` emits its artifact paths as env_provenance's committable repo-relative {path, scope} envelope (issue #4279)."
+    },
+    {
+      "consumer": "functional_verification",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "gen",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "gen_compose",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "gen_compose",
+      "exporter": "gen",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "interface_check",
+      "exporter": "cli-infra",
+      "reason": "Verb adapter uses the shared output envelope (issue #4024), as every verb does."
+    },
+    {
+      "consumer": "kb",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "kb",
+      "exporter": "sim",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "layers",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "layout_metrics",
+      "exporter": "cells",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "layout_metrics",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "layout_metrics",
+      "exporter": "drc",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "layout_metrics",
+      "exporter": "layers",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "layout_plan",
+      "exporter": "gen",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "layout_plan",
+      "exporter": "gen_compose",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "layout_plan",
+      "exporter": "lvs",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "layout_plan",
+      "exporter": "netlist",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "lef_abstract",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "lef_abstract",
+      "exporter": "socket_check",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "lvs",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "lvs",
+      "exporter": "extract",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "lvs",
+      "exporter": "netlist",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "erc",
+      "exporter": "env_provenance",
+      "reason": "`klt erc` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #2703)."
+    },
+    {
+      "consumer": "lef_abstract",
+      "exporter": "env_provenance",
+      "reason": "`klt lef-abstract` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #2703)."
+    },
+    {
+      "consumer": "lvs",
+      "exporter": "env_provenance",
+      "reason": "`klt lvs` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #2659)."
+    },
+    {
+      "consumer": "lvs",
+      "exporter": "place_and_route",
+      "reason": "Issue #3798: klt lvs reuses place_and_route_portable.portable_response for its opt-in portable_paths rewrite rather than a second path walker."
+    },
+    {
+      "consumer": "lvs",
+      "exporter": "socket_check",
+      "reason": "Issue #2971: klt lvs power findings reuse the verb's public classify_pin_by_name ground/power name heuristic to decide which pins get the substrate-continuity caveat, so lvs and socket-check never disagree about what a ground pin is."
+    },
+    {
+      "consumer": "mcp",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "mom",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "netlist",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "netlist",
+      "exporter": "extract",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "netlist",
+      "exporter": "lvs",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "netlist",
+      "exporter": "sim",
+      "reason": "Issue #3182: `klt netlist --backend batch` submits through sim_batch's S3 job transport rather than a second transport."
+    },
+    {
+      "consumer": "pdk",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "pdk",
+      "exporter": "drc",
+      "reason": "Issue #3816: `klt pdk decks` reuses the DRC engine's deck-global scanner (scan_deck_globals) instead of a second Ruby scan; imported lazily."
+    },
+    {
+      "consumer": "pdk",
+      "exporter": "extract",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "pdk",
+      "exporter": "gen",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "pex",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "pex",
+      "exporter": "env_provenance",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "pex",
+      "exporter": "extract",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "pex",
+      "exporter": "sim",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "place_and_route",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "place_and_route",
+      "exporter": "extract",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "place_and_route",
+      "exporter": "synthesize",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "power",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "precheck",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "render",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "render",
+      "exporter": "layers",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "report",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "report",
+      "exporter": "env_provenance",
+      "reason": "Shared report rendering resolves echoed {path, scope} path fields via env_provenance (issue #2659)."
+    },
+    {
+      "consumer": "power_intent",
+      "exporter": "cli-infra",
+      "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
+    },
+    {
+      "consumer": "power_intent",
+      "exporter": "reset_coverage",
+      "reason": "Reuses reset_coverage's cell-model loader and netlist conventions instead of re-parsing (issue #4479)."
+    },
+    {
+      "consumer": "reset_coverage",
+      "exporter": "cli-infra",
+      "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
+    },
+    {
+      "consumer": "ring_check",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "seam_check",
+      "exporter": "cli-infra",
+      "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
+    },
+    {
+      "consumer": "shared-core",
+      "exporter": "deck",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "shared-core",
+      "exporter": "env_provenance",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "shared-core",
+      "exporter": "sim",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "signoff",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "signoff",
+      "exporter": "env_provenance",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "signoff",
+      "exporter": "socket_check",
+      "reason": "Issue #2839: T1 item 11 re-grades a cited klt socket-check envelope's power_ports facts with the verb's own public grading function (grade_power_ports/assess_power_port), so the verb and signoff can never disagree about edge accessibility."
+    },
+    {
+      "consumer": "sim",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "sim",
+      "exporter": "env_provenance",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "size",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "size",
+      "exporter": "design_centering",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "size",
+      "exporter": "env_provenance",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "size",
+      "exporter": "sim",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "socket_check",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "sta",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "sta",
+      "exporter": "env_provenance",
+      "reason": "klt sta reports its def/verilog/spef inputs as {path, scope} envelopes via repo_relative_path/render_path_field, like sim/pex (issue #2879)."
+    },
+    {
+      "consumer": "place_and_route",
+      "exporter": "env_provenance",
+      "reason": "klt place-and-route reports its pinned input netlist as a {path, scope} envelope via find_repo_root/repo_relative_path, like sta/sim/pex (issue #3751)."
+    },
+    {
+      "consumer": "diff",
+      "exporter": "cli-infra",
+      "reason": "klt diff emits through the shared cli output envelope (issue #3093)."
+    },
+    {
+      "consumer": "stats",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "synthesize",
+      "exporter": "arith_gen",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "synthesize",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "synthesize",
+      "exporter": "env_provenance",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "synthesize",
+      "exporter": "equiv",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "techmap",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "techmap",
+      "exporter": "equiv",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "trajectory",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "version",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "wave",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "yield",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "yield_campaign",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "yield_campaign",
+      "exporter": "sim",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "yield_campaign",
+      "exporter": "yield",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "yield_csv",
+      "exporter": "cli-infra",
+      "reason": "Mirrors yield_samples: CLI adapter over the yield core and shared output envelope (issue #2931)."
+    },
+    {
+      "consumer": "yield_csv",
+      "exporter": "yield",
+      "reason": "Mirrors yield_samples: CLI adapter over the yield core and shared output envelope (issue #2931)."
+    },
+    {
+      "consumer": "yield_samples",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "yield_samples",
+      "exporter": "yield",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "yield_threshold",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter emits through the shared envelope in cli/output.py (issue #2976), as every verb does."
+    },
+    {
+      "consumer": "yield_sensitivity",
+      "exporter": "cli-infra",
+      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "place_and_route",
+      "exporter": "sim",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "place_and_route",
+      "exporter": "netlist",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "sim",
+      "exporter": "netlist",
+      "reason": "Issue #4443: `klt sim` command-list requests ship their unit trees through the Spot batch backend and enforce the same batch tree size cap and error code as netlist_batch rather than duplicating them."
+    },
+    {
+      "consumer": "signoff",
+      "exporter": "netlist",
+      "reason": "Issue #3289: operator-approved generator execution reuses the existing Spot batch lifecycle (sim_batch submit/launch/poll/collect) and the netlist batch tree packaging rather than adding another runner."
+    },
+    {
+      "consumer": "signoff",
+      "exporter": "sim",
+      "reason": "Issue #3289: operator-approved generator execution reuses the existing Spot batch lifecycle (sim_batch submit/launch/poll/collect) and the netlist batch tree packaging rather than adding another runner."
+    },
+    {
+      "consumer": "synthesize",
+      "exporter": "characterize",
+      "reason": "Issue #3709: restructure and synthesize read Liberty pins through liberty_compare.parse_liberty_text (the one real Liberty parser) instead of a second regex scraper; the scraper found 0 cells on the sky130 library, the parser finds 428."
+    },
+    {
+      "consumer": "extract",
+      "exporter": "netlist",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "extract",
+      "exporter": "sim",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    }
+  ],
+  "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.power_intent",
+      "exporter": "klayout_tools.reset_coverage",
+      "symbol": "_CAPTURE_PINS",
+      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
+    },
+    {
+      "consumer": "klayout_tools.power_intent",
+      "exporter": "klayout_tools.reset_coverage",
+      "symbol": "_CONST_NETS",
+      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
+    },
+    {
+      "consumer": "klayout_tools.power_intent",
+      "exporter": "klayout_tools.reset_coverage",
+      "symbol": "_CellModel",
+      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
+    },
+    {
+      "consumer": "klayout_tools.power_intent",
+      "exporter": "klayout_tools.reset_coverage",
+      "symbol": "_POWER_PINS",
+      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
+    },
+    {
+      "consumer": "klayout_tools.power_intent",
+      "exporter": "klayout_tools.reset_coverage",
+      "symbol": "_read",
+      "reason": "Issue #4479: power-intent reuses reset_coverage's netlist/cell-model internals; promote to a shared module when a third consumer appears."
+    },
+    {
+      "consumer": "klayout_tools.evidence_lint",
+      "exporter": "klayout_tools.evidence_record",
+      "symbol": "_sha256_file",
+      "reason": "Issue #4043: the lint must verify sidecar hashes with the exact hashing the evidence writer used; promote to a public name when evidence_record is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.evidence_lint",
+      "exporter": "klayout_tools.sim",
+      "symbol": "_grade_corners",
+      "reason": "Issue #4043: verdict re-derivation must match `klt sim` grading by construction; make it public or move it to a shared module when sim is next split."
+    },
+    {
+      "consumer": "klayout_tools.evidence_record",
+      "exporter": "klayout_tools.env_provenance",
+      "symbol": "_assert_no_leaks",
+      "reason": "Issue #4044: the evidence-record wrapper leak scan must match the provenance scrub exactly rather than duplicating its absolute-path/secret scanner."
+    },
+    {
+      "consumer": "klayout_tools.corner_matrix",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #4045: loads the request JSON with the same error handling as sim/characterize; promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.corner_matrix",
+      "exporter": "klayout_tools.sim",
+      "symbol": "_expand_corners",
+      "reason": "Issue #4045: the checker's whole contract is that its grid ids match what `klt sim` expands; reusing the private expander guarantees that. Make it public or move it to a shared module when sim is next split."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_portable",
+      "exporter": "klayout_tools.env_provenance",
+      "symbol": "_absolute_paths_in",
+      "reason": "Issue #3820: portable_paths reuses env_provenance's absolute-path scanner so response rewriting matches the provenance scrub exactly rather than duplicating the regex."
+    },
+    {
+      "consumer": "klayout_tools.tap_distance",
+      "exporter": "klayout_tools.erc",
+      "symbol": "_match_net_clusters",
+      "reason": "Issue #3009: reuse ERC net-label matching for the tap net filter rather than duplicating it."
+    },
+    {
+      "consumer": "klayout_tools.tap_distance",
+      "exporter": "klayout_tools.erc",
+      "symbol": "_register_label_layer",
+      "reason": "Issue #3009: reuse ERC label-layer registration for the tap net filter rather than duplicating it."
+    },
+    {
+      "consumer": "klayout_tools.drc",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.env_provenance",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klayout_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.env_provenance",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_combined_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_yosys_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv_sequential",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_combined_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv_sequential",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_yosys_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv_stage",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_combined_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.equiv_stage",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.erc",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.extract",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.extract",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.lvs",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_batch_environment",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_classify_collected_report",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_default_batch_job_timeout_s",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_read_runner_identity",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_read_stderr_envelope",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_resolve_batch_config",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_runner_preflight_script",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_status_exit_code",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.post_route_sta",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_deck_block",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.extract_resistance_graph",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_decompose_manhattan_polygon",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.extract_resistance_graph",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_rails_under_via",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.power",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_decompose_manhattan_polygon",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.power",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_rails_under_via",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.power",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.sim_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.sim_commands",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.sim_decks",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.synthesize",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_combined_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.synthesize",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Request-shape validation of the outputs object, mirroring klt synthesize (issue #4231); promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.synthesize",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Request-shape validation helper shared with _devices (issue #3466); promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.synthesize",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_yosys_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.wave",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_batch_environment",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_read_runner_identity",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_resolve_batch_config",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_runner_preflight_script",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_status_exit_code",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_remote_stderr_tail",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_runner_error",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim",
+      "symbol": "_yield_host_default_backend",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_tracked_files",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_select_files",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_job_timeout_seconds",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_runner_preflight_script",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_classify_collected_report",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_resolve_batch_config",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_batch_environment",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_read_runner_identity",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.signoff_generator_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_status_exit_code",
+      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
+    },
+    {
+      "consumer": "klayout_tools.lvs_power",
+      "exporter": "klayout_tools.extract_abstract",
+      "symbol": "_load_abstract_cell_lefs",
+      "reason": "Issue #4363: the well-pin exclusion must read LEF pin layers with the exact parser `klt extract` uses for abstract-cell probes; promote to a public name when extract_abstract is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_relative_tracked",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_remote_stderr_tail",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_require_selected",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_resolve_root",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_runner_error",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_select_files",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_tracked_files",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_assess_job_ceiling",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_batch_environment",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_classify_collected_report",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_default_batch_job_timeout_s",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_read_runner_identity",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_resolve_batch_config",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_runner_preflight_script",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_status_exit_code",
+      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.extract_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    }
+  ],
+  "legacy_exceptions": {
+    "private_symbols": [
+      {
+        "consumer": "klayout_tools.characterize",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.characterize",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_resolve_relative",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.characterize",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_osdi_preload",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.cli._request_document",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_resolve_relative",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.cli.pex_cmd",
+        "exporter": "klayout_tools.cli.extract_cmd",
+        "symbol": "_print_label_layers",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.cli.yield_campaign_cmd",
+        "exporter": "klayout_tools.cli.yield_cmd",
+        "symbol": "_print_text",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.congestion",
+        "exporter": "klayout_tools._native",
+        "symbol": "_load_native_extension",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.decks.history",
+        "exporter": "klayout_tools",
+        "symbol": "_build_info",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.design_centering",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.drc",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.equiv",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc",
+        "exporter": "klayout_tools._devices",
+        "symbol": "_conductor_role_layers",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc",
+        "exporter": "klayout_tools._devices",
+        "symbol": "_cut_device_bodies",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc",
+        "exporter": "klayout_tools._devices",
+        "symbol": "_device_body_cuts",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc",
+        "exporter": "klayout_tools._devices",
+        "symbol": "_validate_devices",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_spec_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc_spec",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_parse_layer_datatype",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_reject_unknown_keys",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc_spec",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_reject_unknown_keys",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc_spec",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_validate_via_entries",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc",
+        "exporter": "klayout_tools.extract",
+        "symbol": "_capacitor_plate_regions",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc",
+        "exporter": "klayout_tools.extract",
+        "symbol": "_capacitor_top_via_overlap_region",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.erc",
+        "exporter": "klayout_tools.extract",
+        "symbol": "_resistor_body_region",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.extract",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.extract_finfet",
+        "exporter": "klayout_tools.pdk_models",
+        "symbol": "_format_um",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.functional_verification",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.gen_compose",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_resolve_relative",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.gen_compose",
+        "exporter": "klayout_tools.gen",
+        "symbol": "_cut_fixed_size_um",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.gen_compose",
+        "exporter": "klayout_tools.gen",
+        "symbol": "_fixed_cut_side_um",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.gen_compose",
+        "exporter": "klayout_tools.gen",
+        "symbol": "_pdk_family",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.gen_compose_routing",
+        "exporter": "klayout_tools.gen",
+        "symbol": "_PDK_ROLE_LAYERS",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.gen_compose_routing",
+        "exporter": "klayout_tools.gen",
+        "symbol": "_pdk_family",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.layout_plan",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_resolve_relative",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.layout_plan",
+        "exporter": "klayout_tools.gen",
+        "symbol": "_GENERATOR_SPECS",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.layout_plan",
+        "exporter": "klayout_tools.gen_compose",
+        "symbol": "_ORIENTATIONS",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.layout_plan_execute",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_resolve_relative",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.layout_plan_execute",
+        "exporter": "klayout_tools.gen",
+        "symbol": "_pdk_family",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.layout_plan_execute",
+        "exporter": "klayout_tools.gen",
+        "symbol": "_resolve_expected_device_class",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.layout_plan_execute",
+        "exporter": "klayout_tools.gen_compose",
+        "symbol": "_translate_bbox",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.lef_abstract",
+        "exporter": "klayout_tools.socket_check",
+        "symbol": "_load_descriptor",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.lvs",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.lvs",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_resolve_relative",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.lvs_netgen",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_resolve_relative",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.mom",
+        "exporter": "klayout_tools._native",
+        "symbol": "_load_native_extension",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.mom",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_spec_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.mom",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_parse_layer_datatype",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.mom",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_reject_unknown_keys",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.netlist_digest",
+        "exporter": "klayout_tools.lvs",
+        "symbol": "_read_reference_netlist",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.netlist_digest",
+        "exporter": "klayout_tools.lvs",
+        "symbol": "_select_circuit",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.netlist_normalize",
+        "exporter": "klayout_tools.pdk_models",
+        "symbol": "_format_um",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.netlist_normalize",
+        "exporter": "klayout_tools.pdk_models",
+        "symbol": "_format_um2",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_SIMULATION_ABORTED_RE",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_classify_diagnostics",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_corner_lib_lines",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_expand_corners",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_extract_engine_version",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_needs_models_lib",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_corner_section_libs",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_models_lib",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_netlist_include",
+        "reason": "op-lint follows `.include`s with the same resolver the sweep uses (issue #3101); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_osdi_preload",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_scale_supply_waveforms",
+        "reason": "op-lint rescales `supply_waveforms` rails with the same helper the sweep uses (issue #3624); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_supply_alter_lines",
+        "reason": "op-lint emits `alter` lines for supply rails with the same helper the sweep uses (issue #3624); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.pdk_pcell",
+        "exporter": "klayout_tools.gen",
+        "symbol": "_PARAM_TYPE_NAMES",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.pdk_pcell",
+        "exporter": "klayout_tools.gen",
+        "symbol": "_coerce_param",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.pex",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_resolve_relative",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_OpenRoadResult",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_count_violations",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_openroad_version",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_run_openroad",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_timing_status",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_count_spef_nets_annotated",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_tcl_net_list",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route_gds_merge",
+        "exporter": "klayout_tools.extract",
+        "symbol": "_DEF_NET_NAME_PROPERTY_ID",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route_script",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_timing_violation_report_lines",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route_script",
+        "exporter": "klayout_tools.synthesize",
+        "symbol": "_ABC_DONT_USE_GLOBS",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route_sta",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_count_violations",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route_sta",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_run_openroad",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route_sta",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_timing_status",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route_sta",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_count_spef_nets_annotated",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.place_and_route_sta",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_tcl_net_list",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.post_route_sta",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_OpenRoadResult",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.post_route_sta",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_count_violations",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.post_route_sta",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_openroad_version",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.post_route_sta",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_run_openroad",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.post_route_sta",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_timing_status",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.post_route_sta",
+        "exporter": "klayout_tools._openroad_engine",
+        "symbol": "_timing_violation_report_lines",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.post_route_sta",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_count_spef_nets_annotated",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.post_route_sta",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.post_route_sta",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_tcl_net_list",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.power",
+        "exporter": "klayout_tools._devices",
+        "symbol": "_conductor_role_layers",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.power",
+        "exporter": "klayout_tools._devices",
+        "symbol": "_cut_device_bodies",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.power",
+        "exporter": "klayout_tools._devices",
+        "symbol": "_device_body_cuts",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.power",
+        "exporter": "klayout_tools._devices",
+        "symbol": "_validate_devices",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.power",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_spec_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.power",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_parse_layer_datatype",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.power",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_reject_unknown_keys",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.power",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_validate_via_entries",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.sim",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.sim",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_resolve_relative",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.sim_staging",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_resolve_relative",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.size",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.size",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_expand_corners",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.size",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_models_lib",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.size_topology",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_models_lib",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.sta",
+        "exporter": "klayout_tools._native",
+        "symbol": "_load_native_extension",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.synthesize",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.techmap",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.techmap",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_resolve_relative",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.yield_analysis",
+        "exporter": "klayout_tools._native",
+        "symbol": "_load_native_extension",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.yield_campaign",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_load_request_json",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.yield_campaign",
+        "exporter": "klayout_tools._paths",
+        "symbol": "_resolve_relative",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.yield_campaign",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_derive_mc_seed",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.yield_sensitivity",
+        "exporter": "klayout_tools._native",
+        "symbol": "_load_native_extension",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      }
+    ],
+    "module_edges": []
+  }
+}

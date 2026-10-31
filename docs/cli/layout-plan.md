@@ -26,6 +26,9 @@ Schema is
 > verb is worth revisiting once Phase C can actually execute a plan from the
 > shell.
 
+> **Checking a finished layout:** [`klt layout-plan check`](layout-plan-check.md)
+> verifies a layout against its plan (read-only; feeds `klt signoff`).
+
 ## Scope (Phase B: contract + validation only)
 
 **What the validator does** — answers one question about a plan document:

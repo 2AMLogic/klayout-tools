@@ -352,7 +352,7 @@ listing for good.
 |---|---|
 | `loom-daemon ci-telemetry --once [--owner OWNER]… [--org ORG] [--workspace PATH]` | One poll cycle (`--owner` repeatable; `--org` is the deprecated alias). Runs whether or not `enabled` is set. |
 | `loom-daemon ci-telemetry status [--json]` | Health, each owner (kind, repo count, skip reason), ledger size, per-repo watermarks, records emitted/exported. |
-| Daemon poller | Runs every `intervalSecs` when `autonomous.ciTelemetry.enabled=true`. With `forgeEvents.events.ciTelemetryRuns` it is feed-driven instead; see [Feed-driven capture](#feed-driven-capture-9201). |
+| Daemon poller | Runs every `intervalSecs` when `autonomous.ciTelemetry.enabled=true`. |
 
 `--once` exit codes:
 
@@ -387,7 +387,6 @@ never shows as healthy:
 | `intervalSecs` | `LOOM_CI_TELEMETRY_INTERVAL_SECS` | `120` |
 | `excludedRepos` | none (committed config only) | `[]`. Each entry is `{"repo": "<name or owner/name>", "reason": "<why>"}`, and `repo` matches case-insensitively. See [Capture scope & exclusions](#capture-scope--exclusions). |
 | `logCaptureEnabled` | `LOOM_CI_TELEMETRY_LOG_CAPTURE_ENABLED` | `false`. Honoured since phase 2 (#8825); see [Phase 2 reference](#phase-2-reference-completed-job-logs-8825). |
-| `feedFloorIntervalSecs` | `LOOM_CI_TELEMETRY_FEED_FLOOR_INTERVAL_SECS` | `3600`. The sweep interval while the forge event feed drives capture. It is clamped to `[intervalSecs, 43200]`. See [Feed-driven capture](#feed-driven-capture-9201). |
 
 `logCaptureEnabled` is the switch for the job-log download. Phase 1 (#8824)
 shipped the key with no code behind it and refused a request by name; phase 2
@@ -451,38 +450,26 @@ whole poller** (every owner), never a single repo:
 Any other failure in a repo is recorded, and the cycle moves on to the next
 repo.
 
-### Feed-driven capture (#9201)
+### Feed-driven capture (removed, #12809)
 
-When `forgeEvents.events.ciTelemetryRuns` is on, a finished `workflow_run`
-event on the forge event feed makes the poller record **that one run**. It
-fetches `repos/{repo}/actions/runs/{id}`, then the run's jobs, then commits
-through the same ledger, story-stitching, and export path as a sweep. While
-the feed is healthy and carrying run keys, the repo sweep stretches to
-`feedFloorIntervalSecs` as a correction floor. Otherwise it keeps
-`intervalSecs`. The mechanism, the trust rules, and the Worker requirement
-are in [`forge-events.md` §4.2](forge-events.md#42-ci-telemetry-run-capture-eventscitelemetryruns-9201).
+Run capture driven by the dashboard event feed (`forgeEvents.events.ciTelemetryRuns`,
+`feedFloorIntervalSecs`) was removed with the feed. The repo sweep always runs
+at `intervalSecs`; `feedFloorIntervalSecs` and its env override are ignored.
 
 **Request arithmetic (estimated, not measured).** Each sweep costs one
 runs-listing request per repo. The runs listing is not a conditional request,
 so it always counts. Discovery pages are ETag-cached and are ignored here.
-Each newly finished run costs one jobs listing on the sweep path, or one run
-`GET` plus one jobs listing on the feed path. With `R` eligible repos and `F`
+Each newly finished run costs one jobs listing. With `R` eligible repos and `F`
 finished runs per hour, and ignoring job logs, suite artifacts and story
-lookups (the same on both paths):
+lookups:
 
 | Mode | Requests/hour | `R = 118`, `F = 100` |
 |---|---|---|
 | Sweep every 120 s (default `intervalSecs`) | `30·R + F` | ≈ 3,640 |
 | Sweep every 600 s (#9199) | `6·R + F` | ≈ 808 |
-| Feed-driven, 3600 s floor | `R + 2·F` | ≈ 318 |
 
-The floor sweep re-lists runs the feed already recorded. Those are `seen` in
-the ledger and cost no jobs listing, so the floor adds only its `R` listings.
-**These figures are arithmetic, not a measurement.** No captain was running
-the poller when #9201 landed: #9199, which enables it, was still held. To
-measure, compare `last_cycle.requests` in `ci-telemetry status --json` and the
-`feed batch: … request(s)` log lines over an hour, with the flag off and
-then on.
+**These figures are arithmetic, not a measurement.** To measure, compare
+`last_cycle.requests` in `ci-telemetry status --json` over an hour.
 
 ### Dedup contract: never record the same job twice
 
@@ -496,6 +483,20 @@ gitignored (the managed block ignores all of `.loom/state/*`, #9592).
   unit again. A `watermark` line records a repo's newest observed
   `run.created_at`. An `emitted` line confirms that every unit up to a given
   sequence number has reached the journal.
+- **Bounded working set (#11159).** Each `unit`/`seen` line carries a
+  `committed_at` stamp (optional; an older daemon ignores it). Loading the
+  ledger streams it line by line and skips any key committed more than 45
+  days (`SEEN_RETENTION_DAYS`) before its repo's watermark — longer than
+  GitHub allows a run to be re-run (30 days) or to last (35 days). Keys with
+  no stamp, keys of a repo with no watermark, and unconfirmed units are always
+  kept; compaction stamps unstamped keys, so they age out later. `status`
+  counts the retained keys.
+  The boundary is enforced for every recording path
+  (`poll/targeted.rs`): a hinted run whose forge `created_at` is older than
+  its repo's watermark minus 45 days is refused after the one run fetch (no
+  jobs, artifacts or logs), because its expired keys could no longer prove it
+  was already emitted. `created_at` is fixed across re-runs, so legitimate
+  recent re-runs are unaffected.
 - **Commit first, then emit.** For each run, the job units are committed
   first and the run unit last, all in a single fsynced append. Their
   envelopes are then appended (and fsynced) to the journal, and the batch is
@@ -620,6 +621,54 @@ never rotated.
 |---|---|---|
 | `journalRotateBytes` | `LOOM_CI_TELEMETRY_JOURNAL_ROTATE_BYTES` | `268435456` (256 MiB) |
 | `journalRotateKeep` | `LOOM_CI_TELEMETRY_JOURNAL_ROTATE_KEEP` | `2` (`0` deletes instead of keeping) |
+
+### Bounded backfill admission and queue pressure (#11115)
+
+A historical CI pass can journal tens of thousands of suite/test spans, far
+more than an exporter queue (`queueCapacity`, default 2000) holds. The export
+pass therefore offers journal lines through a bounded, non-evicting admission
+(`QueueSink::offer_backfill`) instead of the drop-oldest push ordinary
+producers use:
+
+- A queue admits backfill only while its depth is below the **backfill limit**,
+  75% of its capacity. The last quarter is headroom for ordinary lifecycle and
+  CI producers, whose push keeps its drop-oldest behavior. The limit check,
+  the enqueue and the durable write happen under one hold of the queue lock,
+  so a concurrent producer cannot fill the queue in between and a backfill
+  offer never evicts a queued record.
+- At the limit the pass stops at the first unadmitted line. That line and
+  everything after it stay behind the persisted cursor, so the next backfill
+  tick (the 5-minute collector cadence) retries. The pass never waits on
+  network delivery and holds nothing in memory beyond the one line it is
+  reading.
+- With several exporters, a record is pushed only when **every** exporter
+  queue has room, so the smallest or slowest queue paces the replay and no
+  exporter silently misses a record. The offer locks every exporter queue (in
+  config order) before checking any of them, so no queue can fill between the
+  check and the push. If a later queue's disk write fails, the earlier queues
+  keep the record and the cursor does not advance. The retry offers it again:
+  delivery is **at-least-once**, so duplicates are possible and downstream
+  consumers dedupe on the stable GitHub/trace identities.
+- Sampling (`>= 250 ms`, 512 tests per job) and the default capacity are
+  unchanged. Throughput is about one backfill limit per tick if the sender
+  drains between ticks; raise `observability.queueCapacity` to speed a large
+  replay, not to hide loss.
+
+**Pressure counters.** Each entry of `observability_exports` in
+`loom-daemon status --json` carries a `queue` object, per exporter:
+
+| Field | Meaning |
+|---|---|
+| `depth` / `capacity` / `backfill_limit` | Current occupancy and the two bounds. |
+| `dropped_total` | Durable cumulative loss across all ledger reasons, including queue eviction, reopen capacity shrink and exporter-reported losses. Receiver rejection may count signal items rather than envelopes; see `host.export.dropped_by_reason`. |
+| `backfill_deferred_total` | Backfill offers refused at the limit. Not loss: the record is retried, so a record may be counted on every pass. |
+
+`dropped_total` is persisted in the queue loss ledger and survives restart.
+`backfill_deferred_total` is cumulative for the daemon process and resets to
+0 on restart; it is not persisted. A rising `backfill_deferred_total` with
+`dropped_total` flat means the replay is being paced correctly. A rising
+`dropped_total` means recorded loss increased; inspect
+`host.export.dropped_by_reason` to distinguish overflow from other reasons.
 
 ### Attribute allowlist
 
@@ -898,7 +947,7 @@ section 10's "whether it is imbalanced") consume these.
 ### Per-test spans (#9456)
 
 The suite spans above only exist for the `LOOM_CI_SHARD` **shell** legs. The
-`nextest-partition` legs — `Rust Unit Tests (k/3)` (the former separate
+`nextest-partition` legs — `Rust Unit Tests (k/N)` (the former separate
 `Rust OTLP Feature Tests` family was folded into it, #10823) — had nothing below step granularity, so "~110s of this leg's 250s was
 the test step" was answerable but *which tests* spent it was not, and
 rebalancing `--partition count:k/N` stayed guesswork (the same Unit partition's
@@ -1054,7 +1103,7 @@ spans from nextest JUnit output (`[profile.ci.junit]`), which would give the
 ### Story stitching (#9088)
 
 A completed run that belongs to exactly one issue N is **also** emitted into
-N's story trace (harness-ops D32 v1, see [tracing](tracing.md)): an extra
+N's story trace (story key v1, see [tracing](tracing.md)): an extra
 `loom.ci.run` span with trace ID `story_context(repo_id, N).trace_id`,
 parented to the story root span, and an extra `loom.ci.job` span per job
 under it. Code: `loom-daemon/src/ci_telemetry/story.rs`.

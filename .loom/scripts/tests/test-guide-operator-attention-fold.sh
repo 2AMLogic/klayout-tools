@@ -26,7 +26,7 @@
 #   1. guide.md's render_plan_body() queries `loom:operator` PRs into a
 #      `held` variable and renders an "Operator Attention: Merge-Risk-Hold
 #      Pileup" section from it, as the FIRST section emitted (ahead of
-#      "Operator Priority") — so it is exactly as (non-)volatile as everything else in
+#      "Very Important") — so it is exactly as (non-)volatile as everything else in
 #      the generated region.
 #   2. guide.md explicitly documents the fix and prohibits reintroducing a
 #      hand-appended narrative paragraph (the #5930 regression marker).
@@ -66,25 +66,11 @@ else
 fi
 WORK_PLAN_MD="$REPO_ROOT/WORK_PLAN.md"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 assert_eq() {
     local actual="$1" expected="$2" msg="$3"
     if [[ "$actual" == "$expected" ]]; then pass "$msg"; else fail "$msg (got '$actual', expected '$expected')"; fi
-}
-
-assert_grep() {
-    local pattern="$1" file="$2" msg="$3"
-    if grep -qE "$pattern" "$file"; then pass "$msg"; else fail "$msg (missing pattern: $pattern)"; fi
 }
 
 assert_not_grep() {
@@ -121,11 +107,11 @@ else
 fi
 
 OPERATOR_LINE="$(grep -n 'section "Operator Attention: Merge-Risk-Hold Pileup"' <<<"$RPB_BODY" | head -1 | cut -d: -f1)"
-STARRED_LINE="$(grep -n 'section "Operator Priority"' <<<"$RPB_BODY" | head -1 | cut -d: -f1)"
+STARRED_LINE="$(grep -n 'section "Very Important"' <<<"$RPB_BODY" | head -1 | cut -d: -f1)"
 if [[ -n "$OPERATOR_LINE" && -n "$STARRED_LINE" && "$OPERATOR_LINE" -lt "$STARRED_LINE" ]]; then
-    pass "the Operator Attention section is emitted BEFORE the Operator Priority section"
+    pass "the Operator Attention section is emitted BEFORE the Very Important section"
 else
-    fail "expected the Operator Attention section call to precede the Operator Priority section call (operator=$OPERATOR_LINE, starred=$STARRED_LINE)"
+    fail "expected the Operator Attention section call to precede the Very Important section call (operator=$OPERATOR_LINE, starred=$STARRED_LINE)"
 fi
 
 # ---------------------------------------------------------------------------

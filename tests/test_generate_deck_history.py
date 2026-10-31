@@ -161,6 +161,32 @@ def test_build_entries_records_commit_and_tag(_tagged_repo, monkeypatch):
     assert entry["git_commit"] == expected_commit
 
 
+def test_build_entries_records_standalone_drc_deck_file(tmp_path, monkeypatch):
+    """Issue #3826: ``<name>.drc`` at a tag is a separate hashed artifact."""
+    repo = _make_repo(tmp_path)
+    decks_dir = repo / "src" / "klayout_tools" / "decks"
+    _write_pyproject(repo, "0.1.0")
+    (decks_dir / "asap7.py").write_text("MODULE = 1\n")
+    (decks_dir / "asap7.drc").write_text("# drc deck\n")
+    (decks_dir / "sky130.py").write_text("DECK = 1\n")
+    _commit(repo, "v0.1.0")
+    monkeypatch.setattr(gdh, "REPO_ROOT", repo)
+
+    entries = gdh.build_entries()
+
+    (drc,) = [e for e in entries if e.get("artifact") == "drc_deck"]
+    assert drc["deck"] == "asap7"
+    assert (
+        drc["content_hash"] == "sha256:" + hashlib.sha256(b"# drc deck\n").hexdigest()
+    )
+    module = [e for e in entries if e["deck"] == "asap7" and "artifact" not in e]
+    assert len(module) == 1
+    assert module[0]["content_hash"] != drc["content_hash"]
+    # sky130 has no .drc file -> no artifact entry for it.
+    assert not [e for e in entries if e["deck"] == "sky130" and "artifact" in e]
+    assert gdh.build_entries() == entries  # deterministic
+
+
 # --------------------------------------------------------------------------- #
 # main() -- writes _history.json, idempotent, fails loudly with no tags
 # --------------------------------------------------------------------------- #
@@ -196,3 +222,18 @@ def test_main_no_tags_fails_loudly(tmp_path, monkeypatch, capsys):
     assert exit_code == 1
     assert "no v* git tags" in capsys.readouterr().err
     assert not (tmp_path / "_history.json").exists()
+
+
+def test_version_regex_reads_both_pyproject_version_styles():
+    """Tags before issue #2823 carry a static `[project]` `version`; tags
+    after it carry `[tool.hatch.version]`'s `base-version` instead."""
+    module = _load_generate_deck_history()
+    legacy = '[project]\nname = "klayout-tools"\nversion = "0.6.0"\n'
+    dynamic = (
+        '[project]\nname = "klayout-tools"\ndynamic = ["version"]\n\n'
+        '[tool.hatch.version]\nsource = "code"\nbase-version = "0.8.0"\n'
+    )
+    assert module._VERSION_RE.search(legacy).group(1) == "0.6.0"
+    assert module._VERSION_RE.search(dynamic).group(1) == "0.8.0"
+    real = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text("utf-8")
+    assert module._VERSION_RE.search(real) is not None

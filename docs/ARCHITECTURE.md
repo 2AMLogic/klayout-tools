@@ -68,6 +68,16 @@ of families than the toolkit; it declares that narrowing with
 `pdk_families.family_subset()` rather than by interpreting variant names
 itself.
 
+This boundary is enforced statically in CI by
+[`scripts/check_import_boundaries.py`](../scripts/check_import_boundaries.py)
+against the declarative policy in
+[`import-boundaries.json`](../import-boundaries.json): a cross-verb import of
+a private symbol, or an unclassified new module, fails the `lint` job.
+Existing violations are grandfathered as exact, reasoned
+`legacy_exceptions` so the check ratchets down rather than requiring a
+big-bang cleanup; see [`scripts/README.md`](../scripts/README.md) for
+maintenance and the analysis limits.
+
 **Wrap the proven engine.** The heavy lifting stays in an existing,
 battle-tested engine; the agent-native surface is ours. KLayout is the
 first engine, not a submodule or fork — a dependency behind the contract.

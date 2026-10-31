@@ -64,24 +64,49 @@ evidence of nothing.
 
 **Not every item has a tool behind it.** Items 3-7 each name a `klt` verb
 that can mechanically grade them, and item 8 has a purpose-built generic
-evidence envelope — but items **1**, **2**, **9**, and **10** have no
-`klt` verb. For those four, the evidence the tool can read is an
-**artifact-anchored generic envelope** (issue #2718). The envelope declares
-the item it attests (`"t1_item": <id>`) and pins the audited artifact by
-path and content hash, and the manifest pins the same hash. The row is
-`met` only when the artifact still re-hashes to that value. The artifact
-per item:
+evidence envelope — but items **1**, **2**, **9**, and **10** are claims
+about what a repository contains. For those four, the evidence the tool can
+read is an **artifact-anchored generic envelope** (issue #2718). The
+envelope declares the item it attests (`"t1_item": <id>`) and pins the
+audited artifact by path and content hash, and the manifest pins the same
+hash. The row is `met` only when the artifact still re-hashes to that value.
+The artifact per item:
 
 - item 1: the design-source inventory;
 - item 2: the committed layout stream;
 - item 9: the testbench inventory;
-- item 10: the repo-hygiene audit record, for example the CI workflow
-  file or a checklist covering README, spec table and license.
+- item 10: the repo-hygiene inventory.
 
-A passing native envelope cited for one of these four is still accepted,
-for compatibility. Its citation carries no `artifact_binding`, which marks
-it as a cited pass the tool could not judge for relevance. See
-[`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10".
+For items 1, 9 and 10 that envelope is **tool-produced**, not hand-rolled:
+`klt signoff --attest {1,9,10} --inventory <file>` (issue #2844) reads a
+versioned inventory and derives `status` from item-specific mechanical
+checks it records in the envelope — item 1, every source and derived
+netlist exists and each derived netlist passes its declared freshness check
+(e.g. `klt netlist --check`); item 9, every testbench exists, the declared
+cold-start invocation succeeds, and the PDK revision and tool versions are
+pinned; item 10, every hygiene artifact exists and every declared CI/audit
+command succeeds. `--check` re-attests and fails on any drift of the
+inventory, an inventoried file, or a check outcome. A passing native
+envelope (a clean DRC report, say) **no longer satisfies items 1, 9 or
+10**. Item 2 still accepts one, for compatibility; its citation carries no
+`artifact_binding`, which marks it as a cited pass the tool could not judge
+for relevance. See [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2,
+9, and 10" and "Attesting items 1, 9 and 10".
+
+Where the claim is about a set of files (item 1's sources plus the derived
+netlist; item 9's or 10's several files), the envelope may bind the set with
+`provenance.input.paths` (issue #3044) so that editing any member turns the
+row stale; see [`docs/cli/signoff.md`](cli/signoff.md).
+
+For items 1 and 2, whose artifacts are usually *generated* (a netlist from
+its schematic, a stream from its generator), the attestation may also carry
+a regeneration claim (issue #2887): the generator command and the hash the
+attester's CI got by re-running it. The tool never runs the generator. It
+checks only that the claimed hash equals the bound artifact's, and renders
+`stale_artifact` when they differ, which means the committed artifact is not
+what its generator produces. This states freshness in the manifest instead
+of in a separate CI gate, but the regeneration itself remains the
+attester's word.
 
 ### What a T1 claim is scoped to
 
@@ -201,7 +226,20 @@ written to every block.
    `met` verdict from `klt signoff` is still not evidence that the gaps were
    disclosed. A reviewer must read the reported `coverage` against the claim
    themselves.
-4. **LVS clean** — latest LVS report `status: match`, fresh, engine named,
+   **Disclosed exception for unmodified foundry cells** (operator ruling
+   2026-10-28): DRC violations inside an unmodified foundry-library cell
+   (a stock I/O pad, a foundry SRAM macro) do not block `met`, provided all
+   three of these hold: (1) the same violations — same rules, same counts —
+   reproduce when the unmodified PDK cell is checked alone, with none of the
+   block's own geometry; (2) the exception is pinned to the stock cell by
+   content hash and names its rules and counts, and lapses if the cell or the
+   counts change; (3) the T1 claim lists every such exception, and says
+   nothing about the internals of those cells. `klt signoff` grades this from
+   a `foundry_cell_exceptions` list on the item 3 evidence entry
+   (`docs/cli/signoff.md` → "Foundry-cell DRC exceptions") and lists each
+   applied exception in item 3's citation.
+4. **LVS clean** — latest LVS report (or, per cell, a list of reports — all must
+   pass) `status: match`, fresh, engine named,
    checked against the netlist from item 1 (schematic netlist for analog,
    synthesized/routed gate-level netlist for digital), **and that same
    report's `power_connectivity.status` not `"mismatch"`**. Those are two
@@ -234,10 +272,45 @@ written to every block.
    is not covered. Warnings-only mismatches must be listed with the claim.
    A second, independent engine's concurring verdict (#343) strengthens this
    from "one toolchain agrees with itself" to a cross-checked result.
+   **PDK-runset path (issue #2870, operator ruling of 2026-10-08).** For
+   device families the PDK's own open KLayout LVS runset recognises and the
+   curated extraction deck does not, a `klt lvs` report with
+   `"engine": "klayout-runset"` is accepted evidence for this item, on four
+   conditions: (1) the runset is the PDK's own at a pinned revision — `klt
+   signoff` checks `provenance.runset.content_hash` against a signoff-side
+   allowlist (`signoff_runset.PINNED_RUNSETS`, hash → PDK revision), not against
+   a field the block declares, and the runset file named by the report must
+   still re-hash to that value; (2) the report is a `klt` envelope with the
+   same `--check` re-hash guarantees as a curated-deck report (layout hash,
+   reference netlist hash, plus the runset hash); (3) the report names its
+   engine, and `klt signoff` carries `engine` and the runset hash distinctly in
+   the check detail and the `met` citation; (4) every device is recognised — a
+   non-empty `coverage.declared_not_recognized`, or a `device_census` whose
+   per-class layout and reference counts differ, is a failure
+   (`runset_unrecognised_device`), never a warning, even when `status` reads
+   `match`. A report from a runset that is not in the allowlist is refused
+   `runset_not_pinned`; one whose runset file changed since the run,
+   `runset_hash_mismatch`. **This does not change** the default: curated decks
+   stay the route wherever they recognise every device in the block, and a
+   block may not choose the runset to avoid a curated-deck finding. The
+   allowlist (`signoff_runset.PINNED_RUNSETS`, listed by
+   `klt signoff --describe-grader` under `pinned_runsets`) holds the SG13G2,
+   SG13CMOS5L and gf180mcu `*.lvs` runsets as of 2026-10-27.
+   **Adding an entry** is a reviewed trust decision, never a copy of a hash
+   from a report: fetch the PDK's runset file from its upstream repo at a
+   named commit, `sha256` it (the same digest `_provenance.sha256_file`
+   records), and add one entry recording `pdk`, `revision`, `repo`, `commit`,
+   `path` and `reviewed_by`. The digest covers the top-level runset file only,
+   so the `commit` is what fixes the `rule_decks/` it includes. A PDK whose
+   runset cannot be fetched or run at a verifiable commit is left unpinned.
 5. **Full corner verification vs a ratified spec**
    - *Analog* — PVT corner-matrix simulation results covering every spec
      row at its bound corners, with per-row pass/fail and the binding
-     corner recorded.
+     corner recorded. A spec needing several testbenches cites several
+     `klt sim` envelopes, optionally naming the rows each covers and
+     declaring the full row set; the item is met only when every cited
+     envelope passes and every declared row is covered, and rows no
+     envelope can express are declared gaps that keep it unmet.
    - *Digital* — multi-corner static timing analysis (setup and hold
      across the PVT corner set) plus a bit-exact functional test suite,
      with per-corner and per-test pass/fail recorded. For the full-custom
@@ -246,7 +319,10 @@ written to every block.
      plus an explicit per-corner timing-margin metric measured directly in
      that same sweep — a SPICE-measured analog of STA setup/hold margin,
      e.g. a derived arrival-time-vs-required-time delta recorded per PVT
-     point — as the full-custom substitute for the STA requirement above.
+     point — as the full-custom substitute for the STA requirement above (`klt
+     signoff` grades it via a `timing_margin` spec row, see
+     [`docs/cli/signoff.md`](cli/signoff.md), "Full-custom digital needs a
+     measured timing margin").
      The machine-checkable evidence for the RTL-flow artifacts is a `klt
      sta` JSON report run across the declared corner set (`pdk.corners`,
      `docs/cli/sta.md`) and a `klt functional-verification` JSON report
@@ -288,14 +364,54 @@ written to every block.
    verb needs the `yield` extra.** Unlike every other T1 item's
    evidence verb (`drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
    `functional-verification`, `erc`, `place-and-route`), `klt yield`
-   requires the `klt_yield_native` Rust extension. It is published as the
-   prebuilt `klt-yield-native` wheel (Linux x86_64, macOS arm64), reached by
-   `pip install 'klayout-tools[yield]'`; a bare `pip install klayout-tools`
-   and the git-pinned form do not include it. A consumer pinning a release
-   that predates the first `klt-yield-native` publication, or on another
-   platform, still needs a repo checkout with a Rust toolchain; see
+   requires the `klt_yield_native` Rust extension. Today that needs a repo
+   checkout with a Rust toolchain: the prebuilt `klt-yield-native` wheel
+   (Linux x86_64, macOS arm64) behind `pip install 'klayout-tools[yield]'` is
+   not yet on PyPI, so the extra resolves for no release to date and only for
+   releases published after the wheel is. A bare `pip install klayout-tools`
+   and the git-pinned form do not include it either. A consumer on another
+   platform likewise needs a repo checkout with a Rust toolchain; see
    `docs/cli/yield.md`'s "What the extra does and does not reach" callout and
    `docs/releasing-native.md`.
+   **When "not applicable" is legitimate** (issue #2865): a block whose
+   ratified spec has *no* statistical row passes this item by a recorded
+   "not applicable", not by a waiver at grant time and not by inventing a
+   statistical claim. That holds only when the spec is ratified, a committed
+   statement accounts for every spec row with the reason its row class is
+   not statistical (for example "timing rows are corner-bounded by STA at the
+   PDK's characterised corners"), and both are bound by content hash so
+   editing either invalidates the claim. Any accuracy, offset, matching or
+   yield row is statistical by definition: a spec carrying one — or a sigma,
+   yield, Cpk or `3σ`-style bound — cannot use the outcome and needs `klt
+   yield` evidence for that row. The outcome is available to a digital
+   partition only; an analog partition (including the analog half of a
+   mixed-signal block) always requires Monte Carlo evidence. `klt signoff`
+   reports it as `not_applicable`, never as `met`.
+   **Analog partitions** (issue #4183, operator ruling 2026-10-28): this
+   restriction is intentional. Analog performance is inherently statistical
+   (offset, mismatch, bias spread), so an analog spec with no statistical row
+   is a gap in the spec, not a block with no variation; the grader is not
+   relaxed and there is no analog-keyed `not_applicable` form. A
+   mixed-signal block's analog partition that uses `not_applicable` renders
+   `unmet` with `reason: not_applicable_wrong_partition`, even when the
+   statement covers every spec row. It discharges item 6 one of two ways:
+   - **Add the missing statistical row(s)** to the block's spec through a
+     decision record the operator ratifies, then supply Monte Carlo evidence
+     (`klt yield`) for them. Where the PDK has no mismatch models, assumed
+     mismatch is acceptable, labelled as such in the evidence.
+   - **Declare item 6 a gap** for the analog partition.
+   The digital partition of the same block may still use `not_applicable`.
+   **Several statistical rows, only some evidenced** (issue #2908): item 6
+   is a claim about *every* statistical row, so a manifest may declare the
+   row set under `spec_rows."6"` and cite one `klt yield` report per row set
+   (`rows` on each citation). Item 6 grades `met` only when every declared
+   row is covered by a passing citation against a ratified target. A row with
+   no citation (`uncovered_rows`), a row declared a `gap` because no evidence
+   can exist yet (`declared_gaps`), or a row declared `ratified: false`
+   (`unratified_rows`, evidence against a proposed limit is provisional)
+   grades `unmet` / `partial_coverage`, never `met`. Without a declaration
+   the item grades as before; a `not_applicable` entry contradicts a declared
+   row set and is `invalid_evidence`.
 7. **Post-layout verification**
    - *Analog* — the spec suite re-run against the netlist extracted from
      the layout, not only the drawn schematic (#252). Parasitic extraction
@@ -358,9 +474,14 @@ written to every block.
    tool). For a digital or mixed-signal digital partition this includes
    Fmax, area, and power across the corner set, not just functional
    pass/fail. Unlike every other T1 item, this one names no specific `klt`
-   verb — there is no dedicated aggregation command, and its evidence may be
-   a hand-assembled record (e.g. a committed Markdown characterization
-   report) rather than one `klt` verb's own JSON output. `klt signoff
+   verb for its evidence, which may be a hand-assembled record (e.g. a
+   committed Markdown characterization report) rather than one `klt` verb's
+   own JSON output. `klt signoff --attest 8 --inventory FILE` (issue #4311)
+   produces the generic envelope mechanically — report present, each spec row
+   cited, each cited envelope present and passing its own `--check`, and for a
+   digital partition Fmax/area/power bound per corner — and a met citation
+   discloses whether the tool produced it; a bare hand-written envelope still
+   grades. `klt signoff
    --manifest` grades it via an opt-in **generic evidence envelope**
    (`"kind": "generic"`, issue #1152) — a minimal, hand-rolled JSON wrapper
    asserting `status: "pass"|"fail"` for whatever record backs it. Item 8
@@ -402,15 +523,28 @@ written to every block.
       `klt signoff` renders `lvs_did_not_pass` (not the plain
       `check_failed`) when the ERC supply evidence is complete and
       continuous and only the LVS half is unavailable, naming in
-      `detail.power_delivery` the supplies the ERC run did prove. Produce
+      `detail.power_delivery` the supplies the ERC run did prove. A set
+      citing only the `erc` or only the `lvs` part renders
+      `power_delivery_parts_missing` (not `wrong_kind`), naming the absent
+      part and crediting the supplies a resolved ERC spec proved. Produce
       the ERC supply spec anyway — it is the half that survives an unrelated
       LVS defect, and it is what makes the distinction visible.
+      A `klayout-runset` report (item 4's PDK-runset path) can be this LVS
+      half under the same pin and re-hash conditions: the engine lists the
+      nets its compare paired in `net_correspondence` (issue #2870), so the
+      supply-pairing test above reads the same way, with the same
+      "participation test, not a second opinion" caveat. An unpinned or
+      modified runset renders `runset_not_pinned` / `runset_hash_mismatch`
+      here too.
     - *Digital* — the `klt erc` supply evidence below, plus the routed
       artifact having actually been produced with a power grid, plus item
       4's power/ground verdict having actually run. Concretely: the `klt
       place-and-route` response's `power.pdn` is `true` with a
       `power.tapcell_master` named (`docs/cli/place-and-route.md` → "Power
-      delivery"), every `power.straps[].layer` is covered by the cited
+      delivery") — or, for a library documented tapless (`sg13g2_stdcell`),
+      `power.tapless: true` with the master `null`, which the citation
+      records (a null master without `tapless` is `no_tapcell_master`, not
+      `no_pdn`) — every `power.straps[].layer` is covered by the cited
       `klt erc` spec's own stackup, and that same LVS report's
       `power_connectivity.status` is `"match"` — `"unchecked"` does **not**
       satisfy this item, unlike item 4 itself, where it means "the question
@@ -668,6 +802,33 @@ written to every block.
       `provenance.devices` before treating a clean `erc.supply_short` read
       as covered by auto-detection rather than a hand-declaration that
       happens to be present.
+    - **Port accessibility — PROVISIONAL, not yet in force** (issue #2839;
+      operator ruling 2AMLogic/product#134, amendment text drafted in
+      2AMLogic/product PR #168 and awaiting the two-key ratification). Every
+      supply the cited `klt erc` spec declares must be published as an
+      **edge-accessible boundary port** and named in a **machine-readable
+      abstract**: (1) a `klt socket-check` envelope whose `power_ports`
+      facts show, for each declared supply, a `POWER`/`GROUND` pin of that
+      name with drawn conductor under its label lying within the edge band
+      of a counted outline edge with a clear approach channel (no other
+      conductor on its layer between it and the edge), on an allowed layer;
+      and (2) a `klt lef-abstract` envelope whose LEF carries a `PIN` of the
+      same name with `USE POWER`/`USE GROUND` matching the port, a drawn
+      `PORT` on the same layer touching the port, and a `SIZE` equal to the
+      outline. Parameters, with their provisional defaults, are set per
+      block in the `klt signoff` manifest's `power_ports` object: the edge
+      band (`edge_band_um`, default `0` — the port must touch the outline;
+      the draft proposes one minimum metal pitch), the counted edges (all
+      four), and the allowed layers (default: any layer that resolves to a
+      LEF routing layer, the draft's recommendation). Until ratification
+      `klt signoff` grades this clause only for a block that opts in
+      (`power_ports.required: true`, or port evidence cited in item 11's
+      list), after the ERC/LVS rules above are proven, rendering
+      `power_port_unproven`, `no_edge_power_port`,
+      `power_port_interior_only`, `power_port_layer_disallowed`,
+      `lef_power_pin_missing` or `lef_power_pin_mismatch` when it fails —
+      see `docs/cli/signoff.md` → "Item 11 port accessibility". Not graded
+      yet: one port per declared island of a multi-island supply.
 
 ## Power/IR-drop + EM evidence (not yet a T1 item)
 

@@ -711,3 +711,90 @@ def test_cli_pdk_pcell_check_unresolvable_pdk_is_application_error(tmp_path, cap
     assert exit_code == 1
     err = json.loads(capsys.readouterr().err)
     assert err["error"]["command"] == "pdk pcell-check"
+
+
+# --- issue #4236: name the remedy; report shim presence in `pdk find` ---------
+
+
+def _sg13g2_tree(tmp_path, *, shim):
+    """An ihp-sg13g2-shaped tree whose ``sg13g2_pycell_lib`` imports ``cni``.
+
+    ``shim``: ``"absent"`` | ``"empty"`` | ``"populated"``."""
+    root = tmp_path / "pdk_install"
+    variant_dir = _make_install(root, "ihp-sg13g2")
+    _write_shim_dependent_package(variant_dir, "sg13g2_pycell_lib", "cni")
+    shim_dir = variant_dir / "libs.tech" / "klayout" / "python" / "pycell4klayout-api"
+    if shim != "absent":
+        shim_dir.mkdir(parents=True)
+    if shim == "populated":
+        (shim_dir / "README.md").write_text("vendored\n")
+    return root
+
+
+@pytest.mark.parametrize("shim", ["absent", "empty"])
+def test_missing_shim_reason_names_upstream_source_and_tarball_cause(tmp_path, shim):
+    root = _sg13g2_tree(tmp_path, shim=shim)
+
+    report = list_pdk_pcells(variant="ihp-sg13g2", root=str(root))
+
+    entry = report["unavailable"][0]
+    assert entry["package"] == "sg13g2_pycell_lib"
+    assert entry["missing_dependency"] == "cni"
+    assert "release tarball omits git submodules" in entry["reason"]
+    assert "https://github.com/IHP-GmbH/pycell4klayout-api" in entry["reason"]
+    assert "Traceback" not in entry["reason"]
+
+
+@pytest.mark.parametrize(
+    ("shim", "expected"),
+    [("absent", "missing"), ("empty", "missing"), ("populated", "present")],
+)
+def test_find_pdk_reports_pcell_shim_state(tmp_path, shim, expected):
+    root = _sg13g2_tree(tmp_path, shim=shim)
+
+    report = pdk.find_pdk(variant="ihp-sg13g2", root=str(root))
+
+    assert report["has_pcell_library"] is True
+    assert report["pcell_shim"] == expected
+    listed = pdk.list_pdks(root=str(root))["installs"][0]["variants"][0]
+    assert listed["pcell_shim"] == expected
+
+
+def test_find_pdk_pcell_shim_not_required_for_shimless_package(tmp_path):
+    root = tmp_path / "pdk_install"
+    variant_dir = _make_install(root, "sky130A")
+    _write_package(variant_dir, "cells", "")
+
+    report = pdk.find_pdk(variant="sky130A", root=str(root))
+
+    assert report["has_pcell_library"] is True
+    assert report["pcell_shim"] == "not_required"
+
+
+def test_find_pdk_pcell_shim_not_required_without_pcell_library(tmp_path):
+    root = tmp_path / "pdk_install"
+    _make_install(root, "sky130A")
+
+    assert pdk.find_pdk(variant="sky130A", root=str(root))["pcell_shim"] == (
+        "not_required"
+    )
+
+
+def test_cli_pdk_find_text_surfaces_missing_shim(tmp_path, capsys):
+    root = _sg13g2_tree(tmp_path, shim="empty")
+
+    code = main(
+        [
+            "pdk",
+            "find",
+            "--pdk",
+            "ihp-sg13g2",
+            "--pdk-root",
+            str(root),
+            "--format",
+            "text",
+        ]
+    )
+
+    assert code == 0
+    assert "pcell_shim: missing" in capsys.readouterr().out

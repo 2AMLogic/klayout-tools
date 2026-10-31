@@ -272,6 +272,26 @@ analysis/solver runs. This applies to the top level and to every nested object
 A key that is valid in a *different* section is still unknown in the section it
 appears in.
 
+**Inline annotations (`_comment`, issue #2822).** The one exception is the
+exact key `_comment`, accepted in every object listed above (top level and
+each entry of an array). Its value may be any JSON value (string, array,
+object, number, boolean, `null`) and is opaque: it is never validated or
+interpreted, keys inside it are not spec fields, and it does not satisfy any
+required field of the object that carries it. The spec file is not rewritten,
+so provenance hashes still cover the exact bytes you supplied. Nothing else is
+exempt -- `_commment`, `_other`, `$comment` and any other key are still
+rejected with the full field path.
+
+```json
+{
+  "_comment": ["two-plate test structure"],
+  "stackup_from_pdk": {"_comment": "met1 from sky130A", "pdk": "sky130A",
+                       "layers": ["met1"]},
+  "ports": [{"_comment": "driven end", "position_um": 0.0},
+            {"position_um": 1.0}]
+}
+```
+
 The reason is version skew: a spec written against a newer `klt` that carries a
 field this build predates would otherwise run green and report the older
 semantics, indistinguishable from a spec that never asked for the field. Upgrade
@@ -461,10 +481,10 @@ boxes share one current-flow axis and axial extent:
   scope**: the coax shield's four wall segments in "Worked example: coax"
   below sit on two *different* current-flow axes (north/south run along one
   axis, east/west along the perpendicular one), so that shape is still
-  rejected — see the general Ruehli mesh note below. That remains a
-  follow-up beyond increments (i) and (ii). (A *connected, non-branching
-  winding* — an L/U trace or a square spiral — is the exception: see "Series
-  windings" below.)
+  rejected — see the general Ruehli mesh note below. Coax-style (non-path)
+  mixed-axis shapes stay rejected. (A *connected, non-branching winding* —
+  an L/U trace or a square spiral — is the exception: see "Series windings"
+  below.)
 - **A true 3-D bar.** All three of a box's extents (x, y, z) must be
   non-zero — a flat, zero-thickness plate (fine for capacitance) has no
   cross-sectional area to carry current.
@@ -489,8 +509,9 @@ special case. A rectangular loop, a single straight bar, an L-shaped trace
 length or axial position), and a multi-box conductor whose boxes share one
 axis (e.g. a dual-strip rail — "Worked example: multi-box conductor" below)
 all satisfy this scope; a coax shield (mixed-axis boxes within one
-conductor) or a pad (not elongated enough to have a well-defined
-current-flow axis) do not (yet).
+conductor, i.e. a non-path shape) or a pad (not elongated enough to have a
+well-defined current-flow axis) do not. A connected, non-branching
+mixed-axis winding is supported — see "Series windings" below.
 
 ### Method: filament bundle + Neumann's formula
 
@@ -581,10 +602,10 @@ partial self inductance; the output shape is unchanged.
   own canonical direction.
 - **Still rejected:** branches (T junctions), disconnected or overlapping
   boxes, closed loops, and ambiguous corner geometry (messages name the
-  failing condition, after the mixed-axis diagnostic above), and **any
-  winding together with `frequencies_hz`** — the retarded sweep has no
-  series-path model yet
-  ([#2730](https://github.com/2AMLogic/klayout-tools/issues/2730)).
+  failing condition, after the mixed-axis diagnostic above). A winding
+  together with `frequencies_hz` is accepted since
+  [#2730](https://github.com/2AMLogic/klayout-tools/issues/2730) — see
+  "Series windings in the frequency sweep" below.
 
 ### Reading the inductance matrix
 
@@ -618,6 +639,9 @@ and why. This applies independent of whether `compute_inductance` is also
 set in the same request. A multi-box conductor's several boxes are combined
 into one equivalent thin wire (summed cross-sectional area, area-weighted
 transverse centroid) before the retarded-kernel solve below.
+
+A conductor that is a connected, non-branching mixed-axis winding is also
+accepted — see "Series windings in the frequency sweep" below.
 
 Since [issue #1842](https://github.com/2AMLogic/klayout-tools/issues/1842),
 conductors no longer need to share a current-flow axis or axial extent for
@@ -703,6 +727,63 @@ fraction of that self-capacitance's field lines terminate "at infinity"
 rather than on the other conductor, so it alone over-counts the capacitance
 the telegrapher-equation model needs. See
 `native/mom/src/fullwave.rs`'s module docs for the full derivation.
+
+### Series windings in the frequency sweep
+
+A conductor that classifies as a series winding (see "Series windings
+(static solve)" above) is accepted together with `frequencies_hz`
+([issue #2730](https://github.com/2AMLogic/klayout-tools/issues/2730)). It
+is **not** collapsed to one straight wire: each electrical leg
+(centreline vertex to vertex) is meshed on its own, every cell carrying its
+leg's signed unit direction, length and equal-area radius, and the double
+integral above is summed over cell pairs with `u_p . u_q` and both lengths
+evaluated per cell pair. Perpendicular legs — including the two meeting at
+a turn — therefore couple by exactly zero, antiparallel legs subtract, and
+the same unit terminal current flows through every leg (legs are in
+series). `impedance_matrix_*_ohm[j][j]` is the winding's
+terminal-to-terminal **partial self impedance**, and `[j][k]` its partial
+mutual impedance to conductor `k`, both signed by the winding's canonical
+traversal direction (the lexicographically smaller terminal first; reversing
+a conductor flips the sign of its mutual terms, not of its self term). The
+output shape is unchanged.
+
+The terminal-impedance contract, in full:
+
+- **Series impedance only.** `Z` is the retarded series impedance of the
+  path. The shunt capacitance matrix (`capacitance_matrix_ff`) is the static
+  Maxwell matrix of the drawn boxes and is reported next to it, but it is
+  **not** folded into `Z`: no inter-turn or substrate capacitance, hence no
+  self-resonance. Read a winding's `Z` only well below its first
+  self-resonance.
+- **Supported regime.** Electrically small to moderate structures: the
+  path's total length should stay well under a wavelength in the background
+  medium (`k * length` of order one at most; retardation is modelled, shunt
+  coupling is not). The cell size must resolve the wire: the
+  point-collocation self term converges only when `segment_size_um` is
+  comparable to or below the equivalent radius (measured: 4 µm cells on a
+  1.13 µm-radius wire are 9% off the converged value, 1 µm cells 0.03%).
+  The converged answer is the thin-wire kernel's, which sits
+  `mu0/(2*pi) * length * ln(a / GMD)` below the static PEEC series
+  inductance (the retarded fill is a surface-current wire of radius `a`,
+  PEEC a uniform-current square bar): 5.5% on the validation U, and it
+  shrinks as the legs get longer relative to their width.
+- **Corners** follow the static solver's volume-conserving centreline
+  convention. Different legs of one winding use their true centre-to-centre
+  distance; the thin-wire regularisation applies only inside a leg.
+- **No line quantities, no ports.** A winding is not a uniform line, so no
+  `characteristic_impedance_*`, `attenuation_np_per_m` or `phase_rad_per_m`
+  are reported. A request that combines a winding with `ports`
+  (S-parameters, de-embedding, Touchstone export) is **rejected** with an
+  explicit error: a port position is an offset along one straight axial
+  span, and no path-port contract has been validated.
+
+Validation: `native/mom/src/fullwave.rs` (L = sum of perpendicular legs;
+U = signed-leg reduction; mutual-sign agreement; port rejection),
+`tests/test_mom_fullwave_validation.py` (low-frequency limit against the
+static series inductance of #2729, refinement convergence) and
+`tests/test_mom_cross_validation.py` (bent-path driving-point impedance
+against NEC2++); numbers in `docs/design/mom-validation.md` and
+`docs/design/mom-cross-validation.md`.
 
 ### Worked example: two-wire transmission line
 
@@ -1115,23 +1196,36 @@ oracles), for the exact geometry and measured accuracy.
   canonical two-port transmission-line case — the same two-conductor
   restriction the characteristic-impedance/propagation-constant derivation
   already has. A general N-port network (more than two conductors/ports) is
-  a follow-up beyond this MVP, delivered by
-  [#894](https://github.com/2AMLogic/klayout-tools/issues/894), Phase 2b of
-  epic #701.
+  not supported. A request combining a series winding with `ports` is
+  rejected with a diagnostic — see "Series windings in the frequency sweep"
+  above. Phase 2b of epic #701
+  ([#894](https://github.com/2AMLogic/klayout-tools/issues/894)) delivered
+  the two-port case.
+- **Series-winding restrictions.** A connected, non-branching winding
+  ("Series windings (static solve)", "Series windings in the frequency
+  sweep" above) is accepted; branched, disconnected/overlapping, closed-loop
+  and ambiguous-corner shapes and curved polygons are rejected. A winding
+  combined with `ports` is rejected and reports no `Z0`/`gamma`/S-parameters.
+  The sweep gives series `Z` only (no shunt C or self-resonance), needs cell
+  size about the trace width, carries the documented 5.5% thin-wire vs PEEC
+  kernel offset, and is valid only well below self-resonance (`k*length`
+  of order 1 or less).
 - **PEEC inductance/resistance and the full-wave solve are both
   bar-shaped-conductors-only (MVP).** See "PEEC inductance/resistance"
   above's "bar-shaped-conductor MVP restriction" — a materially narrower
   scope than the capacitance solve's (every box true 3-D and elongated; a
   conductor may contribute more than one box as long as its own boxes share
-  one axis/extent — a request mixing axes within one conductor, e.g. a coax
-  shield's wall segments, remains out of scope). A request that does not
+  one axis/extent, or form a connected, non-branching winding — a request
+  mixing axes within one conductor in any other shape, e.g. a coax shield's
+  wall segments, is rejected). A request that does not
   fit is rejected with a clear error naming which restriction it violates,
   not silently approximated. Since
   [issue #1842](https://github.com/2AMLogic/klayout-tools/issues/1842),
   conductors no longer need to share a current-flow axis or axial extent —
   a coiled/spiral winding or an L-shaped loop is in scope, provided every
-  box is still a bar-shaped box and each conductor's own boxes stay on one
-  axis. The full-wave solve's derived
+  box is still a bar-shaped box and each conductor's own boxes either stay on
+  one axis or form a connected, non-branching winding (see "Series
+  windings" above). The full-wave solve's derived
   characteristic-impedance/propagation-constant
   fields are further restricted to exactly two conductors that *do* share
   one axis and axial span (the canonical transmission-line case); a request

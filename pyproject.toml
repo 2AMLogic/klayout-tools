@@ -1,6 +1,9 @@
 [project]
 name = "klayout-tools"
-version = "0.7.0"
+# The version is computed at build time from `[tool.hatch.version]`'s
+# `base-version` plus the checkout's git facts (issue #2823) -- see that
+# table below.
+dynamic = ["version"]
 description = "Tools for AI agents to work with IC layout (GDSII/OASIS via KLayout)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -33,51 +36,33 @@ klt = "klayout_tools.cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    # Report-only coverage measurement (issue #3223): one CI leg runs pytest
+    # with --cov and publishes per-module line+branch numbers. See
+    # docs/guides/test-coverage.md.
+    "pytest-cov>=5.0",
     "ruff>=0.14",
+    # Type-check ratchet (issue #3221): scripts/check_type_baseline.py.
+    # Pinned to a major so diagnostics (and thus type-baseline.json) stay
+    # stable between releases.
+    "mypy>=2.4,<3",
     # Lets tests/test_mcp_server.py run its stdio round-trip in CI. Dev-only:
     # the test importorskip()s `mcp`, so the suite also passes without it.
-    "mcp>=1.10,<2",
+    "mcp>=2.0,<3",
 ]
 # Backs `klt mcp serve` (issue #2830): the stdio MCP bridge over the verb
 # registry. Optional so the base install gains no dependency.
 mcp = [
-    "mcp>=1.10,<2",
+    "mcp>=2.0,<3",
 ]
-# Backs the `klt functional-verification` verb (issue #422, Phase 3 of Epic
-# #391) -- not a runtime dependency of any shipped `klt` command, so it is its
-# own extra rather than folded into `dependencies` or `dev`.
+# Backs the `klt functional-verification` verb (issue #422, epic #391). Its own
+# extra: not a runtime dependency of any shipped `klt` command.
 #
-# History, kept because the now-removed marker is still cited as current in
-# docs/design/sdf-annotate-feasibility-spike.md and scripts/research/ (both
-# captured records, deliberately not re-edited): this extra used to carry a
-# `python_version < "3.14"` environment marker, per
-# docs/design/cocotb-verification-spike.md's finding (issue #423). cocotb
-# 2.0.1's own PyPI metadata declared `Requires-Python: >=3.6.2` with **no
-# upper bound** (verified against PyPI's JSON API), so pip/uv's resolver had no
-# signal that Python 3.14 was unsupported -- `pip install cocotb` under a 3.14
-# interpreter proceeded to build the package, then failed with cocotb's own
-# internal check: `RuntimeError: cocotb 2.0.1 only supports a maximum Python
-# version of 3.13` (verified live). The marker moved that failure to
-# dependency-*resolution* time -- the standard, idiomatic way pip/uv already
-# handle a package with no distributable release for a given interpreter --
-# rather than a confusing traceback surfacing from deep inside cocotb's own
-# build backend.
-#
-# The marker was dropped in issue #2593, once the claim it stood in for became
-# verifiable instead of assumed: cocotb 2.1.0 (this pin, bumped in issue #2583)
-# added Python 3.14 support and ships cp314 wheels, and
-# `.github/workflows/ci.yml`'s `test` matrix now carries a real 3.14 leg that
-# installs this extra. Deciding measurement, run 2026-09-28 before lifting it:
-# `uv sync --locked --python 3.14 --extra dev --extra functional-verification`
-# resolves the full 82-package set with no conflicts and installs
-# `cocotb==2.1.0` from a genuine cp314 wheel (`import cocotb` and
-# `cocotb-config --version` both report 2.1.0 under CPython 3.14.7).
-#
-# Before widening this pin past `<2.2`, re-run that measurement and check the
-# CI matrix still covers every interpreter `requires-python` claims: if a
-# future cocotb line reintroduces a real ceiling, the right answer is a marker
-# again (plus a matching guard in `klt functional-verification`), not a silent
-# install-time failure.
+# Before widening this pin past `<2.2`, re-run the Python 3.14 measurement
+# (`uv sync --locked --python 3.14 --extra dev --extra functional-verification`)
+# and check the CI `test` matrix covers every interpreter `requires-python`
+# claims. If a cocotb line reintroduces a ceiling (its PyPI metadata declares no
+# upper bound), restore a `python_version` marker plus a guard in the verb
+# (history: issues #423, #2583, #2593).
 functional-verification = [
     "cocotb>=2.1.0,<2.2",
 ]
@@ -164,46 +149,22 @@ mom-pypeec-cross-validation = [
     "pypeec>=5.8,<6",
 ]
 
-# Backs `klt mom` (issue #718, Phase 0/1 of the Method-of-Moments epic #701):
-# the `klt_mom_native` pyo3 extension whose crate lives in `native/mom/`, this
-# repo's first Rust component.
+# Checkout-local Rust (pyo3) extensions, built from `native/<name>/` via
+# `[tool.uv.sources]` below. They are dependency groups, not extras, for two
+# reasons:
+#   1. Building needs a `cargo` toolchain that a plain
+#      `pip install klayout-tools` cannot assume; each verb fails cleanly with a
+#      build pointer when its extension is absent (e.g. docs/cli/mom.md).
+#   2. They resolve from in-repo paths, so an extra would publish a package
+#      into the wheel metadata that does not exist on PyPI. Groups never land
+#      in published metadata.
 #
-# It is a PEP 735 **dependency group**, not a `[project.optional-dependencies]`
-# extra, on purpose. Two reasons:
-#   1. Building it needs a Rust toolchain (`cargo`) that a plain
-#      `pip install klayout-tools` cannot assume -- every other `klt` verb must
-#      stay installable with no Rust in sight, and `klt mom` fails cleanly with
-#      a build pointer when the extension is absent (see docs/cli/mom.md).
-#   2. It resolves from an in-repo path (`[tool.uv.sources]` below), so it only
-#      exists in a checkout. An extra would publish `klt-mom-native` into the
-#      wheel's own metadata, and `pip install klayout-tools[mom]` from PyPI
-#      would then fail with "no matching distribution" -- there is no such
-#      package on PyPI. Dependency groups are checkout-local by design and
-#      never land in published metadata.
-#
-# `native/congestion/` (issue #785, Epic #700 Phase 1 §3.6 of
-# `docs/design/place-and-route-improvements-survey.md`): the
-# `klt_congestion_native` pyo3 extension backing the FLUTE/RUDY-family
-# post-placement congestion pre-check research spike. Same two reasons as
-# `mom` above (optional Rust toolchain, in-repo-only path source) -- this is
-# a research/library component, not a shipped `klt` CLI verb, so it is
-# likewise a dependency group rather than an installable extra.
-#
-# `native/yield/` (issue #816, Phase 1a of the statistical/yield epic #710):
-# the `klt_yield_native` pyo3 extension backing `klt yield`'s statistics core
-# (distribution fit, exact + parametric yield estimates with confidence
-# intervals, Cp/Cpk, sample-size verdict). Same two reasons as `mom` above --
-# an optional Rust toolchain and an in-repo-only path source -- so `klt yield`
-# likewise fails cleanly with a build pointer when the extension is absent
-# (see docs/cli/yield.md).
-#
-# `native/statime/` (issue #809, promoted from a plain-binary spike to a
-# production pyo3 extension by issue #925, Epic #704 Phase 3): the
-# `klt_statime_native` extension backing `klt synthesize`'s integrated `sta`
-# critical-path report. Same two reasons as `mom` above -- an optional Rust
-# toolchain and an in-repo-only path source -- so `klt synthesize`'s `sta`
-# field degrades to `null` (never a hard failure) when the extension is
-# absent, per `klayout_tools/sta.py`'s own docstring.
+# - `mom`: `klt_mom_native` backing `klt mom` (issue #718, epic #701).
+# - `congestion`: `klt_congestion_native`, FLUTE/RUDY post-placement
+#   congestion research spike (issue #785); no shipped `klt` verb.
+# - `yield`: `klt_yield_native` backing `klt yield` (issue #816, epic #710).
+# - `statime`: `klt_statime_native` backing `klt synthesize`'s `sta` report
+#   (issues #809/#925); the field degrades to `null` when absent.
 [dependency-groups]
 mom = [
     "klt-mom-native",
@@ -220,44 +181,24 @@ yield = [
 statime = [
     "klt-statime-native",
 ]
-# `numerical` (issue #2276): the full-strength numerical-oracle surface --
-# numpy as a *test-only* cross-check oracle for this repo's pure-Python
-# numerical code (the conjugate-gradient IR solver behind `klt power`,
-# `src/klayout_tools/ir_solver.py`, and `sim.py`'s Monte Carlo statistics).
-# It is NOT a runtime dependency and does not move the contract that
-# docstring itself states ("No numpy/scipy: klayout-tools's runtime
-# dependency set is deliberately just klayout/jsonschema"): nothing under
-# `src/klayout_tools/` imports numpy, and a PEP 735 dependency group is
-# never installed by a plain `pip install klayout-tools` -- it exists only
-# for checkouts that ask for it (`uv sync --group numerical`), same
-# checkout-local reasoning as the four Rust groups above.
+# `numerical` (issue #2276): numpy as a *test-only* cross-check oracle for the
+# pure-Python numerical code (`ir_solver.py`, `sim.py` Monte Carlo statistics),
+# used by `tests/test_ir_solver_numpy_crosscheck.py` and the `test-numerical` CI
+# job. Not a runtime dependency; the tests skip without it
+# (docs/guides/dependency-gated-ci.md).
 #
-# A dependency *group*, not a `[project.optional-dependencies]` extra,
-# on purpose: an extra advertises itself to end users installing the
-# package (`pip install klayout-tools[numerical]` would land in the wheel's
-# published metadata), while this oracle exists solely for this repo's own
-# cross-check suite (`tests/test_ir_solver_numpy_crosscheck.py`) and its
-# dedicated CI job (`test-numerical` in .github/workflows/ci.yml).
-# Everywhere numpy's absence is the *declared* state -- the test module
-# skips itself wholesale via `pytest.importorskip("numpy")`, and a
-# stdlib-only host is expected to see exactly that skip, never a failure
-# and never a silent false-pass. See
-# docs/guides/dependency-gated-ci.md for the full skip/refuse/fail
-# convention this group exists to serve.
-#
-# `>=2.2` with deliberately no upper cap. numpy 2.3 dropped Python 3.10
-# (this repo's `requires-python` floor), so 2.2.x is the newest line that
-# still resolves across the whole supported range 3.10-3.13 -- but capping
-# at `<2.3` would reach into the one place numpy already resolves in
-# `uv.lock` today (PyNEC's transitive dependency for the `mom-cross-
-# validation` extra: 2.4.6 on 3.11, 2.5.2 on >=3.12) and silently force a
-# downgrade there. The uncapped floor instead lets the universal lock keep
-# its per-interpreter markers exactly as they are: 2.2.x on 3.10 (where
-# this group is the only requester) and the existing 2.4.6/2.5.2 on 3.11+,
-# unchanged for every surface that already synced numpy.
+# `>=2.2` with no upper cap: 2.2.x is the newest line that resolves on Python
+# 3.10, and capping at `<2.3` would force a downgrade of the numpy that
+# PyNEC's `mom-cross-validation` extra already resolves in `uv.lock`.
 numerical = [
     "numpy>=2.2",
 ]
+
+[tool.uv]
+# The editable install's metadata version is computed from git facts (issue
+# #2823, `[tool.hatch.version]` below), so uv must rebuild it when the commit
+# or tags move -- not only when pyproject.toml changes (uv's default key).
+cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
 
 [tool.uv.sources]
 klt-mom-native = { path = "native/mom" }
@@ -284,20 +225,87 @@ packages = ["src/klayout_tools"]
 [tool.hatch.build.targets.wheel.force-include]
 "docs/design-evidence-tiers.md" = "klayout_tools/data/design-evidence-tiers.md"
 
+# Distribution version (issue #2823). `base-version` is the release this
+# checkout is at or working towards -- bump it here (then `uv lock`) when
+# cutting a release, see RELEASING.md. The version a wheel/sdist actually
+# declares is computed by `hatch_build.py`'s version source from it plus the
+# checkout's git facts (`src/klayout_tools/_version_scheme.py`):
+#   clean tree exactly on tag vX.Y.Z  -> X.Y.Z
+#   after the released tag            -> X.Y.(Z+1).devN+g<sha>[.dirty]
+#   before the base is tagged         -> X.Y.Z.devN+g<sha>[.dirty]
+#   no git facts at all               -> X.Y.Z.dev0+unknown
+# Only the first is the bare public version, so a resolver can never satisfy
+# `klayout-tools==X.Y.Z` with a post-tag/dirty/unknown build -- the previous
+# static `version` let a cached dev build masquerade as the release.
+#
+# Hatchling has no `custom` version-source plugin, so the built-in `code`
+# source loads `hatch_build.py` by path and evaluates the expression below;
+# `version_from_pyproject()` reads `base-version` back out of this table.
+[tool.hatch.version]
+source = "code"
+path = "hatch_build.py"
+expression = "version_from_pyproject()"
+base-version = "0.8.0"
+
 # Build identity (issue #1202). `hatch_build.py` records the commit/tag/dirty
-# state of the checkout each distribution is built from into a generated
-# `klayout_tools/_build_info.py`, so `klt --version` can tell a tagged release
-# apart from a post-tag source build carrying the same `version` string above.
-# The package `version` deliberately stays static -- this adds a *build*
-# identity beside it, it does not make the package version dynamic. Policy
-# (what counts as a release) lives in `src/klayout_tools/build_identity.py`;
-# the hook only records raw git facts.
+# state of the checkout each distribution is built from (plus the version the
+# version source above chose) into a generated `klayout_tools/_build_info.py`,
+# so `klt version` can report the git facts behind the version, and a wheel
+# rebuilt from the sdist (no `.git`) keeps the originating version. Policy
+# (what counts as a release) lives in `src/klayout_tools/build_identity.py`
+# and `_version_scheme.py`; the hook only records facts.
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+# Report-only coverage (issue #3223): no `fail_under` on purpose -- measure
+# first, ratchet later. `_vendor/` is third-party code kept byte-exact.
+[tool.coverage.run]
+source = ["klayout_tools"]
+branch = true
+omit = ["*/klayout_tools/_vendor/*"]
+
+[tool.coverage.report]
+show_missing = false
+skip_empty = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.mypy]
+# Baseline-ratchet type check (issue #3221); see scripts/check_type_baseline.py
+# and docs/type-checking.md. Not `strict`: the baseline records today's
+# diagnostics and the ratchet only blocks new ones.
+files = ["src"]
+python_version = "3.10"
+ignore_missing_imports = false
+show_error_codes = true
+show_column_numbers = true
+pretty = false
+
+# KLayout's Python bindings ship no usable type information.
+[[tool.mypy.overrides]]
+module = ["pya", "pya.*", "klayout", "klayout.*"]
+ignore_missing_imports = true
+
+# Stricter bar for the JSON-contract envelope modules: they must stay fully
+# annotated (and are why `src/klayout_tools/py.typed` ships, issue #3221).
+[[tool.mypy.overrides]]
+module = ["klayout_tools.cli.output", "klayout_tools.signoff_envelopes"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+# Optional-extra / stub-less third parties that are legitimately absent or
+# untyped in the dev environment (cocotb is the `functional-verification`
+# extra; jsonschema ships no inline types). Without this they would surface
+# as import-not-found / import-untyped, which the ratchet refuses to baseline.
+[[tool.mypy.overrides]]
+module = ["cocotb", "cocotb.*", "cocotb_tools", "cocotb_tools.*", "jsonschema", "jsonschema.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py310"
@@ -331,6 +339,21 @@ select = [
     "I",   # isort (import order)
     "UP",  # pyupgrade
     "B",   # flake8-bugbear
+    # flake8-bandit: explicit high-signal subset (NOT blanket "S"). S101
+    # (assert), S603/S607 (subprocess by design) and S105 (false-positive
+    # "password" strings) stay off as pure noise (issue #3222).
+    "S102",  # exec
+    "S108",  # hardcoded /tmp
+    "S202",  # tarfile extractall
+    "S301",  # pickle
+    "S307",  # eval
+    "S310",  # urlopen scheme
+    "S314",  # stdlib xml parsing
+    "S324",  # weak hashes
+    "S506",  # unsafe yaml load
+    "S602",  # subprocess shell=True
+    "S604",  # shell=True call
+    "S605",  # os.system-style shell
 ]
 
 [tool.ruff.lint.mccabe]
@@ -358,3 +381,9 @@ max-complexity = 10
 # reviewer can diff against the origin unmodified -- reflowing them to satisfy
 # this repo's 88-column style would itself be an undisclosed change.
 "src/klayout_tools/_vendor/mutation_variants.py" = ["E501"]
+# Security rules (issue #3222) target shipped code. Tests, examples and research
+# scripts parse repo-controlled/just-built files and use throwaway "/tmp/..."
+# string fixtures that are never opened, so S108/S314/S202 are pure noise there.
+"tests/**" = ["S108", "S202", "S314"]
+"examples/**" = ["S108", "S314"]
+"scripts/**" = ["S108", "S314"]

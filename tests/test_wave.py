@@ -31,13 +31,13 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import jsonschema
 import pytest
 
 from klayout_tools import wave
+from klayout_tools._native import build_cargo_binary
 from klayout_tools.wave import WaveError, run_wave_build, run_wave_query
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -302,13 +302,10 @@ pytestmark_integration = pytest.mark.skipif(
 
 def _wave_binary() -> str:
     """Build (debug profile -- functional correctness only, no lto) and
-    return the real `klt-wave` binary path, mirroring
+    return the real `klt-wave` binary path as cargo reports it, wherever the
+    target directory is (issue #3189) -- mirroring
     `test_techmap_equiv_gate.py::_techmap_binary`'s own convention."""
-    binary = Path(wave._WAVE_CRATE_DIR) / "target" / "debug" / "klt-wave"
-    if not binary.is_file():
-        subprocess.run(["cargo", "build"], cwd=wave._WAVE_CRATE_DIR, check=True)
-    assert binary.is_file(), f"cargo build did not produce {binary}"
-    return str(binary)
+    return build_cargo_binary(wave._WAVE_CRATE_DIR, "klt-wave")
 
 
 @pytest.mark.skipif(not HAVE_CARGO, reason="cargo is not installed on this machine")
@@ -322,15 +319,10 @@ def test_build_then_query_modexp_canary_counts_done_handshakes(tmp_path, monkeyp
     assert MODEXP_FIXTURE.is_file(), f"missing committed fixture: {MODEXP_FIXTURE}"
 
     binary = _wave_binary()
-    debug_dir = Path(binary).parent
     # `_binary_path()` prefers a release build; force it to resolve the
-    # debug build this test just ensured exists, without requiring a full
-    # (slower) release compile in CI.
-    monkeypatch.setattr(
-        wave,
-        "_binary_path",
-        lambda: str(debug_dir / "klt-wave"),
-    )
+    # debug build this test just built, without requiring a full (slower)
+    # release compile in CI.
+    monkeypatch.setattr(wave, "_binary_path", lambda: binary)
 
     store_path = tmp_path / "modexp_canary.klwave"
     build_request = {

@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:11:07.201333+00:00",
+  "slug": "sg13g2-noc",
+  "name": "Sg13G2 Noc",
+  "description": "Narrow network-on-chip mesh on IHP SG13G2 \u2014 2AM Logic canary block",
+  "pdk": "sg13g2",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Topology",
+        "target": "2 x 2 mesh, 5-port routers",
+        "fallback": "1 router + 2 endpoints",
+        "stretch": "4 x 4 mesh"
+      },
+      {
+        "parameter": "Routing",
+        "target": "dimension-ordered (XY), deadlock-free by construction"
+      },
+      {
+        "parameter": "Link",
+        "target": "32-bit narrow flit, credit-based flow control, 4-flit input buffers, no virtual channels (`spec/decisions/0002`)",
+        "stretch": "64-bit"
+      },
+      {
+        "parameter": "Endpoints",
+        "target": "traffic generator + checker per node",
+        "stretch": "AXI4-Lite endpoint"
+      },
+      {
+        "parameter": "Signoff clock (post-route STA, slow corner)",
+        "target": "100 MHz",
+        "fallback": "50 MHz",
+        "stretch": "200 MHz"
+      },
+      {
+        "parameter": "Correctness",
+        "target": "no flit loss, duplication or reordering per source\u2013destination pair"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean, STA closed at every ratified corner (slow 1.08 V/125 \u00b0C, typ 1.20 V/25 \u00b0C, fast 1.32 V/\u221240 \u00b0C)"
+      }
+    ],
+    "status_note": "ratified 2026-10-20 by the merge of #6; see [spec/noc.md](spec/noc.md"
+  },
+  "source": {
+    "repo": "2AMLogic/sg13g2-noc",
+    "ref": "89d4616b08884fe12797a83d28cef0a358d56a8b",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

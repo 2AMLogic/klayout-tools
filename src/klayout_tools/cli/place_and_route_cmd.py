@@ -6,11 +6,14 @@ every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/place-and-route.md`` for the full table):
     0 - place-and-route reached (at least) the requested target_stage
+        (for a `pdk.rebuild_corners` request: in every corner)
     1 - failed to run (bad request, unresolvable netlist/PDK/LEF, a
         floorplan spec with more than one method set, or an OpenROAD engine
         error that stops the run before reaching the requested
         target_stage) -- returned by ``emit_error`` as
-        ``output.ERROR_EXIT_CODE``
+        ``output.ERROR_EXIT_CODE``; also a `pdk.rebuild_corners` request in
+        which any corner's unit failed (the aggregated report is still
+        emitted, with the failure in that corner's `corner_runs` entry)
     3 - ``--check`` only: the committed report no longer reproduces
         (``status: "drifted"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
@@ -30,13 +33,14 @@ gate-level netlist and liberty and compare against the recorded
 import argparse
 import sys
 
+from ..output_lock import OutputLockError
 from ..place_and_route import (
     PlaceAndRouteError,
     check_place_and_route_report,
     rerun_place_and_route_report,
     run_place_and_route,
 )
-from .output import emit_error, emit_success, render_rerun_drift
+from .output import emit_error, emit_success, render_check_text, render_rerun_drift
 
 #: Aliases for the --check/--rerun outcome (issue #2224) -- the same 0/3
 #: split `klt drc --check` uses. This verb has no exit 3 of its own (see this
@@ -49,6 +53,12 @@ EXIT_DRIFTED = 3
 
 def run(args: argparse.Namespace) -> int:
     if args.check is not None:
+        if args.resume:
+            return emit_error(
+                "place-and-route",
+                "--resume cannot be combined with --check",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
@@ -58,12 +68,29 @@ def run(args: argparse.Namespace) -> int:
 
     try:
         report = run_place_and_route(
-            args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root
+            args.request,
+            pdk_variant=args.pdk,
+            pdk_root=args.pdk_root,
+            backend=args.backend,
+            resume=args.resume,
         )
     except PlaceAndRouteError as exc:
-        return emit_error("place-and-route", str(exc), args.format)
+        return _emit_flow_error(exc, args.format)
+    except OutputLockError as exc:
+        return emit_error("place-and-route", str(exc), args.format, code=exc.code)
 
     emit_success(report, args.format, _print_text)
+    if "corner_runs" in report:
+        # Issue #3507: a `pdk.rebuild_corners` request emits its aggregated
+        # report either way; a unit that failed still fails the command.
+        # Each unit's own #2086 warnings go to stderr too, corner-prefixed.
+        for run in report["corner_runs"]:
+            for warning in run.get("warnings", ()):
+                print(
+                    f"klt place-and-route: warning: [{run['corner']}] {warning}",
+                    file=sys.stderr,
+                )
+        return 0 if report["status"] == "ok" else 1
     # Issue #2086: the response's own `warnings` list also goes to stderr,
     # in *both* formats. A run that placed no tapcells, no PDN and no
     # fillers is the failure mode this exists for -- it completes, exits 0,
@@ -75,6 +102,14 @@ def run(args: argparse.Namespace) -> int:
         print(f"klt place-and-route: warning: {warning}", file=sys.stderr)
 
     return 0
+
+
+def _emit_flow_error(exc: PlaceAndRouteError, fmt: str) -> int:
+    """``emit_error`` carrying the batch backend's ``code``/``details``
+    (issue #3518); both are ``None`` for every local failure."""
+    return emit_error(
+        "place-and-route", str(exc), fmt, code=exc.code, details=exc.details
+    )
 
 
 def _run_check(args: argparse.Namespace) -> int:
@@ -92,6 +127,7 @@ def _run_check(args: argparse.Namespace) -> int:
                 args.request,
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
+                backend=args.backend,
             )
         else:
             result = check_place_and_route_report(
@@ -101,33 +137,44 @@ def _run_check(args: argparse.Namespace) -> int:
                 pdk_root=args.pdk_root,
             )
     except PlaceAndRouteError as exc:
-        return emit_error("place-and-route", str(exc), args.format)
+        return _emit_flow_error(exc, args.format)
+    except OutputLockError as exc:
+        return emit_error("place-and-route", str(exc), args.format, code=exc.code)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
-def _print_check_text(result: dict) -> None:
-    """`--format text` rendering of a cheap-mode `--check` result -- the same
-    shape `klt drc`/`klt lvs`/`klt extract` already print (issue #1106)."""
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")
+def _print_corner_runs_text(report: dict) -> None:
+    """`--format text` rendering of a `pdk.rebuild_corners` report (#3507)."""
+    print(f"engine: {report['engine']} {report['engine_version'] or ''}".rstrip())
+    print(f"hdl_toplevel: {report['hdl_toplevel']}")
+    print(f"status: {report['status']}")
+    print()
+    print("corner_runs:")
+    for run in report["corner_runs"]:
+        line = f"  {run['corner']}: {run['status']}"
+        if run["status"] == "ok":
+            line += f", worst_slack_ns={run['worst_slack_ns']}"
+        else:
+            line += f", error={run['error']}"
+        print(f"{line} ({run['output_dir']})")
 
 
 def _print_text(report: dict) -> None:
+    if "corner_runs" in report:
+        _print_corner_runs_text(report)
+        return
     print(f"engine: {report['engine']} {report['engine_version'] or ''}".rstrip())
     print(f"hdl_toplevel: {report['hdl_toplevel']}")
     print(f"status: {report['status']}")
     print(f"stage_reached: {report['stage_reached']}")
     print(f"seed: {report['seed']}")
+    if "resume" in report:
+        resumed = report["resume"]["resumed_stages"]
+        print(f"resumed_stages: {', '.join(resumed) if resumed else '(none)'}")
     print()
     print(f"die_area_um2: {report['die_area_um2']}")
     print(f"core_area_um2: {report['core_area_um2']}")

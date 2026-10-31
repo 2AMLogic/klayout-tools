@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import klayout.db as kdb
 
+    from .decks.extraction import LayerExpr
+
 
 def load_layout(path: str, error_cls: type[Exception]) -> kdb.Layout:
     """Validate ``path`` and read it into a fresh ``klayout.db.Layout``.
@@ -213,6 +215,34 @@ def region(
     if layer_index is None:
         return kdb.Region()
     return kdb.Region(cell.begin_shapes_rec(layer_index))
+
+
+def region_expr(
+    layout: kdb.Layout,
+    cell: kdb.Cell,
+    operand: tuple[int, int] | LayerExpr | None,
+) -> kdb.Region:
+    """A flattened ``Region`` for a drawn layer *or* a derived
+    :class:`~klayout_tools.decks.LayerExpr` (issue #2860).
+
+    A bare ``(layer, datatype)`` pair (or ``None``) is exactly
+    :func:`region`. An expression is evaluated bottom-up: ``"and"``
+    intersects every operand, ``"not"`` subtracts every later operand from
+    the first. A leaf layer absent from the stream reads as an empty region,
+    as it does for :func:`region` -- so an ``"and"`` over a missing layer is
+    empty and a ``"not"`` of a missing layer removes nothing.
+    """
+    if operand is None or isinstance(operand, tuple):
+        return region(layout, cell, operand)
+    result = region_expr(layout, cell, operand.operands[0])
+    for sub in operand.operands[1:]:
+        if operand.op == "and":
+            result = result & region_expr(layout, cell, sub)
+        elif operand.op == "not":
+            result = result - region_expr(layout, cell, sub)
+        else:  # pragma: no cover - LayerExpr.__post_init__ rejects this
+            raise ValueError(f"unknown LayerExpr op {operand.op!r}")
+    return result
 
 
 def complement_well_tie(

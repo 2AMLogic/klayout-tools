@@ -21,6 +21,7 @@ for the identical problem.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import uuid
@@ -134,7 +135,7 @@ _CONTAINER_RUNTIME_HINT_PREFIX = (
 )
 
 
-def _container_runtime_hint(completed: _OpenRoadResult) -> str | None:
+def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
     """``None``, or an actionable hint that ``openroad`` never really ran
     because its container runtime was unreachable (issue #2632).
 
@@ -171,28 +172,127 @@ def _container_runtime_hint(completed: _OpenRoadResult) -> str | None:
     that diagnosis means and what to do next. A caller that does not recognize
     either signature gets today's message byte-for-byte.
 
-    Deliberately **not** classified here: a ``docker`` binary missing from
-    ``$PATH`` after install, which surfaces as the wrapper's own bash
-    ``command not found`` (exit ``127``) -- a separable signature, left to a
-    follow-up rather than folded into an under-tested third branch.
+    Two further signatures are classified (issue #4440), the *environment*
+    failures a fleet worker hits when it cannot run OpenROAD at all:
+
+    - **Wrapper cannot find ``docker``** -- exit ``127`` plus a ``not found``
+      line naming ``docker`` (bash's ``command not found`` or sh's ``not
+      found``): the wrapper is installed but the container CLI is not.
+    - **Image missing** -- Docker's ``Unable to find image`` / ``pull access
+      denied`` / ``manifest unknown`` / ``No such image`` lines: the wrapper's
+      image was never pulled and cannot be.
+
+    When ``$KLT_SIM_BACKEND`` is ``batch`` (a dispatch host that is meant to
+    run OpenROAD on the fleet) the remedy names the fleet path instead of
+    local-install advice that cannot work on such a host.
     """
-    for stream in (completed.stdout or "", completed.stderr or ""):
-        for line in stream.splitlines():
-            lowered = line.lower()
-            if "permission denied" in lowered and "docker" in lowered:
-                return (
-                    f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- this user is not "
-                    "permitted to reach the container runtime's socket; grant "
-                    "it access (e.g. add the user to the 'docker' group, or "
-                    "use a rootless runtime), then retry"
-                )
-            if _CONTAINER_RUNTIME_UNREACHABLE_RE.search(line):
-                return (
-                    f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- verify the runtime "
-                    "is installed and its daemon is running ('docker info'), "
-                    "then retry; the request itself was never analyzed"
-                )
+    batch_host = os.environ.get(_BATCH_BACKEND_ENV) == "batch"
+    lines = [
+        line.lower()
+        for stream in (completed.stdout or "", completed.stderr or "")
+        for line in stream.splitlines()
+    ]
+    matchers = [_runtime_unreachable_hint]
+    if completed.returncode == 127:
+        matchers.append(_docker_missing_hint)
+    matchers.append(_image_missing_hint)
+    for matcher in matchers:
+        for lowered in lines:
+            hint = matcher(lowered, batch_host)
+            if hint:
+                return hint
     return None
+
+
+def _runtime_unreachable_hint(lowered: str, batch_host: bool) -> str | None:
+    """Socket-permission (checked first, narrower) or daemon-unreachable line."""
+    if "permission denied" in lowered and "docker" in lowered:
+        remedy = (
+            "this host runs OpenROAD on the batch fleet, not locally; " + _BATCH_REMEDY
+            if batch_host
+            else "grant it access (e.g. add the user to the 'docker' "
+            "group, or use a rootless runtime), then retry"
+        )
+        return (
+            f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- this user is not "
+            f"permitted to reach the container runtime's socket; {remedy}"
+        )
+    if _CONTAINER_RUNTIME_UNREACHABLE_RE.search(lowered):
+        remedy = (
+            "this host runs OpenROAD on the batch fleet, not locally; " + _BATCH_REMEDY
+            if batch_host
+            else "verify the runtime is installed and its daemon is "
+            "running ('docker info'), then retry; the request itself "
+            "was never analyzed"
+        )
+        return f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- {remedy}"
+    return None
+
+
+def _docker_missing_hint(lowered: str, batch_host: bool) -> str | None:
+    if "docker" in lowered and "not found" in lowered:
+        return (
+            f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- the wrapper ran "
+            "but the 'docker' command is not installed or not on "
+            f"PATH (exit 127); {_install_or_batch_remedy(batch_host)}"
+        )
+    return None
+
+
+def _image_missing_hint(lowered: str, batch_host: bool) -> str | None:
+    if any(marker in lowered for marker in _IMAGE_MISSING_MARKERS):
+        return (
+            f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- the OpenROAD "
+            "container image is not present and could not be pulled; "
+            f"{_install_or_batch_remedy(batch_host, pull=True)}"
+        )
+    return None
+
+
+#: Lowercased Docker lines meaning the wrapper's image is missing locally and
+#: cannot be fetched (issue #4440).
+#: ``klayout_tools.sim.BACKEND_ENV``, duplicated to avoid importing ``sim``.
+_BATCH_BACKEND_ENV = "KLT_SIM_BACKEND"
+
+_IMAGE_MISSING_MARKERS = (
+    "unable to find image",
+    "pull access denied",
+    "manifest unknown",
+    "no such image",
+)
+
+_BATCH_REMEDY = (
+    "submit with '--backend batch' (one pdk.rebuild_corners unit per job, "
+    "see place_and_route_batch) instead of fixing local Docker"
+)
+
+
+def _install_or_batch_remedy(batch_host: bool, *, pull: bool = False) -> str:
+    if batch_host:
+        return (
+            "this host runs OpenROAD on the batch fleet, not locally; " + _BATCH_REMEDY
+        )
+    if pull:
+        return (
+            "pull the image or rebuild it with "
+            "scripts/install-openroad-docker.sh, then retry"
+        )
+    return (
+        "install the container runtime (scripts/install-openroad-docker.sh), then retry"
+    )
+
+
+def _launch_failure_hint(exc: OSError) -> str:
+    """A named cause for ``openroad`` failing to launch at all (issue #4440):
+    binary absent from ``PATH`` versus another launch error."""
+    batch_host = os.environ.get(_BATCH_BACKEND_ENV) == "batch"
+    if isinstance(exc, FileNotFoundError):
+        cause = "the 'openroad' binary is not on PATH"
+    elif isinstance(exc, PermissionError):
+        cause = "the 'openroad' binary is not executable by this user"
+    else:
+        return ""
+    return f" -- {cause}; {_install_or_batch_remedy(batch_host)}"
 
 
 def _log_error_context(message: str, record: dict[str, Any]) -> str:
@@ -235,46 +335,109 @@ def _write_log_artifact(
     return _log_path(path)
 
 
-def _retain_openroad_logs(
-    script_path: str,
-    metrics_path: str,
-    *,
-    invocation_id: str,
-    script_hash: str | None,
-    outcome: str,
-    returncode: int | None,
-    stdout: str | bytes | None,
-    stderr: str | bytes | None,
-) -> dict[str, Any]:
-    """Write only to a newly created directory; retries never overwrite it."""
-    directory = Path(script_path).absolute().parent / "openroad-logs" / invocation_id
-    record: dict[str, Any] = {
-        "invocation_id": invocation_id,
-        "script_name": Path(script_path).name,
-        "script_path": _log_path(Path(script_path)),
-        "script_sha256": script_hash,
-        "metrics_path": _log_path(Path(metrics_path)),
-        "outcome": outcome,
-        "returncode": returncode,
-        "directory": _log_path(None),
-        "stdout_path": _log_path(None),
-        "stderr_path": _log_path(None),
-        "metadata_path": _log_path(None),
-        "retention_errors": [],
-    }
-    try:
-        directory.mkdir(parents=True, exist_ok=False)
-    except OSError as exc:
-        _retention_error(record, "directory", exc)
-        return record
-    record["directory"] = _log_path(directory)
-    record["stdout_path"] = _write_log_artifact(directory, "stdout.log", stdout, record)
-    record["stderr_path"] = _write_log_artifact(directory, "stderr.log", stderr, record)
-    record["metadata_path"] = _log_path(directory / "invocation.json")
-    record["metadata_path"] = _write_log_artifact(
-        directory, "invocation.json", json.dumps(record, indent=2) + "\n", record
-    )
-    return record
+class _LiveLogs:
+    """Retained-log directory created *before* launch so the transcripts grow
+    on disk while OpenROAD runs. Never overwrites: the directory and both
+    stream files are created exclusively. A stream whose file cannot be
+    opened falls back to an in-memory pipe (``None`` handle) and the failure
+    is recorded in ``retention_errors``; the engine run itself proceeds."""
+
+    _STREAMS = ("stdout", "stderr")
+
+    def __init__(
+        self,
+        script_path: str,
+        metrics_path: str,
+        *,
+        invocation_id: str,
+        script_hash: str | None,
+    ) -> None:
+        self.directory = (
+            Path(script_path).absolute().parent / "openroad-logs" / invocation_id
+        )
+        self.record: dict[str, Any] = {
+            "invocation_id": invocation_id,
+            "script_name": Path(script_path).name,
+            "script_path": _log_path(Path(script_path)),
+            "script_sha256": script_hash,
+            "metrics_path": _log_path(Path(metrics_path)),
+            "outcome": None,
+            "returncode": None,
+            "directory": _log_path(None),
+            "stdout_path": _log_path(None),
+            "stderr_path": _log_path(None),
+            "metadata_path": _log_path(None),
+            "retention_errors": [],
+        }
+        self.handles: dict[str, Any] = dict.fromkeys(self._STREAMS)
+        try:
+            self.directory.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            _retention_error(self.record, "directory", exc)
+            self.directory = None  # type: ignore[assignment]
+            return
+        self.record["directory"] = _log_path(self.directory)
+        for stream in self._STREAMS:
+            try:
+                # Unbuffered: the child writes through the shared descriptor.
+                self.handles[stream] = (self.directory / f"{stream}.log").open(
+                    "xb", buffering=0
+                )
+            except OSError as exc:
+                _retention_error(self.record, f"{stream}.log", exc)
+
+    def popen_streams(self) -> dict[str, Any]:
+        return {
+            stream: handle if handle is not None else subprocess.PIPE
+            for stream, handle in self.handles.items()
+        }
+
+    def finish(
+        self,
+        outcome: str,
+        returncode: int | None,
+        captured: dict[str, str | bytes | None],
+    ) -> tuple[dict[str, bytes], dict[str, Any]]:
+        """Close the files, then return ``(stream bytes, final record)``.
+
+        ``captured`` holds data that did not arrive through the files (a pipe
+        fallback, or a runner that supplies partial output on timeout); it is
+        written into a still-empty log file so the retained bytes match."""
+        data: dict[str, bytes] = {}
+        for stream in self._STREAMS:
+            extra = captured.get(stream)
+            extra_bytes = (
+                extra.encode("utf-8") if isinstance(extra, str) else extra or b""
+            )
+            handle = self.handles[stream]
+            if handle is None:
+                data[stream] = extra_bytes
+                continue
+            try:
+                if extra_bytes and os.fstat(handle.fileno()).st_size == 0:
+                    handle.write(extra_bytes)
+            except OSError as exc:
+                _retention_error(self.record, f"{stream}.log", exc)
+            finally:
+                handle.close()
+            path = self.directory / f"{stream}.log"
+            self.record[f"{stream}_path"] = _log_path(path)
+            try:
+                data[stream] = path.read_bytes()
+            except OSError as exc:
+                _retention_error(self.record, f"{stream}.log", exc)
+                data[stream] = extra_bytes
+        self.record["outcome"] = outcome
+        self.record["returncode"] = returncode
+        if self.directory is not None:
+            self.record["metadata_path"] = _log_path(self.directory / "invocation.json")
+            self.record["metadata_path"] = _write_log_artifact(
+                self.directory,
+                "invocation.json",
+                json.dumps(self.record, indent=2) + "\n",
+                self.record,
+            )
+        return data, self.record
 
 
 def _run_openroad(
@@ -285,9 +448,11 @@ def _run_openroad(
     engine_logs: list[dict[str, Any]] | None = None,
 ) -> _OpenRoadResult:
     """Run ``openroad -no_init -exit -metrics <metrics_path> <script_path>``,
-    capturing raw stdout/stderr and retaining both streams separately. The
-    result exposes UTF-8 text (replacement decoding) for existing parsers;
-    an invalid output byte cannot mask the engine failure or lose its logs.
+    streaming raw stdout/stderr into separately retained log files *while the
+    process runs* (``tail -f`` shows progress; an interrupted run keeps
+    whatever OpenROAD had flushed). The result exposes UTF-8 text
+    (replacement decoding) for existing parsers; an invalid output byte
+    cannot mask the engine failure or lose its logs.
     Raises ``error_cls`` if the ``openroad``
     binary itself cannot be launched (e.g. not on ``PATH``); a non-zero exit
     from a successfully-launched run is left for the caller to inspect via
@@ -297,39 +462,41 @@ def _run_openroad(
     Logs are local debugging evidence, not a successful-stage signal."""
     invocation_id = uuid.uuid4().hex
     script_hash = sha256_file(script_path)
+    logs = _LiveLogs(
+        script_path,
+        metrics_path,
+        invocation_id=invocation_id,
+        script_hash=script_hash,
+    )
 
     def retain(outcome, returncode, stdout, stderr):
-        record = _retain_openroad_logs(
-            script_path,
-            metrics_path,
-            invocation_id=invocation_id,
-            script_hash=script_hash,
-            outcome=outcome,
-            returncode=returncode,
-            stdout=stdout,
-            stderr=stderr,
+        data, record = logs.finish(
+            outcome, returncode, {"stdout": stdout, "stderr": stderr}
         )
         if engine_logs is not None:
             engine_logs.append(record)
-        return record
+        return data, record
 
     try:
         completed = subprocess.run(
             ["openroad", "-no_init", "-exit", "-metrics", metrics_path, script_path],
-            capture_output=True,
+            **logs.popen_streams(),
         )
     except OSError as exc:
-        record = retain("launch_failed", None, None, None)
+        _, record = retain("launch_failed", None, None, None)
         raise error_cls(
-            _log_error_context(f"could not launch openroad: {exc}", record)
+            _log_error_context(
+                f"could not launch openroad: {exc}{_launch_failure_hint(exc)}",
+                record,
+            )
         ) from exc
     except subprocess.TimeoutExpired as exc:
-        record = retain("timed_out", None, exc.stdout, exc.stderr)
+        _, record = retain("timed_out", None, exc.stdout, exc.stderr)
         raise error_cls(
             _log_error_context(f"openroad timed out: {exc}", record)
         ) from exc
     except KeyboardInterrupt as exc:
-        record = retain(
+        _, record = retain(
             "interrupted",
             None,
             getattr(exc, "stdout", None),
@@ -337,11 +504,13 @@ def _run_openroad(
         )
         exc.args = (*exc.args, _log_error_context("openroad interrupted", record))
         raise
-    record = retain("exited", completed.returncode, completed.stdout, completed.stderr)
+    data, record = retain(
+        "exited", completed.returncode, completed.stdout, completed.stderr
+    )
     return _OpenRoadResult(
         completed.returncode,
-        _captured_text(completed.stdout),
-        _captured_text(completed.stderr),
+        _captured_text(data["stdout"]),
+        _captured_text(data["stderr"]),
         record,
     )
 
@@ -395,6 +564,18 @@ _SETUP_CHECK_FAMILY_FLAGS = ("-max_delay", "-recovery", "-clock_gating_setup")
 #: **clock-gating hold** (``-clock_gating_hold``) -- the population
 #: ``report_worst_slack_metric -hold``/``report_tns_metric -hold`` measure.
 _HOLD_CHECK_FAMILY_FLAGS = ("-min_delay", "-removal", "-clock_gating_hold")
+
+
+def write_sdf_line(sdf_path: str) -> str:
+    """The one ``write_sdf`` Tcl command every ``klt`` SDF export emits --
+    ``klt place-and-route``'s ``post_route_sdf`` (issue #1002) and ``klt
+    sta``'s ``sdf`` (issue #2886). Shared so the two cannot drift: both files
+    feed the same consumer (``klt functional-verification``'s
+    ``options.sdf``). The rationale for each of the two flags is documented on
+    ``place_and_route_sta._spef_sta_script_lines``.
+    Must be emitted after ``read_spef`` so the delays it writes are the
+    real routed-parasitic ones."""
+    return f"write_sdf -divider . -include_typ {sdf_path}"
 
 
 def _timing_violation_report_lines(

@@ -4,7 +4,7 @@ This is the release process for `klayout-tools`: bump the version, tag it,
 push the tag, and `.github/workflows/publish.yml` builds and publishes to
 PyPI via trusted publishing.
 
-> **TL;DR** — Bump `pyproject.toml` + `uv lock` → merge to `main` → tag
+> **TL;DR** — Bump `base-version` in `pyproject.toml` + `uv lock` → merge to `main` → tag
 > `vX.Y.Z` on the merged commit → push the tag. Pushing the tag is what
 > triggers the publish workflow.
 
@@ -59,6 +59,13 @@ one-time trusted-publisher registration below — it only states *when* to run
 the mechanical sequence that section and the rest of this doc already
 describe.
 
+**Versioning rule for the batch runner:** a change that breaks the batch
+runner contract (a request key, report field or job-command shape the fleet
+runner must understand) ships in a minor release (`vX.Y.0`), never a patch,
+and every minor release is published to PyPI and gets a rebaked runner
+image -- the runner version gate compares major.minor only (#3184, see
+`docs/cli/sim.md` "Runner/client `klt` version skew").
+
 **Interim answer, between releases**: `CHANGELOG.md`'s `## Unreleased` →
 `### Fixed since release` section is the source of truth for "is fix X
 installable yet" — every dated, issue-numbered entry there has landed on
@@ -104,34 +111,40 @@ track it separately if it hasn't happened yet.
 
 ## Version source of truth
 
-`pyproject.toml`'s `version = "…"` is authoritative. Regenerate `uv.lock`
-(`uv lock`) whenever you bump it so the lockfile stays in sync. The runtime
-`klayout_tools.__version__` is derived from installed package metadata
+`pyproject.toml`'s `[tool.hatch.version]` `base-version = "…"` is
+authoritative: the release the checkout is at or working towards. `[project]`
+declares `dynamic = ["version"]`, and each build computes the version it
+actually declares from that base plus the checkout's git facts (issue #2823,
+`src/klayout_tools/_version_scheme.py`). Run `uv lock` after bumping it as
+before (`uv.lock` records no version for this dynamic-version project, so the
+bump usually leaves it unchanged). The runtime `klayout_tools.__version__` is
+derived from installed package metadata
 (`importlib.metadata.version("klayout-tools")`) — there is no second bump
 site to keep in sync.
 
-### Build identity (issue #1202)
-
-Beside that static version, every built distribution carries the git identity
-of the checkout it was built from: `hatch_build.py` writes
-`klayout_tools/_build_info.py` (commit, exact-match tag, dirty flag) into the
-wheel and sdist, and `klt version` / `klt --version` derive the reported
-string from it. The practical rules for a release manager:
+### Distribution version and build identity (issues #1202, #2823)
 
 - A distribution built from a **clean checkout sitting exactly on `vX.Y.Z`**
-  (where `X.Y.Z` matches `pyproject.toml`'s `version`) reports a bare
-  `klt X.Y.Z` — that is what a PyPI release must look like, and what
-  `publish.yml` produces because it is triggered by the tag push.
-- Anything else — a post-tag commit, a dirty tree, a mismatched tag —
-  reports `klt X.Y.Z+g<sha>` (plus `.dirty`). That is the point: a
-  `pip install git+…@<sha>` build must not be mistakable for the release.
+  (where `X.Y.Z` matches `base-version`) declares bare `X.Y.Z` — in its wheel
+  and sdist metadata and on `klt --version`. That is what a PyPI release must
+  look like, and what `publish.yml` produces because it is triggered by the
+  tag push.
+- Anything else declares a distinct PEP 440 dev version — `X.Y.(Z+1).devN+g<sha>`
+  after the release tag, `X.Y.Z.devN+g<sha>` between the bump merge and the
+  tag, `.dirty` for uncommitted changes, `X.Y.Z.dev0+unknown` with no git
+  facts. So a `pip install git+…@<sha>` build can never satisfy
+  `klayout-tools==X.Y.Z`, nor be mistaken for the release.
+- Every built distribution also carries `klayout_tools/_build_info.py`
+  (commit, exact-match tag, dirty flag, and the chosen version), so a wheel
+  rebuilt from the sdist keeps the originating version and `klt version` can
+  show the git facts behind it.
 - `publish.yml` checks out with `fetch-depth: 0` so the tag is visible to
-  `git describe` at build time. If a release ever ships reporting
-  `X.Y.Z+g<sha>` or `X.Y.Z+unknown`, that checkout/tag visibility is the
-  first thing to look at.
+  `git describe` at build time. If a release ever ships declaring a `.dev`
+  version, that checkout/tag visibility is the first thing to look at — and
+  `uv publish` of such a build would upload a dev pre-release, not `X.Y.Z`.
 
-Nothing here needs a manual step during a release; it is recorded
-automatically at build time.
+Nothing here needs a manual step during a release; it is computed and
+recorded automatically at build time.
 
 ## The release sequence
 
@@ -142,7 +155,7 @@ Let `X.Y.Z` be the new version.
 
    ```bash
    git checkout -b release/vX.Y.Z
-   # edit pyproject.toml: version = "X.Y.Z"
+   # edit pyproject.toml: [tool.hatch.version] base-version = "X.Y.Z"
    uv lock            # regenerate uv.lock to match
    git add pyproject.toml uv.lock
    git commit -m "chore(release): bump version to X.Y.Z"
@@ -170,7 +183,12 @@ Let `X.Y.Z` be the new version.
    The workflow builds the tagged commit with `uv build` and publishes the
    resulting sdist/wheel with `uv publish` under PyPI trusted publishing.
 
-4. **Regenerate the deck history table** now that the new tag exists (the
+4. **Fill in availability notes.** Replace "the next release after 0.7.0"
+   in the `--attest` / `--inventory` availability notes in
+   `docs/cli/signoff.md` with `X.Y.Z` (and likewise for any later "not in
+   release" note), in the same release PR or a follow-up.
+
+5. **Regenerate the deck history table** now that the new tag exists (the
    generator can only see tags that have already been pushed — see
    `docs/cli/deck.md`'s "Regenerating" section):
 
@@ -186,6 +204,22 @@ Let `X.Y.Z` be the new version.
    `tests/test_deck_history.py::test_checked_in_history_table_covers_every_release`
    on the next `main` checkout.
 
+6. **Refresh the site's release badge.** The klayout-tools.org landing page
+   reads the release, verb list and MCP tool count from
+   `site/src/data/cli.generated.json`, which is generated from the newest
+   `## X.Y.Z (YYYY-MM-DD)` heading in `CHANGELOG.md` and the CLI registry.
+   In the PR that adds that heading, run
+   `uv run python scripts/gen_site_cli_data.py` and commit the result.
+   `tests/test_site_cli_data.py` fails until you do, and the commit
+   (under `site/`) is what triggers the site redeploy.
+
+**Changelog convention for deck changes.** Any `CHANGELOG.md` entry that
+alters a built-in deck's content hash (rules added, removed or adjusted in
+`sky130`, `gf180mcu`, `sg13g2`, ...) must include the literal phrase
+`deck hash changes`, so consumers pinning `provenance.deck.content_hash` can
+search for it. Hashes are stable only per package version; see
+`docs/cli/deck.md` "Reproducing a run under a pinned deck".
+
 ## Verifying a release
 
 - Watch the run under the repo's **Actions** tab (`Publish to PyPI` workflow).
@@ -197,9 +231,15 @@ Let `X.Y.Z` be the new version.
 
 - [x] One-time PyPI trusted-publisher registration (see above) — completed
       before v0.1.0.
-- [ ] Version bumped in `pyproject.toml`; `uv.lock` regenerated to match.
+- [ ] Every `klt-*-native` pin in `pyproject.toml`'s extras is on PyPI
+      (`docs/releasing-native.md`); `publish.yml` enforces this with
+      `scripts/check_native_extras.py`, which you can run first.
+- [ ] `base-version` bumped in `pyproject.toml`; `uv lock` re-run.
 - [ ] Bump commit merged to `main` via a PR.
 - [ ] Annotated tag `vX.Y.Z` created on the merged commit on `main`.
 - [ ] `git push origin vX.Y.Z` — confirm `publish.yml` runs and succeeds.
 - [ ] `src/klayout_tools/decks/_history.json` regenerated
       (`python scripts/generate_deck_history.py`) and committed to `main`.
+- [ ] `site/src/data/cli.generated.json` regenerated
+      (`uv run python scripts/gen_site_cli_data.py`) in the PR that adds the
+      `## X.Y.Z` CHANGELOG heading.

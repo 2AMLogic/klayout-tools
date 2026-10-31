@@ -53,11 +53,11 @@ ROOT="${LOOM_PROJECT_ROOT:-}"
 
 # Effective value of the canary key: the config tiers deep-merged lowest to highest
 # precedence (private defaults < .loom/config.json < .loom-project/project.json
-# < .loom-local/local.json) exactly like config_resolver.rs deep_merge (jq `*`: a
+# < .loom-local/fleet-repo.json < .loom-local/local.json) exactly like config_resolver.rs deep_merge (jq `*`: a
 # higher-tier null or scalar REPLACES a lower value, even the whole `guards` object).
 # Succeeds only when exactly true; no jq -> no record. Each tier is normalized alone like
 # config_resolver.rs soft_read_json_object: missing/malformed/non-object (null, array, scalar) -> {}.
-_canary_effective_true() { local f t=""; for f in "${LOOM_CONFIG_DEFAULTS_FILE-${HOME:-}/.local/share/loom/config/defaults.json}" "$ROOT"/.loom/config.json "$ROOT"/.loom-project/project.json "$ROOT"/.loom-local/local.json; do t+="$(jq -c -s 'if length==1 and (.[0]|type)=="object" then .[0] else {} end' "$f" 2>/dev/null || echo '{}')"$'\n'; done; [[ "$(jq -s 'reduce .[] as $t ({}; . * $t)|.guards.uncommittedWorkConsumerCanary?' <<<"$t" 2>/dev/null)" == true ]]; }
+_canary_effective_true() { local f t=""; for f in "${LOOM_CONFIG_DEFAULTS_FILE-${HOME:-}/.local/share/loom/config/defaults.json}" "$ROOT"/.loom/config.json "$ROOT"/.loom-project/project.json "$ROOT"/.loom-local/fleet-repo.json "$ROOT"/.loom-local/local.json; do t+="$(jq -c -s 'if length==1 and (.[0]|type)=="object" then .[0] else {} end' "$f" 2>/dev/null || echo '{}')"$'\n'; done; [[ "$(jq -s 'reduce .[] as $t ({}; . * $t)|.guards.uncommittedWorkConsumerCanary?' <<<"$t" 2>/dev/null)" == true ]]; }
 
 # Opted in but unable to record: a non-blocking coverage notice (never a block).
 _canary_gap() { printf '{"continue":true,"systemMessage":"uncommitted-work canary: wrapper failure (%s) NOT recorded (%s) - coverage gap; the stop was allowed."}\n' "$1" "$2"; }
@@ -69,7 +69,7 @@ _record_wrapper_failure() {
     _canary_effective_true || return 0
     local ov="${LOOM_UNCOMMITTED_WORK_CANARY_LOG:-}" d event="" ws log
     [[ -z "$ov" || "$ov" == /* ]] || { _canary_gap "$1" "relative log override"; return 0; }
-    log="$(realpath -m "${ov:-${HOME:-}/.loom/logs/uncommitted-work-canary.jsonl}" 2>/dev/null)" && [[ "$log" == /* ]] || { _canary_gap "$1" "log path unresolved"; return 0; }  # symlinks/".." resolved first
+    log="${ov:-${HOME:-}/.loom/logs/uncommitted-work-canary.jsonl}"; log="$(realpath -m "$log" 2>/dev/null || printf '%s' "$log" | python3 -c 'import os,sys;sys.stdout.write(os.path.realpath(sys.stdin.read()))' 2>/dev/null)" && [[ "$log" == /* ]] || { _canary_gap "$1" "log path unresolved"; return 0; }  # GNU realpath -m, else python3 realpath (BSD has no -m, #11598); symlinks/".." resolved first
     d="$log"; while [[ "$d" == /?* ]]; do d="${d%/*}"; [[ -e "${d:-/}/.git" ]] && { _canary_gap "$1" "log inside a Git checkout"; return 0; }; done
     mkdir -p "$(dirname "$log")" 2>/dev/null && [[ ! -d "$log" ]] || { _canary_gap "$1" "log not writable"; return 0; }
     [[ "$(wc -c 2>/dev/null <"$log")" -lt 1048576 ]] || { _canary_gap "$1" "log full"; return 0; }  # missing log -> "" -> 0

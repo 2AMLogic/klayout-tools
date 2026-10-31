@@ -14,7 +14,9 @@ Exit codes (see ``docs/cli/lef-abstract.md`` for the full table):
     3 - the LEF abstract was written and the report emitted, but the
         structural self-check of the file read back from disk found defects
         (``self_check.status == "fail"``, issue #2769); the file is left on
-        disk for diagnosis and must not be consumed
+        disk for diagnosis and must not be consumed -- or, with
+        ``--require-power-pins`` (issue #2839), the supply-pin verdict
+        failed (``power_pins.status == "fail"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. A pin resolving to synthesized geometry, or to no PORT at all
 (``unroutable_pins``), is reported in ``warnings`` and is not a structural
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..lef_abstract import LefAbstractError, run_lef_abstract
 from .output import emit_error, emit_success
 
@@ -46,6 +49,7 @@ def run(args: argparse.Namespace) -> int:
             symmetry=args.symmetry.split() if args.symmetry else None,
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
+            obs_mode=args.obs_mode,
         )
     except LefAbstractError as exc:
         return emit_error("lef-abstract", str(exc), args.format)
@@ -53,6 +57,11 @@ def run(args: argparse.Namespace) -> int:
     emit_success(report, args.format, _print_text)
 
     if report["self_check"]["status"] != "pass":
+        return EXIT_SELF_CHECK_FAILED
+    # Issue #2839: opt-in gate on the supply-pin verdict.
+    if getattr(args, "require_power_pins", False) and (
+        report["power_pins"]["status"] != "pass"
+    ):
         return EXIT_SELF_CHECK_FAILED
     return 0
 
@@ -62,7 +71,7 @@ def _default_output_path(macro_name: str) -> str:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    print(f"file: {render_path_field(report['file'])}")
     print(f"socket: {report['socket']}")
     print(f"macro_name: {report['macro_name']}")
     print(f"class: {report['class']}")
@@ -80,6 +89,7 @@ def _print_text(report: dict) -> None:
             f"{pin['layer'] or '(unresolved)'} [{pin['geometry_source']}]"
         )
 
+    print(f"obs_mode: {report['obs_mode']}")
     if report["obs"]:
         print()
         print("obs:")
@@ -93,6 +103,17 @@ def _print_text(report: dict) -> None:
             print(f"  {warning}")
 
     _print_self_check(report["self_check"])
+    _print_power_pins(report["power_pins"])
+
+
+def _print_power_pins(power_pins: dict) -> None:
+    print()
+    if power_pins["status"] == "pass":
+        print("power_pins: pass")
+        return
+    print(f"power_pins: FAIL ({len(power_pins['findings'])} finding(s))")
+    for finding in power_pins["findings"]:
+        print(f"  [{finding['code']}] {finding['message']}")
 
 
 def _print_self_check(self_check: dict) -> None:

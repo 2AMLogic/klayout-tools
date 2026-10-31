@@ -1,0 +1,3 @@
+.subckt pfet_unit
+M1 d g s b pfet L=0.5U W=2U
+.ends

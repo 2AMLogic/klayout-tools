@@ -2,13 +2,13 @@
 deck (issue #2761).
 
 **Scope: extraction only.** This module registers ASAP7 with ``klt
-extract`` -- FinFET device recognition with geometry-counted fins -- and
-nothing else. ASAP7 DRC is a separate artefact (the DRC-DSL deck
-``asap7.drc`` beside this module, #2760, run through ``klt drc --engine
-klayout --deck-file``); there are no parasitics coefficients, no ``--pdk``
-subcircuit binding, and ``klt lvs`` refuses a FinFET deck until its
-reference reader preserves ``nfin`` (#2813; see ``docs/cli/extract.md``,
-"ASAP7 FinFET extraction").
+extract`` -- FinFET device recognition with geometry-counted fins, plus the
+first-order ``PARASITICS`` interconnect table (#4558) -- and nothing else.
+ASAP7 DRC is a separate artefact (the DRC-DSL deck ``asap7.drc`` beside this
+module, #2760, run through ``klt drc --engine klayout --deck-file``); there
+is no ``--pdk`` subcircuit binding, and ``klt lvs`` refuses a FinFET deck
+until its reference reader preserves ``nfin`` (#2813; see
+``docs/cli/extract.md``, "ASAP7 FinFET extraction").
 
 **Source of truth.** Every layer number below was read from the pinned
 lambdapdk archive ``scripts/fetch-pdks.sh`` fetches (``LAMBDAPDK_VERSION``
@@ -55,6 +55,10 @@ fact. Threshold voltage is geometry: the LVT (98/0), SLVT (97/0) and SRAMVT
 (110/0) markers select ``*_lvt``/``*_slvt``/``*_sram``; no marker is
 regular VT (``*_rvt``) -- the RVT library draws none of the three, the LVT
 and SLVT libraries draw 98/0 and 97/0 respectively.
+The predictive THICKOX marker (111/0, #4465) selects the thick-oxide I/O
+classes ``nmos_io``/``pmos_io`` (#4466); those model-card names are not
+confirmed against 2AMLogic/pdks, and a finger under both a VT marker and
+THICKOX is malformed geometry (the I/O classes have no VT axis).
 
 **Connectivity.** ``LISD`` (17/0) lands on source/drain, ``LIG`` (16/0) on
 the gate, ``V0`` (18/0) joins either to ``M1`` (19/0); ``V1``..``V8``
@@ -75,7 +79,9 @@ CDL.
 
 from __future__ import annotations
 
-from .finfet import FinFETExtractionDeck, FinFETFlavour
+from .extraction import ResistorDevice
+from .finfet import FinFETExtractionDeck, FinFETFlavour, FinFETPassiveCapacitor
+from .parasitics import CutRC, LayerRC, ParasiticsDeck
 from .rules import RuleProvenance
 
 _LAMBDAPDK_REPO = "siliconcompiler/lambdapdk"
@@ -140,6 +146,15 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (97, 0): "SLVT.drawing",
     (98, 0): "LVT.drawing",
     (110, 0): "SRAMVT.drawing",
+    # Not in the pinned asap7.lyp/layermap or the DRM: an assumed, unused
+    # stream number for the thick-oxide marker (#4465).
+    (111, 0): "THICKOX.drawing",
+    # klt-private passive-recognition markers (issue #4469): not PDK layers.
+    # Absent from the pinned asap7.lyp, so no PDK layout uses them; a layout
+    # drawn for another flow that happens to use 112/0 or 113/0 would be
+    # reinterpreted, hence the explicit klt-private naming.
+    (112, 0): "KLT_RES_MK.assumed",
+    (113, 0): "KLT_CAP_MK.assumed",
 }
 
 _METALS = (
@@ -154,6 +169,13 @@ _METALS = (
     (90, 0),
 )
 _VIAS = ((21, 0), (25, 0), (35, 0), (45, 0), (55, 0), (65, 0), (75, 0), (85, 0))
+
+#: ASSUMED (predictive) M1 sheet resistance, ohm/sq. Neither value below is
+#: read from the pinned lambdapdk files (they publish no sheet resistance);
+#: both are klt placeholders for a predictive PDK, labelled as such.
+ASSUMED_M1_SHEET_RHO_OHM_SQ = 131.0
+#: ASSUMED MOM capacitance per um^2 of marker footprint, farads.
+ASSUMED_MOM_AREA_CAP_F_UM2 = 2.0e-16
 
 EXTRACTION_DECK = FinFETExtractionDeck(
     active=(11, 0),
@@ -198,6 +220,19 @@ EXTRACTION_DECK = FinFETExtractionDeck(
             pfet_class="pmos_sram",
             provenance=_lyp("SRAMVT drawing - 110/0"),
         ),
+        # Thick-oxide I/O device (#4466). The THICKOX marker (111/0) is the
+        # assumed, predictive stream number from #4465 -- not in the pinned
+        # lyp/DRM -- so this flavour carries the lyp citation of the VT
+        # markers' sibling layer only as a pointer, and the nmos_io/pmos_io
+        # card names are unconfirmed against 2AMLogic/pdks (declared gap).
+        # A finger under a VT marker *and* THICKOX stays malformed geometry.
+        FinFETFlavour(
+            name="io",
+            marker=(111, 0),
+            nfet_class="nmos_io",
+            pfet_class="pmos_io",
+            provenance=_lyp("THICKOX drawing - 111/0 (predictive, #4465)"),
+        ),
     ),
     nominal_dbu_um=0.00025,
     # Every one of the 2558 transistors in the pinned RVT CDL is l=20n.
@@ -207,4 +242,131 @@ EXTRACTION_DECK = FinFETExtractionDeck(
     fin_provenance=_lyp("fin drawing - 2/0"),
     lig_lisd_connected=True,
     sd_contact=(88, 0),
+    # Passives (issue #4469): ASAP7 defines no resistor/MIM layers, so these
+    # are klt conventions with ASSUMED predictive coefficients (see
+    # docs/cli/extract.md, "ASAP7 passives").
+    resistors=(
+        ResistorDevice(
+            name="RES",
+            body=(19, 0),
+            marker=(112, 0),
+            sheet_rho_ohm_sq=ASSUMED_M1_SHEET_RHO_OHM_SQ,
+        ),
+    ),
+    passive_capacitors=(
+        FinFETPassiveCapacitor(
+            name="CAP",
+            marker=(113, 0),
+            metal=(19, 0),
+            area_cap_f_um2=ASSUMED_MOM_AREA_CAP_F_UM2,
+        ),
+    ),
+)
+
+
+# --------------------------------------------------------------------------- #
+# Parasitics (issue #4558)
+# --------------------------------------------------------------------------- #
+#
+# First-order, uncalibrated, ASSUMED coefficients. Source: the OpenRCX
+# extraction rules the pinned lambdapdk archive ships at
+# ``lambdapdk/asap7/base/pex/openroad/typical.rules`` (sha256
+# ``32a117e5e866d3de1406e8f18d65b6f1857781f156638941a4769e25ef5252cc``),
+# with the minimum drawn widths from ``lambdapdk/asap7/base/apr/asap7_tech.lef``
+# (sha256 ``830a032810b054d0dc24601c3f57c86073469e6c9cfb0314b2c82eb335b021d2``):
+# M1-M3 0.018 um, M4-M5 0.024 um, M6-M7 0.032 um, M8-M9 0.040 um. The
+# archive's ``asap7_drm_201207a.pdf`` carries no machine-readable sheet
+# resistance, so every number below is ASSUMED in the sense that the rules
+# file does not state its units; the reading used is:
+#
+# - ``sheet_res_ohm_sq``: the first row of ``Metal <n> RESOVER 0`` (last
+#   column), read as kohm/um, times the minimum drawn width (um) -> ohm/sq.
+# - ``cap_area_ff_um2``: the last column of ``Metal <n> OVER 0`` (constant
+#   down the table), read as fF per um of wire length at minimum width,
+#   divided by that width -> fF/um^2.
+# - ``cap_perim_ff_um``: the fringe column of the first row of
+#   ``Metal <n> OVER 0`` (nearest-neighbour row), read as fF/um.
+# - ``metal_overlaps[i]``: the coupling column of the first row of
+#   ``Metal <i+1> UNDER <i+2>``, divided by the lower level's minimum width
+#   -> fF/um^2.
+#
+# Cut resistance has no public source in the pinned archive: every cut is the
+# single ASSUMED_CUT_OHM placeholder. None of this is calibrated against
+# silicon or a signoff extractor; ``diffusion``/``poly`` are left uncurated.
+ASSUMED_CUT_OHM = 10.0
+
+PARASITICS = ParasiticsDeck(
+    metals=(
+        # M1 (width 0.018)
+        LayerRC(
+            sheet_res_ohm_sq=0.5632,
+            cap_area_ff_um2=0.86908,
+            cap_perim_ff_um=1.51331e-05,
+        ),
+        # M2 (0.018)
+        LayerRC(
+            sheet_res_ohm_sq=0.5348,
+            cap_area_ff_um2=0.82535,
+            cap_perim_ff_um=8.84607e-06,
+        ),
+        # M3 (0.018)
+        LayerRC(
+            sheet_res_ohm_sq=0.5632,
+            cap_area_ff_um2=0.86908,
+            cap_perim_ff_um=1.11794e-05,
+        ),
+        # M4 (0.024)
+        LayerRC(
+            sheet_res_ohm_sq=0.4329,
+            cap_area_ff_um2=0.37576,
+            cap_perim_ff_um=9.87151e-06,
+        ),
+        # M5 (0.024)
+        LayerRC(
+            sheet_res_ohm_sq=0.4558,
+            cap_area_ff_um2=0.39570,
+            cap_perim_ff_um=1.14609e-05,
+        ),
+        # M6 (0.032)
+        LayerRC(
+            sheet_res_ohm_sq=0.3801,
+            cap_area_ff_um2=0.18562,
+            cap_perim_ff_um=1.04115e-05,
+        ),
+        # M7 (0.032)
+        LayerRC(
+            sheet_res_ohm_sq=0.4003,
+            cap_area_ff_um2=0.19546,
+            cap_perim_ff_um=9.96683e-06,
+        ),
+        # M8 (0.040)
+        LayerRC(
+            sheet_res_ohm_sq=0.3379,
+            cap_area_ff_um2=0.10558,
+            cap_perim_ff_um=7.30467e-06,
+        ),
+        # M9 (0.040)
+        LayerRC(
+            sheet_res_ohm_sq=0.3558,
+            cap_area_ff_um2=0.11118,
+            cap_perim_ff_um=8.09639e-06,
+        ),
+    ),
+    # Adjacent-pair vertical coupling, M1-M2 .. M8-M9 (see the reading above).
+    metal_overlaps=(
+        0.004884,
+        0.006023,
+        0.005119,
+        0.004253,
+        0.004494,
+        0.004163,
+        0.004292,
+        0.002511,
+    ),
+    cuts=tuple(
+        CutRC(
+            name=f"V{level + 1}", lower_metal_index=level, nominal_ohm=ASSUMED_CUT_OHM
+        )
+        for level in range(8)
+    ),
 )

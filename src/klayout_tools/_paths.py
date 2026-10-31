@@ -1,92 +1,14 @@
-"""Shared path-resolution and request-loading helpers used across the ``klt``
-verb modules.
+"""Shared path-resolution, request-loading and small text helpers used across
+the ``klt`` verb modules.
 
-Several request-parsing paths (``klt lvs``'s ``layout.file``, ``klt sim``'s
-``models`` resolution, ``klt gen-compose``'s report paths) need to turn a
-user-supplied path -- possibly relative, possibly containing ``~`` or an
-environment variable -- into an absolute path anchored at the request's own
-directory. ``_resolve_relative`` was previously defined identically in
-``lvs.py``, ``sim.py``, and ``gen_compose.py``; it now lives here as the
-single source of truth.
-
-Every request-taking verb's own ``load_request(request_path)`` also opens
-the same "does this path exist, is it a file, does it parse as JSON"
-question the same way -- only the exception class raised on failure
-differs per module. ``_load_request_json`` factors that literal prefix out;
-it was previously duplicated verbatim across ``synthesize.py``, ``lvs.py``,
-``sim.py``, ``place_and_route.py``, and ``functional_verification.py``.
-
-``lvs.py`` and ``functional_verification.py`` also each defined an
-identically-shaped ``_validate_request_shape(data, source)`` (the "is this
-a dict, are the required top-level fields present" check) and
-``load_request_arg(value)`` (the stdin / existing-file / inline-JSON
-dispatch) -- differing only in the exception class and the tuple of
-required fields. ``validate_request_shape`` and ``load_request_arg`` below
-factor those out; each caller still owns its own exception class and
-required-field tuple.
-
-``erc.py``, ``power.py``, and ``mom.py`` each defined their own near-
-identical ``_load_spec(spec_path)`` (read a JSON spec file, same missing/
-directory/unreadable/not-an-object checks as ``_load_request_json`` above,
-just with ``"spec"`` wording) and ``_parse_layer_datatype(raw, spec_path,
-field)`` (parse a ``"<layer>/<datatype>"`` string) -- again differing only
-in which ``*Error`` class each module raises. ``_load_spec_json`` and
-``_parse_layer_datatype`` below factor those out the same way.
-
-``erc.py`` and ``power.py`` also each defined an identically-shaped
-``_validate_vias(spec, spec_path, stackup_names)`` (validate the optional
-``"vias"`` array against a ``stackup_names`` list: default/type-check the
-raw array, check each entry is an object with the required keys, parse
-``"layer"`` via ``_parse_layer_datatype``, check ``"between"`` names two
-distinct ``stackup_names`` entries, and reject duplicate via/stackup
-names) -- differing only in the exception class, ``power.py``'s extra
-required ``"resistance_ohm"`` key, and ``power.py``'s additional
-``resistance_ohm``/``current_limit_a``/``current_limit_source`` fields
-layered on top of the shared result. ``_validate_via_entries`` below
-factors out the shared shape/parse/duplicate-tracking logic; each caller
-still builds its own final entry dict from the returned pieces.
-
-``place_and_route.py`` and ``post_route_sta.py`` also each defined an
-identical ``_tcl_net_list(names)`` (render ``names`` as a brace-quoted Tcl
-list body -- the standard Tcl idiom for embedding arbitrary literal
-strings in a generated script without word-splitting or ``$``/``[...]``
-substitution inside each token) and an identically-shaped
-``_count_spef_nets_annotated(stdout)`` (parse the four
-``nets_annotated``/``nets_total``/``design_nets_annotated``/
-``design_nets_total`` ints out of a marker-delimited ``puts`` block in a
-completed OpenSTA run's stdout, or ``None`` when the markers aren't
-found) -- differing only in which module-local marker constants
-(``_SPEF_NET_CHECK_BEGIN``/``_END``/``_RE``) each module's own generated
-Tcl embeds. ``_tcl_net_list`` below is unchanged; ``_count_spef_nets_annotated``
-now takes the three marker values (``begin``, ``end``, ``pattern``) as
-parameters instead of reading module-local constants, since that was the
-only per-module variation.
-
-``lvs_netgen.py``'s ``_resolve_netgen_binary`` (issue #2373) established the
-"``options.<tool>_binary`` -> ``$KLT_<TOOL>_BINARY`` -> bare name(s) on
-``PATH``" resolution order for an externally-wrapped engine binary, so an
-agent whose ``yosys``/``ngspice``/``iverilog``/``vvp`` on ``PATH`` is wrong
-(a WASI-sandboxed ``yowasp-yosys`` build that cannot read a script file off
-disk, a second ngspice build, ...) has a documented escape hatch instead of
-having to reshape ``$PATH`` itself. :func:`resolve_tool_binary` below (issue
-#2423) generalises that one netgen-specific function into a shared helper
-``equiv.py`` (``yosys``, ``iverilog``, ``vvp``) and ``sim.py`` (``ngspice``)
-both call -- ``lvs_netgen.py`` keeps its own already-shipped, already-tested
-``_resolve_netgen_binary`` rather than being retrofitted onto this shared
-version, since netgen alone has a second built-in fallback name
-(``netgen-lvs``) this helper's callers do not need.
-
-``pex.py``, ``op_sanity.py``, and ``netlist_normalize.py`` each also
-independently implemented the SPICE ``+`` continuation-line fold -- glue a
-line starting with ``+`` onto the end of the previously-collected line,
-dropping the ``+`` -- as part of their own ``_logical_lines``/
-``_merge_continuations`` helpers. The fold step itself was byte-for-byte
-identical in intent across all three; only what happens *before* the fold
-(comment stripping, blank/``*``-comment-line dropping) genuinely varies per
-caller. ``_fold_spice_continuations`` below factors out just the fold: each
-caller still runs its own pre-pass over the raw lines (and, for
-``op_sanity.py``, an additional post-pass -- see its docstring) before/after
-delegating to this helper.
+Offers: ``_resolve_relative`` (anchor a user-supplied path at the request's
+directory), ``_load_request_json`` / ``_load_spec_json`` (read a JSON
+request or spec file), ``validate_request_shape`` / ``load_request_arg``
+(request dispatch and shape checks), ``_parse_layer_datatype`` and
+``_validate_via_entries`` (spec parsing), ``_tcl_net_list`` and
+``_count_spef_nets_annotated`` (OpenSTA Tcl helpers), ``resolve_tool_binary``
+(``options.<tool>_binary`` -> ``$KLT_<TOOL>_BINARY`` -> ``PATH``), and
+``fold_spice_continuations`` (SPICE ``+`` continuation fold).
 """
 
 from __future__ import annotations
@@ -125,7 +47,9 @@ def resolve_tool_binary(
     ``None`` when unresolved and ``required`` is ``False``) -- the shared
     generalisation (issue #2423) of ``lvs_netgen._resolve_netgen_binary``
     (issue #2373), reused by ``equiv.py`` (``yosys``, ``iverilog``, ``vvp``)
-    and ``sim.py`` (``ngspice``).
+    and ``sim.py`` (``ngspice``). ``lvs_netgen.py`` keeps its own
+    ``_resolve_netgen_binary`` rather than using this: netgen alone has a
+    second built-in fallback name (``netgen-lvs``) these callers do not need.
 
     Resolution order, first runnable candidate wins:
 
@@ -239,6 +163,9 @@ def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any
     return spec
 
 
+ANNOTATION_KEY = "_comment"
+
+
 def _reject_unknown_keys(
     obj: dict[str, Any],
     allowed: Iterable[str],
@@ -261,16 +188,26 @@ def _reject_unknown_keys(
     message names the complete unknown path (``ties[0].well_boxess``) plus the
     spec filename. Only the *keys* of ``obj`` are checked -- a user-defined
     map's own names are the caller's to treat as data, not pass here.
+
+    Exactly one key is exempt everywhere: ``_comment`` (issue #2822), an inert
+    human annotation that may hold any JSON value. Its contents are opaque
+    -- never validated or interpreted -- and the source file is never
+    rewritten, so provenance hashes still bind the actual input bytes. It is
+    deliberately not a prefix rule: ``_commment``, ``_other`` and
+    ``$comment`` are still rejected.
     """
     allowed_set = set(allowed)
-    unknown = sorted(str(key) for key in obj if key not in allowed_set)
+    unknown = sorted(
+        str(key) for key in obj if key not in allowed_set and key != ANNOTATION_KEY
+    )
     if not unknown:
         return
     paths = ", ".join(repr(f"{field}.{key}" if field else key) for key in unknown)
     noun = "field" if len(unknown) == 1 else "fields"
     raise error_cls(
         f"spec '{spec_path}': unknown {noun} {paths} -- this klt does not "
-        f"recognise it (allowed here: {', '.join(sorted(allowed_set))}); a "
+        f"recognise it (allowed here: {', '.join(sorted(allowed_set))}, plus the "
+        f"'{ANNOTATION_KEY}' annotation); a "
         "misspelt key, a key from a newer klt release, or a key that belongs "
         "to a different section"
     )
@@ -415,7 +352,7 @@ def _count_spef_nets_annotated(
     )
 
 
-def _fold_spice_continuations(lines: list[str]) -> list[str]:
+def fold_spice_continuations(lines: list[str]) -> list[str]:
     """Fold SPICE ``+`` continuation lines onto the entry they continue.
 
     ``lines`` is whatever a caller's own pre-pass has already produced (raw

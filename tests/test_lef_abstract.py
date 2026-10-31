@@ -21,10 +21,10 @@ from klayout_tools.cli import main
 from klayout_tools.lef_abstract import (
     LefAbstractError,
     _polygon_to_um_shape,
-    _resolve_layer_map,
     run_lef_abstract,
 )
 from klayout_tools.lef_header import read_lef_header
+from klayout_tools.pdk import resolve_klayout_layer_map
 
 DBU_UM = 0.001
 
@@ -106,7 +106,7 @@ def _make_pdk_install(
     convention) lets a caller instead write the family-level filename a
     real gf180mcu install ships (``"gf180mcu.map"`` shared across
     ``gf180mcuC``/``gf180mcuD``, never a per-variant file -- issue #1029),
-    to exercise :func:`klayout_tools.lef_abstract._resolve_layer_map`'s
+    to exercise :func:`klayout_tools.pdk.resolve_klayout_layer_map`'s
     family fallback end to end."""
     variant_dir = root / variant
     (variant_dir / "libs.tech").mkdir(parents=True, exist_ok=True)
@@ -209,7 +209,8 @@ def _run(
 def test_basic_run_emits_macro_with_class_and_size(tmp_path, monkeypatch):
     report = _run(tmp_path, monkeypatch)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
+    assert report["file"]["scope"] in {"repo", "external"}
     assert report["macro_name"] == "analog_block"
     assert report["class"] == "BLOCK"
     assert report["size_um"] == {"width": 5.0, "height": 5.0}
@@ -613,9 +614,8 @@ def test_no_layer_map_raises(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# `_resolve_layer_map` -- variant-exact vs. family-fallback vs. none found
-# (issue #1029), this module's own duplicate of
-# `place_and_route._resolve_layer_map`'s equivalent coverage.
+# `resolve_klayout_layer_map` -- variant-exact vs. family-fallback vs. none
+# found (issue #1029); also covered in tests/test_place_and_route.py.
 # --------------------------------------------------------------------------- #
 
 
@@ -629,7 +629,7 @@ def test_resolve_layer_map_prefers_exact_variant_match(tmp_path, monkeypatch):
         "assets": {"klayout": str(install_root / "sky130A" / "libs.tech" / "klayout")},
     }
 
-    path, resolution = _resolve_layer_map(pdk_info)
+    path, resolution = resolve_klayout_layer_map(pdk_info)
 
     assert path == str(
         install_root / "sky130A" / "libs.tech" / "klayout" / "tech" / "sky130A.map"
@@ -652,7 +652,7 @@ def test_resolve_layer_map_falls_back_to_family_level_file(tmp_path, monkeypatch
         },
     }
 
-    path, resolution = _resolve_layer_map(pdk_info)
+    path, resolution = resolve_klayout_layer_map(pdk_info)
 
     assert path == str(
         install_root / "gf180mcuC" / "libs.tech" / "klayout" / "tech" / "gf180mcu.map"
@@ -666,7 +666,7 @@ def test_resolve_layer_map_returns_none_when_neither_file_exists(tmp_path):
         "assets": {"klayout": str(tmp_path / "no-such-klayout-dir")},
     }
 
-    path, resolution = _resolve_layer_map(pdk_info)
+    path, resolution = resolve_klayout_layer_map(pdk_info)
 
     assert path is None
     assert resolution == "none"
@@ -728,6 +728,128 @@ def test_unroutable_pins_empty_when_every_pin_resolves(tmp_path, monkeypatch):
     report = _run(tmp_path, monkeypatch)
     assert all(pin["geometry_source"] != "none" for pin in report["pins"])
     assert report["unroutable_pins"] == []
+
+
+def _notched_layout() -> kdb.Layout:
+    """A met1 C-shaped polygon whose bbox covers the pin at (1.5, 1.5), plus
+    a separate real pin rect sitting in the notch."""
+    layout = kdb.Layout()
+    layout.dbu = DBU_UM
+    top = layout.create_cell("ANALOG_BLOCK")
+    met1 = layout.layer(*MET1_NET)
+    c_shape = kdb.DPolygon(
+        [
+            kdb.DPoint(0, 0),
+            kdb.DPoint(4, 0),
+            kdb.DPoint(4, 1),
+            kdb.DPoint(1, 1),
+            kdb.DPoint(1, 3),
+            kdb.DPoint(4, 3),
+            kdb.DPoint(4, 4),
+            kdb.DPoint(0, 4),
+        ]
+    )
+    top.shapes(met1).insert(c_shape)
+    top.shapes(met1).insert(_box_um(1.4, 1.4, 1.6, 1.6))  # real pin in notch
+    return layout
+
+
+def test_pin_port_ignores_notched_polygon_whose_bbox_covers_pin(tmp_path, monkeypatch):
+    descriptor = _basic_descriptor(
+        pins=[{"name": "A0", "layer": list(MET1_NET), "x": 1.5, "y": 1.5}]
+    )
+    report = _run(
+        tmp_path, monkeypatch, layout=_notched_layout(), descriptor=descriptor
+    )
+    pin = report["pins"][0]
+    assert pin["geometry_source"] == "drawn"
+    assert pin["rects_um"] == [[1.4, 1.4, 1.6, 1.6]]
+
+
+def test_pin_on_polygon_edge_still_matches(tmp_path, monkeypatch):
+    descriptor = _basic_descriptor(
+        pins=[{"name": "VDD", "layer": list(MET1_NET), "x": 0.2, "y": 2.5}]
+    )
+    report = _run(tmp_path, monkeypatch, descriptor=descriptor)
+    assert report["pins"][0]["geometry_source"] == "drawn"
+
+
+def test_oversize_port_rect_warns_but_keeps_geometry(tmp_path, monkeypatch):
+    descriptor = _basic_descriptor(
+        pins=[
+            {
+                "name": "VDD",
+                "layer": list(MET1_NET),
+                "x": 0.1,
+                "y": 2.5,
+                "width_um": 0.2,
+                "height_um": 0.2,
+            }
+        ]
+    )
+    report = _run(tmp_path, monkeypatch, descriptor=descriptor)
+    assert report["pins"][0]["rects_um"] == [[0.0, 2.0, 0.2, 3.0]]
+    assert any(
+        "VDD" in w and "larger than the declared" in w for w in report["warnings"]
+    )
+
+
+def test_pin_declared_on_unmapped_label_datatype_resolves_via_sibling(
+    tmp_path, monkeypatch
+):
+    """Issue #4283: (68, 5) is not in the map but (68, 20) is."""
+    layout = kdb.Layout()
+    layout.dbu = DBU_UM
+    top = layout.create_cell("ANALOG_BLOCK")
+    top.shapes(layout.layer(*MET1_NET)).insert(_box_um(0.0, 2.0, 0.2, 3.0))
+    descriptor = _basic_descriptor(
+        pins=[{"name": "VDD", "layer": [68, 5], "x": 0.1, "y": 2.5}]
+    )
+    report = _run(tmp_path, monkeypatch, layout=layout, descriptor=descriptor)
+    pin = report["pins"][0]
+    assert pin["layer"] == "met1"
+    assert pin["geometry_source"] == "drawn"
+    assert pin["gds_layer"] == [68, 5]
+    assert not report["warnings"]
+
+
+def test_default_obs_mode_is_detailed(tmp_path, monkeypatch):
+    report = _run(tmp_path, monkeypatch)
+    assert report["obs_mode"] == "detailed"
+
+
+def test_coarse_obs_mode_bounds_shape_count_and_keeps_ports_open(tmp_path, monkeypatch):
+    layout = kdb.Layout()
+    layout.dbu = DBU_UM
+    top = layout.create_cell("ANALOG_BLOCK")
+    met1 = layout.layer(*MET1_NET)
+    for i in range(10):
+        top.shapes(met1).insert(_box_um(0.5 + 0.4 * i, 1.0, 0.7 + 0.4 * i, 1.5))
+    top.shapes(met1).insert(_box_um(0.0, 2.0, 0.2, 3.0))  # VDD port
+    descriptor = _basic_descriptor(
+        pins=[{"name": "VDD", "layer": list(MET1_NET), "x": 0.1, "y": 2.5}]
+    )
+    detailed = _run(tmp_path, monkeypatch, layout=layout, descriptor=descriptor)
+    coarse = _run(
+        tmp_path, monkeypatch, layout=layout, descriptor=descriptor, obs_mode="coarse"
+    )
+    assert coarse["obs_mode"] == "coarse"
+    assert detailed["obs_shape_count"] == 10
+    assert coarse["obs_shape_count"] < detailed["obs_shape_count"]
+    text = (tmp_path / "out.lef").read_text(encoding="utf-8")
+    assert "RECT 0.0000 2.0000 0.2000 3.0000" in text  # port still a PIN rect
+    assert coarse["self_check"]["status"] == "pass"
+
+
+def test_coarse_obs_mode_layer_without_pins_is_single_bbox_rect(tmp_path, monkeypatch):
+    report = _run(tmp_path, monkeypatch, obs_mode="coarse")
+    li1 = [e for e in report["obs"] if e["layer"] == "li1"]
+    assert li1 == []  # only shape on li1 is the VOUT port itself
+
+
+def test_invalid_obs_mode_raises(tmp_path, monkeypatch):
+    with pytest.raises(LefAbstractError, match="obs_mode"):
+        _run(tmp_path, monkeypatch, obs_mode="fine")
 
 
 # --------------------------------------------------------------------------- #
@@ -1359,3 +1481,244 @@ def test_cli_readback_failure_is_error_envelope_exit_1(tmp_path, monkeypatch, ca
     payload = json.loads(captured.err)
     assert payload["error"]["command"] == "lef-abstract"
     assert "could not read back" in payload["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# power_pins verdict + T1 item 11 port accessibility end to end (issue #2839)
+# --------------------------------------------------------------------------- #
+
+
+def _supply_block(
+    *,
+    vdd_box: tuple[float, float, float, float] = (0.0, 2.0, 0.2, 3.0),
+    vdd_layer: tuple[int, int] = MET1_NET,
+    draw_vss: bool = True,
+) -> kdb.Layout:
+    """A 5x5 um block with a VDD port (left edge by default) and a VSS port
+    on the right edge, each a drawn met1 box labelled at its centre -- so
+    `klt socket-check` (which needs the labels) and `klt lef-abstract`
+    (which needs the metal) can both run on the same stream."""
+    layout = kdb.Layout()
+    layout.dbu = DBU_UM
+    top = layout.create_cell("ANALOG_BLOCK")
+    ports = [("VDD", vdd_box, vdd_layer)]
+    vss_box = (4.8, 2.0, 5.0, 3.0)
+    ports.append(("VSS", vss_box, MET1_NET))
+    for name, (x0, y0, x1, y1), layer in ports:
+        index = layout.layer(*layer)
+        if name != "VSS" or draw_vss:
+            top.shapes(index).insert(_box_um(x0, y0, x1, y1))
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        top.shapes(index).insert(
+            kdb.Text(
+                name, kdb.Trans(kdb.Vector(round(cx / DBU_UM), round(cy / DBU_UM)))
+            )
+        )
+    return layout
+
+
+def _supply_socket(
+    *,
+    vdd_box: tuple[float, float, float, float] = (0.0, 2.0, 0.2, 3.0),
+    vdd_layer: tuple[int, int] = MET1_NET,
+    vdd_use: str = "POWER",
+    with_vss: bool = True,
+) -> dict:
+    pins = [
+        {
+            "name": "VDD",
+            "layer": list(vdd_layer),
+            "x": (vdd_box[0] + vdd_box[2]) / 2,
+            "y": (vdd_box[1] + vdd_box[3]) / 2,
+            "use": vdd_use,
+            "direction": "INOUT",
+        }
+    ]
+    if with_vss:
+        pins.append(
+            {
+                "name": "VSS",
+                "layer": list(MET1_NET),
+                "x": 4.9,
+                "y": 2.5,
+                "use": "GROUND",
+                "direction": "INOUT",
+            }
+        )
+    return _basic_descriptor(pins=pins)
+
+
+def test_power_pins_pass_for_drawn_power_and_ground(tmp_path, monkeypatch):
+    report = _run(
+        tmp_path, monkeypatch, layout=_supply_block(), descriptor=_supply_socket()
+    )
+
+    assert report["power_pins"]["status"] == "pass", report["power_pins"]
+    assert report["power_pins"]["pins"] == [
+        {
+            "name": "VDD",
+            "use": "POWER",
+            "use_read_back": "POWER",
+            "layer": "met1",
+            "geometry_source": "drawn",
+        },
+        {
+            "name": "VSS",
+            "use": "GROUND",
+            "use_read_back": "GROUND",
+            "layer": "met1",
+            "geometry_source": "drawn",
+        },
+    ]
+    # Additive per-pin echo of the descriptor's declared GDS layer.
+    assert {pin["name"]: pin["gds_layer"] for pin in report["pins"]} == {
+        "VDD": [68, 20],
+        "VSS": [68, 20],
+    }
+
+
+def test_power_pins_fail_without_ground_and_for_synthesized_port(tmp_path, monkeypatch):
+    no_ground = _run(
+        tmp_path,
+        monkeypatch,
+        layout=_supply_block(),
+        descriptor=_supply_socket(with_vss=False),
+    )
+    assert [f["code"] for f in no_ground["power_pins"]["findings"]] == ["no_ground_pin"]
+
+    synthesized = _run(
+        tmp_path,
+        monkeypatch,
+        layout=_supply_block(draw_vss=False),
+        descriptor=_supply_socket(),
+    )
+    findings = synthesized["power_pins"]["findings"]
+    assert [(f["code"], f["pin"]) for f in findings] == [("port_not_drawn", "VSS")]
+    assert synthesized["power_pins"]["status"] == "fail"
+    # The structural self-check is unaffected -- a synthesized PORT is not a
+    # structural defect.
+    assert synthesized["self_check"]["status"] == "pass"
+
+
+def test_read_back_pin_uses_reads_the_written_use():
+    from klayout_tools.lef_abstract import _read_back_pin_uses, check_power_pins
+
+    text = (
+        "VERSION 5.7 ;\nMACRO m\n  PIN VDD\n    DIRECTION INOUT ;\n    USE SIGNAL ;\n"
+        "  END VDD\n  PIN VSS\n    USE GROUND ;\n  END VSS\nEND m\nEND LIBRARY\n"
+    )
+    assert _read_back_pin_uses(text) == {"VDD": "SIGNAL", "VSS": "GROUND"}
+    verdict = check_power_pins(
+        [
+            {
+                "name": "VDD",
+                "use": "POWER",
+                "lef_layer": "met1",
+                "geometry_source": "drawn",
+            },
+            {
+                "name": "VSS",
+                "use": "GROUND",
+                "lef_layer": "met1",
+                "geometry_source": "drawn",
+            },
+        ],
+        text,
+    )
+    assert [(f["code"], f["pin"]) for f in verdict["findings"]] == [
+        ("use_not_written", "VDD")
+    ]
+
+
+def test_cli_require_power_pins_exit_code(tmp_path, monkeypatch, capsys):
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    layout_path = _write_layout(_supply_block(draw_vss=False), tmp_path / "block.gds")
+    socket_path = _write_socket(_supply_socket(), tmp_path / "socket.json")
+    argv = [
+        "lef-abstract",
+        layout_path,
+        "--socket",
+        socket_path,
+        "--macro-name",
+        "analog_block",
+        "--cell-library",
+        "sky130_fd_sc_hd",
+        "--output",
+        str(tmp_path / "out.lef"),
+        "--format",
+        "json",
+    ]
+
+    assert main(argv) == 0
+    capsys.readouterr()
+    assert main([*argv, "--require-power-pins"]) == 3
+    assert json.loads(capsys.readouterr().out)["power_pins"]["status"] == "fail"
+
+
+def _real_port_evidence(tmp_path, monkeypatch, *, layout, descriptor):
+    """Real `klt socket-check` + `klt lef-abstract` envelopes for one block,
+    shaped as the resolutions `klt signoff`'s item 11 grades."""
+    from klayout_tools.socket_check import run_socket_check
+
+    lef_report = _run(tmp_path, monkeypatch, layout=layout, descriptor=descriptor)
+    socket_report = run_socket_check(
+        str(tmp_path / "block.gds"), str(tmp_path / "socket.json")
+    )
+    return {"envelope": socket_report}, {"envelope": lef_report}
+
+
+@pytest.mark.parametrize(
+    ("layout_kwargs", "socket_kwargs", "expected"),
+    [
+        # Both supplies on the boundary, on a routing layer: met.
+        ({}, {}, None),
+        # VDD moved to the block interior.
+        (
+            {"vdd_box": (2.0, 2.0, 2.2, 3.0)},
+            {"vdd_box": (2.0, 2.0, 2.2, 3.0)},
+            "power_port_interior_only",
+        ),
+        # VDD on nwell: drawn and on the edge, but no LEF routing layer.
+        (
+            {"vdd_layer": NWELL},
+            {"vdd_layer": NWELL},
+            "power_port_layer_disallowed",
+        ),
+        # Descriptor declares VDD as a signal: the LEF says USE SIGNAL, so
+        # no supply port of that name exists on the GDS side either.
+        ({}, {"vdd_use": "SIGNAL"}, "no_edge_power_port"),
+    ],
+)
+def test_item_11_port_accessibility_end_to_end(
+    tmp_path, monkeypatch, layout_kwargs, socket_kwargs, expected
+):
+    """Issue #2839: item 11's port-accessibility half graded from envelopes
+    the real verbs produced, not hand-written fixtures."""
+    from klayout_tools.signoff_power_delivery import (
+        _grade_power_ports,
+        _read_power_port_policy,
+    )
+
+    socket, lef = _real_port_evidence(
+        tmp_path,
+        monkeypatch,
+        layout=_supply_block(**layout_kwargs),
+        descriptor=_supply_socket(**socket_kwargs),
+    )
+    reason, block = _grade_power_ports(
+        socket, lef, ["VDD", "VSS"], _read_power_port_policy({"required": True})
+    )
+
+    assert reason == expected, block
+    if expected is None:
+        assert [entry["net"] for entry in block["ports"]] == ["VDD", "VSS"]
+        assert block["ports"][0]["port"]["accessible_edges"] == ["left"]
+        assert block["ports"][0]["lef_pin"] == {
+            "name": "VDD",
+            "use": "POWER",
+            "layer": "met1",
+            "geometry_source": "drawn",
+        }

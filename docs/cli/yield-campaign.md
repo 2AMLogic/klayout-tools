@@ -52,7 +52,7 @@ The command is headless and safe in CI, **except** that — like `klt yield` —
 it requires the `klt_yield_native` Rust extension to be built and importable;
 see [`docs/cli/yield.md`'s "Building the native
 extension"](yield.md#building-the-native-extension) (same crate, same
-`pip install 'klayout-tools[yield]'` extra, same from-source fallback).
+from-source build as the supported route today; the `[yield]` extra does not resolve for any release to date).
 
 ## Campaign spec
 
@@ -60,7 +60,10 @@ extension"](yield.md#building-the-native-extension) (same crate, same
 `monte_carlo` block — a spec without one is just a `klt sim` request; run
 `klt sim` directly instead. Every other field is exactly `klt sim`'s own
 schema (`netlist`, `analysis`, `measurements[]` with each measurement's
-`limits.min`/`max`/`target_yield`, `corners`, `monte_carlo.vary`, `backend`,
+`limits.min`/`max`/`target_yield` (plus the yield-only `target_sigma` and
+`min_converged_samples`, issue #2873 — stripped before dispatch and restored
+for the analysis, like `target_yield`; see
+[`yield.md`](yield.md#sigma-target-and-converged-n)), `corners`, `monte_carlo.vary`, `backend`,
 `remote`). Three additional top-level fields are `klt yield`'s own run-level
 defaults — there is no separate `--limits` file in this flow, so they live on
 the campaign spec's own top level:
@@ -88,6 +91,38 @@ the campaign spec's own top level:
   "backend": "local-parallel"
 }
 ```
+
+## Negative control
+
+A spec may carry an optional top-level `negative_control` object, so one
+call runs the nominal campaign *and* its known-bad control:
+
+```json
+{
+  "negative_control": {
+    "description": "2.5x mismatch",
+    "monte_carlo": {"mismatch_scale": 2.5}
+  }
+}
+```
+
+`negative_control.monte_carlo` (required, non-empty) is merged over the
+spec's own `monte_carlo` block to build a second `klt sim` request, dispatched
+with the same `--backend`/`--hosts` and written under `<out-dir>/control/`.
+Any `monte_carlo` field may be overridden (`mismatch_scale` is the usual one,
+see [`sim.md`](sim.md)); no new `klt sim` fields are involved. `description`
+is optional. The two reports are then combined by the same derivation
+[`klt yield-samples`](yield.md#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples)
+uses, written to `<out-dir>/derived-sample-set.json`, and graded by `klt
+yield` unchanged, so every measurement carries a populated `negative_control`.
+Control draws that fail to converge are disclosed (`errored`/`inconclusive`
+in the `derivation` echo), never dropped.
+
+The control is independently seeded: an omitted
+`negative_control.monte_carlo.seed` is derived from the merged content under
+its own salt, and a control seed equal to the nominal seed is refused. Adding
+a `negative_control` block never changes the nominal seed or draws. A spec
+without the block behaves, and emits, exactly as before.
 
 ## Seed management
 
@@ -143,6 +178,21 @@ schema"](yield.md#json-schema-the-contract)) with one added `campaign` block:
 }
 ```
 
+When the spec has a `negative_control`, `campaign` gains an additive
+`negative_control` echo (absent otherwise):
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `seed` | integer | The control's resolved Monte Carlo seed. |
+| `seed_source` | string | `"spec"` (explicit) or `"derived"`. |
+| `description` | string \| null | Echo of `negative_control.description`. |
+| `overrides` | object | The `monte_carlo` overrides merged over the nominal block. |
+| `sim_status` | string | The control `klt sim` report's top-level `status`. |
+| `derivation` | array | Per-measurement control `errored`/`inconclusive` accounting from the sample-set derivation. |
+| `sim_report_path` | string | Control `klt sim` report path. |
+| `request_path` | string | Resolved control `klt sim` request path. |
+| `sample_set_path` | string | The derived sample set handed to `klt yield`. |
+
 ### `campaign` fields
 
 | Field | Type | Description |
@@ -178,10 +228,11 @@ an empty set is likewise an error.
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | The campaign ran and every measurement's declared `target_yield` was met (or none declared one). |
+| `0` | The campaign ran and every declared criterion (`target_yield`, `target_sigma`, `min_converged_samples`) was met (or none declared one). |
 | `1` | The campaign could not be dispatched or analysed — see "Errors" above. |
 | `2` | Usage error (argparse) — missing/invalid arguments. |
-| `3` | The campaign ran; at least one measurement's yield claim was not met at the stated confidence. |
+| `3` | The campaign ran; at least one measurement's yield or sigma claim was not met at the stated confidence. |
+| `4` | The campaign ran; nothing failed but the evidence is insufficient (`status: "insufficient_evidence"`, issue #2873). |
 
 Exit codes mirror `klt yield`'s own — see
 [`docs/cli/yield.md`'s "Exit codes"](yield.md#exit-codes) — including that

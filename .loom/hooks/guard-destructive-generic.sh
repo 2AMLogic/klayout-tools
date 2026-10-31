@@ -175,6 +175,48 @@ fi
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) || COMMAND=""
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null) || CWD=""
 
+# Champion state files (#13180). `/loom:champion --pr N` keeps a pin file and a
+# PR-facts file directly under the git common dir. The shell would expand
+# `$(git rev-parse --git-common-dir)/loom-champion-{pin,facts}-pr-<digits>` to
+# exactly that directory, but this guard cannot evaluate a substitution and
+# fails closed on it. Rewrite ONLY that exact, anchored spelling (literal PR
+# digits, fixed basename) to the resolved absolute path so the ordinary
+# containment logic judges a literal path; _champion_state_path_ok() below then
+# admits that one shape. Any other `$(…)` target stays unresolvable and denied.
+_CHAMPION_STATE_RE='\$\(git rev-parse --git-common-dir\)/(loom-champion-(pin|facts)-pr-[0-9]+(\.json)?)([^A-Za-z0-9._/-]|$)'
+_CHAMPION_COMMON_DIR=""
+if [[ -n "$CWD" && -d "$CWD" ]]; then
+    _CHAMPION_COMMON_DIR=$(cd "$CWD" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || _CHAMPION_COMMON_DIR=""
+fi
+if [[ -n "$_CHAMPION_COMMON_DIR" && "$COMMAND" == *'$(git rev-parse --git-common-dir)/loom-champion-'* ]]; then
+    _cs_rest="$COMMAND"
+    _cs_out=""
+    while [[ "$_cs_rest" =~ $_CHAMPION_STATE_RE ]]; do
+        _cs_whole="${BASH_REMATCH[0]}"
+        _cs_name="${BASH_REMATCH[1]}"
+        _cs_term="${BASH_REMATCH[4]}"
+        _cs_out+="${_cs_rest%%"$_cs_whole"*}${_CHAMPION_COMMON_DIR}/${_cs_name}${_cs_term}"
+        _cs_rest="${_cs_rest#*"$_cs_whole"}"
+    done
+    COMMAND="${_cs_out}${_cs_rest}"
+fi
+
+# True if $1 (an absolute, normalized path) is exactly one of the Champion
+# state files, a DIRECT child of the git common dir. Anchored on the basename
+# pattern and the resolved directory, so `.git/config`, a sibling file, a
+# `..` traversal or a nested path never matches.
+_champion_state_path_ok() {
+    local p="$1"
+    [[ -n "$_CHAMPION_COMMON_DIR" && -n "$p" ]] || return 1
+    [[ "$p" =~ ^(.*)/(loom-champion-(pin|facts)-pr-[0-9]+(\.json)?)$ ]] || return 1
+    local dir="${BASH_REMATCH[1]}"
+    [[ "$dir" == *"/../"* || "$dir" == */.. || "$dir" == *"/./"* ]] && return 1
+    [[ "$dir" == "$_CHAMPION_COMMON_DIR" ]] && return 0
+    local phys
+    phys=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+    [[ "$phys" == "$_CHAMPION_COMMON_DIR" ]]
+}
+
 # If no command to check, allow
 if [[ -z "$COMMAND" ]]; then
     exit 0
@@ -1906,12 +1948,18 @@ function has_live_subst(str,    i, c, bs) {
 # Do not restate this as "harmless": state the direction.
 #
 # Shared as a single awk source string so the three parsers cannot drift.
+#
+# SEPARATOR SIDE-CHANNEL (#9405): every `\n` emitted for a `;`/`&&`/`&`/`||`/`|`
+# also records that operator in the global qsplit_op[k] (k = 1..qsplit_nops,
+# reset per call), so qsplit_op[k] is the operator BETWEEN output segments k
+# and k+1. Callers that ignore it are unaffected; parse_force_ops() reads it.
 # =============================================================================
 _QSPLIT_AWK="$_HASLIVESUBST_AWK"'
 function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom, bs, bk) {
     SQ = sprintf("%c", 39)   # single quote
     DQ = sprintf("%c", 34)   # double quote
     out = ""
+    qsplit_nops = 0
     n = length(s)
     i = 1
     while (i <= n) {
@@ -2020,14 +2068,14 @@ function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom, bs
             k = i + 1
             while (k < ci) {
                 ch = substr(s, k, 1)
-                if (ch == ";") { out = out "\n"; k++; continue }
+                if (ch == ";") { out = out "\n"; qsplit_op[++qsplit_nops] = ";"; k++; continue }
                 if (ch == "&") {
-                    if (substr(s, k + 1, 1) == "&") { out = out "\n"; k += 2; continue }
-                    out = out "\n"; k++; continue
+                    if (substr(s, k + 1, 1) == "&") { out = out "\n"; qsplit_op[++qsplit_nops] = "&&"; k += 2; continue }
+                    out = out "\n"; qsplit_op[++qsplit_nops] = "&"; k++; continue
                 }
                 if (ch == "|") {
-                    if (substr(s, k + 1, 1) == "|") { out = out "\n"; k += 2; continue }
-                    out = out "\n"; k++; continue
+                    if (substr(s, k + 1, 1) == "|") { out = out "\n"; qsplit_op[++qsplit_nops] = "||"; k += 2; continue }
+                    out = out "\n"; qsplit_op[++qsplit_nops] = "|"; k++; continue
                 }
                 out = out ch
                 k++
@@ -2108,14 +2156,14 @@ function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom, bs
             i += 2
             continue
         }
-        if (c == ";") { out = out "\n"; i++; continue }
+        if (c == ";") { out = out "\n"; qsplit_op[++qsplit_nops] = ";"; i++; continue }
         if (c == "&") {
-            if (i < n && substr(s, i + 1, 1) == "&") { out = out "\n"; i += 2; continue }
-            out = out "\n"; i++; continue
+            if (i < n && substr(s, i + 1, 1) == "&") { out = out "\n"; qsplit_op[++qsplit_nops] = "&&"; i += 2; continue }
+            out = out "\n"; qsplit_op[++qsplit_nops] = "&"; i++; continue
         }
         if (c == "|") {
-            if (i < n && substr(s, i + 1, 1) == "|") { out = out "\n"; i += 2; continue }
-            out = out "\n"; i++; continue
+            if (i < n && substr(s, i + 1, 1) == "|") { out = out "\n"; qsplit_op[++qsplit_nops] = "||"; i += 2; continue }
+            out = out "\n"; qsplit_op[++qsplit_nops] = "|"; i++; continue
         }
         out = out c
         i++
@@ -2671,7 +2719,7 @@ BEGIN {
 # (a masked-away `>` can only DROP a write target, never invent a new deny).
 # =============================================================================
 _MASKGT_AWK='
-function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, btick) {
+function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, btick, bq) {
     SQ = sprintf("%c", 39)    # single quote
     DQ = sprintf("%c", 34)    # double quote
     MASK = sprintf("%c", 1)   # SOH -- placeholder for a quoted/arith-context ">"/"<" (never a real char)
@@ -2683,6 +2731,7 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, bti
     tdepth = 0   # `[[...]]` test-context nesting depth (unquoted only)
     esc = 0      # previous byte was an unescaped backslash (mode 0/2 only, #6472)
     btick = 0    # inside an unquoted `...` command substitution (#8211)
+    bq = 0       # quote state INSIDE a backtick span, for masking ">" only (#12076): 0 none, 1 single, 2 double
     while (i <= n) {
         c = substr(s, i, 1)
         if (esc) {
@@ -2692,12 +2741,13 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, bti
             # every ">" is already masked regardless of escaping, so that
             # half of the ternary is a no-op there, not a behavior change.
             esc = 0
-            out = out (mode == 2 && c == ">" ? MASK : c)
+            out = out ((mode == 2 || bq == 2) && c == ">" ? MASK : c)
             i++
             continue
         }
-        if (c == "\\" && mode != 1) {
-            # Single-quoted mode (mode == 1) is handled below and never
+        if (c == "\\" && mode != 1 && bq != 1) {
+            # Single-quoted mode (mode == 1, or bq == 1 inside a backtick
+            # span) is handled below and never
             # reaches here: a backslash has no escaping power inside single
             # quotes in real bash, so it must stay a plain literal byte
             # there and must never suppress the next quote-close check.
@@ -2709,7 +2759,20 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, bti
         if (mode == 0) {
             # An unquoted backtick span makes the quote characters inside it
             # literal data (#8211 -- lockstep with mask_ws(), see above).
-            if (c == "`") { btick = 1 - btick; out = out c; i++; continue }
+            #
+            # #12076: a quoted ">" inside that span is still data, so track a
+            # SEPARATE quote state (bq) that only masks ">" bytes. It never
+            # touches `mode`, so mask_ws() lockstep and the #8211 span-boundary
+            # handling are unchanged, and a backtick always closes the span
+            # (resetting bq) so a quote can never hide the real close.
+            if (c == "`") { btick = 1 - btick; bq = 0; out = out c; i++; continue }
+            if (btick && bq == 0 && (c == SQ || c == DQ)) { bq = (c == SQ ? 1 : 2); out = out c; i++; continue }
+            if (btick && bq != 0) {
+                if ((bq == 1 && c == SQ) || (bq == 2 && c == DQ)) bq = 0
+                out = out (c == ">" ? MASK : c)
+                i++
+                continue
+            }
             if (c == SQ && !btick) { mode = 1; out = out c; i++; continue }
             if (c == DQ && !btick) { mode = 2; out = out c; i++; continue }
             if (c == "(" && i < n && substr(s, i + 1, 1) == "(") {
@@ -4713,12 +4776,18 @@ parse_force_ops() {
                         if (_cdpwd_rest == "" || _cdpwd_rest == DQ) _cdpwd_closed = 1
                     }
                 }
+                # #9405: only a `&&`/`;` split (or a line break, i == 1) runs
+                # `pwd` in the cd'"'"'d shell. `|`/`&` run each side in its own
+                # subshell and `||` skips `pwd` -- abandon unresolved (ask).
+                if (i > 1 && qsplit_op[i - 1] != "&&" && qsplit_op[i - 1] != ";") _cdpwd_closed = 0
                 if (_cdpwd_closed) {
                     _cdpwd_resolved = resolve_cdpwd_literal(pending_cdpwd_path, curcwd, home)
                     if (_cdpwd_resolved != "") varmap[pending_cdpwd_name] = _cdpwd_resolved
                     pending_cdpwd_name = ""
                     continue
                 }
+                # The shell DID assign NAME even though the close was refused: never keep the stale prior value (ask->allow flip). AMBIG, not delete, so a later conditional reassignment is not trusted.
+                varmap[pending_cdpwd_name] = AMBIG
                 pending_cdpwd_name = ""
             }
             # Record any `NAME=value` assignment(s) leading this segment into
@@ -7344,10 +7413,99 @@ fi
 # text-carrying flags, so the real invocations (`psql -c '…'`, `mysql -e '…'`)
 # are untouched and still deny.
 # =============================================================================
-SQL_DDL_PATTERN='DROP DATABASE|DROP TABLE|DROP SCHEMA|TRUNCATE TABLE'
-if echo "$COMMAND_ASK_SCAN" | grep -qiE "$SQL_DDL_PATTERN" && sql_guard_enabled; then
-    matched=$(echo "$COMMAND_ASK_SCAN" | grep -oiE "$SQL_DDL_PATTERN" | head -1)
-    deny "BLOCKED: Command matches dangerous pattern: ${matched:-SQL DDL statement}" "sql-ddl"  # scan-reads: COMMAND_ASK_SCAN
+# WHAT RUNS THE PHRASE, NOT WHERE IT APPEARS (#11007). The phrase is only
+# dangerous when it reaches something that EXECUTES it, so sql_ddl_exec_match()
+# segments the command with qsplit() and matches only a segment whose command
+# word is a DB client (`sqlite3`, `psql`, `mysql`, ...), an interpreter given
+# inline code (`python -c`, `node -e`, `bash -c`, ...), or a wrapper whose
+# payload is a command string (`ssh`, `docker|podman|kubectl exec|run`) -- or a
+# DB client fed the phrase by the pipeline (`echo 'DROP TABLE t;' | sqlite3 db`)
+# or by its own heredoc. Editors, `sed -i`, `git log -S`, search tools, `jq`,
+# `cat` and interpreters reading a script/heredoc no longer match, so no
+# SQL-specific carve-out is needed for them. Accepted trade-off: an
+# interpreter running DDL from a script file or heredoc is not caught (as with
+# `python3 script.py` before).
+sql_ddl_exec_match() {
+    printf '%s' "$1" | awk "$_QSPLIT_AWK"'
+    function phrase(t,   l) {
+        l = tolower(t)
+        if (match(l, /drop database|drop table|drop schema|truncate table/))
+            return toupper(substr(l, RSTART, RLENGTH))
+        return ""
+    }
+    function is_wrapper(w,   base) {
+        base = w
+        sub(/^.*\//, "", base)
+        sub(/^\\/, "", base)
+        return base ~ /^(env|command|exec|builtin|sudo|doas|nohup|setsid|nice|ionice|stdbuf|timeout|time|xargs|unbuffer)$/
+    }
+    function runs_sql(cmd, toks, m,   j, base) {
+        base = cmd
+        sub(/^.*\//, "", base)
+        if (base ~ /^(sqlite3?|psql|mysql|mariadb|duckdb|clickhouse-client|sqlcmd)$/) return 1
+        if (base ~ /^(python[0-9.]*|node|nodejs|ruby|perl|bash|sh|zsh|dash|ksh)$/) {
+            for (j = 2; j <= m; j++) if (toks[j] ~ /^-[A-Za-z]*[ceE][A-Za-z]*$/) return 1
+            return 0
+        }
+        if (base == "ssh") return 1
+        if (base ~ /^(docker|podman|kubectl)$/) {
+            for (j = 2; j <= m; j++) if (toks[j] == "exec" || toks[j] == "run") return 1
+        }
+        return 0
+    }
+    # Whole-command scan: a heredoc body spans physical lines, so buffer them all.
+    { buf = (NR > 1 ? buf "\n" : "") $0 }
+    END {
+        out = qsplit(buf)   # quote-aware segmentation (#3755)
+        n = split(out, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t]+/, "", seg)
+            # Unwrap command-prefix wrappers (#12237). The list mirrors the
+            # heredoc-interpreter scan earlier in this file; keep them in sync.
+            # After a wrapper, skip its -flags, VAR=val and numeric operands. A
+            # bare word right after a flag is that flag operand (`sudo -u pg
+            # psql`, `nice -n 10`) unless it is itself a DB client or wrapper,
+            # so `sudo -E psql` still unwraps to psql.
+            mr = split(seg, raw, /[ \t]+/)
+            j = 1
+            while (j <= mr && raw[j] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) j++
+            while (j <= mr && is_wrapper(raw[j])) {
+                j++
+                prevflag = 0
+                while (j <= mr) {
+                    if (raw[j] ~ /^-/) { prevflag = 1; j++; continue }
+                    if (raw[j] ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || raw[j] ~ /^[0-9]+([.][0-9]+)?[smhd]?$/) { prevflag = 0; j++; continue }
+                    if (prevflag && !is_wrapper(raw[j]) && !runs_sql(raw[j], raw, mr)) { prevflag = 0; j++; continue }
+                    break
+                }
+            }
+            m = 0
+            for (k = j; k <= mr; k++) toks[++m] = raw[k]
+            if (m == 0 || !runs_sql(toks[1], toks, m)) continue
+            ph = phrase(segs[i])
+            if (ph != "") { print ph; exit }
+            # Phrase fed by the pipeline: walk back over `|`-joined segments.
+            for (j = i - 1; j >= 1 && qsplit_op[j] == "|"; j--) {
+                ph = phrase(segs[j])
+                if (ph != "") { print ph; exit }
+            }
+            # Phrase in a later heredoc-body segment of this same command.
+            if (seg ~ /<</ && seg !~ /<<</) {
+                for (j = i + 1; j <= n; j++) {
+                    ph = phrase(segs[j])
+                    if (ph != "") { print ph; exit }
+                }
+            }
+        }
+    }'
+}
+# Cheap grep first so the awk and the config read stay off the hot path.
+if echo "$COMMAND_ASK_SCAN" | grep -qiE 'DROP DATABASE|DROP TABLE|DROP SCHEMA|TRUNCATE TABLE'; then
+    matched=$(sql_ddl_exec_match "$COMMAND_ASK_SCAN")
+    if [[ -n "$matched" ]] && sql_guard_enabled; then
+        deny "BLOCKED: Command matches dangerous pattern: $matched. Editing source that contains this statement? Use the Edit/Write tools." "sql-ddl"  # scan-reads: COMMAND_ASK_SCAN
+    fi
 fi
 
 # =============================================================================
@@ -7970,6 +8128,108 @@ wt_write_mktemp_same_command_safe() {
 }
 
 # =============================================================================
+# write-confinement /tmp-CWD LOOP-VARIABLE RESOLUTION (#12285)
+#
+# Sibling of wt_write_mktemp_same_command_safe() for routine scratch work:
+#
+#     cd /tmp/probe && for name in a b; do echo x > "$name.gds"; done
+#
+# The target starts with an unexpanded `$`, so the "root unknown" deny
+# (worktree-write-confinement-unresolved-var) fires even though every value the
+# variable can take is a bare literal word and the cwd is a literal /tmp
+# directory -- the write cannot leave /tmp/probe. Skip that deny ONLY when ALL
+# hold (each is lexical and fails closed):
+#
+#   1. The tracked cwd is a literal /tmp/<dir>[/<dir>...] path (components
+#      start alphanumeric, so no `.`/`..`; no `$`, backtick or quote) outside
+#      every managed worktree and the main checkout, AND the
+#      command has an earlier `cd /tmp/<literal>` segment, so the cwd came from
+#      this command and not from the hook's inherited cwd.
+#   2. The target is `$var`/`${var}` plus a literal suffix with no `/`, `..`,
+#      `$`, backtick or quote.
+#   3. EVERY binding of var in the command is a literal `for var in <words>` or
+#      `var=<word>` whose words are `/`-free, `..`-free, non-absolute names,
+#      and the first binding precedes the first use of the target. Any other
+#      rebinding (read, +=, eval, source, unset, ...) or no binding at all keeps
+#      the deny.
+#   4. The command contains no `ln` command word: a symlink created in the same
+#      command could redirect the write out of /tmp/<dir>. A symlink that
+#      already exists from an EARLIER command remains a residual gap, since the
+#      guard is lexical and never resolves paths.
+# =============================================================================
+wt_write_tmp_cwd_loop_var_safe() {
+    local target="$1" cwd="$2" cmdtext="$3" t c1 c2 varname suffix verdict
+    t="$target"
+    if [[ ${#t} -ge 2 ]]; then
+        c1="${t:0:1}"; c2="${t: -1}"
+        if [[ ("$c1" == '"' && "$c2" == '"') || ("$c1" == "'" && "$c2" == "'") ]]; then
+            t="${t:1:${#t}-2}"
+        fi
+    fi
+    if [[ "$t" =~ ^\$\{([A-Za-z_][A-Za-z0-9_]*)\}(.*)$ ]]; then
+        varname="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+    elif [[ "$t" =~ ^\$([A-Za-z_][A-Za-z0-9_]*)(.*)$ ]]; then
+        varname="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+    else
+        return 1
+    fi
+    [[ "$suffix" =~ ^[A-Za-z0-9._+@%,=:-]*$ ]] || return 1
+    [[ "$suffix" == *..* ]] && return 1
+    c1="${cwd:0:1}"; c2="${cwd: -1}"
+    if [[ ${#cwd} -ge 2 && ("$c1" == '"' || "$c1" == "'") && "$c1" == "$c2" ]]; then
+        cwd="${cwd:1:${#cwd}-2}"
+    fi
+    [[ "$cwd" =~ ^/tmp(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$ ]] || return 1
+    # A checkout or worktree that itself lives under /tmp is still protected.
+    _wt_in_protected_area "$cwd" && return 1
+    # A symlink made in this same command could redirect the write.
+    [[ "$cmdtext" =~ (^|[^A-Za-z0-9_.-])ln([[:space:]]|$) ]] && return 1
+    verdict=$(printf '%s' "$cmdtext" | awk -v varname="$varname" -v tok="\$${varname}${suffix}" -v btok="\${${varname}}${suffix}" "$_QSPLIT_AWK""$_MKTEMP_REBIND_AWK"'
+    function strip_q(w,   a, b) {
+        a = substr(w, 1, 1); b = substr(w, length(w), 1)
+        if (length(w) >= 2 && (a == "\"" || a == "\047") && a == b) return substr(w, 2, length(w) - 2)
+        return w
+    }
+    function lit_ok(w) { return w ~ /^[A-Za-z0-9_][A-Za-z0-9._-]*$/ }
+    {
+        $0 = qsplit($0)
+        n = split($0, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t]+/, "", seg)
+            sub(/[ \t]+$/, "", seg)
+            while (sub(/^(do|then|else|elif|if|while|until|!|\{|\()[ \t]+/, "", seg)) { }
+            if (seg ~ /^cd[ \t]+/) {
+                w = seg; sub(/^cd[ \t]+/, "", w); sub(/[ \t].*$/, "", w)
+                w = strip_q(w)
+                if (cdat == 0 && w ~ /^\/tmp(\/[A-Za-z0-9_][A-Za-z0-9._-]*)+$/) cdat = i
+            }
+            if (useat == 0 && (index(seg, tok) > 0 || index(seg, btok) > 0)) useat = i
+            bseg = _mktemp_strip_decl_kw(seg)
+            if (seg ~ ("^for[ \t]+" varname "[ \t]+in[ \t]+")) {
+                total++
+                w = seg; sub(/^for[ \t]+[A-Za-z0-9_]+[ \t]+in[ \t]+/, "", w)
+                m = split(w, words, /[ \t]+/)
+                ok = (m >= 1)
+                for (k = 1; k <= m; k++) if (!lit_ok(words[k])) ok = 0
+                if (ok) { valid++; if (firstbind == 0) firstbind = i }
+            } else if (length(bseg) > length(varname) + 1 && substr(bseg, 1, length(varname) + 1) == varname "=") {
+                total++
+                w = strip_q(substr(bseg, length(varname) + 2))
+                if (lit_ok(w)) { valid++; if (firstbind == 0) firstbind = i }
+            } else if (_mktemp_is_other_rebind(seg, varname)) {
+                total++
+            }
+        }
+    }
+    END {
+        if (total >= 1 && total == valid && cdat > 0 && useat > 0 && cdat < useat && firstbind > 0 && firstbind < useat) print "SAFE"
+        else print "UNSAFE"
+    }')
+    [[ "$verdict" == "SAFE" ]]
+}
+
+# =============================================================================
 # rm-scope SAME-COMMAND LITERAL-PATH RESOLUTION (#6676)
 #
 # rm_scope_mktemp_same_command_safe() (above) proves ONLY the exact-string
@@ -8516,6 +8776,7 @@ _extract_write_targets_scan() {
     BEGIN {
         SEP = sprintf("%c", 31)
         curcwd = startcwd
+        sw_depth = 0; sw_pending = 0; pd_depth = 0   # #12082 subshell / pushd stacks
     }
     # Slurp the whole (possibly multi-line) command into ONE buffer,
     # preserving embedded newlines (mirrors the #3898 multi-line
@@ -8600,6 +8861,38 @@ _extract_write_targets_scan() {
             sub(/^[ \t]+/, "", seg)
             sub(/^sudo[ \t]+/, "", seg)
             sub(/^[ \t]+/, "", seg)
+
+            # GROUPING OPENERS AND CLOSERS AROUND A `cd` (#12082). The cd
+            # tracker below only fires when the segment WORD is `cd`, so
+            # `( cd /tmp/x && echo hi > a.txt )` and `{ cd /tmp/x; ...; }` were
+            # never tracked: the relative write resolved against the hook cwd
+            # (the main checkout) and was denied although it lands in /tmp/x.
+            #   * A subshell `(` saves curcwd on a stack and its matching `)`
+            #     restores it, because a cd inside a subshell never leaks out.
+            #     Restoring on an unmatched `)` can only RESTORE the pre-group
+            #     cwd, so a miscount errs toward more denials, not fewer.
+            #   * A brace group `{ ` runs in the current shell, so it is only
+            #     stripped; its cd correctly persists.
+            # Quoted spans are blanked before counting parens so a `(` or `)`
+            # inside a string can neither open nor close a group.
+            if (sw_pending > 0) {
+                while (sw_pending > 0 && sw_depth > 0) { curcwd = sw_stack[sw_depth]; sw_depth--; sw_pending-- }
+                sw_pending = 0
+            }
+            while (seg ~ /^\{[ \t]/) sub(/^\{[ \t]+/, "", seg)
+            while (seg ~ /^\(/ && seg !~ /^\(\(/) {
+                sw_depth++
+                sw_stack[sw_depth] = curcwd
+                sub(/^\([ \t]*/, "", seg)
+            }
+            if (sw_depth > 0) {
+                _pq = seg
+                gsub(/"[^"]*"/, "", _pq)
+                gsub(/'"'"'[^'"'"']*'"'"'/, "", _pq)
+                _po = gsub(/\(/, "", _pq)
+                _pc = gsub(/\)/, "", _pq)
+                if (_pc > _po) sw_pending = _pc - _po
+            }
             if (seg == "") continue
 
             # `NAME=value` assignments in any ordinary shell assignment
@@ -8666,7 +8959,13 @@ _extract_write_targets_scan() {
             mseg = substr(gsegs[i], stripped + 1)
             mm = split(mseg, mtoks, /[ \t]+/)
 
-            if (toks[1] == "cd") {
+            # `popd` undoes the most recent `pushd` of THIS command (#12082).
+            if (toks[1] == "popd") {
+                if (pd_depth > 0) { curcwd = pd_stack[pd_depth]; pd_depth-- }
+                continue
+            }
+            if (toks[1] == "cd" || (toks[1] == "pushd" && m >= 2 && toks[2] !~ /^-/)) {
+                if (toks[1] == "pushd") { pd_depth++; pd_stack[pd_depth] = curcwd }
                 if (m >= 2 && toks[2] != "" && toks[2] != "-") {
                     # SAME-COMMAND VARIABLE RESOLUTION FOR THE cd ARGUMENT
                     # ITSELF (#7294, mirrors parse_force_ops'"'"' identical
@@ -8958,14 +9257,44 @@ _extract_write_targets_scan() {
                 # every FILE argument after that is still fully scanned, so a
                 # genuine main-checkout target among them still denies.
                 bare_i_pending = 0
+                have_script = 0
+                end_opts = 0
                 sed_skip = 1
                 nf = 0
                 delete nfargs
                 for (j = 2; j <= m; j++) {
                     if (j in stdin_redir) continue
                     if (j in numfd_redir) continue
+                    # `--` ends options (#11074): every later token -- even one
+                    # spelled `-e`/`-f`/`--file=x` -- is an operand, never a
+                    # script option that could swallow the next file.
+                    if (!end_opts && toks[j] == "--") { end_opts = 1; continue }
+                    if (end_opts) {
+                        if (toks[j] == "") continue
+                        if (toks[j] ~ /^<<-?/) {
+                            if (toks[j] == "<<" || toks[j] == "<<-" || toks[j] == "<<<") j++
+                            continue
+                        }
+                        nf++
+                        nfargs[nf] = toks[j]
+                        bare_i_pending = 0
+                        continue
+                    }
                     if (toks[j] == "-i") { has_i = 1; bare_i_pending = 1; continue }
                     if (toks[j] ~ /^-i/) has_i = 1
+                    # Script options (#11074): `-e`/`-f`/`--expression`/`--file`
+                    # (or a short cluster ending in e/f with no `i` before it --
+                    # after `i` the rest is the backup suffix) take the NEXT
+                    # token as script text/file, never a file operand; attached
+                    # forms (`-es/a/b/`, `--file=s.sed`) carry it in-token. Either
+                    # way there is no positional script: every remaining
+                    # non-option token is a file.
+                    if (toks[j] == "--expression" || toks[j] == "--file" || toks[j] ~ /^-[^-eif]*[ef]$/) {
+                        have_script = 1; bare_i_pending = 0; j++; continue
+                    }
+                    if (toks[j] ~ /^--(expression|file)=/ || toks[j] ~ /^-[^-eif]*[ef]./) {
+                        have_script = 1; bare_i_pending = 0; continue
+                    }
                     if (toks[j] ~ /^-/) continue
                     if (toks[j] == "") continue
                     # Same heredoc/herestring exclusion as the `tee` branch
@@ -8984,6 +9313,9 @@ _extract_write_targets_scan() {
                     }
                     bare_i_pending = 0
                 }
+                # With -e/-f there is no positional script: only the BSD `-i ''`
+                # suffix token (sed_skip == 2 -> 1) is left to skip.
+                if (have_script) sed_skip = (sed_skip == 2) ? 1 : 0
                 if (has_i && nf > sed_skip) {
                     for (j = sed_skip + 1; j <= nf; j++) print curcwd SEP resolve_var_q(nfargs[j])
                 }
@@ -9299,8 +9631,24 @@ expand_leading_tilde() {
 #
 # Cheap pre-check keeps awk off the hot path for the ~99% of commands that have
 # no recursive/force rm at all.
-if echo "$COMMAND_ASK_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
-    RM_TARGETS=$(extract_rm_targets "$COMMAND_ASK_SCAN" | head -20)
+# NON-SHELL INTERPRETER HEREDOC DATA (#10422): COMMAND_ASK_SCAN deliberately
+# leaves bodies fed to python/perl/ruby/node VISIBLE (right for the ask-tier
+# scans). For the rm scan that is a false positive: a python3 stdin heredoc
+# carrying rm-looking TEXT is data the outer shell never executes. Build a
+# rm-scan-only copy that re-runs the selective heredoc masker with
+# shell_only=1, so quoted (or provably expansion-free) bodies of NON-shell
+# interpreters are data, while bash/sh/zsh/dash/ksh/eval/source/. -fed bodies
+# (and `cat <<EOF | bash`, `sh -s`) stay visible and fail closed. The true
+# original $COMMAND is passed so capture-then-reparse shapes still fail closed.
+COMMAND_RM_SCAN="$COMMAND_ASK_SCAN"  # scan-contract: COMMAND_RM_SCAN=deny-safe from=COMMAND_ASK_SCAN
+if [[ "$COMMAND_RM_SCAN" == *"<<"* ]]; then
+    COMMAND_RM_SCAN=$(printf '%s' "$COMMAND_RM_SCAN" | ORIG_COMMAND_FOR_READ_CHECK="$COMMAND" awk "$_MASKHEREDOC_AWK"'
+    BEGIN { origcmd = ENVIRON["ORIG_COMMAND_FOR_READ_CHECK"] }
+    { buf = buf (NR > 1 ? "\n" : "") $0 }
+    END { printf "%s", mask_heredoc_bodies_selective(buf, 1, origcmd) }')
+fi
+if echo "$COMMAND_RM_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
+    RM_TARGETS=$(extract_rm_targets "$COMMAND_RM_SCAN" | head -20)
 
     for target in $RM_TARGETS; do
         # Strip the #8217 provenance mark (0x1E) the span pass prefixes onto
@@ -10066,6 +10414,12 @@ if worktree_isolation_guard_enabled && \
                         if wt_write_mktemp_same_command_safe "$_wtarget" "$COMMAND_WT_MKTEMP_SCAN"; then
                             continue
                         fi
+                        # #12285: literal-loop-variable scratch write under a
+                        # literal `cd /tmp/<dir>` -- see
+                        # wt_write_tmp_cwd_loop_var_safe()'s doc comment.
+                        if wt_write_tmp_cwd_loop_var_safe "$_wtarget" "$_wcwd" "$COMMAND_WT_MKTEMP_SCAN"; then
+                            continue
+                        fi
                         deny "BLOCKED: Bash-tool write target '${_wtarget}' is an unexpanded shell variable from the path root down, so this guard cannot tell where the write lands — it may resolve to an absolute path inside the main repository checkout ('${_WT_MAIN_ROOT}'), and a Loom-managed worktree exists in this repository. Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree ($(_wt_worktree_hint)) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"  # scan-reads: COMMAND_ASK_SCAN,COMMAND_WT_MKTEMP_SCAN
                     fi
                     continue
@@ -10189,6 +10543,10 @@ if worktree_isolation_guard_enabled && \
             continue
         fi
         _wabs=$(normalize_abs_path "$_wabs")
+
+        # (a0) The Champion pin / PR-facts file, a direct child of the git
+        # common dir (#13180) -> allow. Exactly those two name patterns.
+        _champion_state_path_ok "$_wabs" && continue
 
         # (a) Already inside some managed worktree -> allow. This is exactly
         # where a builder is supposed to write.

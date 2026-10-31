@@ -13,6 +13,8 @@ from __future__ import annotations
 import types
 from typing import Any, TypedDict, Union
 
+from ._jsonnum import is_number
+
 # --------------------------------------------------------------------------- #
 # Typed envelope shapes + runtime validation (issue #2033)
 #
@@ -255,6 +257,85 @@ class _PlaceAndRouteEnvelope(_PlaceAndRouteRequired, total=False):
     provenance: dict[str, Any] | None
 
 
+class _SocketCheckRequired(_EnvelopeCommon):
+    # Issue #2839: `klt socket-check` (docs/cli/socket-check.md). `socket`
+    # plus the `checks`/`budgets` lists are the fields `_classify`
+    # recognises this shape by; `status` is what `_check_passed` grades.
+    # T1 item 11 reads the additive `power_ports` fact block, defensively,
+    # so an envelope predating it still classifies (and is then refused by
+    # the item's own rule, not here).
+    status: str
+    socket: Any
+    checks: list[Any]
+    budgets: list[Any]
+
+
+class _SocketCheckEnvelope(_SocketCheckRequired, total=False):
+    file: Any
+    socket_name: Any
+    dbu_um: Any
+    check_count: Any
+    power_ports: dict[str, Any]
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _SeamCheckRequired(_EnvelopeCommon):
+    # Issue #4189: `klt seam-check` (docs/cli/seam-check.md). `tiling` and
+    # `bands_um` (null when that assertion was not requested) plus the
+    # `violations` list are what `_classify` recognises this shape by;
+    # `status` is what `_check_passed` grades.
+    status: str
+    violations: list[Any]
+    tiling: Any
+    bands_um: Any
+
+
+class _SeamCheckEnvelope(_SeamCheckRequired, total=False):
+    file: Any
+    layer: Any
+    dbu_um: Any
+    violation_count: Any
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _LefAbstractRequired(_EnvelopeCommon):
+    # Issue #2839: `klt lef-abstract` (docs/cli/lef-abstract.md).
+    # `macro_name` plus the `pins` list and the `self_check` block are the
+    # fields `_classify` recognises this shape by; `self_check.status` is
+    # what `_check_passed` grades (the verb has no top-level `status`).
+    macro_name: str
+    pins: list[Any]
+    self_check: dict[str, Any]
+
+
+class _LefAbstractEnvelope(_LefAbstractRequired, total=False):
+    file: Any
+    socket: Any
+    output: Any
+    size_um: dict[str, Any]
+    power_pins: dict[str, Any]
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _SynthesizeRequired(_EnvelopeCommon):
+    # Issue #4015: `klt synthesize` (docs/cli/synthesize.md). `structural`
+    # plus `netlist_sha256`/`netlist_path` are the fields `_classify`
+    # recognises this shape by; `status` and `structural`'s counts are what
+    # `_check_passed` grades.
+    status: str
+    structural: dict[str, Any]
+    netlist_sha256: str
+    netlist_path: Any
+
+
+class _SynthesizeEnvelope(_SynthesizeRequired, total=False):
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
 class _GenericRequired(_EnvelopeCommon):
     # `kind` and `status` are the two fields docs/cli/signoff.md's "Generic
     # evidence" section declares required; `summary`/`source` are explicitly
@@ -300,6 +381,10 @@ _EvidenceEnvelope = (
     | _FunctionalVerificationEnvelope
     | _ErcEnvelope
     | _PlaceAndRouteEnvelope
+    | _SocketCheckEnvelope
+    | _SeamCheckEnvelope
+    | _LefAbstractEnvelope
+    | _SynthesizeEnvelope
     | _GenericEnvelope
     | _ErrorEnvelope
 )
@@ -322,6 +407,10 @@ _ENVELOPE_SHAPES: dict[str, Any] = {
     "functional-verification": _FunctionalVerificationEnvelope,
     "erc": _ErcEnvelope,
     "place-and-route": _PlaceAndRouteEnvelope,
+    "socket-check": _SocketCheckEnvelope,
+    "seam-check": _SeamCheckEnvelope,
+    "lef-abstract": _LefAbstractEnvelope,
+    "synthesize": _SynthesizeEnvelope,
     "generic": _GenericEnvelope,
     "error": _ErrorEnvelope,
 }
@@ -333,9 +422,7 @@ _ENVELOPE_SHAPES: dict[str, Any] = {
 _SCALAR_CHECKS: dict[Any, Any] = {
     bool: lambda value: isinstance(value, bool),
     int: lambda value: isinstance(value, int) and not isinstance(value, bool),
-    float: lambda value: (
-        isinstance(value, (int, float)) and not isinstance(value, bool)
-    ),
+    float: is_number,
     str: lambda value: isinstance(value, str),
     type(None): lambda value: value is None,
 }

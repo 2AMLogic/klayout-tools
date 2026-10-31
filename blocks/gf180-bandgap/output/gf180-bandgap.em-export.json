@@ -43842,7 +43842,7 @@
       "driver": "examples/em/block_coupling/geode_driver"
     },
     "geometry": {
-      "fixture": "blocks/gf180-bandgap/output/bandgap_top.gds",
+      "fixture": "tests/fixtures/legacy_bandgap_gds/gf180-bandgap.gds",
       "fixture_sha256": "17e274357860c37cd0c42bbc9b0a020f1bcd0a4486dbccaf243575ff1bf26c23",
       "description": "A real routed bundle of the `gf180-bandgap` gallery block: the 6 Metal1 nets (vref, net_32, net_33, net_34, net_35, net_36) that run parallel along x for 94.50 um (x = 12.60 .. 107.10 um), read out of the block's own committed GDS -- the same layout the gallery renders, not a benchmark shape. Widths and spacings are the drawn ones (the mesh is breakpoint-aligned to every conductor edge); net names are the GDS's own label texts.",
       "source_repo": "https://github.com/2AMLogic/klayout-tools",

@@ -29,7 +29,9 @@
 #                         exclusive with --body.
 #   --label, -l LABEL     Label to apply at creation. Repeatable. A single
 #                         comma-separated value is also accepted, matching
-#                         `gh issue create --label "a,b"`.
+#                         `gh issue create --label "a,b"`. `loom:issue` and
+#                         `loom:curated` are REFUSED (exit 2, no forge call):
+#                         issues enter at `loom:triage` (#11820).
 #   --repo, -R OWNER/REPO Target repository. Omit for the current repo (the
 #                         preferred form -- the REST path then resolves the
 #                         repo from the git remote with zero API calls).
@@ -50,10 +52,9 @@
 #   --parent N            File the issue as a child of #N (#10012): the body
 #                         gets `<!-- loom:parent #N -->` (and N's red-main
 #                         marker, if it has one); after the create the child
-#                         is linked as a native sub-issue (best effort) and,
-#                         when N carries loom:operator-priority, starred with
-#                         the inherited audit comment. Logic: `loom-daemon
-#                         forge parent`; needs loom-daemon (127 if absent; a bad N exits 2).
+#                         is linked as a native sub-issue (best effort).
+#                         Logic: `loom-daemon forge parent`; needs
+#                         loom-daemon (127 if absent; a bad N exits 2).
 #
 # Output: the new issue's URL on stdout (identical to `gh issue create`).
 #
@@ -151,7 +152,7 @@ source "$SCRIPT_DIR/lib/filing-lock.sh"
 usage() {
   # Line range = the whole leading comment block (keep in sync when the header
   # grows; `--help` silently truncating its own docs is its own small #8289).
-  sed -n '2,143p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
+  sed -n '2,142p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
 }
 
 TITLE=""
@@ -206,15 +207,17 @@ while [[ $# -gt 0 ]]; do
         # Trim surrounding whitespace from "a, b".
         _l="${_l#"${_l%%[![:space:]]*}"}"
         _l="${_l%"${_l##*[![:space:]]}"}"
+        # Issues enter at loom:triage (#11820, operator ruling 2026-10-13):
+        # opening one as loom:issue or loom:curated skips Curator admission.
+        # Refused here, before any forge call.
+        [[ "$_l" =~ ^loom:(issue|curated)$ ]] && {
+          echo "create-issue.sh: refusing --label $_l: issues enter at loom:triage and reach $_l through Curator admission. Use --label loom:triage (or no --label: the default)." >&2; exit 2; }
         [[ -n "$_l" ]] && LABELS+=("$_l")
       done
       shift 2
       ;;
     --repo | -R) REPO_NWO="${2:-}"; shift 2 ;;
-    --force | --skip-duplicate-check)
-      SKIP_DUP_CHECK=true
-      shift
-      ;;
+    --force | --skip-duplicate-check) SKIP_DUP_CHECK=true; shift ;;
     --parent) PARENT="${2:-}"; shift 2 ;;
     --duplicate-threshold)
       DUP_THRESHOLD="${2:-}"
@@ -259,6 +262,24 @@ if [[ -n "$BODY_FILE" ]]; then
     echo "create-issue.sh: cannot read --body-file: $BODY_FILE" >&2
     exit 2
   fi
+fi
+
+# --- #11787: loom:curated is only ever set by `curation-complete` ------------
+# A bare creation-time loom:curated bypasses the estimate gate (no points:N,
+# no issue.estimate fact). Refuse it unless the body carries a points marker,
+# and with one, defer the label to `loom-daemon curation-complete` below.
+WANT_CURATED=false
+_kept=()
+for _l in "${LABELS[@]+"${LABELS[@]}"}"; do
+  if [[ "$_l" == "loom:curated" ]]; then WANT_CURATED=true; else _kept+=("$_l"); fi
+done
+if [[ "$WANT_CURATED" == "true" ]]; then
+  if ! grep -Eq '^[[:space:]]*<!-- loom:points=[0-9]+ -->[[:space:]]*$' <<< "$BODY"; then
+    echo "create-issue.sh: refusing --label loom:curated without a standalone '<!-- loom:points=N -->' marker in the body." >&2
+    echo "create-issue.sh: file without the label, then run: loom-daemon curation-complete (see .loom/roles/curator-estimate.md)." >&2
+    exit 2
+  fi
+  LABELS=("${_kept[@]+"${_kept[@]}"}" "loom:curating")
 fi
 
 forge_detect
@@ -442,13 +463,42 @@ trap 'loom_filing_lock_release' EXIT INT TERM
 
 # Single intake state (#10041): no loom:* label from the caller -> loom:triage.
 case " ${LABELS[*]-} " in *" loom:"*) ;; *) LABELS+=("loom:triage") ;; esac
-ISSUE_URL="$(forge_gh_create_issue_rl_safe "$REPO_NWO" "$TITLE" "$BODY" "${LABELS[@]+"${LABELS[@]}"}")" || exit 1
+# The create step is `loom-daemon forge create-issue` (#12504): same transport
+# and label guard as forge_gh_create_issue_rl_safe, with a reliable exit code.
+# requires-daemon: forge optional   A binary predating the subcommand (exit 2, "unrecognized subcommand") falls back to the shell create step below.
+_create_args=(); _create_args+=(--title "$TITLE" --body-file -)
+[[ -z "$REPO_NWO" ]] || _create_args+=(--repo "$REPO_NWO")
+for _l in "${LABELS[@]+"${LABELS[@]}"}"; do _create_args+=(--label "$_l"); done
+_create_rc=0; _create_err="$(mktemp)"
+ISSUE_URL="$(printf '%s' "$BODY" | "${LOOM_DAEMON_BIN:-loom-daemon}" forge create-issue "${_create_args[@]}" 2>"$_create_err")" || _create_rc=$?
+if [[ "$_create_rc" -ne 0 ]] && grep -qi "unrecognized subcommand" "$_create_err"; then
+  rm -f "$_create_err"
+  ISSUE_URL="$(forge_gh_create_issue_rl_safe "$REPO_NWO" "$TITLE" "$BODY" "${LABELS[@]+"${LABELS[@]}"}")" || exit 1
+else
+  cat "$_create_err" >&2; rm -f "$_create_err"
+  [[ "$_create_rc" -eq 0 && -n "$ISSUE_URL" ]] || exit 1
+fi
 echo "$ISSUE_URL"
 
-# --- #10012: native sub-issue link + inherited star, best effort ------------
+# --- #11787: curated-at-filing goes through the one producer ----------------
+# requires-daemon: curation-complete >= 0.19.1146   #11676 — the subcommand first shipped in 0.19.1120 (#11621) but only journaled the estimate; applying `loom:curated` (the write this branch relies on) landed in #11676 (31126cd07), first shipped by the 0.19.1146 bump. Hard, not `optional`: there is no version probe — an older or absent binary fails the call and the already-filed issue is left in loom:curating with the stderr note below (#11787).
+if [[ "$WANT_CURATED" == "true" ]]; then
+  _cc_n="${ISSUE_URL##*/}"; _cc_repo="${ISSUE_URL#*://*/}"; _cc_repo="${_cc_repo%/issues/*}"
+  if ! loom-daemon curation-complete --repo "$_cc_repo" --issue "$_cc_n" \
+      --model "${LOOM_CURATION_MODEL:-unknown}" --runtime "${LOOM_CURATION_RUNTIME:-unknown}" \
+      --completion-id "$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)" \
+      --workspace-root "${LOOM_WORKSPACE_ROOT:-$PWD}" >&2; then
+    echo "create-issue.sh: issue filed but left in loom:curating: curation-complete failed; fix the marker and rerun it" >&2
+  else
+    # curation-complete adds loom:curated but never drops the claim label; 404 = already absent.
+    gh api -X DELETE "repos/$_cc_repo/issues/$_cc_n/labels/loom%3Acurating" >/dev/null 2>&1 || true
+  fi
+fi
+
+# --- #10012: native sub-issue link, best effort -----------------------------
 [[ -z "${PARENT+x}" ]] \
   || loom-daemon forge parent link --parent "$PARENT" --child "$ISSUE_URL" ${REPO_NWO:+--repo "$REPO_NWO"} >&2 \
-  || echo "create-issue.sh: note: --parent #$PARENT follow-up (star / sub-issue link) incomplete; the issue itself is filed and the loom:parent marker is in its body" >&2
+  || echo "create-issue.sh: note: --parent #$PARENT follow-up (sub-issue link) incomplete; the issue itself is filed and the loom:parent marker is in its body" >&2
 
 # --- #9774: the filed body ends with the dashboard footer -------------------
 # Best-effort, via the daemon's --patch-created (fetch, footer, PATCH — the

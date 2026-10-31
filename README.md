@@ -65,7 +65,10 @@ Or with `pip`:
 pip install klayout-tools
 ```
 
-`klt` is now on `PATH`. For the latest development version, install from
+`klt` is now on `PATH`. Either install provides the `klayout` **Python
+module** only — `klt drc --engine klayout` additionally needs a system KLayout
+application with `klayout` on `PATH` (<https://www.klayout.de/build.html>).
+For the latest development version, install from
 source instead:
 
 ```bash
@@ -75,16 +78,18 @@ uv tool install git+https://github.com/2AMLogic/klayout-tools
 > **`klt yield` (and its `yield-campaign`/`yield-sensitivity` siblings) need
 > the `yield` extra.** Both install commands above ship the pure-Python
 > package only — `klt yield`'s statistics run in a Rust extension
-> (`klt_yield_native`), published as the prebuilt `klt-yield-native` wheel
-> (Linux x86_64, macOS arm64). Install it with
-> `pip install 'klayout-tools[yield]'` (or `uv tool install
-> 'klayout-tools[yield]'`). The git-pinned form, other platforms, and any
-> release that predates the first `klt-yield-native` publication still need
-> a full repo checkout plus a Rust toolchain; see
+> (`klt_yield_native`). **Today the supported route is a full repo checkout
+> plus a Rust toolchain**; see
 > [`docs/cli/yield.md#building-the-native-extension`](docs/cli/yield.md#building-the-native-extension).
 > `klt mom` and `klt synthesize --restructure-timing` have the same
 > from-source gap for their own Rust extensions; every other verb works
 > from the commands above alone.
+>
+> A prebuilt `klt-yield-native` wheel (Linux x86_64, macOS arm64) is planned
+> but **not yet on PyPI**, so `pip install 'klayout-tools[yield]'` does not
+> resolve for any release to date (0.6.0 and 0.7.0 included). It will only
+> resolve for klayout-tools releases published after the wheel is (issue
+> #2900, [`docs/releasing-native.md`](docs/releasing-native.md)).
 
 ### Container image (`klt` + the analog sim toolchain)
 
@@ -107,6 +112,10 @@ klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
 klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene checks
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
+klt seam-check row.gds --tiling TILE --layer 68/20 --band 0,0,30,2  # abutting cells tile and the rail is continuous across seams
+klt keepout-check design.gds --forbidden '[[67,20]]' --margin 10 --cells SPIRAL  # nothing on the forbidden layers within a margin of a cell
+klt array-check column.gds --cell BIT --pitch 2.72 --count 8  # unit-cell placements abut at the pitch; add --mirror-axis x --at 10 --layers '[[68,20]]' for layer-wise symmetry
+klt tap-distance design.gds --subject '65/20' --taps '65/44' --max-distance-um 15  # every diffusion point within a Euclidean distance of a tap
 klt components design.gds --conductors '[{"name":"m1","layer":[68,20]}]'  # connected components, no deck
 klt clip design.gds --cell SUBCELL -o subcell.gds  # write a bbox region or named cell's subtree out as its own stream
 klt stats design.gds --per-layer         # densities, bbox, polygon counts
@@ -117,8 +126,10 @@ klt sim request.json                     # SPICE PVT corner sweep (ngspice), JSO
 klt size request.json                    # gm/Id sizing (single device or coupled diff-pair+mirror+tail), ngspice-scored
 klt yield mc.json --limits spec.json     # MC sample set + spec limits -> yield estimate with CIs, Cpk, sample-size verdict (Rust core)
 klt yield-samples mc.json --negative-control bad.json --format json  # two MC sim reports -> yield sample set carrying a negative control
+klt yield-csv trials.csv --group-by metric --value result --format json  # per-draw MC CSV -> yield sample set (hash-citable)
 klt yield-campaign spec.json             # launch + manage the MC campaign itself, sharded via klt sim, then yield's own pipeline unmodified
 klt yield-sensitivity campaign.json      # campaign parameter draws + output values -> ranked contribution to the spread (Rust core)
+klt yield-threshold records.json         # comparator/latch (stimulus, binary outcome) records -> probit threshold mu/sigma with CIs, per corner
 klt design-centering request.json        # yield-sensitivity ranking + sized device -> re-centering candidates
 klt layout-metrics design.gds            # normalized layout.json per block
 klt kb search bandgap                    # query the circuit-design knowledge base
@@ -138,9 +149,11 @@ klt power routed.gds power.json          # routed power/ground nets -> resistive
 klt erc routed.gds erc.json --pdk sky130 # per-gate connectivity model + antenna-ratio verdict + core ERC findings (floating gate, unconnected/shorted net, missing tie)
 klt functional-verification verify.json  # cocotb regression (Icarus/Verilator) -> pass/fail + coverage
 klt equiv request.json                   # combinational equivalence (Yosys miter/SAT) -> proof or counterexample
+klt formal request.json                  # bmc / k-induction / cover on RTL or a mapped netlist (SymbiYosys)
 klt eval descriptor.json --candidate '{"layout": "..."}'  # score a candidate: valid + one objective
 klt gen-compose plan.json                # place + wire generated blocks into one circuit
 klt socket-check design.gds --socket socket.json  # pins/outline/budgets vs a socket descriptor
+klt interface-check a.gds b.gds --place=-10,100 --pins 'OUT\[\d+\]'  # do block A's pins land on block B's pads?
 klt lef-abstract design.gds --socket socket.json --macro-name m --cell-library sky130_fd_sc_hd  # layout+socket -> LEF MACRO abstract
 klt report result.json                   # render a klt JSON report as markdown summary
 klt signoff drc.json lvs.json            # aggregate drc/lvs/extract/sim JSON into one pass/fail verdict
@@ -150,6 +163,7 @@ klt deck hash --deck sky130              # the deck content hash this build will
 klt deck info --deck gf180mcu            # this install's own deck hash, device coverage, release status -- no input layout needed
 klt deck rules --deck sky130 --rule poly.width.1  # the numbers a deck enforces (rule id -> value in um), pinned to its content hash
 klt deck devices --deck gf180mcu --class diode_pd2nw_06v0  # what a layout must DRAW for a device class to be recognised (marker + requires/excludes)
+klt deck path --deck asap7              # installed path of the ASAP7 DRC-DSL script, for `klt drc --engine klayout --deck-file`
 klt env-provenance emit                  # committable environment provenance: repo-relative paths, pseudonymous host id, no login
 klt env-provenance scan records/*.md     # flag home-directory absolute paths leaked into committed evidence records
 klt env-provenance lint-envelope r.json  # flag ANY absolute host path in a committed JSON envelope, by field

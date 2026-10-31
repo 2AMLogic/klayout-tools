@@ -929,3 +929,255 @@ def test_resolve_liberty_three_verb_wrappers_agree_and_raise_their_own_error(
         post_route_sta._resolve_liberty(
             "sky130_fd_sc_hd", "ss_100C_1v60", root=str(root)
         )
+
+
+def test_list_lib_corners_strips_single_underscore_prefix_for_ihp(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_stdcell", with_spice=False)
+    pdk_info = pdk.find_pdk(root=str(root))
+
+    names = [c["name"] for c in pdk_cells.list_lib_corners("sg13g2_stdcell", pdk_info)]
+
+    assert names == ["typ_1p20V_25C"]
+
+
+def test_list_cell_libraries_reports_shipped_corners(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hd",
+        corners=(
+            ("tt_025C_1v80", 1.0, 25.0, 1.8),
+            ("ss_100C_1v60", 1.0, 100.0, 1.6),
+        ),
+    )
+    ihp_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(ihp_dir, "sg13g2_stdcell", with_spice=False)
+
+    sky = pdk_cells.list_cell_libraries(variant="sky130A", root=str(root))
+    ihp = pdk_cells.list_cell_libraries(variant="ihp-sg13g2", root=str(root))
+
+    assert sky["libraries"][0]["corners"] == ["ss_100C_1v60", "tt_025C_1v80"]
+    assert ihp["libraries"][0]["corners"] == ["typ_1p20V_25C"]
+
+
+def test_parse_corner_name_open_pdks_shapes():
+    assert pdk_cells.parse_corner_name("ss_n40C_3v00") == {
+        "name": "ss_n40C_3v00",
+        "process": "ss",
+        "temperature_c": -40,
+        "supply_v": 3.0,
+    }
+    ff = pdk_cells.parse_corner_name("ff_125C_1v98")
+    assert (ff["process"], ff["temperature_c"], ff["supply_v"]) == ("ff", 125, 1.98)
+    tt = pdk_cells.parse_corner_name("tt_025C_1v80")
+    assert (tt["temperature_c"], tt["supply_v"]) == (25, 1.8)
+    ss = pdk_cells.parse_corner_name("ss_125C_1v62")
+    assert ss["supply_v"] == 1.62
+
+
+def test_parse_corner_name_unrecognised_yields_nulls():
+    assert pdk_cells.parse_corner_name("typ_1p20V_25C") == {
+        "name": "typ_1p20V_25C",
+        "process": None,
+        "temperature_c": None,
+        "supply_v": None,
+    }
+
+
+def test_list_cell_libraries_reports_corner_points(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hd",
+        corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
+    )
+    ihp_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(ihp_dir, "sg13g2_stdcell", with_spice=False)
+
+    sky = pdk_cells.list_cell_libraries(variant="sky130A", root=str(root))
+    ihp = pdk_cells.list_cell_libraries(variant="ihp-sg13g2", root=str(root))
+
+    assert sky["libraries"][0]["corner_points"] == [
+        {"name": "tt_025C_1v80", "process": "tt", "temperature_c": 25, "supply_v": 1.8}
+    ]
+    assert ihp["libraries"][0]["corner_points"] == [
+        {
+            "name": "typ_1p20V_25C",
+            "process": None,
+            "temperature_c": None,
+            "supply_v": None,
+        }
+    ]
+
+
+def test_resolve_liberty_not_found_lists_available_corners(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(variant_dir, "sg13g2_stdcell", with_spice=False)
+
+    with pytest.raises(ValueError) as excinfo:
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sg13g2_stdcell", "bogus", ValueError, root=str(root)
+        )
+
+    message = str(excinfo.value)
+    assert "available corners: typ_1p20V_25C" in message
+    assert "sg13g2_stdcell__bogus" not in message
+
+
+def test_resolve_liberty_not_found_without_lib_dir_says_none_found(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    (variant_dir / "libs.ref" / "sky130_fd_sc_hd").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="no liberty corners found"):
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", "tt_025C_1v80", ValueError, root=str(root)
+        )
+
+
+# --------------------------------------------------------------------------- #
+# resolve_liberty_for_cell_library -- not-found error hints at other variants
+# (issue #3801).
+# --------------------------------------------------------------------------- #
+
+
+class _LibErr(Exception):
+    pass
+
+
+def _two_variants(tmp_path, monkeypatch, *, lib_in="sky130B"):
+    root = tmp_path / "pdks"
+    for name in ("sky130A", "sky130B"):
+        variant_dir = _make_install(root, name, assets=("libs_ref",))
+        if name == lib_in:
+            _make_cell_library(variant_dir, "sky130_fd_sc_hd")
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [str(root)])
+    return root
+
+
+def test_resolve_liberty_missing_lists_other_variants_and_pdk_hint(
+    tmp_path, monkeypatch
+):
+    _two_variants(tmp_path, monkeypatch)
+    with pytest.raises(_LibErr) as excinfo:
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", None, _LibErr, variant="sky130A"
+        )
+    msg = str(excinfo.value)
+    assert re.search(
+        r"liberty not found for deck.*sky130_fd_sc_hd.*not found under", msg
+    )
+    assert "'sky130B'" in msg
+    assert "--pdk <variant>" in msg
+
+
+def test_resolve_liberty_missing_no_other_variant_message_unchanged(
+    tmp_path, monkeypatch
+):
+    _two_variants(tmp_path, monkeypatch, lib_in="none")
+    with pytest.raises(_LibErr) as excinfo:
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", None, _LibErr, variant="sky130A"
+        )
+    assert str(excinfo.value).endswith("sky130A' at '" + str(tmp_path / "pdks") + "'")
+    assert "--pdk" not in str(excinfo.value)
+
+
+def test_resolve_liberty_hint_failure_does_not_mask_error(tmp_path, monkeypatch):
+    _two_variants(tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("discovery broke")
+
+    monkeypatch.setattr(pdk_cells, "list_pdks", boom)
+    with pytest.raises(_LibErr, match="not found under resolved PDK install"):
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", None, _LibErr, variant="sky130A"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4204 -- cell_library-aware default variant resolution.
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_liberty_defaults_to_variant_shipping_library(tmp_path, monkeypatch):
+    _two_variants(tmp_path, monkeypatch, lib_in="sky130B")
+    path, _corner, info = pdk_cells.resolve_liberty_for_cell_library(
+        "sky130_fd_sc_hd", None, _LibErr
+    )
+    assert info["variant"] == "sky130B"
+    assert "sky130B" in path
+
+
+def test_resolve_liberty_multiple_shippers_first_in_order(tmp_path, monkeypatch):
+    root = tmp_path / "pdks"
+    for name in ("sky130A", "sky130B", "sky130C"):
+        vd = _make_install(root, name, assets=("libs_ref",))
+        if name != "sky130A":
+            _make_cell_library(vd, "sky130_fd_sc_hd")
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [str(root)])
+    _p, _c, info = pdk_cells.resolve_liberty_for_cell_library(
+        "sky130_fd_sc_hd", None, _LibErr
+    )
+    assert info["variant"] == "sky130B"
+
+
+def test_resolve_liberty_defaults_to_descriptor_mapped_variant(tmp_path, monkeypatch):
+    root = tmp_path / "pdks"
+    _make_install(root, "sky130A", assets=("libs_ref",))
+    vd_b = _make_install(root, "sky130B", assets=("libs_ref",))
+    (vd_b / "mapped.lib").write_text("library (x) {}\n", encoding="utf-8")
+    (vd_b / "klt-pdk.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "liberty": {"custom_lib": {"tt": "mapped.lib"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [str(root)])
+    path, corner, info = pdk_cells.resolve_liberty_for_cell_library(
+        "custom_lib", None, _LibErr
+    )
+    assert info["variant"] == "sky130B"
+    assert corner == "tt"
+    assert path.endswith("mapped.lib")
+
+
+def test_resolve_liberty_explicit_variant_not_overridden(tmp_path, monkeypatch):
+    _two_variants(tmp_path, monkeypatch)
+    with pytest.raises(_LibErr, match="not found under"):
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", None, _LibErr, variant="sky130A"
+        )
+
+
+def test_resolve_liberty_env_pdk_not_overridden(tmp_path, monkeypatch):
+    _two_variants(tmp_path, monkeypatch)
+    monkeypatch.setenv("PDK", "sky130A")
+    with pytest.raises(_LibErr, match="not found under"):
+        pdk_cells.resolve_liberty_for_cell_library("sky130_fd_sc_hd", None, _LibErr)
+
+
+def test_resolve_liberty_default_none_ship_error_unchanged(tmp_path, monkeypatch):
+    _two_variants(tmp_path, monkeypatch, lib_in="none")
+    with pytest.raises(_LibErr) as excinfo:
+        pdk_cells.resolve_liberty_for_cell_library("sky130_fd_sc_hd", None, _LibErr)
+    assert str(excinfo.value).endswith("sky130A' at '" + str(tmp_path / "pdks") + "'")
+
+
+def test_resolve_liberty_default_fallback_honors_pinned_root(tmp_path, monkeypatch):
+    _two_variants(tmp_path, monkeypatch, lib_in="sky130B")
+    other = tmp_path / "other"
+    _make_install(other, "sky130A", assets=("libs_ref",))
+    with pytest.raises(_LibErr, match="not found under"):
+        pdk_cells.resolve_liberty_for_cell_library(
+            "sky130_fd_sc_hd", None, _LibErr, root=str(other)
+        )

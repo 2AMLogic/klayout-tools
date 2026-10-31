@@ -48,7 +48,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import pdk as pdk_module
-from klayout_tools import synthesize
+from klayout_tools import pdk_cells, synthesize
 from klayout_tools.synthesize import SynthesizeError, run_synthesize
 
 # 4-bit ripple-carry adder -- purely combinational (no clock), so it is
@@ -141,17 +141,14 @@ def _find_any_cell_library() -> tuple[str, str, str, str] | None:
     ``(root, variant, cell_library, corner)`` or ``None``. Duplicated from
     `tests/test_equiv.py`'s own helper of the same name/behaviour (test
     modules in this repo do not import fixtures across each other)."""
-    try:
-        result = pdk_module.list_pdks()
-    except Exception:
-        return None
+    result = pdk_module.list_pdks()
     for install in result["installs"]:
         for variant in install["variants"]:
             try:
-                libraries = pdk_module.list_cell_libraries(
+                libraries = pdk_cells.list_cell_libraries(
                     variant=variant["name"], root=install["root"]
                 )
-            except Exception:
+            except pdk_module.PdkNotFoundError:
                 continue
             for library in libraries["libraries"]:
                 name = library["name"]
@@ -270,6 +267,11 @@ def test_verify_equivalence_gate_fails_hard_on_seeded_mismatch(tmp_path, monkeyp
         # pre-#1844 positional-only signature, so it keeps working across
         # whatever keyword arguments `run_synthesize` passes through.
         log_text = original_run_yosys(script_path, **kwargs)
+        with open(script_path, encoding="utf-8") as handle:
+            if not any(_WRITE_VERILOG_RE.match(line.rstrip("\n")) for line in handle):
+                # Auxiliary scripts (e.g. the memory-evidence pass) write no
+                # netlist; only the synthesis script's output gets seeded.
+                return log_text
         netlist_path = _netlist_path_from_script(script_path)
         with open(netlist_path, "w", encoding="utf-8") as handle:
             handle.write(broken_netlist_text)
@@ -280,3 +282,116 @@ def test_verify_equivalence_gate_fails_hard_on_seeded_mismatch(tmp_path, monkeyp
     with pytest.raises(SynthesizeError, match="NOT equivalent") as exc_info:
         run_synthesize(good_request_path, verify_equivalence=True)
     assert "sum" in str(exc_info.value)
+
+
+# --- `equiv_engine` (`--equiv-engine`, issue #4310) -------------------------
+
+_GCD_SRC = (
+    Path(__file__).resolve().parent.parent
+    / "examples"
+    / "functional-verification"
+    / "gcd.v"
+)
+# Seeded-broken sequential variant: the `a > b` branch subtracts the wrong way.
+_GCD_BROKEN = _GCD_SRC.read_text(encoding="utf-8").replace("a <= a - b;", "a <= a + b;")
+
+
+def _gcd_request(directory: Path, rtl: str) -> str:
+    root, variant, cell_library, corner = _REAL_CELL_LIBRARY
+    directory.mkdir(exist_ok=True)
+    _write(directory / "gcd.v", rtl)
+    return _write_request(
+        directory / "synth.json",
+        {
+            "sources": ["gcd.v"],
+            "hdl_toplevel": "gcd",
+            "pdk": {"cell_library": cell_library, "corner": corner},
+        },
+    )
+
+
+@pytest.fixture
+def _pdk_env(monkeypatch):
+    root, variant, _, _ = _REAL_CELL_LIBRARY
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+
+
+def test_equiv_engine_sequential_proves_gcd(tmp_path, _pdk_env):
+    request = _gcd_request(tmp_path, _GCD_SRC.read_text(encoding="utf-8"))
+    report = run_synthesize(
+        request, verify_equivalence=True, equiv_engine="yosys-sequential"
+    )
+    assert report["equivalence"]["status"] == "equivalent"
+    assert report["equivalence"]["engine"] == "yosys-sequential"
+
+
+def test_equiv_engine_default_still_rejects_sequential(tmp_path, _pdk_env):
+    request = _gcd_request(tmp_path, _GCD_SRC.read_text(encoding="utf-8"))
+    with pytest.raises(SynthesizeError, match="equivalence check"):
+        run_synthesize(request, verify_equivalence=True)
+
+
+def test_equiv_engine_sequential_catches_seeded_mismatch(
+    tmp_path, monkeypatch, _pdk_env
+):
+    bad_request = _gcd_request(tmp_path / "bad", _GCD_BROKEN)
+    bad_report = run_synthesize(bad_request)
+    with open(
+        _synth_netlist_path(bad_request, "gcd", bad_report["run_id"]),
+        encoding="utf-8",
+    ) as handle:
+        broken_netlist_text = handle.read()
+
+    good_request = _gcd_request(tmp_path / "good", _GCD_SRC.read_text(encoding="utf-8"))
+    original_run_yosys = synthesize._run_yosys
+
+    def _seed(script_path: str, **kwargs) -> str:
+        log_text = original_run_yosys(script_path, **kwargs)
+        with open(script_path, encoding="utf-8") as handle:
+            if not any(_WRITE_VERILOG_RE.match(line.rstrip("\n")) for line in handle):
+                return log_text
+        with open(_netlist_path_from_script(script_path), "w", encoding="utf-8") as out:
+            out.write(broken_netlist_text)
+        return log_text
+
+    monkeypatch.setattr(synthesize, "_run_yosys", _seed)
+    with pytest.raises(SynthesizeError):
+        run_synthesize(
+            good_request, verify_equivalence=True, equiv_engine="yosys-sequential"
+        )
+
+
+def test_equiv_engine_rerun_reports_drift_on_engine(tmp_path, _pdk_env):
+    _, _, cell_library, corner = _REAL_CELL_LIBRARY
+    _write(tmp_path / "adder4.v", _ADDER4_RTL)
+    request = _write_request(
+        tmp_path / "synth.json",
+        {
+            "sources": ["adder4.v"],
+            "hdl_toplevel": "adder4",
+            "pdk": {"cell_library": cell_library, "corner": corner},
+        },
+    )
+    report = run_synthesize(
+        request, verify_equivalence=True, equiv_engine="yosys-sequential"
+    )
+    assert report["equivalence"]["engine"] == "yosys-sequential"
+    report_path = tmp_path / "adder4.synth.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    # The flag is not echoed in the report: re-running with the default engine
+    # surfaces the different engine as drift on `equivalence.engine`.
+    result = synthesize.rerun_synthesize_report(
+        str(report_path), request, verify_equivalence=True
+    )
+    assert result["status"] == "drifted"
+    assert any(d["field"] == "equivalence.engine" for d in result["drift"])
+
+
+def test_equiv_engine_cli_rejects_unknown_value(capsys):
+    from klayout_tools.cli import main
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["synthesize", "req.json", "--equiv-engine", "bogus"])
+    assert exc_info.value.code == 2

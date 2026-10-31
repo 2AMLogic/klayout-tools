@@ -46,7 +46,7 @@ rustc-hash = "2"
 # `provenance.input.content_hash` (docs/json-contract.md's shared
 # provenance block) -- sha256 of the store file `query` read / `build`
 # wrote.
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Glob matching for signal-name patterns (ported `signal.rs` depends on
 # this crate upstream too; same normal-dependency treatment).
