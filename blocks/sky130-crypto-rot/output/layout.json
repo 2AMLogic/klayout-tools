@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:11:58.172157+00:00",
+  "slug": "sky130-crypto-rot",
+  "name": "Sky130 Crypto Rot",
+  "description": "Crypto root of trust (AES, SHA-256, key ladder, DRBG) on sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "AES",
+        "target": "AES-128, encrypt + decrypt, one round per cycle",
+        "fallback": "encrypt only",
+        "stretch": "AES-256"
+      },
+      {
+        "parameter": "Hash / MAC",
+        "target": "SHA-256 + HMAC-SHA-256",
+        "fallback": "SHA-256 only"
+      },
+      {
+        "parameter": "Key ladder",
+        "target": "SP 800-108 counter-mode KDF on HMAC-SHA-256, 4 derived slots",
+        "fallback": "1 derived slot",
+        "stretch": "AES-CMAC KDF variant"
+      },
+      {
+        "parameter": "DRBG",
+        "target": "CTR_DRBG (AES-128, derivation function), seeded and reseeded from `sky130-trng`'s conditioned output",
+        "stretch": "prediction-resistance mode"
+      },
+      {
+        "parameter": "Clock (all sky130_fd_sc_hd corners; setup binds at `ss_100C_1v60`)",
+        "target": "50 MHz, target unmeasured",
+        "fallback": "25 MHz",
+        "stretch": "100 MHz"
+      },
+      {
+        "parameter": "Key confidentiality",
+        "target": "numbered properties in [`spec/key-isolation-properties.md`](spec/key-isolation-properties.md), re-proven on the synthesized netlist where marked",
+        "fallback": "RTL-level property",
+        "stretch": "post-P&R netlist"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean"
+      }
+    ],
+    "status_note": "ratified for v1"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-crypto-rot",
+    "ref": "390818d6bb2bce50e8591d3850d4833c72ba5754",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

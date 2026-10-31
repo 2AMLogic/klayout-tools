@@ -1,0 +1,463 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:13:14.180411+00:00",
+  "slug": "sky130-temp-por",
+  "name": "Sky130 Temp Por",
+  "description": "Canary \u2014 sky130 temperature sensor + power-on reset. AI-designed, open-source.",
+  "pdk": "sky130",
+  "layer_count": 29,
+  "cell_count": 150,
+  "instance_count": 149,
+  "layout_file": "bias_core.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "nwell.drawing": "renders/64_20.png",
+    "diff.drawing": "renders/65_20.png",
+    "tap.drawing": "renders/65_44.png",
+    "layer_66_13": "renders/66_13.png",
+    "poly.drawing": "renders/66_20.png",
+    "licon1.drawing": "renders/66_44.png",
+    "layer_67_5": "renders/67_5.png",
+    "li1.drawing": "renders/67_20.png",
+    "mcon.drawing": "renders/67_44.png",
+    "layer_68_5": "renders/68_5.png",
+    "met1.drawing": "renders/68_20.png",
+    "via.drawing": "renders/68_44.png",
+    "layer_69_5": "renders/69_5.png",
+    "met2.drawing": "renders/69_20.png",
+    "via2.drawing": "renders/69_44.png",
+    "layer_70_5": "renders/70_5.png",
+    "met3.drawing": "renders/70_20.png",
+    "via3.drawing": "renders/70_44.png",
+    "layer_71_5": "renders/71_5.png",
+    "met4.drawing": "renders/71_20.png",
+    "via4.drawing": "renders/71_44.png",
+    "layer_72_5": "renders/72_5.png",
+    "met5.drawing": "renders/72_20.png",
+    "layer_79_20": "renders/79_20.png",
+    "pnp.drawing": "renders/82_44.png",
+    "capm.drawing": "renders/89_44.png",
+    "nsdm.drawing": "renders/93_44.png",
+    "psdm.drawing": "renders/94_20.png",
+    "npc.drawing": "renders/95_20.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Operating temperature",
+        "target": "\u221240\u2026+125 \u00b0C",
+        "status": "ratified (DR-003)"
+      },
+      {
+        "parameter": "Temperature error, untrimmed",
+        "target": "[TBD-1]",
+        "stretch": "[TBD-1]",
+        "status": "not ratified"
+      },
+      {
+        "parameter": "Sensor output",
+        "target": "[TBD] (draft: analog PTAT + CTAT pads)",
+        "stretch": "[TBD] (draft: digital out via SAR pairing)",
+        "status": "not ratified"
+      },
+      {
+        "parameter": "POR thresholds VPOR\u2191 / VPOR\u2193",
+        "target": "[TBD-2] (re-derive against sky130 models)",
+        "status": "not ratified"
+      },
+      {
+        "parameter": "POR hysteresis",
+        "target": "[TBD-3]",
+        "status": "not ratified"
+      },
+      {
+        "parameter": "Supply",
+        "target": "2.97\u20133.63 V (3.3 V \u00b110 %)",
+        "status": "ratified (DR-003)"
+      },
+      {
+        "parameter": "Iq (block total)",
+        "target": "[TBD-4] por-iq / [TBD-5] temp-iq / [TBD-6] iq-total",
+        "stretch": "[TBD-4..6]",
+        "status": "not ratified"
+      },
+      {
+        "parameter": "Supply-ramp coverage",
+        "target": "[TBD] (draft: ramp-rate sweep in the POR testbench matrix)",
+        "status": "not ratified"
+      }
+    ],
+    "status_note": "partially ratified \u2014 DR-003, issue #78; remaining rows TBD"
+  },
+  "signals": {
+    "schema_version": 1,
+    "engine": "ngspice",
+    "engine_version": "reports",
+    "status": "fail",
+    "corner_count": 7,
+    "default_corner_id": "bias-core-op-branch/overall",
+    "passed": 5,
+    "failed": 2,
+    "errored": 0,
+    "measurements": [
+      {
+        "name": "Bias Core Op Branch",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Bias Core Smoke",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Bias Core Startup",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Native Device Characterization",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Pnp Mismatch",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Temp Core Startup",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Temp Core Startup En Delayed",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      }
+    ],
+    "corners": [
+      {
+        "corner_id": "bias-core-op-branch/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "bias-core-smoke/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vref",
+            "value": 1.25601,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ibias",
+            "value": 2.97,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "bias_ok",
+            "value": 2.97,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "isup",
+            "value": 9.32333e-07,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "bias-core-startup/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vref",
+            "value": 1.25603,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vref_settled",
+            "value": 3.29208e-10,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ibias",
+            "value": 2.97,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "bias_ok",
+            "value": 2.97,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "isup",
+            "value": 9.32355e-07,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "native-device-characterization/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vth_n05l25",
+            "value": 0.1255,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ion_n05l25",
+            "value": 1.44615e-05,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ioff_n05l25",
+            "value": 1.66446e-10,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vmin1n_n05l25",
+            "value": 0.0715,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vmin100n_n05l25",
+            "value": 0.2995,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vth_n05l8",
+            "value": 0.1215,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ion_n05l8",
+            "value": 4.78464e-05,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ioff_n05l8",
+            "value": 5.73372e-10,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "pnp-mismatch/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "temp-core-startup/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "ptat",
+            "value": 1.41402,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ptat_settled",
+            "value": 3.26921e-10,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ctat",
+            "value": 0.65826,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ctat_settled",
+            "value": 7.02638e-12,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "na",
+            "value": 0.65826,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "nb",
+            "value": 0.65826,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "isup",
+            "value": 7.17995e-06,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "bias_ok",
+            "value": 2.97,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "temp-core-startup-en-delayed/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "ptat",
+            "value": 1.41402,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ptat_settled",
+            "value": 4.31245e-10,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ctat",
+            "value": 0.65826,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ctat_settled",
+            "value": 6.90747e-12,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "na",
+            "value": 0.65826,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "nb",
+            "value": 0.65826,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "isup",
+            "value": 7.17995e-06,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "bias_ok",
+            "value": 2.97,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-temp-por",
+    "ref": "c1a06d630548a07dedd5a331d63c88bfa8fcf359",
+    "path": "layout/bias_core/bias_core.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

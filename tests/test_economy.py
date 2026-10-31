@@ -705,7 +705,7 @@ def test_cli_grid_and_max_empty_regions_flags(tmp_path, capsys):
 
 REPO_ROOT = Path(__file__).parent.parent
 BANDGAP_GDS = (
-    REPO_ROOT / "blocks" / "sky130-bandgap" / "output" / "bandgap_core_routed.gds"
+    REPO_ROOT / "tests" / "fixtures" / "legacy_bandgap_gds" / "sky130-bandgap.gds"
 )
 BUF4_GDS = (
     REPO_ROOT

@@ -56,25 +56,25 @@ describe.skipIf(!hasBlocks)("gf180-bandgap (gf180mcu canary, flat)", () => {
     const layout = load("gf180-bandgap", "bandgap_top.gds");
     expect(layout.topName).toBe("bandgap_top");
     expect(layout.dbuMicrons).toBeCloseTo(0.001, 9);
-    expect(layout.bbox).toEqual({ minX: -3600, minY: -3800, maxX: 151100, maxY: 311686 });
+    expect(layout.bbox).toEqual({ minX: -3400, minY: -3800, maxX: 218700, maxY: 288520 });
   });
 
   it("matches KLayout's per-layer shape counts", () => {
     const layout = load("gf180-bandgap", "bandgap_top.gds");
     expect(shapeCounts(layout)).toEqual({
       "21/0": 9,
-      "22/0": 161,
-      "30/0": 892,
-      "31/0": 158,
-      "32/0": 68,
-      "33/0": 6825,
-      "34/0": 350,
-      "35/0": 2,
-      "36/0": 2,
-      "38/0": 2,
+      "22/0": 173,
+      "30/0": 422,
+      "31/0": 207,
+      "32/0": 117,
+      "33/0": 9442,
+      "34/0": 395,
+      "35/0": 301,
+      "36/0": 326,
+      "38/0": 372,
       "40/0": 2,
       "41/0": 2,
-      "42/0": 2,
+      "42/0": 74,
       "46/0": 2,
       "49/0": 66,
       "62/0": 1,
@@ -85,7 +85,7 @@ describe.skipIf(!hasBlocks)("gf180-bandgap (gf180mcu canary, flat)", () => {
       "117/10": 1,
       "127/5": 8,
     });
-    expect(layout.shapeCount).toBe(8624);
+    expect(layout.shapeCount).toBe(11991);
     expect(layout.truncated).toBe(false);
   });
 });
@@ -94,30 +94,30 @@ describe.skipIf(!hasBlocks)("sky130-bandgap (sky130 canary, 27-cell hierarchy)",
   it("flattens the hierarchy to KLayout's shape counts and bounding box", () => {
     const layout = load("sky130-bandgap", "bandgap_core_routed.gds");
     expect(layout.topName).toBe("bandgap_core_routed");
-    expect(layout.bbox).toEqual({ minX: -10000, minY: -10000, maxX: 318200, maxY: 215440 });
+    expect(layout.bbox).toEqual({ minX: -10000, minY: -10000, maxX: 302100, maxY: 215440 });
     expect(shapeCounts(layout)).toEqual({
-      "64/20": 10,
-      "65/20": 134,
-      "65/44": 31,
-      "66/13": 155,
-      "66/20": 323,
-      "66/44": 722,
-      "67/20": 619,
-      "67/44": 576,
-      "68/20": 1000,
-      "68/44": 22,
-      "69/20": 49,
-      "82/44": 24,
-      "83/20": 20,
-      "86/20": 155,
-      "94/20": 155,
+      "64/20": 13,
+      "65/20": 148,
+      "65/44": 44,
+      "66/13": 157,
+      "66/20": 303,
+      "66/44": 739,
+      "67/20": 616,
+      "67/44": 564,
+      "68/20": 1044,
+      "68/44": 26,
+      "69/20": 56,
+      "82/44": 36,
+      "83/20": 24,
+      "86/20": 157,
+      "94/20": 157,
     });
   });
 
-  it("keeps the 11 met1 pin labels KLayout reports on 68/5", () => {
+  it("keeps the 13 met1 pin labels KLayout reports on 68/5", () => {
     const layout = load("sky130-bandgap", "bandgap_core_routed.gds");
     const labels = layout.layers.find((layer) => layer.key === "68/5");
-    expect(labels?.texts).toHaveLength(11);
+    expect(labels?.texts).toHaveLength(13);
     expect(labels?.shapeCount).toBe(0);
   });
 });
