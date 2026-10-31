@@ -140,7 +140,7 @@ from dataclasses import replace
 from typing import Any, NamedTuple
 
 from . import _spice_number as spice_number
-from ._paths import _fold_spice_continuations
+from ._paths import fold_spice_continuations
 from .pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
     DeviceLookup,
@@ -2189,7 +2189,7 @@ def convert_reference_netlist(
     custom_device_classes = _resolve_custom_device_classes(deck)
     sim_model_classes = _sim_model_classes(deck)
     plain_resistor_classes = _deck_plain_resistor_classes(deck)
-    logical_lines = _fold_spice_continuations(text.splitlines())
+    logical_lines = fold_spice_continuations(text.splitlines())
     param_scopes = _collect_param_scopes(logical_lines)
     call_overrides = _collect_call_overrides(logical_lines, param_scopes)
     subckt_scope = ""
@@ -2269,7 +2269,7 @@ def defined_subckt_names(text: str) -> set[str]:
     names back that way, so a caller can compare against
     ``kdb.Circuit.name`` directly. ``.include``-d files are not followed."""
     defined: set[str] = set()
-    for line in _fold_spice_continuations(text.splitlines()):
+    for line in fold_spice_continuations(text.splitlines()):
         parts = line.split()
         if len(parts) >= 2 and parts[0].lower() == ".subckt":
             defined.add(parts[1].upper())
@@ -2334,7 +2334,7 @@ def detect_subckt_call_devices(text: str) -> list[str]:
     used: list[str] = []
     seen: set[str] = set()
 
-    for line in _fold_spice_continuations(text.splitlines()):
+    for line in fold_spice_continuations(text.splitlines()):
         stripped = line.strip()
         if not stripped or stripped.startswith("*"):
             continue

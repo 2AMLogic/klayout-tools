@@ -219,7 +219,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from . import env_provenance, output_lock, pex_async
-from ._paths import _fold_spice_continuations, _resolve_relative
+from ._paths import _resolve_relative, fold_spice_continuations
 from ._provenance import sha256_file
 from .coverage import (
     REASON_NO_DELTA_ROWS,
@@ -742,7 +742,7 @@ def _logical_lines(netlist_text: str) -> list[str]:
         re.split(r"\s\$|;", raw, maxsplit=1)[0].rstrip()
         for raw in netlist_text.splitlines()
     ]
-    return _fold_spice_continuations(lines)
+    return fold_spice_continuations(lines)
 
 
 def _subckt_interfaces(netlist_text: str) -> dict[str, tuple[str, list[str]]]:
@@ -2696,7 +2696,7 @@ _STAR_NODE_SUFFIX = re.compile(r"__t\d+(?=\s|$)")
 def _logical_cards(text: str) -> list[str]:
     """``text``'s SPICE cards with ``+`` continuation lines joined and
     comments dropped."""
-    return _fold_spice_continuations(
+    return fold_spice_continuations(
         [
             line.strip()
             for line in text.splitlines()
