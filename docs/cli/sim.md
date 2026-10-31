@@ -3229,6 +3229,21 @@ fails with `error.code: "nodeset_unsupported_worker"` on any difference. This
 does not add raw-card injection, stimulus rewriting or any runner
 negotiation; for a transient start state see `options.initial_conditions` below.
 
+**Live fleet verification (2026-10-31, issue #3676).** `corners.params` and
+`options.nodeset` were measured on the batch fleet after the 2026-10-27 runner
+rebake (client `klt 0.8.1.dev969+gf6d4cd522990`, `KLT_SIM_BACKEND=batch`;
+`runner_klt_version` `0.8.0`, `runner_compatibility` `match`,
+`runner_request_features.status` `supported`, AMI `ami-0fa5ef830209100bd`,
+spot `m6i.4xlarge`). Both reports are `pass`:
+
+| Request | Batch job | Observed |
+|---|---|---|
+| `corners.params` `rload: [1000, 2000]`, `.param rload=1000` body, `i(v1)` | `klt-sim-ba8e00d2ff11` | `i1` = -1 mA at `rload=1000`, -0.5 mA at `rload=2000` |
+| one `options.nodeset` rule (`out=0.2`) on a 1k/1k divider, `v(out)` | `klt-sim-ac396a702a03` | `nodeset` `{"out": 0.2}` echoed by the runner; `vout` = 0.5 V (a hint, not an answer) |
+
+This supersedes the 2026-10-16 measurement (job `klt-sim-38dbf707a38d`, runner
+0.7.0), which the client refused with `params_unsupported_worker`.
+
 ### Transient start states: `options.initial_conditions` (issue #3881)
 
 "Passes from every start state at every corner" is a claim the report should
