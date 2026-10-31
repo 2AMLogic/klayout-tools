@@ -187,6 +187,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import gen_compose_port_request as _pr
+from ._jsonnum import is_number
 from ._layout import write_layout
 from ._paths import _resolve_relative
 from ._provenance import build_provenance, layout_geometry_digest
@@ -1195,8 +1196,8 @@ def _parse_cell_ports(raw_ports: Any, where: str) -> list[dict[str, Any]]:
 
         port = dict(raw_port)
         x_um, y_um = raw_port.get("x_um"), raw_port.get("y_um")
-        has_x = not isinstance(x_um, bool) and isinstance(x_um, (int, float))
-        has_y = not isinstance(y_um, bool) and isinstance(y_um, (int, float))
+        has_x = is_number(x_um)
+        has_y = is_number(y_um)
         if (x_um is not None or y_um is not None) and not (has_x and has_y):
             raise GenComposeError(
                 f"{at} (name '{name}') must declare both x_um and y_um as "
@@ -1549,10 +1550,10 @@ def _parse_drc_hints(drc_hints: Any) -> tuple[str | None, float, float | None]:
     if isinstance(candidate, str) and candidate:
         matched_group_id = candidate
     spacing = drc_hints.get("min_spacing_um")
-    if not isinstance(spacing, bool) and isinstance(spacing, (int, float)):
+    if is_number(spacing):
         min_spacing_um = max(0.0, float(spacing))
     clearance = drc_hints.get("foreign_clearance_um")
-    if not isinstance(clearance, bool) and isinstance(clearance, (int, float)):
+    if is_number(clearance):
         foreign_clearance_um = max(0.0, float(clearance))
     return matched_group_id, min_spacing_um, foreign_clearance_um
 
@@ -2919,11 +2920,7 @@ def _snap_port_to_grid(
     direction = int(port.get("direction_deg", 0)) % 360
     tangential = "y" if direction in (0, 180) else "x"
     width = port.get("width_um")
-    half = (
-        float(width) / 2.0
-        if isinstance(width, (int, float)) and not isinstance(width, bool)
-        else None
-    )
+    half = float(width) / 2.0 if is_number(width) else None
     new_port = dict(port)
     for axis in ("x", "y"):
         composed = float(port[f"{axis}_um"]) + offset[axis]
