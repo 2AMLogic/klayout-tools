@@ -12623,7 +12623,9 @@ from klayout_tools.pdk_models import build_device_binding_map  # noqa: E402
 #: `.subckt`; sky130's `res_generic_m1`..`res_generic_m5` (issue #1621) are
 #: the same carve-out -- `sky130_fd_pr__model__r+c.model.spice` wraps a
 #: `.subckt` around `res_generic_po` but not around any metal flavour, only
-#: a bare `.model ... r` card. Kept as an explicit allowlist so a *new*
+#: a bare `.model ... r` card; gf180mcu's `efuse` (issue #4312) is a plain
+#: two-terminal `R` element on the reference side, with no subcircuit
+#: either. Kept as an explicit allowlist so a *new*
 #: undeclarable class has to be added here consciously rather than silently
 #: skipping the coverage assertion below.
 _SUBCKT_LESS_DEVICE_CLASSES = frozenset(
@@ -12635,6 +12637,7 @@ _SUBCKT_LESS_DEVICE_CLASSES = frozenset(
         "res_generic_m3",
         "res_generic_m4",
         "res_generic_m5",
+        "efuse",
     }
 )
 
