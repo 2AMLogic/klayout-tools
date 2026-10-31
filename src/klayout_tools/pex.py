@@ -914,6 +914,31 @@ def _pin_count_mismatch(
     }
 
 
+def _refuse_submit_on_preflight_mismatch(
+    *,
+    submitting: bool,
+    flat_dut_mismatch: dict[str, Any] | None,
+    pin_count_mismatch: dict[str, Any] | None,
+    pin_order_mismatch: dict[str, Any] | None,
+) -> None:
+    """Issue #4696: raise :class:`PexError` for the first fired static
+    pre-flight diagnostic (which skips the extracted leg), so ``--submit-only``
+    refuses before any leg is submitted. No-op unless ``submitting``."""
+    if not submitting:
+        return
+    for code, diagnostic in (
+        ("flat_dut_mismatch", flat_dut_mismatch),
+        ("pin_count_mismatch", pin_count_mismatch),
+        ("pin_order_mismatch", pin_order_mismatch),
+    ):
+        if diagnostic is not None:
+            raise PexError(
+                f"--submit-only: the extracted leg cannot be submitted "
+                f"({code}): {diagnostic.get('detail') or code}",
+                code=code,
+            )
+
+
 def _no_preflight_mismatch(*diagnostics: dict[str, Any] | None) -> bool:
     """True when none of the pre-flight mismatch diagnostics fired, i.e. the
     extracted-side simulation is worth attempting."""
@@ -3513,6 +3538,16 @@ def run_pex(
         reference_netlist=reference_netlist_path,
         extracted_netlist=extracted_netlist_path,
         top_cell=extract_report["top"],
+    )
+
+    # Issue #4696: a static pre-flight diagnostic skips the extracted leg, so
+    # a --submit-only run would record only the schematic leg. Refuse before
+    # any leg is submitted rather than pay for shards that can never be graded.
+    _refuse_submit_on_preflight_mismatch(
+        submitting=legs.submitting,
+        flat_dut_mismatch=flat_dut_mismatch,
+        pin_count_mismatch=pin_count_mismatch,
+        pin_order_mismatch=pin_order_mismatch,
     )
 
     # `--measure-command` mode (issue #2478): `testbench_paths` is empty (it

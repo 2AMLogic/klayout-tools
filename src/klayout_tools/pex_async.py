@@ -279,6 +279,21 @@ class AsyncLegs:
         ``submitted`` status payload."""
         self._extracted_netlist_sha256 = extracted_netlist_sha256
         self._request_sha256 = dict(request_sha256)
+        recorded = {(leg["testbench"], leg["side"]) for leg in self._legs}
+        missing = [
+            f"{label}/{side}"
+            for label in self._request_sha256
+            for side in ("schematic", "extracted")
+            if (label, side) not in recorded
+        ]
+        if missing:
+            from .pex import PexError
+
+            raise PexError(
+                "--submit-only: refusing to mark the manifest complete -- "
+                f"missing legs: {', '.join(missing)}",
+                code=MANIFEST_INCOMPLETE_CODE,
+            )
         self._write(complete=True)
         return {
             "schema_version": ASYNC_SCHEMA_VERSION,
