@@ -2126,9 +2126,13 @@ def dry_run_runner_check(
     only the runner version/feature refusals propagate.
 
     When ``runner_out`` is given it is filled with the published runner
-    identity (``status``, ``client_klt_version``, ``images``) whatever the
-    status -- ``match`` and ``unknown`` included -- so the report can answer
-    "which ``klt`` does the fleet accept" without a submit (issue #4675).
+    identity (``status``, ``client_klt_version``, ``images``) for ``match``,
+    ``unknown`` and, under ``runner_version_check: "warn"``, ``mismatch``, so
+    the report can answer "which ``klt`` does the fleet accept" without a
+    submit (issue #4675). A ``mismatch`` under the default ``"enforce"`` is
+    refused with ``BATCH_RUNNER_MISMATCH_CODE`` before ``runner_out`` is
+    filled; the client and published runner versions are in that error's
+    message (issue #4680).
     """
     from .sim import SimError
 
