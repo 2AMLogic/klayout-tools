@@ -11714,12 +11714,12 @@ def test_stubbed_macro_halo_with_power_emits_a_macro_pdn_grid(tmp_path, monkeypa
     )
 
 
-def test_stubbed_bracketed_macro_instance_is_identical_in_place_and_pdn(
+def test_stubbed_bracketed_macro_instance_is_escaped_for_pdn_instances(
     tmp_path, monkeypatch
 ):
-    """Issue #4701: a bracketed instance (single backslash per bracket) is
-    brace-quoted in both `place_macro` and `define_pdn_grid -instances`, so
-    OpenROAD receives the identical string in both."""
+    """Issues #4701/#4715: a bracketed instance (single backslash per bracket)
+    reaches `place_macro` literally, and `define_pdn_grid -instances` with the
+    glob + list escaping (six backslashes before each bracket)."""
     instance = "top/blk/gen\\[0\\].inst"
     _write_macro_lef_with_power_pins(tmp_path / "sram.lef", pg_layer="met1")
     request_path = _setup_success_env(
@@ -11753,7 +11753,22 @@ def test_stubbed_bracketed_macro_instance_is_identical_in_place_and_pdn(
         f"place_macro -macro_name {{{instance}}} -location {{10.0 20.0}} "
         "-orientation R0 -exact"
     ) in lines
-    assert any(f"-instances {{{instance}}} -halo" in ln for ln in lines)
+    pdn_instance = "top/blk/gen\\\\\\\\\\\\[0\\\\\\\\\\\\].inst"
+    assert any(f"-instances {{{pdn_instance}}} -halo" in ln for ln in lines)
+
+
+def test_pdn_instances_arg_escapes_glob_and_list_metacharacters():
+    from klayout_tools.place_and_route_script import _pdn_instances_arg
+
+    bs = "\\"
+    assert _pdn_instances_arg("u_sram") == "u_sram"
+    assert _pdn_instances_arg(f"g{bs}[0{bs}]") == f"g{bs * 6}[0{bs * 6}]"
+    assert (
+        _pdn_instances_arg(f"a{bs}[0{bs}].b{bs}[1{bs}]")
+        == f"a{bs * 6}[0{bs * 6}].b{bs * 6}[1{bs * 6}]"
+    )
+    assert _pdn_instances_arg("a*b?c") == f"a{bs * 2}*b{bs * 2}?c"
+    assert _pdn_instances_arg(f"x{bs}y") == f"x{bs * 4}y"
 
 
 def test_stubbed_macro_halo_without_power_emits_no_macro_pdn_grid(
