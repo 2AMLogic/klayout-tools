@@ -114,12 +114,12 @@ from . import (
     sim_transfer_meas,
     sim_twoport,
 )
+from .pdk_families import family_subset, pdk_variant_family
 from .remote_launcher import (
     ASSUMED_THREADS_PER_CORNER,
     RemoteLaunchError,
     _signal_handlers_install,
     _signal_handlers_restore,
-    ami_pdk_key,
     published_runner_identities,
 )
 from .sim_remote import (
@@ -1786,37 +1786,62 @@ def _resolve_provision_script(batch_spec: dict[str, Any]) -> str:
     return resolved
 
 
+#: PDK keys the batch fleet's runner image bakes (issue #2727). Deliberately
+#: **not** :data:`remote_launcher.SUPPORTED_PDKS`: the batch fleet runs the EDA
+#: batch-runner image published by 2AMLogic/2am, not the ``remote`` AMIs, so
+#: the two sets are independent (``remote`` still needs a published AMI per
+#: PDK; batch does not). Same key shape as ``SUPPORTED_PDKS``: ``sky130A`` is
+#: a real variant, the others are bare families that variants reduce to.
+BATCH_PUBLISHED_PDKS: tuple[str, ...] = ("sky130A", "gf180mcu", "sg13g2", "sg13cmos5l")
+
+_BATCH_PDK_FAMILIES: frozenset[str] = family_subset(
+    "gf180mcu", "sky130", "sg13g2", "sg13cmos5l"
+)
+
+
+def batch_pdk_key(pdk: str) -> str:
+    """Map ``models.pdk`` to the batch-published key, mirroring
+    :func:`remote_launcher.ami_pdk_key`: exact key wins, otherwise the variant
+    is reduced via :func:`pdk_families.pdk_variant_family` and accepted only
+    if the batch image publishes that family. Raises :class:`SimError`."""
+    from .sim import SimError
+
+    if pdk in BATCH_PUBLISHED_PDKS:
+        return pdk
+    family = pdk_variant_family(pdk)
+    if family in _BATCH_PDK_FAMILIES and family in BATCH_PUBLISHED_PDKS:
+        return family
+    raise SimError(
+        f"unsupported PDK '{pdk}' for the batch backend "
+        f"(supported: {', '.join(BATCH_PUBLISHED_PDKS)}). `models.pdk` carries "
+        "the local variant name and is reduced to its family (e.g. "
+        "'gf180mcuC' -> 'gf180mcu'), so a variant whose family the batch "
+        "runner image does not bake is unsupported even when it resolves "
+        "locally."
+    )
+
+
 def _validate_batch_pdk(request: dict[str, Any]) -> None:
     """Refuse a ``models.pdk`` the batch fleet has no image for, **before**
     :func:`_resolve_batch_config`'s caller writes anything to S3 (issue
     #2523).
 
-    The check is :func:`remote_launcher.ami_pdk_key` itself -- not a copy of
-    :data:`~klayout_tools.remote_launcher.SUPPORTED_PDKS` or its
-    family-reduction rule -- so the ``batch`` and ``remote`` backends can
-    never silently disagree about which PDKs are supported: a job instance
-    boots an image from the same published set ``remote`` provisions from,
-    which is why ``remote``'s pre-``run-instances`` refusal
-    (``RemoteLauncher.provision`` -> :func:`remote_launcher.resolve_ami`)
-    and this one must agree by construction. A variant reducible to a
-    published family is accepted on the same terms (``"gf180mcuC"`` ->
-    ``"gf180mcu"``); the *variant* keeps flowing into ``job.json``'s
-    ``pdk_variant`` (see :func:`_build_batch_job_spec`), because the job
-    instance resolves the PDK locally exactly as the ``local`` backend does.
+    The accepted set is :data:`BATCH_PUBLISHED_PDKS`, the PDKs the batch
+    runner image bakes (issue #2727) -- independent of the ``remote`` AMI
+    manifest, which gates only the ``remote`` backend. A variant reducible to
+    a published family is accepted (``"gf180mcuC"`` -> ``"gf180mcu"``); the
+    *variant* keeps flowing into ``job.json``'s ``pdk_variant`` (see
+    :func:`_build_batch_job_spec`), because the job instance resolves the PDK
+    locally exactly as the ``local`` backend does.
 
     A request that names **no** PDK at all is untouched: without a
     ``corners.process`` axis there is no model library to resolve, so there
     is nothing to validate and nothing to refuse.
     """
-    from .sim import SimError
-
     pdk = (request.get("models") or {}).get("pdk")
     if not pdk:
         return
-    try:
-        ami_pdk_key(str(pdk), backend="batch")
-    except RemoteLaunchError as exc:
-        raise SimError(str(exc)) from exc
+    batch_pdk_key(str(pdk))
 
 
 #: ``SimError.code`` for an absolute host-path model library on the batch
