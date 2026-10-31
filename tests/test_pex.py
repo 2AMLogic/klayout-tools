@@ -6969,6 +6969,80 @@ def test_run_pex_submit_only_writes_manifest_without_polling(
     assert "delta" not in report
 
 
+def _interrupting_async_sim(monkeypatch, calls, fail_on):
+    """A fake `run_sim` whose submit of the `fail_on` side raises once."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    state = {"armed": True}
+
+    def _fake_run_sim(request_path, **kwargs):
+        side = os.path.basename(kwargs["artifacts_dir"])
+        if kwargs.get("submit_only"):
+            if side == fail_on and state["armed"]:
+                state["armed"] = False
+                raise SimError("submit cut off", code="batch_client_interrupted")
+            calls.append(side)
+            return {"status": "submitted", "job_id": f"job-{side}", "unit_count": 2}
+        return _two_corner_schematic_report()
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+
+def test_run_pex_submit_only_flushes_manifest_per_leg_and_resumes(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4686: an interrupted submit leaves an incomplete manifest; a
+    re-run submits only the legs that are missing, and attach is refused
+    until the manifest is complete."""
+    calls: list = []
+    _interrupting_async_sim(monkeypatch, calls, fail_on="extracted")
+    request = _async_inputs(tmp_path)
+    outdir = tmp_path / "art"
+    kwargs = dict(artifacts_dir=str(outdir), backend="batch")
+
+    with pytest.raises(PexError):
+        run_pex(resistor_layout, [request], "sky130", submit_only=True, **kwargs)
+    partial = json.loads((outdir / "pex-submit.json").read_text())
+    assert partial["complete"] is False
+    assert [leg["side"] for leg in partial["legs"]] == ["schematic"]
+
+    with pytest.raises(PexError) as err:
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            attach=str(outdir / "pex-submit.json"),
+            **kwargs,
+        )
+    assert err.value.code == "pex_manifest_incomplete"
+    assert "extracted" in str(err.value)
+
+    report = run_pex(resistor_layout, [request], "sky130", submit_only=True, **kwargs)
+    # The schematic leg was not submitted a second time.
+    assert calls == ["schematic", "extracted"]
+    assert [leg["side"] for leg in report["legs"]] == ["schematic", "extracted"]
+    final = json.loads((outdir / "pex-submit.json").read_text())
+    assert final["complete"] is True
+
+
+def test_run_pex_submit_only_rerun_refuses_changed_request(
+    tmp_path, resistor_layout, monkeypatch
+):
+    calls: list = []
+    _interrupting_async_sim(monkeypatch, calls, fail_on="extracted")
+    request = _async_inputs(tmp_path)
+    kwargs = dict(artifacts_dir=str(tmp_path / "art"), backend="batch")
+    with pytest.raises(PexError):
+        run_pex(resistor_layout, [request], "sky130", submit_only=True, **kwargs)
+    with open(request, "a", encoding="utf-8") as handle:
+        handle.write("\n")
+    with pytest.raises(PexError) as err:
+        run_pex(resistor_layout, [request], "sky130", submit_only=True, **kwargs)
+    assert err.value.code == "resume_fingerprint_mismatch"
+    assert calls == ["schematic"]
+
+
 def test_run_pex_attach_delta_equals_synchronous_run(
     tmp_path, resistor_layout, monkeypatch
 ):

@@ -3798,7 +3798,9 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "backend `batch`: extract, submit every testbench's schematic "
             "and extracted `klt sim` leg without polling, write "
-            "`<outdir>/pex-submit.json` and exit 0 with a `submitted` "
+            "`<outdir>/pex-submit.json` (rewritten after each leg; re-run "
+            "the same command to finish an interrupted submit without "
+            "new jobs for recorded legs) and exit 0 with a `submitted` "
             "status. Collect later with `--attach`. Refused with "
             "`--attach`, `--resume`, `--measure-command`, `--extract-only`, "
             "`--device-only-leg` or a non-batch backend (issue #4619)."
@@ -3814,7 +3816,8 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "command with this `pex-submit.json`; each leg attaches to its "
             "recorded job(s) and the normal pex report is produced. A "
             "manifest recorded for different inputs is refused "
-            "(`resume_fingerprint_mismatch`) (issue #4619)."
+            "(`resume_fingerprint_mismatch`), as is an incomplete one "
+            "(`pex_manifest_incomplete`) (issue #4619)."
         ),
     )
     pex_parser.add_argument(
