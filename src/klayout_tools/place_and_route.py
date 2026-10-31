@@ -252,6 +252,9 @@ from .place_and_route_request import (
     _validate_output_dbu_um as _validate_output_dbu_um,
 )
 from .place_and_route_request import (
+    _validate_placement_density as _validate_placement_density,
+)
+from .place_and_route_request import (
     _validate_portable_paths as _validate_portable_paths,
 )
 from .place_and_route_request import (
@@ -262,6 +265,12 @@ from .place_and_route_request import (
 )
 from .place_and_route_request import (
     _validate_power as _validate_power,
+)
+from .place_and_route_request import (
+    _validate_route_allow_congestion as _validate_route_allow_congestion,
+)
+from .place_and_route_request import (
+    _validate_route_congestion_iterations as _validate_route_congestion_iterations,
 )
 from .place_and_route_request import (
     _validate_route_critical_nets_percentage as _validate_route_critical_nets_percentage,  # noqa: E501
@@ -965,10 +974,9 @@ def _require_extract_deck_for_cell_library(cell_library: str) -> str:
     return extract_deck
 
 
-#: Fixed internal `global_placement -density` target -- not an exposed
-#: request field (the contract's `floorplan` block sizes the die/core, not
-#: placement density); verified live at this value against the worked
-#: example (docstring above).
+#: Default `global_placement -density` target, used when
+#: `request.placement_density` (issue #4716) is omitted; verified live at
+#: this value against the worked example (docstring above).
 _GLOBAL_PLACEMENT_DENSITY = 0.6
 
 #: Matches `check_antennas`'s own stdout summary line, e.g.
@@ -1167,6 +1175,9 @@ _ALLOWED_REQUEST_KEYS = (
     "seed",
     "target_stage",
     "route_critical_nets_percentage",
+    "placement_density",
+    "route_congestion_iterations",
+    "route_allow_congestion",
     "max_antenna_repair_iterations",
     "library",
     "post_route_spef",
@@ -1834,6 +1845,13 @@ def _run_single_corner(
     route_critical_nets_percentage = _validate_route_critical_nets_percentage(
         request.get("route_critical_nets_percentage")
     )
+    placement_density = _validate_placement_density(request.get("placement_density"))
+    route_congestion_iterations = _validate_route_congestion_iterations(
+        request.get("route_congestion_iterations")
+    )
+    route_allow_congestion = _validate_route_allow_congestion(
+        request.get("route_allow_congestion")
+    )
     max_antenna_repair_iterations = _validate_max_antenna_repair_iterations(
         request.get("max_antenna_repair_iterations")
     )
@@ -1943,6 +1961,9 @@ def _run_single_corner(
             seed=seed,
             output_dir=output_dir,
             route_critical_nets_percentage=route_critical_nets_percentage,
+            placement_density=placement_density,
+            route_congestion_iterations=route_congestion_iterations,
+            route_allow_congestion=route_allow_congestion,
             max_antenna_repair_iterations=max_antenna_repair_iterations,
             macro_liberty_paths=macro_liberty_paths,
             library=library,
@@ -2437,6 +2458,13 @@ def _run_single_corner(
         "status": "ok",
         "stage_reached": target_stage,
         "seed": seed,
+        # Additive field (issue #4716): the resolved global-placement /
+        # global-route knobs actually applied (defaults included).
+        "applied": {
+            "placement_density": placement_density,
+            "route_congestion_iterations": route_congestion_iterations,
+            "route_allow_congestion": route_allow_congestion,
+        },
         # Additive field (issue #2781): see `_coverage_declaration`.
         "coverage": _coverage_declaration(),
         # Additive field (issue #1100): the tech-LEF parasitic-extraction

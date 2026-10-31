@@ -2127,6 +2127,50 @@ def _validate_route_critical_nets_percentage(value: Any) -> int:
     return value
 
 
+def _validate_placement_density(value: Any) -> float:
+    """Optional ``request.placement_density`` (issue #4716) -- the target
+    density handed to ``global_placement -density``. ``0 < x <= 1``.
+    Omitted/``None`` defaults to ``0.6`` (``_GLOBAL_PLACEMENT_DENSITY``),
+    this command's prior fixed value, so the generated Tcl is unchanged."""
+    if value is None:
+        return 0.6
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise PlaceAndRouteError("request.placement_density must be a number")
+    if not (0 < value <= 1):
+        raise PlaceAndRouteError(
+            "request.placement_density must be greater than 0 and at most 1"
+        )
+    return float(value)
+
+
+def _validate_route_congestion_iterations(value: Any) -> int | None:
+    """Optional ``request.route_congestion_iterations`` (issue #4716) --
+    ``global_route -congestion_iterations``. An integer >= 1; omitted/
+    ``None`` emits no flag (OpenROAD's own default)."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PlaceAndRouteError(
+            "request.route_congestion_iterations must be an integer"
+        )
+    if value < 1:
+        raise PlaceAndRouteError(
+            "request.route_congestion_iterations must be at least 1"
+        )
+    return value
+
+
+def _validate_route_allow_congestion(value: Any) -> bool:
+    """Optional ``request.route_allow_congestion`` (issue #4716) --
+    ``global_route -allow_congestion``. Boolean; omitted/``None`` is
+    ``false`` (no flag)."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise PlaceAndRouteError("request.route_allow_congestion must be a boolean")
+    return value
+
+
 #: Upper bound on ``request.max_antenna_repair_iterations`` (issue #939) --
 #: each additional iteration re-runs a full ``repair_antennas``/
 #: ``detailed_route`` pair (a real, potentially expensive detailed-routing

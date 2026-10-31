@@ -934,6 +934,31 @@ def _repair_iterations(diode_cell: str | None, requested: int) -> int:
     return 0 if diode_cell is None else requested
 
 
+def _global_placement_call(
+    density: float | None, default_density: float, seed: int
+) -> str:
+    """The ``global_placement`` line; ``density=None`` uses ``default_density``
+    (issue #4716)."""
+    used = default_density if density is None else density
+    return (
+        f"global_placement -density {used} "
+        f"-routability_driven -timing_driven -random_seed {seed}"
+    )
+
+
+def _global_route_congestion_flags(
+    iterations: int | None, allow_congestion: bool
+) -> str:
+    """Opt-in ``global_route`` congestion flags, each omitted by default
+    (issue #4716). Returns a string with a leading space per flag, or ``""``."""
+    flags = ""
+    if iterations is not None:
+        flags += f" -congestion_iterations {iterations}"
+    if allow_congestion:
+        flags += " -allow_congestion"
+    return flags
+
+
 def _stage_script_lines(
     *,
     stage: str,
@@ -960,6 +985,9 @@ def _stage_script_lines(
     output_dir: str,
     route_critical_nets_percentage: int,
     max_antenna_repair_iterations: int,
+    placement_density: float | None = None,
+    route_congestion_iterations: int | None = None,
+    route_allow_congestion: bool = False,
     library: dict[str, Any] | None = None,
     macro_liberty_paths: list[str] | None = None,
 ) -> list[str]:
@@ -968,6 +996,10 @@ def _stage_script_lines(
         _GLOBAL_PLACEMENT_DENSITY,
         _ROUTING_LAYER_RANGE,
         _ROW_RAIL_STRAP,
+    )
+
+    global_placement_call = _global_placement_call(
+        placement_density, _GLOBAL_PLACEMENT_DENSITY, seed
     )
 
     # Issue #2635: `request.macros[].lib`, resolved to this run's own
@@ -1061,8 +1093,7 @@ def _stage_script_lines(
             f"place_pins -hor_layers {io_spec['layer_h']} "
             f"-ver_layers {io_spec['layer_v']}",
             *_wire_rc_lines(io_spec, library),
-            f"global_placement -density {_GLOBAL_PLACEMENT_DENSITY} "
-            f"-routability_driven -timing_driven -random_seed {seed}",
+            global_placement_call,
             "estimate_parasitics -placement",
             "repair_design",
             "repair_timing",
@@ -1193,6 +1224,9 @@ def _stage_script_lines(
             global_route_call += (
                 f" -critical_nets_percentage {route_critical_nets_percentage}"
             )
+        global_route_call += _global_route_congestion_flags(
+            route_congestion_iterations, route_allow_congestion
+        )
         # Row-rail fallback (issue #1442): only when `request.power` was
         # *not* given -- a `request.power`-bearing run already got a real
         # PDN (including, when the caller's own `straps[]` name a met1
