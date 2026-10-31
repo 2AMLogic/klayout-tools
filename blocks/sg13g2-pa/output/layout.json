@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:11:14.699223+00:00",
+  "slug": "sg13g2-pa",
+  "name": "Sg13G2 Pa",
+  "description": "SiGe power amplifier on IHP SG13G2 \u2014 2AM Logic canary block",
+  "pdk": "sg13g2",
+  "layer_count": 11,
+  "cell_count": 3,
+  "instance_count": 0,
+  "layout_file": "sg13g2_inv_1.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Activ.drawing": "renders/1_0.png",
+    "GatPoly.drawing": "renders/5_0.png",
+    "Cont.drawing": "renders/6_0.png",
+    "Metal1.drawing": "renders/8_0.png",
+    "layer_8_2": "renders/8_2.png",
+    "Metal1.text": "renders/8_25.png",
+    "pSD.drawing": "renders/14_0.png",
+    "NWell.drawing": "renders/31_0.png",
+    "layer_32_0": "renders/32_0.png",
+    "layer_60_0": "renders/60_0.png",
+    "layer_189_4": "renders/189_4.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Band",
+        "fallback": "2400\u20132483.5 MHz",
+        "target": "2400\u20132483.5 MHz"
+      },
+      {
+        "parameter": "Saturated output power",
+        "fallback": "> +10 dBm",
+        "target": "> +15 dBm",
+        "stretch": "> +20 dBm"
+      },
+      {
+        "parameter": "Output P1dB",
+        "fallback": "> +7 dBm",
+        "target": "> +12 dBm",
+        "stretch": "> +17 dBm"
+      },
+      {
+        "parameter": "Power gain",
+        "fallback": "> 10 dB",
+        "target": "> 15 dB",
+        "stretch": "> 20 dB"
+      },
+      {
+        "parameter": "Peak PAE",
+        "fallback": "> 15%",
+        "target": "> 25%",
+        "stretch": "> 35%"
+      },
+      {
+        "parameter": "PAE at back-off (Psat \u2212 6 dB) \u2014 DRAFT",
+        "fallback": "reported, no threshold",
+        "target": "reported, no threshold"
+      },
+      {
+        "parameter": "Input match (S11)",
+        "fallback": "< \u22128 dB",
+        "target": "< \u221210 dB",
+        "stretch": "< \u221215 dB"
+      },
+      {
+        "parameter": "Ports",
+        "fallback": "50 \u03a9, off-chip output match",
+        "target": "50 \u03a9, on-chip output match"
+      },
+      {
+        "parameter": "Inductor / passive models \u2014 DRAFT",
+        "fallback": "each inductor's source, Q and self-resonance stated at every use; source deferred (operator `consumes` decision)",
+        "target": "same"
+      },
+      {
+        "parameter": "Stability, small-signal",
+        "fallback": "\u03bc > 1, 10 MHz\u201330 GHz, every corner (k, \\",
+        "target": "\u0394\\",
+        "stretch": ", negative-resistance check reported)"
+      },
+      {
+        "parameter": "Stability, large-signal \u2014 DRAFT",
+        "fallback": "no sustained non-harmonic line, threshold not set",
+        "target": "same"
+      },
+      {
+        "parameter": "Supply \u2014 DRAFT",
+        "fallback": "single rail, nominal set by the first load-line study, \u00b110%",
+        "target": "same"
+      },
+      {
+        "parameter": "Device and stacking \u2014 DRAFT",
+        "fallback": "single `npn13g2` first; stack or `npn13g2v` only if the target cannot close with margin",
+        "target": "same",
+        "stretch": "stack/`npn13g2v` for +20 dBm only"
+      },
+      {
+        "parameter": "Device stress",
+        "fallback": "no device beyond its documented breakdown over the full swing, every corner",
+        "target": "same, inside the model card's validity window"
+      },
+      {
+        "parameter": "Thermal, electromigration \u2014 DRAFT",
+        "fallback": "junction temperature reported; PDK current-density limits applied after layout",
+        "target": "same"
+      },
+      {
+        "parameter": "Harmonics (2nd, 3rd) \u2014 DRAFT",
+        "fallback": "reported at Psat and Psat \u2212 6 dB, no threshold",
+        "target": "same"
+      },
+      {
+        "parameter": "Area \u2014 DRAFT",
+        "fallback": "reported",
+        "target": "reported"
+      },
+      {
+        "parameter": "Signoff",
+        "fallback": "DRC + LVS clean",
+        "target": "DRC + LVS clean, post-layout re-verified"
+      }
+    ],
+    "status_note": "see [`spec/target-spec.md`](spec/target-spec.md"
+  },
+  "source": {
+    "repo": "2AMLogic/sg13g2-pa",
+    "ref": "1061804bf2d650e24f2b1730814bcdcee3ade094",
+    "path": "layout/smoke/sg13g2_inv_1.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

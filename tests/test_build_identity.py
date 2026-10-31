@@ -1,11 +1,11 @@
-"""Build identity of the running klt build (issue #1202).
+"""Build identity of the running klt build (issues #1202, #2823).
 
-The gap these cover: a wheel built from a commit *after* a release tag
-declares the same package version the release does, so `klt --version` alone
-could not tell a consumer committing klt output as evidence which build
-produced it. `build_identity` adds the missing half -- a PEP 440
-local-version suffix for anything that is not a confirmed tagged release --
-without changing what a real release reports.
+The gap these cover: a wheel built from a commit *after* a release tag used
+to declare the same package version the release does. Since issue #2823 the
+build folds the git facts into the distribution version itself
+(`_version_scheme`, exercised directly in `tests/test_version_scheme.py`);
+`build_identity` reports that version plus the facts behind it, and a real
+release still reports bare `X.Y.Z`.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools import __version__, _provenance, build_identity
+from klayout_tools import __version__, _provenance, _version_scheme, build_identity
 from klayout_tools.cli import main
 
 # --------------------------------------------------------------------------- #
@@ -51,57 +51,17 @@ def _make_repo(directory: Path) -> None:
     _git(directory, "commit", "-qm", "initial")
 
 
-# --------------------------------------------------------------------------- #
-# version-string rendering
-# --------------------------------------------------------------------------- #
-
-
-def test_confirmed_release_renders_bare_version():
-    """Regression guard: existing consumers parse `klt X.Y.Z`, so a real
-    tagged-release build must gain no suffix at all."""
-    ident = {
-        "git_commit": "a" * 40,
-        "git_tag": "v1.2.3",
-        "dirty": False,
-        "is_release": True,
-    }
-    assert build_identity.format_build_version("1.2.3", ident) == "1.2.3"
-
-
-def test_post_tag_build_renders_local_version_segment():
-    ident = {
-        "git_commit": "abcdef0123456789" + "0" * 24,
-        "git_tag": None,
-        "dirty": False,
-        "is_release": False,
-    }
-    assert build_identity.format_build_version("1.2.3", ident) == "1.2.3+gabcdef012345"
-
-
-def test_dirty_build_is_marked_dirty():
-    ident = {
-        "git_commit": "abcdef0123456789" + "0" * 24,
-        "git_tag": "v1.2.3",
-        "dirty": True,
-        "is_release": False,
-    }
-    assert (
-        build_identity.format_build_version("1.2.3", ident)
-        == "1.2.3+gabcdef012345.dirty"
+def _make_versioned_repo(directory: Path, base: str) -> None:
+    """A git checkout carrying a tracked `pyproject.toml` with `base` as its
+    `[tool.hatch.version]` `base-version` -- what an editable install reads."""
+    directory.mkdir(parents=True, exist_ok=True)
+    _git(directory, "init", "-q", ".")
+    (directory / "tracked.py").write_text("x = 1\n")
+    (directory / "pyproject.toml").write_text(
+        f'[tool.hatch.version]\nsource = "code"\nbase-version = "{base}"\n'
     )
-
-
-def test_unrecoverable_identity_renders_unknown_not_bare():
-    """The whole point: "I cannot tell" must never look like a release."""
-    ident = {
-        "git_commit": None,
-        "git_tag": None,
-        "dirty": None,
-        "is_release": None,
-    }
-    rendered = build_identity.format_build_version("1.2.3", ident)
-    assert rendered == "1.2.3+unknown"
-    assert rendered != "1.2.3"
+    _git(directory, "add", "-A")
+    _git(directory, "commit", "-qm", "initial")
 
 
 # --------------------------------------------------------------------------- #
@@ -152,12 +112,12 @@ def test_identity_of_one_commit_is_provisioning_route_dependent_by_design():
     from_source_tarball = build_identity._resolve(None, None, None, "1.2.3")
 
     assert from_git_checkout != from_source_tarball
-    assert build_identity.format_build_version("1.2.3", from_git_checkout) == (
-        f"1.2.3+g{commit[:12]}"
+    assert _version_scheme.render("1.2.3", commit, None, False, True, 1) == (
+        f"1.2.4.dev1+g{commit[:12]}"
     )
     assert (
-        build_identity.format_build_version("1.2.3", from_source_tarball)
-        == "1.2.3+unknown"
+        _version_scheme.render("1.2.3", None, None, None, None, None)
+        == "1.2.3.dev0+unknown"
     )
     # Neither is a release claim, and neither is wrong about the build it
     # describes -- the report-side exclusion is what makes the two
@@ -198,9 +158,51 @@ def test_checkout_identity_reports_non_release_after_the_tag(tmp_path):
     assert post_tag["is_release"] is False
     assert post_tag["git_tag"] is None
     assert post_tag["git_commit"] != tagged["git_commit"]
-    assert build_identity.format_build_version(
-        "1.2.3", post_tag
-    ) != build_identity.format_build_version("1.2.3", tagged)
+
+
+def test_checkout_identity_reads_the_release_base_from_the_checkout(tmp_path):
+    """Issue #2823: an editable install's metadata version is a dev version,
+    so "is this the release tag?" must be asked of the checkout's own
+    `base-version`, not of `__version__`."""
+    repo = tmp_path / "repo"
+    _make_versioned_repo(repo, "1.2.3")
+    _git(repo, "tag", "v1.2.3")
+
+    assert build_identity._checkout_base_version(str(repo)) == "1.2.3"
+    assert build_identity._checkout_identity(str(repo))["is_release"] is True
+    assert build_identity._checkout_version(str(repo)) == "1.2.3"
+
+
+def test_checkout_version_tracks_the_live_tree(tmp_path):
+    repo = tmp_path / "repo"
+    _make_versioned_repo(repo, "1.2.3")
+    _git(repo, "tag", "v1.2.3")
+    (repo / "tracked.py").write_text("x = 2\n")
+    _git(repo, "commit", "-qam", "after the tag")
+    commit = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+    assert build_identity._checkout_version(str(repo)) == f"1.2.4.dev1+g{commit[:12]}"
+    assert build_identity._checkout_identity(str(repo))["is_release"] is False
+
+
+def test_checkout_version_none_outside_a_checkout(tmp_path):
+    assert build_identity._checkout_version(str(tmp_path)) is None
+
+
+def test_checkout_identity_ignores_untracked_files(tmp_path):
+    """The live probe applies the build's own dirty rule (issue #2248), so
+    the live identity and the live version never disagree about it."""
+    repo = tmp_path / "repo"
+    _make_versioned_repo(repo, "1.2.3")
+    _git(repo, "tag", "v1.2.3")
+    (repo / "scratch.txt").write_text("untracked")
+
+    ident = build_identity._checkout_identity(str(repo))
+    assert ident["dirty"] is False
+    assert ident["is_release"] is True
+    assert build_identity._checkout_version(str(repo)) == "1.2.3"
 
 
 def test_checkout_identity_detects_uncommitted_changes(tmp_path):
@@ -317,19 +319,23 @@ def _assert_provenance_matches_cli(expected: str, capsys) -> None:
     assert main(["version", "--format", "json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["version"] == expected
-    # Package metadata keeps its separate, static-version contract.
+    # `package_version` is always the installed distribution metadata.
     assert payload["package_version"] == __version__
 
 
 @pytest.mark.parametrize("state", ["release", "post-tag", "dirty", "unknown"])
 def test_provenance_identifies_source_build(state, tmp_path, monkeypatch, capsys):
+    """An editable/source install recomputes its version live from the
+    checkout with the build's own scheme (issue #2823)."""
     repo = tmp_path / "source"
     if state == "unknown":
         repo.mkdir()
-        expected = f"{__version__}+unknown"
+        # No checkout to probe: the installed metadata version stands (a
+        # build with no git facts already rendered it `X.Y.Z.dev0+unknown`).
+        expected = __version__
     else:
-        _make_repo(repo)
-        _git(repo, "tag", f"v{__version__}")
+        _make_versioned_repo(repo, "1.2.3")
+        _git(repo, "tag", "v1.2.3")
         if state in {"post-tag", "dirty"}:
             (repo / "tracked.py").write_text("x = 2\n")
         if state == "post-tag":
@@ -337,11 +343,11 @@ def test_provenance_identifies_source_build(state, tmp_path, monkeypatch, capsys
         commit = subprocess.check_output(
             ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
         ).strip()
-        expected = __version__
-        if state != "release":
-            expected += f"+g{commit[:12]}"
-        if state == "dirty":
-            expected += ".dirty"
+        expected = {
+            "release": "1.2.3",
+            "post-tag": f"1.2.4.dev1+g{commit[:12]}",
+            "dirty": f"1.2.4.dev0+g{commit[:12]}.dirty",
+        }[state]
 
     monkeypatch.setattr(build_identity, "_recorded_identity", lambda _v: None)
     monkeypatch.setattr(build_identity, "__file__", str(repo / "tracked.py"))
@@ -349,29 +355,35 @@ def test_provenance_identifies_source_build(state, tmp_path, monkeypatch, capsys
 
 
 @pytest.mark.parametrize(
-    "tagged,dirty,commit,suffix",
+    "tagged,dirty,commit,is_release",
     [
-        (True, False, "b" * 40, ""),
-        (False, False, "b" * 40, "+g" + "b" * 12),
-        (True, True, "b" * 40, "+g" + "b" * 12 + ".dirty"),
-        (False, None, None, "+unknown"),
+        (True, False, "b" * 40, True),
+        (False, False, "b" * 40, False),
+        (True, True, "b" * 40, False),
+        (False, None, None, None),
     ],
     ids=["release", "post-tag", "dirty", "unknown"],
 )
 def test_provenance_identifies_packaged_build(
-    tagged, dirty, commit, suffix, monkeypatch, capsys
+    tagged, dirty, commit, is_release, monkeypatch, capsys
 ):
+    """A built distribution reports exactly its distribution version on
+    every surface (issue #2823) -- the build already folded the git facts
+    into it, so no runtime suffix is added on top."""
     module = type(sys)("klayout_tools._build_info")
     module.GIT_COMMIT = commit
     module.GIT_TAG = f"v{__version__}" if tagged else None
     module.GIT_DIRTY = dirty
+    module.VERSION = __version__
     monkeypatch.setitem(sys.modules, "klayout_tools._build_info", module)
 
     def _fail(*args, **kwargs):  # pragma: no cover - must not be reached
         raise AssertionError("packaged provenance must not probe the checkout")
 
     monkeypatch.setattr(build_identity, "_checkout_identity", _fail)
-    _assert_provenance_matches_cli(f"{__version__}{suffix}", capsys)
+    monkeypatch.setattr(build_identity, "_checkout_version", _fail)
+    _assert_provenance_matches_cli(__version__, capsys)
+    assert build_identity.version_report()["is_release"] is is_release
 
 
 # --------------------------------------------------------------------------- #
@@ -389,13 +401,16 @@ def test_version_report_shape():
         "git_tag",
         "dirty",
         "is_release",
+        "reinstall_spec",
         "grading_ruleset_id",
         "klayout_version",
         "klayout_version_expected",
     }
     assert report["schema_version"] == 1
     assert report["package_version"] == __version__
-    assert report["version"].startswith(__version__)
+    packaging_version = pytest.importorskip("packaging.version")
+    packaging_version.Version(report["version"])  # valid PEP 440
+    packaging_version.Version(report["package_version"])
     assert report["is_release"] in (True, False, None)
     assert report["grading_ruleset_id"].startswith("sha256:")
     assert report["klayout_version"] is None or isinstance(
@@ -417,18 +432,49 @@ def test_cli_version_text(capsys):
     assert capsys.readouterr().out.strip() == f"klt {build_identity.build_version()}"
 
 
-def test_cli_version_flag_matches_the_version_verb(monkeypatch, capsys):
-    monkeypatch.setattr(build_identity, "_recorded_identity", lambda _v: None)
+_SHA = "4f1c8a9b2d3e5f60718293a4b5c6d7e8f9a0b1c2"
+
+
+@pytest.mark.parametrize(
+    ("ident", "expected"),
+    [
+        (
+            {"is_release": True, "git_commit": _SHA, "dirty": False},
+            "klayout-tools==0.2.0",
+        ),
+        (
+            {"is_release": False, "git_commit": _SHA, "dirty": False},
+            f"klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@{_SHA}",
+        ),
+        ({"is_release": False, "git_commit": _SHA, "dirty": True}, None),
+        ({"is_release": False, "git_commit": _SHA, "dirty": None}, None),
+        ({"is_release": None, "git_commit": None, "dirty": None}, None),
+    ],
+    ids=["release", "clean-dev", "dirty", "dirty-unknown", "unknown"],
+)
+def test_reinstall_spec_cases(ident, expected):
+    assert build_identity.reinstall_spec(ident, "0.2.0") == expected
+
+
+def test_version_text_says_when_not_reinstallable(monkeypatch, capsys):
     monkeypatch.setattr(
         build_identity,
-        "_checkout_identity",
+        "identity",
         lambda: {
-            "git_commit": "d" * 40,
+            "git_commit": None,
             "git_tag": None,
-            "dirty": False,
-            "is_release": False,
+            "dirty": None,
+            "is_release": None,
         },
     )
+    assert main(["version"]) == 0
+    assert "not reinstallable" in capsys.readouterr().err
+
+
+def test_cli_version_flag_matches_the_version_verb(monkeypatch, capsys):
+    monkeypatch.setattr(build_identity, "_recorded_identity", lambda _v: None)
+    live = "1.2.4.dev3+g" + "d" * 12
+    monkeypatch.setattr(build_identity, "_checkout_version", lambda: live)
 
     with pytest.raises(SystemExit) as exc_info:
         main(["--version"])
@@ -437,7 +483,7 @@ def test_cli_version_flag_matches_the_version_verb(monkeypatch, capsys):
 
     assert main(["version"]) == 0
     assert capsys.readouterr().out.strip() == flag_output
-    assert flag_output == f"klt {__version__}+g{'d' * 12}"
+    assert flag_output == f"klt {live}"
 
 
 def test_cli_version_flag_is_bare_for_a_release_build(monkeypatch, capsys):
@@ -554,7 +600,7 @@ def test_klayout_version_expected_falls_back_to_live_probe(monkeypatch):
 
 
 def test_version_report_includes_klayout_fields(monkeypatch):
-    monkeypatch.setattr(build_identity, "_klayout_version", lambda: "0.30.12")
+    monkeypatch.setattr(build_identity, "klayout_version", lambda: "0.30.12")
     monkeypatch.setattr(build_identity, "klayout_version_expected", lambda: "0.30.10")
 
     report = build_identity.version_report()

@@ -15,6 +15,7 @@ klt economy <file> [--top <cell>] [--grid-cols N] [--grid-rows N]
                     [--area-eff-min-utilization <fraction>]
                     [--area-eff-max-empty-region-fraction <fraction>]
                     [--area-eff-require-bbox-tightness]
+                    [--what-if <moves.json>]
                     [--format text|json]
 ```
 
@@ -225,6 +226,27 @@ cluster's placed footprint area does not exceed its row's own bounding area
 would need `utilization > 1.0` to describe it is not a genuine row and is
 silently discarded rather than reported as an impossible density).
 
+### Attribution block (`--attribute`)
+
+Opt-in (issue #4660). With `--attribute`, the report gains a top-level
+`attribution` object that partitions the top bbox into direct-child
+instance bboxes and the gaps between them; absent without the flag.
+Array instances contribute one child per element.
+
+| Field | Meaning |
+| ----- | ------- |
+| `children[]` | One entry per direct instance: `name` (`<cell>[<n>]`, ordinal by position), `cell`, `bbox_um`, `bbox_area_um2`, `own_whitespace_um2` (instance bbox area minus the child's flattened drawn area). Sorted by `bbox_area_um2` descending, then name. |
+| `gap_components[]` | Connected pieces of the top bbox not covered by any instance bbox: `position`, `bbox_um`, `area_um2`. Zero-area gaps are dropped. Sorted by area descending. |
+| `unattributed_um2` | `bbox_area - (sum(children) - overlap) - sum(gaps)`; expected `0`. |
+| `instance_overlap_um2` | Area double-covered by overlapping instance bboxes (counted once in the partition). |
+| `top_level_drawn_area_um2` | Drawn area of shapes placed directly in the top cell (not an extra partition term). |
+| `sums_to_total` | `true` when `unattributed_um2` is exactly zero (integer dbu² arithmetic). |
+
+`position` is `margin:<edges>` (edges joined by `+`, order bottom, left,
+right, top) when the gap touches the top bbox boundary; otherwise
+`between:<a>,<b>` (names sorted) when it abuts two or more instances, or
+`left_of|right_of|above|below:<inst>` for one; `interior` if it abuts none.
+
 ### Budget and reference blocks
 
 With `--budget-um2 <area>`, `budget` is added:
@@ -319,6 +341,52 @@ the opposite failure. See
 "Area-efficiency spec convention (AREA-EFF)" section for the full
 convention this block implements, including how it composes with a block's
 ratified spec (T1 checklist item 5).
+
+## What-if floorplan estimate (`--what-if`)
+
+`--what-if moves.json` (issue #4661) answers "what would the top bbox and
+utilization become if this instance moved, or this sub-cell were re-shaped?"
+without regenerating the layout. The edits are applied to an **in-memory
+copy**: the input is never modified, nothing is written, and no DRC runs. It
+is an **area and overlap estimate only** — never a legality claim.
+
+```json
+{
+  "moves":   [{"instance": "<cell name | index>", "dx_um": 1.5, "dy_um": 0}],
+  "reshape": [{"cell": "<name>", "width_um": 20, "height_um": 10}]
+}
+```
+
+Both keys are optional (`{}` yields the baseline report plus an empty
+`what_if` block). `instance` selects a direct, non-array child of the top
+cell, by child cell name (must match exactly one instance) or by its integer
+index in the top cell's instance order. Array instances, nested instances,
+unknown or ambiguous selectors, unknown cells, unknown keys and malformed
+files fail through the normal error envelope. `reshape` replaces the named
+cell's content with an empty W x H footprint anchored at its current
+lower-left corner.
+
+The report is the normal one for the edited arrangement plus an additive
+`what_if` block (no `schema_version` bump; without `--what-if` the output is
+unchanged):
+
+- `moves_applied[]` — `instance` (`{index, cell}`), `dx_um`, `dy_um`
+  (snapped to the database grid).
+- `reshaped_cells[]` — `cell`, `original_bbox_um`, `width_um`, `height_um`,
+  `anchor_um`.
+- `overlaps[]` — pairs of direct-child instances (`a`, `b`) whose bboxes
+  overlap after the edit, with `overlap_area_um2` and `overlap_bbox_um`.
+- `broken_contacts[]` — for each moved instance, top-cell-level shapes or
+  label/pin texts on the same layer/datatype that touched its geometry before
+  the move and no longer do. Entries: `layer`, `datatype`, `kind`
+  (`shape`/`text`), `text`, `instance`, `bbox_um`. Not a connectivity check.
+- `utilization_basis` — `"measured"`, or `"excludes_reshaped_footprints"`
+  when a reshape was applied: the reshaped footprint adds to the bbox but its
+  area is not invented as drawn geometry, so `utilization` is not a measured
+  figure for that cell.
+- `legality` — always `"not_checked"`.
+
+All lists are sorted, so output is deterministic.
 
 ## Bounding-box tightness vs. dead margins
 

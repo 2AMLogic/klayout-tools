@@ -30,12 +30,13 @@ from pathlib import Path
 import klayout.db as kdb
 import pytest
 
-from klayout_tools import sim
+from klayout_tools import output_lock, sim
 from klayout_tools.cli import main
 from klayout_tools.pex import (
     BODY_BIAS_BIASED,
     BODY_BIAS_UNBIASED,
     PexError,
+    _apply_tie_nets,
     _body_bias_report,
     _build_coverage,
     _build_delta_rows,
@@ -48,6 +49,7 @@ from klayout_tools.pex import (
     _normalize_measurement_document,
     _pin_count_mismatch,
     _pin_count_mismatch_from_report,
+    _pin_order_mismatch,
     _prepare_extracted_request,
     _reference_is_hierarchical,
     _rewrite_dut_include,
@@ -55,6 +57,7 @@ from klayout_tools.pex import (
     _status_from_coverage,
     _subckt_interfaces,
     _unextracted_delta_rows,
+    _validate_tie_nets,
     run_pex,
 )
 
@@ -123,6 +126,12 @@ def test_find_dut_include_two_directives_raises(tmp_path):
     # can see exactly which directives were ambiguous.
     assert 'line 2: `.include "design.ngspice"`' in message
     assert 'line 3: `.include "dut.spice"`' in message
+    # Issue #2871: shared content must never be steered into the DUT file,
+    # since the DUT include is swapped out on the extracted side.
+    assert "fold any other" not in message
+    assert "into the DUT netlist itself" not in message
+    assert "schematic side only" in message
+    assert "Inline content both sides need into the testbench body" in message
 
 
 def test_find_dut_include_two_directives_mixed_spellings_raises():
@@ -276,6 +285,153 @@ def test_body_bias_report_unbiased_names_devices_and_nets():
 
 
 # --------------------------------------------------------------------------- #
+# `--tie-net` (issue #4245): a caller-declared tie of a reported-unbiased net.
+# --------------------------------------------------------------------------- #
+
+_TIE_ENTRIES = [
+    {"device": "M1", "net": "\\$5"},
+    {"device": "M2", "net": "\\$7"},
+]
+
+
+def test_body_bias_report_without_ties_has_no_tied_key():
+    assert "tied" not in _body_bias_report({"unbiased_pmos_body_nets": _TIE_ENTRIES})
+
+
+def test_body_bias_report_partial_tie_stays_unbiased():
+    report = _body_bias_report(
+        {"unbiased_pmos_body_nets": _TIE_ENTRIES}, [("\\$5", "VDD")]
+    )
+    assert report["status"] == BODY_BIAS_UNBIASED
+    assert report["tied"] == [
+        {"extracted_net": "\\$5", "schematic_net": "VDD", "source": "declared"}
+    ]
+    # The layout's own finding is carried verbatim.
+    assert report["unbiased_pmos_body_nets"] == _TIE_ENTRIES
+
+
+def test_body_bias_report_fully_tied_is_tied_not_biased():
+    report = _body_bias_report(
+        {"unbiased_pmos_body_nets": _TIE_ENTRIES},
+        [("\\$5", "VDD"), ("\\$7", "VDD")],
+    )
+    assert report["status"] == "tied"
+    assert [t["schematic_net"] for t in report["tied"]] == ["VDD", "VDD"]
+
+
+def test_validate_tie_nets_lists_valid_names_for_unknown_net():
+    with pytest.raises(PexError) as exc:
+        _validate_tie_nets([("vout", "VDD")], {"unbiased_pmos_body_nets": _TIE_ENTRIES})
+    assert "vout" in str(exc.value)
+    assert "\\$5" in str(exc.value) and "\\$7" in str(exc.value)
+    assert exc.value.code == "invalid_tie_net"
+
+
+def test_validate_tie_nets_errors_when_nothing_is_unbiased():
+    with pytest.raises(PexError, match="no unbiased net"):
+        _validate_tie_nets([("\\$5", "VDD")], {"unbiased_pmos_body_nets": []})
+
+
+def test_apply_tie_nets_rewrites_whole_tokens_on_device_cards(tmp_path):
+    path = tmp_path / "x.spice"
+    path.write_text(
+        "* \\$5 comment\n.SUBCKT top a b\n"
+        "M1 a b c \\$5 pmos w=1\nM2 a b c \\$7 pmos w=1\n"
+        "M3 a b c \\$55 pmos w=1\n.ENDS\n"
+    )
+    _apply_tie_nets(str(path), [("\\$5", "VDD"), ("\\$7", "VDD")])
+    assert path.read_text() == (
+        "* \\$5 comment\n.SUBCKT top a b\n"
+        "M1 a b c VDD pmos w=1\nM2 a b c VDD pmos w=1\n"
+        "M3 a b c \\$55 pmos w=1\n.ENDS\n"
+    )
+
+
+def test_apply_tie_nets_does_not_chain(tmp_path):
+    path = tmp_path / "x.spice"
+    path.write_text("M1 a b c n1 pmos\nM2 a b c n2 pmos\n")
+    _apply_tie_nets(str(path), [("n1", "n2"), ("n2", "n3")])
+    assert path.read_text() == "M1 a b c n2 pmos\nM2 a b c n3 pmos\n"
+
+
+def test_apply_tie_nets_errors_when_net_absent(tmp_path):
+    path = tmp_path / "x.spice"
+    path.write_text("M1 a b c d pmos\n")
+    with pytest.raises(PexError, match="does not appear"):
+        _apply_tie_nets(str(path), [("\\$9", "VDD")])
+
+
+def test_parse_tie_nets():
+    from klayout_tools.cli._parsing import parse_tie_nets
+
+    assert parse_tie_nets(None, PexError) is None
+    assert parse_tie_nets(["\\$5=VDD", "\\$7=VDD", "\\$5=VDD"], PexError) == [
+        ("\\$5", "VDD"),
+        ("\\$7", "VDD"),
+    ]
+    for bad in ("nope", "=VDD", "a="):
+        with pytest.raises(PexError):
+            parse_tie_nets([bad], PexError)
+    with pytest.raises(PexError, match="twice"):
+        parse_tie_nets(["a=X", "a=Y"], PexError)
+
+
+def test_run_pex_tie_net_on_layout_with_no_unbiased_nets_errors(
+    tmp_path, resistor_layout, measure_reference
+):
+    with pytest.raises(PexError, match="not an unbiased"):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            measure_command=_write_harness(tmp_path),
+            reference_netlist=measure_reference,
+            tie_nets=[("\\$5", "VDD")],
+        )
+
+
+def test_run_pex_tie_net_reports_hash_of_rewritten_netlist(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    import klayout_tools.pex as pex_module
+    from klayout_tools._provenance import sha256_file
+
+    real = pex_module.run_extract
+
+    def _with_unbiased(*args, **kwargs):
+        rep = real(*args, **kwargs)
+        rep["unbiased_pmos_body_nets"] = [{"device": "M0", "net": "n_tie"}]
+        return rep
+
+    monkeypatch.setattr(pex_module, "run_extract", _with_unbiased)
+    monkeypatch.setattr(
+        pex_module,
+        "_validate_tie_nets",
+        lambda ties, rep: None,
+    )
+    out = tmp_path / "res.spice"
+
+    def _fake_apply(path, ties):
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("* tied\n")
+
+    monkeypatch.setattr(pex_module, "_apply_tie_nets", _fake_apply)
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(out),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=measure_reference,
+        tie_nets=[("n_tie", "VDD")],
+    )
+    assert report["extraction"]["netlist_sha256"] == sha256_file(str(out))
+
+
+# --------------------------------------------------------------------------- #
 # `_delta_pct` / `_row_status`
 # --------------------------------------------------------------------------- #
 
@@ -330,6 +486,21 @@ def test_row_status_error_when_schematic_missing():
     assert _row_status(None, _measurement(1.1)) == "error"
 
 
+def test_row_status_error_when_only_extracted_absent():
+    assert _row_status(_measurement(1.0), _measurement(None, "absent")) == "error"
+
+
+def test_row_status_error_when_only_schematic_absent():
+    assert _row_status(_measurement(None, "absent"), _measurement(1.1)) == "error"
+
+
+def test_row_status_pass_when_both_absent():
+    assert (
+        _row_status(_measurement(None, "absent"), _measurement(None, "absent"))
+        == "pass"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # `_build_delta_rows`
 # --------------------------------------------------------------------------- #
@@ -357,8 +528,89 @@ def test_build_delta_rows_single_testbench_bare_spec_row():
             "extracted_value": 1.1,
             "delta_pct": 10.0,
             "status": "pass",
+            "schematic_status": "pass",
+            "extracted_status": "pass",
         }
     ]
+
+
+def test_build_delta_rows_carry_per_side_status():
+    # Issue #2989: schematic fail / extracted pass keeps `status: "pass"` but
+    # names the schematic-side violation.
+    schematic = _sim_report(
+        [{"corner_id": "tt", "measurements": [_measurement(1.0, "fail")]}]
+    )
+    extracted = _sim_report(
+        [{"corner_id": "tt", "measurements": [_measurement(1.1, "pass")]}]
+    )
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert row["status"] == "pass"
+    assert row["schematic_status"] == "fail"
+    assert row["extracted_status"] == "pass"
+
+
+def test_build_delta_rows_missing_schematic_measurement_is_error_side():
+    schematic = _sim_report([{"corner_id": "tt", "measurements": []}])
+    extracted = _sim_report([{"corner_id": "tt", "measurements": [_measurement(1.1)]}])
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert row["schematic_status"] == "error"
+    assert row["extracted_status"] == "pass"
+
+
+def _absent_rows(schematic_status, extracted_status):
+    def side(status):
+        return _sim_report(
+            [
+                {
+                    "corner_id": "tt",
+                    "measurements": [
+                        _measurement(None if status == "absent" else 1.0, status)
+                    ],
+                    "diagnostics": [],
+                }
+            ]
+        )
+
+    return _build_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=side(schematic_status),
+        extracted_report=side(extracted_status),
+    )
+
+
+def test_build_delta_rows_extracted_absent_is_error_blaming_extracted():
+    (row,) = _absent_rows("pass", "absent")
+    assert row["status"] == "error"
+    assert row["delta_pct"] is None
+    assert row["extracted_status"] == "absent"
+    assert row["error"]["side"] == "extracted"
+
+
+def test_build_delta_rows_schematic_absent_is_error_blaming_schematic():
+    (row,) = _absent_rows("absent", "pass")
+    assert row["status"] == "error"
+    assert row["schematic_status"] == "absent"
+    assert row["error"]["side"] == "schematic"
+
+
+def test_build_delta_rows_both_absent_is_pass():
+    (row,) = _absent_rows("absent", "absent")
+    assert row["status"] == "pass"
+    assert row["delta_pct"] is None
+    assert "error" not in row
+
+
+def test_unextracted_delta_rows_carry_per_side_status():
+    schematic = _sim_report(
+        [{"corner_id": "tt", "measurements": [_measurement(1.0, "fail")]}]
+    )
+    (row,) = _unextracted_delta_rows(spec_row_prefix=None, schematic_report=schematic)
+    assert row["schematic_status"] == "fail"
+    assert row["extracted_status"] == "error"
 
 
 def test_build_delta_rows_multi_testbench_prefixes_spec_row():
@@ -829,8 +1081,10 @@ def test_model_mismatch_reports_divergent_flavours(tmp_path):
     mismatch = _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
 
     assert mismatch is not None
+    assert mismatch["kind"] == "model_set"
     assert mismatch["reference_only"] == ["sky130_fd_pr__nfet_g5v0"]
     assert mismatch["extracted_only"] == ["sky130_fd_pr__nfet_01v8"]
+    assert "different device models" in mismatch["detail"]
     assert mismatch["counts"]["reference"] == {"sky130_fd_pr__nfet_g5v0": 2}
     assert mismatch["counts"]["extracted"] == {"sky130_fd_pr__nfet_01v8": 2}
     assert "sky130_fd_pr__nfet_g5v0" in mismatch["detail"]
@@ -845,6 +1099,29 @@ def test_model_mismatch_none_when_models_agree(tmp_path):
     )
     assert (
         _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+        is None
+    )
+
+
+def test_model_mismatch_quoted_expression_params_with_spaces(tmp_path):
+    """Issue #2866: a quoted parameter expression containing spaces must be
+    one name=value token, not mis-read as the model name."""
+    from klayout_tools.pex import _device_model_counts
+
+    card = (
+        "XMn y a vss vss nfet_03v3 L=0.28u W=0.22u nf=1 "
+        "ad='int((nf+1)/2) * W/nf * 0.18u' "
+        "as='int((nf+2)/2) * W/nf * 0.18u'\n"
+    )
+    reference = tmp_path / "ref.spice"
+    extracted = tmp_path / "ext.spice"
+    reference.write_text(card)
+    extracted.write_text(card.replace("XMn", "X0"))
+    assert _device_model_counts(card) == {"nfet_03v3": ("nfet_03v3", 1)}
+    assert (
+        _model_mismatch(
+            reference_netlist=str(reference), extracted_netlist=str(extracted)
+        )
         is None
     )
 
@@ -924,10 +1201,41 @@ def test_model_mismatch_detects_instance_count_only_divergence(tmp_path):
         reference_netlist=str(reference), extracted_netlist=str(extracted)
     )
     assert mismatch is not None
+    assert mismatch["kind"] == "count_only"
     assert mismatch["reference_only"] == []
     assert mismatch["extracted_only"] == []
     assert mismatch["counts"]["reference"] == {"nfet_01v8": 2}
     assert mismatch["counts"]["extracted"] == {"nfet_01v8": 1}
+    # Issue #3054: the detail must not claim a model divergence.
+    detail = mismatch["detail"]
+    assert "different device models" not in detail
+    assert "electrically unrelated" not in detail
+    assert "A common cause" not in detail
+    assert "finger/multiplier" in detail
+
+
+def test_model_mismatch_hierarchical_reference_keeps_hierarchy_text(tmp_path):
+    """Issue #3054: a hierarchical reference keeps the hierarchy-artifact
+    wording alongside the new `kind` field."""
+    reference = tmp_path / "schematic_dut.spice"
+    reference.write_text(
+        ".SUBCKT CELL A Y VSS\n"
+        "Xn1 Y A VSS VSS nfet_01v8\n"
+        "Xn2 Y A VSS VSS nfet_01v8\n"
+        ".ENDS CELL\n"
+        ".SUBCKT TOP A Y VSS\n"
+        "Xi1 A Y VSS CELL\n"
+        ".ENDS TOP\n"
+    )
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(".SUBCKT TOP A Y VSS\nXn1 Y A VSS VSS nfet_01v8\n.ENDS TOP\n")
+    mismatch = _model_mismatch(
+        reference_netlist=str(reference), extracted_netlist=str(extracted)
+    )
+    assert mismatch is not None
+    assert mismatch["reference_only"] == ["CELL"]
+    assert mismatch["kind"] == "model_set"
+    assert "#1085" in mismatch["detail"]
 
 
 def test_reference_is_hierarchical_detects_local_subckt_call(tmp_path):
@@ -993,6 +1301,7 @@ def test_model_mismatch_names_hierarchy_not_electrically_unrelated(tmp_path):
     assert mismatch is not None
     # Same circuit: the only divergence is hierarchy depth, not device
     # identity -- `reference_only` names the leaf `.subckt` call itself.
+    assert mismatch["kind"] == "model_set"
     assert mismatch["reference_only"] == ["INV"]
     assert mismatch["extracted_only"] == []
     assert "electrically unrelated" not in mismatch["detail"]
@@ -1466,12 +1775,24 @@ def test_run_pex_relative_output_bakes_absolute_include_line(tmp_path, monkeypat
     assert report["netlist"]["scope"] == "repo"
 
 
-def test_run_pex_unrelated_sim_error_still_aborts(
+def _two_corner_schematic_report():
+    return {
+        "corners": [
+            {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]},
+            {"corner_id": "ss/1.620V/-40C", "measurements": [_measurement(1.3)]},
+        ],
+        "corner_count": 2,
+        "measurements": [{"name": "vout"}],
+    }
+
+
+def test_run_pex_extracted_side_backend_failure_keeps_schematic_results(
     tmp_path, resistor_layout, monkeypatch
 ):
-    """The new diagnostic is scoped to the pin-count-mismatch text only --
-    every other extracted-side `SimError` aborts with a `PexError`, exactly
-    as before."""
+    """Issue #2990: a non-pin-count extracted-side `SimError` (here a batch
+    capacity refusal) no longer aborts the run and discards the completed
+    schematic side -- every row is an error row with the schematic value
+    intact, and the failure is named in `backend_failure`."""
     import klayout_tools.pex as pex_module
     from klayout_tools.sim import SimError
 
@@ -1480,14 +1801,11 @@ def test_run_pex_unrelated_sim_error_still_aborts(
     def _fake_run_sim(*_args, **_kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            return {
-                "corners": [
-                    {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
-                ],
-                "corner_count": 1,
-                "measurements": [{"name": "vout"}],
-            }
-        raise SimError("model library not found: /nope/sky130.lib.spice")
+            return _two_corner_schematic_report()
+        raise SimError(
+            "batch backend failed: no capacity in any of the 30 pools",
+            code="batch_no_capacity",
+        )
 
     monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
 
@@ -1495,8 +1813,82 @@ def test_run_pex_unrelated_sim_error_still_aborts(
     tb = _write_testbench(tmp_path / "testbench.spice", dut)
     request = _write_request(tmp_path / "request.json", tb)
 
-    with pytest.raises(PexError, match="extracted-side simulation failed"):
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert report["status"] == "error"
+    assert report["errored"] == 2
+    assert [row["status"] for row in report["delta"]] == ["error", "error"]
+    assert [row["schematic_value"] for row in report["delta"]] == [1.4, 1.3]
+    assert all(row["extracted_value"] is None for row in report["delta"])
+    failure = report["backend_failure"]
+    assert failure["side"] == "extracted"
+    assert failure["code"] == "batch_no_capacity"
+    assert "no capacity" in failure["message"]
+    assert failure["testbench"] == str(request)
+    assert report["pin_count_mismatch"] is None
+
+
+def test_run_pex_backend_failure_only_second_testbench_keeps_first_graded(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #2990: with two testbenches, a failure on the second one's
+    extracted side leaves the first one's rows graded normally."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    one_corner = {
+        "corners": [
+            {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
+        ],
+        "corner_count": 1,
+        "measurements": [{"name": "vout"}],
+    }
+    calls = {"n": 0}
+
+    def _fake_run_sim(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 4:
+            raise SimError("batch backend failed: boom", code="batch_no_capacity")
+        return one_corner
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    requests = []
+    for name in ("a", "b"):
+        tb = _write_testbench(tmp_path / f"{name}.spice", dut)
+        requests.append(str(_write_request(tmp_path / f"{name}.json", tb)))
+
+    report = run_pex(resistor_layout, requests, "sky130")
+
+    assert calls["n"] == 4
+    statuses = [row["status"] for row in report["delta"]]
+    assert len(statuses) == 2
+    assert statuses[0] != "error"
+    assert statuses[1] == "error"
+    assert report["backend_failure"]["testbench"] == requests[1]
+
+
+def test_run_pex_schematic_side_sim_error_keeps_code(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #2990: a schematic-side `SimError` still aborts, but its
+    machine-readable `code` survives on the `PexError`."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    def _fake_run_sim(*_args, **_kwargs):
+        raise SimError("batch backend failed: no capacity", code="batch_no_capacity")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    with pytest.raises(PexError, match="schematic-side simulation failed") as info:
         run_pex(resistor_layout, [str(request)], "sky130")
+    assert info.value.code == "batch_no_capacity"
 
 
 def test_run_pex_flat_dut_mismatch_skips_extracted_side_entirely(
@@ -1557,6 +1949,124 @@ def test_run_pex_flat_dut_mismatch_skips_extracted_side_entirely(
     assert mismatch["subcircuit"] == "RES"
     assert mismatch["schematic"]["netlist"] == dut
     assert mismatch["schematic"]["pin_count"] is None
+    assert mismatch["extracted"]["pins"] == ["RA", "RB"]
+
+
+def test_pin_order_mismatch_reports_same_set_different_order(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["b", "a", "vdd"], ["a", "b", "vdd"])
+    mismatch = _pin_order_mismatch(
+        reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+    )
+    assert mismatch is not None
+    assert mismatch["subcircuit"] == "RES"
+    assert mismatch["schematic"]["pins"] == ["b", "a", "vdd"]
+    assert mismatch["extracted"]["pins"] == ["a", "b", "vdd"]
+    assert mismatch["ngspice_message"] is None
+    assert "(b, a, vdd)" in mismatch["detail"]
+    assert "(a, b, vdd)" in mismatch["detail"]
+
+
+def test_pin_order_mismatch_none_when_order_agrees(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["a", "b"], ["a", "b"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_pin_order_mismatch_ignores_case_only_differences(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["RA", "RB"], ["ra", "rb"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+    schematic, extracted = _write_pair(tmp_path, ["RB", "RA"], ["ra", "rb"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is not None
+    )
+
+
+def test_pin_order_mismatch_none_when_counts_or_sets_differ(tmp_path):
+    schematic, extracted = _write_pair(tmp_path, ["b", "a"], ["a", "b", "vsub"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+    assert (
+        _pin_count_mismatch(reference_netlist=schematic, extracted_netlist=extracted)
+        is not None
+    )
+    schematic, extracted = _write_pair(tmp_path, ["b", "a"], ["a", "c"])
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=schematic, extracted_netlist=extracted, top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_pin_order_mismatch_none_for_flat_schematic(tmp_path):
+    dut = _write_flat_dut(tmp_path)
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(".SUBCKT RES RA RB\nR1 RA RB 1\n.ENDS RES\n")
+    assert (
+        _pin_order_mismatch(
+            reference_netlist=dut, extracted_netlist=str(extracted), top_cell="RES"
+        )
+        is None
+    )
+
+
+def test_run_pex_pin_order_mismatch_skips_extracted_side(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #2890: same pins, different order -> flagged pre-flight, the
+    extracted leg is never simulated, rows error (exit 4 path)."""
+    import klayout_tools.pex as pex_module
+
+    calls = {"n": 0}
+
+    def _fake_run_sim(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "corners": [
+                    {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
+                ],
+                "corner_count": 1,
+                "measurements": [{"name": "vout"}],
+            }
+        raise AssertionError("extracted leg must not run on pin_order_mismatch")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(".SUBCKT RES RB RA\nR1 RA RB 289.2\n.ENDS RES\n")
+    tb = tmp_path / "testbench.spice"
+    tb.write_text(
+        f'.include "{dut}"\n.model res_generic_po r\n'
+        "Vdd RA 0 DC 1.8\nXres RB RA RES\nRload RB 0 1k\n"
+    )
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert calls["n"] == 1
+    assert report["status"] == "error"
+    assert all(row["status"] == "error" for row in report["delta"])
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+    mismatch = report["pin_order_mismatch"]
+    assert mismatch is not None
+    assert mismatch["schematic"]["pins"] == ["RB", "RA"]
     assert mismatch["extracted"]["pins"] == ["RA", "RB"]
 
 
@@ -2370,6 +2880,47 @@ def test_run_pex_critical_nets_threaded_through_to_extraction(
 
 
 @_SKIP_NO_NGSPICE
+def test_run_pex_critical_net_pattern_threaded_through_to_extraction(
+    tmp_path, resistor_layout
+):
+    """`--critical-net-pattern` (issue #2974) is forwarded to `run_extract`;
+    `extraction.critical_nets` echoes the resolved concrete names."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout, [str(request)], "sky130", critical_net_patterns=["R*"]
+    )
+
+    assert report["extraction"]["critical_nets"] == ["RA", "RB"]
+    assert report["status"] == "pass"
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_parasitic_variant_threaded_through_to_extraction(
+    tmp_path, resistor_layout
+):
+    """`--parasitic-variant` (issue #3056) is forwarded from `run_pex` to
+    `run_extract` and echoed in `extraction.parasitic_variant`; absent
+    otherwise."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        parasitic_variants=["drop-c-ground:*"],
+    )
+
+    assert report["extraction"]["parasitic_variant"] == ["drop-c-ground:*"]
+    baseline = run_pex(resistor_layout, [str(request)], "sky130")
+    assert "parasitic_variant" not in baseline["extraction"]
+
+
+@_SKIP_NO_NGSPICE
 def test_run_pex_distributed_rc_threaded_through_to_extraction(
     tmp_path, resistor_layout
 ):
@@ -2540,6 +3091,32 @@ def test_run_pex_distributed_rc_requires_critical_net(tmp_path, resistor_layout)
 
     with pytest.raises(PexError, match="--distributed-rc requires --critical-net"):
         run_pex(resistor_layout, [str(request)], "sky130", distributed_rc=True)
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_substrate_tie_ohms_forwarded_to_extraction(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """`--substrate-tie-ohms` (issue #3089) reaches `run_extract` unchanged
+    (and `None` -- the default tie -- when the flag is not given)."""
+    import klayout_tools.pex as pex_module
+
+    seen: list[object] = []
+    real_run_extract = pex_module.run_extract
+
+    def _spy(*args, **kwargs):
+        seen.append(kwargs.get("substrate_tie_ohms", "missing"))
+        return real_run_extract(*args, **kwargs)
+
+    monkeypatch.setattr(pex_module, "run_extract", _spy)
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    run_pex(resistor_layout, [str(request)], "sky130", substrate_tie_ohms=1e-3)
+    run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert seen == [1e-3, None]
 
 
 @_SKIP_NO_NGSPICE
@@ -3404,6 +3981,57 @@ def test_cli_pex_deck_option_and_pins_reach_run_pex(tmp_path, monkeypatch):
     assert captured["declared_pins"] == frozenset({"RA", "RB"})
 
 
+def test_cli_pex_rename_declared_pins_reaches_run_pex(tmp_path, monkeypatch):
+    """Issue #2854's CLI half: `klt pex --rename-declared-pins` parses as a
+    plain boolean flag and forwards `False` when omitted -- the exact
+    `run_pex` call every site that predates it makes."""
+    import klayout_tools.cli.pex_cmd as pex_cmd
+
+    captured: dict = {}
+
+    def _fake_run_pex(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "pass",
+            "layout": {"path": "mim.gds", "scope": "repo"},
+            "netlist": {"path": "mim.spice", "scope": "repo"},
+            "reference_netlist": {"path": "dut.spice", "scope": "repo"},
+            "corner_count": 0,
+            "delta": [],
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "extraction": {"deck": "gf180mcu", "device_count": 1, "net_count": 2},
+            "testbenches": [],
+        }
+
+    monkeypatch.setattr(pex_cmd, "run_pex", _fake_run_pex)
+
+    layout, request = _mim_pex_inputs(tmp_path)
+    exit_code = main(
+        ["pex", str(layout), str(request), "--deck", "gf180mcu", "--format", "json"]
+    )
+    assert exit_code == 0
+    assert captured["rename_declared_pins"] is False
+
+    exit_code = main(
+        [
+            "pex",
+            str(layout),
+            str(request),
+            "--deck",
+            "gf180mcu",
+            "--pins",
+            "RA,RB",
+            "--rename-declared-pins",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    assert captured["rename_declared_pins"] is True
+
+
 def test_cli_pex_omitting_the_new_flags_passes_none(tmp_path, monkeypatch):
     """Omitting both flags forwards `None` for both -- the exact `run_pex`
     call every caller made before issue #1558."""
@@ -3577,11 +4205,117 @@ def test_run_pex_measure_command_produces_delta_rows(
     ]
     assert [row["schematic_value"] for row in report["delta"]] == [1.0, 2.0]
     assert [row["extracted_value"] for row in report["delta"]] == [1.1, 2.2]
+    # Issue #2989: per-side limit status rides on command-mode rows too, and
+    # `schematic_failed` is reported (here 0) without touching `status`.
+    assert all(
+        row["schematic_status"] in {"pass", "fail", "error"}
+        and row["extracted_status"] in {"pass", "fail", "error"}
+        for row in report["delta"]
+    )
+    assert report["schematic_failed"] == sum(
+        row["schematic_status"] == "fail" for row in report["delta"]
+    )
     # The delta is computed by `klt pex`, not supplied by the caller.
     assert [row["delta_pct"] for row in report["delta"]] == [10.0, 10.0]
     assert report["passed"] == 2
     assert report["failed"] == 0
     assert report["errored"] == 0
+
+
+_ENV_RECORDING_HARNESS = _MEASURE_HARNESS.replace(
+    "import json, os, sys\n",
+    "import json, os, sys\n"
+    "open(os.path.join(os.environ['KLT_PEX_ARTIFACTS_DIR'], 'env.json'), 'w')"
+    ".write(json.dumps({k: os.environ.get(k) for k in "
+    "('KLT_PEX_BACKEND', 'KLT_SIM_BACKEND')}))",
+    1,
+)
+
+
+def _recorded_backend_env(tmp_path, side: str) -> dict:
+    return json.loads((tmp_path / "art" / "measure" / side / "env.json").read_text())
+
+
+@pytest.mark.parametrize("inherited", [None, "local"])
+def test_run_pex_measure_command_exports_backend_flag(
+    tmp_path, resistor_layout, measure_reference, monkeypatch, inherited
+):
+    """Issue #2962: `--backend` reaches the child, and beats a pre-set
+    `$KLT_SIM_BACKEND`, so a child `klt sim` obeys it."""
+    if inherited is None:
+        monkeypatch.delenv("KLT_SIM_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("KLT_SIM_BACKEND", inherited)
+    run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, _ENV_RECORDING_HARNESS),
+        reference_netlist=measure_reference,
+        backend="batch",
+    )
+    for side in ("schematic", "extracted"):
+        assert _recorded_backend_env(tmp_path, side) == {
+            "KLT_PEX_BACKEND": "batch",
+            "KLT_SIM_BACKEND": "batch",
+        }
+
+
+def test_run_pex_measure_command_leaves_backend_env_alone_without_flag(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    monkeypatch.setenv("KLT_SIM_BACKEND", "batch")
+    monkeypatch.delenv("KLT_PEX_BACKEND", raising=False)
+    run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, _ENV_RECORDING_HARNESS),
+        reference_netlist=measure_reference,
+    )
+    assert _recorded_backend_env(tmp_path, "schematic") == {
+        "KLT_PEX_BACKEND": None,
+        "KLT_SIM_BACKEND": "batch",
+    }
+
+
+#: A harness that takes ownership of the directory a nested ``klt sim`` would
+#: default to (``.klt/sim`` beside a request under $KLT_PEX_ARTIFACTS_DIR) while
+#: the parent ``klt pex`` holds its outdir locked (#3291).
+_NESTED_LOCK_HARNESS = """\
+import json, os
+from klayout_tools import output_lock
+
+with output_lock.hold_output_dir(
+    os.path.join(os.environ["KLT_PEX_ARTIFACTS_DIR"], ".klt", "sim")
+):
+    pass
+print(json.dumps({"corners": [{"corner_id": "tt", "measurements": [
+    {"name": "t_cross", "value": 1.0, "status": "pass"}]}]}))
+"""
+
+
+def test_run_pex_measure_command_child_can_own_dir_under_artifacts_dir(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    """Issue #3291: the parent's flock is per-process, so without the inherited
+    marker a nested `klt sim` under $KLT_PEX_ARTIFACTS_DIR is `outdir_locked`."""
+    monkeypatch.setenv("KLT_LOCK_DIR", str(tmp_path / "locks"))
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, _NESTED_LOCK_HARNESS),
+        reference_netlist=measure_reference,
+    )
+
+    assert report["status"] == "pass"
 
 
 def test_run_pex_measure_command_keeps_extraction_disclosures(
@@ -3722,6 +4456,105 @@ print(json.dumps({"corners": [{"corner_id": "tt", "measurements": [
     assert report["delta"][0]["status"] == "error"
     assert report["delta"][0]["extracted_value"] is None
     assert report["errored"] == 1
+
+
+def _run_message_harness(tmp_path, resistor_layout, measure_reference, entry):
+    harness = f"""\
+import json, os
+side = os.environ["KLT_PEX_SIDE"]
+entry = {entry}
+print(json.dumps({{"corners": [{{"corner_id": "tt", "measurements": [
+    dict(name="t_cross", **entry.get(side, {{}}))
+]}}]}}))
+"""
+    return run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, harness),
+        reference_netlist=measure_reference,
+    )
+
+
+_OK = {"value": 1.0}
+
+
+@pytest.mark.parametrize("bad_side", ["extracted", "schematic"])
+def test_run_pex_measure_command_message_reaches_error_row(
+    tmp_path, resistor_layout, measure_reference, bad_side
+):
+    other = "schematic" if bad_side == "extracted" else "extracted"
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {bad_side: {"value": None, "message": "out of interval"}, other: _OK},
+    )
+    assert report["delta"][0]["error"] == {
+        "side": bad_side,
+        "stage": "execute",
+        "message": "out of interval",
+    }
+
+
+def test_run_pex_measure_command_no_message_keeps_fallback(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {"extracted": {"value": None}, "schematic": _OK},
+    )
+    error = report["delta"][0]["error"]
+    assert error["stage"] == "unknown"
+    assert error["message"] == "no diagnostic was recorded for this errored row"
+    assert set(error) == {"side", "stage", "message"}
+
+
+def test_run_pex_measure_command_both_null_blames_schematic_message(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {
+            "schematic": {"value": None, "message": "sch msg"},
+            "extracted": {"value": None, "message": "ext msg"},
+        },
+    )
+    error = report["delta"][0]["error"]
+    assert (error["side"], error["message"]) == ("schematic", "sch msg")
+
+
+def test_run_pex_measure_command_message_on_pass_row_is_ignored(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {"extracted": {**_OK, "message": "fine"}, "schematic": _OK},
+    )
+    assert report["delta"][0]["status"] == "pass"
+    assert "error" not in report["delta"][0]
+    assert "fine" not in json.dumps(report["delta"])
+
+
+@pytest.mark.parametrize("bad", [5, "", "  "])
+def test_run_pex_measure_command_bad_message_is_pex_error(
+    tmp_path, resistor_layout, measure_reference, bad
+):
+    with pytest.raises(PexError, match=r"measurements\[0\]\.message"):
+        _run_message_harness(
+            tmp_path,
+            resistor_layout,
+            measure_reference,
+            {"extracted": {"value": 1.0, "message": bad}, "schematic": _OK},
+        )
 
 
 def test_run_pex_measure_command_failing_row_status_is_a_fail(
@@ -4412,6 +5245,51 @@ def test_cli_pex_label_layer_reaches_run_pex(tmp_path, resistor_layout, monkeypa
     assert captured["label_layers"] == {"metal0": (67, 10), "poly": None}
 
 
+def test_cli_pex_device_model_reaches_run_pex(tmp_path, resistor_layout, monkeypatch):
+    """`--device-model` is repeatable and a later CLASS wins (issue #4234);
+    omitting it passes `None`."""
+    captured = _fake_run_pex_capturing(monkeypatch)
+    argv = [
+        "pex",
+        resistor_layout,
+        str(tmp_path / "request.json"),
+        "--deck",
+        "gf180mcu",
+        "--format",
+        "json",
+    ]
+    assert main(argv) == 0
+    assert captured["device_models"] is None
+
+    assert (
+        main(
+            argv + ["--device-model", "bjt=a", "--device-model", "bjt=pnp_05p00x05p00"]
+        )
+        == 0
+    )
+    assert captured["device_models"] == {"bjt": "pnp_05p00x05p00"}
+
+
+def test_cli_pex_malformed_device_model_is_a_clean_error(
+    tmp_path, resistor_layout, monkeypatch
+):
+    _fake_run_pex_capturing(monkeypatch)
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(tmp_path / "request.json"),
+            "--deck",
+            "gf180mcu",
+            "--device-model",
+            "bjt",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+
+
 def test_cli_pex_omitting_label_layer_passes_none(
     tmp_path, resistor_layout, monkeypatch
 ):
@@ -4509,3 +5387,2172 @@ def test_cli_pex_unknown_label_layer_role_is_a_clean_error(
     err = json.loads(capsys.readouterr().err)
     assert err["error"]["command"] == "pex"
     assert "no label-layer role" in err["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2875: content identity of the schematic-side inputs
+# --------------------------------------------------------------------------- #
+
+
+def _sha(path) -> str:
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _fake_two_sided_sim(monkeypatch, *, extracted_side_runs=True):
+    import klayout_tools.pex as pex_module
+
+    report = {
+        "corners": [
+            {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]},
+        ],
+        "corner_count": 1,
+        "measurements": [{"name": "vout"}],
+    }
+    monkeypatch.setattr(pex_module, "run_sim", lambda *a, **k: report)
+
+
+def _run_two_testbenches(tmp_path, layout, monkeypatch, *, dut_ohm=289.2, load=1000.0):
+    _fake_two_sided_sim(monkeypatch)
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice", dut_ohm)
+    tb_a = _write_testbench(tmp_path / "tb_a.spice", dut, load_ohm=load)
+    tb_b = _write_testbench(tmp_path / "tb_b.spice", dut)
+    req_a = _write_request(tmp_path / "a.json", tb_a)
+    req_b = _write_request(tmp_path / "b.json", tb_b, measurement_name="vout")
+    report = run_pex(layout, [str(req_a), str(req_b)], "sky130")
+    return report, req_a, tb_a, dut, req_b
+
+
+def test_run_pex_records_content_identity_of_schematic_side_inputs(
+    tmp_path, resistor_layout, monkeypatch
+):
+    report, req_a, tb_a, dut, req_b = _run_two_testbenches(
+        tmp_path, resistor_layout, monkeypatch
+    )
+
+    first, second = report["testbenches"]
+    assert first["request_sha256"] == _sha(req_a)
+    assert first["netlist_sha256"] == _sha(tb_a)
+    assert first["schematic_netlist_sha256"] == _sha(dut)
+    assert second["request_sha256"] == _sha(req_b)
+    # Two testbenches sharing one DUT keep the same DUT identity, and each
+    # retains its own request/body identity.
+    assert second["schematic_netlist_sha256"] == first["schematic_netlist_sha256"]
+    assert second["request_sha256"] != first["request_sha256"]
+    assert report["reference_netlist_sha256"] == _sha(dut)
+    assert first["netlist"] == {"path": None, "scope": "external"}
+    # The layout/extraction identity is a distinct role.
+    assert report["extraction"]["netlist_sha256"] != first["schematic_netlist_sha256"]
+
+
+def test_run_pex_each_schematic_side_digest_tracks_only_its_own_file(
+    tmp_path, resistor_layout, monkeypatch
+):
+    base, *_ = _run_two_testbenches(tmp_path, resistor_layout, monkeypatch)
+    tmp2 = tmp_path / "dut_changed"
+    tmp2.mkdir()
+    dut_changed, *_ = _run_two_testbenches(
+        tmp2, resistor_layout, monkeypatch, dut_ohm=300.0
+    )
+    tmp3 = tmp_path / "body_changed"
+    tmp3.mkdir()
+    body_changed, *_ = _run_two_testbenches(
+        tmp3, resistor_layout, monkeypatch, load=2000.0
+    )
+
+    keys = ("request_sha256", "netlist_sha256", "schematic_netlist_sha256")
+
+    def differing(other):
+        # Paths differ per tmp dir, so compare only digest *content* that
+        # does not embed a path: the DUT text and the extracted netlist.
+        return {
+            k for k in keys if base["testbenches"][0][k] != other["testbenches"][0][k]
+        }
+
+    assert "schematic_netlist_sha256" in differing(dut_changed)
+    assert "netlist_sha256" in differing(body_changed)
+    assert (
+        body_changed["testbenches"][0]["schematic_netlist_sha256"]
+        == base["testbenches"][0]["schematic_netlist_sha256"]
+    )
+    for other in (dut_changed, body_changed):
+        assert (
+            other["extraction"]["netlist_sha256"]
+            == base["extraction"]["netlist_sha256"]
+        )
+
+
+def test_run_pex_diagnostic_branch_carries_same_digest_keys(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """The extracted-side-skipped branch (pre-flight pin mismatch) builds its
+    summary entry separately; it must carry the same provenance keys."""
+    report_full, *_ = _run_two_testbenches(tmp_path, resistor_layout, monkeypatch)
+    sub = tmp_path / "diag"
+    sub.mkdir()
+    _fake_two_sided_sim(monkeypatch)
+    dut = sub / "schematic_dut.spice"
+    dut.write_text(".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES\n")
+    tb = sub / "tb.spice"
+    tb.write_text(f'.include "{dut}"\nXres RA RB 0 RES\nRload RB 0 1k\n')
+    request = _write_request(sub / "r.json", tb)
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+    assert report["pin_count_mismatch"] is not None
+    assert set(report["testbenches"][0]) == set(report_full["testbenches"][0])
+    assert report["testbenches"][0]["schematic_netlist_sha256"] == _sha(dut)
+
+
+def test_run_pex_measure_command_records_reference_netlist_digest(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=measure_reference,
+    )
+    assert report["testbenches"] == []
+    assert report["reference_netlist_sha256"] == _sha(measure_reference)
+    assert report["extraction"]["netlist_sha256"] != report["reference_netlist_sha256"]
+
+
+def test_run_pex_external_paths_still_carry_digests(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """A path redacted as `scope: external` keeps its digest."""
+    report, *_ = _run_two_testbenches(tmp_path, resistor_layout, monkeypatch)
+    entry = report["testbenches"][0]
+    assert entry["schematic_netlist"]["scope"] == "external"
+    assert entry["schematic_netlist"]["path"] is None
+    assert entry["schematic_netlist_sha256"].startswith("sha256:")
+    assert len(entry["schematic_netlist_sha256"]) == len("sha256:") + 64
+
+
+# --- Issue #2872 / #2876: per-side execution evidence ------------------------
+
+_BATCH_DIAG = {
+    "severity": "error",
+    "code": "batch_job_failed",
+    "runner_code": "batch_runner_version_mismatch",
+    "message": "the fleet runner runs klt 0.5.0 -- the request was not run",
+    "future_unknown_key": {"nested": [1, 2]},
+}
+
+
+def _side_report(corners, *, remote=None, extra_env=None):
+    """A minimal `klt sim` response. `corners` is a list of
+    `(corner_id, value_or_None, diagnostics)`."""
+    environment = {"engine": "ngspice", "engine_version": "45", **(extra_env or {})}
+    if remote is not None:
+        environment["remote"] = remote
+    return {
+        "corners": [
+            {
+                "corner_id": cid,
+                "status": "pass" if value is not None else "error",
+                "diagnostics": diags,
+                "measurements": [
+                    _measurement(value, "pass" if value is not None else "error")
+                ],
+            }
+            for cid, value, diags in corners
+        ],
+        "corner_count": len(corners),
+        "measurements": [{"name": "vout"}],
+        "environment": environment,
+    }
+
+
+def _run_pex_with_sim_reports(tmp_path, layout, monkeypatch, reports, n_testbenches=1):
+    """`reports` is the ordered list of `run_sim` responses (schematic,
+    extracted, schematic, extracted, ...)."""
+    import klayout_tools.pex as pex_module
+
+    queue = list(reports)
+    monkeypatch.setattr(pex_module, "run_sim", lambda *_a, **_k: queue.pop(0))
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    requests = []
+    for i in range(n_testbenches):
+        tb = _write_testbench(tmp_path / f"tb{i}.spice", dut)
+        requests.append(str(_write_request(tmp_path / f"request{i}.json", tb)))
+    return run_pex(layout, requests, "sky130")
+
+
+def test_pex_neither_side_ran_carries_diagnostics_and_remote(
+    tmp_path, resistor_layout, monkeypatch
+):
+    remote = {"provider": "aws-batch-fleet", "job_id": "job-123"}
+    corners = [("tt/1.800V/27C", None, [_BATCH_DIAG])]
+    report = _run_pex_with_sim_reports(
+        tmp_path,
+        resistor_layout,
+        monkeypatch,
+        [
+            _side_report(
+                corners,
+                remote=remote,
+                extra_env={"ngspice_binary": "/usr/bin/ngspice"},
+            ),
+            _side_report(
+                corners, remote={"provider": "aws-batch-fleet", "job_id": "job-456"}
+            ),
+        ],
+    )
+    tb = report["testbenches"][0]
+    assert tb["nothing_simulated_corners"] == ["tt/1.800V/27C"]
+    schematic = tb["sides"]["schematic"]
+    extracted = tb["sides"]["extracted"]
+    assert schematic["environment"]["remote"] == remote
+    assert schematic["environment"]["ngspice_binary"] == "/usr/bin/ngspice"
+    # Only real `klt sim` environment keys are projected.
+    assert set(schematic["environment"]) <= {
+        "engine",
+        "engine_version",
+        "ngspice_binary",
+        "remote",
+    }
+    assert extracted["environment"]["remote"]["job_id"] == "job-456"
+    corner = schematic["corners"][0]
+    assert corner["corner_id"] == "tt/1.800V/27C"
+    assert corner["status"] == "error"
+    assert corner["produced_value"] is False
+    # Passed through unchanged, optional/unknown keys included.
+    assert corner["diagnostics"] == [_BATCH_DIAG]
+    # Existing behavior untouched.
+    assert report["status"] == "error"
+    assert report["delta"][0]["status"] == "error"
+
+
+def test_pex_one_sided_failure_is_not_nothing_simulated(
+    tmp_path, resistor_layout, monkeypatch
+):
+    report = _run_pex_with_sim_reports(
+        tmp_path,
+        resistor_layout,
+        monkeypatch,
+        [
+            _side_report([("tt/1.800V/27C", 1.4, [])]),
+            _side_report([("tt/1.800V/27C", None, [_BATCH_DIAG])]),
+        ],
+    )
+    tb = report["testbenches"][0]
+    assert tb["nothing_simulated_corners"] == []
+    assert tb["sides"]["schematic"]["corners"][0]["produced_value"] is True
+    assert tb["sides"]["extracted"]["corners"][0]["produced_value"] is False
+    assert tb["sides"]["extracted"]["corners"][0]["diagnostics"] == [_BATCH_DIAG]
+    # Local run: no remote key is fabricated.
+    assert "remote" not in tb["sides"]["schematic"]["environment"]
+    assert report["delta"][0]["status"] == "error"
+    assert report["delta"][0]["schematic_value"] == 1.4
+
+
+def test_pex_side_evidence_stays_with_its_testbench_and_corner(
+    tmp_path, resistor_layout, monkeypatch
+):
+    c1, c2 = "tt/1.800V/27C", "ss/1.620V/-40C"
+    report = _run_pex_with_sim_reports(
+        tmp_path,
+        resistor_layout,
+        monkeypatch,
+        [
+            _side_report([(c1, 1.0, []), (c2, 1.1, [])], remote={"job_id": "s0"}),
+            _side_report([(c1, 1.0, []), (c2, None, [_BATCH_DIAG])]),
+            _side_report([(c1, None, [_BATCH_DIAG]), (c2, None, [])]),
+            _side_report([(c1, None, []), (c2, None, [])], remote={"job_id": "e1"}),
+        ],
+        n_testbenches=2,
+    )
+    first, second = report["testbenches"]
+    assert first["nothing_simulated_corners"] == []
+    assert [c["corner_id"] for c in first["sides"]["extracted"]["corners"]] == [c1, c2]
+    assert first["sides"]["extracted"]["corners"][1]["diagnostics"] == [_BATCH_DIAG]
+    assert first["sides"]["schematic"]["environment"]["remote"]["job_id"] == "s0"
+    assert second["nothing_simulated_corners"] == [c1, c2]
+    assert second["sides"]["schematic"]["corners"][0]["diagnostics"] == [_BATCH_DIAG]
+    assert second["sides"]["extracted"]["environment"]["remote"]["job_id"] == "e1"
+    assert second["sides"]["schematic"]["environment"].get("remote") is None
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2889: `--flatten-schematic` -- flatten a hierarchical schematic DUT
+# to PDK leaf devices before the schematic-side run.
+# --------------------------------------------------------------------------- #
+
+
+def _write_hierarchical_dut(path: Path) -> Path:
+    """The same 289.2-ohm `RES` the flat fixture models, written as two
+    instances of a locally defined `HALF` subcircuit (each itself two
+    resistors) -- `model_mismatch` reports `HALF` on hierarchy alone."""
+    path.write_text(
+        ".SUBCKT HALF A B R=1\n"
+        "R1 A MID {R/2}\n"
+        "R2 MID B {R/2}\n"
+        ".ENDS HALF\n"
+        ".SUBCKT RES RA RB\n"
+        "X1 RA M HALF R=144.6\n"
+        "X2 M RB HALF R=144.6\n"
+        ".ENDS RES\n"
+    )
+    return path
+
+
+def _sha256_hex(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _install_recording_fake_run_sim(monkeypatch):
+    """Like `_install_two_call_fake_run_sim`, but records every request path."""
+    import klayout_tools.pex as pex_module
+
+    requests: list[str] = []
+
+    def _fake_run_sim(request_path, *_args, **_kwargs):
+        requests.append(str(request_path))
+        return {
+            "corners": [
+                {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]}
+            ],
+            "corner_count": 1,
+            "measurements": [{"name": "vout"}],
+        }
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    return requests
+
+
+def test_run_pex_without_flatten_schematic_is_unchanged(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Default off: the schematic leg runs the testbench itself, and the
+    hierarchical DUT still reports the hierarchy-caused `model_mismatch`,
+    whose `detail` now names the new flag."""
+    dut = _write_hierarchical_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    requests = _install_recording_fake_run_sim(monkeypatch)
+
+    report = run_pex(
+        resistor_layout, [str(request)], "sky130", artifacts_dir=str(tmp_path / "pex")
+    )
+
+    assert requests[0] == str(request)
+    assert report["flatten_schematic"] is False
+    assert report["schematic_flatten"] is None
+    assert not (tmp_path / "pex" / "schematic-dut.flat.spice").exists()
+    mismatch = report["model_mismatch"]
+    assert mismatch is not None
+    assert mismatch["reference_only"] == ["HALF"]
+    assert "--flatten-schematic" in mismatch["detail"]
+
+
+def test_run_pex_flatten_schematic_runs_the_flattened_dut(
+    tmp_path, resistor_layout, monkeypatch
+):
+    dut = _write_hierarchical_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    requests = _install_recording_fake_run_sim(monkeypatch)
+    outdir = tmp_path / "pex"
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(outdir),
+        flatten_schematic=True,
+    )
+
+    flat_path = outdir / "schematic-dut.flat.spice"
+    flat_text = flat_path.read_text()
+    assert ".SUBCKT HALF" not in flat_text
+    assert "R.X1.R1 RA X1.MID {144.6/2}" in flat_text
+
+    # The schematic leg ran a DUT-swapped copy of the testbench, not the
+    # testbench itself; the copy keeps the request's own netlist_source.
+    schematic_request = json.loads(Path(requests[0]).read_text())
+    assert requests[0] != str(request)
+    assert "netlist_source" not in schematic_request
+    body = Path(schematic_request["netlist"]).read_text()
+    assert f'.include "{flat_path}"' in body
+    assert "Xres RA RB RES" in body
+
+    assert report["flatten_schematic"] is True
+    block = report["schematic_flatten"]
+    assert block == {
+        "netlist": {"path": None, "scope": "external"},
+        "netlist_sha256": "sha256:" + _sha256_hex(flat_path),
+        "subckts": ["RES"],
+        "inlined_instances": 2,
+        "inlined_subckts": ["HALF"],
+        "external_subckts": [],
+        "already_flat": False,
+        "wrapper": None,
+    }
+    # No hierarchy-caused model_mismatch any more.
+    assert report["model_mismatch"] is None
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+    # `reference_netlist` still names (and hashes) the caller's own file.
+    assert report["reference_netlist_sha256"] == "sha256:" + _sha256_hex(dut)
+    assert report["testbenches"][0]["schematic_netlist_sha256"] == (
+        "sha256:" + _sha256_hex(dut)
+    )
+
+
+def test_run_pex_flatten_schematic_wraps_a_fragment_dut(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4625: a fragment DUT (file-level devices, helper `.subckt`, no
+    `.subckt <top>`) gets a synthesized wrapper with the extracted pins."""
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(
+        ".SUBCKT HALF A B\nR1 A B 144.6\n.ENDS HALF\n"
+        ".model res_generic_po r\n"
+        "X1 RA M HALF\nX2 M RB HALF\n"
+    )
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    _install_recording_fake_run_sim(monkeypatch)
+    outdir = tmp_path / "pex"
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(outdir),
+        flatten_schematic=True,
+    )
+
+    block = report["schematic_flatten"]
+    assert block["wrapper"] == {"synthesized": True, "pins": ["RA", "RB"]}
+    assert block["subckts"] == ["RES"]
+    flat = (outdir / "schematic-dut.flat.spice").read_text()
+    assert ".subckt RES RA RB" in flat
+    assert flat.index(".subckt RES") < flat.index("R.X1.R1") < flat.index(".ends RES")
+    assert flat.index(".subckt RES") < flat.index(".model res_generic_po")
+    assert report["flat_dut_mismatch"] is None
+    assert report["pin_count_mismatch"] is None
+
+
+def test_run_pex_flatten_schematic_fragment_missing_pin_net_is_coded(
+    tmp_path, resistor_layout, monkeypatch
+):
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text("R1 RA MID 289.2\n")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("run_sim must not be called")
+
+    import klayout_tools.pex as pex_module
+
+    monkeypatch.setattr(pex_module, "run_sim", _boom)
+    with pytest.raises(PexError) as excinfo:
+        run_pex(
+            resistor_layout,
+            [str(request)],
+            "sky130",
+            artifacts_dir=str(tmp_path / "pex"),
+            flatten_schematic=True,
+        )
+    assert excinfo.value.code == "schematic_flatten_wrapper_pin_unconnected"
+
+
+def test_run_pex_flatten_schematic_already_flat_dut_is_reported(
+    tmp_path, resistor_layout, monkeypatch
+):
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    _install_recording_fake_run_sim(monkeypatch)
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(tmp_path / "pex"),
+        flatten_schematic=True,
+    )
+
+    block = report["schematic_flatten"]
+    assert block["already_flat"] is True
+    assert block["inlined_instances"] == 0
+    assert block["subckts"] == ["RES"]
+    assert report["model_mismatch"] is None
+
+
+def test_run_pex_flatten_schematic_shared_by_multiple_testbenches(
+    tmp_path, resistor_layout, monkeypatch
+):
+    dut = _write_hierarchical_dut(tmp_path / "schematic_dut.spice")
+    requests_in = []
+    for name in ("a", "b"):
+        tb = _write_testbench(tmp_path / f"tb_{name}.spice", dut)
+        requests_in.append(str(_write_request(tmp_path / f"req_{name}.json", tb)))
+    requests = _install_recording_fake_run_sim(monkeypatch)
+    outdir = tmp_path / "pex"
+
+    report = run_pex(
+        resistor_layout,
+        requests_in,
+        "sky130",
+        artifacts_dir=str(outdir),
+        flatten_schematic=True,
+    )
+
+    flat_path = outdir / "schematic-dut.flat.spice"
+    # Call order: schematic, extracted per testbench.
+    schematic_requests = requests[0::2]
+    assert len(schematic_requests) == 2
+    for path in schematic_requests:
+        assert path not in requests_in
+        body = Path(json.loads(Path(path).read_text())["netlist"]).read_text()
+        assert f'.include "{flat_path}"' in body
+    assert len(report["testbenches"]) == 2
+    assert report["model_mismatch"] is None
+
+
+@pytest.mark.parametrize(
+    ("dut_text", "code"),
+    [
+        (
+            ".SUBCKT A P\nX1 P B\n.ENDS A\n.SUBCKT B P\nX1 P A\n.ENDS B\n"
+            ".SUBCKT RES RA RB\nX1 RA A\nR1 RA RB 1\n.ENDS RES\n",
+            "schematic_flatten_cycle",
+        ),
+        (
+            ".SUBCKT HALF A B\nR1 A B 1\n.ENDS HALF\n"
+            ".SUBCKT RES RA RB\nX1 RA HALF\n.ENDS RES\n",
+            "schematic_flatten_pin_count_mismatch",
+        ),
+        (
+            ".SUBCKT HALF A B\nB1 A B V=v(A)\n.ENDS HALF\n"
+            ".SUBCKT RES RA RB\nX1 RA RB HALF\n.ENDS RES\n",
+            "schematic_flatten_unsupported_card",
+        ),
+    ],
+)
+def test_run_pex_flatten_schematic_errors_are_coded_and_simulate_nothing(
+    tmp_path, resistor_layout, monkeypatch, dut_text, code
+):
+    import klayout_tools.pex as pex_module
+
+    def _unreachable_run_sim(*_args, **_kwargs):
+        raise AssertionError("run_sim must not be called when flattening fails")
+
+    monkeypatch.setattr(pex_module, "run_sim", _unreachable_run_sim)
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(dut_text)
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    outdir = tmp_path / "pex"
+
+    with pytest.raises(PexError, match="--flatten-schematic") as excinfo:
+        run_pex(
+            resistor_layout,
+            [str(request)],
+            "sky130",
+            artifacts_dir=str(outdir),
+            flatten_schematic=True,
+        )
+    assert excinfo.value.code == code
+    # Never a partial flatten on disk.
+    assert not (outdir / "schematic-dut.flat.spice").exists()
+
+
+def test_cli_pex_flatten_schematic_error_carries_error_code(
+    tmp_path, resistor_layout, capsys
+):
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(
+        ".SUBCKT HALF A B\nR1 A B 1\n.ENDS HALF\n"
+        ".SUBCKT RES RA RB\nX1 RA HALF\n.ENDS RES\n"
+    )
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    exit_code = main(
+        [
+            "pex",
+            str(resistor_layout),
+            str(request),
+            "--deck",
+            "sky130",
+            "--outdir",
+            str(tmp_path / "pex"),
+            "--flatten-schematic",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "pex"
+    assert err["error"]["code"] == "schematic_flatten_pin_count_mismatch"
+
+
+def test_cli_pex_flatten_schematic_reaches_run_pex(tmp_path, monkeypatch):
+    import klayout_tools.cli.pex_cmd as pex_cmd
+
+    captured: dict = {}
+
+    def _fake_run_pex(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "pass",
+            "layout": {"path": "mim.gds", "scope": "repo"},
+            "netlist": {"path": "mim.spice", "scope": "repo"},
+            "reference_netlist": {"path": "dut.spice", "scope": "repo"},
+            "corner_count": 0,
+            "delta": [],
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "extraction": {"deck": "gf180mcu", "device_count": 1, "net_count": 2},
+            "testbenches": [],
+        }
+
+    monkeypatch.setattr(pex_cmd, "run_pex", _fake_run_pex)
+    layout, request = _mim_pex_inputs(tmp_path)
+
+    assert main(["pex", str(layout), str(request), "--deck", "gf180mcu"]) == 0
+    assert captured["flatten_schematic"] is False
+    assert (
+        main(
+            [
+                "pex",
+                str(layout),
+                str(request),
+                "--deck",
+                "gf180mcu",
+                "--flatten-schematic",
+            ]
+        )
+        == 0
+    )
+    assert captured["flatten_schematic"] is True
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_run_pex_flatten_schematic_end_to_end(tmp_path, resistor_layout):
+    """Issue #2889, end to end against real `ngspice`: the hierarchical DUT,
+    flattened, simulates to the same ideal 289.2-ohm divider the flat DUT
+    does, and the comparison carries no hierarchy-caused `model_mismatch`."""
+    dut = _write_hierarchical_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(tmp_path / "pex"),
+        flatten_schematic=True,
+    )
+
+    assert report["status"] == "pass"
+    assert report["model_mismatch"] is None
+    assert report["schematic_flatten"]["inlined_instances"] == 2
+    (row,) = report["delta"]
+    assert row["schematic_value"] == pytest.approx(1.8 * 1000 / 1289.2, rel=1e-3)
+    assert row["extracted_value"] < row["schematic_value"]
+
+
+def test_run_pex_flatten_schematic_keeps_relative_includes_resolvable(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """The flattened copy lives under the artifact root, so a relative
+    `.include` inside the DUT file is rewritten to an absolute path against
+    the DUT's own directory (the #2891 shape); absolute ones are untouched."""
+    (tmp_path / "params.spice").write_text(".param rhalf=144.6\n")
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(
+        '.include "params.spice"\n'
+        ".include /abs/models.spice\n"
+        ".SUBCKT HALF A B\nR1 A B {rhalf}\n.ENDS HALF\n"
+        ".SUBCKT RES RA RB\nX1 RA M HALF\nX2 M RB HALF\n.ENDS RES\n"
+    )
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    _install_recording_fake_run_sim(monkeypatch)
+    outdir = tmp_path / "pex"
+
+    run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(outdir),
+        flatten_schematic=True,
+    )
+
+    flat_text = (outdir / "schematic-dut.flat.spice").read_text()
+    assert f'.include "{tmp_path / "params.spice"}"' in flat_text
+    assert ".include /abs/models.spice" in flat_text
+
+
+def test_run_pex_flatten_schematic_keeps_dollar_prefixed_targets(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """`$`-prefixed `.include`/`.lib` targets are environment-variable paths
+    (`$PDK_ROOT/...`): the flattener must not read the `$` as an inline
+    comment, and `_absolutize_includes` must leave them exactly as written."""
+    dut = tmp_path / "schematic_dut.spice"
+    include = ".include $PDK_ROOT/sky130A/libs.ref/sky130_fd_pr/spice/models.spice"
+    lib = ".lib $SKY130/libs.tech/combined/sky130.lib.spice tt"
+    dut.write_text(
+        f"{include}\n{lib}\n"
+        ".SUBCKT HALF A B\nR1 A B 144.6\n.ENDS HALF\n"
+        ".SUBCKT RES RA RB\nX1 RA M HALF\nX2 M RB HALF\n.ENDS RES\n"
+    )
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    _install_recording_fake_run_sim(monkeypatch)
+    outdir = tmp_path / "pex"
+
+    run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(outdir),
+        flatten_schematic=True,
+    )
+
+    flat_lines = (outdir / "schematic-dut.flat.spice").read_text().splitlines()
+    assert include in flat_lines
+    assert lib in flat_lines
+
+
+# --------------------------------------------------------------------------- #
+# Issue #3062: errored `delta[]` rows carry an `error` object
+# --------------------------------------------------------------------------- #
+
+
+def _errored_corner(corner_id, diagnostics):
+    return {
+        "corner_id": corner_id,
+        "status": "error",
+        "measurements": [_measurement(None, "error")],
+        "diagnostics": diagnostics,
+    }
+
+
+_BATCH_FAILED = {
+    "severity": "error",
+    "code": "batch_job_failed",
+    "message": "batch job job-7 finished 'failed' without a usable report",
+}
+
+
+def test_delta_row_error_names_extracted_side_stage_and_remote_job():
+    schematic = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+    )
+    extracted = {
+        "environment": {"remote": {"job_id": "job-7"}},
+        "corners": [_errored_corner("tt/1.800V/27C", [_BATCH_FAILED])],
+    }
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert row["status"] == "error"
+    assert row["error"] == {
+        "side": "extracted",
+        "stage": "execute",
+        "message": _BATCH_FAILED["message"],
+        "code": "batch_job_failed",
+        "remote": {"job_id": "job-7"},
+    }
+
+
+def test_delta_row_error_blames_schematic_side_when_it_errored():
+    schematic = _sim_report([_errored_corner("tt/1.800V/27C", [_BATCH_FAILED])])
+    extracted = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.1)]}]
+    )
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert row["error"]["side"] == "schematic"
+
+
+def test_delta_row_error_with_empty_diagnostics_is_unknown_not_silent():
+    schematic = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+    )
+    extracted = _sim_report([_errored_corner("tt/1.800V/27C", [])])
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert row["error"]["stage"] == "unknown"
+    assert row["error"]["message"]
+    assert "code" not in row["error"]
+
+
+def test_ok_rows_carry_no_error_field():
+    schematic = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+    )
+    extracted = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.1)]}]
+    )
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert "error" not in row
+
+
+def test_unextracted_rows_carry_the_recorded_failure():
+    schematic = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+    )
+    (row,) = _unextracted_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=schematic,
+        failure_message="no capacity",
+        failure_code="batch_no_capacity",
+    )
+    assert row["error"] == {
+        "side": "extracted",
+        "stage": "submit",
+        "message": "no capacity",
+        "code": "batch_no_capacity",
+    }
+
+
+def test_run_pex_preserves_sim_error_code(tmp_path, resistor_layout, monkeypatch):
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    def _fake_run_sim(*_args, **_kwargs):
+        raise SimError("batch fleet has no capacity", code="batch_no_capacity")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    with pytest.raises(PexError) as excinfo:
+        run_pex(resistor_layout, [str(request)], "sky130")
+    assert excinfo.value.code == "batch_no_capacity"
+
+
+def test_errored_rows_summary_one_line():
+    from klayout_tools.cli.pex_cmd import _errored_rows_summary
+
+    error = {
+        "side": "extracted",
+        "stage": "execute",
+        "message": "boom\nsecond line",
+        "code": "batch_job_failed",
+    }
+    report = {"delta": [{"error": error}, {"status": "pass"}]}
+    line = _errored_rows_summary(report)
+    assert "\n" not in line
+    assert line.startswith("klt pex: 1 of 2 delta rows errored")
+    assert "stage execute" in line and "batch_job_failed" in line
+    assert _errored_rows_summary({"delta": [{"status": "pass"}]}) is None
+
+
+# `--device-only-leg` (issue #3298): a parasitic-free third leg
+# --------------------------------------------------------------------------- #
+
+
+def _leg_report(value, corner_id="tt/1.800V/27C"):
+    return {
+        "corners": [{"corner_id": corner_id, "measurements": [_measurement(value)]}],
+        "corner_count": 1,
+        "measurements": [{"name": "vout"}],
+    }
+
+
+def _fake_three_leg_sim(monkeypatch, *, device_only_value=1.5, device_only_error=False):
+    """`run_sim` stub that tells the legs apart by the request path `run_pex`
+    hands it: schematic 1.0, extracted 2.0, device-only ``device_only_value``."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    seen: list[str] = []
+
+    def _fake_run_sim(request_path, **_kwargs):
+        seen.append(os.path.basename(request_path))
+        if "device-only" in request_path:
+            if device_only_error:
+                raise SimError("device-only leg failed")
+            return _leg_report(device_only_value)
+        if "extracted" in request_path:
+            return _leg_report(2.0)
+        return _leg_report(1.0)
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    return seen
+
+
+def _device_only_inputs(tmp_path):
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    return str(_write_request(tmp_path / "request.json", tb))
+
+
+def test_build_delta_rows_device_only_split_reconciles():
+    corner = "tt/1.800V/27C"
+    rows = _build_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=_sim_report(
+            [{"corner_id": corner, "measurements": [_measurement(1.0)]}]
+        ),
+        extracted_report=_sim_report(
+            [{"corner_id": corner, "measurements": [_measurement(2.0)]}]
+        ),
+        device_only_report=_sim_report(
+            [{"corner_id": corner, "measurements": [_measurement(1.25)]}]
+        ),
+        device_only_leg=True,
+    )
+    (row,) = rows
+    assert row["device_only_value"] == 1.25
+    assert row["representation_delta_pct"] == 25.0
+    assert row["parasitic_delta_pct"] == 60.0
+    assert row["delta_pct"] == 100.0
+    assert row["device_only_status"] == "pass"
+    reconciled = (1 + row["representation_delta_pct"] / 100) * (
+        1 + row["parasitic_delta_pct"] / 100
+    ) - 1
+    assert reconciled == pytest.approx(row["delta_pct"] / 100, abs=1e-3)
+
+
+def test_build_delta_rows_device_only_nulls_on_missing_or_zero():
+    corner = "tt/1.800V/27C"
+
+    def rows_for(schematic, device_only):
+        return _build_delta_rows(
+            spec_row_prefix=None,
+            schematic_report=_sim_report(
+                [{"corner_id": corner, "measurements": [_measurement(schematic)]}]
+            ),
+            extracted_report=_sim_report(
+                [{"corner_id": corner, "measurements": [_measurement(2.0)]}]
+            ),
+            device_only_report=(
+                None
+                if device_only is None
+                else _sim_report(
+                    [{"corner_id": corner, "measurements": [_measurement(device_only)]}]
+                )
+            ),
+            device_only_leg=True,
+        )[0]
+
+    zero_schematic = rows_for(0.0, 1.0)
+    assert zero_schematic["representation_delta_pct"] is None
+    assert zero_schematic["parasitic_delta_pct"] == 100.0
+
+    no_leg = rows_for(1.0, None)
+    assert no_leg["device_only_value"] is None
+    assert no_leg["representation_delta_pct"] is None
+    assert no_leg["parasitic_delta_pct"] is None
+    assert no_leg["device_only_status"] == "error"
+    # The graded fields are untouched by the missing leg.
+    assert no_leg["delta_pct"] == 100.0
+    assert no_leg["status"] == "pass"
+
+
+def test_build_delta_rows_without_flag_carries_no_device_only_keys():
+    corner = "tt/1.800V/27C"
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=_sim_report(
+            [{"corner_id": corner, "measurements": [_measurement(1.0)]}]
+        ),
+        extracted_report=_sim_report(
+            [{"corner_id": corner, "measurements": [_measurement(2.0)]}]
+        ),
+    )
+    assert set(row) == {
+        "spec_row",
+        "corner_id",
+        "schematic_value",
+        "extracted_value",
+        "delta_pct",
+        "status",
+        "schematic_status",
+        "extracted_status",
+    }
+
+
+def test_run_pex_device_only_leg_adds_third_leg(tmp_path, resistor_layout, monkeypatch):
+    seen = _fake_three_leg_sim(monkeypatch, device_only_value=1.25)
+    request = _device_only_inputs(tmp_path)
+
+    report = run_pex(resistor_layout, [request], "sky130", device_only_leg=True)
+
+    assert any("device-only" in name for name in seen)
+    (row,) = report["delta"]
+    assert row["schematic_value"] == 1.0
+    assert row["extracted_value"] == 2.0
+    assert row["device_only_value"] == 1.25
+    assert row["representation_delta_pct"] == 25.0
+    assert row["parasitic_delta_pct"] == 60.0
+
+    # The path itself is redacted (`scope: external`) outside the repo, so
+    # find the file where `run_pex` wrote it: beside the extracted netlist.
+    assert report["device_only_netlist"]["scope"] == "external"
+    (netlist,) = tmp_path.rglob("*.device-only.*")
+    text = netlist.read_text()
+    assert "__t" not in text
+    cards = [
+        ln for ln in text.splitlines() if ln and not ln.startswith(("*", "+", "."))
+    ]
+    assert not any(ln[0] in "Cc" for ln in cards)
+    assert report["device_only_netlist_sha256"].startswith("sha256:")
+    assert report["device_cards_match"] is True
+    assert report["device_card_count"] >= 1
+
+
+def test_run_pex_without_device_only_leg_is_unchanged(
+    tmp_path, resistor_layout, monkeypatch
+):
+    seen = _fake_three_leg_sim(monkeypatch)
+    request = _device_only_inputs(tmp_path)
+
+    report = run_pex(resistor_layout, [request], "sky130")
+
+    assert not any("device-only" in name for name in seen)
+    for key in (
+        "device_only_netlist",
+        "device_only_netlist_sha256",
+        "device_card_count",
+        "device_cards_match",
+    ):
+        assert key not in report
+    assert "device_only_value" not in report["delta"][0]
+
+
+def test_run_pex_device_only_leg_failure_nulls_only_its_fields(
+    tmp_path, resistor_layout, monkeypatch
+):
+    _fake_three_leg_sim(monkeypatch, device_only_error=True)
+    request = _device_only_inputs(tmp_path)
+
+    report = run_pex(resistor_layout, [request], "sky130", device_only_leg=True)
+
+    (row,) = report["delta"]
+    assert row["device_only_value"] is None
+    assert row["representation_delta_pct"] is None
+    assert row["parasitic_delta_pct"] is None
+    assert row["device_only_status"] == "error"
+    assert row["delta_pct"] == 100.0
+    assert row["status"] == "pass"
+    assert report["status"] == "pass"
+
+
+_DEVICE_ONLY_HARNESS = """\
+import json, os, sys
+
+side = os.environ["KLT_PEX_SIDE"]
+assert sys.argv[-1] == os.environ["KLT_PEX_NETLIST"]
+assert os.environ["KLT_PEX_ARTIFACTS_DIR"].endswith(os.path.join("measure", side))
+with open(os.environ["KLT_PEX_LOG"], "a") as log:
+    log.write(side + "\\n")
+if side == "device-only" and os.environ.get("KLT_TEST_FAIL") == "1":
+    sys.exit(3)
+value = {"schematic": 1.0, "device-only": 1.2, "extracted": 1.5}[side]
+if side == "device-only" and os.environ.get("KLT_TEST_NULL") == "1":
+    value = None
+print(
+    json.dumps(
+        {
+            "corners": [
+                {
+                    "corner_id": "tt/1.800V/27C",
+                    "measurements": [
+                        {"name": "t_cross", "value": value, "status": "pass"}
+                    ],
+                }
+            ]
+        }
+    )
+)
+"""
+
+
+def _run_device_only_command(
+    tmp_path, resistor_layout, measure_reference, monkeypatch, **env
+):
+    log = tmp_path / "sides.log"
+    monkeypatch.setenv("KLT_PEX_LOG", str(log))
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        measure_command=_write_harness(tmp_path, _DEVICE_ONLY_HARNESS),
+        reference_netlist=str(measure_reference),
+        device_only_leg=True,
+    )
+    return report, log
+
+
+def test_run_pex_device_only_leg_with_measure_command_splits_delta(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    report, log = _run_device_only_command(
+        tmp_path, resistor_layout, measure_reference, monkeypatch
+    )
+
+    assert log.read_text().split() == ["schematic", "extracted", "device-only"]
+    assert set(report["measurement"]["sides"]) == {
+        "schematic",
+        "extracted",
+        "device_only",
+    }
+    (row,) = report["delta"]
+    assert row["device_only_value"] == 1.2
+    assert row["representation_delta_pct"] == pytest.approx(20.0)
+    assert row["parasitic_delta_pct"] == pytest.approx(25.0)
+    assert row["device_only_status"] == "pass"
+
+
+def test_run_pex_device_only_leg_command_null_value_is_error_row(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    report, _ = _run_device_only_command(
+        tmp_path, resistor_layout, measure_reference, monkeypatch, KLT_TEST_NULL="1"
+    )
+
+    (row,) = report["delta"]
+    assert row["device_only_value"] is None
+    assert row["representation_delta_pct"] is None
+    assert row["parasitic_delta_pct"] is None
+    assert row["device_only_status"] != "pass"
+    assert row["delta_pct"] == pytest.approx(50.0)
+
+
+def test_run_pex_device_only_leg_command_failure_is_pex_error(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    with pytest.raises(PexError):
+        _run_device_only_command(
+            tmp_path,
+            resistor_layout,
+            measure_reference,
+            monkeypatch,
+            KLT_TEST_FAIL="1",
+        )
+
+
+def test_run_pex_measure_command_without_device_only_leg_has_no_third_side(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=str(measure_reference),
+    )
+
+    assert set(report["measurement"]["sides"]) == {"schematic", "extracted"}
+    assert "device_only_value" not in report["delta"][0]
+
+
+# --- `--extract-only` (issue #3739) ----------------------------------------
+
+
+def test_run_pex_extract_only_reports_extraction_without_measuring(
+    tmp_path, resistor_layout
+):
+    netlist = tmp_path / "res.spice"
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(netlist),
+        artifacts_dir=str(tmp_path / "art"),
+        extract_only=True,
+    )
+
+    assert netlist.is_file()
+    assert report["extraction"]["device_count"] >= 1
+    assert report["body_bias"]
+    assert report["provenance"]
+    assert report["testbenches"] == []
+    assert report["delta"] == []
+    assert report["measurement"] == {
+        "mode": "extract-only",
+        "command": None,
+        "timeout_s": None,
+        "sides": None,
+    }
+    assert report["status"] == "not_checked"
+    assert report["coverage"]["nothing_checked_reasons"] == ["no_delta_rows"]
+    assert report["reference_netlist"] == {"path": None, "scope": "absent"}
+    assert report["reference_netlist_sha256"] is None
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+    assert report["model_mismatch"] is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "needle"),
+    [
+        ({"measure_command": ["true"]}, "--measure-command"),
+        ({"reference_netlist": "x.spice"}, "--reference-netlist"),
+        ({"measure_timeout_s": 5.0}, "--measure-timeout-s"),
+        ({"device_only_leg": True}, "--device-only-leg"),
+        ({"flatten_schematic": True}, "--flatten-schematic"),
+        ({"testbench_paths": ["tb.json"]}, "a testbench request"),
+    ],
+)
+def test_run_pex_extract_only_rejects_measurement_options(
+    tmp_path, resistor_layout, kwargs, needle
+):
+    testbenches = kwargs.pop("testbench_paths", [])
+    with pytest.raises(PexError, match=f"--extract-only cannot be combined.*{needle}"):
+        run_pex(
+            resistor_layout,
+            testbenches,
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            extract_only=True,
+            **kwargs,
+        )
+
+
+def test_cli_pex_extract_only_json_and_exit_code(tmp_path, resistor_layout, capsys):
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "-o",
+            str(tmp_path / "res.spice"),
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 4
+    report = json.loads(capsys.readouterr().out)
+    assert report["measurement"]["mode"] == "extract-only"
+    assert report["status"] == "not_checked"
+
+
+def test_cli_pex_extract_only_text_prints_mode(tmp_path, resistor_layout, capsys):
+    main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "-o",
+            str(tmp_path / "res.spice"),
+            "--outdir",
+            str(tmp_path / "art"),
+        ]
+    )
+    assert "measurement: extract-only" in capsys.readouterr().out
+
+
+def test_cli_pex_extract_only_conflict_is_clean_error(
+    tmp_path, resistor_layout, capsys
+):
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "--device-only-leg",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    assert (
+        "--extract-only cannot be combined"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
+
+
+def test_signoff_refuses_extract_only_report_as_evidence(tmp_path, resistor_layout):
+    """Issue #3739: an `--extract-only` envelope is not comparison evidence."""
+    from klayout_tools.signoff import build_signoff
+
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        extract_only=True,
+    )
+    path = tmp_path / "pex.json"
+    path.write_text(json.dumps(report))
+
+    check = build_signoff([str(path)])["checks"][0]
+
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["no_delta_rows"]
+
+
+# ---------------------------------------------------------------------------
+# --resistance-graph (issue #4037): pex consumes the selected scalar
+# ---------------------------------------------------------------------------
+
+_STRAP_GDS = Path(__file__).parent / "fixtures" / "resistance_graph_strap"
+
+
+def _netlist_resistors(path) -> list[float]:
+    """Every ``R`` card's value in a written SPICE netlist."""
+    values = []
+    for line in Path(path).read_text().splitlines():
+        parts = line.split()
+        if parts and parts[0].upper().startswith("R") and len(parts) >= 4:
+            value = float(parts[3])
+            if value < 1e9:  # skip the 1 TOhm substrate-isolation card
+                values.append(value)
+    return values
+
+
+def _pex_strapped(tmp_path, name, label, **kwargs):
+    out = tmp_path / f"{label}.spice"
+    report = run_pex(
+        str(_STRAP_GDS / f"{name}.gds"),
+        [],
+        "sky130",
+        output=str(out),
+        artifacts_dir=str(tmp_path / f"art_{label}"),
+        extract_only=True,
+        **kwargs,
+    )
+    return report, out
+
+
+def test_run_pex_resistance_graph_writes_selected_resistance(tmp_path):
+    """The strapped conductor's pex-written R is the graph value (smaller than
+    the legacy series sum), the envelope echoes the source, and without the
+    flag the netlist and report carry neither."""
+    base, base_out = _pex_strapped(tmp_path, "strapped", "base")
+    graph, graph_out = _pex_strapped(
+        tmp_path,
+        "strapped",
+        "graph",
+        resistance_graph=True,
+        resistance_graph_r_cut_ohm=0.0,
+    )
+
+    assert "resistance_graph" not in base["extraction"]
+    echo = graph["extraction"]["resistance_graph"]
+    assert echo["r_cut_ohm"] == 0.0
+    (net,) = echo["nets"]
+    assert net["resistance_source"] == "graph"
+    assert net["selected_resistance_ohm"] < net["legacy_resistance_ohm"]
+    assert sum(_netlist_resistors(base_out)) == pytest.approx(
+        net["legacy_resistance_ohm"], rel=1e-3
+    )
+    assert sum(_netlist_resistors(graph_out)) == pytest.approx(
+        net["selected_resistance_ohm"], rel=1e-3
+    )
+    assert graph["extraction"]["netlist_sha256"] != base["extraction"]["netlist_sha256"]
+
+
+def test_run_pex_resistance_graph_legacy_net_keeps_legacy_value(tmp_path):
+    """Without a per-cut resistance the strapped net is `unsupported`: the
+    source stays `legacy` and the written netlist is unchanged."""
+    base, _ = _pex_strapped(tmp_path, "strapped", "base")
+    graph, _ = _pex_strapped(tmp_path, "strapped", "graph", resistance_graph=True)
+
+    (net,) = graph["extraction"]["resistance_graph"]["nets"]
+    assert net["resistance_source"] == "legacy"
+    assert net["selected_resistance_ohm"] == net["legacy_resistance_ohm"]
+    assert graph["extraction"]["netlist_sha256"] == base["extraction"]["netlist_sha256"]
+
+
+def test_run_pex_resistance_graph_r_cut_zero_is_forwarded(tmp_path, monkeypatch):
+    calls = _capture_run_extract_kwargs(monkeypatch)
+    _pex_strapped(
+        tmp_path,
+        "single_level",
+        "g",
+        resistance_graph=True,
+        resistance_graph_r_cut_ohm=0,
+    )
+    assert calls[0]["resistance_graph"] is True
+    assert calls[0]["resistance_graph_r_cut_ohm"] == 0
+    assert calls[0]["emit_selected_resistance"] is True
+
+
+def test_run_pex_resistance_graph_default_passes_no_graph_request(
+    tmp_path, monkeypatch
+):
+    calls = _capture_run_extract_kwargs(monkeypatch)
+    _pex_strapped(tmp_path, "single_level", "d")
+    assert calls[0]["resistance_graph"] is False
+    assert calls[0]["emit_selected_resistance"] is False
+
+
+def test_run_pex_resistance_graph_r_cut_requires_graph_flag(tmp_path):
+    with pytest.raises(PexError, match="--resistance-graph-r-cut requires"):
+        _pex_strapped(tmp_path, "strapped", "x", resistance_graph_r_cut_ohm=1.0)
+    with pytest.raises(PexError, match="finite number >= 0"):
+        _pex_strapped(
+            tmp_path,
+            "strapped",
+            "y",
+            resistance_graph=True,
+            resistance_graph_r_cut_ohm=-1.0,
+        )
+
+
+def test_run_pex_resistance_graph_rejects_distributed_rc(tmp_path):
+    with pytest.raises(PexError, match="cannot be combined with --distributed-rc"):
+        _pex_strapped(
+            tmp_path,
+            "strapped",
+            "z",
+            resistance_graph=True,
+            critical_nets=["S"],
+            distributed_rc=True,
+        )
+
+
+def test_cli_pex_resistance_graph_extract_only_json(tmp_path, capsys):
+    out = tmp_path / "cli.spice"
+    code = main(
+        [
+            "pex",
+            str(_STRAP_GDS / "strapped.gds"),
+            "--deck",
+            "sky130",
+            "--extract-only",
+            "--resistance-graph",
+            "--resistance-graph-r-cut",
+            "0",
+            "-o",
+            str(out),
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 4  # extract-only: nothing checked
+    report = json.loads(capsys.readouterr().out)
+    (net,) = report["extraction"]["resistance_graph"]["nets"]
+    assert net["resistance_source"] == "graph"
+
+
+def test_run_pex_forwards_batch_sharding_flags_to_every_run_sim(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4616: `--max-units-per-job` / `--max-concurrent-jobs` reach both
+    the schematic-side and extracted-side `run_sim`; omitted, neither kwarg is
+    passed (the call shape of before the flags existed)."""
+    import klayout_tools.pex as pex_module
+
+    def _run(**flags):
+        seen = []
+
+        def _fake_run_sim(*_args, **kwargs):
+            seen.append(kwargs)
+            return _two_corner_schematic_report()
+
+        monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+        dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+        tb = _write_testbench(tmp_path / "testbench.spice", dut)
+        request = _write_request(tmp_path / "request.json", tb)
+        run_pex(resistor_layout, [str(request)], "sky130", **flags)
+        return seen
+
+    seen = _run(max_units_per_job=5, max_concurrent_jobs=2)
+    assert len(seen) == 2
+    for kwargs in seen:
+        assert kwargs["max_units_per_job"] == 5
+        assert kwargs["max_concurrent_jobs"] == 2
+
+    for kwargs in _run():
+        assert "max_units_per_job" not in kwargs
+        assert "max_concurrent_jobs" not in kwargs
+        assert "hosts" not in kwargs
+        assert "resume" not in kwargs
+
+    seen = _run(hosts=3, resume=True)
+    assert len(seen) == 2
+    for kwargs in seen:
+        assert kwargs["hosts"] == 3
+        assert kwargs["resume"] is True
+
+
+def test_run_pex_invalid_hosts_surfaces_as_pex_error(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4624: a `hosts < 1` rejection from `run_sim` is a PexError."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    def _fake_run_sim(*_args, **_kwargs):
+        raise SimError("remote.hosts must be a positive integer")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    with pytest.raises(PexError, match="positive integer"):
+        run_pex(resistor_layout, [str(request)], "sky130", hosts=0)
+
+
+def _async_inputs(tmp_path):
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    return str(_write_request(tmp_path / "request.json", tb))
+
+
+def _fake_async_sim(monkeypatch, calls, sharded=False):
+    import klayout_tools.pex as pex_module
+
+    def _fake_run_sim(request_path, **kwargs):
+        calls.append(kwargs)
+        side = os.path.basename(kwargs["artifacts_dir"])
+        if kwargs.get("submit_only"):
+            if sharded:
+                return {
+                    "status": "submitted",
+                    "sharded": True,
+                    "manifest_path": f"/shards/{side}/batch-shards.json",
+                    "unit_count": 2,
+                }
+            return {"status": "submitted", "job_id": f"job-{side}", "unit_count": 2}
+        return _two_corner_schematic_report()
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+
+def test_run_pex_submit_only_writes_manifest_without_polling(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4619: every side/testbench is submitted, none is collected."""
+    calls: list = []
+    _fake_async_sim(monkeypatch, calls)
+    request = _async_inputs(tmp_path)
+    outdir = tmp_path / "art"
+    report = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=str(outdir),
+        backend="batch",
+        submit_only=True,
+    )
+    assert report["status"] == "submitted"
+    assert [(leg["side"], leg["attach"]) for leg in report["legs"]] == [
+        ("schematic", "job-schematic"),
+        ("extracted", "job-extracted"),
+    ]
+    assert all(call["submit_only"] for call in calls)
+    manifest = json.loads((outdir / "pex-submit.json").read_text())
+    assert manifest["legs"] == report["legs"]
+    assert "delta" not in report
+
+
+def _mismatched_async_inputs(tmp_path, *, flat):
+    if flat:
+        dut = _write_flat_dut(tmp_path)
+        tb = tmp_path / "testbench.spice"
+        tb.write_text(f'.include "{dut}"\nVdd RA 0 DC 1.8\nRload RB 0 1k\n')
+    else:
+        dut = tmp_path / "schematic_dut.spice"
+        dut.write_text(".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES\n")
+        tb = tmp_path / "testbench.spice"
+        tb.write_text(
+            f'.include "{dut}"\n'
+            ".model res_generic_po r\n"
+            "Vdd RA 0 DC 1.8\nXres RA RB 0 RES\nRload RB 0 1k\n"
+        )
+    return str(_write_request(tmp_path / "request.json", tb))
+
+
+@pytest.mark.parametrize(
+    ("flat", "code"), [(False, "pin_count_mismatch"), (True, "flat_dut_mismatch")]
+)
+def test_run_pex_submit_only_refuses_static_preflight_mismatch(
+    tmp_path, resistor_layout, monkeypatch, flat, code
+):
+    """Issue #4696: a pre-flight diagnostic that would skip the extracted leg
+    fails the submit before any leg is launched or any manifest written."""
+    calls: list = []
+    _fake_async_sim(monkeypatch, calls)
+    request = _mismatched_async_inputs(tmp_path, flat=flat)
+    outdir = tmp_path / "art"
+    with pytest.raises(PexError) as err:
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            artifacts_dir=str(outdir),
+            backend="batch",
+            submit_only=True,
+        )
+    assert err.value.code == code
+    assert calls == []
+    assert not (outdir / "pex-submit.json").exists()
+
+
+@pytest.mark.parametrize(
+    "code", ["flat_dut_mismatch", "pin_count_mismatch", "pin_order_mismatch"]
+)
+def test_refuse_submit_on_preflight_mismatch_names_each_code(code):
+    """Issue #4696: every static pre-flight code, pin order included, refuses."""
+    from klayout_tools.pex import _refuse_submit_on_preflight_mismatch
+
+    fired = {
+        "flat_dut_mismatch": None,
+        "pin_count_mismatch": None,
+        "pin_order_mismatch": None,
+    }
+    fired[code] = {"detail": "boom"}
+    with pytest.raises(PexError) as err:
+        _refuse_submit_on_preflight_mismatch(submitting=True, **fired)
+    assert err.value.code == code
+    _refuse_submit_on_preflight_mismatch(submitting=False, **fired)
+
+
+def test_async_legs_finish_submit_refuses_missing_leg(tmp_path):
+    """Issue #4696: `complete: true` is never written with a leg missing."""
+    from klayout_tools.pex_async import AsyncLegs
+
+    legs = AsyncLegs(submit_only=True, attach=None, work_dir=str(tmp_path))
+    legs._legs.append(
+        {"testbench": "tb", "side": "schematic", "sharded": False, "attach": "j"}
+    )
+    with pytest.raises(PexError) as err:
+        legs.finish_submit(extracted_netlist_sha256="x", request_sha256={"tb": "y"})
+    assert err.value.code == "pex_manifest_incomplete"
+    assert not os.path.exists(legs.manifest_path)
+
+
+def _interrupting_async_sim(monkeypatch, calls, fail_on):
+    """A fake `run_sim` whose submit of the `fail_on` side raises once."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    state = {"armed": True}
+
+    def _fake_run_sim(request_path, **kwargs):
+        side = os.path.basename(kwargs["artifacts_dir"])
+        if kwargs.get("submit_only"):
+            if side == fail_on and state["armed"]:
+                state["armed"] = False
+                raise SimError("submit cut off", code="batch_client_interrupted")
+            calls.append(side)
+            return {"status": "submitted", "job_id": f"job-{side}", "unit_count": 2}
+        return _two_corner_schematic_report()
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+
+def test_run_pex_submit_only_flushes_manifest_per_leg_and_resumes(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4686: an interrupted submit leaves an incomplete manifest; a
+    re-run submits only the legs that are missing, and attach is refused
+    until the manifest is complete."""
+    calls: list = []
+    _interrupting_async_sim(monkeypatch, calls, fail_on="extracted")
+    request = _async_inputs(tmp_path)
+    outdir = tmp_path / "art"
+    kwargs = dict(artifacts_dir=str(outdir), backend="batch")
+
+    with pytest.raises(PexError):
+        run_pex(resistor_layout, [request], "sky130", submit_only=True, **kwargs)
+    partial = json.loads((outdir / "pex-submit.json").read_text())
+    assert partial["complete"] is False
+    assert [leg["side"] for leg in partial["legs"]] == ["schematic"]
+
+    with pytest.raises(PexError) as err:
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            attach=str(outdir / "pex-submit.json"),
+            **kwargs,
+        )
+    assert err.value.code == "pex_manifest_incomplete"
+    assert "extracted" in str(err.value)
+
+    report = run_pex(resistor_layout, [request], "sky130", submit_only=True, **kwargs)
+    # The schematic leg was not submitted a second time.
+    assert calls == ["schematic", "extracted"]
+    assert [leg["side"] for leg in report["legs"]] == ["schematic", "extracted"]
+    final = json.loads((outdir / "pex-submit.json").read_text())
+    assert final["complete"] is True
+
+
+def test_run_pex_submit_only_rerun_refuses_changed_request(
+    tmp_path, resistor_layout, monkeypatch
+):
+    calls: list = []
+    _interrupting_async_sim(monkeypatch, calls, fail_on="extracted")
+    request = _async_inputs(tmp_path)
+    kwargs = dict(artifacts_dir=str(tmp_path / "art"), backend="batch")
+    with pytest.raises(PexError):
+        run_pex(resistor_layout, [request], "sky130", submit_only=True, **kwargs)
+    with open(request, "a", encoding="utf-8") as handle:
+        handle.write("\n")
+    with pytest.raises(PexError) as err:
+        run_pex(resistor_layout, [request], "sky130", submit_only=True, **kwargs)
+    assert err.value.code == "resume_fingerprint_mismatch"
+    assert calls == ["schematic"]
+
+
+def test_run_pex_attach_delta_equals_synchronous_run(
+    tmp_path, resistor_layout, monkeypatch
+):
+    calls: list = []
+    _fake_async_sim(monkeypatch, calls, sharded=True)
+    request = _async_inputs(tmp_path)
+    outdir = str(tmp_path / "art")
+    sync = run_pex(resistor_layout, [request], "sky130", artifacts_dir=outdir)
+    submitted = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        backend="batch",
+        submit_only=True,
+    )
+    calls.clear()
+    attached = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        backend="batch",
+        attach=submitted["manifest_path"],
+    )
+    assert attached["delta"] == sync["delta"]
+    assert [c["attach_job_id"] for c in calls] == [
+        "/shards/schematic/batch-shards.json",
+        "/shards/extracted/batch-shards.json",
+    ]
+
+
+def test_run_pex_attach_refuses_changed_request(tmp_path, resistor_layout, monkeypatch):
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    outdir = str(tmp_path / "art")
+    submitted = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        submit_only=True,
+    )
+    with open(request, "a", encoding="utf-8") as handle:
+        handle.write("\n")
+    with pytest.raises(PexError) as err:
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            artifacts_dir=outdir,
+            attach=submitted["manifest_path"],
+        )
+    assert err.value.code == "resume_fingerprint_mismatch"
+
+
+def test_attach_removes_sharded_leg_maps_only_after_full_success(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4721: leg 1 collects, leg 2 is interrupted -> leg 1's map stays
+    (run_sim keeps it on a sharded attach); a completed attach removes both."""
+    import klayout_tools.pex as pex_module
+
+    request = _async_inputs(tmp_path)
+    outdir = str(tmp_path / "art")
+    _fake_async_sim(monkeypatch, [], sharded=True)
+    submitted = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        submit_only=True,
+    )
+    maps = [leg["attach"] for leg in submitted["legs"]]
+    assert len(maps) == 2
+    # Real files at the recorded paths, as the fleet run would leave them.
+    real = [tmp_path / f"leg{i}" / "batch-shards.json" for i in range(2)]
+    for path in real:
+        path.parent.mkdir()
+        path.write_text("{}")
+    manifest = json.loads(open(submitted["manifest_path"], encoding="utf-8").read())
+    for leg, path in zip(manifest["legs"], real, strict=True):
+        leg["attach"] = str(path)
+    with open(submitted["manifest_path"], "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle)
+
+    def _interrupted(request_path, **kwargs):
+        raise PexError("interrupted", code="batch_client_interrupted")
+
+    monkeypatch.setattr(pex_module, "run_sim", _interrupted)
+    with pytest.raises(PexError):
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            artifacts_dir=outdir,
+            attach=submitted["manifest_path"],
+        )
+    assert all(path.exists() for path in real)
+
+    def _collect(request_path, **kwargs):
+        return _two_corner_schematic_report()
+
+    monkeypatch.setattr(pex_module, "run_sim", _collect)
+    run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        attach=submitted["manifest_path"],
+    )
+    assert not any(path.exists() for path in real)
+
+
+@pytest.mark.parametrize(
+    "flags, match",
+    [
+        ({"submit_only": True, "attach": "m.json"}, "mutually exclusive"),
+        ({"submit_only": True, "backend": "local"}, "requires backend 'batch'"),
+        ({"attach": "m.json", "backend": "local"}, "requires backend 'batch'"),
+        ({"submit_only": True, "resume": True}, "--resume"),
+        ({"submit_only": True, "extract_only": True}, "--extract-only"),
+        ({"submit_only": True, "device_only_leg": True}, "--device-only-leg"),
+        ({"submit_only": True, "measure_command": ["x"]}, "--measure-command"),
+    ],
+)
+def test_run_pex_async_refusals_by_name(tmp_path, resistor_layout, flags, match):
+    with pytest.raises(PexError, match=match):
+        run_pex(resistor_layout, [], "sky130", artifacts_dir=str(tmp_path), **flags)
+
+
+def test_run_pex_attach_missing_manifest_is_named_error(tmp_path, resistor_layout):
+    request = _async_inputs(tmp_path)
+    with pytest.raises(PexError) as err:
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            artifacts_dir=str(tmp_path / "art"),
+            attach=str(tmp_path / "nope.json"),
+        )
+    assert err.value.code == "pex_manifest_invalid"
+
+
+def test_cli_pex_submit_only_emits_submitted_payload_exit_0(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    code = main(
+        [
+            "pex",
+            str(resistor_layout),
+            request,
+            "--deck",
+            "sky130",
+            "--backend",
+            "batch",
+            "--submit-only",
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "submitted"
+    assert payload["leg_count"] == 2
+
+
+def _cli_submit(tmp_path, resistor_layout, request, *extra):
+    return main(
+        [
+            "pex",
+            str(resistor_layout),
+            request,
+            "--deck",
+            "sky130",
+            "--backend",
+            "batch",
+            "--submit-only",
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+            *extra,
+        ]
+    )
+
+
+def test_cli_pex_envelope_out_writes_submitted_envelope(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    """Issue #4692: `--envelope-out` gets the envelope; `-o` the netlist."""
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    envelope = tmp_path / "r.json"
+    netlist = tmp_path / "n.spice"
+    code = _cli_submit(
+        tmp_path,
+        resistor_layout,
+        request,
+        "--envelope-out",
+        str(envelope),
+        "-o",
+        str(netlist),
+    )
+    assert code == 0
+    assert json.loads(envelope.read_text()) == json.loads(capsys.readouterr().out)
+    assert netlist.read_text().lstrip().startswith((".SUBCKT", "*", ".subckt"))
+
+
+def test_cli_pex_envelope_out_with_text_format_still_json(
+    tmp_path, resistor_layout, monkeypatch
+):
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    envelope = tmp_path / "r.json"
+    code = main(
+        [
+            "pex",
+            str(resistor_layout),
+            request,
+            "--deck",
+            "sky130",
+            "--backend",
+            "batch",
+            "--submit-only",
+            "--outdir",
+            str(tmp_path / "art"),
+            "--envelope-out",
+            str(envelope),
+        ]
+    )
+    assert code == 0
+    assert json.loads(envelope.read_text())["status"] == "submitted"
+
+
+def test_cli_pex_envelope_out_gets_error_envelope(tmp_path, resistor_layout, capsys):
+    envelope = tmp_path / "r.json"
+    code = main(
+        [
+            "pex",
+            str(resistor_layout),
+            str(tmp_path / "missing-request.json"),
+            "--deck",
+            "sky130",
+            "--format",
+            "json",
+            "--envelope-out",
+            str(envelope),
+        ]
+    )
+    assert code == 1
+    written = json.loads(envelope.read_text())
+    assert written == json.loads(capsys.readouterr().err)
+    assert written["error"]["command"] == "pex"
+
+
+def test_cli_pex_envelope_out_unwritable_path_is_an_error(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    code = _cli_submit(
+        tmp_path,
+        resistor_layout,
+        request,
+        "--envelope-out",
+        str(tmp_path / "no-such-dir" / "r.json"),
+    )
+    assert code == 1
+    assert "--envelope-out" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_cli_pex_outdir_locked_carries_structured_owner(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    import klayout_tools.cli.pex_cmd as pex_cmd
+
+    def _locked(*args, **kwargs):
+        raise output_lock.OutputDirLockedError(
+            str(tmp_path / "art"),
+            owner_pid=4242,
+            owner_acquired_at="2026-10-31T00:00:00+00:00",
+        )
+
+    monkeypatch.setattr(pex_cmd, "run_pex", _locked)
+    request = _async_inputs(tmp_path)
+    code = _cli_submit(tmp_path, resistor_layout, request)
+    assert code == 1
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error["code"] == "outdir_locked"
+    assert error["owner_pid"] == 4242
+    assert error["owner_acquired_at"] == "2026-10-31T00:00:00+00:00"
+    assert error["relation"] == "same"
+    assert error["locked_directory"] == str(tmp_path / "art")
+
+
+def test_cli_pex_bare_attach_matches_full_args_attach(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    """Issue #4692: `--attach MANIFEST` alone rebuilds the run from the
+    manifest, even from another working directory."""
+    calls: list = []
+    _fake_async_sim(monkeypatch, calls)
+    request = _async_inputs(tmp_path)
+    assert _cli_submit(tmp_path, resistor_layout, request) == 0
+    capsys.readouterr()
+    manifest = tmp_path / "art" / "pex-submit.json"
+    assert "request" in json.loads(manifest.read_text())
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    full = main(
+        [
+            "pex",
+            str(resistor_layout),
+            request,
+            "--deck",
+            "sky130",
+            "--backend",
+            "batch",
+            "--outdir",
+            str(tmp_path / "art"),
+            "--attach",
+            str(manifest),
+            "--format",
+            "json",
+        ]
+    )
+    full_out = json.loads(capsys.readouterr().out)
+    bare = main(["pex", "--attach", str(manifest), "--format", "json"])
+    bare_out = json.loads(capsys.readouterr().out)
+    assert bare == full
+    assert bare_out["delta"] == full_out["delta"]
+    assert bare_out["status"] == full_out["status"]
+
+
+def test_cli_pex_bare_attach_of_old_manifest_is_named_error(tmp_path, capsys):
+    manifest = tmp_path / "pex-submit.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "complete": True,
+                "extracted_netlist_sha256": "x",
+                "testbenches": [],
+                "legs": [],
+            }
+        )
+    )
+    code = main(["pex", "--attach", str(manifest), "--format", "json"])
+    assert code == 1
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error["code"] == "pex_manifest_no_request"
+    assert "layout" not in error["message"].split("--attach:")[0]
+
+
+def test_cli_pex_without_attach_still_requires_layout_and_deck(capsys):
+    code = main(["pex", "--format", "json"])
+    assert code == 2
+    assert "required" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def _write_wrapper_pair(tmp_path, *, included_model, extracted_model, subdir=""):
+    base = tmp_path / subdir if subdir else tmp_path
+    base.mkdir(exist_ok=True)
+    (base / "devs.spice").write_text(
+        f"Xm1 Y A VSS VSS {included_model} l=0.15 w=0.42\n"
+        f"Xm2 Y A VDD VDD {included_model} l=0.15 w=0.84\n"
+    )
+    reference = base / "ref.spice"
+    reference.write_text('.subckt INV A Y VDD VSS\n.include "devs.spice"\n.ends INV\n')
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(
+        ".SUBCKT INV A Y VDD VSS\n"
+        f"Xm1 Y A VSS VSS {extracted_model} l=0.15 w=0.42\n"
+        f"Xm2 Y A VDD VDD {extracted_model} l=0.15 w=0.84\n"
+        ".ENDS INV\n"
+    )
+    return str(reference), str(extracted)
+
+
+def test_model_mismatch_expands_include_wrapper_match(tmp_path, monkeypatch):
+    reference, extracted = _write_wrapper_pair(
+        tmp_path,
+        included_model="sky130_fd_pr__nfet_01v8",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+        subdir="sub",
+    )
+    monkeypatch.chdir(tmp_path)  # includes resolve against the file, not CWD
+    assert (
+        _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+        is None
+    )
+
+
+def test_model_mismatch_expands_include_wrapper_divergence(tmp_path):
+    reference, extracted = _write_wrapper_pair(
+        tmp_path,
+        included_model="sky130_fd_pr__nfet_g5v0",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+    )
+    mismatch = _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+    assert mismatch["kind"] == "model_set"
+    assert mismatch["counts"]["reference"] == {"sky130_fd_pr__nfet_g5v0": 2}
+    assert "could not be resolved" not in mismatch["detail"]
+
+
+def test_model_mismatch_include_cycle_terminates(tmp_path):
+    reference, extracted = _write_wrapper_pair(
+        tmp_path,
+        included_model="sky130_fd_pr__nfet_01v8",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+    )
+    with open(tmp_path / "devs.spice", "a") as handle:
+        handle.write(".inc devs.spice\n.include ref.spice\n")
+    assert (
+        _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+        is None
+    )
+
+
+def test_model_mismatch_unresolvable_include_says_so(tmp_path):
+    reference, extracted = _write_wrapper_pair(
+        tmp_path,
+        included_model="sky130_fd_pr__nfet_01v8",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+    )
+    (tmp_path / "devs.spice").unlink()
+    mismatch = _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+    assert mismatch["counts"]["reference"] == {}
+    assert "`.include` that could not be resolved" in mismatch["detail"]
+    assert "electrically unrelated" not in mismatch["detail"]

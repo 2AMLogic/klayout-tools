@@ -189,6 +189,18 @@ def get_number(
     return float(value)
 
 
+def get_int(
+    request: dict[str, Any], key: str, *, verb: str, error_cls: ErrorFactory
+) -> int | None:
+    """``request[key]`` as an int, or ``None`` when absent/``null``."""
+    value = request.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _type_error(verb, key, "an integer", value, error_cls)
+    return value
+
+
 def get_str_list(
     request: dict[str, Any],
     key: str,

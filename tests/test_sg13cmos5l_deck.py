@@ -68,6 +68,8 @@ from klayout_tools.decks import sg13cmos5l as sg13cmos5l_deck_module
 from klayout_tools.decks.sg13cmos5l import EXTRACTION_DECK
 from klayout_tools.drc import run_drc
 from klayout_tools.extract import run_extract
+from klayout_tools.lvs import run_lvs
+from klayout_tools.pdk import PdkNotFoundError, find_pdk
 
 _DBU_UM = 0.001
 _IHP_OPEN_PDK_COMMIT = "d2cc0355f26235c777dfcc6867b390fa1e78083f"
@@ -106,7 +108,7 @@ def test_sg13cmos5l_deck_registered_with_six_width_space_rules():
     (Name kept from #1400 for git-blame continuity even though #1417 below
     grew the deck well past six rules -- the `Activ`/`GatPoly`/`Metal1`
     width/space-only *subset* this test asserts is still exactly six rules;
-    see `test_sg13cmos5l_deck_has_27_rules_after_metal_stack_extension` for
+    see `test_sg13cmos5l_deck_has_30_rules_after_metal_stack_extension` for
     the full, current rule count.)"""
     deck = get_deck("sg13cmos5l")
     mos_only_rules = [
@@ -118,15 +120,30 @@ def test_sg13cmos5l_deck_registered_with_six_width_space_rules():
     assert {rule.check for rule in mos_only_rules} == {"width", "space"}
 
 
-def test_sg13cmos5l_deck_has_27_rules_after_metal_stack_extension():
+def test_sg13cmos5l_deck_has_41_rules_after_nwell_space_rules():
     """Issue #1417 extends the curated deck past its #1400 Activ/GatPoly/
     Metal1-only starter to cover the full Metal1-TopMetal1 stack and its
-    Via1/Via2/Via3/TopVia1 vias -- 27 rules total across 11 layers, and now
+    Via1/Via2/Via3/TopVia1 vias -- 30 rules total (27 + 3 upper-landing containment
+    rules, #2726) across 11 layers, and now
     an `"enclosing"` check kind (the via/metal enclosure rules) alongside
-    `"width"`/`"space"`."""
+    `"width"`/`"space"`. Issue #3012 adds `nwell.width.1`/`nwell.space.1`
+    on NWell (31/0): 32 rules across 12 layers; #3572 adds the net-aware
+    `nwell.space.2` (NW.b1): 33. Issue #3573 adds the four derived-region
+    `"enclosed"` NWell-enclosure rules (NW.c/c1/e/e1), which report on
+    Activ (1/0): 37 rules, same 12 layers. Issue #3645 adds the four
+    derived-region `"separation"` NWell-to-Activ rules (NW.d/d1/f/f1): 41.
+    Issue #3682 adds the two DigiBnd `.dig.1` variants
+    (NW.c1.dig/NW.e1.dig): 43. Issue #3646 adds NW.d1.dig/NW.f1.dig: 45."""
     deck = get_deck("sg13cmos5l")
-    assert len(deck) == 27
-    assert {rule.check for rule in deck} == {"width", "space", "enclosing"}
+    assert len(deck) == 45
+    assert {rule.check for rule in deck} == {
+        "width",
+        "space",
+        "enclosing",
+        "net_space",
+        "enclosed",
+        "separation",
+    }
     assert {rule.layer for rule in deck} == {
         (1, 0),  # Activ.drawing
         (5, 0),  # GatPoly.drawing
@@ -135,11 +152,399 @@ def test_sg13cmos5l_deck_has_27_rules_after_metal_stack_extension():
         (19, 0),  # Via1.drawing
         (29, 0),  # Via2.drawing
         (30, 0),  # Metal3.drawing
+        (31, 0),  # NWell.drawing
         (49, 0),  # Via3.drawing
         (50, 0),  # Metal4.drawing
         (125, 0),  # TopVia1.drawing
         (126, 0),  # TopMetal1.drawing
     }
+
+
+def _nwell_layout(tmp_path: Path, name: str, boxes) -> str:
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    for box in boxes:
+        top.shapes(layout.layer(31, 0)).insert(_box_um(*box))
+    return _write_gds(layout, tmp_path / name)
+
+
+def test_run_drc_sg13cmos5l_nwell_width_clean_and_violation(tmp_path: Path):
+    """Issue #3012: a 3x3 um NWell is clean; a 0.5 um-wide one trips
+    `nwell.width.1` (NW.a, 0.62 um). `31/0` is no longer unruled."""
+    ok = run_drc(_nwell_layout(tmp_path, "nw_ok.gds", [(0, 0, 3, 3)]), "sg13cmos5l")
+    assert ok["status"] == "clean"
+    assert "nwell.width.1" in ok["coverage"]["rules_checked"]
+    assert "31/0" not in ok["coverage"]["layers_in_stream_without_rules"]
+
+    bad = run_drc(_nwell_layout(tmp_path, "nw_bad.gds", [(0, 0, 0.5, 3)]), "sg13cmos5l")
+    assert bad["status"] == "violations"
+    assert bad["rule_counts"].get("nwell.width.1", 0) >= 1
+
+
+def test_run_drc_sg13cmos5l_nwell_space_violation(tmp_path: Path):
+    """Two wells 0.4 um apart (< NW.b's 0.62 um) trip `nwell.space.1`."""
+    path = _nwell_layout(tmp_path, "nw_sp.gds", [(0, 0, 3, 3), (3.4, 0, 6.4, 3)])
+    report = run_drc(path, "sg13cmos5l")
+    assert report["rule_counts"].get("nwell.space.1", 0) >= 1
+
+
+def _tied_wells_layout(tmp_path: Path, name: str, wells, tie_wells=(), metal=()) -> str:
+    """NWell boxes plus an n+ tap (Activ & nSD, Cont on top) at the lower-left
+    of each well index in ``tie_wells``, and any ``metal`` boxes (um)."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    for box in wells:
+        top.shapes(layout.layer(31, 0)).insert(_box_um(*box))
+    for index in tie_wells:
+        x, y = wells[index][0], wells[index][1]
+        top.shapes(layout.layer(1, 0)).insert(
+            _box_um(x + 0.5, y + 0.5, x + 1.0, y + 1.0)
+        )
+        top.shapes(layout.layer(7, 0)).insert(
+            _box_um(x + 0.4, y + 0.4, x + 1.1, y + 1.1)
+        )
+        top.shapes(layout.layer(6, 0)).insert(
+            _box_um(x + 0.6, y + 0.6, x + 0.8, y + 0.8)
+        )
+    for box in metal:
+        top.shapes(layout.layer(8, 0)).insert(_box_um(*box))
+    return _write_gds(layout, tmp_path / name)
+
+
+_TWO_WELLS_1_5_APART = [(0, 0, 3, 3), (4.5, 0, 7.5, 3)]
+
+
+def test_run_drc_sg13cmos5l_nw_b1_different_nets_flagged(tmp_path: Path):
+    """Issue #3572: two wells 1.5 um apart (< 1.80 um) on different nets
+    (separate Metal1 islands) trip `nwell.space.2`; NW.b1 is no longer an
+    unchecked rule."""
+    path = _tied_wells_layout(
+        tmp_path,
+        "nw_b1_diff.gds",
+        _TWO_WELLS_1_5_APART,
+        tie_wells=(0, 1),
+        metal=[(0.5, 0.5, 1.0, 1.0), (5.0, 0.5, 5.5, 1.0)],
+    )
+    report = run_drc(path, "sg13cmos5l")
+    assert report["rule_counts"].get("nwell.space.2", 0) >= 1
+    assert "nwell.space.2" in report["coverage"]["rules_checked"]
+    assert "NW.b1" not in {u["rule"] for u in report["coverage"]["unchecked_rules"]}
+    flagged = [v for v in report["violations"] if v["rule"] == "nwell.space.2"]
+    assert flagged[0]["layer"] == "NWell.drawing"
+    assert flagged[0]["bbox"] is not None
+
+
+def test_run_drc_sg13cmos5l_nw_b1_same_net_not_flagged(tmp_path: Path):
+    """The same pair joined by a Metal1 strap over both taps is one net, so
+    `nwell.space.2` stays quiet (the geometric `nwell.space.1` still sees a
+    1.5 um gap, which is above its 0.62 um floor)."""
+    path = _tied_wells_layout(
+        tmp_path,
+        "nw_b1_same.gds",
+        _TWO_WELLS_1_5_APART,
+        tie_wells=(0, 1),
+        metal=[(0.5, 0.5, 5.5, 1.0)],
+    )
+    report = run_drc(path, "sg13cmos5l")
+    assert report["rule_counts"].get("nwell.space.2", 0) == 0
+    assert report["status"] == "clean"
+
+
+def test_run_drc_sg13cmos5l_nw_b1_untapped_well_is_own_net(tmp_path: Path):
+    """A well with no tap is its own net: it is flagged against a tapped
+    neighbour closer than 1.80 um, and two untapped wells likewise."""
+    path = _tied_wells_layout(
+        tmp_path,
+        "nw_b1_untapped.gds",
+        _TWO_WELLS_1_5_APART,
+        tie_wells=(0,),
+        metal=[(0.5, 0.5, 1.0, 1.0)],
+    )
+    assert run_drc(path, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) >= 1
+    bare = _nwell_layout(tmp_path, "nw_b1_bare.gds", _TWO_WELLS_1_5_APART)
+    assert run_drc(bare, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) >= 1
+
+
+def test_run_drc_sg13cmos5l_nw_b1_far_apart_and_touching_clean(tmp_path: Path):
+    """1.8 um apart passes; wells that touch/overlap merge into one polygon
+    (one net) and are not flagged."""
+    far = _nwell_layout(tmp_path, "nw_b1_far.gds", [(0, 0, 3, 3), (4.8, 0, 7.8, 3)])
+    assert run_drc(far, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) == 0
+    touching = _nwell_layout(tmp_path, "nw_b1_touch.gds", [(0, 0, 3, 3), (3, 0, 6, 3)])
+    assert run_drc(touching, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) == 0
+
+
+def _hier_wells_layout(tmp_path: Path, name: str, strap: bool) -> str:
+    """Two 3x3 um wells 1.5 um apart, each (with its n+ tap) in its own
+    subcell of TOP; ``strap`` adds a TOP-level Metal1 bar over both taps."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    for index, x in enumerate((0, 4.5)):
+        sub = layout.create_cell(f"SUB{index}")
+        sub.shapes(layout.layer(31, 0)).insert(_box_um(0, 0, 3, 3))
+        sub.shapes(layout.layer(1, 0)).insert(_box_um(0.5, 0.5, 1.0, 1.0))
+        sub.shapes(layout.layer(7, 0)).insert(_box_um(0.4, 0.4, 1.1, 1.1))
+        sub.shapes(layout.layer(6, 0)).insert(_box_um(0.6, 0.6, 0.8, 0.8))
+        top.insert(
+            kdb.CellInstArray(sub.cell_index(), kdb.Trans(round(x / _DBU_UM), 0))
+        )
+    if strap:
+        top.shapes(layout.layer(8, 0)).insert(_box_um(0.5, 0.5, 5.5, 1.0))
+    return _write_gds(layout, tmp_path / name)
+
+
+def test_run_drc_sg13cmos5l_nw_b1_wells_in_subcells(tmp_path: Path):
+    """Regression: wells whose nets live inside subcells are still checked
+    (no hierarchical false negative). Separate nets are flagged; the same
+    wells strapped together by a TOP-level Metal1 bar are one net, clean."""
+    bad = _hier_wells_layout(tmp_path, "nw_b1_hier_bad.gds", strap=False)
+    assert run_drc(bad, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) >= 1
+    ok = _hier_wells_layout(tmp_path, "nw_b1_hier_ok.gds", strap=True)
+    assert run_drc(ok, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) == 0
+
+
+def test_run_drc_sg13cmos5l_nw_b1_corner_to_corner(tmp_path: Path):
+    """Diagonal gap: corners 1.5 um apart in x and y (Euclidean ~2.12 um)
+    pass; 1.0 x 1.0 um (~1.41 um) is flagged."""
+    ok = _nwell_layout(tmp_path, "nw_b1_c_ok.gds", [(0, 0, 3, 3), (4.5, 4.5, 7.5, 7.5)])
+    assert run_drc(ok, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) == 0
+    bad = _nwell_layout(tmp_path, "nw_b1_c_bad.gds", [(0, 0, 3, 3), (4, 4, 7, 7)])
+    assert run_drc(bad, "sg13cmos5l")["rule_counts"].get("nwell.space.2", 0) >= 1
+
+
+def test_run_drc_sg13cmos5l_nwell_has_no_remaining_unchecked(tmp_path: Path):
+    """NW.b1 (#3572), NW.d/d1/f/f1 (#3645) and the DigiBnd variants (#3682,
+    #3646) are all checked: no NWell rule is left in `unchecked_rules`."""
+    path = _nwell_layout(tmp_path, "nw_unchecked.gds", [(0, 0, 3, 3)])
+    report = run_drc(path, "sg13cmos5l")
+    assert report["status"] == "clean"
+    assert not [
+        u for u in report["coverage"].get("unchecked_rules", []) if u["layer"] == "31/0"
+    ]
+
+
+def _nwell_activ_layout(
+    tmp_path: Path,
+    name: str,
+    *,
+    implant: tuple[int, int],
+    activ,
+    nwell=(0, 0, 4, 4),
+    thick_gate_ox=None,
+) -> str:
+    """NWell + one implanted Activ box (+ optional ThickGateOx box), all in um."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(31, 0)).insert(_box_um(*nwell))
+    top.shapes(layout.layer(1, 0)).insert(_box_um(*activ))
+    top.shapes(layout.layer(*implant)).insert(_box_um(*activ))
+    if thick_gate_ox is not None:
+        top.shapes(layout.layer(44, 0)).insert(_box_um(*thick_gate_ox))
+    return _write_gds(layout, tmp_path / name)
+
+
+_NW_ENCLOSURE_RULES = {
+    # (implant layer, thick gate ox) -> (rule id, threshold um)
+    ((14, 0), False): ("nwell.enclosing.pactiv.1", 0.31),
+    ((14, 0), True): ("nwell.enclosing.pactiv.hv.1", 0.62),
+    ((7, 0), False): ("nwell.enclosing.nactiv.1", 0.24),
+    ((7, 0), True): ("nwell.enclosing.nactiv.hv.1", 0.62),
+}
+
+
+@pytest.mark.parametrize(("implant", "hv"), list(_NW_ENCLOSURE_RULES))
+def test_run_drc_sg13cmos5l_nwell_enclosure_threshold_edges(
+    tmp_path: Path, implant, hv
+):
+    """NW.c/c1/e/e1: Activ 0.01 um short of the rule's enclosure trips only the
+    rule for its implant and ThickGateOx column; exactly at the threshold is
+    clean. The other three rules of the family never fire on it."""
+    rule_id, enclosure = _NW_ENCLOSURE_RULES[(implant, hv)]
+    well = (0, 0, 4, 4)
+
+    def run(margin: float) -> dict:
+        activ = (margin, margin, 4 - margin, 4 - margin)
+        gox = (-1, -1, 5, 5) if hv else None
+        path = _nwell_activ_layout(
+            tmp_path,
+            f"nw_{rule_id}_{margin}.gds",
+            implant=implant,
+            activ=activ,
+            nwell=well,
+            thick_gate_ox=gox,
+        )
+        return run_drc(path, "sg13cmos5l")
+
+    bad = run(round(enclosure - 0.01, 3))
+    assert bad["status"] == "violations"
+    fired = {k for k in bad["rule_counts"] if k.startswith("nwell.enclosing.")}
+    assert fired == {rule_id}
+
+    ok = run(enclosure)
+    assert ok["status"] == "clean", ok["rule_counts"]
+    assert rule_id in ok["coverage"]["rules_checked"]
+
+
+_NW_DIG_RULES = {
+    # implant layer -> (hv rule id, dig rule id, hv um, dig um)
+    (14, 0): (
+        "nwell.enclosing.pactiv.hv.1",
+        "nwell.enclosing.pactiv.dig.1",
+        0.62,
+        0.31,
+    ),
+    (7, 0): ("nwell.enclosing.nactiv.hv.1", "nwell.enclosing.nactiv.dig.1", 0.62, 0.24),
+}
+
+
+@pytest.mark.parametrize("implant", list(_NW_DIG_RULES))
+def test_run_drc_sg13cmos5l_nwell_enclosure_digbnd_split(tmp_path: Path, implant):
+    """Issue #3682 (NW.c1.dig / NW.e1.dig): HV Activ inside DigiBnd is held to
+    the relaxed value by the `.dig.1` rule only (at threshold clean, 0.01 um
+    short flagged); outside DigiBnd the 0.62 um `.hv.1` rule applies to the
+    same geometry and `.dig.1` is silent. DigiBnd covering only part of the
+    Activ still selects the whole polygon as digital."""
+    hv_id, dig_id, hv_um, dig_um = _NW_DIG_RULES[implant]
+
+    def run(margin: float, digbnd) -> dict:
+        layout = kdb.Layout()
+        layout.dbu = _DBU_UM
+        top = layout.create_cell("TOP")
+        top.shapes(layout.layer(31, 0)).insert(_box_um(0, 0, 4, 4))
+        activ = _box_um(margin, margin, 4 - margin, 4 - margin)
+        top.shapes(layout.layer(1, 0)).insert(activ)
+        top.shapes(layout.layer(*implant)).insert(activ)
+        top.shapes(layout.layer(44, 0)).insert(_box_um(-1, -1, 5, 5))
+        if digbnd is not None:
+            top.shapes(layout.layer(16, 0)).insert(_box_um(*digbnd))
+        path = _write_gds(layout, tmp_path / f"dig_{dig_id}_{margin}_{digbnd}.gds")
+        return run_drc(path, "sg13cmos5l")["rule_counts"]
+
+    def fired(counts):
+        return {k for k in counts if k.startswith("nwell.enclosing.")}
+
+    whole = (-1, -1, 5, 5)
+    partial = (0, 0, 1.5, 1.5)
+    for digbnd in (whole, partial):
+        assert fired(run(round(dig_um - 0.01, 3), digbnd)) == {dig_id}
+        assert fired(run(dig_um, digbnd)) == set()
+    # No DigiBnd: the 0.62 um HV rule applies and `.dig.1` never fires.
+    assert fired(run(dig_um, None)) == {hv_id}
+    assert fired(run(hv_um, None)) == set()
+
+
+def test_run_drc_sg13cmos5l_pactiv_under_enclosed_by_0_20_um(tmp_path: Path):
+    """Issue #3573 AC: P+ Activ under-enclosed by 0.20 um reports NW.c; at
+    0.31 um it is clean."""
+    bad = _nwell_activ_layout(
+        tmp_path, "pa_bad.gds", implant=(14, 0), activ=(0.2, 0.2, 3.8, 3.8)
+    )
+    assert run_drc(bad, "sg13cmos5l")["rule_counts"].get("nwell.enclosing.pactiv.1", 0)
+    ok = _nwell_activ_layout(
+        tmp_path, "pa_ok.gds", implant=(14, 0), activ=(0.31, 0.31, 3.69, 3.69)
+    )
+    assert run_drc(ok, "sg13cmos5l")["status"] == "clean"
+
+
+def test_run_drc_sg13cmos5l_pactiv_straddling_well_edge_and_outside(tmp_path: Path):
+    """A P+ Activ crossing the well edge is an escape (flagged); a substrate
+    tap wholly outside NWell, and N+ Activ outside NWell, are not."""
+    straddle = _nwell_activ_layout(
+        tmp_path, "pa_straddle.gds", implant=(14, 0), activ=(3, 1, 5, 3)
+    )
+    assert run_drc(straddle, "sg13cmos5l")["rule_counts"].get(
+        "nwell.enclosing.pactiv.1", 0
+    )
+    for implant in ((14, 0), (7, 0)):
+        outside = _nwell_activ_layout(
+            tmp_path, f"outside_{implant[0]}.gds", implant=implant, activ=(6, 1, 7, 2)
+        )
+        assert run_drc(outside, "sg13cmos5l")["status"] == "clean"
+
+
+def test_run_drc_sg13cmos5l_nwell_enclosure_unmarked_thickgateox_absent_is_lv(
+    tmp_path: Path,
+):
+    """ThickGateOx absent from the stream selects the LV column (0.31), not a
+    skipped rule: 0.40 um enclosure is clean at 0.31 and would fail at 0.62."""
+    path = _nwell_activ_layout(
+        tmp_path, "lv_default.gds", implant=(14, 0), activ=(0.4, 0.4, 3.6, 3.6)
+    )
+    report = run_drc(path, "sg13cmos5l")
+    assert report["status"] == "clean"
+    assert "nwell.enclosing.pactiv.1" in report["coverage"]["rules_checked"]
+
+
+_NW_SPACE_RULES = {
+    # (implant layer, thick gate ox) -> (rule id, threshold um)
+    ((7, 0), False): ("nwell.space.nactiv.1", 0.31),
+    ((7, 0), True): ("nwell.space.nactiv.hv.1", 0.62),
+    ((14, 0), False): ("nwell.space.pactiv.1", 0.24),
+    ((14, 0), True): ("nwell.space.pactiv.hv.1", 0.62),
+}
+
+
+@pytest.mark.parametrize(("implant", "hv"), list(_NW_SPACE_RULES))
+def test_run_drc_sg13cmos5l_nwell_space_threshold_edges(tmp_path: Path, implant, hv):
+    """NW.d/d1/f/f1: Activ 0.01 um short of the spacing trips only the rule for
+    its implant and ThickGateOx column; exactly at the threshold is clean."""
+    rule_id, space = _NW_SPACE_RULES[(implant, hv)]
+
+    def run(gap: float) -> dict:
+        left = 4 + gap
+        gox = (left - 1, -1, left + 3, 3) if hv else None
+        path = _nwell_activ_layout(
+            tmp_path,
+            f"nws_{rule_id}_{gap}.gds",
+            implant=implant,
+            activ=(left, 0, left + 2, 2),
+            nwell=(0, 0, 4, 4),
+            thick_gate_ox=gox,
+        )
+        return run_drc(path, "sg13cmos5l")
+
+    bad = run(round(space - 0.01, 3))
+    assert bad["status"] == "violations"
+    fired = {
+        k
+        for k in bad["rule_counts"]
+        if k.startswith("nwell.space.nactiv") or k.startswith("nwell.space.pactiv")
+    }
+    assert fired == {rule_id}
+
+    ok = run(space)
+    assert ok["status"] == "clean", ok["rule_counts"]
+    assert rule_id in ok["coverage"]["rules_checked"]
+
+
+@pytest.mark.parametrize("implant", [(7, 0), (14, 0)])
+def test_run_drc_sg13cmos5l_nwell_space_ignores_activ_inside_well(
+    tmp_path: Path, implant
+):
+    """Well tie / P+ wholly inside NWell is the enclosure rules' job, not a
+    space violation."""
+    path = _nwell_activ_layout(
+        tmp_path,
+        f"nws_inside_{implant[0]}.gds",
+        implant=implant,
+        activ=(1, 1, 3, 3),
+    )
+    report = run_drc(path, "sg13cmos5l")
+    assert not [k for k in report["rule_counts"] if k.startswith("nwell.space.")]
+
+
+def test_run_drc_sg13cmos5l_no_nwell_no_unchecked_marker(tmp_path: Path):
+    """No NWell in the stream -> no NW.b1 marker."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(8, 0)).insert(_box_um(0, 0, 0.21, 4))
+    report = run_drc(_write_gds(layout, tmp_path / "no_nw.gds"), "sg13cmos5l")
+    assert report["coverage"]["unchecked_rules"] == []
 
 
 def test_run_drc_sg13cmos5l_metal1_width_violation(tmp_path: Path):
@@ -1293,10 +1698,11 @@ def test_sg13cmos5l_mom_capacitor_card_omits_unmeasured_pdk_subckt_params(
     Those three are omitted deliberately, not accidentally:
 
     - `feed` (`cap_cmomi` only): issue #2445 settled that all three PCell
-      variants ARE separable (see `_mom_feed_variant` in `extract.py` and the
-      per-variant tests below), so a layout drawn with the PCell's port
-      placement now gets `FEED=<variant>`. THESE fixtures hand-place two
-      ports at positions matching none of the three PCell signatures, and
+      variants ARE separable (see `_mom_feed_variant` in
+      `extract_passive_regions.py` and the per-variant tests below), so a
+      layout drawn with the PCell's port placement now gets
+      `FEED=<variant>`. THESE fixtures hand-place two ports at positions
+      matching none of the three PCell signatures, and
       the extractor leaves such a layout unmeasured rather than forcing it
       onto the nearest variant -- the #2408 "never guess" rule -- so `feed`
       is still absent here.
@@ -2088,3 +2494,125 @@ def test_sg13cmos5l_cap_cmomf_never_gains_a_feed_token(tmp_path: Path, feed: str
     assert "feed" not in device
     (card,) = [line for line in _device_cards(report) if " cap_cmomf " in line]
     assert "feed=" not in card.lower()
+
+
+def test_digibnd_is_a_named_cmos5l_layer():
+    """DigiBnd (16/0) is read by the NW.c1/e1.dig rules (#3682), so it must
+    carry a display name like every other layer the deck reads."""
+    from klayout_tools.decks import sg13cmos5l
+
+    assert sg13cmos5l.LAYER_NAMES[(16, 0)] == "DigiBnd.drawing"
+
+
+_NW_SPACE_DIG_RULES = {
+    # implant layer -> (hv rule id, dig rule id, hv um, dig um)
+    (7, 0): ("nwell.space.nactiv.hv.1", "nwell.space.nactiv.dig.1", 0.62, 0.31),
+    (14, 0): ("nwell.space.pactiv.hv.1", "nwell.space.pactiv.dig.1", 0.62, 0.24),
+}
+
+
+@pytest.mark.parametrize("implant", list(_NW_SPACE_DIG_RULES))
+def test_run_drc_sg13cmos5l_nwell_space_digbnd_split(tmp_path: Path, implant):
+    """Issue #3646 (NW.d1.dig / NW.f1.dig): HV Activ inside DigiBnd is held to
+    the relaxed spacing by the `.dig.1` rule only (at threshold clean, 0.01 um
+    short flagged); outside DigiBnd the 0.62 um `.hv.1` rule applies to the
+    same geometry and `.dig.1` is silent. DigiBnd covering only part of the
+    Activ still selects the whole polygon as digital."""
+    hv_id, dig_id, hv_um, dig_um = _NW_SPACE_DIG_RULES[implant]
+
+    def run(gap: float, digbnd) -> dict:
+        left = 4 + gap
+        layout = kdb.Layout()
+        layout.dbu = _DBU_UM
+        top = layout.create_cell("TOP")
+        top.shapes(layout.layer(31, 0)).insert(_box_um(0, 0, 4, 4))
+        activ = _box_um(left, 0, left + 2, 2)
+        top.shapes(layout.layer(1, 0)).insert(activ)
+        top.shapes(layout.layer(*implant)).insert(activ)
+        top.shapes(layout.layer(44, 0)).insert(_box_um(left - 1, -1, left + 3, 3))
+        if digbnd is not None:
+            top.shapes(layout.layer(16, 0)).insert(_box_um(*digbnd))
+        path = _write_gds(layout, tmp_path / f"sdig_{dig_id}_{gap}_{digbnd}.gds")
+        return run_drc(path, "sg13cmos5l")["rule_counts"]
+
+    def fired(counts):
+        return {
+            k
+            for k in counts
+            if k.startswith("nwell.space.")
+            and k != "nwell.space.1"
+            and k != "nwell.space.2"
+        }
+
+    for digbnd in ((3, -2, 12, 4), (5, 0, 5.5, 0.5)):
+        assert fired(run(round(dig_um - 0.01, 3), digbnd)) == {dig_id}
+        assert fired(run(dig_um, digbnd)) == set()
+    assert fired(run(dig_um, None)) == {hv_id}
+    assert fired(run(hv_um, None)) == set()
+
+
+def _stdcell_inv_1(tmp_path: Path) -> tuple[Path, Path]:
+    """Clip the PDK's own ``sg13cmos5l_inv_1`` and its ``.subckt`` into
+    ``tmp_path``; skips when the sg13cmos5l PDK is not fetched."""
+    try:
+        libs_ref = find_pdk("ihp-sg13cmos5l")["assets"]["libs_ref"]
+    except PdkNotFoundError:
+        pytest.skip("ihp-sg13cmos5l PDK not fetched")
+    stdcell = Path(libs_ref or "") / "sg13cmos5l_stdcell"
+    gds = stdcell / "gds" / "sg13cmos5l_stdcell.gds"
+    spice = stdcell / "spice" / "sg13cmos5l_stdcell.spice"
+    if not (gds.is_file() and spice.is_file()):
+        pytest.skip("sg13cmos5l_stdcell not present in the fetched PDK")
+    src = kdb.Layout()
+    src.read(str(gds))
+    cell = src.cell("sg13cmos5l_inv_1")
+    out = kdb.Layout()
+    out.dbu = src.dbu
+    top = out.create_cell("sg13cmos5l_inv_1")
+    top.copy_tree(cell)
+    gds_out = tmp_path / "inv_1.gds"
+    out.write(str(gds_out))
+    lines = spice.read_text().splitlines()
+    start = next(
+        i
+        for i, ln in enumerate(lines)
+        if ln.lower().startswith(".subckt sg13cmos5l_inv_1 ")
+    )
+    end = next(
+        i for i in range(start, len(lines)) if lines[i].lower().startswith(".ends")
+    )
+    sp_out = tmp_path / "inv_1.spice"
+    sp_out.write_text("\n".join(lines[start : end + 1]) + "\n")
+    return gds_out, sp_out
+
+
+@pytest.mark.parametrize(
+    ("label_layers", "pins"),
+    [(None, 1), ({"metal0": [8, 25]}, 4)],
+)
+def test_lvs_sg13cmos5l_stdcell_inv_1_matches_own_subckt(tmp_path, label_layers, pins):
+    """Issue #3831: the PDK's own inverter draws no `nSD` (n+ is implicit), so
+    the well tie is unimplanted Activ in NWell -- `tap_nplus_complement`
+    (`pSD` absence) must derive it, or the PMOS body floats and the compare
+    reports device.unmatched / net.merged / net.split. The stdcell writes its
+    pin names on Metal1.text (8/25), not the deck's default Metal1.pin (8/2),
+    so pins only promote with the `label_layers` override."""
+    gds, spice = _stdcell_inv_1(tmp_path)
+    layout = {"file": str(gds), "deck": "sg13cmos5l"}
+    if label_layers is not None:
+        layout["label_layers"] = label_layers
+    request = {
+        "layout": layout,
+        "reference": {
+            "netlist": str(spice),
+            "cell": "sg13cmos5l_inv_1",
+            "form": "subckt-call",
+        },
+        "engine": "klayout",
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 2, "reference": 2, "matched": 2}
+    assert report["counts"]["pins"]["layout"] == pins
+    errors = [m for m in report["mismatches"] if m["severity"] == "error"]
+    assert errors == []

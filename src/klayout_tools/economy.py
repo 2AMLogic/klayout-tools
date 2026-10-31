@@ -485,6 +485,151 @@ def _row_utilization(kdb: Any, top_cell: Any, dbu: float) -> dict[str, Any] | No
     }
 
 
+def _margin_edges(gap_bbox: Any, bbox: Any) -> list[str]:
+    """Top-bbox edges the gap component touches, in fixed order."""
+    checks = (
+        ("bottom", gap_bbox.bottom <= bbox.bottom),
+        ("left", gap_bbox.left <= bbox.left),
+        ("right", gap_bbox.right >= bbox.right),
+        ("top", gap_bbox.top >= bbox.top),
+    )
+    return [edge for edge, hit in checks if hit]
+
+
+def _single_neighbour_position(gap_bbox: Any, name: str, ibox: Any) -> str:
+    if gap_bbox.left >= ibox.right:
+        return f"right_of:{name}"
+    if gap_bbox.right <= ibox.left:
+        return f"left_of:{name}"
+    if gap_bbox.bottom >= ibox.top:
+        return f"above:{name}"
+    return f"below:{name}"
+
+
+def _gap_position(gap_bbox: Any, bbox: Any, placed: list[tuple[str, Any]]) -> str:
+    """Deterministic position label for one gap component.
+
+    ``margin:<edges>`` when the component touches the top bbox boundary
+    (edges joined by ``+`` in a fixed order); otherwise ``between:<a>,<b>``
+    when it abuts two or more instance bboxes (names sorted), or
+    ``left_of|right_of|above|below:<inst>`` when it abuts exactly one.
+    """
+    edges = _margin_edges(gap_bbox, bbox)
+    if edges:
+        return "margin:" + "+".join(edges)
+
+    neighbours = sorted(
+        (name, ibox)
+        for name, ibox in placed
+        if ibox.left <= gap_bbox.right
+        and ibox.right >= gap_bbox.left
+        and ibox.bottom <= gap_bbox.top
+        and ibox.top >= gap_bbox.bottom
+    )
+    if len(neighbours) >= 2:
+        return "between:" + ",".join(n for n, _ in neighbours)
+    if neighbours:
+        return _single_neighbour_position(gap_bbox, *neighbours[0])
+    return "interior"
+
+
+def _attribution_block(
+    kdb: Any,
+    layout: Any,
+    top_cell: Any,
+    bbox: Any,
+    dbu: float,
+    annotation_pairs: set[tuple[int, int]],
+) -> dict[str, Any]:
+    """Partition the top bbox into direct-child instance bboxes and the gap
+    components between them (issue #4660).
+
+    All sums are taken in integer dbu^2 so ``sums_to_total`` is exact:
+    ``sum(child bbox) - instance_overlap + sum(gap components) +
+    unattributed == bbox area``. Overlapping instance bboxes are counted
+    once (the double-counted area is reported as ``instance_overlap_um2``).
+    Array instances contribute one child per element.
+    """
+    drawn_cache: dict[int, float] = {}
+    raw: list[tuple[str, str, Any, float]] = []
+    for inst in top_cell.each_inst():
+        child = inst.cell
+        child_bbox = child.bbox()
+        if child_bbox.empty():
+            continue
+        if child.cell_index() not in drawn_cache:
+            drawn_cache[child.cell_index()] = _merged_region(
+                kdb, layout, child, annotation_pairs, recursive=True
+            ).area()
+        for trans in inst.cell_inst.each_cplx_trans():
+            raw.append(
+                (
+                    child.name,
+                    child.name,
+                    child_bbox.transformed(trans),
+                    drawn_cache[child.cell_index()] * trans.mag**2,
+                )
+            )
+
+    # Stable names: ordinal among same-cell instances by position.
+    raw.sort(key=lambda r: (r[0], r[2].left, r[2].bottom, r[2].right, r[2].top))
+    counts: dict[str, int] = {}
+    placed: list[tuple[str, Any]] = []
+    children: list[dict[str, Any]] = []
+    for cell_name, _, ibox, drawn_dbu2 in raw:
+        idx = counts.get(cell_name, 0)
+        counts[cell_name] = idx + 1
+        name = f"{cell_name}[{idx}]"
+        placed.append((name, ibox))
+        ibox_area = ibox.area()
+        children.append(
+            {
+                "name": name,
+                "cell": cell_name,
+                "bbox_um": bbox_um_dict(ibox, dbu),
+                "bbox_area_um2": ibox_area * dbu * dbu,
+                "own_whitespace_um2": (ibox_area - drawn_dbu2) * dbu * dbu,
+            }
+        )
+    children.sort(key=lambda c: (-c["bbox_area_um2"], c["name"]))
+
+    union = kdb.Region()
+    for _, ibox in placed:
+        union.insert(ibox)
+    union = union.merged()
+    sum_children = sum(ibox.area() for _, ibox in placed)
+    overlap = sum_children - union.area()
+
+    remainder = (kdb.Region(bbox) - union).merged()
+    gaps: list[dict[str, Any]] = []
+    gap_total = 0
+    for polygon in remainder.each():
+        area = polygon.area()
+        if area <= 0:
+            continue
+        gap_total += area
+        gb = polygon.bbox()
+        gaps.append(
+            {
+                "position": _gap_position(gb, bbox, placed),
+                "bbox_um": bbox_um_dict(gb, dbu),
+                "area_um2": area * dbu * dbu,
+            }
+        )
+    gaps.sort(key=lambda g: (-g["area_um2"], g["position"], g["bbox_um"]["left"]))
+
+    unattributed = bbox.area() - (sum_children - overlap) - gap_total
+    top_local = _merged_region(kdb, layout, top_cell, annotation_pairs, recursive=False)
+    return {
+        "children": children,
+        "gap_components": gaps,
+        "unattributed_um2": unattributed * dbu * dbu,
+        "instance_overlap_um2": overlap * dbu * dbu,
+        "top_level_drawn_area_um2": top_local.area() * dbu * dbu,
+        "sums_to_total": unattributed == 0,
+    }
+
+
 def _area_eff_block(
     *,
     dead_margins_um: dict[str, float],
@@ -575,6 +720,26 @@ def _area_eff_block(
     return {"checks": checks, "status": overall}
 
 
+def _what_if_block(
+    kdb: Any, layout: Any, top_cell: Any, what_if: str | None
+) -> dict[str, Any] | None:
+    """Apply the ``what_if`` moves spec (if any) to the in-memory layout and
+    return the report's ``what_if`` block, or ``None`` when not requested.
+
+    Edits land on the in-memory copy ``load_layout`` just read; nothing is
+    ever written back (issue #4661).
+    """
+    if what_if is None:
+        return None
+    # Imported lazily, matching load_layout()'s own lazy `klayout.db` import
+    # convention (`_layout.py`'s module docstring).
+    from .economy_whatif import apply_what_if, load_what_if_spec
+
+    return apply_what_if(
+        kdb, layout, top_cell, load_what_if_spec(what_if, EconomyError), EconomyError
+    )
+
+
 def economy_report(
     path: str,
     top: str | None = None,
@@ -587,6 +752,8 @@ def economy_report(
     area_eff_min_utilization: float | None = None,
     area_eff_max_empty_region_fraction: float | None = None,
     area_eff_require_bbox_tightness: bool = False,
+    what_if: str | None = None,
+    attribute: bool = False,
 ) -> dict[str, Any]:
     """Compute the layout-economy report for one top cell of a GDSII/OASIS
     stream.
@@ -612,6 +779,17 @@ def economy_report(
     ``False`` is simply not checked; the ``area_eff`` block is omitted
     entirely when none of them are given (same optional-block convention as
     ``budget``/``reference``).
+
+    ``what_if`` is the path to a ``moves.json`` (issue #4661; schema in
+    :mod:`klayout_tools.economy_whatif`): its instance translations and cell
+    reshapes are applied to the in-memory copy of the layout before
+    measuring, and the report gains an additive ``what_if`` block. It is an
+    area/overlap estimate only -- no file is written, no DRC runs, and the
+    block's ``legality`` is always ``"not_checked"``.
+
+    ``attribute`` (issue #4660) adds an ``attribution`` block partitioning
+    the top bbox into direct-child instance bboxes and gap components; see
+    :func:`_attribution_block`. Omitted when false.
     """
     if grid_cols <= 0 or grid_rows <= 0:
         raise EconomyError(f"grid must be positive, got {grid_cols}x{grid_rows}")
@@ -628,6 +806,8 @@ def economy_report(
 
     top_cell = resolve_top_cell(layout, top, EconomyError)
     dbu = layout.dbu
+
+    what_if_block = _what_if_block(kdb, layout, top_cell, what_if)
 
     bbox = top_cell.bbox()
     if bbox.empty():
@@ -729,6 +909,13 @@ def economy_report(
     )
     if area_eff is not None:
         report["area_eff"] = area_eff
+
+    if what_if_block is not None:
+        report["what_if"] = what_if_block
+    if attribute:
+        report["attribution"] = _attribution_block(
+            kdb, layout, top_cell, bbox, dbu, annotation_pairs
+        )
 
     report["provenance"] = build_provenance(input_path=path)
 

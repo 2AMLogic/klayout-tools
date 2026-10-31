@@ -211,6 +211,71 @@
       ]
     }
   },
+  "diff.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        },
+        {
+          "box": [
+            2360,
+            0,
+            4360,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "The real sky130A.lydrc (the native deck this cross-check drives) defines no difftap.3/poly.2 spacing rule at all -- the gap issue #4282 reports (klt drc --engine klayout --pdk sky130A is coverage_unknown on these). The foundry spacing rule lives only in sky130A_mr.drc's FEOL block, which this engine's invocation cannot enable. A violate fixture correctly trips the curated engine but is always reported \"clean\" by sky130.lydrc.",
+    "layer": [
+      65,
+      20
+    ],
+    "threshold_dbu": 270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        },
+        {
+          "box": [
+            2180,
+            0,
+            4180,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        }
+      ]
+    }
+  },
   "diff.width.1": {
     "check": "width",
     "clean": {
@@ -1035,6 +1100,88 @@
       ]
     }
   },
+  "npc.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            360,
+            4000
+          ],
+          "layer": [
+            95,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A.lydrc hard-codes `FEOL = false` (its own \"do not change\" comment, verified against a real ciel-fetched install) with no `-rd`-settable override this engine's invocation can flip -- this rule's source (`npc.1`) lives inside the script's top-level `if FEOL ... end` block, so the native engine never evaluates it and reports clean on the violate fixture (issue #2934).",
+    "layer": [
+      95,
+      20
+    ],
+    "threshold_dbu": 270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            180,
+            4000
+          ],
+          "layer": [
+            95,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "nsdm.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            480,
+            4000
+          ],
+          "layer": [
+            93,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A.lydrc hard-codes `FEOL = false` (its own \"do not change\" comment, verified against a real ciel-fetched install) with no `-rd`-settable override this engine's invocation can flip -- this rule's source (`nsdm.1`) lives inside the script's top-level `if FEOL ... end` block, so the native engine never evaluates it and reports clean on the violate fixture (issue #2934).",
+    "layer": [
+      93,
+      44
+    ],
+    "threshold_dbu": 380,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            280,
+            4000
+          ],
+          "layer": [
+            93,
+            44
+          ]
+        }
+      ]
+    }
+  },
   "nwell.width.1": {
     "check": "width",
     "clean": {
@@ -1070,6 +1217,71 @@
           ],
           "layer": [
             64,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "poly.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            66,
+            20
+          ]
+        },
+        {
+          "box": [
+            2280,
+            0,
+            4280,
+            4000
+          ],
+          "layer": [
+            66,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "The real sky130A.lydrc (the native deck this cross-check drives) defines no difftap.3/poly.2 spacing rule at all -- the gap issue #4282 reports (klt drc --engine klayout --pdk sky130A is coverage_unknown on these). The foundry spacing rule lives only in sky130A_mr.drc's FEOL block, which this engine's invocation cannot enable. A violate fixture correctly trips the curated engine but is always reported \"clean\" by sky130.lydrc.",
+    "layer": [
+      66,
+      20
+    ],
+    "threshold_dbu": 210,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            66,
+            20
+          ]
+        },
+        {
+          "box": [
+            2140,
+            0,
+            4140,
+            4000
+          ],
+          "layer": [
+            66,
             20
           ]
         }
@@ -1117,6 +1329,153 @@
       ]
     }
   },
+  "psdm.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            480,
+            4000
+          ],
+          "layer": [
+            94,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A.lydrc hard-codes `FEOL = false` (its own \"do not change\" comment, verified against a real ciel-fetched install) with no `-rd`-settable override this engine's invocation can flip -- this rule's source (`psdm.1`) lives inside the script's top-level `if FEOL ... end` block, so the native engine never evaluates it and reports clean on the violate fixture (issue #2934).",
+    "layer": [
+      94,
+      20
+    ],
+    "threshold_dbu": 380,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            280,
+            4000
+          ],
+          "layer": [
+            94,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "rpm.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1370,
+            4000
+          ],
+          "layer": [
+            86,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A_mr.drc's rpm/urpm rules (\"rpm.1a\"/\"urpm.1a\") live inside the script's top-level `if FEOL ... end` block, and `FEOL = false` is hard-coded at the top of the file with its own \"do not change\" comment and no `-rd`-settable override this engine's invocation can flip -- the same root cause already documented for capm.width.1/diff.width.1/poly.width.1 above. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck, since it never evaluates this rule at all regardless of the input layout. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      86,
+      20
+    ],
+    "threshold_dbu": 1270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1170,
+            4000
+          ],
+          "layer": [
+            86,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "tap.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        },
+        {
+          "box": [
+            2360,
+            0,
+            4360,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "The real sky130A.lydrc (the native deck this cross-check drives) defines no difftap.3/poly.2 spacing rule at all -- the gap issue #4282 reports (klt drc --engine klayout --pdk sky130A is coverage_unknown on these). The foundry spacing rule lives only in sky130A_mr.drc's FEOL block, which this engine's invocation cannot enable. A violate fixture correctly trips the curated engine but is always reported \"clean\" by sky130.lydrc.",
+    "layer": [
+      65,
+      44
+    ],
+    "threshold_dbu": 270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        },
+        {
+          "box": [
+            2180,
+            0,
+            4180,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        }
+      ]
+    }
+  },
   "tap.width.1": {
     "check": "width",
     "clean": {
@@ -1153,6 +1512,47 @@
           "layer": [
             65,
             44
+          ]
+        }
+      ]
+    }
+  },
+  "urpm.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1370,
+            4000
+          ],
+          "layer": [
+            79,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A_mr.drc's rpm/urpm rules (\"rpm.1a\"/\"urpm.1a\") live inside the script's top-level `if FEOL ... end` block, and `FEOL = false` is hard-coded at the top of the file with its own \"do not change\" comment and no `-rd`-settable override this engine's invocation can flip -- the same root cause already documented for capm.width.1/diff.width.1/poly.width.1 above. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck, since it never evaluates this rule at all regardless of the input layout. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      79,
+      20
+    ],
+    "threshold_dbu": 1270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1170,
+            4000
+          ],
+          "layer": [
+            79,
+            20
           ]
         }
       ]

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:12:20.330232+00:00",
+  "slug": "sky130-io-ring",
+  "name": "Sky130 Io Ring",
+  "description": "I/O ring with GPIO, ESD, corner and filler cells on sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
+  "layer_count": 9,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "sky130_ioring_corner.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "nwell.drawing": "renders/64_20.png",
+    "tap.drawing": "renders/65_44.png",
+    "licon1.drawing": "renders/66_44.png",
+    "li1.drawing": "renders/67_20.png",
+    "met3.drawing": "renders/70_20.png",
+    "met4.drawing": "renders/71_20.png",
+    "met5.drawing": "renders/72_20.png",
+    "nsdm.drawing": "renders/93_44.png",
+    "psdm.drawing": "renders/94_20.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-io-ring",
+    "ref": "f38534fc7539550d074964286bce7667a51005b8",
+    "path": "layout/gds/sky130_ioring_corner.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

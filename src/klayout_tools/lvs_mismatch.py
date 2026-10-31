@@ -8,7 +8,7 @@ construction (:func:`_build_net_correspondence`, :func:`_make_compare_logger`,
 mismatch + tolerance handling (:func:`_classify_param_mismatch`,
 :func:`_parse_parameter_tolerance`, :func:`_collect_tolerance_snaps`,
 :func:`_apply_tolerance_snaps`), and net-mismatch pooling/classification
-(:class:`_UnionFind`, :func:`_net_mismatch_pools`,
+(:class:`UnionFind`, :func:`_net_mismatch_pools`,
 :func:`_classify_net_mismatches`). This mirrors the shape of the earlier
 ``gen_compose.py``/``gen_compose_routing.py`` (#1717), ``_paths.py`` (#1715),
 and ``gen.py``/``gen_pcells`` (#1713) splits: a cohesive, low-coupling
@@ -42,6 +42,8 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from typing import Any, NamedTuple
+
+from ._unionfind import UnionFind
 
 #: Issue #2461: the ``(device-class name, parameter name)`` pairs -- both
 #: lower-cased -- that a **request-side hook took out of this particular
@@ -509,7 +511,14 @@ def _device_body_net_name(device: Any) -> str | None:
 #: straight off the in-memory netlist, so the prefix to match here is the
 #: bare ``"$"``. Reusing ``extract_report.py``'s escaped constant here would
 #: silently never match any real body net.
+#:
+#: **A netlist read back from disk spells it escaped (issue #3177).** For the
+#: ``layout.netlist`` + ``layout.deck`` shape the circuit comes from
+#: ``NetlistSpiceReader`` over a ``klt extract -o`` file, whose anonymous nodes
+#: are written ``\\$<n>`` -- so :func:`_is_unresolved_body_net` accepts that
+#: spelling too (:data:`_ESCAPED_ANONYMOUS_NET_PREFIX`).
 _RAW_ANONYMOUS_NET_PREFIX = "$"
+_ESCAPED_ANONYMOUS_NET_PREFIX = "\\$"
 
 
 def _is_unresolved_body_net(name: str | None) -> bool:
@@ -526,7 +535,9 @@ def _is_unresolved_body_net(name: str | None) -> bool:
     see :data:`_RAW_ANONYMOUS_NET_PREFIX` for why the prefix differs between
     the two paths even though the condition is identical.
     """
-    return name is None or name.startswith(_RAW_ANONYMOUS_NET_PREFIX)
+    return name is None or name.startswith(
+        (_RAW_ANONYMOUS_NET_PREFIX, _ESCAPED_ANONYMOUS_NET_PREFIX)
+    )
 
 
 def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
@@ -536,7 +547,7 @@ def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
 
     The single source of truth for that determination: :func:`_body_net_warnings`
     renders these counts as its ``device.body_unverified`` ``mismatches[]``
-    prose, and :func:`~klayout_tools.lvs._body_verification_report` renders the
+    prose, and :func:`~klayout_tools.lvs_power._body_verification_report` renders the
     same counts as the machine-checkable ``body_verification`` block (issue
     #1983) -- so the warning a reader sees and the field a grader reads can
     never disagree. See :func:`_body_net_warnings` for the full rationale on
@@ -548,12 +559,17 @@ def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
     """
     counts: dict[str, int] = {}
 
-    nfet_count = sum(
-        1
-        for device in layout_circuit.each_device()
-        if device.device_class().name == deck.nfet_class
-        and _device_body_net_name(device) in (deck.substrate_net, None)
-    )
+    # Issue #3177: a netlist read back from disk (``layout.netlist`` +
+    # ``layout.deck``) presents class and net names upper-cased
+    # (``NFET``/``VSUBS``), so every name compare is case-insensitive.
+    substrate_net = deck.substrate_net.casefold()
+    nfet_count = 0
+    for device in layout_circuit.each_device():
+        if device.device_class().name.casefold() != deck.nfet_class.casefold():
+            continue
+        body = _device_body_net_name(device)
+        if body is None or body.casefold() == substrate_net:
+            nfet_count += 1
     if nfet_count:
         counts[deck.nfet_class] = nfet_count
 
@@ -564,7 +580,7 @@ def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
     pfet_count = sum(
         1
         for device in layout_circuit.each_device()
-        if device.device_class().name == deck.pfet_class
+        if device.device_class().name.casefold() == deck.pfet_class.casefold()
         and _is_unresolved_body_net(_device_body_net_name(device))
     )
     if pfet_count:
@@ -615,11 +631,14 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
     PMOS body demonstrably landed on a named net (e.g. ``VPB``), not because
     the deck declared a mechanism.
 
-    Neither warning fires at all for the pre-extracted ``layout.netlist``
-    request form -- callers only reach this helper when ``layout.file`` +
-    ``layout.deck`` (inline extraction) was given, mirroring how
-    ``device_classes``/``provenance.deck`` are conditioned on that same
-    distinction in ``run_lvs``.
+    Neither warning fires for the pre-extracted ``layout.netlist`` request
+    form *without* a ``layout.deck`` -- callers only reach this helper when a
+    deck was resolved, mirroring how ``device_classes``/``provenance.deck``
+    are conditioned on that same distinction in ``run_lvs``. With
+    ``layout.netlist`` + ``layout.deck`` it does run, against the SPICE read
+    back from disk: names there are upper-cased and anonymous nets are
+    spelled ``\\$<n>``, so the compares are case-insensitive and accept both
+    anonymous spellings (issue #3177).
 
     Counts only the layout's top circuit's own devices (``each_device()``,
     not recursive), matching ``run_lvs``'s own ``counts.devices.layout``
@@ -643,10 +662,11 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
                 "warning",
                 f"{nfet_count} NMOS device body terminal(s) were compared "
                 f"against the '{deck.substrate_net}' deck-synthesized "
-                "substrate net, not a real schematic net -- no drawn "
-                "substrate-tap geometry resolved these device(s)' body "
-                "terminal to a real net (see docs/cli/extract.md, "
-                '"Coverage")',
+                "substrate net, not a real schematic net -- either no "
+                "substrate-tap geometry is drawn, or the drawn tap's net "
+                "carries no name label (a body resolves only to a *named* "
+                "net; label the tap-connected conductor, e.g. VSS, to "
+                'resolve it; see docs/cli/extract.md, "Coverage")',
                 "layout",
                 device={"layout": None, "reference": None, "class": deck.nfet_class},
             )
@@ -660,9 +680,11 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
                 "warning",
                 f"{pfet_count} PMOS device body terminal(s) were "
                 "compared against an anonymous, KLayout-synthesized well "
-                "net, not a real schematic net -- no drawn or derived "
-                "well-tap geometry resolved these device(s)' body terminal "
-                'to a real net (see docs/cli/extract.md, "Coverage")',
+                "net, not a real schematic net -- either no drawn or "
+                "derived well-tap geometry exists, or the tap-connected net "
+                "carries no name label (a body resolves only to a *named* "
+                "net; label the tap-connected conductor, e.g. VDD, to "
+                'resolve it; see docs/cli/extract.md, "Coverage")',
                 "layout",
                 device={
                     "layout": None,
@@ -809,6 +831,153 @@ def _device_class_family_findings(
     return entries
 
 
+class _DanglingSplit(NamedTuple):
+    """Result of :func:`_split_dangling_output_ambiguity`: the compare events
+    that remain for the ordinary classification, plus the warning entries
+    that replace the ones removed."""
+
+    net_mismatches: list[tuple[Any, Any]]
+    net_mismatch_keys: list[tuple[_NetKey | None, _NetKey | None]] | None
+    subcircuit_mismatches: list[tuple[Any, Any]]
+    entries: list[dict[str, Any]]
+
+
+def _is_dangling_net(net: Any) -> bool:
+    """A net with exactly one connection (a device terminal or a
+    subcircuit-instance pin) and no declared pin -- e.g. an unconnected
+    cell output. ``False`` for anything that does not expose the counts."""
+    try:
+        return bool(
+            net.pin_count() == 0
+            and net.terminal_count() + net.subcircuit_pin_count() == 1
+        )
+    except Exception:
+        return False
+
+
+def _has_dangling_pin(subcircuit: Any) -> bool:
+    """Whether any pin of ``subcircuit`` lands on a dangling net."""
+    try:
+        for pin in subcircuit.circuit_ref().each_pin():
+            net = subcircuit.net_for_pin(pin.id())
+            if net is not None and _is_dangling_net(net):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _split_dangling_output_ambiguity(logger: Any) -> _DanglingSplit:
+    """Peel interchangeable same-cell instances on one-terminal dangling
+    nets out of the comparer's mismatch events (issue #4296).
+
+    Identical cell instances whose outputs connect to nothing (CTS dummy
+    loads, unused flop outputs) have no distinguishing topology, so the
+    comparer cannot pair them even though nothing is wrong. This is a
+    report-side classification only -- ``status`` still comes from
+    ``compare()``. Three conditions keep it from masking a real defect:
+
+    * a ``net_mismatch`` event is peeled only when every net it names, on
+      either side, is dangling (so one side connected and the other
+      dangling stays an error), and only alongside balanced instances;
+    * an unmatched instance is peeled only if it has a dangling pin and its
+      ``(containing circuit, cell type)`` group has as many unmatched
+      layout instances as reference ones (a different cell type, or a
+      missing instance, leaves the counts unbalanced);
+    * nothing is peeled unless every instance group balances *and* every
+      net event is dangling-only: a swap on a connected net, or an extra
+      instance whose own dangling nets are mere collateral, stays an error.
+    """
+    from .lvs import (
+        CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS,
+        _name_or_none,
+        _subcircuit_parent_name,
+        _subcircuit_ref_name,
+    )
+
+    net_events: list[tuple[Any, Any]] = list(logger.net_mismatches)
+    event_keys = getattr(logger, "net_mismatch_keys", None)
+    keys = list(event_keys) if event_keys is not None else None
+    sub_events: list[tuple[Any, Any]] = list(logger.subcircuit_mismatches)
+
+    dangling_flags = [
+        all(_is_dangling_net(net) for net in event if net is not None)
+        and any(net is not None for net in event)
+        for event in net_events
+    ]
+
+    groups: dict[tuple[str | None, str | None], dict[str, list[Any]]] = {}
+    ineligible = False
+    for a, b in sub_events:
+        instance = a if a is not None else b
+        side = "layout" if b is None else "reference" if a is None else None
+        if side is None or not _has_dangling_pin(instance):
+            ineligible = True
+            break
+        group = groups.setdefault(
+            (_subcircuit_parent_name(instance), _subcircuit_ref_name(instance)),
+            {"layout": [], "reference": []},
+        )
+        group[side].append(instance)
+    balanced = (
+        bool(groups)
+        and not ineligible
+        and all(dangling_flags)
+        and all(len(g["layout"]) == len(g["reference"]) for g in groups.values())
+    )
+
+    entries: list[dict[str, Any]] = []
+    remaining_subs = sub_events
+    kept_nets = net_events
+    kept_keys = keys
+    peeled_nets: list[tuple[Any, Any]] = []
+    if balanced:
+        remaining_subs = []
+        kept_nets = []
+        kept_keys = [] if keys is not None else None
+        peeled_nets = net_events
+        for (parent, cell_type), group in sorted(
+            groups.items(), key=lambda item: (str(item[0][0]), str(item[0][1]))
+        ):
+            count = len(group["layout"])
+            entries.append(
+                _mismatch(
+                    CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS,
+                    "warning",
+                    f"{count} interchangeable instance(s) of cell "
+                    f"'{cell_type}' drive nets with no other connection on "
+                    "either side; the comparer cannot tell them apart, so "
+                    "they are reported as an ambiguity, not a layout defect",
+                    "both",
+                    details={
+                        "cell_type": cell_type,
+                        "instance_count": count,
+                        "layout_instances": sorted(
+                            _name_or_none(i) or "" for i in group["layout"]
+                        ),
+                        "reference_instances": sorted(
+                            _name_or_none(i) or "" for i in group["reference"]
+                        ),
+                    },
+                    circuit={"layout": parent, "reference": parent},
+                    subcircuit={"layout": cell_type, "reference": cell_type},
+                )
+            )
+    if peeled_nets:
+        entries.append(
+            _mismatch(
+                CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS,
+                "warning",
+                f"{len(peeled_nets)} net mismatch event(s) involve only nets "
+                "with a single connection and no pin on each side they "
+                "appear on (unconnected outputs); not a connectivity defect",
+                "both",
+                details={"net_event_count": len(peeled_nets)},
+            )
+        )
+    return _DanglingSplit(kept_nets, kept_keys, remaining_subs, entries)
+
+
 def _build_mismatches(
     logger: Any,
     layout_netlist: Any | None = None,
@@ -816,6 +985,7 @@ def _build_mismatches(
     *,
     same_nets_hints: list[tuple[str, str]] | None = None,
     anchored_pins: Sequence[tuple[str, str, str]] | None = None,
+    constant_bindings: Sequence[tuple[str, str, str]] | None = None,
     excluded_parameters: ExcludedParameters | None = None,
 ) -> list[dict[str, Any]]:
     from .lvs import (
@@ -846,8 +1016,13 @@ def _build_mismatches(
     # `same_nets(..., must_match=True)` assertions too, just ones this module
     # declared on the caller's behalf rather than ones the request spelled out.
     hint_outcomes = _same_nets_hint_outcomes(
-        logger, _same_nets_assertion_pairs(same_nets_hints, anchored_pins)
+        logger,
+        _same_nets_assertion_pairs(same_nets_hints, anchored_pins, constant_bindings),
     )
+
+    # Issue #4296: interchangeable same-cell instances on dangling outputs.
+    dangling = _split_dangling_output_ambiguity(logger)
+    mismatches.extend(dangling.entries)
 
     # Issue #1622 deliberately does NOT filter the `circuit_mismatches`/
     # `subcircuit_mismatches` loops below for power-only (filler/tap)
@@ -865,8 +1040,8 @@ def _build_mismatches(
     # universe classified as "power-only" and vanished from the report).
     mismatches.extend(
         _classify_net_mismatches(
-            logger.net_mismatches,
-            event_keys=getattr(logger, "net_mismatch_keys", None),
+            dangling.net_mismatches,
+            event_keys=dangling.net_mismatch_keys,
             explained_layout_nets=(
                 degraded.explained_layout_nets if degraded else frozenset()
             ),
@@ -975,7 +1150,7 @@ def _build_mismatches(
             )
         )
 
-    for a, b in logger.subcircuit_mismatches:
+    for a, b in dangling.subcircuit_mismatches:
         side = "layout" if b is None else ("reference" if a is None else "both")
         mismatches.append(
             _mismatch(
@@ -1016,6 +1191,9 @@ def _build_mismatches(
         # A class with actual instances that still has no counterpart is a
         # genuine gap and stays `error`.
         present_class = a if a is not None else b
+        class_name = getattr(present_class, "name", None)
+        class_suffix = f": '{class_name}'" if class_name else ""
+        class_device = {"layout": None, "reference": None, "class": class_name}
         present_netlist = layout_netlist if a is not None else reference_netlist
         instance_count = (
             _count_devices_of_class(present_netlist, present_class)
@@ -1029,8 +1207,9 @@ def _build_mismatches(
                     "warning",
                     "device class has no counterpart on the other side, but "
                     "no devices of this class were extracted either -- not "
-                    "a real topology mismatch",
+                    "a real topology mismatch" + class_suffix,
                     side,
+                    device=class_device,
                 )
             )
         else:
@@ -1038,8 +1217,9 @@ def _build_mismatches(
                 _mismatch(
                     CATEGORY_TOPOLOGY,
                     "error",
-                    "device class could not be mapped to a counterpart",
+                    "device class could not be mapped to a counterpart" + class_suffix,
                     side,
+                    device=class_device,
                 )
             )
 
@@ -1098,7 +1278,9 @@ def _build_mismatches(
     # was refused, and that disagreement is reported rather than silently
     # dropped -- see `_same_nets_rejections`.
     mismatches.extend(
-        _same_nets_rejections(logger, hint_outcomes, same_nets_hints, anchored_pins)
+        _same_nets_rejections(
+            logger, hint_outcomes, same_nets_hints, anchored_pins, constant_bindings
+        )
     )
 
     mismatches.sort(key=_sort_key)
@@ -1108,37 +1290,44 @@ def _build_mismatches(
 def _same_nets_assertion_pairs(
     same_nets_hints: Sequence[tuple[str, str]] | None,
     anchored_pins: Sequence[tuple[str, str, str]] | None,
+    constant_bindings: Sequence[tuple[str, str, str]] | None = None,
 ) -> list[tuple[str, str]]:
     """Every ``(layout net, reference net)`` pair this run asserted with
     ``same_nets(..., must_match=True)`` -- the request's own
-    ``hints.same_nets`` pairs (issue #499) followed by the automatic
-    top-level-pin anchors (issue #2692), whose third element (the pin name
-    that licensed the anchor) is dropped here."""
+    ``hints.same_nets`` pairs (issue #499), the automatic top-level-pin
+    anchors (issue #2692) and the caller's ``hints.constant_nets`` bindings
+    (issue #3014), whose third element (the pin / constant name) is dropped
+    here."""
     return [
-        *(same_nets_hints or ()),
-        *(
-            (layout_name, reference_name)
-            for layout_name, reference_name, _ in anchored_pins or ()
-        ),
+        (layout_name, reference_name)
+        for layout_name, reference_name, _ in _same_nets_assertions(
+            same_nets_hints, anchored_pins, constant_bindings
+        )
     ]
 
 
 def _same_nets_assertions(
     same_nets_hints: Sequence[tuple[str, str]] | None,
     anchored_pins: Sequence[tuple[str, str, str]] | None,
-) -> Iterator[tuple[str, str, str | None]]:
+    constant_bindings: Sequence[tuple[str, str, str]] | None = None,
+) -> Iterator[tuple[str, str, dict[str, str] | None]]:
     """:func:`_same_nets_assertion_pairs` with provenance kept: each pair
-    yielded as ``(layout net, reference net, pin name or None)``, where the
-    pin name is the top-level pin that licensed an automatic anchor (issue
-    #2692) and ``None`` marks a pair the request declared by hand."""
+    yielded as ``(layout net, reference net, details or None)``, where
+    ``details`` is ``{"anchored_top_level_pin": <pin>}`` for an automatic
+    anchor (issue #2692), ``{"declared_constant_net": <constant>}`` for a
+    ``hints.constant_nets`` binding (issue #3014; ``constant_bindings`` is
+    ``(constant, layout net, reference net)``), and ``None`` marks a pair the
+    request declared by hand."""
     for layout_name, reference_name in same_nets_hints or ():
         yield layout_name, reference_name, None
     for layout_name, reference_name, pin_name in anchored_pins or ():
-        yield layout_name, reference_name, pin_name
+        yield layout_name, reference_name, {"anchored_top_level_pin": pin_name}
+    for constant, layout_name, reference_name in constant_bindings or ():
+        yield layout_name, reference_name, {"declared_constant_net": constant}
 
 
 def _same_nets_rejection_description(
-    pin_name: str | None, refused_after_pairing: bool
+    provenance: dict[str, str] | None, refused_after_pairing: bool
 ) -> str:
     """The ``hints.rejected`` description for one refused
     ``same_nets(..., must_match=True)`` assertion.
@@ -1156,7 +1345,7 @@ def _same_nets_rejection_description(
     anchoring exists to produce (typically a permuted boundary bus) -- so it
     names the pin and points at the option rather than at the hint.
     """
-    if pin_name is None:
+    if provenance is None:
         if refused_after_pairing:
             return (
                 "hints.same_nets declared this pairing, but the comparer "
@@ -1170,6 +1359,17 @@ def _same_nets_rejection_description(
             "hints.same_nets declared this pairing, but the comparer "
             "did not confirm it as a topological match"
         )
+    if "declared_constant_net" in provenance:
+        return (
+            f"hints.constant_nets declared this layout net as the node that "
+            f"carries the reference constant '{provenance['declared_constant_net']}'"
+            ", and the comparer did not confirm that pairing. The layout net "
+            "is wired differently from the reference constant (a swapped or "
+            "mis-tied constant is the ordinary cause) -- the underlying "
+            "structural difference is reported separately in this same "
+            'mismatches[] (see docs/cli/lvs.md, "hints.constant_nets")'
+        )
+    pin_name = provenance["anchored_top_level_pin"]
     return (
         f"top-level pin '{pin_name}' is declared on both sides, so "
         "options.anchor_top_level_pins asserted that its layout net and its "
@@ -1188,6 +1388,7 @@ def _same_nets_rejections(
     hint_outcomes: _SameNetsHintOutcomes,
     same_nets_hints: Sequence[tuple[str, str]] | None,
     anchored_pins: Sequence[tuple[str, str, str]] | None,
+    constant_bindings: Sequence[tuple[str, str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """One ``hints.rejected`` entry per ``same_nets(..., must_match=True)``
     assertion the comparer did not confirm (issue #499 / #1484 / #2692).
@@ -1200,16 +1401,19 @@ def _same_nets_rejections(
     ``NetlistComparer`` log text.
 
     An automatically anchored pin's refusal (issue #2692) carries
-    ``details.anchored_top_level_pin`` naming the pin, so a reader can always
-    tell it apart from a hand-written ``hints.same_nets`` refusal (whose
-    ``details`` stays ``null``, exactly as before this distinction existed).
+    ``details.anchored_top_level_pin`` naming the pin, and a refused
+    ``hints.constant_nets`` binding (issue #3014) carries
+    ``details.declared_constant_net`` naming the constant, so a reader can
+    always tell either apart from a hand-written ``hints.same_nets`` refusal
+    (whose ``details`` stays ``null``, exactly as before this distinction
+    existed).
     """
     from .lvs import CATEGORY_HINTS_REJECTED
 
     top_scope = getattr(logger, "top_scope", None)
     entries: list[dict[str, Any]] = []
-    for layout_name, reference_name, pin_name in _same_nets_assertions(
-        same_nets_hints, anchored_pins
+    for layout_name, reference_name, provenance in _same_nets_assertions(
+        same_nets_hints, anchored_pins, constant_bindings
     ):
         pair = ((top_scope, layout_name), (top_scope, reference_name))
         if pair in hint_outcomes.confirmed:
@@ -1219,13 +1423,11 @@ def _same_nets_rejections(
                 CATEGORY_HINTS_REJECTED,
                 "error",
                 _same_nets_rejection_description(
-                    pin_name, pair in hint_outcomes.refused_after_pairing
+                    provenance, pair in hint_outcomes.refused_after_pairing
                 ),
                 "both",
                 net={"layout": layout_name, "reference": reference_name},
-                details=(
-                    None if pin_name is None else {"anchored_top_level_pin": pin_name}
-                ),
+                details=provenance,
             )
         )
     return entries
@@ -1347,9 +1549,91 @@ def _net_is_explained_by_device(net: Any, device: Any) -> bool:
     )
 
 
+def _has_interchangeable_terminals(device_class: Any) -> bool:
+    """True for KLayout's built-in two-terminal passives, whose terminals the
+    SPICE reader declares equivalent (the Python API has no getter for
+    ``DeviceClass.equivalent_terminal_id``, so the class type stands in)."""
+    import klayout.db as db
+
+    passives = tuple(
+        getattr(db, name)
+        for name in (
+            "DeviceClassCapacitor",
+            "DeviceClassCapacitorWithBulk",
+            "DeviceClassResistor",
+            "DeviceClassResistorWithBulk",
+            "DeviceClassInductor",
+        )
+        if hasattr(db, name)
+    )
+    return isinstance(device_class, passives)
+
+
+def _terminal_net_correspondence(
+    a: Any,
+    b: Any,
+    terminals_a: list[tuple[int, str]],
+    b_terminal_ids: list[int],
+    scope: Any,
+    paired: dict[_NetKey, _NetKey],
+    unpaired_layout: set[_NetKey],
+    unpaired_reference: set[_NetKey],
+    reference_declares_no_pins: bool,
+) -> tuple[set[_NetKey], set[_NetKey]] | None:
+    """The collateral nets of the terminal-by-terminal correspondence of
+    ``a``'s terminals onto ``b``'s ``b_terminal_ids``, or ``None``.
+
+    Hoisted out of :func:`_degraded_param_pair` to keep that function's
+    complexity under its ratchet baseline."""
+    explained_layout: set[_NetKey] = set()
+    explained_reference: set[_NetKey] = set()
+    for (terminal_id, _terminal_name), b_terminal_id in zip(
+        terminals_a, b_terminal_ids, strict=True
+    ):
+        net_a = a.net_for_terminal(terminal_id)
+        net_b = b.net_for_terminal(b_terminal_id)
+        if net_a is None and net_b is None:
+            continue
+        if net_a is None or net_b is None:
+            return None
+        key_a = (scope, net_a.expanded_name())
+        key_b = (scope, net_b.expanded_name())
+        if key_a in paired:
+            if paired[key_a] != key_b:
+                return None
+            continue
+        if key_a not in unpaired_layout or key_b not in unpaired_reference:
+            return None
+        # Both sides left this net unpaired. It corresponds only if the
+        # two are interchangeable: same number of top-level pins, and
+        # either the same name or -- for a net nothing but this one device
+        # touches (a dangling well/bulk net is the common case) --
+        # structurally identical, whatever it happens to be called on each
+        # side. A flat reference declares no pins at all, so it carries no
+        # pin information to compare the layout's pins against (issue
+        # #2946).
+        if net_a.pin_count() != net_b.pin_count() and not (
+            reference_declares_no_pins and net_b.pin_count() == 0
+        ):
+            return None
+        collateral = _net_is_explained_by_device(
+            net_a, a
+        ) and _net_is_explained_by_device(net_b, b)
+        if (
+            not collateral
+            and net_a.expanded_name().lower() != net_b.expanded_name().lower()
+        ):
+            return None
+        if collateral:
+            explained_layout.add(key_a)
+            explained_reference.add(key_b)
+    return explained_layout, explained_reference
+
+
 def _degraded_param_pair(
     logger: Any,
     excluded_parameters: ExcludedParameters | None = None,
+    exact_differences: bool = False,
 ) -> _DegradedParamPair | None:
     """Detect the minimal-circuit degradation issue #282 describes and return
     the device pair behind it, or ``None``.
@@ -1399,6 +1683,14 @@ def _degraded_param_pair(
     loosens nothing structural: device identity here is proven by the
     terminal-by-terminal *net* correspondence, not by any name.
 
+    ``exact_differences`` swaps that last epsilon test for a bare ``!=``. The
+    tolerance snap pass sets it (issue #2946): ``_PARAM_ABS_EPSILON`` is an
+    absolute floor sized for micron-scale parameters, so it swallows any
+    farad-scale capacitance difference (``100.011P`` vs ``100P`` is ``1.1e-14``)
+    and the pair was never recovered, however wide the declared tolerance.
+    :func:`_tolerated_device_pair` already uses ``!=`` for the same reason, and
+    the comparer itself had already refused the pair.
+
     The verdict is untouched either way: ``compare()`` already said
     "mismatch" and still does. This only decides which entry the caller reads
     first.
@@ -1447,42 +1739,32 @@ def _degraded_param_pair(
 
     paired, unpaired_layout, unpaired_reference = _net_correspondence(logger)
     scope = scopes[0]
-    explained_layout: set[_NetKey] = set()
-    explained_reference: set[_NetKey] = set()
+    circuit_b = b.circuit()
+    reference_declares_no_pins = circuit_b is not None and circuit_b.pin_count() == 0
 
-    for terminal_id, _terminal_name in terminals_a:
-        net_a = a.net_for_terminal(terminal_id)
-        net_b = b.net_for_terminal(terminal_id)
-        if net_a is None and net_b is None:
-            continue
-        if net_a is None or net_b is None:
-            return None
-        key_a = (scope, net_a.expanded_name())
-        key_b = (scope, net_b.expanded_name())
-        if key_a in paired:
-            if paired[key_a] != key_b:
-                return None
-            continue
-        if key_a not in unpaired_layout or key_b not in unpaired_reference:
-            return None
-        # Both sides left this net unpaired. It corresponds only if the two
-        # are interchangeable: same number of top-level pins, and either the
-        # same name or -- for a net nothing but this one device touches (a
-        # dangling well/bulk net is the common case) -- structurally
-        # identical, whatever it happens to be called on each side.
-        if net_a.pin_count() != net_b.pin_count():
-            return None
-        collateral = _net_is_explained_by_device(
-            net_a, a
-        ) and _net_is_explained_by_device(net_b, b)
-        if (
-            not collateral
-            and net_a.expanded_name().lower() != net_b.expanded_name().lower()
-        ):
-            return None
-        if collateral:
-            explained_layout.add(key_a)
-            explained_reference.add(key_b)
+    def correspond(
+        b_terminal_ids: list[int],
+    ) -> tuple[set[_NetKey], set[_NetKey]] | None:
+        return _terminal_net_correspondence(
+            a,
+            b,
+            terminals_a,
+            b_terminal_ids,
+            scope,
+            paired,
+            unpaired_layout,
+            unpaired_reference,
+            reference_declares_no_pins,
+        )
+
+    terminal_ids = [terminal_id for terminal_id, _ in terminals_a]
+    explained = correspond(terminal_ids)
+    if explained is None and _has_interchangeable_terminals(class_a):
+        # Issue #2946: `C1 d a` against `C1 a d` is the same capacitor.
+        explained = correspond(terminal_ids[::-1])
+    if explained is None:
+        return None
+    explained_layout, explained_reference = explained
 
     if not any(
         _param_pair_is_comparable(
@@ -1492,7 +1774,9 @@ def _degraded_param_pair(
             class_name=class_a.name,
             excluded_parameters=excluded_parameters,
         )
-        and _values_differ(a.parameter(param.id()), b.parameter(param.id()))
+        and _param_values_differ(
+            a.parameter(param.id()), b.parameter(param.id()), exact_differences
+        )
         for param in params_a
     ):
         return None
@@ -1572,6 +1856,12 @@ def _classify_param_mismatch(
             )
         )
     return entries
+
+
+def _param_values_differ(a_value: float, b_value: float, exact: bool) -> bool:
+    """:func:`_values_differ`, or a bare ``!=`` when ``exact`` -- see
+    :func:`_degraded_param_pair`'s ``exact_differences``."""
+    return a_value != b_value if exact else _values_differ(a_value, b_value)
 
 
 def _values_differ(a_value: float, b_value: float) -> bool:
@@ -1846,7 +2136,7 @@ def _collect_tolerance_snaps(
       ``"match"`` however wide the tolerance.
     """
     pairs: list[tuple[Any, Any]] = list(getattr(logger, "param_mismatches", ()) or ())
-    degraded = _degraded_param_pair(logger, excluded_parameters)
+    degraded = _degraded_param_pair(logger, excluded_parameters, exact_differences=True)
     if degraded is not None:
         pairs.append((degraded.layout_device, degraded.reference_device))
 
@@ -1933,31 +2223,6 @@ def _tolerance_disclosure(snap: _ToleratedParam, tolerance: float) -> dict[str, 
 _NetNode = tuple[str, int, str]
 
 
-class _UnionFind:
-    """Minimal union-find over hashable nodes, for the merge/split locality
-    grouping in :func:`_net_mismatch_pools` (issue #1533)."""
-
-    def __init__(self) -> None:
-        self._parent: dict[Any, Any] = {}
-
-    def find(self, node: Any) -> Any:
-        parent = self._parent
-        if node not in parent:
-            parent[node] = node
-            return node
-        root = node
-        while parent[root] != root:
-            root = parent[root]
-        while parent[node] != root:
-            parent[node], node = root, parent[node]
-        return root
-
-    def union(self, a: Any, b: Any) -> None:
-        root_a, root_b = self.find(a), self.find(b)
-        if root_a != root_b:
-            self._parent[root_b] = root_a
-
-
 def _adjacent_nets(net: Any) -> list[Any]:
     """Every net that shares a device terminal or a subcircuit-instance pin
     with ``net`` -- one hop in the netlist's own connectivity graph.
@@ -1985,7 +2250,7 @@ def _adjacent_nets(net: Any) -> list[Any]:
 
 
 def _explore_net_component(
-    groups: _UnionFind, visited: set[_NetNode], side: str, scope: int, net: Any
+    groups: UnionFind, visited: set[_NetNode], side: str, scope: int, net: Any
 ) -> None:
     """Union every net reachable from ``net`` (within its own circuit and its
     own side's netlist) into one component."""
@@ -2063,7 +2328,7 @@ def _net_mismatch_pools(
     ):
         return [tagged]
 
-    groups = _UnionFind()
+    groups = UnionFind()
     visited: set[_NetNode] = set()
     try:
         for (a, b), key in tagged:
@@ -2261,6 +2526,40 @@ def _classify_net_mismatch_pool(
             )
 
     return entries
+
+
+def _annotate_case_collision_merges(
+    mismatches: list[dict[str, Any]], layout_circuit: Any, inline: bool
+) -> None:
+    """Explain ``net.merged`` entries caused by case-folded net-name collisions.
+
+    Issue #4200. On an inline-extraction layout whose extracted nets include
+    names differing only by case (``pb`` / ``PB``), the SPICE read-back is
+    case-insensitive and merges them, which surfaces as a ``net.merged`` with
+    no hint of the cause. Appends a note to each such entry's ``description``;
+    ``status``, ``severity`` and counts are untouched.
+    """
+    from .extract_report import detect_case_colliding_net_names
+
+    groups = (
+        detect_case_colliding_net_names(
+            n.expanded_name() for n in layout_circuit.each_net()
+        )
+        if inline
+        else []
+    )
+    if not groups:
+        return
+    names = "; ".join(", ".join(repr(n) for n in group) for group in groups)
+    note = (
+        f" (the layout extraction contains net names differing only by case "
+        f"({names}); the netlist is read back case-insensitively, so "
+        "same-named labels merge at read-back -- for a composed layout, "
+        "extract with --hierarchical-cells and use options.flatten_layout)"
+    )
+    for entry in mismatches:
+        if entry["category"] == "net.merged":
+            entry["description"] += note
 
 
 def _sort_key(mismatch: dict[str, Any]) -> tuple[str, str, str, str, str, str]:

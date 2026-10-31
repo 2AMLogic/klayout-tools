@@ -45,6 +45,7 @@ import os
 import subprocess
 from typing import Any
 
+from ._native import find_cargo_binary
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
 from .equiv import EquivError, run_equiv
 
@@ -101,7 +102,10 @@ def load_request(request_path: str) -> dict[str, Any]:
 def _binary_path() -> str:
     """The compiled `klt-techmap` binary path -- release build preferred
     (matching `tests/corpus/techmap/compare.py`'s own `_ensure_binary`
-    convention), falling back to a debug build.
+    convention), falling back to a debug build -- looked up in every
+    target directory cargo may have built into (crate-local ``target/``,
+    ``$CARGO_TARGET_DIR``, a cargo-config ``build.target-dir``; see
+    ``_native.find_cargo_binary``, issue #3189).
 
     Raises :class:`TechmapError` with a clear, actionable message (mirroring
     ``mom.py``'s/``congestion.py``'s own "extension not installed" errors)
@@ -111,12 +115,9 @@ def _binary_path() -> str:
     explicit step, same posture the `pyo3` extensions take toward
     `maturin develop`.
     """
-    release = os.path.join(_TECHMAP_CRATE_DIR, "target", "release", "klt-techmap")
-    if os.path.isfile(release):
-        return release
-    debug = os.path.join(_TECHMAP_CRATE_DIR, "target", "debug", "klt-techmap")
-    if os.path.isfile(debug):
-        return debug
+    found = find_cargo_binary(_TECHMAP_CRATE_DIR, "klt-techmap")
+    if found is not None:
+        return found
     raise TechmapError(
         "the klt-techmap binary is not built -- from a repo checkout, run "
         "`cargo build --release` inside native/techmap/ (or `cargo build` "

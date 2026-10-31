@@ -13,6 +13,7 @@ scripts/
   fetch-ihp-sg13g2.sh            # pinned fetch of IHP-Open-PDK into pdks/ so `klt pdk` resolves a real SG13G2 install (#522)
   fetch-ihp-sg13cmos5l.sh        # pinned, checksum-verified fetch of the IHP-Open-PDK ihp-sg13cmos5l/ subtree into pdks/ so `klt pdk` resolves a real sg13cmos5l install (#1929)
   fetch-sg13g2-sim-toolchain.sh  # provision the ngspice/OSDI half of an SG13G2 sim flow that fetch-ihp-sg13g2.sh does not (#1628)
+  fetch-asap7-sim-toolchain.sh   # compile the pinned CMC BSIM-CMG Verilog-A source to an OSDI module + load-verify it in ngspice, for ASAP7 FinFET simulation (#2814)
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs
   install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
@@ -347,7 +348,15 @@ mounting `$PDK_ROOT` alongside `$PWD` so a real PDK install resolves inside
 the container too — falling back to `klt pdk find`'s own resolved root when
 `$PDK_ROOT` is unset, so the mount always matches what `klt
 place-and-route` will actually reference (issue #1868) — see the script's
-own header comment for why that matters.
+own header comment for why that matters. The container runs as the caller's
+uid:gid (`--user "$(id -u):$(id -g)"`, with `HOME` set to `$TMPDIR`) so files it
+writes into the mounted `$PWD`/`$TMPDIR` are not root-owned on Linux (issue
+#3151); re-run the installer to upgrade an older wrapper. It also forwards
+`PLATFORM_DIR` (when set, even if empty) and every `OPENROAD_*` variable from
+the caller into the container by name (`-e NAME`, issue #3821) so ORFS-style Tcl
+reading `$::env(PLATFORM_DIR)` works; the rest of the environment is not
+forwarded. Values pass verbatim, so a host-path `PLATFORM_DIR` only resolves if
+it lies under a mounted path (`$PWD`, `$PDK_ROOT`, `$TMPDIR`).
 
 The image is **pinned by digest** (`ORFS_IMAGE_DIGEST` near the top of the
 script), not by the moving `:latest` tag: both the `docker pull` and the

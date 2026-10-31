@@ -1,12 +1,9 @@
 import { useMemo, useState } from "react";
 import type { KeyboardEvent } from "react";
 import type { Layout } from "@/data/types";
-import type { EmSiteExport } from "@/components/em/types";
 import { Table, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { WaveformViewer } from "@/components/waveform";
 import { StimulusPlayground, isPlaygroundEligible } from "@/components/playground";
-import { FieldViewer } from "@/components/field";
-import { ProvenancePanel } from "@/components/em";
 import { GdsViewer } from "@/components/layout";
 // Imported from `@/lib/gds/layerNames` rather than the `@/lib/gds` barrel on
 // purpose: the barrel also reaches the generated PDK color tables, which must
@@ -37,11 +34,7 @@ import { blockAssetUrl } from "@/lib/blockAssets";
  * `WaveformViewer` — or, for a sky130 gallery cell with a staged playground
  * model deck (Epic #90 phase C, issue #151), `@/components/playground`'s
  * `StimulusPlayground`, which wraps the same viewer with editable stimulus
- * controls and a client-side ngspice re-run — a Field Data section (Epic
- * #840 Phase 3b, issue #959) gated behind an `emExport` prop loaded at build
- * time (`@/data/loadEmExport.ts`) from `blocks/<slug>/output/<slug>.em-export.json`
- * when present, rendered with `@/components/field`'s `FieldViewer` and
- * `@/components/em`'s `ProvenancePanel` — a downloads section gated
+ * controls and a client-side ngspice re-run, a downloads section gated
  * behind `layout.downloadable`, and a back-link to the gallery index.
  *
  * Render thumbnails and the downloads section's viewer entry both open
@@ -64,11 +57,6 @@ import { blockAssetUrl } from "@/lib/blockAssets";
  */
 export interface DetailPageProps {
   layout: Layout;
-  /** This block's `<slug>.em-export.json` (Epic #840 Phase 3b, issue #959),
-   *  loaded at build time by `@/data/loadEmExport.ts` — `null`/omitted for
-   *  the vast majority of blocks (no committed artifact), in which case the
-   *  Field Data section below is not rendered at all. */
-  emExport?: EmSiteExport | null;
 }
 
 const STATUS_BORDER_CLASS: Record<Layout["status"], string> = {
@@ -159,7 +147,7 @@ function formatRenderLabel(id: string): string {
   return id;
 }
 
-export function DetailPage({ layout, emExport }: DetailPageProps) {
+export function DetailPage({ layout }: DetailPageProps) {
   const displayName = layout.name;
   const isPreLayout = layout.status === "in design — simulation evidence";
   const isBuilt = layout.status !== "no_artifacts" && !isPreLayout;
@@ -420,21 +408,6 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
           ) : (
             <WaveformViewer slug={layout.slug} signals={layout.signals} />
           )}
-        </section>
-      )}
-
-      {emExport && (
-        <section aria-label="Field Data" className="mt-9">
-          <h2 className="mb-4 font-mono text-[1.1rem] text-cyan">Field Data</h2>
-          <div className="flex flex-col gap-4">
-            <FieldViewer data={{ mesh: emExport.mesh, frames: emExport.frames }} />
-            <ProvenancePanel provenance={emExport.provenance} />
-            <p className="text-[0.8rem] text-fog-dim">
-              This field result is produced by geode-fem, validated against known
-              answers in the gallery&rsquo;s{" "}
-              <a href="/#solver-validation">solver validation</a> strip.
-            </p>
-          </div>
         </section>
       )}
 

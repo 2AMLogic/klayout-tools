@@ -2,16 +2,11 @@
  * Shared vitest mocks for the WebGL-backed gallery component suites
  * (issue #2337).
  *
- * `makeFakeGL()` and `mockFetchOk()` were previously copy-pasted verbatim
- * into every `src/components/em/*.test.tsx` file plus
- * `src/components/field/FieldViewer.test.tsx` — seven identical copies of
- * the same two helpers. They live here instead so there is exactly one
- * maintenance point.
+ * `makeFakeGL()` and `mockFetchOk()` live here so there is exactly one
+ * maintenance point (the former `components/em/` suites that shared them
+ * were removed in issue #4641).
  *
- * This module is test-only: nothing in the app bundle imports it, and it
- * is deliberately *not* under `components/em/` (which would make the more
- * primitive `components/field/` suite depend on the EM layer that already
- * imports *from* it).
+ * This module is test-only: nothing in the app bundle imports it.
  */
 import { vi } from "vitest";
 

@@ -81,13 +81,19 @@ mapping.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
+from . import env_provenance
 from ._layout import load_layout, resolve_top_cell
 from ._provenance import build_provenance
 from .lef_header import read_lef_header
-from .pdk import PdkNotFoundError, find_pdk, lef_files
+from .pdk import (
+    PdkNotFoundError,
+    find_pdk,
+    lef_files,
+    load_gds_to_lef_layer_map,
+    resolve_klayout_layer_map,
+)
 from .socket_check import (
     GROUND_NAME_TOKENS,
     POWER_NAME_TOKENS,
@@ -98,7 +104,14 @@ from .socket_check import (
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 1
+#:
+#: Bumped 1 -> 2 (issue #2703): ``file`` changed from a raw (usually
+#: absolute) path string to the ``{path, scope}`` shape
+#: ``env_provenance.repo_relative_path`` defines (as `klt drc`/`klt extract`/
+#: `klt lvs` did in issue #2659), so a committed report's
+#: ``provenance.input`` layout can be re-verified by `klt signoff` from any
+#: checkout. ``socket`` and ``output`` stay plain strings.
+SCHEMA_VERSION = 2
 
 #: The supply-pin name heuristic (``_GROUND_TOKENS``/``_POWER_TOKENS``) and
 #: :func:`_classify_pin` live in :mod:`klayout_tools.socket_check` since
@@ -114,6 +127,9 @@ _POWER_TOKENS = POWER_NAME_TOKENS
 #: real sky130 deck (every routing layer declares ``WIDTH``), kept only as a
 #: last-resort so pin emission never raises for missing geometry data.
 _DEFAULT_SYNTHESIZED_PIN_UM = 0.1
+
+#: Accepted ``obs_mode`` values (issue #4283); the first is the default.
+OBS_MODES = ("detailed", "coarse")
 
 
 class LefAbstractError(Exception):
@@ -138,6 +154,7 @@ def run_lef_abstract(
     symmetry: list[str] | None = None,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    obs_mode: str = "detailed",
 ) -> dict[str, Any]:
     """Emit a LEF abstract for the block at ``layout_path`` per its socket
     descriptor at ``socket_path``, writing it to ``output_path``.
@@ -147,7 +164,7 @@ def run_lef_abstract(
 
         {
             "schema_version": 1,
-            "file": <layout_path>,
+            "file": {"path", "scope"},  # layout_path, issue #2703
             "socket": <socket_path>,
             "output": <output_path>,
             "macro_name": <macro_name>,
@@ -166,6 +183,7 @@ def run_lef_abstract(
             "unroutable_pins": [
                 {"name": <str>, "layer": [<gds_layer>, <gds_datatype>]}, ...
             ],
+            "obs_mode": "detailed" | "coarse",
             "obs": [{"layer": str, "shape_count": int}, ...],
             "obs_shape_count": <int>,
             "warnings": [...],
@@ -208,10 +226,16 @@ def run_lef_abstract(
     placement" docs section) -- either signal reflects the same underlying
     condition.
 
+    ``obs_mode`` (issue #4283) selects the obstruction granularity:
+    ``"detailed"`` (default) emits every merged routing-layer region;
+    ``"coarse"`` emits, per routing LEF layer, the merged region's bounding
+    rectangle minus the declared pin ports, so the OBS size is O(pins)
+    rather than O(shapes). Echoed as the additive ``obs_mode`` report field.
+
     Raises :class:`LefAbstractError` for a missing/unreadable layout or
-    socket descriptor, an ambiguous/missing top cell, an unresolvable PDK or
-    tech LEF for ``cell_library``, a write failure, or a failure to read the
-    written file back for its self-check.
+    socket descriptor, an invalid ``obs_mode``, an ambiguous/missing top cell,
+    an unresolvable PDK or tech LEF for ``cell_library``, a write failure, or
+    a failure to read the written file back for its self-check.
     """
     layout = load_layout(layout_path, LefAbstractError)
     top_cell = resolve_top_cell(layout, top, LefAbstractError, path=layout_path)
@@ -223,6 +247,10 @@ def run_lef_abstract(
 
     if not macro_name:
         raise LefAbstractError("macro_name must be a non-empty string")
+    if obs_mode not in OBS_MODES:
+        raise LefAbstractError(
+            f"obs_mode must be one of {', '.join(OBS_MODES)}; got {obs_mode!r}"
+        )
     if symmetry is not None and not all(isinstance(s, str) and s for s in symmetry):
         raise LefAbstractError("symmetry must be a list of non-empty strings")
 
@@ -246,14 +274,14 @@ def run_lef_abstract(
         if layer["type"] == "ROUTING"
     }
 
-    layer_map_path, _layer_map_resolution = _resolve_layer_map(pdk_info)
+    layer_map_path, _layer_map_resolution = resolve_klayout_layer_map(pdk_info)
     if layer_map_path is None:
         raise LefAbstractError(
             f"no KLayout GDS<->LEF layer map found for resolved PDK install "
             f"'{pdk_info['variant']}' -- cannot translate socket descriptor "
             "layers into LEF layer names"
         )
-    gds_to_lef = _load_gds_to_lef_layer_map(layer_map_path)
+    gds_to_lef = load_gds_to_lef_layer_map(layer_map_path)
 
     dbu_um = layout.dbu
     outline = descriptor["outline"]
@@ -286,6 +314,7 @@ def run_lef_abstract(
         width_dbu=round(width_um / dbu_um),
         height_dbu=round(height_um / dbu_um),
         dbu_um=dbu_um,
+        obs_mode=obs_mode,
     )
 
     _write_lef(
@@ -319,7 +348,8 @@ def run_lef_abstract(
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "file": layout_path,
+        # `{path, scope}` (issue #2703): the layout `provenance.input` hashes.
+        "file": env_provenance.repo_relative_path(layout_path),
         "socket": socket_path,
         "output": output_path,
         "macro_name": macro_name,
@@ -346,6 +376,7 @@ def run_lef_abstract(
         ],
         "pin_count": len(pins_report),
         "unroutable_pins": _unroutable_pins(pins_report, descriptor["pins"]),
+        "obs_mode": obs_mode,
         "obs": [
             {"layer": layer_name, "shape_count": len(shapes)}
             for layer_name, shapes in obs_report
@@ -373,81 +404,6 @@ def _classify_pin(name: str) -> tuple[str, str]:
 # --------------------------------------------------------------------------- #
 # GDS (layer, datatype) -> LEF layer name (open_pdks KLayout map file)
 # --------------------------------------------------------------------------- #
-
-
-def _resolve_layer_map(pdk_info: dict[str, Any]) -> tuple[str | None, str]:
-    """The same open_pdks KLayout LEF/DEF layer-map file
-    ``place_and_route.py``'s own DEF->GDS merge resolves
-    (``libs.tech/klayout/tech/<variant>.map``) -- this module's own copy of
-    that resolution (each verb module in this repo is self-contained,
-    matching the existing precedent noted in ``place_and_route.py``).
-
-    Prefers the variant-named file (``<variant>.map``, ``resolution=
-    "exact"``); falls back to a family-level file (``<family>.map``,
-    ``resolution="family"``) when the variant-named file is absent -- some
-    open_pdks families (gf180mcu, unlike sky130) ship a single
-    ``klayout.tech`` map file shared across every variant rather than one
-    per variant (issue #1029). Returns ``(None, "none")`` when neither
-    exists (or the variant ships no ``klayout`` asset at all)."""
-    klayout_dir = pdk_info["assets"].get("klayout")
-    if klayout_dir is None:
-        return None, "none"
-    tech_dir = os.path.join(klayout_dir, "tech")
-    variant = pdk_info["variant"]
-    exact = os.path.join(tech_dir, f"{variant}.map")
-    if os.path.isfile(exact):
-        return exact, "exact"
-
-    family = variant
-    if len(family) > 1 and family[-1].isupper():
-        family = family[:-1]
-    # IHP-Open-PDK (issue #2444): the install variant is ``ihp-sg13g2`` but
-    # the shipped map is named after the process, ``sg13g2.map`` -- without
-    # this the DEF->GDS merge silently fell back to KLayout's sequential
-    # default layer numbering (Via1 cuts on 8/0, Metal2 pads on 9/0, ...).
-    if family.startswith("ihp-"):
-        family = family[len("ihp-") :]
-    if family != variant:
-        family_candidate = os.path.join(tech_dir, f"{family}.map")
-        if os.path.isfile(family_candidate):
-            return family_candidate, "family"
-
-    return None, "none"
-
-
-def _load_gds_to_lef_layer_map(map_path: str) -> dict[tuple[int, int], str]:
-    """Parse an open_pdks KLayout ``.map`` file into a ``{(gds_layer,
-    gds_datatype): lef_layer_name}`` dict.
-
-    File shape (whitespace-delimited, one entry per line):
-    ``<lef_layer_name> <comma-separated purposes> <gds_layer> <gds_datatype>``.
-    ``NAME``/``DIEAREA`` pseudo-entries (annotation purposes, not a real
-    drawn layer) are skipped. A ``(layer, datatype)`` pair with more than
-    one purpose entry for the same LEF layer name (e.g. sky130's ``met1``
-    ``NET``/``LEFPIN`` purposes at different datatypes) simply contributes
-    multiple dict entries mapping to the same name -- never a conflict,
-    since distinct purposes always use distinct datatypes in a real
-    open_pdks map file.
-    """
-    mapping: dict[tuple[int, int], str] = {}
-    with open(map_path, encoding="utf-8") as handle:
-        for line in handle:
-            stripped = line.split("#", 1)[0].strip()
-            if not stripped:
-                continue
-            parts = stripped.split()
-            if len(parts) < 4:
-                continue
-            lef_name = parts[0]
-            if lef_name in ("NAME", "DIEAREA"):
-                continue
-            try:
-                gds_layer = int(parts[-2])
-                gds_datatype = int(parts[-1])
-            except ValueError:
-                continue
-            mapping[(gds_layer, gds_datatype)] = lef_name
-    return mapping
 
 
 def _invert_gds_to_lef(
@@ -478,6 +434,36 @@ def _invert_gds_to_lef(
 # --------------------------------------------------------------------------- #
 
 
+def _match_drawn_boxes(
+    layout: Any,
+    top_cell: Any,
+    search_layers: list[tuple[int, int]],
+    point: Any,
+) -> list[tuple[int, int, int, int]]:
+    """Return the placed bboxes of every polygon on ``search_layers`` that
+    contains ``point``.
+
+    Issue #4283: tests the polygon itself (edges inclusive), not its bbox --
+    a notched/holed polygon whose bbox merely covers the pin must not become
+    the pin's PORT.
+    """
+    boxes: list[tuple[int, int, int, int]] = []
+    for search_layer in search_layers:
+        layer_index = layout.find_layer(*search_layer)
+        if layer_index is None:
+            continue
+        iterator = top_cell.begin_shapes_rec(layer_index)
+        while not iterator.at_end():
+            polygon = iterator.shape().polygon
+            if polygon is not None:
+                placed = polygon.transformed(iterator.trans())
+                bbox = placed.bbox()
+                if bbox.contains(point) and placed.inside(point):
+                    boxes.append((bbox.left, bbox.bottom, bbox.right, bbox.top))
+            iterator.next()
+    return boxes
+
+
 def _resolve_pins(
     *,
     layout: Any,
@@ -505,6 +491,8 @@ def _resolve_pins(
     for pin in pins:
         layer_tuple = pin["layer"]
         lef_layer = gds_to_lef.get(layer_tuple)
+        if lef_layer is None:
+            lef_layer = _sibling_lef_layer(gds_to_lef, layer_tuple, routing_layers)
         if lef_layer is None or lef_layer not in routing_layers:
             warnings.append(
                 f"pin '{pin['name']}': layer {layer_tuple[0]}/{layer_tuple[1]} does "
@@ -542,26 +530,12 @@ def _resolve_pins(
         y_dbu = round(pin["y"] / dbu_um)
         point = kdb.Point(x_dbu, y_dbu)
 
-        drawn_boxes: list[tuple[int, int, int, int]] = []
-        for search_layer in search_layers:
-            layer_index = layout.find_layer(*search_layer)
-            if layer_index is None:
-                continue
-            iterator = top_cell.begin_shapes_rec(layer_index)
-            while not iterator.at_end():
-                shape = iterator.shape()
-                polygon = shape.polygon
-                if polygon is not None:
-                    bbox = polygon.transformed(iterator.trans()).bbox()
-                    if bbox.contains(point):
-                        drawn_boxes.append(
-                            (bbox.left, bbox.bottom, bbox.right, bbox.top)
-                        )
-                iterator.next()
+        drawn_boxes = _match_drawn_boxes(layout, top_cell, search_layers, point)
 
         if drawn_boxes:
             geometry_source = "drawn"
             boxes_dbu = drawn_boxes
+            _warn_oversize_pin_rects(pin, drawn_boxes, dbu_um, warnings)
         else:
             geometry_source = "synthesized"
             boxes_dbu = [
@@ -615,6 +589,54 @@ def _resolve_pins(
 
     pins_report.sort(key=lambda p: p["name"])
     return pins_report, pin_boxes_by_layer
+
+
+def _sibling_lef_layer(
+    gds_to_lef: dict[tuple[int, int], str],
+    layer_tuple: tuple[int, int],
+    routing_layers: dict[str, dict[str, Any]],
+) -> str | None:
+    """Resolve a declared ``(layer, datatype)`` absent from the layer map
+    through other datatypes of the same GDS layer number that map to a
+    routing LEF layer (issue #4283): a pin labelled on a non-drawing purpose
+    (sky130 ``met3.label`` 70/5) still belongs to that metal. The drawing
+    datatype (20) is preferred, then the lowest datatype."""
+    candidates = sorted(
+        (datatype, lef_layer)
+        for (layer, datatype), lef_layer in gds_to_lef.items()
+        if layer == layer_tuple[0] and lef_layer in routing_layers
+    )
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0] != 20, item[0]))
+    return candidates[0][1]
+
+
+def _warn_oversize_pin_rects(
+    pin: dict[str, Any],
+    boxes_dbu: list[tuple[int, int, int, int]],
+    dbu_um: float,
+    warnings: list[str],
+) -> None:
+    """Warn (never drop) when a matched drawn rect exceeds the pin's
+    declared ``width_um``/``height_um`` (issue #4283)."""
+    width_um = pin.get("width_um")
+    height_um = pin.get("height_um")
+    if width_um is None and height_um is None:
+        return
+    tol_um = dbu_um
+    for x0, y0, x1, y1 in boxes_dbu:
+        w_um = (x1 - x0) * dbu_um
+        h_um = (y1 - y0) * dbu_um
+        if (width_um is not None and w_um > width_um + tol_um) or (
+            height_um is not None and h_um > height_um + tol_um
+        ):
+            warnings.append(
+                f"pin '{pin['name']}': PORT rectangle "
+                f"({round(x0 * dbu_um, 6)}, {round(y0 * dbu_um, 6)}, "
+                f"{round(x1 * dbu_um, 6)}, {round(y1 * dbu_um, 6)}) um is larger "
+                f"than the declared {width_um} x {height_um} um pin size"
+            )
 
 
 def _unroutable_pins(
@@ -686,6 +708,7 @@ def _resolve_obs(
     width_dbu: int,
     height_dbu: int,
     dbu_um: float,
+    obs_mode: str = "detailed",
 ) -> list[tuple[str, list[dict[str, Any]]]]:
     """Build the obstruction geometry: every shape drawn on a GDS layer that
     maps to a routing-type LEF layer, unioned per LEF layer, shifted into
@@ -726,6 +749,10 @@ def _resolve_obs(
         region.merge()
         region = region & kdb.Region(outline_box_dbu)
         region = region.transformed(translation)
+        if obs_mode == "coarse" and not region.is_empty():
+            # Issue #4283: one bounding rectangle per layer; the pin
+            # subtraction below keeps declared ports unblocked.
+            region = kdb.Region(region.bbox())
 
         pin_boxes = pin_boxes_by_layer.get(lef_layer)
         if pin_boxes:

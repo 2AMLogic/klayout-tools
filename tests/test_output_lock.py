@@ -414,6 +414,73 @@ def test_nested_sim_inherits_pex_style_ancestor_ownership(tmp_path, stub_ngspice
     assert report["status"] == "pass"
 
 
+def _deck_request_path(tmp_path: Path) -> Path:
+    from test_sim_decks import deck_request, write_request
+
+    return write_request(tmp_path, deck_request(tmp_path))
+
+
+def test_run_sim_deck_list_default_outdir_is_owned(tmp_path, holder_factory):
+    request = _deck_request_path(tmp_path)
+    outdir = tmp_path / ".klt" / "sim"
+    outdir.mkdir(parents=True)
+    (outdir / "sentinel.txt").write_text("owner data")
+    before = _snapshot(outdir)
+    holder = holder_factory(outdir)
+
+    with pytest.raises(output_lock.OutputDirLockedError):
+        sim.run_sim(str(request))
+    assert _snapshot(outdir) == before
+
+    holder.release()
+    assert sim.run_sim(str(request))["status"] == "pass"
+
+
+def test_run_sim_deck_list_explicit_outdir_contends_via_alias(tmp_path, holder_factory):
+    request = _deck_request_path(tmp_path)
+    real = tmp_path / "real"
+    alias = tmp_path / "alias"
+    real.mkdir()
+    alias.symlink_to(real, target_is_directory=True)
+    holder_factory(real)
+
+    with pytest.raises(output_lock.OutputDirLockedError):
+        sim.run_sim(str(request), artifacts_dir=str(alias))
+    assert _snapshot(real) == {}
+
+
+def test_run_sim_deck_list_nested_under_owned_ancestor_does_not_self_contend(
+    tmp_path,
+):
+    request = _deck_request_path(tmp_path)
+    work = tmp_path / "pexroot"
+    with output_lock.hold_output_dir(work):
+        report = sim.run_sim(str(request), artifacts_dir=str(work / "tb"))
+    assert report["status"] == "pass"
+
+
+def test_run_sim_deck_list_flag_errors_take_no_lock_and_create_nothing(
+    tmp_path, holder_factory
+):
+    request = _deck_request_path(tmp_path)
+    holder_factory(tmp_path / ".klt" / "sim")
+    with pytest.raises(sim.SimError, match="--budget-s"):
+        sim.run_sim(str(request), budget_s=5.0)
+    assert not (tmp_path / ".klt" / "sim" / "tt_27c").exists()
+
+
+def test_run_sim_deck_list_dry_run_takes_no_lock_and_creates_nothing(
+    tmp_path, holder_factory
+):
+    request = _deck_request_path(tmp_path)
+    outdir = tmp_path / ".klt" / "sim"
+    holder_factory(outdir)  # held by another process: a real run would contend
+    report = sim.run_sim(str(request), dry_run=True)
+    assert report["dry_run"] is True
+    assert report["status"] == "valid"
+    assert not (outdir / "tt_27c").exists()
+
+
 def test_run_pex_default_and_explicit_roots_are_owned(tmp_path, holder_factory):
     layout = tmp_path / "cell.gds"  # never read: ownership precedes all work
     holder = holder_factory(tmp_path / ".klt" / "pex")
@@ -433,9 +500,17 @@ def test_run_pex_without_contention_gets_past_the_lock(tmp_path):
         pex.run_pex(str(tmp_path / "cell.gds"), [], "deck")
 
 
+# Shape-valid (the stage root depends on the parsed request, #4231), but
+# otherwise unrunnable: the flow fails right after the lock is taken.
+_PNR_REQUEST = (
+    '{"netlist": "n.v", "hdl_toplevel": "top", "pdk": "sky130A",'
+    ' "floorplan": {}, "seed": 1}'
+)
+
+
 def test_run_place_and_route_owns_its_stage_root(tmp_path, holder_factory):
     request = tmp_path / "req.json"
-    request.write_text("{}")
+    request.write_text(_PNR_REQUEST)
     holder = holder_factory(tmp_path / ".klt" / "place-and-route")
     with pytest.raises(output_lock.OutputDirLockedError):
         place_and_route.run_place_and_route(str(request))
@@ -500,7 +575,103 @@ def test_cli_place_and_route_contention_is_exit_1_empty_stdout(
     tmp_path, holder_factory, capsys, fmt
 ):
     request = tmp_path / "req.json"
-    request.write_text("{}")
+    request.write_text(_PNR_REQUEST)
     holder = holder_factory(tmp_path / ".klt" / "place-and-route")
     assert main(["place-and-route", str(request), "--format", fmt]) == 1
     _assert_locked_envelope(capsys, "place-and-route", fmt, holder.proc.pid)
+
+
+# --------------------------------------------------------------------------- #
+# Inherited ownership for a child of ``klt pex --measure-command`` (#3291)
+# --------------------------------------------------------------------------- #
+
+_CHILD = textwrap.dedent(
+    """
+    import sys
+    from klayout_tools import output_lock
+
+    try:
+        with output_lock.hold_output_dir(sys.argv[1]):
+            print("OK")
+    except output_lock.OutputDirLockedError as exc:
+        print("LOCKED " + exc.relation)
+    """
+)
+
+
+def _child_result(target: Path, inherit: Path | None) -> str:
+    env = dict(os.environ)
+    env.pop(output_lock.INHERIT_ENV, None)
+    if inherit is not None:
+        env[output_lock.INHERIT_ENV] = str(inherit)
+    done = subprocess.run(
+        [sys.executable, "-c", _CHILD, str(target)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    return done.stdout.strip()
+
+
+def test_child_inherits_ownership_at_and_under_marked_root(tmp_path, holder_factory):
+    root = tmp_path / "out"
+    marked = root / "measure" / "schematic"
+    marked.mkdir(parents=True)
+    holder_factory(root)
+
+    assert _child_result(marked / ".klt" / "sim", marked) == "OK"
+    assert _child_result(marked, marked) == "OK"
+
+
+def test_child_without_marker_is_still_refused(tmp_path, holder_factory):
+    root = tmp_path / "out"
+    marked = root / "measure" / "schematic"
+    marked.mkdir(parents=True)
+    holder_factory(root)
+
+    assert _child_result(marked / ".klt" / "sim", None) == "LOCKED ancestor"
+
+
+def test_inheritance_never_covers_ancestor_sibling_or_unrelated(
+    tmp_path, holder_factory
+):
+    root = tmp_path / "out"
+    marked = root / "measure" / "schematic"
+    marked.mkdir(parents=True)
+    holder_factory(root)
+
+    assert _child_result(root, marked) == "LOCKED same"
+    assert _child_result(root / "measure" / "extracted", marked) == "LOCKED ancestor"
+    # An unrelated marker path covers nothing under the held root.
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    assert _child_result(marked / "x", other) == "LOCKED ancestor"
+
+
+def test_inheritance_resolves_symlink_alias_of_marked_root(tmp_path, holder_factory):
+    root = tmp_path / "out"
+    marked = root / "measure" / "schematic"
+    marked.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(marked, target_is_directory=True)
+    holder_factory(root)
+
+    assert _child_result(alias / "sim", marked) == "OK"
+    assert _child_result(marked / "sim", alias) == "OK"
+
+
+def test_relative_marker_is_ignored(tmp_path, holder_factory):
+    root = tmp_path / "out"
+    root.mkdir()
+    holder_factory(root)
+    env = dict(os.environ, **{output_lock.INHERIT_ENV: "out"})
+    done = subprocess.run(
+        [sys.executable, "-c", _CHILD, str(root)],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        check=True,
+    )
+    assert done.stdout.strip() == "LOCKED same"

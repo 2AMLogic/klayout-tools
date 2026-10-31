@@ -89,6 +89,7 @@ def layers_report(
     top: str | None = None,
     flattened: bool = False,
     include_text: bool = False,
+    deck: str | None = None,
 ) -> dict[str, Any]:
     """Enumerate the layers of a GDSII or OASIS stream.
 
@@ -187,12 +188,43 @@ def layers_report(
     - ``texts`` -- the distinct text strings that occur, each with its own
       flattened occurrence count, sorted by string for deterministic output.
 
+    ``deck`` (issue #3092, opt-in, default ``None`` -- output is
+    byte-identical to before this option existed) names a built-in deck whose
+    layer-name table fills each entry's ``name`` where the stream carries
+    none (a name the stream does carry is never overridden), and adds a
+    top-level ``deck: {"name", "content_hash"}`` pinning the table used (the
+    same ``sha256:`` hash ``klt deck rules`` reports). An unknown deck raises
+    :class:`LayersError`.
+
     Raises :class:`LayersError` if the file is missing, unreadable, not a
     recognisable layout stream, ``top`` names a cell absent from the stream,
-    or ``include_text=True`` is given without ``flattened=True``.
+    ``include_text=True`` is given without ``flattened=True``, or ``deck`` is
+    not a registered deck.
     """
     if include_text and not flattened:
         raise LayersError("--include-text requires --flattened")
+
+    deck_names: dict[tuple[int, int], str] = {}
+    deck_info: dict[str, Any] | None = None
+    if deck is not None:
+        from ._provenance import sha256_file
+        from .decks import (
+            UnknownDeckError,
+            deck_source_path,
+            get_deck,
+            get_layer_names,
+        )
+
+        try:
+            get_deck(deck)
+        except UnknownDeckError as exc:
+            raise LayersError(str(exc)) from exc
+        deck_names = get_layer_names(deck)
+        digest = sha256_file(deck_source_path(deck))
+        deck_info = {
+            "name": deck,
+            "content_hash": f"sha256:{digest}" if digest is not None else None,
+        }
 
     layout = load_layout(path, LayersError)
 
@@ -214,7 +246,7 @@ def layers_report(
             "layer": info.layer,
             "datatype": info.datatype,
             # LayerInfo.name is "" for unnamed layers -> normalise to None.
-            "name": info.name if info.name else None,
+            "name": info.name or deck_names.get((info.layer, info.datatype)) or None,
             "shapes": shape_count,
             "annotation": is_reserved_annotation_layer(info.layer, info.datatype),
         }
@@ -231,10 +263,13 @@ def layers_report(
 
     layers.sort(key=lambda entry: (entry["layer"], entry["datatype"]))
 
-    return {
+    report: dict[str, Any] = {
         "schema_version": 1,
         "file": path,
         "dbu_um": layout.dbu,
         "layer_count": len(layers),
         "layers": layers,
     }
+    if deck_info is not None:
+        report["deck"] = deck_info
+    return report

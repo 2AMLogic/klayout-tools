@@ -1,5 +1,5 @@
 """Opt-in hierarchical SPICE emission for ``klt extract --hierarchical-cells``
-(issue #2722, increment 1).
+(issue #2722 increment 1; nested selections, issue #2916).
 
 ``klt extract`` is flat by default: every deck layer is one flattened
 ``Region`` over the top cell, so the written SPICE carries a single
@@ -13,30 +13,36 @@ the flat extraction and before the ordinary ``NetlistSpiceWriter`` runs -- so
 the existing writer, model-binding delegate, net-name handling and digest path
 stay authoritative. Nothing here is reachable unless the option was given.
 
-Contract (increment 1)
-----------------------
+Contract
+--------
 
-* The caller names **non-nested** cell definitions. One ``.SUBCKT`` is
-  emitted per selected *cell definition*; every placement of it becomes one
-  ``X`` instance in the circuit that holds it (the top circuit).
+* The caller names cell definitions. One ``.SUBCKT`` is emitted per selected
+  *cell definition*; every placement of it becomes one ``X`` instance in the
+  circuit that holds it: the top circuit, or -- when the placement sits
+  inside a placement of another selected cell -- that cell's ``.SUBCKT``
+  (nested selections, issue #2916). A device belongs to exactly one circuit:
+  the innermost selected placement it is drawn in.
 * Devices are attributed to a *placement* positionally, by the same
   ``begin_instances_rec_touching`` query ``devices[].instance_path`` uses
   (issue #1666), but keyed on the placement's accumulated transform rather
   than only the cell name, so two sibling placements stay distinguishable.
 * A child net becomes a ``.SUBCKT`` pin when, in at least one placement, it
-  also carries a terminal of a device outside that placement or is a pin of
-  the flat deck. In placements where it is internal the pin is still wired
+  also carries a terminal of a device outside that placement's whole subtree
+  (nested placements included) or is a pin of the flat deck. In placements
+  where it is internal the pin is still wired
   (to a parent net nothing else touches), so every placement of one cell
   instantiates one identical definition.
 * Placements of one cell must be electrically identical (same devices at the
   same cell-local positions, same parameters, same net partition); anything
   else is an error rather than a silently merged or wrong definition.
 * Conservation is verified before the netlist is handed back: every
-  pre-transform device appears exactly once (per-class counts too).
+  pre-transform device appears exactly once (per-class counts too),
+  counting each definition once per instance path from the top, so it holds
+  across every nesting level.
 
-Deferred to issue #2916: nested selections, ``--parasitics``,
-``--subcircuit`` and ``--abstract-cells`` combinations. All are rejected with
-an error naming the combination.
+``--parasitics``, ``--subcircuit`` and ``--abstract-cells`` stay rejected
+with an error naming the combination and the reason (decision recorded in
+issue #2916; see :func:`reject_unsupported_combinations`).
 """
 
 from __future__ import annotations
@@ -68,6 +74,25 @@ class HierarchyError(Exception):
     of ``extract``."""
 
 
+_COMBINATION_REASONS = {
+    "--parasitics": (
+        "parasitic elements are extracted on the flat deck against flat "
+        "nets, and a net that crosses a .SUBCKT boundary has no single "
+        "owning circuit, so splitting them across definitions would drop or "
+        "double count boundary and coupling elements"
+    ),
+    "--subcircuit": (
+        "--subcircuit writes a second, flat slice of one cell from the flat "
+        "deck, which would compete with the hierarchy this option emits"
+    ),
+    "--abstract-cells": (
+        "abstracted cells are erased before extraction, so the placements "
+        "this option attributes devices to no longer exist"
+    ),
+}
+_COMBINATION_REASONS["--abstract-cell-lef"] = _COMBINATION_REASONS["--abstract-cells"]
+
+
 def reject_unsupported_combinations(
     *,
     parasitics: bool,
@@ -75,7 +100,8 @@ def reject_unsupported_combinations(
     abstract_cell_patterns: tuple[str, ...],
     abstract_cell_lef_paths: tuple[str, ...] = (),
 ) -> None:
-    """Raise for every option combination increment 1 does not support."""
+    """Raise for every option combination that stays unsupported, naming the
+    combination and why (decision recorded in issue #2916)."""
     combos = (
         ("--parasitics", parasitics),
         ("--subcircuit", subcircuit_cell is not None),
@@ -85,10 +111,9 @@ def reject_unsupported_combinations(
     for flag, given in combos:
         if given:
             raise HierarchyError(
-                f"--hierarchical-cells cannot be combined with {flag} yet -- "
-                "boundary/parasitic/abstraction ownership across a "
-                "hierarchical deck is not defined in this increment (tracked "
-                f"in {FOLLOW_UP_ISSUE}). Run the two modes as separate "
+                f"--hierarchical-cells cannot be combined with {flag}: "
+                f"{_COMBINATION_REASONS[flag]} (decision recorded in "
+                f"{FOLLOW_UP_ISSUE}). Run the two modes as separate "
                 "extractions"
             )
 
@@ -96,12 +121,11 @@ def reject_unsupported_combinations(
 def validate_selection(
     layout: kdb.Layout, top_cell: kdb.Cell, names: tuple[str, ...]
 ) -> None:
-    """Reject, before anything is written, a selection that is empty, names an
-    absent / top / unreachable cell, or contains a nested pair."""
+    """Reject, before anything is written, a selection that is empty or names
+    an absent / top / unreachable cell. Nested pairs are supported."""
     if not names:
         raise HierarchyError("--hierarchical-cells was given no cell name")
     top_called = {top_cell.cell_index(), *top_cell.called_cells()}
-    cells: dict[str, kdb.Cell] = {}
     for name in names:
         cell = layout.cell(name)
         if cell is None:
@@ -120,17 +144,6 @@ def validate_selection(
                 f"under top cell {top_cell.name!r} -- pass the name of a "
                 "cell instantiated in this layout's hierarchy"
             )
-        cells[name] = cell
-    ordered = sorted(cells)
-    for outer in ordered:
-        called = set(cells[outer].called_cells())
-        for inner in ordered:
-            if inner != outer and cells[inner].cell_index() in called:
-                raise HierarchyError(
-                    f"--hierarchical-cells {outer!r} contains selected cell "
-                    f"{inner!r} -- nested selections are not supported yet "
-                    f"(tracked in {FOLLOW_UP_ISSUE}); select only one of them"
-                )
 
 
 @dataclass(frozen=True)
@@ -148,9 +161,10 @@ def device_placements(
     circuit: kdb.Circuit,
     selected: frozenset[str],
     dbu: float,
-) -> dict[int, Placement]:
-    """``Device.id()`` -> the :class:`Placement` of a selected cell the device
-    was drawn in. Devices outside every selected cell are absent.
+) -> dict[int, tuple[Placement, ...]]:
+    """``Device.id()`` -> the chain of :class:`Placement` s of selected cells
+    the device was drawn in, outermost first (several entries when selected
+    cells nest, issue #2916). Devices outside every selected cell are absent.
 
     Ties between overlapping candidate chains are broken exactly as
     ``extract._instance_path_for_point`` does (deepest chain, then smallest
@@ -159,7 +173,7 @@ def device_placements(
     """
     import klayout.db as kdb
 
-    result: dict[int, Placement] = {}
+    result: dict[int, tuple[Placement, ...]] = {}
     for device in circuit.each_device():
         disp = device.trans.disp
         point = kdb.DPoint(disp.x, disp.y)
@@ -183,6 +197,7 @@ def device_placements(
             iterator.next()
 
         cumulative = kdb.DCplxTrans()
+        chain: list[Placement] = []
         for element in best_elements:
             step = element.specific_cplx_trans()
             cumulative = cumulative * kdb.DCplxTrans(
@@ -195,18 +210,21 @@ def device_placements(
             name = element.inst().cell.name
             if name in selected:
                 local = cumulative.inverted() * point
-                result[device.id()] = Placement(
-                    cell=name,
-                    key=(
-                        round(cumulative.disp.x * 1000),
-                        round(cumulative.disp.y * 1000),
-                        round(cumulative.angle * 1000),
-                        1 if cumulative.is_mirror() else 0,
-                        round(cumulative.mag * 1e6),
-                    ),
-                    local=(round(local.x * 1000), round(local.y * 1000)),
+                chain.append(
+                    Placement(
+                        cell=name,
+                        key=(
+                            round(cumulative.disp.x * 1000),
+                            round(cumulative.disp.y * 1000),
+                            round(cumulative.angle * 1000),
+                            1 if cumulative.is_mirror() else 0,
+                            round(cumulative.mag * 1e6),
+                        ),
+                        local=(round(local.x * 1000), round(local.y * 1000)),
+                    )
                 )
-                break
+        if chain:
+            result[device.id()] = tuple(chain)
     return result
 
 
@@ -235,12 +253,27 @@ def _parameters(device: kdb.Device) -> dict[str, float]:
 class _PlacementView:
     """One placement's devices and the nets they touch, in cell-local terms."""
 
-    __slots__ = ("cell", "device_keys", "devices", "key", "nets_by_sig")
+    __slots__ = (
+        "cell",
+        "children",
+        "device_keys",
+        "devices",
+        "direct_keys",
+        "key",
+        "nets_by_sig",
+        "parent",
+    )
 
     def __init__(self, cell: str, key: tuple[float, ...]) -> None:
         self.cell = cell
         self.key = key
-        #: local key -> device
+        #: the enclosing selected placement, ``None`` for a top-level one
+        self.parent: _PlacementView | None = None
+        #: selected placements directly inside this one
+        self.children: list[_PlacementView] = []
+        #: local keys of devices drawn in this placement but in no nested one
+        self.direct_keys: set[tuple[str, int, int]] = set()
+        #: local key -> device (the whole subtree, nested placements included)
         self.devices: dict[tuple[str, int, int], kdb.Device] = {}
         self.device_keys: list[tuple[str, int, int]] = []
         #: signature -> (net index, is boundary)
@@ -260,7 +293,7 @@ class _InstancePlan:
 def build_hierarchy(
     netlist: kdb.Netlist,
     top_circuit: kdb.Circuit,
-    placements: dict[int, Placement],
+    placements: dict[int, tuple[Placement, ...]],
 ) -> dict[str, Any]:
     """Rebuild ``netlist`` in place into one ``.SUBCKT`` per selected cell
     plus the top circuit instantiating them, and return the response's
@@ -289,27 +322,36 @@ def build_hierarchy(
     for (cell, _key), view in sorted(views.items()):
         by_cell.setdefault(cell, []).append(view)
     taken_names = {circuit.name for circuit in netlist.each_circuit()}
-    plan: list[_InstancePlan] = []
-    cell_reports: list[dict[str, Any]] = []
-    for cell in sorted(by_cell):
+    for cell in by_cell:
         if cell in taken_names:
             raise HierarchyError(
                 f"--hierarchical-cells {cell!r}: a circuit with that name "
                 "already exists in the extracted netlist"
             )
-        taken_names.add(cell)
+    for cell in sorted(by_cell):
         group = by_cell[cell]
         _require_identical(cell, group[0], group[1:])
-        child, pin_sigs = _build_child(netlist, cell, group)
+
+    # Definitions are built innermost first so a parent can instantiate them.
+    built: dict[str, tuple[kdb.Circuit, list[frozenset]]] = {}
+    for cell in _innermost_first(by_cell):
+        built[cell] = _build_child(netlist, cell, by_cell[cell], built)
+    cell_reports = [
+        _cell_report(cell, built[cell][0], by_cell[cell]) for cell in sorted(by_cell)
+    ]
+
+    plan: list[_InstancePlan] = []
+    for cell in sorted(by_cell):
+        child, pin_sigs = built[cell]
+        top_level = [view for view in by_cell[cell] if view.parent is None]
         plan.extend(
             _InstancePlan(child, f"{cell}_{index}", view, pin_sigs)
-            for index, view in enumerate(group, start=1)
+            for index, view in enumerate(top_level, start=1)
         )
-        cell_reports.append(_cell_report(cell, child, group))
 
     _wire_parent(top_circuit, nets, devices, views, plan)
-    _check_conservation(pre_class_counts, top_circuit, plan)
-    _check_instances(top_circuit, plan)
+    _check_conservation(pre_class_counts, top_circuit)
+    _check_instances(netlist, top_circuit, plan)
     return {
         "cells": cell_reports,
         "top_device_count": sum(1 for _ in top_circuit.each_device()),
@@ -321,51 +363,96 @@ def build_hierarchy(
 def _cell_report(
     cell: str, child: kdb.Circuit, group: list[_PlacementView]
 ) -> dict[str, Any]:
-    return {
+    top_level = sum(1 for view in group if view.parent is None)
+    report: dict[str, Any] = {
         "cell": cell,
         "circuit": child.name,
         "placements": len(group),
         "device_count": sum(1 for _ in child.each_device()),
         "pins": [pin.name() for pin in child.each_pin()],
-        "instances": [f"X{cell}_{index}" for index in range(1, len(group) + 1)],
+        "instances": [f"X{cell}_{index}" for index in range(1, top_level + 1)],
     }
+    # Nested selections (issue #2916): the instances this definition holds,
+    # grouped by the definition they instantiate. Absent for a leaf cell, so
+    # a non-nested run's JSON is unchanged.
+    nested: dict[str, list[str]] = {}
+    for sub in child.each_subcircuit():
+        nested.setdefault(sub.circuit_ref().name, []).append(f"X{sub.name}")
+    if nested:
+        report["children"] = [
+            {"cell": name, "instances": nested[name]} for name in sorted(nested)
+        ]
+    return report
+
+
+def _innermost_first(by_cell: dict[str, list[_PlacementView]]) -> list[str]:
+    """Selected cells ordered so every cell follows the cells nested in it."""
+    inside: dict[str, set[str]] = {
+        cell: {child.cell for view in group for child in view.children}
+        for cell, group in by_cell.items()
+    }
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def visit(cell: str) -> None:
+        if cell in seen:
+            return
+        seen.add(cell)
+        for nested in sorted(inside[cell]):
+            visit(nested)
+        ordered.append(cell)
+
+    for cell in sorted(by_cell):
+        visit(cell)
+    return ordered
 
 
 def _group_by_placement(
-    devices: list[kdb.Device], placements: dict[int, Placement]
+    devices: list[kdb.Device], placements: dict[int, tuple[Placement, ...]]
 ) -> dict[tuple[str, tuple[float, ...]], _PlacementView]:
     """Group the selected devices by ``(cell, placement key)`` and index each
-    by its cell-local key (class + position)."""
+    by its cell-local key (class + position). A device is indexed in every
+    placement of its chain (so a view covers its nested placements too) and
+    marked *direct* in the innermost one only."""
     views: dict[tuple[str, tuple[float, ...]], _PlacementView] = {}
     for device in devices:
-        placement = placements.get(device.id())
-        if placement is None:
+        chain = placements.get(device.id())
+        if not chain:
             continue
-        view = views.setdefault(
-            (placement.cell, placement.key),
-            _PlacementView(placement.cell, placement.key),
-        )
-        local_key = (device.device_class().name, *placement.local)
-        if local_key in view.devices:
-            raise HierarchyError(
-                f"--hierarchical-cells {placement.cell!r}: two recognized "
-                f"devices of class {local_key[0]!r} share cell-local position "
-                f"{placement.local} -- the placement's devices cannot be told "
-                "apart, so a definition would be ambiguous"
+        for depth, placement in enumerate(chain):
+            view = views.setdefault(
+                (placement.cell, placement.key),
+                _PlacementView(placement.cell, placement.key),
             )
-        view.devices[local_key] = device
+            if depth:
+                outer = chain[depth - 1]
+                view.parent = views[(outer.cell, outer.key)]
+            local_key = (device.device_class().name, *placement.local)
+            if local_key in view.devices:
+                raise HierarchyError(
+                    f"--hierarchical-cells {placement.cell!r}: two recognized "
+                    f"devices of class {local_key[0]!r} share cell-local "
+                    f"position {placement.local} -- the placement's devices "
+                    "cannot be told apart, so a definition would be ambiguous"
+                )
+            view.devices[local_key] = device
+            if depth == len(chain) - 1:
+                view.direct_keys.add(local_key)
+    for _key, view in sorted(views.items()):
+        if view.parent is not None:
+            view.parent.children.append(view)
     return views
 
 
 def _annotate_views(
     top_circuit: kdb.Circuit,
     devices: list[kdb.Device],
-    placements: dict[int, Placement],
+    placements: dict[int, tuple[Placement, ...]],
     views: dict[tuple[str, tuple[float, ...]], _PlacementView],
 ) -> None:
     """Fill each view's net signatures: net -> the cell-local ``(device key,
     terminal)`` set on it, flagged boundary when it also touches a device
-    outside the placement or is a pin of the flat deck."""
+    outside the placement's subtree or is a pin of the flat deck."""
     pin_nets = {
         int(net.property(_NET_INDEX_PROPERTY))
         for pin in top_circuit.each_pin()
@@ -380,8 +467,8 @@ def _annotate_views(
                 terms_by_net.setdefault(net_index, set()).add((local_key, terminal_id))
         outside: set[int] = set()
         for device in devices:
-            owner = placements.get(device.id())
-            if owner is not None and (owner.cell, owner.key) == (view.cell, view.key):
+            chain = placements.get(device.id(), ())
+            if any((p.cell, p.key) == (view.cell, view.key) for p in chain):
                 continue
             outside.update(
                 net_index
@@ -427,16 +514,25 @@ def _wire_parent(
 
 
 def _check_conservation(
-    pre_class_counts: dict[str, int],
-    top_circuit: kdb.Circuit,
-    plan: list[_InstancePlan],
+    pre_class_counts: dict[str, int], top_circuit: kdb.Circuit
 ) -> None:
-    """Every pre-transform device appears exactly once: the top's remaining
-    devices plus each child's devices once per instance, per device class."""
-    post_counts = _class_counts(list(top_circuit.each_device()))
-    for item in plan:
-        for name, count in _class_counts(list(item.child.each_device())).items():
-            post_counts[name] = post_counts.get(name, 0) + count
+    """Every pre-transform device appears exactly once: the top's own devices
+    plus, recursively, each definition's devices once per instance path from
+    the top (so the check spans every nesting level), per device class."""
+    memo: dict[str, dict[str, int]] = {}
+
+    def counts_of(circuit: kdb.Circuit) -> dict[str, int]:
+        cached = memo.get(circuit.name)
+        if cached is not None:
+            return cached
+        total = _class_counts(list(circuit.each_device()))
+        for sub in circuit.each_subcircuit():
+            for name, count in counts_of(sub.circuit_ref()).items():
+                total[name] = total.get(name, 0) + count
+        memo[circuit.name] = total
+        return total
+
+    post_counts = counts_of(top_circuit)
     if post_counts != pre_class_counts:
         raise HierarchyError(
             "--hierarchical-cells conservation check failed -- the "
@@ -447,8 +543,11 @@ def _check_conservation(
         )
 
 
-def _check_instances(top_circuit: kdb.Circuit, plan: list[_InstancePlan]) -> None:
-    """Every instance is bound to its definition with every pin connected."""
+def _check_instances(
+    netlist: kdb.Netlist, top_circuit: kdb.Circuit, plan: list[_InstancePlan]
+) -> None:
+    """Every top-level instance is bound to its definition, and every instance
+    in every circuit has every pin connected."""
     subs = {sub.name: sub for sub in top_circuit.each_subcircuit()}
     for item in plan:
         sub = subs.get(item.name)
@@ -457,12 +556,14 @@ def _check_instances(top_circuit: kdb.Circuit, plan: list[_InstancePlan]) -> Non
                 f"--hierarchical-cells instance {item.name!r} is not bound to "
                 f"circuit {item.child.name!r}"
             )
-        for pin in item.child.each_pin():
-            if sub.net_for_pin(pin.id()) is None:
-                raise HierarchyError(
-                    f"--hierarchical-cells instance {item.name!r}: pin "
-                    f"{pin.name()!r} is not connected to a parent net"
-                )
+    for circuit in netlist.each_circuit():
+        for sub in circuit.each_subcircuit():
+            for pin in sub.circuit_ref().each_pin():
+                if sub.net_for_pin(pin.id()) is None:
+                    raise HierarchyError(
+                        f"--hierarchical-cells instance {sub.name!r}: pin "
+                        f"{pin.name()!r} is not connected to a parent net"
+                    )
 
 
 def _class_counts(devices: list[kdb.Device]) -> dict[str, int]:
@@ -480,6 +581,10 @@ def _first_difference(ref: _PlacementView, other: _PlacementView) -> str | None:
             f"{len(other.device_keys)} device(s) vs {len(ref.device_keys)} "
             "at different cell-local positions/classes"
         )
+    if other.direct_keys != ref.direct_keys or sorted(
+        child.cell for child in other.children
+    ) != sorted(child.cell for child in ref.children):
+        return "different split between its own devices and nested selected cells"
     if set(other.nets_by_sig) != set(ref.nets_by_sig):
         return "different internal connectivity (net partition)"
     for key in ref.device_keys:
@@ -507,8 +612,7 @@ def _require_identical(
             raise HierarchyError(
                 f"--hierarchical-cells {cell!r}: placements are not "
                 f"electrically identical ({problem}) -- one shared .SUBCKT "
-                "definition would be wrong for some of them. Nested/varied "
-                f"shapes are tracked in {FOLLOW_UP_ISSUE}"
+                "definition would be wrong for some of them"
             )
 
 
@@ -523,10 +627,14 @@ def _net_label(group: list[_PlacementView], sig: frozenset) -> str:
 
 
 def _build_child(
-    netlist: kdb.Netlist, cell: str, group: list[_PlacementView]
+    netlist: kdb.Netlist,
+    cell: str,
+    group: list[_PlacementView],
+    built: dict[str, tuple[kdb.Circuit, list[frozenset]]] | None = None,
 ) -> tuple[kdb.Circuit, list[frozenset]]:
     """Create the ``.SUBCKT`` for ``cell`` from its first placement. Returns
-    the circuit and its pin signatures in pin order."""
+    the circuit and its pin signatures in pin order. ``built`` holds the
+    already-created definitions of the cells nested in ``cell``."""
     import klayout.db as kdb
 
     ref = group[0]
@@ -557,7 +665,20 @@ def _build_child(
 
     sig_of_terminal = {terminal: sig for sig in child_nets for terminal in sig}
     for key in ref.device_keys:
-        _copy_device(child, ref.devices[key], key, sig_of_terminal, child_nets)
+        if key in ref.direct_keys:
+            _copy_device(child, ref.devices[key], key, sig_of_terminal, child_nets)
+
+    # Nested selected placements become instances of their own definitions,
+    # wired by the flat net each of their pins resolves to in this placement.
+    sig_of_net = {net_index: sig for sig, (net_index, _b) in ref.nets_by_sig.items()}
+    instance_counts: dict[str, int] = {}
+    for inner in ref.children:
+        inner_circuit, inner_pin_sigs = (built or {})[inner.cell]
+        index = instance_counts[inner.cell] = instance_counts.get(inner.cell, 0) + 1
+        sub = child.create_subcircuit(inner_circuit, f"{inner.cell}_{index}")
+        for pin, pin_sig in zip(inner_circuit.each_pin(), inner_pin_sigs, strict=True):
+            net_index = inner.nets_by_sig[pin_sig][0]
+            sub.connect_pin(pin.id(), child_nets[sig_of_net[net_index]])
     return child, pin_sigs
 
 

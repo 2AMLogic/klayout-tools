@@ -36,7 +36,7 @@ import shutil
 
 import pytest
 
-from golden_deck.generate_golden_deck import ALLOWED_CHECKS
+from golden_deck.generate_golden_deck import ALLOWED_CHECKS, is_curated_topology_rule
 from golden_deck.manifest import DECK_NAMES, load_manifest, write_layout
 from klayout_tools import pdk
 from klayout_tools.decks import get_deck
@@ -87,7 +87,12 @@ def test_golden_manifest_covers_every_width_space_rule(deck_name: str) -> None:
     no real negative control."""
     manifest = load_manifest(deck_name)
     deck = get_deck(deck_name)
-    expected_ids = {rule.id for rule in deck if rule.check in ALLOWED_CHECKS[deck_name]}
+    expected_ids = {
+        rule.id
+        for rule in deck
+        if rule.check in ALLOWED_CHECKS[deck_name]
+        and not is_curated_topology_rule(rule)
+    }
 
     assert set(manifest) == expected_ids, (
         f"{deck_name}: golden-pair manifest does not exactly match the "
@@ -110,7 +115,12 @@ def test_piloted_rules_have_provenance_populated(deck_name: str) -> None:
     this deck's own dotted `DrcRule.id`, confirming the two identify
     different things."""
     deck = get_deck(deck_name)
-    piloted = [rule for rule in deck if rule.check in ALLOWED_CHECKS[deck_name]]
+    piloted = [
+        rule
+        for rule in deck
+        if rule.check in ALLOWED_CHECKS[deck_name]
+        and not is_curated_topology_rule(rule)
+    ]
     assert piloted, f"{deck_name}: no piloted rules found"
 
     for rule in piloted:

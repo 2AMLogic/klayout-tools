@@ -226,7 +226,7 @@ def test_non_directive_lines_are_left_byte_identical(tmp_path):
     netlist = tmp_path / "tb.spice"
     netlist.write_bytes(
         b"* this deck will .include the dut\r\n"
-        b".lib /pdk/sky130.lib.spice tt\r\n"
+        b".lib $MODELS/sky130.lib.spice tt\r\n"
         b'.include "dut.spice"\r\n'
         b"R1 a b 1k\r\n"
     )
@@ -236,7 +236,7 @@ def test_non_directive_lines_are_left_byte_identical(tmp_path):
     content = staged.netlist.content
     assert content is not None
     assert "* this deck will .include the dut\r\n" in content
-    assert ".lib /pdk/sky130.lib.spice tt\r\n" in content
+    assert ".lib $MODELS/sky130.lib.spice tt\r\n" in content
     assert '.include "dut.spice"\r\n' in content
     assert content.endswith("R1 a b 1k\r\n")
 
@@ -350,35 +350,62 @@ def test_pdk_rooted_includes_are_left_verbatim(tmp_path):
     assert str(models) in staged.netlist.content
 
 
-def test_host_resolved_roots_reads_the_request_then_the_environment(monkeypatch):
+def test_host_resolved_roots_is_only_the_forwarded_request_root(monkeypatch):
+    """The client's own `$PDK_ROOT` is not forwarded to the runner, so it is
+    not a verbatim root (#3770)."""
     monkeypatch.setenv("PDK_ROOT", "/env/pdks")
     assert st.host_resolved_roots({"models": {"pdk_root": "/req/pdks"}}) == (
         "/req/pdks",
-        "/env/pdks",
     )
-    assert st.host_resolved_roots({}) == ("/env/pdks",)
+    assert st.host_resolved_roots({}) == ()
+    assert st.client_pdk_root() == "/env/pdks"
     monkeypatch.delenv("PDK_ROOT")
     assert st.host_resolved_roots({}) == ()
+    assert st.client_pdk_root() is None
 
 
-def test_stage_sim_netlist_reraises_as_a_sim_error_naming_the_backend(tmp_path):
-    """Both backends surface a staging failure as `klt sim`'s own documented
-    "could not run" error (exit 1), never as a submitted job that comes back
-    undiagnosable."""
-    from klayout_tools.sim import SimError
+def test_client_pdk_root_include_is_rewritten_to_env_form(tmp_path, monkeypatch):
+    """An absolute include under the submitter's own `$PDK_ROOT` (not
+    forwarded) becomes `$PDK_ROOT/<rel>`, which the runner expands (#3770)."""
+    pdk_root = tmp_path / "pdks"
+    models = _write(pdk_root / "sky130A", "design.ngspice", "* models\n")
+    monkeypatch.setenv("PDK_ROOT", str(pdk_root))
+    netlist = _write(tmp_path, "tb.spice", f'.include "{models}"\nR1 a b 1k\n')
 
-    netlist = _write(tmp_path, "tb.spice", '.include "missing.spice"\n')
+    staged = _stage(netlist)
 
-    with pytest.raises(SimError) as excinfo:
-        st.stage_sim_netlist(
-            {"models": {"pdk": "sky130A"}},
-            str(netlist),
-            netlist_staged_name="netlist.cir",
-            reserved_names=("request.json",),
-            backend="batch",
-        )
-    assert "backend 'batch'" in str(excinfo.value)
-    assert "missing.spice" in str(excinfo.value)
+    assert staged.includes == ()
+    assert staged.host_resolved == ("$PDK_ROOT/sky130A/design.ngspice",)
+    assert staged.host_resolved_detail == (
+        ("$PDK_ROOT/sky130A/design.ngspice", "env_var"),
+    )
+    assert staged.netlist.content is not None
+    assert '.include "$PDK_ROOT/sky130A/design.ngspice"' in staged.netlist.content
+    assert str(pdk_root) not in staged.netlist.content
+
+
+def test_forwarded_root_wins_over_client_pdk_root(tmp_path, monkeypatch):
+    """Under both roots, the forwarded `models.pdk_root` keeps it verbatim."""
+    pdk_root = tmp_path / "pdks"
+    models = _write(pdk_root / "sky130A", "models.spice", "* models\n")
+    monkeypatch.setenv("PDK_ROOT", str(pdk_root))
+    netlist = _write(tmp_path, "tb.spice", f'.include "{models}"\n')
+
+    staged = _stage(netlist, roots=(str(pdk_root),))
+
+    assert staged.host_resolved == (str(models),)
+    assert staged.host_resolved_detail == ((str(models), "pdk_root"),)
+
+
+def test_include_outside_client_pdk_root_is_still_staged(tmp_path, monkeypatch):
+    monkeypatch.setenv("PDK_ROOT", str(tmp_path / "pdks"))
+    _write(tmp_path, "dut.spice", "* dut\n")
+    netlist = _write(tmp_path, "tb.spice", '.include "dut.spice"\n')
+
+    staged = _stage(netlist)
+
+    assert [item.staged_name for item in staged.includes] == ["dut.spice"]
+    assert staged.host_resolved == ()
 
 
 # --------------------------------------------------------------------------- #
@@ -395,6 +422,20 @@ def _job(request, netlist_path, request_dir, **overrides):
     )
     fields.update(overrides)
     return st.stage_sim_job(request, str(netlist_path), **fields)
+
+
+def test_stage_sim_job_reraises_as_a_sim_error_naming_the_backend(tmp_path):
+    """Both backends surface a staging failure as `klt sim`'s own documented
+    "could not run" error (exit 1), never as a submitted job that comes back
+    undiagnosable -- with model staging off (the default)."""
+    from klayout_tools.sim import SimError
+
+    netlist = _write(tmp_path, "tb.spice", '.include "missing.spice"\n')
+
+    with pytest.raises(SimError) as excinfo:
+        _job({"models": {"pdk": "sky130A"}}, netlist, tmp_path)
+    assert "backend 'batch'" in str(excinfo.value)
+    assert "missing.spice" in str(excinfo.value)
 
 
 def _model_request(**overrides):
@@ -576,6 +617,34 @@ def test_section_libraries_and_explicit_points_share_staged_names(tmp_path):
     ]
     fields = {asset.name: asset.field for asset in job.model_assets}
     assert fields["mos.lib"] == "corners.process[0].sections[0].lib"
+
+
+def test_runner_resolved_osdi_is_not_staged_and_is_forwarded_in_order(tmp_path):
+    """Issue #3819: image-baked entries ride along verbatim, in declared order,
+    around the one host-local binary that is staged."""
+    netlist = _model_tree(tmp_path)
+    local = tmp_path / "local.osdi"
+    local.write_bytes(b"\x7fELFlocal")
+    request = _model_request(
+        options={
+            "stage_model_inputs": True,
+            "osdi_preload": [
+                "$PDK_ROOT/ihp/a.osdi",
+                "local.osdi",
+                "${PDK_ROOT}/ihp/b.osdi",
+            ],
+        }
+    )
+
+    job = _job(request, netlist, tmp_path)
+
+    assert job.request["options"]["osdi_preload"] == [
+        "$PDK_ROOT/ihp/a.osdi",
+        "local.osdi",
+        "${PDK_ROOT}/ihp/b.osdi",
+    ]
+    osdi_assets = [a for a in job.model_assets if a.kind == "osdi"]
+    assert [a.field for a in osdi_assets] == ["options.osdi_preload[1]"]
 
 
 def test_osdi_binaries_keep_bytes_order_and_get_collision_safe_names(tmp_path):
@@ -814,3 +883,73 @@ def test_netlist_closure_missing_include_raises(tmp_path):
     (tmp_path / "top.spice").write_text(".include nope.spice\n")
     with pytest.raises(st.IncludeStagingError):
         st.netlist_closure({}, str(tmp_path / "top.spice"))
+
+
+def test_tilde_and_quoted_env_targets_still_host_resolved_off_host(tmp_path):
+    """Issue #2926: expansion happens on the executing host only; the
+    off-host stager leaves `$VAR` includes (quoted or `.inc`) verbatim."""
+    netlist = _write(
+        tmp_path, "tb.spice", ".inc ${INCDIR}/a.sp\n.include '$INCDIR/b.sp'\n"
+    )
+
+    staged = _stage(netlist)
+
+    assert staged.includes == ()
+    assert staged.netlist.local_path == str(netlist)
+    assert set(staged.host_resolved) == {"${INCDIR}/a.sp", "$INCDIR/b.sp"}
+
+
+def test_netlist_lib_under_client_pdk_root_is_rewritten(tmp_path, monkeypatch):
+    """`.lib <abs under $PDK_ROOT> <section>` -> `$PDK_ROOT/<rel> <section>` (#4097)."""
+    pdk_root = tmp_path / "pdks"
+    models = _write(pdk_root / "sky130A", "sm141064.ngspice", "* models\n")
+    monkeypatch.setenv("PDK_ROOT", str(pdk_root))
+    netlist = _write(tmp_path, "tb.spice", f".lib {models} efuse\n.lib tt\nR1 a b 1k\n")
+
+    staged = _stage(netlist)
+
+    assert staged.netlist.content is not None
+    assert '.lib "$PDK_ROOT/sky130A/sm141064.ngspice" efuse' in staged.netlist.content
+    assert "\n.lib tt\n" in staged.netlist.content
+    assert str(pdk_root) not in staged.netlist.content
+
+
+def test_netlist_lib_outside_pdk_root_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("PDK_ROOT", str(tmp_path / "pdks"))
+    models = _write(tmp_path / "elsewhere", "m.lib", "* models\n")
+    netlist = _write(tmp_path, "tb.spice", f'.lib "{models}" tt\n')
+
+    with pytest.raises(st.IncludeStagingError, match="`.lib` target"):
+        _stage(netlist)
+
+
+def test_netlist_lib_one_token_and_other_env_forms_stay_verbatim(tmp_path, monkeypatch):
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    netlist = _write(tmp_path, "tb.spice", ".lib tt\n.lib $MODELS/x.lib tt\n")
+
+    staged = _stage(netlist)
+
+    assert staged.netlist.content is None
+
+
+@pytest.mark.parametrize(
+    "target", ["$PDK_ROOT/x.lib", "${PDK_ROOT}/x.lib", '"$PDK_ROOT/x.lib"']
+)
+def test_netlist_lib_literal_pdk_root_is_refused(tmp_path, monkeypatch, target):
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    netlist = _write(tmp_path, "tb.spice", f".lib {target} tt\n")
+
+    with pytest.raises(st.IncludeStagingError, match="names `\\$PDK_ROOT` literally"):
+        _stage(netlist)
+
+
+def test_netlist_lib_refusal_text_does_not_suggest_literal_pdk_root(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PDK_ROOT", str(tmp_path / "pdks"))
+    models = _write(tmp_path / "elsewhere", "m.lib", "* models\n")
+    netlist = _write(tmp_path, "tb.spice", f'.lib "{models}" tt\n')
+
+    with pytest.raises(st.IncludeStagingError) as exc:
+        _stage(netlist)
+    assert "e.g. `$PDK_ROOT/...`" not in str(exc.value)

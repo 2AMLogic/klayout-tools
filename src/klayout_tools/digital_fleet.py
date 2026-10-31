@@ -74,6 +74,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import remote_fleet, remote_transport
+from ._jsonnum import is_number
 from .remote_launcher import (
     RemoteLauncher,
     RemoteLaunchError,
@@ -902,7 +903,7 @@ def _is_scoreable(result: CandidateResult) -> bool:
     if result.status != "ok" or not isinstance(result.objective, dict):
         return False
     value = result.objective.get("value")
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return is_number(value)
 
 
 def rank_candidates(results: Sequence[CandidateResult]) -> list[CandidateResult]:

@@ -1,0 +1,82 @@
+name: Refresh canary blocks
+
+# Issue #4565: `blocks/canaries.json` is the single source of truth for which
+# public canary repos the klayout-tools.org gallery presents. This job re-runs
+# `scripts/ingest-canary.py --manifest` when someone triggers it (Actions ->
+# "Refresh canary blocks" -> Run workflow; there is no schedule) and, if
+# `blocks/` changed, opens a PR with the diff. It never pushes to main: content drift is
+# reviewed, and `deploy-site.yml` redeploys when that PR merges.
+#
+# Ingestion is fail-closed on repo visibility (`assert_public_repo()`), so a
+# manifest entry that is not public is reported and skipped, and the job
+# fails after opening any PR for the entries that did succeed.
+#
+# Content rules: blocks/README.md "Adding a canary / what the site shows".
+# A PR opened with the default GITHUB_TOKEN does not itself trigger other
+# workflows; a reviewer can close/reopen it to run CI.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: refresh-canaries
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Re-ingest manifest canaries and open a PR on change
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Ingest manifest
+        id: ingest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Don't abort on a failing entry: the others' diff should still land.
+        # The failure is re-raised in the last step.
+        run: |
+          set +e
+          uv run --frozen --extra dev python scripts/ingest-canary.py \
+            --manifest blocks/canaries.json
+          echo "rc=$?" >>"$GITHUB_OUTPUT"
+
+      - name: Open PR if blocks/ changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git status --porcelain -- blocks/)" ]; then
+            echo "No blocks/ changes; nothing to do."
+            exit 0
+          fi
+          branch="auto/refresh-canaries-$(date -u +%Y%m%d)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add blocks/
+          git commit -m "chore(blocks): refresh canary blocks from manifest"
+          git push --force-with-lease origin "$branch"
+          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')" ]; then
+            gh pr create --base main --head "$branch" \
+              --title "chore(blocks): refresh canary blocks from manifest" \
+              --body "Manually triggered re-ingest of \`blocks/canaries.json\` (scripts/ingest-canary.py --manifest). Review the \`blocks/\` diff; merging redeploys the site. Content rules: blocks/README.md."
+          fi
+
+      - name: Fail if any manifest entry failed
+        if: steps.ingest.outputs.rc != '0'
+        run: |
+          echo "One or more manifest entries failed; see the 'Ingest manifest' step."
+          exit 1

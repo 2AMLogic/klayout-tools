@@ -4,26 +4,25 @@ For every issue you actually curate or re-curate, write exactly one concrete,
 standalone comment in the current issue body (replace its previous estimate):
 
 ```html
-<!-- loom:estimate difficulty=3 lines=400 files=4 doctor_risk=0.2 -->
+<!-- loom:estimate lines=400 files=4 doctor_risk=0.2 -->
 ```
 
 Estimate from this curated issue's title, body and scope only. Never look up
 other issues' outcomes, PR sizes, elapsed time or Doctor histories to rate it.
-Difficulty is expected work: 1 tiny, 2 small, 3 moderate, 4 substantial,
-5 exceptionally difficult. Lines and files are nonnegative integer estimates
+Lines and files are nonnegative integer estimates
 of the eventual change; doctor_risk is a finite probability between 0 and 1.
 These are predictions, not promises. Do not copy the example as a default.
 
-Keep the existing complexity marker's definition: it classifies how costly an
-unnoticed error is, independently of expected work. A tiny security fix can
-be difficulty 1 and complexity complex. Do not derive one from the other or
-change routing consumers. Estimates are observational and never change approval,
-consolidation, dependency, readiness or decomposition decisions. Do not add an
+`loom:estimate` is an observational forecast that no consumer may route, gate
+or order on; story points are the only decision-bearing size. Estimates never
+change approval, consolidation, dependency, readiness or decomposition
+decisions. Do not add an
 estimate to an untouched historical issue, a duplicate you close, or an issue
 you defer without completing curation.
 
-After saving the body and passing the existing complexity/consolidation gates,
-before applying curated labels, run the native completion command:
+After saving the body and your points marker, and passing the consolidation
+gate, run the native completion command. It is also the points gate (see
+`curator.md`), and it applies `points:N` and `loom:curated`:
 
 ```bash
 loom-daemon curation-complete --repo owner/repo --issue N \
@@ -31,22 +30,21 @@ loom-daemon curation-complete --repo owner/repo --issue N \
   --completion-id UUID --workspace-root MAIN_WORKSPACE
 ```
 
-Generate a fresh UUID once for this completed pass; retain it for retries.
-A genuine re-curation uses a new UUID even when numeric values are unchanged.
-Use the actual model/runtime of this Curator, never a Builder or a later tick.
-Daemon-mediated sessions expose `LOOM_CURATION_MODEL` and
-`LOOM_CURATION_RUNTIME` from their admitted launch; attended sessions supply
-their known actual identities. Use `unknown` for unavailable provenance; the fact carries JSON null and no
-model/runtime attribute for that field. Never guess, and never change readiness
-or strand otherwise complete curation because provenance is unknown.
-The workspace root must be the main checkout monitored by the daemon. Both
-attended and daemon-mediated curation use this same command and producer.
+The command is the points gate and label writer only; it writes no telemetry.
+`--model`, `--runtime` and `--completion-id` are still accepted but ignored, so
+existing invocations keep working. Pass your actual model/runtime (or `unknown`)
+and any UUID; never guess, and never change readiness or strand otherwise
+complete curation over them. The workspace root must be the main checkout
+monitored by the daemon.
 
 The command fetches the current body and rejects missing, malformed, duplicate
-or invalid concrete estimates; backticks and fenced examples do not count.
-On fetch/validation/persistence failure, keep the curation claim and retry or
-report the failure. Never announce completion without its journalled fact.
-The durable envelope dates the completion, not later export; normal daemon
-backfill delivers it to configured telemetry queues without new credentials.
-Export retries keep the same UUID, timestamp and fact identity. Retrying a
-successful completion does not reread its numeric values into a new fact.
+or invalid points markers; backticks and fenced examples do not count. On
+fetch/validation failure, keep the curation claim and retry or report the
+failure. Retrying is safe: it resolves the points again and re-applies the
+labels idempotently.
+
+The `issue.estimate` fact is the daemon's job, not yours (#12118). When it
+observes an open, recently updated issue carrying `loom:curated` and a valid
+`loom:estimate` marker, it journals the fact once, keyed on repo, issue and the
+marker values; the Curator's model and runtime are not observable there, so the
+fact carries them as null. A malformed or absent marker emits nothing.

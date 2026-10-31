@@ -83,7 +83,7 @@ def _stub_ngspice_discovery(monkeypatch) -> None:
     """Issue #2675: `sim.py` resolves the `ngspice` binary (issue #2423)
     *before* dispatching any corner, i.e. before the `subprocess.run` stubs
     below take effect. Stub resolution to the bare name (mirrors
-    `test_sim.py`'s `_bare_name_ngspice_resolution`) and drop any host
+    the conftest `bare_name_ngspice_resolution` fixture) and drop any host
     `$KLT_NGSPICE_BINARY`, so these tests do not need a real install.
     Production discovery is untouched; only called by tests that also stub
     `subprocess.run`."""
@@ -449,6 +449,25 @@ def test_resolve_request_strips_only_known_yield_only_limit_keys(tmp_path):
     assert spec["measurements"][0]["limits"]["target_yield"] == 0.9
 
 
+def test_resolve_request_strips_the_issue_2873_qualification_keys(tmp_path):
+    """Issue #2873: `target_sigma` / `min_converged_samples` are yield-only
+    limit keys too -- carried to `klt yield`, never dispatched to `klt sim`."""
+    spec = _base_spec()
+    spec["measurements"][0]["limits"] = {
+        "min": 0.3,
+        "max": 0.7,
+        "target_sigma": 4.0,
+        "min_converged_samples": 100,
+    }
+
+    request, _, yield_limits, _, _ = yield_campaign._resolve_request(
+        spec, spec_dir=str(tmp_path), seed_override=None
+    )
+
+    assert request["measurements"][0]["limits"] == {"min": 0.3, "max": 0.7}
+    assert yield_limits == {"vout": {"target_sigma": 4.0, "min_converged_samples": 100}}
+
+
 def test_resolve_request_leaves_a_spec_without_target_yield_untouched(tmp_path):
     """Regression guard for the no-`target_yield` case: nothing is stripped,
     nothing is carried, and the dispatched limits are byte-identical."""
@@ -533,6 +552,203 @@ def test_run_campaign_yield_analysis_failure_raises_campaign_error(
     monkeypatch.setattr(yield_campaign, "run_yield", fake_run_yield)
 
     with pytest.raises(CampaignError, match="not enough samples"):
+        run_campaign(str(spec_path))
+
+
+# --------------------------------------------------------------------------- #
+# Negative control (issue #4047)
+# --------------------------------------------------------------------------- #
+
+
+def _control_spec(**control) -> dict:
+    block = {"monte_carlo": {"mismatch_scale": 2.5}}
+    block.update(control)
+    return _base_spec(negative_control=block)
+
+
+def _install_control_stubs(monkeypatch, *, control_values=None):
+    """Stub `sim.run_sim` (nominal vs control told apart by the request's
+    `mismatch_scale`) and capture what `run_yield` is handed."""
+    captured: dict = {"requests": [], "analysed": None}
+
+    def fake_run_sim(request_path, *, artifacts_dir, backend, hosts):
+        with open(request_path, encoding="utf-8") as handle:
+            request = json.load(handle)
+        captured["requests"].append((request_path, request, backend, hosts))
+        report = _fake_sim_report()
+        if "mismatch_scale" in request["monte_carlo"] and control_values is not None:
+            for corner, value in zip(report["corners"], control_values, strict=True):
+                if value is None:
+                    corner["status"] = "error"
+                    corner["measurements"] = [
+                        {"name": "vout", "value": None, "unit": None}
+                    ]
+                else:
+                    corner["measurements"][0]["value"] = value
+        return report
+
+    def fake_run_yield(path, **kwargs):
+        captured["analysed"] = path
+        with open(path, encoding="utf-8") as handle:
+            captured["sample_set"] = json.load(handle)
+        return _fake_yield_report()
+
+    monkeypatch.setattr(yield_campaign.sim, "run_sim", fake_run_sim)
+    monkeypatch.setattr(yield_campaign, "run_yield", fake_run_yield)
+    return captured
+
+
+def test_run_campaign_without_negative_control_dispatches_once(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    spec_path = _write_spec(tmp_path, _base_spec())
+    captured = _install_control_stubs(monkeypatch)
+
+    report = run_campaign(str(spec_path))
+
+    assert len(captured["requests"]) == 1
+    assert "negative_control" not in report["campaign"]
+    assert captured["analysed"].endswith("sample-set.json")
+
+
+def test_run_campaign_negative_control_does_not_move_nominal_seed(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    _install_control_stubs(monkeypatch)
+    plain = run_campaign(str(_write_spec(tmp_path, _base_spec(), name="a.json")))
+    paired = run_campaign(str(_write_spec(tmp_path, _control_spec(), name="b.json")))
+
+    assert paired["campaign"]["seed"] == plain["campaign"]["seed"]
+
+
+def test_run_campaign_negative_control_second_dispatch_and_pairing(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    spec_path = _write_spec(tmp_path, _control_spec(description="2.5x mismatch"))
+    captured = _install_control_stubs(
+        monkeypatch, control_values=[0.1, 0.2, 0.9, 0.95, 0.15, 0.8]
+    )
+
+    report = run_campaign(str(spec_path), backend="local-parallel", hosts=2)
+
+    assert len(captured["requests"]) == 2
+    (_, nominal, nbackend, nhosts), (cpath, control, cbackend, chosts) = captured[
+        "requests"
+    ]
+    assert "negative_control" not in nominal
+    assert "negative_control" not in control
+    assert "mismatch_scale" not in nominal["monte_carlo"]
+    assert control["monte_carlo"]["mismatch_scale"] == 2.5
+    assert control["monte_carlo"]["n"] == nominal["monte_carlo"]["n"]
+    assert control["monte_carlo"]["seed"] != nominal["monte_carlo"]["seed"]
+    assert (cbackend, chosts) == (nbackend, nhosts) == ("local-parallel", 2)
+    assert cpath.endswith(os.path.join("control", "sim-request.json"))
+
+    echo = report["campaign"]["negative_control"]
+    assert echo["seed"] == control["monte_carlo"]["seed"]
+    assert echo["seed_source"] == "derived"
+    assert echo["overrides"] == {"mismatch_scale": 2.5}
+    assert echo["request_path"] == cpath
+    assert os.path.isfile(echo["sim_report_path"])
+    # The analysed document is the derived sample set, nominal untouched.
+    assert captured["analysed"] == echo["sample_set_path"]
+    measurement = captured["sample_set"]["measurements"][0]
+    assert len(measurement["samples"]) == 6
+    assert measurement["negative_control"]["samples"] == [
+        0.1,
+        0.2,
+        0.9,
+        0.95,
+        0.15,
+        0.8,
+    ]
+    assert measurement["negative_control"]["description"] == "2.5x mismatch"
+    assert measurement["limits"]["target_yield"] == pytest.approx(0.9)
+    assert report["campaign"]["sim_report_path"].endswith("sample-set.json")
+
+
+def test_run_campaign_negative_control_nonconverged_draws_are_disclosed(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    spec_path = _write_spec(tmp_path, _control_spec())
+    captured = _install_control_stubs(
+        monkeypatch, control_values=[0.1, None, 0.9, None, 0.15, 0.8]
+    )
+
+    report = run_campaign(str(spec_path))
+
+    control = captured["sample_set"]["measurements"][0]["negative_control"]
+    assert len(control["samples"]) == 4
+    assert control["errored"] == 2
+    disclosed = report["campaign"]["negative_control"]["derivation"][0]
+    assert disclosed["name"] == "vout"
+    assert disclosed["negative_control"]["errored"] == 2
+
+
+def test_run_campaign_negative_control_explicit_seed_used(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    spec_path = _write_spec(
+        tmp_path, _control_spec(monte_carlo={"mismatch_scale": 2.5, "seed": 4242})
+    )
+    captured = _install_control_stubs(monkeypatch)
+
+    report = run_campaign(str(spec_path))
+
+    assert captured["requests"][1][1]["monte_carlo"]["seed"] == 4242
+    assert report["campaign"]["negative_control"]["seed_source"] == "spec"
+
+
+def test_run_campaign_negative_control_same_seed_as_nominal_refused(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    spec = _control_spec(monte_carlo={"mismatch_scale": 2.5, "seed": 777})
+    spec["monte_carlo"]["seed"] = 777
+    spec_path = _write_spec(tmp_path, spec)
+    captured = _install_control_stubs(monkeypatch)
+
+    with pytest.raises(CampaignError, match="independently seeded"):
+        run_campaign(str(spec_path))
+    assert captured["requests"] == []
+
+
+@pytest.mark.parametrize(
+    "block, match",
+    [
+        ("nope", "must be an object"),
+        ({"monte_carlo": {}}, "non-empty"),
+        ({}, "non-empty"),
+        ({"monte_carlo": {"mismatch_scale": 2}, "extra": 1}, "unknown field"),
+        ({"monte_carlo": {"seed": "x"}}, "must be an integer"),
+        ({"monte_carlo": {"seed": 1}, "description": 3}, "must be a string"),
+    ],
+)
+def test_run_campaign_negative_control_bad_block_raises(
+    tmp_path, monkeypatch, block, match
+):
+    _write_body(tmp_path)
+    spec_path = _write_spec(tmp_path, _base_spec(negative_control=block))
+    captured = _install_control_stubs(monkeypatch)
+
+    with pytest.raises(CampaignError, match=match):
+        run_campaign(str(spec_path))
+    assert captured["requests"] == []
+
+
+def test_run_campaign_negative_control_dispatch_failure_raises(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    spec_path = _write_spec(tmp_path, _control_spec())
+
+    def fake_run_sim(request_path, *, artifacts_dir, backend, hosts):
+        with open(request_path, encoding="utf-8") as handle:
+            if "mismatch_scale" in json.load(handle)["monte_carlo"]:
+                raise sim.SimError("mismatch_scale unsupported for this PDK")
+        return _fake_sim_report()
+
+    monkeypatch.setattr(yield_campaign.sim, "run_sim", fake_run_sim)
+    with pytest.raises(CampaignError, match="negative-control dispatch failed"):
         run_campaign(str(spec_path))
 
 

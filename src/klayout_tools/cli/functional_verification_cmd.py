@@ -41,6 +41,7 @@ import argparse
 
 from ..functional_verification import (
     FunctionalVerificationError,
+    _log_tail,
     run_functional_verification,
     run_functional_verification_with_mutations,
 )
@@ -52,15 +53,22 @@ EXIT_TESTS_FAILED = 3
 
 def run(args: argparse.Namespace) -> int:
     mutations_path = getattr(args, "mutations", None)
+    outdir = getattr(args, "outdir", None)
     try:
         if mutations_path:
             report = run_functional_verification_with_mutations(
-                args.request, mutations_path
+                args.request, mutations_path, output_dir=outdir
             )
         else:
-            report = run_functional_verification(args.request)
+            report = run_functional_verification(args.request, output_dir=outdir)
     except FunctionalVerificationError as exc:
-        return emit_error("functional-verification", str(exc), args.format)
+        return emit_error(
+            "functional-verification",
+            str(exc),
+            args.format,
+            code=getattr(exc, "code", None),
+            details=getattr(exc, "details", None),
+        )
 
     emit_success(report, args.format, _print_text)
 
@@ -76,6 +84,45 @@ def run(args: argparse.Namespace) -> int:
         )
 
     return EXIT_TESTS_FAILED if report["status"] == "fail" else EXIT_PASS
+
+
+def _print_initial_state(initial_state: dict | None) -> None:
+    """One line, only when `options.initial_state` was requested (issue #2998)."""
+    if initial_state is None:
+        return
+    seeds = ",".join(str(seed) for seed in initial_state["seeds"]) or "-"
+    print(
+        f"initial_state: {initial_state['mode']}  seeds: {seeds}  "
+        f"state_elements: {initial_state['state_elements']}  "
+        f"clock: {initial_state['clock']}"
+    )
+
+
+def _local_path(report: dict, key: str) -> str | None:
+    """The resolved absolute path for ``environment.<key>``. The JSON carries
+    only a repo-relative ``{path, scope}`` envelope (#2224), which is null for
+    an external outdir, so the text view reads the path the run kept aside."""
+    local_paths = getattr(report, "local_paths", None)
+    if local_paths is not None:
+        return local_paths.get(key)
+    return (report["environment"].get(key) or {}).get("path")
+
+
+def _print_log_lines(report: dict) -> None:
+    test_log = _local_path(report, "test_log")
+    status = report["status"]
+    if test_log is None:
+        return
+    print(f"test_log: {test_log}")
+    if status == "fail":
+        print(f"test_log tail: {_log_tail(test_log, lines=40)}")
+
+
+def _print_results_xml(report: dict) -> None:
+    # Null on the Verilog-bench path (issue #4083): no cocotb run, no XML.
+    results_xml = _local_path(report, "results_xml")
+    if results_xml is not None:
+        print(f"results_xml: {results_xml}")
 
 
 def _print_text(report: dict) -> None:
@@ -121,10 +168,12 @@ def _print_text(report: dict) -> None:
         )
 
     print()
-    print(f"results_xml: {environment['results_xml']}")
+    _print_results_xml(report)
+    _print_log_lines(report)
     random_seed = environment.get("random_seed")
     if random_seed is not None:
         print(f"random_seed: {random_seed}")
+    _print_initial_state(environment.get("initial_state"))
     # Printed only on an SDF-annotated run (issue #1002): a reader glancing
     # at a gate-level report has no other way to tell a delay-annotated
     # verdict from a zero-delay one, and the two mean very different things.

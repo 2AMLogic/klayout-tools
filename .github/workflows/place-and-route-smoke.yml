@@ -34,6 +34,14 @@ name: Place-and-route smoke (LVS/DRC)
 
 on:
   workflow_dispatch:
+    inputs:
+      portable_paths:
+        description: >-
+          Run the smoke with "portable_paths": true on the route request
+          (SMOKE_PORTABLE_PATHS=1; issue #3874) and lint the envelope with
+          `klt env-provenance lint-envelope`.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -48,10 +56,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -89,7 +97,7 @@ jobs:
 
       - name: Cache pinned Yosys build
         id: yosys-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/yosys-0.67
           key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh', 'scripts/_install_common.sh') }}
@@ -104,28 +112,27 @@ jobs:
       - name: Verify Yosys runs headlessly
         run: yosys -V
 
-      - name: Install volare
+      - name: Install ciel
         run: |
-          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user volare
+          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user ciel==2.6.1
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"
 
-      - name: Cache full sky130A PDK (volare, pinned)
+      - name: Cache full sky130A PDK (ciel, pinned)
         id: pdk-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: .pdk-cache
+          path: ~/.ciel
           # Pinned open_pdks build -- the same commit
           # scripts/aws/build-remote-sim-ami.sh and docs/cli/drc.md's
           # gf180mcu recipe pin, reused here for reproducibility rather than
-          # "whatever volare's latest is at run time".
-          key: sky130A-pdk-c6d73a35f524070e85faff4a6a9eef49553ebc2b
+          # "whatever ciel's latest is at run time".
+          key: sky130A-ciel-f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
 
-      - name: Fetch full sky130A PDK (volare, cache miss only)
+      - name: Fetch full sky130A PDK (ciel, cache miss only)
         if: steps.pdk-cache.outputs.cache-hit != 'true'
         timeout-minutes: 20
         run: |
-          PDK_ROOT="${{ github.workspace }}/.pdk-cache" \
-            volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b
+          ciel enable --pdk-family sky130 -l sky130_fd_pr -l sky130_fd_sc_hd f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
 
       - name: Install the openroad Docker wrapper
         # scripts/install-openroad-docker.sh (issue #1328) -- pulls the
@@ -143,5 +150,8 @@ jobs:
       - name: Run the synth -> place-and-route -> LVS -> DRC smoke pipeline (gcd, mult8)
         env:
           PDK: sky130A
-          PDK_ROOT: ${{ github.workspace }}/.pdk-cache
+          PDK_ROOT: /home/runner/.ciel
+          # Unset (not "0") when the input is false, so a default run's
+          # route request stays byte-identical to before the input existed.
+          SMOKE_PORTABLE_PATHS: ${{ inputs.portable_paths && '1' || '' }}
         run: scripts/place-and-route-smoke.sh gcd mult8

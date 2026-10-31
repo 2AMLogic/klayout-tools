@@ -56,6 +56,16 @@
 # `cannot open '<tmp_path>/.../pnr_*.tcl'` the moment a caller's request
 # lives outside `$PWD` (verified live against this exact failure while
 # building #1353).
+#
+# The wrapper forwards a narrow allowlist of the caller's environment into the
+# container (issue #3821): `PLATFORM_DIR` (the ORFS idiom, read by Tcl as
+# `$::env(PLATFORM_DIR)`) when it is set -- even if empty -- and every variable
+# whose name starts with `OPENROAD_`. Each is passed by NAME only (`-e NAME`),
+# so Docker copies the host value verbatim and an unset variable stays unset.
+# The whole environment is deliberately NOT forwarded (it would leak unrelated
+# host state and break reproducibility). Because values are verbatim, a
+# host-path `PLATFORM_DIR` only resolves in the container if it lies under a
+# mounted path ($PWD, $PDK_ROOT, $TMPDIR).
 
 set -euo pipefail
 
@@ -111,6 +121,12 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 # even after upstream republishes \`:latest\` (issue #2465):
 #   $IMAGE
 #   openroad -version == 26Q3-1510-g6cb3f2b704
+#
+# Runs the container as the CALLER's uid:gid (\`--user\`), not the image's
+# default root, so files OpenROAD writes into the read-write \$PWD / \$TMPDIR
+# mounts are owned by the caller on Linux (a root-owned directory there blocks
+# worktree/scratch cleanup -- issue #3151). \$HOME is pointed at \$TMPDIR
+# because that uid usually has no passwd entry (hence no home) in the image.
 set -euo pipefail
 MOUNTS=(-v "\$PWD:\$PWD" -w "\$PWD")
 if [[ -n "\${PDK_ROOT:-}" ]]; then
@@ -126,8 +142,19 @@ elif command -v klt >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     fi
 fi
 MOUNTS+=(-v "\${TMPDIR:-/tmp}:\${TMPDIR:-/tmp}")
+# Forward PLATFORM_DIR and OPENROAD_* by name (issue #3821).
+ENV_ARGS=()
+if [[ -n "\${PLATFORM_DIR+x}" ]]; then
+    ENV_ARGS+=(-e PLATFORM_DIR)
+fi
+while IFS= read -r v; do
+    [[ -n "\$v" ]] && ENV_ARGS+=(-e "\$v")
+done < <(compgen -e OPENROAD_ || true)
 exec docker run --rm -i \\
     --platform linux/amd64 \\
+    --user "\$(id -u):\$(id -g)" \\
+    -e HOME="\${TMPDIR:-/tmp}" \\
+    \${ENV_ARGS[@]+"\${ENV_ARGS[@]}"} \\
     "\${MOUNTS[@]}" \\
     $IMAGE \\
     $IN_IMAGE_BINARY "\$@"

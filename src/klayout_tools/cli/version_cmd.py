@@ -9,13 +9,14 @@ library, not the CLI layer (see ``docs/json-contract.md``, "Adding a new
 command").
 
 Always exits 0: identifying the running build cannot fail -- an unrecoverable
-identity is reported as ``+unknown`` with ``is_release: null``, never as an
-error.
+identity is reported as ``X.Y.Z.dev0+unknown`` with ``is_release: null``,
+never as an error.
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 
 from ..build_identity import version_report
 from .output import emit_success
@@ -28,3 +29,9 @@ def run(args: argparse.Namespace) -> int:
 
 def _print_text(report: dict) -> None:
     print(f"klt {report['version']}")
+    if report["reinstall_spec"] is None:
+        # stderr keeps stdout the one-line string `klt --version` shares.
+        print(
+            "not reinstallable: no clean, committed build to reinstall from",
+            file=sys.stderr,
+        )

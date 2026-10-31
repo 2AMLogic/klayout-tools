@@ -40,18 +40,23 @@ import itertools
 import json
 import os
 import re
-import subprocess
-import tempfile
-import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from typing import Any
 
+from . import env_provenance
 from ._layout import load_layout
 from ._layout import select_top_cells as _select_top_cells
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import _content_hash, build_provenance
-from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
+from ._report_verify import (
+    build_check_result,
+    build_rerun_result,
+    get_path,
+    hash_check,
+    resolve_committed_path,
+)
 from ._report_verify import load_committed_report as _load_committed_report
 from .coverage import (
     REASON_ALL_RULES_SKIPPED,
@@ -59,20 +64,24 @@ from .coverage import (
     build_check_coverage,
     coverage_rollup,
     rollup_status,
-    work_id,
 )
 from .decks import (
+    CompCoverageSpec,
     DrcRule,
+    TapDistanceSpec,
     UnknownDeckError,
     deck_source_path,
     get_deck,
     get_layer_names,
+    get_marker_blind_layers,
     get_nominal_dbu,
+    get_unchecked_rules,
+    get_unmodeled_rules,
     get_unmodeled_voltage_markers,
 )
 from .layers import layers_report
 from .metrics import is_registered
-from .pdk import PdkNotFoundError, find_pdk
+from .pdk import PdkNotFoundError, find_pdk_for_deck
 
 # Check kinds that operate on a single region (no other_layer).
 # "isolated" (issue #1654) dispatches to `Region.isolated_check`, which
@@ -96,7 +105,13 @@ _SINGLE_LAYER_CHECKS = {"width", "space", "notch", "isolated"}
 # `_validate_threshold_max`/`_run_width_max_check` below.
 _MAX_BOUND_CHECKS = {"width"}
 # Check kinds that compare a region against another region (other_layer required).
-_TWO_LAYER_CHECKS = {"separation", "enclosing", "enclosed", "overlap"}
+_TWO_LAYER_CHECKS = {
+    "separation",
+    "enclosing",
+    "enclosed",
+    "overlap",
+    "enclosing_adjacent",
+}
 # Two-layer check kinds where the "enclosed" layer can lie entirely outside
 # the "enclosing" layer -- a case `Region.enclosing_check`/`enclosed_check`
 # never reports (they only measure *facing edges*, so zero spatial overlap
@@ -139,6 +154,33 @@ _ANGLE_CHECKS = {"angle"}
 # both kinds (`_run_vertex_check`), so adding a third vertex check kind does
 # not add another branch to `run_drc` itself.
 _VERTEX_CHECKS = _GRID_CHECKS | _ANGLE_CHECKS
+# Region rules (issues #3587, #3607): a typed `DrcRule.region_spec` descriptor
+# evaluated by `_run_comp_coverage_check` / `_run_tap_distance_check`, not a
+# distance primitive.
+_COMP_COVERAGE_CHECKS = {"comp_coverage"}
+_TAP_DISTANCE_CHECKS = {"tap_distance"}
+
+#: Triage note attached to every ``tap_distance`` violation (issue #4348).
+_TAP_DISTANCE_NOTE = (
+    "tap_distance is context-dependent (tap-cell placement): a standalone "
+    "standard cell carries no tap, so this may be expected there and is not "
+    "necessarily a cell defect; evaluate it on the placed design"
+)
+_REGION_CHECKS = _COMP_COVERAGE_CHECKS | _TAP_DISTANCE_CHECKS
+# Net-aware spacing (issue #3572): `"space"` restricted to facing edges of
+# polygons on different nets, per `DrcRule.net_spec` -- `_run_net_space_check`.
+# Returns `EdgePairs`, so it reuses the ordinary edge-pair reporting path.
+_NET_SPACE_CHECKS = {"net_space"}
+
+
+def _spec_layers(rule: DrcRule) -> set[tuple[int, int]]:
+    """Layers referenced by a rule's ``region_spec`` / ``net_spec``, if any."""
+    layers: set[tuple[int, int]] = set()
+    for spec in (rule.region_spec, rule.net_spec):
+        if spec is not None:
+            layers.update(spec.layers())
+    return layers
+
 
 # Every `DerivedLayer.mode` `run_drc()` knows how to derive a region for --
 # see that class's docstring for each one's derivation. Validated per rule
@@ -149,7 +191,21 @@ _DERIVED_LAYER_MODES = {
     "overlapping",
     "not_interacting",
     "holes",
+    "union",
+    "gate_endcap",
 }
+
+# Every `DerivedLayer.context` value (issue #3484); `None` = no partition.
+_DERIVED_CONTEXTS = {None, "near", "far"}
+
+# Every `DrcRule.other_layer_selection` value `run_drc()` knows how to apply
+# (issue #2688) -- validated per rule for the same "fail loudly, never
+# silently check a different population" reason as `_DERIVED_LAYER_MODES`.
+_OTHER_LAYER_SELECTIONS = {"squares"}
+
+# Every `DrcRule.layer_selection` value (the primary-layer counterpart of
+# `_OTHER_LAYER_SELECTIONS`, issues #2943/#3139).
+_LAYER_SELECTIONS = {"squares"}
 
 # `run_drc()`'s own field name -> its declared METRICS2.1-style name in
 # `metrics.py`'s registry (issue #1847, adopting the #247 registry beyond its
@@ -162,13 +218,48 @@ _VIOLATION_COUNT_METRIC_NAME = "drc__error__count"
 assert is_registered(_VIOLATION_COUNT_METRIC_NAME)
 
 
+#: Bumped only on a non-additive (breaking) change to this command's own JSON
+#: shape -- see docs/json-contract.md. Shared by both engines'
+#: response builders (:func:`run_drc`, :func:`run_drc_klayout_engine`), which
+#: have always carried the same version number and must not drift apart.
+#:
+#: Bumped 2 -> 3 (issue #2659): ``file`` changed from a raw (usually
+#: absolute) path string to the ``{path, scope}`` shape
+#: ``env_provenance.repo_relative_path`` already defines -- a committed `klt
+#: drc` envelope is cited verbatim by a `klt signoff` manifest, so an
+#: absolute path here pinned the record to the producing host's own
+#: filesystem: ``klt signoff``'s ``input_verified`` freshness gate could
+#: re-verify such a citation only on that host, and reported drift from
+#: every other checkout. The same normalization `klt sim`/`klt pex` adopted
+#: for their own input-path fields in issue #1261.
+#: See `env_provenance.repo_relative_path`.
+SCHEMA_VERSION = 3
+
+
 class DrcError(Exception):
     """Raised when a layout cannot be checked: bad file, unknown deck, or a
     malformed rule.
 
     The CLI turns this into a clean stderr message + exit code 1, never a
     traceback.
+
+    ``code`` (issue #3076) is an optional stable machine-readable
+    classification, surfaced as ``error.code`` in the JSON error envelope
+    (``docs/json-contract.md``); ``None`` for every error that has none.
     """
+
+    def __init__(self, message: str = "", code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+#: Error codes for a ``--engine klayout`` second opinion that could not run
+#: (issue #3076): distinguishes "unavailable" from bad input without parsing
+#: ``error.message``. Exit code stays ``1``.
+CODE_KLAYOUT_UNAVAILABLE = "klayout_unavailable"
+CODE_KLAYOUT_VERSION_TOO_OLD = "klayout_version_too_old"
+CODE_NEGATIVE_CONTROL_FAILED = "negative_control_failed"
+CODE_MULTIPLE_TOP_CELLS = "multiple_top_cells"
 
 
 #: The one top-level field a ``klt drc`` request document must carry (issue
@@ -255,6 +346,14 @@ INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY = "no_applicable_geometry"
 #: expressible would be worse than reporting the gap.
 SKIP_REASON_GRID_NOT_REPRESENTABLE = "grid_not_representable"
 
+#: The curated engine's second ``coverage.inapplicable[].reason`` (issue
+#: #3587): a ``"comp_coverage"`` rule whose checked layer *is* drawn but whose
+#: checked region is empty once the rule's marker exemption is applied (every
+#: COMP polygon is under an exempting marker), so there was nothing for it to
+#: constrain. Distinct from
+#: :data:`INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY` (checked layer absent).
+INAPPLICABLE_REASON_EMPTY_CHECKED_REGION = "inapplicable_empty_checked_region"
+
 
 def _grid_is_representable(rule: DrcRule, dbu: float) -> bool:
     """Whether ``rule``'s ``grid_um`` can be checked exactly against a stream
@@ -279,10 +378,22 @@ def _grid_is_representable(rule: DrcRule, dbu: float) -> bool:
     and records :data:`SKIP_REASON_GRID_NOT_REPRESENTABLE`, which makes the
     run partial rather than an unqualified ``clean``.
 
-    ``True`` for every non-``"ongrid"`` rule and for an ``"ongrid"`` rule with
-    no ``grid_um`` at all -- neither is this predicate's question (the latter
-    is a deck-authoring error :func:`_run_grid_check` raises on).
+    A ``"tap_distance"`` rule (issue #3607) has the same problem with its
+    ``max_distance_um`` and ``step_um``: both must be a whole, positive number
+    of database units, or the boundary distance would be silently rounded.
+
+    ``True`` for every other non-``"ongrid"`` rule and for an ``"ongrid"`` rule
+    with no ``grid_um`` at all -- neither is this predicate's question (the
+    latter is a deck-authoring error :func:`_run_grid_check` raises on).
     """
+    if rule.check in _TAP_DISTANCE_CHECKS and isinstance(
+        rule.region_spec, TapDistanceSpec
+    ):
+        spec = rule.region_spec
+        return all(
+            round(um / dbu) >= 1 and abs(um / dbu - round(um / dbu)) <= 1e-9
+            for um in (spec.max_distance_um, spec.step_um)
+        )
     if rule.check not in _GRID_CHECKS or rule.grid_um is None:
         return True
     units_per_grid = rule.grid_um / dbu
@@ -367,7 +478,11 @@ def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
     the region by intersecting it (``"sized_intersection"``,
     ``"overlapping"``). ``"not_interacting"`` and ``"holes"`` derive from
     ``base`` alone and are never skipped for an absent marker in the first
-    place (see :class:`~klayout_tools.decks.DerivedLayer`).
+    place (see :class:`~klayout_tools.decks.DerivedLayer`). ``"union"``
+    (issue #2688) contributes *neither* input here: its region is empty
+    only when **both** are absent, an "all absent" condition a set of
+    "any absent" layers cannot express -- :func:`_union_inputs_all_absent`
+    answers it instead.
 
     A new check kind must decide its own entry here deliberately: the
     fallthrough treats ``other_layer`` as vacuity-forcing, matching every
@@ -376,10 +491,17 @@ def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
     :data:`_ANTENNA_CHECKS` is excluded below, or it will report a real gap
     as inapplicable.
     """
-    if rule.derived_layer is not None:
+    if rule.require_containment and rule.other_layer is not None:
+        # Required containment (#2726): only the cut layer's absence makes the
+        # rule vacuous; an absent conductor is the very defect it reports.
+        return {_containment_layers(rule)[0]}
+    if rule.derived_layer is not None and rule.derived_layer.mode == "union":
+        layers: set[tuple[int, int]] = set()
+    elif rule.derived_layer is not None:
         layers = {rule.derived_layer.base}
         if rule.derived_layer.intersect_with is not None and (
-            rule.derived_layer.mode in ("sized_intersection", "overlapping")
+            rule.derived_layer.mode
+            in ("sized_intersection", "overlapping", "gate_endcap")
         ):
             layers.add(rule.derived_layer.intersect_with)
     else:
@@ -387,6 +509,232 @@ def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
     if rule.other_layer is not None and rule.check not in _ANTENNA_CHECKS:
         layers.add(rule.other_layer)
     return layers
+
+
+def _union_inputs_all_absent(rule: DrcRule, layout: Any) -> bool:
+    """Whether ``rule`` is a ``"union"``-mode derived rule (issue #2688) none
+    of whose union inputs is present in ``layout`` -- the only way its
+    checked region can be empty, and so the only way an absent enclosing
+    input makes it vacuous (see :func:`_vacuity_layers`). ``False`` for
+    every other rule."""
+    derived = rule.derived_layer
+    if derived is None or derived.mode != "union":
+        return False
+    inputs = [derived.base]
+    if derived.intersect_with is not None:
+        inputs.append(derived.intersect_with)
+    return all(layout.find_layer(*layer) is None for layer in inputs)
+
+
+def _derived_inputs_absent(
+    rule: DrcRule, base_index: int | None, intersect_index: int | None
+) -> bool:
+    """Whether a ``derived_layer`` rule's resolved inputs make its checked
+    region provably empty, so :func:`run_drc` skips it like any other
+    missing-layer rule. ``base_index``/``intersect_index`` are the
+    ``layout.find_layer`` results for ``derived_layer.base`` /
+    ``derived_layer.intersect_with`` (``None`` = absent from the stream).
+
+    - ``"union"`` (#2688) joins its two inputs: either one alone is a
+      complete enclosing region (a mask-only HBT contact window draws no
+      ``base`` geometry at all), so it is skipped only when *both* are
+      absent. An absent input contributes an empty region instead.
+    - Every other mode: an absent ``base`` means the derived region's own
+      source shapes are missing -> no violations possible, skip.
+    - An absent second input empties both the ``"sized_intersection"`` and
+      ``"overlapping"`` derivations, so there is nothing to check.
+      ``"not_interacting"`` is the exception: "base polygons that touch no
+      marker" is every base polygon when the marker layer was never drawn,
+      so that rule must still run against the full base region (see
+      ``DerivedLayer``'s docstring) -- the ordinary thin-oxide-only layout,
+      which must stay checked against the unmarked column. ``"holes"`` is
+      the other exception: it never reads a second layer at all
+      (``intersect_with`` is always ``None`` for it), so ``intersect_index``
+      being ``None`` is expected, not a missing-layer condition.
+    """
+    mode = rule.derived_layer.mode
+    if mode == "union":
+        return base_index is None and intersect_index is None
+    if base_index is None:
+        return True
+    return intersect_index is None and mode not in ("not_interacting", "holes")
+
+
+def _cell_region_or_empty(cell: Any, layer_index: int | None) -> Any:
+    """``cell``'s recursive shapes on ``layer_index`` as a ``kdb.Region``,
+    or an empty ``kdb.Region`` when the layer is absent (``None``) -- only
+    reachable for a ``"union"`` input or an unused ``intersect_with``; see
+    :func:`_derived_inputs_absent`."""
+    import klayout.db as kdb
+
+    if layer_index is None:
+        return kdb.Region()
+    return kdb.Region(cell.begin_shapes_rec(layer_index))
+
+
+def _derived_region(
+    rule: DrcRule,
+    base_region: Any,
+    intersect_region: Any,
+    dbu: float,
+    context_region: Any | None = None,
+    context2_region: Any | None = None,
+) -> Any:
+    """Build the checked region for a ``derived_layer`` rule, then apply its
+    optional well-context partition (issue #3484, see ``DerivedLayer``):
+    ``context_region`` is the already-joined (unsized) union of
+    ``derived_layer.context_layers``, oversized here by ``context_sized_by_um``
+    and used to keep only the whole polygons ``interacting`` with it
+    (``"near"``) or ``not_interacting`` with it (``"far"``). The optional
+    second stage (issue #3682, ``context2*``) repeats that on the stage-1
+    result, so the two stages AND together."""
+    region = _derived_region_unscoped(rule, base_region, intersect_region, dbu)
+    derived = rule.derived_layer
+    if derived is None or derived.context is None or context_region is None:
+        return region
+    region = _apply_context(
+        region, context_region, derived.context_sized_by_um, derived.context, dbu
+    )
+    if derived.context2 is None or context2_region is None:
+        return region
+    return _apply_context(
+        region, context2_region, derived.context2_sized_by_um, derived.context2, dbu
+    )
+
+
+def _apply_context(
+    region: Any, context_region: Any, sized_by_um: float, mode: str, dbu: float
+) -> Any:
+    """One near/far whole-polygon partition of ``region`` by ``context_region``
+    oversized by ``sized_by_um``."""
+    size_dbu = round(sized_by_um / dbu)
+    ctx = context_region.sized(size_dbu) if size_dbu else context_region
+    if mode == "near":
+        return region.interacting(ctx)
+    return region.not_interacting(ctx)
+
+
+def _context_region(
+    cell: Any, layout: Any, rule: DrcRule, stage: int = 1
+) -> Any | None:
+    """Join of ``rule.derived_layer.context_layers`` (``context2_layers`` for
+    ``stage=2``) in ``cell`` (absent layers contribute nothing), or ``None``
+    when the rule has no such context."""
+    import klayout.db as kdb
+
+    derived = rule.derived_layer
+    if derived is None:
+        return None
+    mode, layers = (
+        (derived.context, derived.context_layers)
+        if stage == 1
+        else (derived.context2, derived.context2_layers)
+    )
+    if mode is None:
+        return None
+    region = kdb.Region()
+    for layer in layers:
+        region += _cell_region_or_empty(cell, layout.find_layer(*layer))
+    return region.merged()
+
+
+def _derived_region_unscoped(
+    rule: DrcRule, base_region: Any, intersect_region: Any, dbu: float
+) -> Any:
+    """Build the checked region for a ``derived_layer`` rule (#345, marker-
+    scoped modes #1110, ``"holes"`` #1976, ``"union"`` #2688) from its two
+    input regions -- see ``DerivedLayer``'s docstring for each mode's full
+    derivation and why an unscoped check against either raw input layer
+    would be wrong, not just conservative. ``sized_by_um`` is a real
+    micrometre distance, rescaled against this layout's own ``dbu``
+    directly (unlike ``rule.threshold_dbu``, which is rescaled via
+    ``dbu_scale`` against the deck's nominal dbu). Always returns a new
+    Region; neither input (nor the source layout) is modified.
+    """
+    derived = rule.derived_layer
+    assert derived is not None, "_derived_region requires a derived_layer rule"
+    size_dbu = round(derived.sized_by_um / dbu)
+    if derived.mode == "holes":
+        # Interior voids of the merged `base` region (#1976) --
+        # `intersect_with`/`sized_by_um` are unused for this mode. Explicit
+        # `.merged()` before `.holes()` documents the requirement even though
+        # `Region.holes()` already applies merged semantics itself -- a hole
+        # formed by several abutting drawn rectangles (the common GDS idiom
+        # for a slotted plate) is only visible once merged. A `base` region
+        # with no holes at all derives an empty region, which is simply
+        # nothing to report -- not an error.
+        return base_region.merged().holes()
+    if derived.mode == "gate_endcap":
+        # Endcap probe zones (#2936), e.g. sky130's `poly.8`: the part of
+        # each `base` (diffusion) edge that lies under or flush with an
+        # `intersect_with` (poly) shape is a gate end edge; extend it
+        # outward by `sized_by_um`. Only the *outer* side is probed, so poly
+        # that merely abuts the diffusion from outside never reads as a
+        # gate. The rule pairs this region with `check="enclosed"`,
+        # `other_layer=<poly>` and a zero threshold: whatever part of a probe
+        # zone is not covered by poly is the missing endcap. A flush poly
+        # edge is collinear with the diffusion edge, which `inside_part`
+        # alone excludes, hence the explicit edge AND.
+        base_edges = base_region.merged().edges()
+        poly_region = intersect_region.merged()
+        gate_end_edges = (
+            base_edges.inside_part(poly_region) + (base_edges & poly_region.edges())
+        ).merged()
+        return gate_end_edges.extended(0, 0, size_dbu, 0, False)
+    if derived.mode == "union":
+        # Boolean join of both inputs (#2688), e.g. sg13g2's `Cnt.c`
+        # enclosing region `activ.join(activ_mask)`. `_run_check` merges it
+        # before measuring, so a contact window assembled across both layers
+        # is measured against the joined outline, not either layer's seam.
+        return base_region + intersect_region
+    if derived.mode in ("overlapping", "not_interacting"):
+        # Marker-scoped whole-polygon selection (#1110): here `sized_by_um`
+        # is a guard band around the *marker* (`intersect_with`), not around
+        # `base`.
+        marker_region = (
+            intersect_region.sized(size_dbu) if size_dbu else intersect_region
+        )
+        if derived.mode == "overlapping":
+            # Whole `base` polygons sharing area with the marker -- the
+            # marked ("_MV") half of a rule pair.
+            return base_region.overlapping(marker_region)
+        # Whole `base` polygons touching no marker geometry at all -- the
+        # unmarked ("_LV") half of the pair.
+        return base_region.not_interacting(marker_region)
+    # "sized_intersection" (the default, issue #345): shapes of
+    # `intersect_with` that already touch the *unsized* `base` region
+    # somewhere, clipped to `base`'s outline oversized by `sized_by_um`.
+    return intersect_region.interacting(base_region) & (base_region.sized(size_dbu))
+
+
+def _select_other_region(rule: DrcRule, other_region: Any) -> Any:
+    """Apply ``rule.other_layer_selection`` to the resolved ``other_layer``
+    region; returned unchanged when no selection is set.
+
+    ``"squares"`` (#2688) is whole-polygon square selection: the complement
+    of the DRC-DSL ``non_squares`` selector, applied to the *merged* layer
+    so two abutting squares forming a bar count as the bar they are.
+    Non-square shapes (contact bars) are dropped from both the margin check
+    and the #318 escape term.
+    """
+    if rule.other_layer_selection == "squares":
+        return other_region.merged().squares()
+    return other_region
+
+
+def _select_primary_region(rule: DrcRule, region: Any) -> Any:
+    """Apply ``rule.layer_selection`` to the rule's own ``layer`` region;
+    returned unchanged when no selection is set.
+
+    ``"squares"`` mirrors :func:`_select_other_region`: the *merged* layer
+    filtered by ``Region.squares()``, so a contact bar -- or a row of
+    abutting legal contacts that merges into one strip -- is dropped
+    (``cont_sq = cont.not(cont.non_squares)`` in the IHP runset) rather than
+    measured as a single oversized contact.
+    """
+    if rule.layer_selection == "squares":
+        return region.merged().squares()
+    return region
 
 
 def _rule_outside_voltage_gate(
@@ -405,6 +753,9 @@ def _rule_outside_voltage_gate(
     - its ``derived_layer`` **reads the marker itself** (gf180mcu's
       ``DF.1a``/``DF.3a`` ``_LV``/``_MV`` pairs, issue #1110) -- its checked
       region is already scoped by the marker, so it applied the right column;
+    - its ``region_spec`` **reads the marker itself** (``dualgate`` / ``v5_xtor``
+      in a ``"tap_distance"`` rule, issue #3607) -- the rule is scoped by the
+      marker, so it applied the right column;
     - it is flagged :attr:`~klayout_tools.decks.DrcRule.voltage_independent`
       (issue #2369) -- its source DRM section publishes a single value
       column, so no second column exists for it to have misread. Opt-in per
@@ -415,14 +766,25 @@ def _rule_outside_voltage_gate(
         return True
     if rule.voltage_independent:
         return True
-    return rule.derived_layer is not None and marker in (
+    if rule.check in _TAP_DISTANCE_CHECKS and rule.region_spec is not None:
+        if marker in rule.region_spec.layers():
+            return True
+    # A `"union"` derivation (issue #2688) *adds* its inputs to the checked
+    # region rather than scoping it, so reading the marker as one of them
+    # does not mean the rule applied the marker's column.
+    return (
+        rule.derived_layer is not None and rule.derived_layer.mode != "union"
+    ) and marker in (
         rule.derived_layer.base,
         rule.derived_layer.intersect_with,
     )
 
 
 def _classify_skipped_rules(
-    deck: list[DrcRule], rules_skipped: list[str], layout: Any
+    deck: list[DrcRule],
+    rules_skipped: list[str],
+    layout: Any,
+    empty_checked_region_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Split ``rules_skipped`` into common-coverage *skipped* and
     *inapplicable* records (issue #2110).
@@ -480,6 +842,11 @@ def _classify_skipped_rules(
     categories, unchanged: it is the pre-contract spelling of "did not run",
     and this classification is additive to it.
 
+    ``empty_checked_region_ids`` (issue #3587) names the ``"comp_coverage"``
+    rules whose checked layer is drawn but whose checked region came out empty
+    (:data:`INAPPLICABLE_REASON_EMPTY_CHECKED_REGION`): a rule constraining
+    nothing in this stream, so inapplicable rather than skipped.
+
     Returns ``(skipped, inapplicable)``, each a list of ``{"id", "reason"}``
     records sorted by rule id.
     """
@@ -489,8 +856,14 @@ def _classify_skipped_rules(
     for rule in deck:
         if rule.id not in skipped_ids:
             continue
-        vacuous = any(
-            layout.find_layer(*layer) is None for layer in _vacuity_layers(rule)
+        if rule.id in empty_checked_region_ids:
+            inapplicable.append(
+                {"id": rule.id, "reason": INAPPLICABLE_REASON_EMPTY_CHECKED_REGION}
+            )
+            continue
+        vacuous = (
+            any(layout.find_layer(*layer) is None for layer in _vacuity_layers(rule))
+            or _union_inputs_all_absent(rule, layout)
         ) or (
             # `requires_any_layer` (issue #2634) is a second, independent way
             # a rule can be provably vacuous: its own checked geometry
@@ -714,6 +1087,28 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
                     "base": _fmt_layer(derived.base),
                     "intersect_with": _fmt_layer(derived.intersect_with),
                     "sized_by_um": derived.sized_by_um,
+                    **(
+                        {}
+                        if derived.context is None
+                        else {
+                            "context": derived.context,
+                            "context_layers": [
+                                _fmt_layer(c) for c in derived.context_layers
+                            ],
+                            "context_sized_by_um": derived.context_sized_by_um,
+                        }
+                    ),
+                    **(
+                        {}
+                        if derived.context2 is None
+                        else {
+                            "context2": derived.context2,
+                            "context2_layers": [
+                                _fmt_layer(c) for c in derived.context2_layers
+                            ],
+                            "context2_sized_by_um": derived.context2_sized_by_um,
+                        }
+                    ),
                 },
                 "scope": rule.scope or None,
             }
@@ -739,6 +1134,1093 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
     }
 
 
+_WAIVER_KEYS = ("cell", "rule", "justification")
+
+
+def load_waivers(path: str) -> list[dict[str, str]]:
+    """Read a ``--waivers`` file (issue #3483): a JSON object
+    ``{"waivers": [{"cell": str, "rule": str, "justification": str}, ...]}``.
+
+    ``cell`` is matched against a violation's ``source_cell``; ``rule`` is an
+    exact rule id or a case-sensitive shell-style glob (the ``--rules``
+    matcher). All three keys are required and non-blank -- there is
+    deliberately no cell-wide blanket waiver, which would hide real
+    violations in the waived cell.
+
+    Raises :class:`DrcError` for an unreadable, non-JSON or malformed file,
+    naming the offending entry -- before the layout is ever read.
+    """
+    label = f"waivers file (--waivers) '{path}'"
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except OSError as exc:
+        raise DrcError(f"could not read {label}: {exc.strerror or exc}") from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise DrcError(f"{label} is not valid JSON: {exc}") from exc
+    entries = data.get("waivers") if isinstance(data, dict) else None
+    if not isinstance(entries, list) or not entries:
+        raise DrcError(f"{label} must be a JSON object with a non-empty 'waivers' list")
+    waivers: list[dict[str, str]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise DrcError(f"{label}: waivers[{index}] must be an object")
+        unknown = sorted(set(entry) - set(_WAIVER_KEYS))
+        if unknown:
+            raise DrcError(
+                f"{label}: waivers[{index}] has unknown key(s) "
+                f"{', '.join(unknown)} (allowed: {', '.join(_WAIVER_KEYS)})"
+            )
+        for key in _WAIVER_KEYS:
+            value = entry.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise DrcError(
+                    f"{label}: waivers[{index}] is missing a non-empty string '{key}'"
+                )
+        waivers.append({key: entry[key].strip() for key in _WAIVER_KEYS})
+    return waivers
+
+
+def _waiver_matches(waiver: dict[str, str], violation: dict[str, Any]) -> bool:
+    source_cell = violation.get("source_cell")
+    if source_cell is None or source_cell != waiver["cell"]:
+        return False
+    return fnmatch.fnmatchcase(violation["rule"], waiver["rule"])
+
+
+def _partition_waived(
+    violations: list[dict[str, Any]], waivers: list[dict[str, str]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
+    """Split ``violations`` into ``(kept, waived, unused_waivers)`` (issue
+    #3483). A violation is waived by the first waiver whose ``cell`` equals
+    its ``source_cell`` and whose ``rule`` matches its rule id; a violation
+    with no ``source_cell`` is never waived. Waived entries keep the full
+    violation shape plus ``waiver_justification``."""
+    kept: list[dict[str, Any]] = []
+    waived: list[dict[str, Any]] = []
+    used: set[int] = set()
+    for violation in violations:
+        for index, waiver in enumerate(waivers):
+            if _waiver_matches(waiver, violation):
+                used.add(index)
+                waived.append(
+                    {**violation, "waiver_justification": waiver["justification"]}
+                )
+                break
+        else:
+            kept.append(violation)
+    unused = [waiver for index, waiver in enumerate(waivers) if index not in used]
+    return kept, waived, unused
+
+
+def _apply_waivers(
+    violations: list[dict[str, Any]], waivers: list[dict[str, str]]
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, Any]]:
+    """Apply ``waivers`` to ``violations`` (issue #3483). Returns the kept
+    violations, their recomputed per-rule counts, and the report fields the
+    waiver run adds (``waived_count``, ``waived_rule_counts``, ``waived``,
+    ``unused_waivers``)."""
+    kept, waived, unused = _partition_waived(violations, waivers)
+    rule_counts: dict[str, int] = {}
+    for violation in kept:
+        rule_counts[violation["rule"]] = rule_counts.get(violation["rule"], 0) + 1
+    waived_rule_counts: dict[str, int] = {}
+    for entry in waived:
+        waived_rule_counts[entry["rule"]] = waived_rule_counts.get(entry["rule"], 0) + 1
+    fields = {
+        "waived_count": len(waived),
+        "waived_rule_counts": dict(sorted(waived_rule_counts.items())),
+        "waived": waived,
+        "unused_waivers": unused,
+    }
+    return kept, rule_counts, fields
+
+
+def _source_cell_rollup(
+    violations: list[dict[str, Any]], waived: list[dict[str, Any]] | None
+) -> list[dict[str, Any]]:
+    """Per-``source_cell`` x rule counts (issue #4520), sorted by cell (the
+    unattributed ``None`` cell last) then rule. ``waived`` entries are counted
+    in a separate ``waived_count`` so a policy decision on waiving a third-party
+    macro can be made from the report alone."""
+    counts: dict[tuple[str | None, str], list[int]] = {}
+    for index, group in enumerate((violations, waived or [])):
+        for entry in group:
+            slot = counts.setdefault((entry.get("source_cell"), entry["rule"]), [0, 0])
+            slot[index] += 1
+    ordered = sorted(
+        counts.items(), key=lambda kv: (kv[0][0] is None, kv[0][0] or "", kv[0][1])
+    )
+    return [
+        {"source_cell": cell, "rule": rule, "count": kept, "waived_count": waived_n}
+        for (cell, rule), (kept, waived_n) in ordered
+    ]
+
+
+def _runset_correspondence(
+    deck: list[DrcRule], violations: list[dict[str, Any]], waived: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The deck's ``runset_note`` for each rule that produced a finding
+    (kept or waived), sorted by rule id (issue #4520). Empty for decks that
+    declare no notes, so their reports are unchanged."""
+    fired = {entry["rule"] for entry in (*violations, *waived)}
+    return [
+        {"rule": rule.id, **rule.runset_note}
+        for rule in sorted(deck, key=lambda r: r.id)
+        if rule.runset_note and rule.id in fired
+    ]
+
+
+@dataclass
+class _DrcSetup:
+    """Run-wide inputs :func:`run_drc` resolves once before any rule runs."""
+
+    deck_name: str
+    deck: list[DrcRule]
+    layer_names: dict[tuple[int, int], str]
+    rule_selection: dict[str, Any] | None
+    omitted_ids: set[str]
+    waivers: Any
+    pdk_info: dict[str, Any] | None
+    layout: Any
+    dbu_scale: float
+    top_cells: list[Any]
+    deck_layer_tuples: set[tuple[int, int]]
+    stream_layer_tuples: set[tuple[int, int]]
+    # Issue #4226 (`--tile`): the parsed ``(columns, rows)``, and for each
+    # wrapper cell the checked top cells were swapped for -- its name mapped
+    # to ``(original cell name, centre-instance window)``. Both are empty/None
+    # for a default run.
+    tile: tuple[int, int] | None = None
+    tile_windows: dict[str, tuple[str, Any]] = field(default_factory=dict)
+
+
+@dataclass
+class _DrcState:
+    """Accumulators the per-rule loop fills and the report assembly reads."""
+
+    violations: list[dict[str, Any]] = field(default_factory=list)
+    rule_counts: dict[str, int] = field(default_factory=dict)
+    rules_skipped: list[str] = field(default_factory=list)
+    rules_checked: list[str] = field(default_factory=list)
+    empty_checked_region_ids: set[str] = field(default_factory=set)
+
+
+def _layer_str(layer_tuple: tuple[int, int]) -> str:
+    return f"{layer_tuple[0]}/{layer_tuple[1]}"
+
+
+#: Reserved annotation layer carrying a cell's abutment boundary (see
+#: "Reserved annotation layer" in docs/cli/drc.md). Preferred over the
+#: geometry bbox as the tile pitch when a cell draws one.
+_PR_BOUNDARY_LAYER = (235, 4)
+
+
+def parse_tile(raw: str | None) -> tuple[int, int] | None:
+    """Parse a ``--tile`` value (issue #4226): ``<cols>x<rows>``, each a
+    positive odd integer so one instance sits exactly at the array centre.
+    ``None`` stays ``None``; anything malformed is a :class:`DrcError`."""
+    if raw is None:
+        return None
+    match = re.fullmatch(r"(\d+)[xX](\d+)", raw.strip())
+    if match is None:
+        raise DrcError(f"--tile must look like <cols>x<rows>, e.g. 3x1 (got {raw!r})")
+    cols, rows = int(match.group(1)), int(match.group(2))
+    if cols < 1 or rows < 1 or cols % 2 == 0 or rows % 2 == 0:
+        raise DrcError(
+            f"--tile counts must be positive odd integers so the checked cell "
+            f"sits at the array centre (got {raw!r})"
+        )
+    return cols, rows
+
+
+def _tile_pitch_box(layout: Any, cell: Any) -> Any:
+    """The abutment box of ``cell``: its ``prBoundary`` shapes' bbox when it
+    draws any, else the cell's own bbox. Empty for an empty cell."""
+    index = layout.find_layer(*_PR_BOUNDARY_LAYER)
+    if index is not None:
+        box = cell.bbox_per_layer(index)
+        if not box.empty():
+            return box
+    return cell.bbox()
+
+
+def _tile_top_cells(
+    layout: Any, top_cells: list[Any], tile: tuple[int, int]
+) -> tuple[list[Any], dict[str, tuple[str, Any]]]:
+    """Swap each top cell for an in-memory wrapper holding a
+    ``cols x rows`` array of it at its abutment pitch (issue #4226). The
+    array is offset so the centre instance sits at the original coordinates;
+    the returned windows map each wrapper's name to ``(original name, that
+    instance's pitch box)``. An empty cell, or a 1x1 tile, is left as is."""
+    import klayout.db as kdb
+
+    cols, rows = tile
+    if (cols, rows) == (1, 1):
+        return top_cells, {}
+    checked: list[Any] = []
+    windows: dict[str, tuple[str, Any]] = {}
+    for cell in top_cells:
+        box = _tile_pitch_box(layout, cell)
+        if box.empty() or box.width() == 0 or box.height() == 0:
+            checked.append(cell)
+            continue
+        wrapper = layout.create_cell(f"{cell.name}__klt_tile")
+        pitch_x, pitch_y = box.width(), box.height()
+        wrapper.insert(
+            kdb.CellInstArray(
+                cell.cell_index(),
+                kdb.Trans(-(cols // 2) * pitch_x, -(rows // 2) * pitch_y),
+                kdb.Vector(pitch_x, 0),
+                kdb.Vector(0, pitch_y),
+                cols,
+                rows,
+            )
+        )
+        checked.append(wrapper)
+        windows[wrapper.name] = (cell.name, box)
+    return checked, windows
+
+
+def _overlaps_window(low: int, high: int, start: int, stop: int) -> bool:
+    """Whether the marker span ``[low, high]`` falls in the half-open window
+    ``[start, stop)``: by interior overlap, or -- for a zero-extent span -- by
+    containing point. Merely touching the window edge does not count, so a
+    marker lying wholly in a neighbour instance is excluded."""
+    if low == high:
+        return start <= low < stop
+    return low < stop and high > start
+
+
+def _restrict_to_tile_centre(state: _DrcState, setup: _DrcSetup) -> None:
+    """Keep only the markers overlapping the centre instance's window,
+    relabelled to the original cell (issue #4226): neighbour-only
+    markers are dropped so the array's edge instances raise no findings."""
+    kept: list[dict[str, Any]] = []
+    for violation in state.violations:
+        entry = setup.tile_windows.get(violation["cell"])
+        if entry is None:
+            kept.append(violation)
+            continue
+        original, window = entry
+        bbox = violation["bbox"]
+        # Overlap, not centre-in-window: a violation on a conductor merged
+        # across instances spans several of them and must still be reported.
+        if not (
+            _overlaps_window(bbox["left"], bbox["right"], window.left, window.right)
+            and _overlaps_window(bbox["bottom"], bbox["top"], window.bottom, window.top)
+        ):
+            continue
+        path = violation["source_path"]
+        # The array instance of the cell under check is not a real child of
+        # it: drop that first hop so attribution matches an untiled run.
+        path = path[1:] if path else None
+        violation["cell"] = original
+        violation["source_path"] = path or None
+        violation["source_cell"] = path[-1] if path else None
+        kept.append(violation)
+    state.violations = kept
+    counts: dict[str, int] = {}
+    for violation in kept:
+        counts[violation["rule"]] = counts.get(violation["rule"], 0) + 1
+    state.rule_counts = counts
+
+
+def _deck_layer_tuples(deck: Any) -> set[tuple[int, int]]:
+    """Every (layer, datatype) any rule in ``deck`` references."""
+    # Deck-static: every (layer, datatype) any rule in this deck references,
+    # regardless of what's actually present in `path`.
+    deck_layer_tuples: set[tuple[int, int]] = set()
+    for rule in deck:
+        deck_layer_tuples.add(rule.layer)
+        if rule.other_layer is not None:
+            deck_layer_tuples.add(rule.other_layer)
+        deck_layer_tuples.update(_spec_layers(rule))
+        if rule.derived_layer is not None:
+            # `rule.layer` is only the derived rule's *reporting* identity
+            # (see DerivedLayer's docstring) -- the layer(s) actually read
+            # to compute the checked region are these, independent of
+            # whether either happens to equal `rule.layer`. `"holes"` mode
+            # (#1976) reads only `base` -- `intersect_with` is `None` for it.
+            deck_layer_tuples.add(rule.derived_layer.base)
+            if rule.derived_layer.intersect_with is not None:
+                deck_layer_tuples.add(rule.derived_layer.intersect_with)
+    return deck_layer_tuples
+
+
+def _prepare_drc(
+    path: str,
+    deck_name: str,
+    top: str | None,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    rules: list[str] | None,
+    waivers_file: str | None,
+    tile: tuple[int, int] | None = None,
+) -> _DrcSetup:
+    """The setup phase of :func:`run_drc`: PDK/path/deck resolution, rule
+    selection, the layout load and the deck-static layer inventory."""
+    # Resolved only when `--pdk`/`--pdk-root` was given -- this engine's
+    # rules come entirely from `deck_name`, so the resolved PDK is used for
+    # nothing but `provenance.pdk` (issue #1901). Mirrors extract.py's own
+    # `pdk_variant is not None or pdk_root is not None` guard so an omitted
+    # `--pdk` still yields `provenance.pdk: null`, not a spuriously-resolved
+    # default PDK.
+    pdk_info: dict[str, Any] | None = None
+    if pdk_variant is not None or pdk_root is not None:
+        try:
+            pdk_info = find_pdk_for_deck(deck_name, variant=pdk_variant, root=pdk_root)
+        except PdkNotFoundError as exc:
+            raise DrcError(str(exc)) from exc
+
+    # Checked here (ahead of deck lookup) so a missing/bad path is reported
+    # before an unknown deck name, matching this command's historical error
+    # precedence; load_layout() repeats this cheap check before the read.
+    if not os.path.exists(path):
+        raise DrcError(f"file not found: {path}")
+    if os.path.isdir(path):
+        raise DrcError(f"not a file: {path}")
+
+    try:
+        deck = get_deck(deck_name)
+        nominal_dbu_um = get_nominal_dbu(deck_name)
+    except UnknownDeckError as exc:
+        raise DrcError(str(exc)) from exc
+    layer_names = get_layer_names(deck_name)
+
+    # Issue #2768: resolved against the full deck before the layout is read,
+    # so a bad selector never costs a stream load. `omitted_ids` is empty for
+    # a full run (no selection, or a selection naming every rule).
+    rule_selection, omitted_ids = _resolve_optional_selection(deck, rules)
+    waivers = None if waivers_file is None else load_waivers(waivers_file)
+
+    layout = load_layout(path, DrcError)
+
+    # `deck`'s threshold_dbu values are authored against nominal_dbu_um, not
+    # necessarily this layout's own dbu (see DrcRule's docstring / #172) —
+    # rescale so the same physical distance is checked regardless of the
+    # stream's database unit.
+    dbu_scale = nominal_dbu_um / layout.dbu
+
+    top_cells = _select_top_cells(layout, top, DrcError)
+    tile_windows: dict[str, tuple[str, Any]] = {}
+    if tile is not None:
+        top_cells, tile_windows = _tile_top_cells(layout, top_cells, tile)
+
+    deck_layer_tuples = _deck_layer_tuples(deck)
+
+    # Reuse layers.py's existing per-layer enumeration (used today by
+    # `klt layers`) for stream-layer enumeration, rather than a second
+    # `kdb.Layout` layer walk -- see #189. `top=top` keeps this scoped to the
+    # same cells `top_cells` above was just restricted to, so a scoped run's
+    # `coverage` reflects only what was actually checked, not the whole
+    # stream's layer usage.
+    stream_layer_tuples = {
+        (entry["layer"], entry["datatype"])
+        for entry in layers_report(path, top=top)["layers"]
+    }
+    return _DrcSetup(
+        deck_name=deck_name,
+        deck=deck,
+        layer_names=layer_names,
+        rule_selection=rule_selection,
+        omitted_ids=omitted_ids,
+        waivers=waivers,
+        pdk_info=pdk_info,
+        layout=layout,
+        dbu_scale=dbu_scale,
+        top_cells=top_cells,
+        deck_layer_tuples=deck_layer_tuples,
+        stream_layer_tuples=stream_layer_tuples,
+        tile=tile,
+        tile_windows=tile_windows,
+    )
+
+
+def _record_violation(
+    state: _DrcState,
+    rule: DrcRule,
+    layer_label: str,
+    cell: Any,
+    bbox: Any,
+    points: list[list[int]] | None,
+) -> None:
+    """Append one ``violations[]`` entry for ``rule`` and bump its count."""
+    source_cell, source_path = _attribute_to_instance(cell, bbox)
+    state.violations.append(
+        {
+            "rule": rule.id,
+            "description": rule.description,
+            "check": rule.check,
+            "layer": layer_label,
+            "cell": cell.name,
+            "source_cell": source_cell,
+            "source_path": source_path,
+            "bbox": {
+                "left": bbox.left,
+                "bottom": bbox.bottom,
+                "right": bbox.right,
+                "top": bbox.top,
+            },
+            "polygon": points,
+        }
+    )
+    state.rule_counts[rule.id] = state.rule_counts.get(rule.id, 0) + 1
+
+
+def _separate_peer_plates(
+    rule: DrcRule, other_region: Any, base_region: Any, dbu_scale: float
+) -> tuple[Any, Any]:
+    """Split ``other_region`` for a ``derived_layer`` ``"separation"`` rule
+    whose ``other_layer`` is the same drawn layer ``derived_layer.intersect_with``
+    reads (issue #1033); returns ``(other_region, peer_edge_pairs)``."""
+    # A `derived_layer` "separation" rule whose `other_layer` is
+    # the *same* drawn layer `derived_layer.intersect_with` reads
+    # (issue #1033, e.g. gf180mcu's `mim.space.1`: `region` is the
+    # virtual bottom plate carved out of `Metal4`, `other_layer`
+    # is `Metal4` itself) needs `other_region` scoped to exclude
+    # the plate's own footprint -- otherwise `other_region`
+    # trivially contains every shape `region` was built from
+    # (they're the same drawn layer), which is not a meaningful
+    # "spacing to other metal" comparison.
+    #
+    # A plain `other_region - region` is not safe here: `region`
+    # is only the *clipped* fragment of an `other_layer` polygon
+    # that falls inside the oversized `base` window (see
+    # `DerivedLayer`'s docstring) -- any part of that same
+    # physical polygon *outside* the window would be left behind
+    # in `other_region`, touching `region` at the sizing cutoff
+    # with zero gap: a `separation_check` between them reports a
+    # synthetic violation at that seam, an artefact of one
+    # continuous shape being cut in two, not a real spacing gap.
+    #
+    # Instead, exclude the *whole* `other_region` polygon for any
+    # polygon that already overlaps the raw (unsized) `base`
+    # region anywhere. Every polygon that can contribute a
+    # fragment to `region` only does so because it already passed
+    # this same `.interacting(base_region)` pre-filter (see
+    # `region`'s own construction above), so this removes exactly
+    # the candidates `region` was built from, wholesale --
+    # leaving only genuinely distinct `other_layer` geometry (e.g.
+    # ordinary routing/PDN metal with no relationship to any MiM
+    # structure) as "other".
+    other_merged = other_region.merged()
+    peer_region = other_merged.interacting(base_region)
+    other_region = other_merged - peer_region
+
+    # That wholesale exclusion leaves one half of the official
+    # rule unmeasured: gf180mcu's `MIMTM.1` is spacing to the
+    # bottom plate metal "whether adjacent MiM or routing
+    # metal", and every *adjacent MiM* plate has just been
+    # excluded from `other_region` along with this rule's own
+    # plate (both overlap `base`). Measure that half here, as a
+    # peer-to-peer check among the excluded, plate-bearing
+    # polygons themselves, and report it under the same rule id.
+    #
+    # `isolated_check` (spacing between *different* polygons of
+    # one region), not `space_check` (which also measures
+    # intra-polygon notches): a single MiM's own bottom plate
+    # metal is one polygon after `.merged()`, and a legitimate
+    # slot in wide plate metal (a routine density/stress-relief
+    # feature, typically ~1um wide) is not "spacing to another
+    # bottom plate" -- `space_check` would flag it, a fresh
+    # false positive of exactly the kind this issue is about.
+    #
+    # Measured on the *whole* plate-bearing polygons rather than
+    # the sizing-clipped virtual plates, which is deliberate:
+    # clipped plates split a shared bottom plate carrying two
+    # top plates more than `2 * sized_by_um` apart into two
+    # region polygons with no real gap between them (the metal
+    # is continuous), which `isolated_check` would flag. The
+    # residual conservatism this trades for -- two plate-bearing
+    # polygons whose *facing* metal is routing tail rather than
+    # virtual plate on both sides -- is documented in the deck's
+    # own `mim.space.1` note.
+    peer_edge_pairs = peer_region.isolated_check(round(rule.threshold_dbu * dbu_scale))
+    return other_region, peer_edge_pairs
+
+
+def _cell_check_regions(
+    rule: DrcRule,
+    cell: Any,
+    setup: _DrcSetup,
+    layer_index: int | None,
+    base_index: int | None,
+    intersect_index: int | None,
+    other_index: int | None,
+) -> tuple[Any, Any, Any, Any | None]:
+    """Build ``(region, other_region, base_region, peer_edge_pairs)`` for
+    ``rule`` on one top ``cell``."""
+    import klayout.db as kdb
+
+    layout = setup.layout
+    dbu_scale = setup.dbu_scale
+
+    base_region = None
+    if rule.derived_layer is not None:
+        # Virtual/derived region (#345, marker-scoped modes #1110) --
+        # see `DerivedLayer`'s docstring for each mode's full
+        # derivation and why an unscoped check against either raw
+        # input layer would be wrong, not just conservative.
+        # `sized_by_um` is a real micrometre distance, rescaled
+        # against this layout's own `dbu` directly (unlike
+        # `rule.threshold_dbu`, which is rescaled via `dbu_scale`
+        # against the deck's nominal dbu).
+        base_region = _cell_region_or_empty(cell, base_index)
+        region = _derived_region(
+            rule,
+            base_region,
+            _cell_region_or_empty(cell, intersect_index),
+            layout.dbu,
+            _context_region(cell, layout, rule),
+            _context_region(cell, layout, rule, stage=2),
+        )
+    else:
+        region = _select_primary_region(
+            rule,
+            kdb.Region(cell.begin_shapes_rec(layer_index))
+            if layer_index is not None
+            else kdb.Region(),  # absent conductor (#2726)
+        )
+    other_region = (
+        _select_other_region(rule, kdb.Region(cell.begin_shapes_rec(other_index)))
+        if other_index is not None
+        else (kdb.Region() if rule.require_containment else None)
+    )
+
+    # Supplementary edge pairs reported under the same rule id,
+    # alongside whatever `_run_check` returns -- the same additive
+    # pattern `_run_check`'s own `outside_region` escape term already
+    # uses (#318). Only ever set for the derived+`"separation"`
+    # same-drawn-layer case (issue #1033).
+    peer_edge_pairs: Any | None = None
+
+    if (
+        rule.derived_layer is not None
+        and rule.check == "separation"
+        and other_region is not None
+        and rule.other_layer == rule.derived_layer.intersect_with
+    ):
+        other_region, peer_edge_pairs = _separate_peer_plates(
+            rule, other_region, base_region, dbu_scale
+        )
+
+    return region, other_region, base_region, peer_edge_pairs
+
+
+def _record_polygons(
+    state: _DrcState,
+    rule: DrcRule,
+    layer_label: str,
+    cell: Any,
+    polygons: Any,
+) -> None:
+    """Record one violation per merged polygon in ``polygons``."""
+    for polygon in polygons.each_merged():
+        bbox = polygon.bbox()
+        points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
+        _record_violation(state, rule, layer_label, cell, bbox, points)
+
+
+def _check_non_edge_pair_rule(
+    rule: DrcRule,
+    cell: Any,
+    setup: _DrcSetup,
+    state: _DrcState,
+    layer_label: str,
+    region: Any,
+    other_region: Any,
+) -> bool:
+    """Run the area / density / antenna checks, which report something other
+    than edge pairs. Returns whether ``rule`` was one of those kinds (and so
+    is fully handled)."""
+    if rule.check in _AREA_CHECKS:
+        _record_polygons(
+            state,
+            rule,
+            layer_label,
+            cell,
+            _run_area_check(region, rule, setup.dbu_scale),
+        )
+        return True
+
+    if rule.check in _DENSITY_CHECKS:
+        for window_box in _run_density_check(region, rule, setup.layout.dbu):
+            points = [
+                [window_box.left, window_box.bottom],
+                [window_box.right, window_box.bottom],
+                [window_box.right, window_box.top],
+                [window_box.left, window_box.top],
+            ]
+            _record_violation(state, rule, layer_label, cell, window_box, points)
+        return True
+
+    if rule.check in _ANTENNA_CHECKS:
+        antenna_bbox = _run_antenna_check(region, other_region, rule)
+        if antenna_bbox is not None:
+            # Flat, whole-cell aggregate -- no single real polygon
+            # corresponds to "the violation" the way an "area" or
+            # edge-pair check's does, see `_run_antenna_check`'s docstring.
+            _record_violation(state, rule, layer_label, cell, antenna_bbox, None)
+        return True
+
+    return False
+
+
+def _edge_pairs_for_rule(
+    rule: DrcRule,
+    cell: Any,
+    setup: _DrcSetup,
+    region: Any,
+    other_region: Any,
+) -> tuple[Any, Any]:
+    """``(edge_pairs, outside_region)`` for an edge-pair-reporting ``rule``."""
+    if rule.check in _NET_SPACE_CHECKS:
+        return _run_net_space_check(cell, setup.layout, rule, setup.dbu_scale), None
+    if rule.check in _VERTEX_CHECKS:
+        # Vertex checks (issue #2642). Dispatched here rather than
+        # inside `_run_check` because neither reads `threshold_dbu`
+        # (and `"ongrid"` needs the layout's own `dbu`, which
+        # `_run_check`'s `dbu_scale` has already divided out) -- but
+        # both return the same `EdgePairs` shape, so everything
+        # downstream (bbox/polygon extraction, `rule_counts`,
+        # `violations[]`) is reused verbatim. Neither kind has an
+        # `outside_region` term.
+        return _run_vertex_check(region, rule, setup.layout.dbu), None
+    return _run_check(region, other_region, rule, setup.dbu_scale)
+
+
+def _check_rule_on_cell(
+    rule: DrcRule,
+    cell: Any,
+    setup: _DrcSetup,
+    state: _DrcState,
+    layer_label: str,
+    layer_index: int | None,
+    base_index: int | None,
+    intersect_index: int | None,
+    other_index: int | None,
+) -> None:
+    """Evaluate one resolved ``rule`` against one top ``cell``, recording
+    every violation in ``state``."""
+    region, other_region, _, peer_edge_pairs = _cell_check_regions(
+        rule, cell, setup, layer_index, base_index, intersect_index, other_index
+    )
+
+    if _check_non_edge_pair_rule(
+        rule, cell, setup, state, layer_label, region, other_region
+    ):
+        return
+
+    edge_pairs, outside_region = _edge_pairs_for_rule(
+        rule, cell, setup, region, other_region
+    )
+
+    checked_edge_pairs = (
+        edge_pairs
+        if peer_edge_pairs is None
+        else itertools.chain(edge_pairs, peer_edge_pairs)
+    )
+
+    for edge_pair in checked_edge_pairs:
+        _record_violation(
+            state,
+            rule,
+            layer_label,
+            cell,
+            edge_pair.bbox(),
+            _edge_pair_hull_points(edge_pair),
+        )
+
+    # Polygon-shaped violation terms reported under the same rule id,
+    # additive to the edge-pair violations above (each `None` for
+    # every rule that doesn't opt into it):
+    #
+    # - `outside_region` (only set for "enclosing"/"enclosed", see
+    #   _OUTSIDE_CHECKS) holds the part of the enclosed layer that
+    #   `enclosing_check`/`enclosed_check` structurally cannot
+    #   report: area with zero (or partial) spatial overlap with the
+    #   enclosing layer, up to and including a shape that lies
+    #   entirely outside it -- the worst-case enclosure violation
+    #   (#318).
+    # - the max-size term (only set for a `"width"` rule that
+    #   declares `threshold_max_dbu`, see `_run_width_max_check`)
+    #   holds the merged cuts whose bounding box exceeds the *upper*
+    #   bound of a fixed-size rule like gf180mcu's `CO.1`/`Vn.1`
+    #   (#2370) -- the half no `Region` check primitive reports.
+    polygon_terms = [
+        term
+        for term in (
+            outside_region,
+            _run_width_max_check(region, rule, setup.dbu_scale),
+        )
+        if term is not None
+    ]
+    for polygon_term in polygon_terms:
+        _record_polygons(state, rule, layer_label, cell, polygon_term)
+
+
+def _evaluate_rule(rule: DrcRule, setup: _DrcSetup, state: _DrcState) -> None:
+    """Validate ``rule``, resolve its input layers, and run it on every top
+    cell -- or record it in ``state.rules_skipped`` when an input is absent."""
+    layout = setup.layout
+
+    # A `threshold_max_dbu` (#2370) attached to a check kind with no
+    # upper-bound branch is a deck-authoring mistake that must fail
+    # loudly, including on a stream where this rule's layer is absent
+    # (below) and the check itself never runs -- see
+    # `_validate_threshold_max`.
+    _validate_threshold_max(rule)
+    _validate_require_containment(rule)
+    _validate_other_layer_selection(rule)
+    _validate_layer_selection(rule)
+
+    # Gates that skip a rule before any layer resolution below -- see
+    # `_rule_skipped_before_evaluation` for each one and why. Like a
+    # missing `layer`/`other_layer`, they land the rule in
+    # `coverage.rules_skipped`; `_classify_skipped_rules` decides which
+    # reason code each one reports.
+    if _rule_skipped_before_evaluation(rule, layout):
+        state.rules_skipped.append(rule.id)
+        return
+
+    # For a `derived_layer` rule (#345), the region actually checked is
+    # computed from two *different* drawn layers (`derived_layer.base`/
+    # `intersect_with`) rather than `rule.layer`'s own raw shapes -- see
+    # `DerivedLayer`'s docstring. `rule.layer` itself is resolved only for
+    # `coverage`/`layer_label` reporting below, never used to build the
+    # checked region in this branch.
+    if _dispatch_region_rule(
+        rule,
+        layout,
+        setup.top_cells,
+        setup.layer_names,
+        state.violations,
+        state.rule_counts,
+        state.rules_checked,
+        state.rules_skipped,
+        state.empty_checked_region_ids,
+    ):
+        return
+
+    base_index: int | None = None
+    intersect_index: int | None = None
+    layer_index: int | None = None
+
+    if rule.derived_layer is not None:
+        _validate_derived_layer(rule)
+        base_index = layout.find_layer(*rule.derived_layer.base)
+        intersect_index = (
+            layout.find_layer(*rule.derived_layer.intersect_with)
+            if rule.derived_layer.intersect_with is not None
+            else None
+        )
+        if _derived_inputs_absent(rule, base_index, intersect_index):
+            # See `_derived_inputs_absent` for each mode's skip condition.
+            state.rules_skipped.append(rule.id)
+            return
+    else:
+        layer_index = layout.find_layer(*rule.layer)
+        if layer_index is None and not (
+            rule.require_containment
+            and _containment_layers(rule)[1] == rule.layer
+            and layout.find_layer(*_containment_layers(rule)[0]) is not None
+        ):
+            # rule's layer is absent from this stream -> no violations,
+            # but record it so `coverage.rules_skipped` can surface the
+            # skip.
+            state.rules_skipped.append(rule.id)
+            return
+
+    other_index = None
+    if rule.other_layer is not None:
+        other_index = layout.find_layer(*rule.other_layer)
+        if other_index is None and not (
+            rule.require_containment
+            and _containment_layers(rule)[1] == rule.other_layer
+            and layout.find_layer(*_containment_layers(rule)[0]) is not None
+        ):
+            state.rules_skipped.append(rule.id)
+            return
+
+    # Every return above is a skip; reaching here means this rule's
+    # input layer(s) all resolved, so it is about to be evaluated against
+    # real geometry -- record it so `coverage.rules_checked` (and the
+    # `coverage.nothing_checked` roll-up derived from it) can state what
+    # this verdict was actually measured over (issue #1996).
+    state.rules_checked.append(rule.id)
+
+    layer_label = setup.layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
+
+    for cell in setup.top_cells:
+        _check_rule_on_cell(
+            rule,
+            cell,
+            setup,
+            state,
+            layer_label,
+            layer_index,
+            base_index,
+            intersect_index,
+            other_index,
+        )
+
+
+def _marker_interacts_in_cell(
+    layout: Any,
+    cell: Any,
+    marker_index: int,
+    unscoped_layers: set[tuple[int, int]],
+) -> bool:
+    """Whether the marker layer's geometry in ``cell`` interacts with any of
+    ``unscoped_layers``."""
+    import klayout.db as kdb
+
+    marker_region = kdb.Region(cell.begin_shapes_rec(marker_index))
+    if marker_region.is_empty():
+        return False
+    for checked_layer in sorted(unscoped_layers):
+        checked_index = layout.find_layer(*checked_layer)
+        if checked_index is None:
+            continue
+        checked_region = kdb.Region(cell.begin_shapes_rec(checked_index))
+        if not marker_region.interacting(checked_region).is_empty():
+            return True
+    return False
+
+
+def _voltage_domain_warnings(
+    setup: _DrcSetup, skipped_rule_ids: set[str]
+) -> list[dict[str, str]]:
+    """``coverage.voltage_domain_warnings`` (issue #552).
+
+    A marker this deck registers via `get_unmodeled_voltage_markers` (e.g.
+    gf180mcu's `Dualgate` 55/0) selects a second gate-oxide/voltage domain
+    whose real DRC thresholds this deck's rules do not encode -- geometry
+    inside it is checked against the wrong (default) column and would
+    otherwise report an unqualified `layers_checked` pass. Gated on the
+    marker's geometry actually *interacting* with at least one layer an
+    **unscoped** rule checked on this run (not merely present in the stream),
+    so a marker shape that never overlaps any such geometry produces no
+    warning with nothing behind it.
+
+    "Unscoped" is per rule, not per deck (issue #1110): a marker can be
+    partly modelled. gf180mcu's `DF.1a`/`DF.3a` now ship as `_LV`/`_MV`
+    rule pairs that read `Dualgate` themselves via `DerivedLayer`'s
+    `"overlapping"`/`"not_interacting"` modes, so geometry those rules
+    checked was *not* checked against the wrong column and must not
+    produce a warning -- while every rule that ran without reading the
+    marker still can. Rules skipped this run (their layers absent from
+    this stream) are excluded too: a rule that never ran applied no
+    threshold, right or wrong.
+    """
+    layout = setup.layout
+    stream_layer_tuples = setup.stream_layer_tuples
+    warnings: list[dict[str, str]] = []
+    unmodeled_markers = get_unmodeled_voltage_markers(setup.deck_name)
+    for marker, description in sorted(unmodeled_markers.items()):
+        if marker not in stream_layer_tuples:
+            continue
+        marker_index = layout.find_layer(*marker)
+        if marker_index is None:
+            continue
+        unscoped_layers: set[tuple[int, int]] = set()
+        for rule in setup.deck:
+            if _rule_outside_voltage_gate(rule, marker, skipped_rule_ids):
+                continue
+            unscoped_layers |= _rule_input_layers(rule)
+        unscoped_layers &= stream_layer_tuples
+        unscoped_layers.discard(marker)
+        if any(
+            _marker_interacts_in_cell(layout, cell, marker_index, unscoped_layers)
+            for cell in setup.top_cells
+        ):
+            warnings.append({"marker": _layer_str(marker), "description": description})
+    return warnings
+
+
+def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
+    """The report's ``coverage`` block."""
+    deck = setup.deck
+    deck_name = setup.deck_name
+    stream_layer_tuples = setup.stream_layer_tuples
+    deck_layer_tuples = setup.deck_layer_tuples
+    omitted_ids = setup.omitted_ids
+    rules_checked = state.rules_checked
+    rules_skipped = state.rules_skipped
+
+    layers_checked = deck_layer_tuples & stream_layer_tuples
+    layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
+
+    # Deck-static, like `deck_layers` above: every distinct non-empty
+    # DrcRule.scope this deck's rules declare, regardless of what's actually
+    # present in `path` (#566).
+    deck_scope = sorted({rule.scope for rule in deck if rule.scope})
+
+    # A rule omitted from a `--rules` subset (issue #2768) applied no
+    # threshold either, exactly like a skipped one.
+    skipped_rule_ids = set(rules_skipped) | omitted_ids
+    voltage_domain_warnings = _voltage_domain_warnings(setup, skipped_rule_ids)
+
+    # Issue #3012: foundry rules the deck knows but cannot evaluate, named so
+    # a `clean` cannot be read as covering them. Only when the rule's layer
+    # is actually in the stream.
+    unchecked_rules = [
+        {"rule": rule_id, "layer": _layer_str(layer), "description": description}
+        for rule_id, (layer, description) in sorted(
+            get_unchecked_rules(deck_name).items()
+        )
+        if layer in stream_layer_tuples
+    ]
+
+    # Issue #3815: area-marker layers the deck accepts but does not model, so
+    # a result identical with and without the marker is not read as
+    # marker-aware. Informational only, like `unchecked_rules`.
+    marker_blind_layers_in_stream = sorted(
+        _layer_str(layer)
+        for layer in get_marker_blind_layers(deck_name)
+        if layer in stream_layer_tuples
+    )
+
+    # Issue #2110: the two common-coverage categories this engine's single
+    # "a layer it reads is absent" skip splits into -- see
+    # `_classify_skipped_rules` for why an empty assessment domain is
+    # inapplicable work rather than a skipped request, and why anything else
+    # stays a disclosed skip.
+    skipped_records, inapplicable_records = _classify_skipped_rules(
+        deck, rules_skipped, setup.layout, frozenset(state.empty_checked_region_ids)
+    )
+    # Issue #2768: every deliberately omitted rule is requested work that did
+    # not run -- a skip, never inapplicable, even when its layers are absent
+    # (the full registered deck is what a DRC verdict is about).
+    skipped_records += [
+        {"id": rule_id, "reason": SKIP_REASON_NOT_SELECTED}
+        for rule_id in sorted(omitted_ids)
+    ]
+    return {
+        "deck_layers": [_layer_str(t) for t in sorted(deck_layer_tuples)],
+        "layers_checked": [_layer_str(t) for t in sorted(layers_checked)],
+        "layers_in_stream_without_rules": [
+            _layer_str(t) for t in sorted(layers_in_stream_without_rules)
+        ],
+        "rules_checked": sorted(rules_checked),
+        "rules_skipped": sorted(rules_skipped),
+        "voltage_domain_warnings": voltage_domain_warnings,
+        "unchecked_rules": unchecked_rules,
+        "marker_blind_layers_in_stream": marker_blind_layers_in_stream,
+        "deck_scope": deck_scope,
+        # Issue #3031: deck-static, like `deck_scope` -- official rule ids the
+        # deck knowingly does not transcribe.
+        "unmodeled_rules": get_unmodeled_rules(deck_name),
+        # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
+        # refuse a "clean" verdict measured over nothing without re-deriving
+        # that emptiness from `rules_skipped` vs. the deck's own rule count.
+        **build_check_coverage(
+            checked=sorted(rules_checked),
+            skipped=skipped_records,
+            inapplicable=inapplicable_records,
+            nothing_checked_reasons=_curated_nothing_checked_reasons(
+                deck, rules_checked
+            ),
+        ),
+    }
+
+
+def _assemble_report(
+    path: str, setup: _DrcSetup, state: _DrcState, waivers_file: str | None
+) -> dict[str, Any]:
+    """The report-assembly phase of :func:`run_drc`: sort, coverage, waivers,
+    verdict and provenance."""
+    if setup.tile_windows:
+        _restrict_to_tile_centre(state, setup)
+    violations = state.violations
+    rule_counts = state.rule_counts
+    violations.sort(
+        key=lambda v: (
+            v["rule"],
+            v["cell"],
+            v["bbox"]["left"],
+            v["bbox"]["bottom"],
+            v["bbox"]["right"],
+            v["bbox"]["top"],
+        )
+    )
+
+    coverage = _build_coverage(setup, state)
+
+    # Issue #2110: the verdict is the common decision table's, never a local
+    # re-derivation of it -- violations are `failed` (exit 3, decided before
+    # coverage is consulted at all), known zero checked work is `not_checked`
+    # (exit 4), and successful checks alongside a nonempty skipped-request
+    # list are `clean_partial` (exit 0, a real result that is *not* this
+    # verb's unconditional success). See `docs/coverage-contract.md`.
+    # Issue #3483: waived markers leave every count and the verdict, and are
+    # reported in full under `waived` -- never dropped.
+    waiver_fields: dict[str, Any] = {}
+    if setup.waivers is not None:
+        violations, rule_counts, waiver_fields = _apply_waivers(
+            violations, setup.waivers
+        )
+    waived_entries = waiver_fields.get("waived", [])
+    # Issue #4520: additive and report-only. Present only when a finding is
+    # attributed to a sub-cell or a waiver run happened, so a flat layout's
+    # report (and every committed one) is byte-identical to before.
+    if setup.waivers is not None or any(
+        v.get("source_cell") is not None for v in (*violations, *waived_entries)
+    ):
+        waiver_fields["source_cell_rollup"] = _source_cell_rollup(
+            violations, waived_entries
+        )
+    runset_notes = _runset_correspondence(setup.deck, violations, waived_entries)
+    if runset_notes:
+        waiver_fields["runset_correspondence"] = runset_notes
+    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
+    report: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        # Issue #2659: the committable `{path, scope}` shape, never the
+        # producing host's absolute path -- see `env_provenance.repo_relative_path`.
+        "file": env_provenance.repo_relative_path(
+            path, repo_root=env_provenance.repo_root_for(path)
+        ),
+        "deck": setup.deck_name,
+        "dbu_um": setup.layout.dbu,
+        "status": rollup_status(rollup, success="clean", failure="violations"),
+        "violation_count": len(violations),
+        "rule_counts": dict(sorted(rule_counts.items())),
+        "metrics": {_VIOLATION_COUNT_METRIC_NAME: len(violations)},
+        "violations": violations,
+        "coverage": coverage,
+        # Issue #2768: present only for a `--rules` run, so a default run's
+        # report (and every committed one) is byte-identical to before.
+        **(
+            {}
+            if setup.rule_selection is None
+            else {"rule_selection": setup.rule_selection}
+        ),
+        **waiver_fields,
+        # Issue #4226: present only for a `--tile` run, so a default run's
+        # report is byte-identical to before.
+        **(
+            {}
+            if setup.tile is None
+            else {"tile": {"columns": setup.tile[0], "rows": setup.tile[1]}}
+        ),
+    }
+    report["provenance"] = build_provenance(
+        deck_name=setup.deck_name,
+        deck_path=deck_source_path(setup.deck_name),
+        pdk=setup.pdk_info,
+        input_path=path,
+        include_klayout_version_mismatch=True,
+    )
+    if waivers_file is not None:
+        report["provenance"]["waivers"] = {
+            "file": waivers_file,
+            "content_hash": _content_hash(waivers_file),
+        }
+    return report
+
+
 def run_drc(
     path: str,
     deck_name: str,
@@ -746,6 +2228,10 @@ def run_drc(
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     rules: list[str] | None = None,
+    waivers_file: str | None = None,
+    tile: str | tuple[int, int] | None = None,
+    negative_control: str | None = None,
+    negative_control_categories: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run ``deck_name``'s rules against the layout at ``path``.
 
@@ -753,8 +2239,8 @@ def run_drc(
     ``docs/cli/drc.md``)::
 
         {
-            "schema_version": 2,
-            "file": <path as provided>,
+            "schema_version": 3,
+            "file": {"path": <repo-relative path>, "scope": "repo"},
             "deck": <deck name>,
             "dbu_um": <database unit in micrometres, float>,
             "status": "clean" | "clean_partial" | "violations" | "not_checked",
@@ -780,7 +2266,13 @@ def run_drc(
                 "voltage_domain_warnings": [
                     {"marker": "<layer>/<datatype>", "description": str}, ...
                 ],
+                "unchecked_rules": [
+                    {"rule": str, "layer": "<layer>/<datatype>",
+                     "description": str}, ...
+                ],
+                "marker_blind_layers_in_stream": ["<layer>/<datatype>", ...],
                 "deck_scope": [<scope identifier>, ...],
+                "unmodeled_rules": [<official rule id>, ...],
                 "nothing_checked": bool,
                 "nothing_checked_reasons": [<reason code>, ...],
             },
@@ -978,651 +2470,101 @@ def run_drc(
     ``None``, so a default run's report is unchanged. Selecting every rule is
     equivalent to a full run (``omitted: []``).
 
+    ``waivers_file`` (issue #3483, ``--waivers``) names a reviewed JSON file
+    of rule-scoped cell waivers (:func:`load_waivers`). A violation whose
+    ``source_cell`` and rule both match a waiver moves out of ``violations``/
+    ``violation_count``/``rule_counts``/``metrics`` (and so out of
+    ``status``) into a top-level ``waived`` array carrying
+    ``waiver_justification``, with ``waived_count``, ``waived_rule_counts``
+    and ``unused_waivers`` alongside; ``provenance.waivers`` pins the file by
+    content hash. All of these are absent when ``waivers_file`` is ``None``,
+    so a default report is unchanged. A marker straddling two instances
+    carries the container's ``source_cell`` (see
+    :func:`_attribute_to_instance`), so waive it under that cell.
+
+    ``negative_control`` (issue #4320, ``--negative-control``) names a
+    known-bad layout the same deck is run over *first*, with the same
+    ``top``/``rules``/pdk options but no waivers (a waiver must not hide the
+    control's violations). A fixture with no violation, or one missing a
+    ``negative_control_categories`` rule id, raises :class:`DrcError` (code
+    ``negative_control_failed``) and no verdict is reached for ``path``. On
+    success the report gains the native engine's ``negative_control`` block;
+    it is absent without the flag, so a default report is unchanged.
+
     Raises :class:`DrcError` if the file is missing/unreadable, the deck
     name is unknown, ``top`` names a cell absent from the stream, a rule is
     malformed (e.g. a two-layer check missing ``other_layer``),
     ``pdk_variant``/``pdk_root`` is given but no matching PDK can be found,
-    or a ``rules`` selector matches no rule.
+    a ``rules`` selector matches no rule, or the negative control fails.
     """
-    # Resolved only when `--pdk`/`--pdk-root` was given -- this engine's
-    # rules come entirely from `deck_name`, so the resolved PDK is used for
-    # nothing but `provenance.pdk` (issue #1901). Mirrors extract.py's own
-    # `pdk_variant is not None or pdk_root is not None` guard so an omitted
-    # `--pdk` still yields `provenance.pdk: null`, not a spuriously-resolved
-    # default PDK.
-    pdk_info: dict[str, Any] | None = None
-    if pdk_variant is not None or pdk_root is not None:
-        try:
-            pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
-        except PdkNotFoundError as exc:
-            raise DrcError(str(exc)) from exc
-
-    # Checked here (ahead of deck lookup) so a missing/bad path is reported
-    # before an unknown deck name, matching this command's historical error
-    # precedence; load_layout() repeats this cheap check before the read.
-    if not os.path.exists(path):
-        raise DrcError(f"file not found: {path}")
-    if os.path.isdir(path):
-        raise DrcError(f"not a file: {path}")
-
-    try:
-        deck = get_deck(deck_name)
-        nominal_dbu_um = get_nominal_dbu(deck_name)
-    except UnknownDeckError as exc:
-        raise DrcError(str(exc)) from exc
-    layer_names = get_layer_names(deck_name)
-
-    # Issue #2768: resolved against the full deck before the layout is read,
-    # so a bad selector never costs a stream load. `omitted_ids` is empty for
-    # a full run (no selection, or a selection naming every rule).
-    rule_selection, omitted_ids = _resolve_optional_selection(deck, rules)
-
-    layout = load_layout(path, DrcError)
-
-    # `deck`'s threshold_dbu values are authored against nominal_dbu_um, not
-    # necessarily this layout's own dbu (see DrcRule's docstring / #172) —
-    # rescale so the same physical distance is checked regardless of the
-    # stream's database unit.
-    dbu_scale = nominal_dbu_um / layout.dbu
-
-    # Imported lazily (after load_layout, which already paid this cost) for
-    # kdb.Region() below.
-    import klayout.db as kdb
-
-    top_cells = _select_top_cells(layout, top, DrcError)
-
-    # Deck-static: every (layer, datatype) any rule in this deck references,
-    # regardless of what's actually present in `path`.
-    deck_layer_tuples: set[tuple[int, int]] = set()
-    for rule in deck:
-        deck_layer_tuples.add(rule.layer)
-        if rule.other_layer is not None:
-            deck_layer_tuples.add(rule.other_layer)
-        if rule.derived_layer is not None:
-            # `rule.layer` is only the derived rule's *reporting* identity
-            # (see DerivedLayer's docstring) -- the layer(s) actually read
-            # to compute the checked region are these, independent of
-            # whether either happens to equal `rule.layer`. `"holes"` mode
-            # (#1976) reads only `base` -- `intersect_with` is `None` for it.
-            deck_layer_tuples.add(rule.derived_layer.base)
-            if rule.derived_layer.intersect_with is not None:
-                deck_layer_tuples.add(rule.derived_layer.intersect_with)
-
-    # Reuse layers.py's existing per-layer enumeration (used today by
-    # `klt layers`) for stream-layer enumeration, rather than a second
-    # `kdb.Layout` layer walk -- see #189. `top=top` keeps this scoped to the
-    # same cells `top_cells` above was just restricted to, so a scoped run's
-    # `coverage` reflects only what was actually checked, not the whole
-    # stream's layer usage.
-    stream_layer_tuples = {
-        (entry["layer"], entry["datatype"])
-        for entry in layers_report(path, top=top)["layers"]
-    }
-
-    violations: list[dict[str, Any]] = []
-    rule_counts: dict[str, int] = {}
-    rules_skipped: list[str] = []
-    rules_checked: list[str] = []
+    # Issue #4226 (``--tile``): ``tile`` is ``"<cols>x<rows>"`` (odd counts)
+    # or an already-parsed pair. Each checked top cell is placed as that
+    # array at its abutment pitch (``prBoundary`` when drawn, else its bbox)
+    # and only markers overlapping the middle instance are reported, so a
+    # cell cut at its boundary is judged as placed among identical
+    # neighbours. The report gains ``tile``; absent otherwise.
+    tile_pair = parse_tile(tile) if isinstance(tile, str) else tile
+    control_result = None
+    if negative_control is not None:
+        control_result = _run_curated_negative_control(
+            negative_control,
+            negative_control_categories,
+            deck_name=deck_name,
+            top=top,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+            rules=rules,
+        )
+    setup = _prepare_drc(
+        path, deck_name, top, pdk_variant, pdk_root, rules, waivers_file, tile_pair
+    )
+    state = _DrcState()
 
     # Issue #2768: a rule left out of a `--rules` subset is never dispatched
     # -- not run-and-filtered (see `_dispatched_rules`). It is recorded
     # separately from `rules_skipped` (absent-layer skips) so the omission
-    # cannot be reclassified as inapplicable work below.
-    for rule in _dispatched_rules(deck, omitted_ids):
-        # A `threshold_max_dbu` (#2370) attached to a check kind with no
-        # upper-bound branch is a deck-authoring mistake that must fail
-        # loudly, including on a stream where this rule's layer is absent
-        # (below) and the check itself never runs -- see
-        # `_validate_threshold_max`.
-        _validate_threshold_max(rule)
+    # cannot be reclassified as inapplicable work.
+    for rule in _dispatched_rules(setup.deck, setup.omitted_ids):
+        _evaluate_rule(rule, setup, state)
 
-        # Gates that skip a rule before any layer resolution below -- see
-        # `_rule_skipped_before_evaluation` for each one and why. Like a
-        # missing `layer`/`other_layer`, they land the rule in
-        # `coverage.rules_skipped`; `_classify_skipped_rules` decides which
-        # reason code each one reports.
-        if _rule_skipped_before_evaluation(rule, layout):
-            rules_skipped.append(rule.id)
-            continue
-
-        # For a `derived_layer` rule (#345), the region actually checked is
-        # computed from two *different* drawn layers (`derived_layer.base`/
-        # `intersect_with`) rather than `rule.layer`'s own raw shapes -- see
-        # `DerivedLayer`'s docstring. `rule.layer` itself is resolved only for
-        # `coverage`/`layer_label` reporting below, never used to build the
-        # checked region in this branch.
-        base_index: int | None = None
-        intersect_index: int | None = None
-        layer_index: int | None = None
-
-        if rule.derived_layer is not None:
-            _validate_derived_layer(rule)
-            base_index = layout.find_layer(*rule.derived_layer.base)
-            intersect_index = (
-                layout.find_layer(*rule.derived_layer.intersect_with)
-                if rule.derived_layer.intersect_with is not None
-                else None
-            )
-            if base_index is None:
-                # The derived region's own source shapes are absent from this
-                # stream -> no violations possible in any mode, skip like any
-                # other missing-layer rule.
-                rules_skipped.append(rule.id)
-                continue
-            if intersect_index is None and rule.derived_layer.mode not in (
-                "not_interacting",
-                "holes",
-            ):
-                # The second input layer is absent -> both the
-                # "sized_intersection" and "overlapping" derivations yield an
-                # empty region, so there is nothing to check. "not_interacting"
-                # is the exception: "base polygons that touch no marker" is
-                # every base polygon when the marker layer was never drawn, so
-                # that rule must still run against the full base region (see
-                # `DerivedLayer`'s docstring) -- the ordinary thin-oxide-only
-                # layout, which must stay checked against the unmarked column.
-                # "holes" is the other exception: it never reads a second
-                # layer at all (`intersect_with` is always `None` for it), so
-                # `intersect_index` being `None` here is expected, not a
-                # missing-layer condition.
-                rules_skipped.append(rule.id)
-                continue
-        else:
-            layer_index = layout.find_layer(*rule.layer)
-            if layer_index is None:
-                # rule's layer is absent from this stream -> no violations,
-                # but record it so `coverage.rules_skipped` can surface the
-                # skip.
-                rules_skipped.append(rule.id)
-                continue
-
-        other_index = None
-        if rule.other_layer is not None:
-            other_index = layout.find_layer(*rule.other_layer)
-            if other_index is None:
-                rules_skipped.append(rule.id)
-                continue
-
-        # Every `continue` above is a skip; reaching here means this rule's
-        # input layer(s) all resolved, so it is about to be evaluated against
-        # real geometry -- record it so `coverage.rules_checked` (and the
-        # `coverage.nothing_checked` roll-up derived from it) can state what
-        # this verdict was actually measured over (issue #1996).
-        rules_checked.append(rule.id)
-
-        layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
-
-        for cell in top_cells:
-            if rule.derived_layer is not None:
-                # Virtual/derived region (#345, marker-scoped modes #1110) --
-                # see `DerivedLayer`'s docstring for each mode's full
-                # derivation and why an unscoped check against either raw
-                # input layer would be wrong, not just conservative.
-                # `sized_by_um` is a real micrometre distance, rescaled
-                # against this layout's own `dbu` directly (unlike
-                # `rule.threshold_dbu`, which is rescaled via `dbu_scale`
-                # against the deck's nominal dbu).
-                base_region = kdb.Region(cell.begin_shapes_rec(base_index))
-                intersect_region = (
-                    kdb.Region(cell.begin_shapes_rec(intersect_index))
-                    if intersect_index is not None
-                    else kdb.Region()
-                )
-                size_dbu = round(rule.derived_layer.sized_by_um / layout.dbu)
-                if rule.derived_layer.mode == "holes":
-                    # Interior voids of the merged `base` region (#1976) --
-                    # `intersect_with`/`sized_by_um` are unused for this mode.
-                    # Explicit `.merged()` before `.holes()` documents the
-                    # requirement even though `Region.holes()` already applies
-                    # merged semantics itself -- a hole formed by several
-                    # abutting drawn rectangles (the common GDS idiom for a
-                    # slotted plate) is only visible once merged. A `base`
-                    # region with no holes at all derives an empty region,
-                    # which is simply nothing to report -- not an error.
-                    region = base_region.merged().holes()
-                elif rule.derived_layer.mode in ("overlapping", "not_interacting"):
-                    # Marker-scoped whole-polygon selection (#1110): here
-                    # `sized_by_um` is a guard band around the *marker*
-                    # (`intersect_with`), not around `base`.
-                    marker_region = (
-                        intersect_region.sized(size_dbu)
-                        if size_dbu
-                        else intersect_region
-                    )
-                    if rule.derived_layer.mode == "overlapping":
-                        # Whole `base` polygons sharing area with the marker
-                        # -- the marked ("_MV") half of a rule pair.
-                        region = base_region.overlapping(marker_region)
-                    else:
-                        # Whole `base` polygons touching no marker geometry
-                        # at all -- the unmarked ("_LV") half of the pair.
-                        region = base_region.not_interacting(marker_region)
-                else:  # "sized_intersection" (the default, issue #345)
-                    # Shapes of `intersect_with` that already touch the
-                    # *unsized* `base` region somewhere, clipped to `base`'s
-                    # outline oversized by `sized_by_um`.
-                    region = intersect_region.interacting(base_region) & (
-                        base_region.sized(size_dbu)
-                    )
-            else:
-                region = kdb.Region(cell.begin_shapes_rec(layer_index))
-            other_region = (
-                kdb.Region(cell.begin_shapes_rec(other_index))
-                if other_index is not None
-                else None
-            )
-
-            # Supplementary edge pairs reported under the same rule id,
-            # alongside whatever `_run_check` returns -- the same additive
-            # pattern `_run_check`'s own `outside_region` escape term already
-            # uses (#318). Only ever set for the derived+`"separation"`
-            # same-drawn-layer case immediately below (issue #1033).
-            peer_edge_pairs: Any | None = None
-
-            if (
-                rule.derived_layer is not None
-                and rule.check == "separation"
-                and other_region is not None
-                and rule.other_layer == rule.derived_layer.intersect_with
-            ):
-                # A `derived_layer` "separation" rule whose `other_layer` is
-                # the *same* drawn layer `derived_layer.intersect_with` reads
-                # (issue #1033, e.g. gf180mcu's `mim.space.1`: `region` is the
-                # virtual bottom plate carved out of `Metal4`, `other_layer`
-                # is `Metal4` itself) needs `other_region` scoped to exclude
-                # the plate's own footprint -- otherwise `other_region`
-                # trivially contains every shape `region` was built from
-                # (they're the same drawn layer), which is not a meaningful
-                # "spacing to other metal" comparison.
-                #
-                # A plain `other_region - region` is not safe here: `region`
-                # is only the *clipped* fragment of an `other_layer` polygon
-                # that falls inside the oversized `base` window (see
-                # `DerivedLayer`'s docstring) -- any part of that same
-                # physical polygon *outside* the window would be left behind
-                # in `other_region`, touching `region` at the sizing cutoff
-                # with zero gap: a `separation_check` between them reports a
-                # synthetic violation at that seam, an artefact of one
-                # continuous shape being cut in two, not a real spacing gap.
-                #
-                # Instead, exclude the *whole* `other_region` polygon for any
-                # polygon that already overlaps the raw (unsized) `base`
-                # region anywhere. Every polygon that can contribute a
-                # fragment to `region` only does so because it already passed
-                # this same `.interacting(base_region)` pre-filter (see
-                # `region`'s own construction above), so this removes exactly
-                # the candidates `region` was built from, wholesale --
-                # leaving only genuinely distinct `other_layer` geometry (e.g.
-                # ordinary routing/PDN metal with no relationship to any MiM
-                # structure) as "other".
-                other_merged = other_region.merged()
-                peer_region = other_merged.interacting(base_region)
-                other_region = other_merged - peer_region
-
-                # That wholesale exclusion leaves one half of the official
-                # rule unmeasured: gf180mcu's `MIMTM.1` is spacing to the
-                # bottom plate metal "whether adjacent MiM or routing
-                # metal", and every *adjacent MiM* plate has just been
-                # excluded from `other_region` along with this rule's own
-                # plate (both overlap `base`). Measure that half here, as a
-                # peer-to-peer check among the excluded, plate-bearing
-                # polygons themselves, and report it under the same rule id.
-                #
-                # `isolated_check` (spacing between *different* polygons of
-                # one region), not `space_check` (which also measures
-                # intra-polygon notches): a single MiM's own bottom plate
-                # metal is one polygon after `.merged()`, and a legitimate
-                # slot in wide plate metal (a routine density/stress-relief
-                # feature, typically ~1um wide) is not "spacing to another
-                # bottom plate" -- `space_check` would flag it, a fresh
-                # false positive of exactly the kind this issue is about.
-                #
-                # Measured on the *whole* plate-bearing polygons rather than
-                # the sizing-clipped virtual plates, which is deliberate:
-                # clipped plates split a shared bottom plate carrying two
-                # top plates more than `2 * sized_by_um` apart into two
-                # region polygons with no real gap between them (the metal
-                # is continuous), which `isolated_check` would flag. The
-                # residual conservatism this trades for -- two plate-bearing
-                # polygons whose *facing* metal is routing tail rather than
-                # virtual plate on both sides -- is documented in the deck's
-                # own `mim.space.1` note.
-                peer_edge_pairs = peer_region.isolated_check(
-                    round(rule.threshold_dbu * dbu_scale)
-                )
-
-            if rule.check in _AREA_CHECKS:
-                for polygon in _run_area_check(region, rule, dbu_scale).each_merged():
-                    bbox = polygon.bbox()
-                    points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
-                    source_cell, source_path = _attribute_to_instance(cell, bbox)
-                    violations.append(
-                        {
-                            "rule": rule.id,
-                            "description": rule.description,
-                            "check": rule.check,
-                            "layer": layer_label,
-                            "cell": cell.name,
-                            "source_cell": source_cell,
-                            "source_path": source_path,
-                            "bbox": {
-                                "left": bbox.left,
-                                "bottom": bbox.bottom,
-                                "right": bbox.right,
-                                "top": bbox.top,
-                            },
-                            "polygon": points,
-                        }
-                    )
-                    rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
-                continue
-
-            if rule.check in _DENSITY_CHECKS:
-                for window_box in _run_density_check(region, rule, layout.dbu):
-                    points = [
-                        [window_box.left, window_box.bottom],
-                        [window_box.right, window_box.bottom],
-                        [window_box.right, window_box.top],
-                        [window_box.left, window_box.top],
-                    ]
-                    source_cell, source_path = _attribute_to_instance(cell, window_box)
-                    violations.append(
-                        {
-                            "rule": rule.id,
-                            "description": rule.description,
-                            "check": rule.check,
-                            "layer": layer_label,
-                            "cell": cell.name,
-                            "source_cell": source_cell,
-                            "source_path": source_path,
-                            "bbox": {
-                                "left": window_box.left,
-                                "bottom": window_box.bottom,
-                                "right": window_box.right,
-                                "top": window_box.top,
-                            },
-                            "polygon": points,
-                        }
-                    )
-                    rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
-                continue
-
-            if rule.check in _ANTENNA_CHECKS:
-                antenna_bbox = _run_antenna_check(region, other_region, rule)
-                if antenna_bbox is not None:
-                    source_cell, source_path = _attribute_to_instance(
-                        cell, antenna_bbox
-                    )
-                    violations.append(
-                        {
-                            "rule": rule.id,
-                            "description": rule.description,
-                            "check": rule.check,
-                            "layer": layer_label,
-                            "cell": cell.name,
-                            "source_cell": source_cell,
-                            "source_path": source_path,
-                            "bbox": {
-                                "left": antenna_bbox.left,
-                                "bottom": antenna_bbox.bottom,
-                                "right": antenna_bbox.right,
-                                "top": antenna_bbox.top,
-                            },
-                            # Flat, whole-cell aggregate -- no single real
-                            # polygon corresponds to "the violation" the way
-                            # an "area" or edge-pair check's does, see
-                            # `_run_antenna_check`'s docstring.
-                            "polygon": None,
-                        }
-                    )
-                    rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
-                continue
-
-            if rule.check in _VERTEX_CHECKS:
-                # Vertex checks (issue #2642). Dispatched here rather than
-                # inside `_run_check` because neither reads `threshold_dbu`
-                # (and `"ongrid"` needs the layout's own `dbu`, which
-                # `_run_check`'s `dbu_scale` has already divided out) -- but
-                # both return the same `EdgePairs` shape, so everything
-                # downstream (bbox/polygon extraction, `rule_counts`,
-                # `violations[]`) is reused verbatim. Neither kind has an
-                # `outside_region` term.
-                edge_pairs = _run_vertex_check(region, rule, layout.dbu)
-                outside_region = None
-            else:
-                edge_pairs, outside_region = _run_check(
-                    region, other_region, rule, dbu_scale
-                )
-
-            checked_edge_pairs = (
-                edge_pairs
-                if peer_edge_pairs is None
-                else itertools.chain(edge_pairs, peer_edge_pairs)
-            )
-
-            for edge_pair in checked_edge_pairs:
-                bbox = edge_pair.bbox()
-                points = _edge_pair_hull_points(edge_pair)
-
-                source_cell, source_path = _attribute_to_instance(cell, bbox)
-                violations.append(
-                    {
-                        "rule": rule.id,
-                        "description": rule.description,
-                        "check": rule.check,
-                        "layer": layer_label,
-                        "cell": cell.name,
-                        "source_cell": source_cell,
-                        "source_path": source_path,
-                        "bbox": {
-                            "left": bbox.left,
-                            "bottom": bbox.bottom,
-                            "right": bbox.right,
-                            "top": bbox.top,
-                        },
-                        "polygon": points,
-                    }
-                )
-                rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
-
-            # Polygon-shaped violation terms reported under the same rule id,
-            # additive to the edge-pair violations above (each `None` for
-            # every rule that doesn't opt into it):
-            #
-            # - `outside_region` (only set for "enclosing"/"enclosed", see
-            #   _OUTSIDE_CHECKS) holds the part of the enclosed layer that
-            #   `enclosing_check`/`enclosed_check` structurally cannot
-            #   report: area with zero (or partial) spatial overlap with the
-            #   enclosing layer, up to and including a shape that lies
-            #   entirely outside it -- the worst-case enclosure violation
-            #   (#318).
-            # - the max-size term (only set for a `"width"` rule that
-            #   declares `threshold_max_dbu`, see `_run_width_max_check`)
-            #   holds the merged cuts whose bounding box exceeds the *upper*
-            #   bound of a fixed-size rule like gf180mcu's `CO.1`/`Vn.1`
-            #   (#2370) -- the half no `Region` check primitive reports.
-            polygon_terms = [
-                term
-                for term in (
-                    outside_region,
-                    _run_width_max_check(region, rule, dbu_scale),
-                )
-                if term is not None
-            ]
-            for polygon_term in polygon_terms:
-                for polygon in polygon_term.each_merged():
-                    bbox = polygon.bbox()
-                    points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
-
-                    source_cell, source_path = _attribute_to_instance(cell, bbox)
-                    violations.append(
-                        {
-                            "rule": rule.id,
-                            "description": rule.description,
-                            "check": rule.check,
-                            "layer": layer_label,
-                            "cell": cell.name,
-                            "source_cell": source_cell,
-                            "source_path": source_path,
-                            "bbox": {
-                                "left": bbox.left,
-                                "bottom": bbox.bottom,
-                                "right": bbox.right,
-                                "top": bbox.top,
-                            },
-                            "polygon": points,
-                        }
-                    )
-                    rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
-
-    violations.sort(
-        key=lambda v: (
-            v["rule"],
-            v["cell"],
-            v["bbox"]["left"],
-            v["bbox"]["bottom"],
-            v["bbox"]["right"],
-            v["bbox"]["top"],
-        )
-    )
-
-    def _fmt(layer_tuple: tuple[int, int]) -> str:
-        return f"{layer_tuple[0]}/{layer_tuple[1]}"
-
-    layers_checked = deck_layer_tuples & stream_layer_tuples
-    layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
-
-    # Deck-static, like `deck_layers` above: every distinct non-empty
-    # DrcRule.scope this deck's rules declare, regardless of what's actually
-    # present in `path` (#566).
-    deck_scope = sorted({rule.scope for rule in deck if rule.scope})
-
-    # Voltage-domain marker warnings (issue #552): a marker this deck
-    # registers via `get_unmodeled_voltage_markers` (e.g. gf180mcu's
-    # `Dualgate` 55/0) selects a second gate-oxide/voltage domain whose real
-    # DRC thresholds this deck's rules do not encode -- geometry inside it is
-    # checked against the wrong (default) column and would otherwise report
-    # an unqualified `layers_checked` pass. Gated on the marker's geometry
-    # actually *interacting* with at least one layer an **unscoped** rule
-    # checked on this run (not merely present in the stream), so a marker
-    # shape that never overlaps any such geometry produces no warning with
-    # nothing behind it.
-    #
-    # "Unscoped" is per rule, not per deck (issue #1110): a marker can be
-    # partly modelled. gf180mcu's `DF.1a`/`DF.3a` now ship as `_LV`/`_MV`
-    # rule pairs that read `Dualgate` themselves via `DerivedLayer`'s
-    # `"overlapping"`/`"not_interacting"` modes, so geometry those rules
-    # checked was *not* checked against the wrong column and must not
-    # produce a warning -- while every rule that ran without reading the
-    # marker still can. Rules skipped this run (their layers absent from
-    # this stream) are excluded too: a rule that never ran applied no
-    # threshold, right or wrong.
-    voltage_domain_warnings: list[dict[str, str]] = []
-    unmodeled_markers = get_unmodeled_voltage_markers(deck_name)
-    # A rule omitted from a `--rules` subset (issue #2768) applied no
-    # threshold either, exactly like a skipped one.
-    skipped_rule_ids = set(rules_skipped) | omitted_ids
-    for marker, description in sorted(unmodeled_markers.items()):
-        if marker not in stream_layer_tuples:
-            continue
-        marker_index = layout.find_layer(*marker)
-        if marker_index is None:
-            continue
-        unscoped_layers: set[tuple[int, int]] = set()
-        for rule in deck:
-            if _rule_outside_voltage_gate(rule, marker, skipped_rule_ids):
-                continue
-            unscoped_layers |= _rule_input_layers(rule)
-        unscoped_layers &= stream_layer_tuples
-        unscoped_layers.discard(marker)
-        interacts = False
-        for cell in top_cells:
-            marker_region = kdb.Region(cell.begin_shapes_rec(marker_index))
-            if marker_region.is_empty():
-                continue
-            for checked_layer in sorted(unscoped_layers):
-                checked_index = layout.find_layer(*checked_layer)
-                if checked_index is None:
-                    continue
-                checked_region = kdb.Region(cell.begin_shapes_rec(checked_index))
-                if not marker_region.interacting(checked_region).is_empty():
-                    interacts = True
-                    break
-            if interacts:
-                break
-        if interacts:
-            voltage_domain_warnings.append(
-                {"marker": _fmt(marker), "description": description}
-            )
-
-    # Issue #2110: the two common-coverage categories this engine's single
-    # "a layer it reads is absent" skip splits into -- see
-    # `_classify_skipped_rules` for why an empty assessment domain is
-    # inapplicable work rather than a skipped request, and why anything else
-    # stays a disclosed skip.
-    skipped_records, inapplicable_records = _classify_skipped_rules(
-        deck, rules_skipped, layout
-    )
-    # Issue #2768: every deliberately omitted rule is requested work that did
-    # not run -- a skip, never inapplicable, even when its layers are absent
-    # (the full registered deck is what a DRC verdict is about).
-    skipped_records += [
-        {"id": rule_id, "reason": SKIP_REASON_NOT_SELECTED}
-        for rule_id in sorted(omitted_ids)
-    ]
-    coverage = {
-        "deck_layers": [_fmt(t) for t in sorted(deck_layer_tuples)],
-        "layers_checked": [_fmt(t) for t in sorted(layers_checked)],
-        "layers_in_stream_without_rules": [
-            _fmt(t) for t in sorted(layers_in_stream_without_rules)
-        ],
-        "rules_checked": sorted(rules_checked),
-        "rules_skipped": sorted(rules_skipped),
-        "voltage_domain_warnings": voltage_domain_warnings,
-        "deck_scope": deck_scope,
-        # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
-        # refuse a "clean" verdict measured over nothing without re-deriving
-        # that emptiness from `rules_skipped` vs. the deck's own rule count.
-        **build_check_coverage(
-            checked=sorted(rules_checked),
-            skipped=skipped_records,
-            inapplicable=inapplicable_records,
-            nothing_checked_reasons=_curated_nothing_checked_reasons(
-                deck, rules_checked
-            ),
-        ),
-    }
-
-    # Issue #2110: the verdict is the common decision table's, never a local
-    # re-derivation of it -- violations are `failed` (exit 3, decided before
-    # coverage is consulted at all), known zero checked work is `not_checked`
-    # (exit 4), and successful checks alongside a nonempty skipped-request
-    # list are `clean_partial` (exit 0, a real result that is *not* this
-    # verb's unconditional success). See `docs/coverage-contract.md`.
-    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
-    report: dict[str, Any] = {
-        "schema_version": 2,
-        "file": path,
-        "deck": deck_name,
-        "dbu_um": layout.dbu,
-        "status": rollup_status(rollup, success="clean", failure="violations"),
-        "violation_count": len(violations),
-        "rule_counts": dict(sorted(rule_counts.items())),
-        "metrics": {_VIOLATION_COUNT_METRIC_NAME: len(violations)},
-        "violations": violations,
-        "coverage": coverage,
-        # Issue #2768: present only for a `--rules` run, so a default run's
-        # report (and every committed one) is byte-identical to before.
-        **({} if rule_selection is None else {"rule_selection": rule_selection}),
-    }
-    report["provenance"] = build_provenance(
-        deck_name=deck_name,
-        deck_path=deck_source_path(deck_name),
-        pdk=pdk_info,
-        input_path=path,
-        include_klayout_version_mismatch=True,
-    )
+    report = _assemble_report(path, setup, state, waivers_file)
+    if control_result is not None:
+        report["negative_control"] = control_result
     return report
+
+
+def _run_curated_negative_control(
+    control_path: str,
+    categories: list[str] | None,
+    **run_kwargs: Any,
+) -> dict[str, Any]:
+    """Run the same curated deck over a known-bad fixture and require
+    findings (issue #4320), mirroring the native engine's control: proof the
+    deck can fail on this stream's own layers, so a clean verdict on the real
+    layout is not vacuous. Raises :class:`DrcError` (code
+    ``negative_control_failed``) on no violations or a missing category."""
+    control = run_drc(control_path, **run_kwargs)
+    found = sorted({v["rule"] for v in control["violations"]})
+    missing = sorted(set(categories or []) - set(found))
+    if control["violation_count"] < 1 or missing:
+        detail = (
+            f"missing expected categories {missing}"
+            if control["violation_count"] and missing
+            else "no violations reported"
+        )
+        raise DrcError(
+            f"negative control {control_path!r} failed on the same deck: "
+            f"{detail} -- the deck may not have executed its rules, so a "
+            "clean verdict on the real layout cannot be trusted",
+            code=CODE_NEGATIVE_CONTROL_FAILED,
+        )
+    return {
+        "file": control_path,
+        "status": "passed",
+        "violation_count": control["violation_count"],
+        "rules_found": found,
+        "expected_categories": sorted(categories or []),
+    }
 
 
 def drc_exit_code(report: dict[str, Any]) -> int:
@@ -1666,7 +2608,9 @@ def _deck_path_for_report(committed: dict[str, Any]) -> str | None:
     return deck_source_path(deck)
 
 
-def check_drc_report(report_path: str) -> dict[str, Any]:
+def check_drc_report(
+    report_path: str, *, input_path: str | None = None
+) -> dict[str, Any]:
     """``klt drc --check`` (cheap mode, issue #1106): verify a previously
     committed ``klt drc --format json`` report at ``report_path`` still
     reproduces, without re-running the DRC engine at all.
@@ -1695,7 +2639,13 @@ def check_drc_report(report_path: str) -> dict[str, Any]:
         hash_check(
             "provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
-            _content_hash(committed.get("file")),
+            _content_hash(
+                resolve_committed_path(
+                    committed.get("file"),
+                    report_path=report_path,
+                    override=input_path,
+                )
+            ),
         ),
         hash_check(
             "provenance.deck.content_hash",
@@ -1703,6 +2653,29 @@ def check_drc_report(report_path: str) -> dict[str, Any]:
             _content_hash(_deck_path_for_report(committed)),
         ),
     ]
+    # Issue #3483: a waived report also pins its waivers file.
+    waivers_file = get_path(committed, ("provenance", "waivers", "file"))
+    if waivers_file is not None:
+        checks.append(
+            hash_check(
+                "provenance.waivers.content_hash",
+                get_path(committed, ("provenance", "waivers", "content_hash")),
+                _content_hash(waivers_file),
+            )
+        )
+    recorded_tree = get_path(committed, ("provenance", "deck", "tree", "content_hash"))
+    if recorded_tree is not None:
+        deck_path = _deck_path_for_report(committed)
+        from .drc_klayout_engine import _deck_tree_identity
+
+        current_tree = _deck_tree_identity(deck_path) if deck_path else None
+        checks.append(
+            hash_check(
+                "provenance.deck.tree.content_hash",
+                recorded_tree,
+                current_tree["content_hash"] if current_tree else None,
+            )
+        )
     return build_check_result(report_path=report_path, checks=checks)
 
 
@@ -1731,7 +2704,21 @@ def _recorded_rule_selectors(committed: dict[str, Any]) -> list[str] | None:
     return parse_rule_selectors(selectors)
 
 
-def rerun_drc_report(report_path: str) -> dict[str, Any]:
+def _recorded_tile(committed: dict[str, Any]) -> tuple[int, int] | None:
+    """The ``(columns, rows)`` a committed report's ``tile`` echo records
+    (issue #4226), or ``None`` for a report that carries none."""
+    recorded = committed.get("tile")
+    if not isinstance(recorded, dict):
+        return None
+    cols, rows = recorded.get("columns"), recorded.get("rows")
+    if isinstance(cols, int) and isinstance(rows, int):
+        return cols, rows
+    return None
+
+
+def rerun_drc_report(
+    report_path: str, *, input_path: str | None = None
+) -> dict[str, Any]:
     """``klt drc --check <report> --rerun`` (full mode, issue #1106):
     verify a previously committed ``klt drc --format json`` report at
     ``report_path`` by actually re-running the DRC deck it names and
@@ -1765,7 +2752,9 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
     raises (bad file, unknown deck, engine error) -- never a traceback.
     """
     committed = _load_committed_report(report_path, DrcError)
-    file_path = committed.get("file")
+    file_path = resolve_committed_path(
+        committed.get("file"), report_path=report_path, override=input_path
+    )
     if not file_path:
         raise DrcError(f"committed report has no 'file' field to rerun: {report_path}")
     deck = committed.get("deck")
@@ -1773,6 +2762,8 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
         raise DrcError(f"committed report has no 'deck' field to rerun: {report_path}")
 
     if committed.get("engine") == "klayout":
+        from .drc_klayout_engine import _rerun_assertion_kwargs, run_drc_klayout_engine
+
         # A committed report carrying `engine_deck_errors` was produced with
         # `--allow-deck-errors` (issue #1941); re-running it strictly would
         # fail the verification outright rather than diffing it, so the
@@ -1794,7 +2785,14 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
         # up as drift); a report without `rule_selection` -- every report
         # written before the flag existed -- keeps its full-deck meaning.
         fresh = run_drc(
-            file_path, deck, top=None, rules=_recorded_rule_selectors(committed)
+            file_path,
+            deck,
+            top=None,
+            rules=_recorded_rule_selectors(committed),
+            # Issue #3483: replay the waivers the committed report applied.
+            waivers_file=get_path(committed, ("provenance", "waivers", "file")),
+            # Issue #4226: replay the abutment context the report was run in.
+            tile=_recorded_tile(committed),
         )
 
     return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
@@ -1946,10 +2944,12 @@ def _run_check(
     if check in _TWO_LAYER_CHECKS:
         if other_region is None:
             raise DrcError(f"rule '{rule.id}': check '{check}' requires other_layer")
+        if check == "enclosing_adjacent":
+            return _run_enclosing_adjacent_check(region, other_region, d)
         edge_pairs = getattr(region, f"{check}_check")(other_region, d)
 
         outside_region = None
-        if check in _OUTSIDE_CHECKS:
+        if check in _OUTSIDE_CHECKS and rule.report_escapes:
             if check == "enclosing":
                 # `region` is the enclosing layer, `other_region` the
                 # enclosed one -- among the `other_region` shapes that do
@@ -1957,14 +2957,131 @@ def _run_check(
                 # escapes `region` entirely (a plain Boolean NOT, no
                 # threshold: any escape at all is worse than a
                 # marginal-distance violation).
-                outside_region = other_region.interacting(region) - region
+                outside_region = (
+                    other_region - region
+                    if rule.require_containment
+                    else other_region.interacting(region) - region
+                )
             else:  # check == "enclosed"
                 # Symmetric: `region` is the enclosed layer here.
-                outside_region = region.interacting(other_region) - other_region
+                outside_region = (
+                    region - other_region
+                    if rule.require_containment
+                    else region.interacting(other_region) - other_region
+                )
 
         return edge_pairs, outside_region
 
     raise DrcError(f"rule '{rule.id}': unsupported check kind '{check}'")
+
+
+def _run_net_space_check(
+    cell: Any, layout: Any, rule: DrcRule, dbu_scale: float
+) -> Any:
+    """``check="net_space"`` (issue #3572): spacing between polygons of
+    ``region`` that sit on *different* nets.
+
+    Nets come from KLayout's own ``LayoutToNetlist`` connectivity over the
+    chain declared in ``rule.net_spec`` (:class:`NetSpaceSpec`): the checked
+    layer joins the tap (``tap_and`` layers intersected with it), the tap
+    joins ``chain[0]``, and so on up the chain. Each polygon of ``region``
+    is tagged with its net id as a user property, and
+    ``Region.space_check(..., DifferentPropertiesConstraint)`` -- the
+    primitive behind the DRC-DSL ``space(d, props_ne)`` the ASAP7 deck uses
+    -- then measures only polygon pairs on different nets. A polygon with no
+    tap is its own net; a connection outside the chain is not modelled.
+    """
+    import klayout.db as kdb
+
+    spec = rule.net_spec
+    if spec is None:
+        raise DrcError(f"rule '{rule.id}': check '{rule.check}' requires net_spec")
+    d = round(rule.threshold_dbu * dbu_scale)
+
+    # Extract on a flattened copy: `LayoutToNetlist` is hierarchical, so a
+    # well whose net lives wholly inside a subcell circuit would never be
+    # visited through the top circuit's nets (a silent miss -- the opposite
+    # of this check's over-flag policy). Flat, every shape is a top-circuit
+    # shape in top coordinates and nets are unique by construction.
+    flat_layout = kdb.Layout()
+    flat_layout.assign(layout)
+    cell = flat_layout.cell(cell.name)
+    cell.flatten(True)
+    layout = flat_layout
+    l2n = kdb.LayoutToNetlist(kdb.RecursiveShapeIterator(layout, cell, []))
+
+    def layer_region(pair: tuple[int, int]) -> Any:
+        index = layout.find_layer(*pair)
+        if index is None:
+            return l2n.make_layer(f"{pair[0]}_{pair[1]}")
+        return l2n.make_layer(index, f"{pair[0]}_{pair[1]}")
+
+    checked = layer_region(rule.layer)
+    tap = checked
+    for pair in spec.tap_and:
+        tap = tap & layer_region(pair)
+    l2n.register(tap, "tap")
+    chain = [layer_region(pair) for pair in spec.chain]
+    for conductor in (checked, tap, *chain):
+        l2n.connect(conductor)
+    l2n.connect(checked, tap)
+    previous = tap
+    for conductor in chain:
+        l2n.connect(previous, conductor)
+        previous = conductor
+    l2n.extract_netlist()
+
+    tagged = kdb.Region()
+    circuit = l2n.netlist().circuit_by_name(cell.name)
+    if circuit is None:
+        return kdb.EdgePairs()
+    for net in circuit.each_net():
+        for polygon in l2n.shapes_of_net(net, checked, True).each():
+            tagged.insert(kdb.PolygonWithProperties(polygon, {1: net.cluster_id}))
+    return tagged.space_check(
+        d,
+        False,
+        kdb.Region.Euclidian,
+        90,
+        None,
+        None,
+        False,
+        kdb.Region.NoOppositeFilter,
+        kdb.Region.NoRectFilter,
+        False,
+        kdb.Region.DifferentPropertiesConstraint,
+    )
+
+
+def _run_enclosing_adjacent_check(
+    region: Any, other_region: Any, d: int
+) -> tuple[Any, Any]:
+    """``check="enclosing_adjacent"``: sky130's two-adjacent-edges enclosure
+    rules (``via.5a``, ``m2.5``, ``via2.5``, ``via3.5``, #3316).
+
+    Mirrors ``sky130A_mr.drc``: the cut edges whose enclosure is below ``d``
+    (``enclosing_check(...).second_edges``) are tested for a *corner* --
+    two short edges meeting at an angle under 100 degrees -- and every cut
+    touching such a corner is a violation. So a cut passes when its short
+    sides (< ``d``) are at most one side or two opposite sides; it fails
+    when two adjacent sides are both short. A cut with no facing edge at
+    all yields no edge pair and is not reported here (the sibling
+    ``enclosing`` rule already reports an escape).
+
+    Returns ``(empty EdgePairs, cuts)``: one polygon per offending cut
+    (reported through ``run_drc``'s polygon-term path), not one entry per
+    corner, which is the official deck's per-cut counting.
+    """
+    import klayout.db as kdb
+
+    short_edges = region.enclosing_check(
+        other_region, d, metrics=kdb.Metrics.Projection
+    ).second_edges()
+    corners = short_edges.width_check(
+        1, metrics=kdb.Metrics.Euclidian, ignore_angle=100
+    )
+    bad_cuts = other_region.interacting(corners.polygons(1))
+    return kdb.EdgePairs(), bad_cuts
 
 
 def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
@@ -1991,6 +3108,36 @@ def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
     return layers
 
 
+def _validate_require_containment(rule: DrcRule) -> None:
+    """Reject a malformed ``require_containment`` declaration (issue #2726).
+
+    Runs for every rule before any layer-presence shortcut, so a bad
+    declaration fails loudly even on a stream that lacks its layers.
+    """
+    if not rule.require_containment:
+        return
+    if rule.check not in _OUTSIDE_CHECKS:
+        raise DrcError(
+            f"rule '{rule.id}': require_containment is only valid on "
+            f"'enclosing'/'enclosed' checks, not '{rule.check}'"
+        )
+    if rule.other_layer is None:
+        raise DrcError(f"rule '{rule.id}': require_containment requires other_layer")
+    if rule.derived_layer is not None:
+        raise DrcError(
+            f"rule '{rule.id}': require_containment cannot be combined with "
+            "derived_layer"
+        )
+
+
+def _containment_layers(rule: DrcRule) -> tuple[tuple[int, int], tuple[int, int]]:
+    """``(cut_layer, conductor_layer)`` of a ``require_containment`` rule."""
+    assert rule.other_layer is not None
+    if rule.check == "enclosing":
+        return rule.other_layer, rule.layer
+    return rule.layer, rule.other_layer
+
+
 def _validate_derived_layer(rule: DrcRule) -> None:
     """Reject a :class:`~klayout_tools.decks.DrcRule` whose
     ``derived_layer.mode`` names a derivation this engine has no branch for
@@ -2001,12 +3148,94 @@ def _validate_derived_layer(rule: DrcRule) -> None:
     mode would otherwise fall through to the default ``"sized_intersection"``
     derivation and quietly check a completely different region than the deck
     author asked for.
+
+    Also rejects a ``"union"`` derivation with no ``intersect_with``
+    (issue #2688), which would silently degrade to a plain ``base`` check.
     """
     derived = rule.derived_layer
     if derived is not None and derived.mode not in _DERIVED_LAYER_MODES:
         raise DrcError(
             f"rule '{rule.id}': unknown derived_layer mode "
             f"'{derived.mode}' (known: {', '.join(sorted(_DERIVED_LAYER_MODES))})"
+        )
+    if (
+        derived is not None
+        and derived.mode == "union"
+        and derived.intersect_with is None
+    ):
+        raise DrcError(
+            f"rule '{rule.id}': derived_layer mode 'union' requires intersect_with"
+        )
+    if derived is not None and derived.context not in _DERIVED_CONTEXTS:
+        raise DrcError(
+            f"rule '{rule.id}': unknown derived_layer context "
+            f"'{derived.context}' (known: near, far, or unset)"
+        )
+    if derived is not None and (derived.context is None) == bool(
+        derived.context_layers
+    ):
+        raise DrcError(
+            f"rule '{rule.id}': derived_layer context and context_layers "
+            "must be set together"
+        )
+    if derived is not None and derived.context2 not in _DERIVED_CONTEXTS:
+        raise DrcError(
+            f"rule '{rule.id}': unknown derived_layer context2 "
+            f"'{derived.context2}' (known: near, far, or unset)"
+        )
+    if derived is not None and (derived.context2 is None) == bool(
+        derived.context2_layers
+    ):
+        raise DrcError(
+            f"rule '{rule.id}': derived_layer context2 and context2_layers "
+            "must be set together"
+        )
+    if derived is not None and derived.context2 is not None and derived.context is None:
+        raise DrcError(
+            f"rule '{rule.id}': derived_layer context2 requires context "
+            "(stage 2 applies after stage 1)"
+        )
+
+
+def _validate_other_layer_selection(rule: DrcRule) -> None:
+    """Reject a :class:`~klayout_tools.decks.DrcRule` whose
+    ``other_layer_selection`` this engine cannot apply (issue #2688): an
+    unknown value, or one set on a rule with no ``other_layer`` to select
+    from. Same "fail loudly with the rule id" contract as
+    :func:`_validate_derived_layer` (which owns the ``"union"``-needs-
+    ``intersect_with`` check alongside the other ``derived_layer`` mode
+    validation).
+    """
+    selection = rule.other_layer_selection
+    if selection is not None:
+        if selection not in _OTHER_LAYER_SELECTIONS:
+            raise DrcError(
+                f"rule '{rule.id}': unknown other_layer_selection "
+                f"'{selection}' (known: {', '.join(sorted(_OTHER_LAYER_SELECTIONS))})"
+            )
+        if rule.other_layer is None:
+            raise DrcError(
+                f"rule '{rule.id}': other_layer_selection requires other_layer"
+            )
+
+
+def _validate_layer_selection(rule: DrcRule) -> None:
+    """Reject a ``layer_selection`` this engine cannot apply (issues
+    #2943/#3139): an unknown value, or one on a ``derived_layer`` rule (whose
+    checked region is not the rule's own drawn ``layer``). Same "fail loudly
+    with the rule id" contract as :func:`_validate_other_layer_selection`.
+    """
+    selection = rule.layer_selection
+    if selection is None:
+        return
+    if selection not in _LAYER_SELECTIONS:
+        raise DrcError(
+            f"rule '{rule.id}': unknown layer_selection "
+            f"'{selection}' (known: {', '.join(sorted(_LAYER_SELECTIONS))})"
+        )
+    if rule.derived_layer is not None:
+        raise DrcError(
+            f"rule '{rule.id}': layer_selection cannot be combined with derived_layer"
         )
 
 
@@ -2357,6 +3586,196 @@ def _run_density_check(region: Any, rule: DrcRule, dbu: float) -> list[Any]:
     return violations
 
 
+def _dispatch_region_rule(
+    rule: DrcRule,
+    layout: Any,
+    top_cells: list[Any],
+    layer_names: dict[tuple[int, int], str],
+    violations: list[dict[str, Any]],
+    rule_counts: dict[str, int],
+    rules_checked: list[str],
+    rules_skipped: list[str],
+    empty_checked_region_ids: set[str],
+) -> bool:
+    """Run a :data:`_REGION_CHECKS` rule (issues #3587, #3607), recording its
+    outcome in the caller's accumulators; ``False`` when ``rule`` is not one.
+
+    A region rule resolves its own layers (named layers other than the
+    checked one may be absent) and decides checked-vs-inapplicable itself --
+    see :func:`_run_comp_coverage_check`. Only an absent *checked* layer or
+    an empty checked region lands the rule in ``rules_skipped`` (the latter
+    also in ``empty_checked_region_ids``).
+    """
+    if rule.check not in _REGION_CHECKS:
+        return False
+    if layout.find_layer(*rule.layer) is None:
+        rules_skipped.append(rule.id)  # absent checked layer
+        return True
+    runner = (
+        _run_tap_distance_check
+        if rule.check in _TAP_DISTANCE_CHECKS
+        else _run_comp_coverage_check
+    )
+    found = runner(rule, layout, top_cells, layer_names)
+    if found is None:
+        rules_skipped.append(rule.id)
+        empty_checked_region_ids.add(rule.id)
+        return True
+    rules_checked.append(rule.id)
+    violations.extend(found)
+    if found:
+        rule_counts[rule.id] = rule_counts.get(rule.id, 0) + len(found)
+    return True
+
+
+def _run_comp_coverage_check(
+    rule: DrcRule,
+    layout: Any,
+    top_cells: list[Any],
+    layer_names: dict[tuple[int, int], str],
+) -> list[dict[str, Any]] | None:
+    """``check="comp_coverage"`` (issue #3587): the rule's checked layer minus
+    every ``region_spec.covered_by_any`` layer, with whole checked polygons
+    exempted when they interact with an ``exempt_markers`` polygon -- gf180mcu
+    ``DF.12`` (``comp.not_interacting(schottky_diode).not(nplus).not(pplus)``).
+
+    Evaluated flat per top cell on merged regions. Every named layer other
+    than the checked one is read as an *empty* region when absent from the
+    stream and is never a reason to skip: an unimplanted COMP is the
+    violation. One violation per residual polygon.
+
+    Returns ``None`` when the checked region (the checked layer after the
+    marker exemption) is empty in every top cell -- the rule constrains
+    nothing here, so the caller records it as inapplicable
+    (:data:`INAPPLICABLE_REASON_EMPTY_CHECKED_REGION`), not as checked.
+    """
+    spec = rule.region_spec
+    if not isinstance(spec, CompCoverageSpec):
+        raise DrcError(f"rule '{rule.id}': check '{rule.check}' requires region_spec")
+    layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
+
+    def merged(cell: Any, layer: tuple[int, int]) -> Any:
+        return _cell_region_or_empty(cell, layout.find_layer(*layer)).merged()
+
+    any_checked = False
+    found: list[dict[str, Any]] = []
+    for cell in top_cells:
+        region = merged(cell, rule.layer)
+        for marker in spec.exempt_markers:
+            region = region.not_interacting(merged(cell, marker))
+        if region.is_empty():
+            continue
+        any_checked = True
+        for covering in spec.covered_by_any:
+            region = region - merged(cell, covering)
+        found.extend(_polygon_violations(rule, cell, region.merged(), layer_label))
+    return found if any_checked else None
+
+
+def _polygon_violations(
+    rule: DrcRule, cell: Any, region: Any, layer_label: str
+) -> list[dict[str, Any]]:
+    """One violation record per polygon of ``region`` (bbox + polygon), the
+    reporting shape shared by every :data:`_REGION_CHECKS` rule."""
+    records: list[dict[str, Any]] = []
+    for polygon in region.each():
+        bbox = polygon.bbox()
+        source_cell, source_path = _attribute_to_instance(cell, bbox)
+        record: dict[str, Any] = {
+            "rule": rule.id,
+            "description": rule.description,
+            "check": rule.check,
+            "layer": layer_label,
+            "cell": cell.name,
+            "source_cell": source_cell,
+            "source_path": source_path,
+            "bbox": {
+                "left": bbox.left,
+                "bottom": bbox.bottom,
+                "right": bbox.right,
+                "top": bbox.top,
+            },
+            "polygon": [[pt.x, pt.y] for pt in polygon.each_point_hull()],
+        }
+        if rule.check in _TAP_DISTANCE_CHECKS:
+            record["note"] = _TAP_DISTANCE_NOTE
+        records.append(record)
+    return records
+
+
+def _run_tap_distance_check(
+    rule: DrcRule,
+    layout: Any,
+    top_cells: list[Any],
+    layer_names: dict[tuple[int, int], str],
+) -> list[dict[str, Any]] | None:
+    """``check="tap_distance"`` (issue #3607): gf180mcu ``DF.13`` / ``DF.14``,
+    a ``klayout.db.Region`` translation of the upstream operation sequence
+    (``docs/design/gf180mcu-comp-checks-spike.md`` sections 3 and 7; ported
+    from ``tests/helpers/gf180mcu_comp_spike.py``'s
+    ``evaluate_port_upstream_clip``).
+
+    Evaluated flat per top cell on merged regions. Every layer other than the
+    checked ``comp`` is read as an *empty* region when absent, so zero taps
+    with active present is a violation, never a skip. One violation per
+    selected (whole) active polygon.
+
+    Returns ``None`` when the voltage-selected active region is empty in every
+    top cell -- the rule constrains nothing here (inapplicable,
+    :data:`INAPPLICABLE_REASON_EMPTY_CHECKED_REGION`).
+    """
+    spec = rule.region_spec
+    if not isinstance(spec, TapDistanceSpec) or rule.check not in _TAP_DISTANCE_CHECKS:
+        raise DrcError(f"rule '{rule.id}': check '{rule.check}' requires region_spec")
+    layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
+    dbu = layout.dbu
+    distance = round(spec.max_distance_um / dbu)
+    step = round(spec.step_um / dbu)
+    steps = round(spec.max_distance_um / spec.step_um)
+
+    def merged(cell: Any, layer: tuple[int, int]) -> Any:
+        return _cell_region_or_empty(cell, layout.find_layer(*layer)).merged()
+
+    any_checked = False
+    found: list[dict[str, Any]] = []
+    for cell in top_cells:
+        comp = merged(cell, rule.layer)
+        nwell = merged(cell, spec.nwell)
+        all_nwell = (merged(cell, spec.dnwell) - merged(cell, spec.lvpwell)) + nwell
+        all_nwell = all_nwell.merged()
+        ncomp = comp & merged(cell, spec.nplus)
+        pcomp = comp & merged(cell, spec.pplus)
+        res_mk = merged(cell, spec.res_mk)
+        dualgate = merged(cell, spec.dualgate)
+        if spec.well_domain == "inside":
+            active = pcomp & all_nwell
+            tap = (ncomp & all_nwell) - res_mk
+        else:
+            active = ncomp - all_nwell
+            tap = (pcomp - all_nwell) - res_mk
+        if spec.voltage == "lv":
+            active = active.not_interacting(merged(cell, spec.v5_xtor))
+            active = active.not_interacting(dualgate)
+        else:
+            active = active.overlapping(dualgate)
+        if active.is_empty():
+            continue
+        any_checked = True
+        if spec.well_domain == "inside":
+            # Upstream clips every growth step with the *raw* `nwell`, not
+            # `all_nwell` (spike discrepancy D2); reproduced faithfully.
+            reach = tap
+            for _ in range(steps):
+                reach = reach.sized(step, 1).merged() & nwell
+            violating = active.not_interacting(reach)
+        else:
+            candidates = active.not_interacting(tap.sized(distance, 0))
+            good = candidates.separation_check(tap, distance).polygons()
+            violating = candidates.not_interacting(good)
+        found.extend(_polygon_violations(rule, cell, violating, layer_label))
+    return found if any_checked else None
+
+
 def _run_antenna_check(region: Any, other_region: Any | None, rule: DrcRule) -> Any:
     """``check="antenna"`` (issue #812): a flat, connectivity-free
     approximation of an antenna/process-antenna-area-ratio (PAAR) check.
@@ -2410,1334 +3829,18 @@ def _run_antenna_check(region: Any, other_region: Any | None, rule: DrcRule) -> 
     return None
 
 
-# --------------------------------------------------------------------------- #
-# "klayout" engine (issue #565): opt-in subprocess wrapper around the
-# standalone `klayout` application binary, running a PDK-native DRC-DSL
-# script (`.lydrc`/`.drc`) instead of this module's own curated `DrcRule`
-# tables. Mirrors `lvs.py`'s `"netgen"` engine (issue #343) closely --
-# binary-resolution-without-`shutil.which`-precheck, timeout handling, and
-# "never trust the exit code, parse the tool's own report" discipline are all
-# copied from `_run_netgen_lvs`/`_parse_netgen_report`/
-# `_cleanup_netgen_work_dir` (see those functions' docstrings in `lvs.py`).
-# See `docs/cli/drc.md`, "Engine" -> "klayout" (opt-in, issue #565) for the
-# caller-facing writeup.
-# --------------------------------------------------------------------------- #
-
-#: Default `klayout -b -r ...` wall-clock budget -- the same idiom as
-#: `lvs.py`'s `_NETGEN_DEFAULT_TIMEOUT_S`, but scoped to a single DRC deck
-#: run rather than a netlist compare. Overridable via `klt drc`'s
-#: `--timeout-s` flag.
-KLAYOUT_ENGINE_DEFAULT_TIMEOUT_S = 300.0
-
-#: Matches a coordinate pair inside a KLayout report-database (`.lyrdb`) item
-#: value string, e.g. the `(0.2,1;0.2,0)` in
-#: `"edge-pair: (0,0;0,1)|(0.2,1;0.2,0)"` or the `(0,0;0,1;0.2,1;0.2,0)` in
-#: `"polygon: (0,0;0,1;0.2,1;0.2,0)"` (both forms verified empirically against
-#: a real `klayout -b -r ... -rd report=...lyrdb` run for this issue --
-#: KLayout's RDB writer always reports coordinates in the layout's *user*
-#: units, i.e. micrometres, regardless of the check kind). Deliberately
-#: generic across every value kind (`edge-pair:`, `polygon:`, `box:`,
-#: `edge:`, ...) rather than one regex per kind, since an arbitrary
-#: PDK-native deck can emit `.output()` calls this module has no static list
-#: of.
-_RDB_COORD_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)")
-
-
-def _strip_rdb_quotes(text: str) -> str:
-    """Strip a matching pair of leading/trailing single quotes KLayout's RDB
-    writer sometimes wraps a category name in (empirically, when the name
-    contains a period -- `'.'` is the RDB category-path hierarchy separator,
-    so a literal rule id like ``"poly.width.1"`` is quoted to disambiguate it
-    from a three-level category path; a name with no period, e.g. ``"L1"``,
-    is written bare). Both forms were verified against real
-    ``klayout -b -r ...`` output for this issue -- this normalises them back
-    to the same rule id either way."""
-    text = text.strip()
-    if len(text) >= 2 and text[0] == "'" and text[-1] == "'":
-        return text[1:-1]
-    return text
-
-
-def _rdb_value_points_um(value_text: str) -> list[tuple[float, float]]:
-    """Every coordinate pair in one RDB item ``<value>`` string, in the
-    layout's user units (micrometres) -- see :data:`_RDB_COORD_RE`."""
-    return [(float(x), float(y)) for x, y in _RDB_COORD_RE.findall(value_text)]
-
-
-def _parse_klayout_rdb_report(
-    report_path: str, dbu: float
-) -> tuple[list[dict[str, Any]], dict[str, int], list[str]]:
-    """Classify a KLayout report-database (``.lyrdb``, RDB XML) file into
-    ``(violations, rule_counts, rule_categories)`` -- the first two matching
-    ``klt drc``'s existing ``violations[]``/``rule_counts`` shape (see
-    :func:`run_drc`'s docstring), the third (issue #1996) the sorted,
-    deduplicated list of ``<category>`` names the report *declares*.
-
-    ``rule_categories`` is the closest thing an externally-run deck offers to
-    "which rules did you actually run": KLayout's DRC DSL creates a category
-    the moment a rule calls ``output(...)``, whether or not that rule found
-    anything, so an ordinary clean run still declares one category per rule
-    and an empty ``<items/>`` list. A report declaring **no** categories at
-    all therefore means the deck never reached a single ``output(...)`` --
-    the all-rules-gated-behind-an-unset-``--deck-var`` case
-    :func:`run_drc_klayout_engine` reports as
-    ``coverage.nothing_checked``. (A deck that instead creates its categories
-    lazily, only when a violation exists, would report the same emptiness on
-    a genuinely clean run; that is an honest "this report cannot distinguish
-    the two", not a misclassification this module can silently resolve.)
-
-    Unlike the curated engine (:func:`run_drc`), an arbitrary PDK-native
-    ``.lydrc``/``.drc`` script is not built from this module's own
-    :class:`~klayout_tools.decks.DrcRule` table -- there is no declarative
-    ``check``/``layer`` identity to report per violation, only whatever the
-    deck's own ``report(...)``/``.output(...)`` calls wrote to the RDB. This
-    parser is therefore necessarily generic: each RDB ``<category>`` becomes
-    one ``violations[].rule`` id (with its ``<description>`` carried
-    through), ``violations[].check`` is always the literal string
-    ``"external"`` (this module cannot recover a `width`/`space`/... kind
-    from RDB XML alone), and ``violations[].layer`` echoes the same rule id
-    (an external deck's own category naming is the only per-violation layer
-    identity available). ``source_cell``/``source_path`` are always ``None``
-    -- per-instance attribution (see :func:`_attribute_to_instance`) needs
-    this module's own instance-tree walk against the *input* layout, which an
-    RDB report does not carry.
-
-    ``bbox``/``polygon`` are derived from every coordinate pair embedded in
-    an item's ``<values><value>`` text (see :data:`_RDB_COORD_RE`), converted
-    from the RDB's reported micrometre user units back to the input layout's
-    own database units via ``dbu`` (``round(value_um / dbu)``) -- the same
-    integer-dbu convention :func:`run_drc`'s own ``violations[].bbox`` uses.
-    ``polygon`` is populated only for a value whose text starts with
-    ``"polygon:"`` (a plain closed-polygon vertex list echoes back
-    faithfully); every other value kind (``edge-pair:``, ``box:``, ``edge:``,
-    ...) still contributes its points to the ``bbox`` bound but leaves
-    ``polygon`` ``None``, matching :func:`run_drc`'s own "``None`` if the
-    check produced a degenerate edge pair" convention for the analogous case.
-    An item with no recognisable coordinate payload at all gets a degenerate
-    zero ``bbox`` rather than being silently dropped -- mirroring
-    ``_parse_netgen_report``'s "never silently drop a declared defect"
-    discipline (`lvs.py`).
-
-    Raises :class:`DrcError` if ``report_path`` is not well-formed XML at
-    all -- a malformed/truncated report must never silently parse as "no
-    violations found."
-    """
-    try:
-        tree = ET.parse(report_path)
-    except ET.ParseError as exc:
-        raise DrcError(
-            f"could not parse klayout DRC report '{report_path}': {exc}"
-        ) from exc
-
-    root = tree.getroot()
-
-    descriptions: dict[str, str] = {}
-    categories_el = root.find("categories")
-    if categories_el is not None:
-        for category_el in categories_el.findall("category"):
-            name_el = category_el.find("name")
-            if name_el is None or not name_el.text:
-                continue
-            rule_id = _strip_rdb_quotes(name_el.text)
-            desc_el = category_el.find("description")
-            descriptions[rule_id] = (
-                desc_el.text if desc_el is not None and desc_el.text else ""
-            )
-
-    rule_categories = sorted(descriptions)
-
-    violations: list[dict[str, Any]] = []
-    rule_counts: dict[str, int] = {}
-
-    items_el = root.find("items")
-    if items_el is None:
-        return violations, rule_counts, rule_categories
-
-    for item_el in items_el.findall("item"):
-        category_el = item_el.find("category")
-        cell_el = item_el.find("cell")
-        if (
-            category_el is None
-            or not category_el.text
-            or cell_el is None
-            or not cell_el.text
-        ):
-            continue
-        rule_id = _strip_rdb_quotes(category_el.text)
-        cell_name = cell_el.text
-
-        points_um: list[tuple[float, float]] = []
-        polygon_points_um: list[tuple[float, float]] | None = None
-        values_el = item_el.find("values")
-        if values_el is not None:
-            for value_el in values_el.findall("value"):
-                if not value_el.text:
-                    continue
-                value_text = value_el.text
-                value_points = _rdb_value_points_um(value_text)
-                points_um.extend(value_points)
-                if value_text.lstrip().startswith("polygon:") and value_points:
-                    polygon_points_um = value_points
-
-        if points_um:
-            xs = [round(x / dbu) for x, _ in points_um]
-            ys = [round(y / dbu) for _, y in points_um]
-            bbox = {
-                "left": min(xs),
-                "bottom": min(ys),
-                "right": max(xs),
-                "top": max(ys),
-            }
-            polygon = (
-                [[round(x / dbu), round(y / dbu)] for x, y in polygon_points_um]
-                if polygon_points_um
-                else None
-            )
-        else:
-            bbox = {"left": 0, "bottom": 0, "right": 0, "top": 0}
-            polygon = None
-
-        violations.append(
-            {
-                "rule": rule_id,
-                "description": descriptions.get(rule_id, ""),
-                "check": "external",
-                "layer": rule_id,
-                "cell": cell_name,
-                "source_cell": None,
-                "source_path": None,
-                "bbox": bbox,
-                "polygon": polygon,
-            }
-        )
-        rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
-
-    # A rule id that produced items but was never declared under
-    # `<categories>` (a deck writing RDB XML by hand, say) still counts as a
-    # rule this run reported on -- union rather than trust `<categories>`
-    # alone, so `rule_categories` can never be empty for a report that
-    # plainly found violations.
-    return (
-        violations,
-        rule_counts,
-        sorted(set(rule_categories) | set(rule_counts)),
-    )
-
-
-#: KLayout's own error prefix for a deck-script failure, as emitted by
-#: ``klayout -b -r`` (verified against a real 0.28.16 run for issue #1941:
-#: ``ERROR: In <deck>: undefined local variable or method '...'`` followed by
-#: ``ERROR: NameError: ... in Executable::execute``). Anchored at column 0:
-#: the backtrace lines KLayout prints after each ``ERROR:`` line are indented,
-#: and a deck's own rule names/progress output (``Executing rule
-#: ERROR_CHECK.1``) never starts a line with the bare prefix -- so the anchor
-#: is what keeps this from misreading ordinary deck output as a failure.
-_KLAYOUT_ERROR_LINE_RE = re.compile(r"^ERROR\b.*$", re.MULTILINE)
-
-
-def _klayout_deck_error_lines(*streams: str | None) -> list[str]:
-    """Every ``ERROR``-prefixed line in the given ``klayout`` output streams
-    (issue #1941), in order, stdout before stderr.
-
-    ``klayout -b -r`` writes its deck-script diagnostics to one or the other
-    depending on build/platform, so both are scanned. An empty list means
-    KLayout itself reported no error -- not that the deck necessarily ran to
-    completion (see :func:`run_drc_klayout_engine`, which pairs this with the
-    exit status).
-    """
-    lines: list[str] = []
-    for stream in streams:
-        if not stream:
-            continue
-        lines.extend(
-            match.group(0).rstrip() for match in _KLAYOUT_ERROR_LINE_RE.finditer(stream)
-        )
-    return lines
-
-
-#: Cap on how many lines of klayout's own output a deck-abort error message
-#: carries (issue #2333). The whole captured stdout/stderr is surfaced below
-#: this size -- the point of the change is that a *non*-``ERROR``-prefixed
-#: line (``sh: pmap: command not found``) is usually the causal one -- but a
-#: deck that prints a per-rule progress line for thousands of rules should
-#: not turn a single error into a multi-megabyte message. When the cap trips,
-#: the **tail** is what survives (the abort is at the end of the run) and any
-#: ``ERROR`` line from the omitted head is repeated so the detection signal is
-#: never lost to truncation.
-_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES = 500
-
-
-def _klayout_deck_error_detail(
-    stdout: str | None, stderr: str | None, error_lines: list[str]
-) -> str:
-    """The klayout output to quote in a deck-abort :class:`DrcError` (issue
-    #2333), stdout before stderr.
-
-    Deliberately **not** ``error_lines`` alone. ``_klayout_deck_error_lines``
-    keeps only lines starting with ``ERROR`` -- correct for *detecting* a
-    failed deck (a rule named ``ERROR_CHECK.1`` must not be misread as one),
-    but wrong for *explaining* it: the line that says why is routinely not
-    ``ERROR``-prefixed. The motivating case is a PDK driver that shells out
-    to a host utility the machine does not have, where klayout's captured
-    output is::
-
-        sh: pmap: command not found
-        ERROR: In main.drc: undefined method 'strip' for nil
-        ERROR: NoMethodError: undefined method 'strip' for nil in ...
-
-    Quoting only the ``ERROR`` lines drops the one line that identifies the
-    real cause and leaves a nil-dereference that reads like a broken rule
-    deck. So the full captured output is surfaced (subject to
-    :data:`_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES`), and ``error_lines`` is
-    used only as the fallback for the impossible-in-practice case of an empty
-    capture.
-    """
-    chunks = [
-        stream.strip() for stream in (stdout, stderr) if stream and stream.strip()
-    ]
-    combined = "\n".join(chunks)
-    if not combined:
-        return "\n".join(error_lines)
-
-    lines = combined.splitlines()
-    if len(lines) <= _KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES:
-        return combined
-
-    kept = lines[-_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES:]
-    kept_set = {line.rstrip() for line in kept}
-    dropped_errors = [line for line in error_lines if line.rstrip() not in kept_set]
-    head = [
-        f"... ({len(lines) - len(kept)} earlier lines omitted; "
-        "klt kept the tail, where the abort is)"
-    ]
-    if dropped_errors:
-        head.extend(dropped_errors)
-        head.append("... (end of ERROR lines recovered from the omitted section)")
-    return "\n".join(head + kept)
-
-
-#: Ruby's shell-out forms, as they appear in a KLayout DRC-DSL driver script
-#: (issue #2333). Each alternative captures the *command string* the host
-#: shell would run, which :func:`_shell_command_words` then reduces to the
-#: executables it names. Backticks and ``%x`` are the literal forms; the rest
-#: are the method calls whose first argument is a command line.
-_RUBY_SHELL_OUT_RES = (
-    # `pmap #{Process.pid} | tail -1`
-    re.compile(r"`(?P<cmd>[^`\n]*)`"),
-    # %x{...} / %x(...) / %x[...]
-    re.compile(r"%x[{(\[](?P<cmd>[^)}\]\n]*)[)}\]]"),
-    # system("..."), exec('...'), spawn("..."), IO.popen("..."),
-    # Open3.capture3("..."), Open3.popen3('...'), ...
-    re.compile(
-        r"\b(?:system|exec|spawn|IO\.popen|Open3\.\w+)\s*\(?\s*"
-        r"""(?:"(?P<cmd_dq>[^"\n]*)"|'(?P<cmd_sq>[^'\n]*)')"""
-    ),
+#: Names that moved to :mod:`klayout_tools.drc_klayout_engine` (issue #3704).
+#: Re-exported lazily because that module imports this one at top level.
+_ENGINE_REEXPORTS = (
+    "KLAYOUT_ENGINE_DEFAULT_TIMEOUT_S",
+    "load_rule_category_manifest",
+    "run_drc_klayout_engine",
 )
 
-#: Ruby's literal-path include forms, so a driver split across files is
-#: scanned as a whole (issue #2333). Only string *literals* are followed --
-#: a computed path is unknowable statically and is simply not scanned.
-_RUBY_INCLUDE_RE = re.compile(
-    r"""\b(?:require_relative|require|load)\s*\(?\s*"""
-    r"""(?:"(?P<path_dq>[^"\n]*)"|'(?P<path_sq>[^'\n]*)')"""
-)
 
-#: Words that name no external executable: shell builtins/keywords, plus the
-#: redirection/grouping artifacts a naive split can leave behind. Anything
-#: here is skipped rather than looked up on PATH.
-_SHELL_BUILTIN_WORDS = frozenset(
-    {
-        ".",
-        ":",
-        "[",
-        "alias",
-        "bg",
-        "break",
-        "case",
-        "cd",
-        "command",
-        "continue",
-        "do",
-        "done",
-        "echo",
-        "elif",
-        "else",
-        "esac",
-        "eval",
-        "exec",
-        "exit",
-        "export",
-        "false",
-        "fg",
-        "fi",
-        "for",
-        "function",
-        "if",
-        "jobs",
-        "local",
-        "printf",
-        "pwd",
-        "read",
-        "return",
-        "set",
-        "shift",
-        "source",
-        "test",
-        "then",
-        "time",
-        "trap",
-        "true",
-        "type",
-        "ulimit",
-        "umask",
-        "unalias",
-        "unset",
-        "until",
-        "wait",
-        "while",
-    }
-)
+def __getattr__(name: str) -> Any:
+    if name in _ENGINE_REEXPORTS:
+        from . import drc_klayout_engine
 
-#: A word that could plausibly name an executable: a bare command name or a
-#: path to one. Anything else (a redirection fragment, a glob, a quote-mangled
-#: token) is skipped -- the preflight only reports what it is sure about.
-_COMMAND_WORD_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]*$|^[./~][\w./+-]*$")
-
-#: Upper bound on how many files one deck's include graph is scanned for
-#: (issue #2333) -- a static scan must never become the expensive part of a
-#: DRC run, and a driver that pulls in more than this is past the point where
-#: a heuristic preflight is useful.
-_DECK_SCAN_MAX_FILES = 64
-
-
-def _shell_command_words(command: str) -> list[str]:
-    """The executables a shell would run for ``command`` -- the first word of
-    each pipeline/list segment (issue #2333).
-
-    Conservative by design: a segment whose command word is Ruby-interpolated
-    (``#{...}``), a shell builtin, or anything that does not look like a
-    command name at all yields nothing rather than a guess, because every word
-    returned here becomes a hard failure when it is missing from PATH.
-    """
-    words: list[str] = []
-    for segment in re.split(r"\|\||&&|[|;\n]", command):
-        tokens = segment.strip().lstrip("(").strip().split()
-        # Leading `FOO=bar` environment assignments precede the command.
-        while tokens and re.fullmatch(r"[A-Za-z_]\w*=.*", tokens[0]):
-            tokens.pop(0)
-        if not tokens:
-            continue
-        word = tokens[0]
-        # Only a *matched* surrounding quote pair is stripped: a stray
-        # apostrophe (Ruby renders names as `foo', so a line quoting two of
-        # them pairs the backticks by accident) must keep it and be rejected
-        # by `_COMMAND_WORD_RE` below rather than become a bogus lookup.
-        if len(word) >= 2 and word[0] == word[-1] and word[0] in "\"'":
-            word = word[1:-1]
-        if "#{" in word or "$" in word:
-            continue
-        if word in _SHELL_BUILTIN_WORDS or not _COMMAND_WORD_RE.match(word):
-            continue
-        words.append(word)
-    return words
-
-
-def _deck_script_files(deck_file: str) -> list[str]:
-    """``deck_file`` plus every literal-path Ruby include reachable from it
-    (issue #2333), depth-first, de-duplicated, bounded by
-    :data:`_DECK_SCAN_MAX_FILES`.
-
-    A PDK's driver is often one file, but the shapes that carry host
-    assumptions (a shared logging/util prologue, a per-topic rule table) split
-    it across a handful. Unreadable or computed-path includes are skipped, not
-    an error: this is a diagnostic aid, and a file it cannot read is simply
-    one it cannot make claims about.
-    """
-    seen: set[str] = set()
-    ordered: list[str] = []
-    pending = [os.path.abspath(deck_file)]
-    while pending and len(ordered) < _DECK_SCAN_MAX_FILES:
-        current = pending.pop(0)
-        if current in seen or not os.path.isfile(current):
-            continue
-        seen.add(current)
-        ordered.append(current)
-        try:
-            with open(current, encoding="utf-8", errors="replace") as handle:
-                text = handle.read()
-        except OSError:
-            continue
-        base = os.path.dirname(current)
-        for match in _RUBY_INCLUDE_RE.finditer(text):
-            raw = match.group("path_dq") or match.group("path_sq") or ""
-            if not raw or "#{" in raw:
-                continue
-            candidate = raw if os.path.isabs(raw) else os.path.join(base, raw)
-            for resolved in (candidate, candidate + ".rb"):
-                if os.path.isfile(resolved):
-                    pending.append(os.path.abspath(resolved))
-                    break
-    return ordered
-
-
-def _scan_deck_host_commands(deck_file: str) -> dict[str, str]:
-    """Every host executable the deck script (and its literal includes) shells
-    out to, mapped to the ``<file>:<line>`` where it was first seen (issue
-    #2333).
-
-    A static, deliberately shallow scan -- see
-    :func:`_missing_deck_host_commands` for what that means for the caller.
-    """
-    found: dict[str, str] = {}
-    for source in _deck_script_files(deck_file):
-        try:
-            with open(source, encoding="utf-8", errors="replace") as handle:
-                lines = handle.read().splitlines()
-        except OSError:
-            continue
-        for number, line in enumerate(lines, start=1):
-            if line.lstrip().startswith("#"):
-                continue
-            for pattern in _RUBY_SHELL_OUT_RES:
-                for match in pattern.finditer(line):
-                    groups = match.groupdict()
-                    command = (
-                        groups.get("cmd")
-                        or groups.get("cmd_dq")
-                        or groups.get("cmd_sq")
-                        or ""
-                    )
-                    for word in _shell_command_words(command):
-                        found.setdefault(word, f"{source}:{number}")
-    return found
-
-
-def _missing_deck_host_commands(deck_file: str) -> dict[str, str]:
-    """The subset of :func:`_scan_deck_host_commands` that is not on ``PATH``,
-    mapped to its first ``<file>:<line>`` citation (issue #2333).
-
-    Both directions of error are accepted on purpose, and both are safe:
-
-    - **False negative** (a shell-out through a computed command string, an
-      include this cannot resolve): the run proceeds exactly as it did before
-      this check existed, and the deck's own failure is still caught by the
-      deck-abort check -- now quoting the ``sh: ...: command not found`` line
-      that explains it (:func:`_klayout_deck_error_detail`).
-    - **False positive** (a shell-out on a branch this run would never take):
-      the caller is told which utility and which line, and
-      ``--allow-missing-host-tools`` runs the deck anyway.
-
-    What is *not* acceptable is guessing: a word that might not be a command
-    name is never reported, since every word here fails the run by default.
-    """
-    import shutil
-
-    return {
-        command: where
-        for command, where in _scan_deck_host_commands(deck_file).items()
-        if shutil.which(command) is None
-    }
-
-
-_KLAYOUT_EXECUTABLE = "klayout"
-
-KLAYOUT_VERSION_PROBE_TIMEOUT_S = 15.0
-"""Wall-clock budget for the ``klayout -v`` version probe (issue #2689)."""
-
-_REQUESTED_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*$")
-_REPORTED_VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
-
-
-def _parse_requested_klayout_version(value: str) -> tuple[int, ...]:
-    """Validate a caller-declared ``min_klayout_version`` (issue #2689): dotted
-    decimal components only (``0.30.12``). Raises :class:`DrcError` otherwise."""
-    text = value.strip() if isinstance(value, str) else value
-    if not isinstance(text, str) or not _REQUESTED_VERSION_RE.match(text):
-        raise DrcError(
-            f"invalid minimum KLayout version {value!r}: expected dotted "
-            "decimal components such as '0.30.12'"
-        )
-    return tuple(int(part) for part in text.split("."))
-
-
-def _klayout_version_at_least(
-    found: tuple[int, ...], required: tuple[int, ...]
-) -> bool:
-    """Numeric component-wise comparison (``0.30.12 > 0.30.9``); missing
-    trailing components count as zero."""
-    width = max(len(found), len(required))
-    pad = lambda v: v + (0,) * (width - len(v))  # noqa: E731
-    return pad(found) >= pad(required)
-
-
-def _preflight_klayout_version(executable: str, min_version: str | None) -> None:
-    """Refuse to run a deck on a standalone ``klayout`` application older than
-    the caller-declared minimum (issue #2689).
-
-    A no-op when ``min_version`` is ``None`` (existing behaviour: no
-    compatibility is claimed or checked). Otherwise probes the *same*
-    executable the deck will run with (``<executable> -v``, bounded by
-    :data:`KLAYOUT_VERSION_PROBE_TIMEOUT_S`) and raises :class:`DrcError` for
-    an invalid minimum, a missing/failed/timed-out/unparseable probe, or a
-    detected version below the minimum. Never bypassed by
-    ``allow_deck_errors`` or ``allow_missing_host_tools``. Passing proves only
-    the version, not that an arbitrary deck is compatible.
-    """
-    if min_version is None:
-        return
-    required = _parse_requested_klayout_version(min_version)
-    required_text = ".".join(str(c) for c in required)
-    try:
-        probe = subprocess.run(
-            [executable, "-v"],
-            capture_output=True,
-            text=True,
-            timeout=KLAYOUT_VERSION_PROBE_TIMEOUT_S,
-        )
-    except FileNotFoundError as exc:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"{executable!r} binary not found on PATH. Install KLayout "
-            f">= {required_text} (https://www.klayout.de/build.html) or omit "
-            f"the minimum version. ({exc})"
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"'{executable} -v' did not complete within "
-            f"{KLAYOUT_VERSION_PROBE_TIMEOUT_S}s. Check the installation."
-        ) from exc
-    except OSError as exc:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"could not launch '{executable} -v' ({exc}). Check that the "
-            f"binary is executable and install KLayout >= {required_text}."
-        ) from exc
-    output = ((probe.stdout or "") + "\n" + (probe.stderr or "")).strip()
-    if probe.returncode != 0:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"'{executable} -v' exited with status {probe.returncode}. "
-            f"Reinstall or update KLayout. Output:\n{output}"
-        )
-    match = _REPORTED_VERSION_RE.search(output)
-    if match is None:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"could not parse a version from '{executable} -v' output. "
-            f"Check the installation. Output:\n{output}"
-        )
-    found = tuple(int(part) for part in match.group(0).split("."))
-    if not _klayout_version_at_least(found, required):
-        raise DrcError(
-            f"the standalone KLayout application on PATH is version "
-            f"{match.group(0)}, but this run requires >= {required_text}. "
-            f"Install or update the KLayout application to {required_text} "
-            "or newer (https://www.klayout.de/build.html); the pip `klayout` "
-            "package is a separate install and is not used by --engine "
-            "klayout. See docs/cli/drc.md, 'Engine' -> 'klayout'."
-        )
-
-
-def _preflight_deck_host_tools(deck_file: str, allow_missing_host_tools: bool) -> None:
-    """Raise :class:`DrcError` if the deck script shells out to a command
-    this host does not have (issue #2333), naming the command and where it is
-    used. A no-op when ``allow_missing_host_tools`` is set.
-
-    Called *before* the ``klayout`` subprocess is launched: the failure it
-    prevents is not a rule-checking failure at all, and the error the deck
-    itself would produce names something else entirely.
-    """
-    if allow_missing_host_tools:
-        return
-    missing = _missing_deck_host_commands(deck_file)
-    if missing:
-        raise DrcError(_missing_host_commands_message(missing))
-
-
-def _missing_host_commands_message(missing: dict[str, str]) -> str:
-    """The actionable error text for a deck whose host utilities are absent
-    (issue #2333), one ``deck requires '<cmd>' (not found on PATH)`` line per
-    utility with the ``<file>:<line>`` that shells out to it.
-
-    Phrased so the *first* thing the caller reads is the missing utility --
-    the whole point of the preflight is that the failure the deck itself
-    produces names something else entirely.
-    """
-    bullets = "\n".join(
-        f"  - deck requires {command!r} (not found on PATH) -- shelled out to "
-        f"at {where}"
-        for command, where in sorted(missing.items())
-    )
-    return (
-        "the DRC-DSL deck script shells out to a host utility this machine "
-        "does not have, so it would abort before reporting rules (typically "
-        "with a downstream error naming something else entirely):\n"
-        f"{bullets}\n"
-        "Install the missing utility (e.g. `pmap` ships with procps on "
-        "Linux and has no macOS equivalent), point --deck-file at a driver "
-        "that does not need it, or pass --allow-missing-host-tools to run "
-        "the deck anyway. See docs/cli/drc.md, 'Engine' -> 'klayout'."
-    )
-
-
-def _cleanup_klayout_drc_work_dir(work_dir: str) -> None:
-    import shutil
-
-    shutil.rmtree(work_dir, ignore_errors=True)
-
-
-#: ``coverage_assertion.kind`` of the count assertion (issue #2697).
-COVERAGE_ASSERTION_COUNT_KIND = "expected_rule_categories"
-#: ``coverage_assertion.kind`` of the exact-set assertion (issue #2806).
-COVERAGE_ASSERTION_NAMES_KIND = "expected_rule_category_names"
-
-
-def _evaluate_category_assertion(
-    expected: int | None,
-    rule_categories: list[str],
-    deck_errored: bool,
-    expected_names: list[str] | None = None,
-) -> dict[str, Any] | None:
-    """Evaluate the opt-in ``expected_rule_categories`` assertion (issue
-    #2697) -- or its exact-set sibling ``expected_rule_category_names``
-    (issue #2806) -- against the deduplicated declared categories. ``None``
-    when neither is requested; raises :class:`DrcError` on a mismatch of a
-    run that did not tolerate deck errors; a tolerated-error run is never
-    satisfied."""
-    if expected_names is not None:
-        return _evaluate_category_set_assertion(
-            expected_names, rule_categories, deck_errored
-        )
-    if expected is None:
-        return None
-    observed = len(set(rule_categories))
-    if observed != expected and not deck_errored:
-        raise DrcError(
-            "rule-category coverage assertion failed: expected "
-            f"{expected} unique rule categories "
-            f"(--expect-rule-categories) but the deck's report "
-            f"declared {observed} -- the deck did not declare the "
-            "rule set you vouched for (a gated-off rule group, a "
-            "missing --deck-var, or a changed deck?). Fix the deck "
-            "invocation or update the expected count."
-        )
-    return {
-        "kind": COVERAGE_ASSERTION_COUNT_KIND,
-        "expected": expected,
-        "observed": observed,
-        "satisfied": observed == expected and not deck_errored,
-    }
-
-
-def _evaluate_category_set_assertion(
-    expected_names: list[str], rule_categories: list[str], deck_errored: bool
-) -> dict[str, Any]:
-    """The exact-set variant (issue #2806): the unique declared RDB category
-    names must equal ``expected_names`` exactly (case-sensitive; order and
-    duplicate declarations are irrelevant). A same-size swap fails just like
-    a missing or extra category. Raises :class:`DrcError` listing the sorted
-    missing and unexpected names unless the run tolerated deck errors, in
-    which case the assertion is recorded unsatisfied instead."""
-    expected_set = set(expected_names)
-    observed_set = set(rule_categories)
-    missing = sorted(expected_set - observed_set)
-    unexpected = sorted(observed_set - expected_set)
-    if (missing or unexpected) and not deck_errored:
-        raise DrcError(
-            "rule-category coverage assertion failed: the deck's report "
-            "declared a different set of rule categories than the "
-            "expected set (--expect-rule-categories-file) vouched for "
-            f"(expected {len(expected_set)}, declared {len(observed_set)}). "
-            f"missing (expected, not declared): {json.dumps(missing)}; "
-            f"unexpected (declared, not expected): {json.dumps(unexpected)}"
-            " -- a gated-off rule group, a missing --deck-var, a "
-            "data-dependent declaration, or a changed deck? Fix the deck "
-            "invocation or re-review the expected category list."
-        )
-    return {
-        "kind": COVERAGE_ASSERTION_NAMES_KIND,
-        "expected_names": sorted(expected_set),
-        "observed_names": sorted(observed_set),
-        "missing_names": missing,
-        "unexpected_names": unexpected,
-        "satisfied": not missing and not unexpected and not deck_errored,
-    }
-
-
-def _klayout_engine_coverage(
-    rule_counts: dict[str, int],
-    rule_categories: list[str],
-    coverage_assertion: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """The klayout engine's ``coverage`` block. Categories are declarations,
-    not execution instrumentation, unless the caller's satisfied
-    ``expected_rule_categories`` assertion vouches for them (issue #2697);
-    otherwise only finding-producing rules are checked and the
-    ``unmeasured_rule_execution`` sentinel keeps coverage unknown."""
-    asserted = bool(coverage_assertion and coverage_assertion["satisfied"])
-    checked = (
-        sorted(set(rule_counts) | set(rule_categories))
-        if asserted
-        else sorted(rule_counts)
-    )
-    unknown = (
-        []
-        if asserted
-        else [
-            {
-                # `work_id` namespaces this sentinel so it cannot collide
-                # with a real (caller-chosen) RDB category name.
-                "id": work_id("engine_execution", "klayout"),
-                "reason": "unmeasured_rule_execution",
-            }
-        ]
-    )
-    return {
-        "deck_layers": [],
-        "layers_checked": [],
-        "rule_categories": rule_categories,
-        "rules_checked": checked,
-        "layers_in_stream_without_rules": [],
-        "rules_skipped": [],
-        "voltage_domain_warnings": [],
-        "deck_scope": [],
-        **build_check_coverage(checked=checked, unknown=unknown),
-    }
-
-
-def _validate_expected_rule_categories(value: Any) -> None:
-    """Reject anything but ``None`` or a positive ``int`` (issue #2697)."""
-    if value is None:
-        return
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise DrcError(
-            "expected_rule_categories (--expect-rule-categories) must be a "
-            f"positive integer (got {value!r})"
-        )
-
-
-def _validate_expected_rule_category_names(
-    value: Any, expected_count: Any = None
-) -> list[str] | None:
-    """Normalize the exact-set assertion's ``expected_rule_category_names``
-    (issue #2806) into a sorted, deduplicated list, or ``None`` when omitted.
-
-    Accepts any list/tuple/set/frozenset of non-empty strings, compared
-    exactly (case-sensitive, no stripping, no glob interpretation -- the
-    manifest loader :func:`load_rule_category_manifest` has already trimmed
-    its lines). A bare string, an empty collection, a non-string or a
-    blank name raises :class:`DrcError`, as does combining it with the count
-    assertion ``expected_count`` -- the two are mutually exclusive.
-    """
-    if value is None:
-        return None
-    if expected_count is not None:
-        raise DrcError(
-            "expected_rule_categories (--expect-rule-categories) and "
-            "expected_rule_category_names (--expect-rule-categories-file) "
-            "are mutually exclusive -- pass one rule-category assertion"
-        )
-    if not isinstance(value, (list, tuple, set, frozenset)):
-        raise DrcError(
-            "expected_rule_category_names (--expect-rule-categories-file) "
-            f"must be a list of rule category names (got {type(value).__name__})"
-        )
-    names: set[str] = set()
-    for name in value:
-        if not isinstance(name, str) or not name.strip():
-            raise DrcError(
-                "expected_rule_category_names (--expect-rule-categories-file) "
-                f"must contain only non-empty strings (got {name!r})"
-            )
-        names.add(name)
-    if not names:
-        raise DrcError(
-            "expected_rule_category_names (--expect-rule-categories-file) "
-            "must name at least one rule category (got an empty set)"
-        )
-    return sorted(names)
-
-
-def load_rule_category_manifest(path: str) -> list[str]:
-    """Read an ``--expect-rule-categories-file`` manifest (issue #2806):
-    UTF-8 text, one exact rule category name per line. Surrounding
-    whitespace is trimmed, blank lines are ignored and duplicates are
-    deduplicated; there is no comment syntax and no glob expansion, so a
-    line ``# M1.a`` names the category ``# M1.a``. Returns the sorted,
-    deduplicated names.
-
-    Raises :class:`DrcError` for an unreadable file, invalid UTF-8, or a
-    manifest that resolves to no names at all -- all before KLayout is
-    ever launched.
-    """
-    try:
-        with open(path, "rb") as handle:
-            raw = handle.read()
-    except OSError as exc:
-        raise DrcError(
-            f"could not read rule-category manifest "
-            f"(--expect-rule-categories-file) '{path}': {exc.strerror or exc}"
-        ) from exc
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise DrcError(
-            f"rule-category manifest (--expect-rule-categories-file) '{path}' "
-            f"is not valid UTF-8: {exc}"
-        ) from exc
-    if text.startswith("﻿"):
-        text = text[1:]
-    names = {line.strip() for line in text.splitlines()}
-    names.discard("")
-    if not names:
-        raise DrcError(
-            f"rule-category manifest (--expect-rule-categories-file) '{path}' "
-            "names no rule categories (empty or blank-only file)"
-        )
-    return sorted(names)
-
-
-def _rerun_assertion_kwargs(committed: dict[str, Any]) -> dict[str, Any]:
-    """The ``run_drc_klayout_engine`` keyword reproducing a committed
-    report's ``coverage_assertion`` on ``--rerun`` (issues #2697/#2806),
-    dispatched on ``kind``. A set assertion replays its embedded
-    ``expected_names`` -- the original manifest file is not needed. A
-    malformed assertion raises :class:`DrcError` rather than leaking an
-    array into the count path."""
-    assertion = committed.get("coverage_assertion")
-    if assertion is None:
-        return {}
-    if not isinstance(assertion, dict):
-        raise DrcError(
-            "committed report's 'coverage_assertion' is malformed (expected "
-            f"an object, got {type(assertion).__name__})"
-        )
-    kind = assertion.get("kind", COVERAGE_ASSERTION_COUNT_KIND)
-    if kind == COVERAGE_ASSERTION_COUNT_KIND:
-        expected = assertion.get("expected")
-        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
-            raise DrcError(
-                "committed report's 'coverage_assertion.expected' is "
-                f"malformed (expected a positive integer, got {expected!r})"
-            )
-        return {"expected_rule_categories": expected}
-    if kind == COVERAGE_ASSERTION_NAMES_KIND:
-        names = assertion.get("expected_names")
-        if not isinstance(names, list):
-            raise DrcError(
-                "committed report's 'coverage_assertion.expected_names' is "
-                f"malformed (expected a list of names, got {names!r})"
-            )
-        try:
-            resolved = _validate_expected_rule_category_names(names)
-        except DrcError as exc:
-            raise DrcError(
-                "committed report's 'coverage_assertion.expected_names' is "
-                f"malformed: {exc}"
-            ) from exc
-        return {"expected_rule_category_names": resolved}
-    raise DrcError(
-        f"committed report's 'coverage_assertion.kind' {kind!r} is not "
-        f"recognized (expected {COVERAGE_ASSERTION_COUNT_KIND!r} or "
-        f"{COVERAGE_ASSERTION_NAMES_KIND!r})"
-    )
-
-
-def run_drc_klayout_engine(
-    path: str,
-    deck_file: str,
-    top: str | None = None,
-    timeout_s: float = KLAYOUT_ENGINE_DEFAULT_TIMEOUT_S,
-    deck_vars: dict[str, str] | None = None,
-    pdk_variant: str | None = None,
-    pdk_root: str | None = None,
-    allow_deck_errors: bool = False,
-    allow_missing_host_tools: bool = False,
-    expected_rule_categories: int | None = None,
-    min_klayout_version: str | None = None,
-    expected_rule_category_names: list[str] | None = None,
-) -> dict[str, Any]:
-    """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
-    typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
-    explicit ``--deck-file`` override) against the layout at ``path``, via
-    the standalone ``klayout`` application binary -- opt-in alongside
-    :func:`run_drc`'s curated, pip-only engine (see ``docs/cli/drc.md``,
-    "Engine").
-
-    Invokes::
-
-        klayout -b -r <deck_file> -rd input=<path> -rd report=<tmp>.lyrdb
-
-    -- the standard batch-mode DRC-DSL invocation KLayout's own tooling
-    documents and open_pdks' sky130 deck itself embeds as a usage comment
-    (verified for this issue against a real ``volare``-fetched sky130A
-    install's ``libs.tech/klayout/drc/sky130A.lydrc``). The report path is
-    always a ``.lyrdb`` (RDB XML) file, regardless of what ``deck_file``
-    itself would otherwise default to, so the result is always the
-    structured format :func:`_parse_klayout_rdb_report` reads -- never
-    KLayout's plain-text list alternative.
-
-    ``deck_vars`` (issue #1302, CLI: repeatable ``--deck-var name=value``)
-    appends additional ``-rd name=value`` pairs to the invocation, after the
-    ``input``/``report`` pair, in insertion order. Some PDK-native decks are
-    assembled from feature-toggle globals a PDK's own run wrapper would
-    normally set (FEOL/BEOL enable flags, a metal-stack selector, etc.) and
-    gate every rule behind them -- without a way to set those extra globals,
-    every rule's enable condition evaluates false and the deck silently
-    checks nothing while still producing a well-formed, empty report (a
-    false "clean" verdict indistinguishable from a real one). ``deck_vars``
-    is empty/``None`` by default, so the existing zero-config contract for a
-    self-contained deck (e.g. sky130A's ``sky130A.lydrc``, which needs only
-    ``input``/``report``) is unchanged.
-
-    Mirrors ``lvs.py``'s ``_run_netgen_lvs`` in every structural way that
-    module's docstring calls out:
-
-    - **Binary resolution**: no ``shutil.which`` precheck -- ``subprocess.run``
-      is attempted directly and a ``FileNotFoundError`` is caught and
-      re-raised as an actionable :class:`DrcError` naming the missing binary
-      and how to get one, or how to fall back to the curated engine.
-    - **Timeout**: ``subprocess.TimeoutExpired`` -> :class:`DrcError`.
-    - **Never trusts the exit code *alone*.** ``klayout -b -r`` can exit
-      ``0`` even when the deck script itself errored out before reaching
-      ``report(...)`` (e.g. a deck expecting a variable this invocation does
-      not set), so a missing report file is its own failure -> :class:`DrcError`
-      carrying klayout's own stdout/stderr, never a silent ``status:
-      "clean"`` (mirroring netgen's "no log file at all" check).
-    - **...but the report file's presence is not a completion signal
-      either** (issue #1941). A PDK-native deck typically calls
-      ``report(...)`` near the top and appends rules as they run, so a deck
-      that aborts part-way through -- an unsupported DRC-DSL construct, a
-      typo'd method -- still leaves a *partial* report behind covering only
-      the rules that ran before the abort. A non-zero exit status **or** an
-      ``ERROR``-prefixed line in klayout's own output (either signal, since
-      neither alone is reliable) therefore raises :class:`DrcError` even
-      when a report file exists, rather than reporting the partial report's
-      zero violations as ``status: "clean"``. ``allow_deck_errors=True``
-      (CLI: ``--allow-deck-errors``) is the escape hatch for a caller who
-      has deliberately scoped around a known-unrunnable rule: the partial
-      report is accepted, and the run records what it tolerated in the
-      additive ``engine_deck_errors`` field (see below) so the verdict is
-      never *silently* clean. It never tolerates a missing report file. The
-      raised error quotes klayout's **whole** captured output, not just its
-      ``ERROR``-prefixed lines (issue #2333): the line that explains an abort
-      is routinely not ``ERROR``-prefixed (``sh: pmap: command not found``),
-      and dropping it leaves a downstream traceback that misdiagnoses a host
-      problem as a broken rule deck. Only the *message* is widened -- what
-      counts as a deck error is still the ``ERROR``-prefix test, so a rule
-      named ``ERROR_CHECK.1`` is still not misread as a failure.
-    - **Workdir**: ``tempfile.mkdtemp``, cleaned up via
-      :func:`_cleanup_klayout_drc_work_dir` (``shutil.rmtree(...,
-      ignore_errors=True)``) in a ``finally``.
-
-    **Host preflight (issue #2333).** Running a PDK's own driver script makes
-    that vendor's *host* assumptions part of this engine's contract, and
-    those assumptions routinely have nothing to do with rule checking: a real
-    open-PDK driver installs a Ruby ``Logger`` formatter that shells out to
-    procps ``pmap(1)`` on every log line, so on a host without ``pmap``
-    (macOS, minimal container images) the deck dies on its *first*
-    ``logger.info`` -- before a single rule runs -- with a nil dereference
-    that reads like a broken rule deck. Before launching klayout, the deck
-    script and its literal-path Ruby includes are scanned for shelled-out
-    command names (:func:`_scan_deck_host_commands`) and any that are not on
-    ``PATH`` fail the run with a :class:`DrcError` naming them and where they
-    are used (``deck requires 'pmap' (not found on PATH)``), instead of
-    letting the deck surface an unrelated downstream traceback.
-    ``min_klayout_version`` (CLI: ``--min-klayout-version``, issue #2689)
-    declares the minimum standalone application version; the same executable
-    is probed with ``-v`` before the deck launches and an older, missing or
-    unparseable probe raises :class:`DrcError`. Omitted: no probe. Neither
-    allow flag bypasses it, and passing proves nothing about deck
-    compatibility beyond the version.
-
-    ``allow_missing_host_tools=True`` (CLI: ``--allow-missing-host-tools``)
-    skips the check, for a driver whose shell-out is on a branch this run
-    never takes. The scan is static and deliberately conservative -- it
-    reports only words it is sure name a command -- so it is a diagnostic
-    aid, never a guarantee; a shell-out it cannot see still fails the way it
-    always did, now with the causal ``sh: ...: command not found`` line
-    quoted in the deck-abort error (see below).
-
-    ``top`` is not yet supported for this engine (unlike :func:`run_drc`'s
-    curated engine, issue #554): an arbitrary PDK-native DRC-DSL script has
-    no standard ``-rd``-settable "restrict to this one top cell" variable
-    this module can rely on generically (`sky130A.lydrc`, e.g., always reads
-    the whole ``$input`` stream). Passing ``top`` raises :class:`DrcError`
-    rather than silently ignoring the caller's stated scope request --
-    mirroring how the ``"netgen"`` LVS engine rejects request fields it has
-    no equivalent hook for (``lvs.py``'s ``hints``/``reference.device_bulk``/
-    ``options.parameter_tolerance`` checks).
-
-    The returned dict matches :func:`run_drc`'s documented top-level shape
-    (``schema_version``, ``file``, ``deck``, ``dbu_um``, ``status``,
-    ``violation_count``, ``rule_counts``, ``violations``, ``coverage``,
-    ``provenance``) plus one additive field, ``"engine": "klayout"`` (the
-    curated engine's own output carries no ``engine`` key at all, unchanged,
-    since it has always been the sole engine until this issue) -- and, only
-    on a run that actually tolerated deck errors via ``allow_deck_errors``,
-    a second additive ``engine_deck_errors`` field (issue #1941):
-    ``{"exit_status": <int>, "error_lines": [<klayout's own ERROR lines>]}``.
-    That key is omitted entirely otherwise, so an ordinary run's payload is
-    byte-identical to previous releases'. ``deck`` is
-    ``deck_file`` itself (there is no separate short deck *name* the way the
-    curated engine's ``sky130``/``gf180mcu`` deck identifiers are -- an
-    arbitrary PDK-native script is identified by its own path).
-
-    Unlike the curated engine, most of ``coverage`` cannot be meaningfully
-    populated for an externally-run script this module has no declarative
-    rule table for -- the layer-level sub-fields
-    (``deck_layers``/``layers_checked``/``layers_in_stream_without_rules``/
-    ``rules_skipped``/``voltage_domain_warnings``/``deck_scope``) are all
-    empty lists (never fabricated), a known, documented limitation (see
-    ``docs/cli/drc.md``, "Engine" -> "klayout").
-
-    Two sub-fields *are* populated, on a distinction issue #2108 sharpened.
-    ``coverage.rule_categories`` (issue #1996) is the sorted list of rule
-    categories the deck's own report declares -- KLayout's DRC DSL opens a
-    ``<category>`` the moment a rule calls ``output(...)``, whether or not
-    that call found anything, so this is the closest thing an RDB report
-    offers to "which rules did you attempt". It is *not* proof of execution,
-    though: a deck that gates its whole rule set behind a feature-toggle
-    global set via ``-rd`` (``--deck-var``) which this invocation left unset
-    produces the same well-formed, zero-category-or-zero-item report as one
-    that genuinely ran everything and found nothing -- previously
-    indistinguishable from a real ``status: "clean"``. ``coverage.checked``
-    (the common contract's identity list, plus this module's own
-    ``coverage.rules_checked`` alias) is therefore *not* ``rule_categories``:
-    it is only the rule ids that actually produced a finding (a real item is
-    the one signal this format cannot fake). Whenever no violation exists --
-    regardless of whether ``rule_categories`` is empty or populated --
-    ``coverage.known`` is ``False`` and ``coverage.unknown`` carries a single
-    ``engine_execution`` sentinel with reason ``unmeasured_rule_execution``,
-    and the envelope's own ``status`` is ``"coverage_unknown"`` (exit 4) --
-    never ``"clean"``. There is no instrumentation interface in this release
-    that lets an externally-run deck claim known-full coverage; see the
-    shared convention in :mod:`klayout_tools.coverage` and the
-    ``drc --engine klayout`` row of ``docs/coverage-contract.md``. A found
-    violation always overrides: ``status`` is ``"violations"`` and that
-    rule's id is recorded as checked, regardless of coverage unknownness
-    elsewhere in the same run.
-
-    ``expected_rule_categories`` (CLI ``--expect-rule-categories N``, issue
-    #2697) is an opt-in, caller-supplied coverage assertion: "this deck, with
-    these inputs, declares exactly ``N`` unique RDB rule categories, and I
-    vouch that declaring them means they ran". It must be a positive ``int``
-    (``0``, negatives, ``bool`` and non-integers raise :class:`DrcError`
-    before KLayout is launched). After a successful run the count is compared
-    with ``len(coverage.rule_categories)``: a mismatch raises
-    :class:`DrcError` naming both counts; an exact match marks every declared
-    category as checked, sets ``coverage.known`` and clears the
-    ``unmeasured_rule_execution`` sentinel, so zero findings derive
-    ``status: "clean"`` (exit 0) through the shared rollup. Findings still
-    yield ``"violations"``. The assertion is recorded under the additive
-    top-level ``coverage_assertion`` field. A run that tolerated deck errors
-    (``allow_deck_errors``) can never satisfy it: no mismatch error is raised
-    for such a partial run, but ``coverage_assertion.satisfied`` is ``False``
-    and coverage stays unknown. Omitted, behaviour is unchanged.
-
-    ``expected_rule_category_names`` (CLI ``--expect-rule-categories-file
-    PATH``, issue #2806) is the exact-set form of the same caller-vouched
-    assertion: a non-empty collection of exact (case-sensitive) category
-    names, mutually exclusive with ``expected_rule_categories`` (both
-    validated before KLayout is launched). The unique declared categories
-    must equal that set exactly -- a same-size swap fails just like a
-    missing or extra name, raising :class:`DrcError` that lists the sorted
-    missing and unexpected names. A match grants the same caller-vouched
-    coverage as a count match; the report records it under
-    ``coverage_assertion`` with ``kind: "expected_rule_category_names"``
-    (``expected_names``/``observed_names``/``missing_names``/
-    ``unexpected_names``/``satisfied``). Neither form proves rule execution
-    independently: the names must be reviewed for the deck revision,
-    switches and inputs in use, not copied from the accepted run.
-
-    ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags, issue
-    #1901) are resolved via :func:`klayout_tools.pdk.find_pdk`, when either
-    is given, purely so ``provenance.pdk`` can record which PDK revision the
-    run is evidence for -- **in addition to**, not instead of, this engine's
-    existing use of ``--pdk``/``--pdk-root`` one layer up in
-    ``cli/drc_cmd.py`` to resolve ``deck_file`` itself via
-    :func:`klayout_tools.pdk.drc_deck_file` when ``--deck-file`` is omitted.
-    Omitting both leaves ``provenance.pdk`` ``None``, matching every prior
-    release's behaviour.
-
-    Raises :class:`DrcError` for every failure mode above, plus a missing/
-    unreadable ``path`` or ``deck_file`` (checked before the subprocess is
-    launched, the same fail-fast order :func:`run_drc` uses for ``path``),
-    or ``pdk_variant``/``pdk_root`` given but no matching PDK found.
-    """
-    _validate_expected_rule_categories(expected_rule_categories)
-    expected_names = _validate_expected_rule_category_names(
-        expected_rule_category_names, expected_rule_categories
-    )
-    if top is not None:
-        raise DrcError(
-            "the klayout engine does not support --top yet -- omit --top, "
-            "or use the curated deck engine (the default) instead"
-        )
-
-    # Resolved only when `--pdk`/`--pdk-root` was given -- purely for
-    # `provenance.pdk` (issue #1901); this engine's own rules come from
-    # `deck_file`, resolved separately (possibly using the same flags, one
-    # layer up in `cli/drc_cmd.py`'s `drc_deck_file` call). Mirrors
-    # `run_drc`'s identical guard so an omitted `--pdk` still yields
-    # `provenance.pdk: null`.
-    pdk_info: dict[str, Any] | None = None
-    if pdk_variant is not None or pdk_root is not None:
-        try:
-            pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
-        except PdkNotFoundError as exc:
-            raise DrcError(str(exc)) from exc
-
-    if not os.path.isfile(deck_file):
-        raise DrcError(f"deck file not found: {deck_file}")
-
-    # Issue #2333: a vendor driver's host assumptions are not rule checking,
-    # but they abort the deck all the same -- and the abort they produce
-    # names the wrong thing. Fail before the subprocess, naming the utility.
-    _preflight_deck_host_tools(deck_file, allow_missing_host_tools)
-
-    # Issue #2689: opt-in application-version floor, probed on the very
-    # executable launched below, before any deck work.
-    _preflight_klayout_version(_KLAYOUT_EXECUTABLE, min_klayout_version)
-
-    # Validates `path` (missing/directory/unreadable) before the subprocess
-    # is launched, the same fail-fast order `run_drc` uses -- and gives this
-    # engine the input layout's own `dbu`, needed to convert the RDB report's
-    # micrometre coordinates back to database units (see
-    # `_parse_klayout_rdb_report`).
-    layout = load_layout(path, DrcError)
-    dbu = layout.dbu
-
-    work_dir = tempfile.mkdtemp(prefix="klt-drc-klayout-")
-    try:
-        report_path = os.path.join(work_dir, "report.lyrdb")
-        cmd = [
-            _KLAYOUT_EXECUTABLE,
-            "-b",
-            "-r",
-            deck_file,
-            "-rd",
-            f"input={path}",
-            "-rd",
-            f"report={report_path}",
-        ]
-        for name, value in (deck_vars or {}).items():
-            cmd.extend(["-rd", f"{name}={value}"])
-        try:
-            completed = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout_s
-            )
-        except FileNotFoundError as exc:
-            raise DrcError(
-                "could not launch klayout: binary not found on PATH. "
-                "Install KLayout (https://www.klayout.de/build.html) or "
-                "omit --engine klayout to use the curated deck instead. "
-                f"({exc})"
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise DrcError(
-                f"klayout did not complete within {timeout_s}s (raise "
-                "--timeout-s to allow more time)"
-            ) from exc
-
-        if not os.path.isfile(report_path):
-            # klayout -b -r can exit 0 even when the deck script errored out
-            # before reaching report(...) -- never trust the exit code alone
-            # (see this function's docstring). No report file at all means no
-            # trustworthy verdict is possible; surface klayout's own
-            # stdout/stderr rather than a bare "no report" message. Not
-            # tolerable via allow_deck_errors: there is no partial report to
-            # accept here, only nothing at all.
-            raise DrcError(
-                "klayout did not produce a report file -- the deck script "
-                "likely failed before completing. klayout's own output:\n"
-                + (completed.stdout or completed.stderr or "").strip()
-            )
-
-        # ...and the report file's presence is not a completion signal either
-        # (issue #1941): a deck that called report(...) early and then aborted
-        # leaves a partial report behind. Either of klayout's own failure
-        # signals -- a non-zero exit status, or an ERROR-prefixed line in its
-        # output -- means the rules after the abort never ran, so the partial
-        # report's zero violations must not be reported as "clean".
-        error_lines = _klayout_deck_error_lines(completed.stdout, completed.stderr)
-        deck_errored = completed.returncode != 0 or bool(error_lines)
-        if deck_errored and not allow_deck_errors:
-            # Issue #2333: the *whole* captured output, not `error_lines`
-            # alone -- the causal line is routinely not ERROR-prefixed.
-            detail = _klayout_deck_error_detail(
-                completed.stdout, completed.stderr, error_lines
-            )
-            raise DrcError(
-                "klayout reported an error while running the deck script "
-                f"(exit status {completed.returncode}) -- the deck likely "
-                "aborted part-way through, so the report file it did write "
-                "covers only the rules that ran before the abort, and its "
-                "verdict cannot be trusted. Pass --allow-deck-errors to "
-                "accept a partial report anyway. klayout's own output:\n" + detail
-            )
-
-        violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
-            report_path, dbu
-        )
-        coverage_assertion = _evaluate_category_assertion(
-            expected_rule_categories, rule_categories, deck_errored, expected_names
-        )
-    finally:
-        _cleanup_klayout_drc_work_dir(work_dir)
-
-    violations.sort(
-        key=lambda v: (
-            v["rule"],
-            v["cell"],
-            v["bbox"]["left"],
-            v["bbox"]["bottom"],
-            v["bbox"]["right"],
-            v["bbox"]["top"],
-        )
-    )
-
-    coverage = _klayout_engine_coverage(
-        rule_counts, rule_categories, coverage_assertion
-    )
-    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
-    return {
-        "schema_version": 2,
-        "file": path,
-        "deck": deck_file,
-        "engine": "klayout",
-        # Additive, and present *only* when --allow-deck-errors actually
-        # tolerated a failed deck run (issue #1941) -- an ordinary run's
-        # payload is unchanged, and a tolerated one is self-describing
-        # rather than silently "clean".
-        **(
-            {
-                "engine_deck_errors": {
-                    "exit_status": completed.returncode,
-                    "error_lines": error_lines,
-                }
-            }
-            if deck_errored
-            else {}
-        ),
-        "dbu_um": dbu,
-        "status": rollup_status(rollup, success="clean", failure="violations"),
-        "violation_count": len(violations),
-        "rule_counts": dict(sorted(rule_counts.items())),
-        "violations": violations,
-        "coverage": coverage,
-        **(
-            {"coverage_assertion": coverage_assertion}
-            if coverage_assertion is not None
-            else {}
-        ),
-        "provenance": build_provenance(
-            deck_name=os.path.basename(deck_file),
-            deck_path=deck_file,
-            pdk=pdk_info,
-            input_path=path,
-            deck_options=deck_vars,
-            include_klayout_version_mismatch=True,
-        ),
-    }
+        return getattr(drc_klayout_engine, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

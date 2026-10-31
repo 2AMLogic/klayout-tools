@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:11:40.410209+00:00",
+  "slug": "sky130-adpll",
+  "name": "Sky130 Adpll",
+  "description": "Synthesizable all-digital PLL on sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Output frequency",
+        "target": "200 MHz",
+        "fallback": "100 MHz",
+        "stretch": "400 MHz"
+      },
+      {
+        "parameter": "Reference input",
+        "target": "10\u201350 MHz",
+        "fallback": "25 MHz fixed"
+      },
+      {
+        "parameter": "Multiplication",
+        "target": "integer-N",
+        "fallback": "fixed N",
+        "stretch": "fractional-N"
+      },
+      {
+        "parameter": "Period jitter (rms, simulated, post-layout)",
+        "target": "\u2264 1% of the output period",
+        "fallback": "\u2264 2%",
+        "stretch": "\u2264 0.5%"
+      },
+      {
+        "parameter": "Lock time",
+        "target": "\u2264 20 \u00b5s",
+        "fallback": "\u2264 100 \u00b5s",
+        "stretch": "\u2264 5 \u00b5s"
+      },
+      {
+        "parameter": "Supply / power",
+        "target": "1.8 V core cells; \u2264 2 mW",
+        "fallback": "\u2264 5 mW",
+        "stretch": "\u2264 1 mW"
+      },
+      {
+        "parameter": "Implementation",
+        "target": "standard cells only, no custom analog"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean, STA and post-layout re-verified"
+      }
+    ],
+    "status_note": "DRAFT \u2014 engineering to ratify, see issue #2"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-adpll",
+    "ref": "cfe3843a57cd3adb4f1ce5c7d3494e4b0c5bb9d7",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

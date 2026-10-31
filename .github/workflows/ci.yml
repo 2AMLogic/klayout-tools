@@ -63,10 +63,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -109,6 +109,15 @@ jobs:
         # review cycle.
         run: uv run --frozen --extra dev python scripts/check_complexity_baseline.py
 
+      - name: Type-check ratchet (mypy)
+        # scripts/check_type_baseline.py (issue #3221): mypy over src/ against
+        # type-baseline.json, keyed on (file, error code, message). Fails on a
+        # new diagnostic or a baselined one occurring more often; decreases
+        # never fail. Runs on this job's single Python version only. Refresh
+        # procedure: docs/type-checking.md. GATES -- do not add
+        # continue-on-error.
+        run: uv run --frozen --extra dev python scripts/check_type_baseline.py
+
       - name: Verb-module import boundaries
         # scripts/check_import_boundaries.py (issue #2767): static AST gate
         # for docs/ARCHITECTURE.md's "verb modules stay self-contained"
@@ -117,6 +126,18 @@ jobs:
         # seeded legacy exceptions in import-boundaries.json. Never imports
         # klayout_tools. GATES -- do not add continue-on-error.
         run: uv run --frozen --extra dev python scripts/check_import_boundaries.py
+
+      - name: Canary manifest matches the forge
+        # `ingest-canary.py --check-manifest` (issue #4642): fails when a public
+        # 2AMLogic canary repo is missing from blocks/canaries.json, or a listed
+        # repo is no longer public. Only reads public repo names, so the
+        # read-only GITHUB_TOKEN a fork PR gets is enough. A `gh` failure is a
+        # failure (never a silent pass). Fix: `scripts/ingest-canary.py
+        # --sync-manifest`, then ingest the new entries (blocks/README.md).
+        # GATES -- do not add continue-on-error.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --frozen --extra dev python scripts/ingest-canary.py --check-manifest
 
       - name: Committed examples/ carry no absolute host paths
         # `klt env-provenance lint-envelope` (issue #2224) over every
@@ -247,13 +268,13 @@ jobs:
       run:
         working-directory: ${{ matrix.dir }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: cargo --version
         run: cargo --version && rustc --version
 
       - name: Cache cargo registry + build output
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -278,7 +299,7 @@ jobs:
         run: cargo test ${{ matrix.cargo_test_args }}
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -552,13 +573,13 @@ jobs:
       run:
         working-directory: native/statime
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: cargo --version
         run: cargo --version && rustc --version
 
       - name: Cache cargo registry + build output
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -585,7 +606,7 @@ jobs:
         run: cargo test
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -688,13 +709,13 @@ jobs:
       run:
         working-directory: native/techmap
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: cargo --version
         run: cargo --version && rustc --version
 
       - name: Cache cargo registry + build output
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -720,7 +741,7 @@ jobs:
         # above only runs *its own* package's tests, never a path
         # dependency's, so the shared crate's own union-of-both-forks test
         # suite needs its own explicit invocation below.
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -760,13 +781,13 @@ jobs:
       run:
         working-directory: native/wave
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: cargo --version
         run: cargo --version && rustc --version
 
       - name: Cache cargo registry + build output
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -811,10 +832,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -845,7 +866,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Full history so the diff below can compare against the PR base
           # / pre-push commit -- the default shallow (depth-1) checkout
@@ -879,7 +900,7 @@ jobs:
         with:
           # Node 22+ per site/README.md / site's @types/node -- matches
           # deploy-site.yml's own Node setup.
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: site/package-lock.json
 
@@ -928,10 +949,10 @@ jobs:
         # one per interpreter that exists.
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -996,7 +1017,20 @@ jobs:
         # silently pass) if this step is ever unavailable, but CI always has it.
         run: scripts/fetch-cell-netlists.sh
 
+      - name: Cache pinned Yosys build
+        id: yosys-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/yosys-0.67
+          key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh', 'scripts/_install_common.sh') }}
+
       - name: Install Yosys build dependencies
+        # Cache-hit gate (issue #4100): these packages exist only to compile
+        # Yosys, and the compile step below is already skipped on a cache hit,
+        # so a warm-cache leg no longer touches the apt mirror at all. The
+        # cache step therefore runs before this one. Cache-miss runs still
+        # install and build, and remain exposed to mirror flakes by design.
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
         # scripts/install-yosys.sh builds Yosys from a pinned, checksum-
         # verified source release (issue #417) -- `apt-get install yosys`
         # would resolve Ubuntu 24.04's 0.33-5build2, ~30 releases stale
@@ -1060,13 +1094,6 @@ jobs:
             cmake bison flex libfl-dev libreadline-dev gawk tcl-dev \
             libffi-dev pkg-config zlib1g-dev
 
-      - name: Cache pinned Yosys build
-        id: yosys-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/yosys-0.67
-          key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh', 'scripts/_install_common.sh') }}
-
       - name: Build + install pinned Yosys (cache miss only)
         if: steps.yosys-cache.outputs.cache-hit != 'true'
         run: scripts/install-yosys.sh
@@ -1108,7 +1135,7 @@ jobs:
 
       - name: Cache pinned SymbiYosys + Bitwuzla install
         id: symbiyosys-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/symbiyosys-0.67
           key: symbiyosys-0.67-bitwuzla-0.9.1-${{ runner.os }}-${{ hashFiles('scripts/install-symbiyosys.sh', 'scripts/_install_common.sh') }}
@@ -1134,7 +1161,7 @@ jobs:
 
       - name: Cache pinned sky130_fd_sc_hd liberty
         id: sky130-liberty-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: pdks/sky130-liberty
           key: sky130-liberty-${{ hashFiles('scripts/fetch-sky130-liberty.sh') }}
@@ -1177,7 +1204,7 @@ jobs:
 
       - name: Cache pinned Icarus Verilog build
         id: icarus-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/icarus-13.0
           key: icarus-13.0-${{ runner.os }}-${{ hashFiles('scripts/install-icarus-verilog.sh', 'scripts/_install_common.sh') }}
@@ -1194,7 +1221,7 @@ jobs:
 
       - name: Cache pinned Verilator build
         id: verilator-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/verilator-5.050
           key: verilator-5.050-${{ runner.os }}-${{ hashFiles('scripts/install-verilator.sh', 'scripts/_install_common.sh') }}
@@ -1210,7 +1237,7 @@ jobs:
         run: verilator --version
 
       - name: Cache native/techmap cargo build (debug)
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -1274,11 +1301,33 @@ jobs:
         # coverage percentages, plus the `options.random_seed` end-to-end
         # pinning/echo tests (issue #423 AC #4) -- including that two runs of
         # the same seeded request reproduce identical `tests[]` content.
-        run: uv run --frozen --extra dev --extra functional-verification pytest
+        #
+        # Report-only coverage (issue #3223): COV_ARGS is non-empty on the
+        # 3.12 leg only (one leg, to respect the wall-clock budget), where it
+        # adds --cov and a JSON report that the two steps below publish.
+        # No --cov-fail-under: measure first, ratchet in a follow-up. Config
+        # lives in pyproject.toml's [tool.coverage.*]; see
+        # docs/guides/test-coverage.md.
+        run: uv run --frozen --extra dev --extra functional-verification pytest $COV_ARGS
         env:
           GH_TOKEN: ${{ github.token }}
           PDK_ROOT: ${{ github.workspace }}/pdks/sky130-liberty
           PDK: sky130A
+          COV_ARGS: ${{ matrix.python-version == '3.12' && '--cov --cov-report=json:coverage.json --cov-report=term' || '' }}
+
+      - name: Coverage job summary (report-only)
+        # `!cancelled()` so a red pytest still publishes what was measured;
+        # hashFiles guards the legs that did not collect coverage.
+        if: ${{ !cancelled() && matrix.python-version == '3.12' && hashFiles('coverage.json') != '' }}
+        run: python3 scripts/coverage_summary.py coverage.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: ${{ !cancelled() && matrix.python-version == '3.12' && hashFiles('coverage.json') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage.json
+          retention-days: 30
 
       - name: klt kb validate
         # Belt-and-suspenders alongside tests/test_kb.py (which calls the same
@@ -1326,7 +1375,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out the primary copy
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: primary
 
@@ -1335,12 +1384,12 @@ jobs:
         # different prefix AND a different path length, so a generator that
         # embeds its own absolute path produces different bytes here --
         # precisely what the byte-compare below is looking for.
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: second-checkout/nested/deeper-than-the-primary
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1450,7 +1499,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Prepare fixture block directories
         # `layout-metrics` expects a block *directory* (docs/cli/layout-metrics.md),
@@ -1568,7 +1617,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out the primary copy
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: primary
 
@@ -1576,12 +1625,12 @@ jobs:
         # A different prefix AND a different path length: a generator that
         # embeds its own absolute path produces different bytes here, which
         # is precisely what the byte-compare below is looking for.
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: second-checkout/nested/deeper-than-the-primary
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1659,10 +1708,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1672,13 +1721,72 @@ jobs:
       - name: Install dependencies (includes the klayout wheel)
         run: uv sync --locked --extra dev
 
+      - name: Restore cached klayout .deb closure
+        # Issue #4392: the apt `klayout` package drags in a large Qt5 .deb
+        # set, and a slow mirror (#4059, #4075, #4372) either failed the
+        # install or pushed the job past its wall-clock budget. Caching the
+        # downloaded .debs means most runs never touch the mirror. Restore
+        # anywhere, save only on main (same pattern as the uv cache, #2559).
+        # Bump the `v1` in the key when the pinned version/deps change.
+        id: klayout-debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/klayout-debs
+          key: klayout-0.28.16-ubuntu24.04-v1-${{ hashFiles('scripts/ci-apt-*.sh') }}
+
       - name: Install the klayout binary
+        # Cache hit: install offline from the restored .debs; any failure
+        # (stale/corrupt cache, missing dep) falls through to the apt path.
         # Same bounded, mirror-tolerant apt wrapper as the `test` job's
-        # ngspice step (issues #1204, #1219).
-        timeout-minutes: 5
+        # ngspice step (issues #1204, #1219). The apt `klayout` package
+        # pulls Qt5 widgets libs, so the bare 90s per-command cap killed a
+        # slow-but-live mirror mid-download on every retry (issue #4059).
+        # Same sizing as the Yosys-deps step (#2662): two full-length
+        # attempts fit (60 + 150 + 5 backoff + 150 = 365s <= 380s) inside
+        # the 420s (`timeout-minutes: 7`) backstop. Only a degraded-mirror
+        # day pays the worst case; a normal run is unchanged (~30s).
+        timeout-minutes: 7
         env:
           DEBIAN_FRONTEND: noninteractive
-        run: scripts/ci-apt-install.sh klayout
+          CI_APT_DEADLINE: "380"
+          CI_APT_PER_CMD_TIMEOUT: "150"
+        run: |
+          DEBS="$HOME/.cache/klayout-debs"
+          HIT="${{ steps.klayout-debs.outputs.cache-hit }}"
+          # Record path + seconds so the first post-merge cache hit is
+          # verifiable from the job summary (hit should be seconds, a miss
+          # pays the mirror).
+          report() {
+            echo "klayout install: cache-hit=${HIT:-false} path=$1 seconds=$SECONDS" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          if [ "$HIT" = "true" ] \
+             && sudo dpkg -i "$DEBS"/*.deb && klayout -v; then
+            echo "klayout installed from cached .debs (no network)"
+            report offline
+            exit 0
+          fi
+          # A failed offline install can leave packages half-configured;
+          # settle dpkg before the apt path takes over.
+          [ "$HIT" = "true" ] && { sudo dpkg --configure -a || true; }
+          scripts/ci-apt-install.sh klayout
+          # Populate the cache dir for the save step (miss / fallback path).
+          # The glob may match nothing if the runner purges the apt archive;
+          # that must not turn a successful install into a red step.
+          rm -rf "$DEBS" && mkdir -p "$DEBS"
+          if compgen -G "/var/cache/apt/archives/*.deb" >/dev/null; then
+            cp /var/cache/apt/archives/*.deb "$DEBS"/
+          else
+            echo "no .debs in /var/cache/apt/archives; nothing to cache"
+          fi
+          report apt
+
+      - name: Save klayout .deb closure (main only)
+        if: github.ref == 'refs/heads/main' && steps.klayout-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/klayout-debs
+          key: ${{ steps.klayout-debs.outputs.cache-primary-key }}
 
       - name: ASAP7 deck fixtures
         run: |
@@ -1725,7 +1833,7 @@ jobs:
       # The Actions API call below reads this run's own job timings.
       actions: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Fetch this run's job and run timings
         env:

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:10:07.121644+00:00",
+  "slug": "sg13cmos5l-protocol-emulator",
+  "name": "Sg13Cmos5L Protocol Emulator",
+  "description": "Protocol emulator ASIC on IHP SG13CMOS5L \u2014 2AM Logic canary block",
+  "source": {
+    "repo": "2AMLogic/sg13cmos5l-protocol-emulator",
+    "ref": "f495d60316ee856f84059d6eec4cabb5baf54ee4",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

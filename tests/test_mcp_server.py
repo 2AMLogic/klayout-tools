@@ -114,6 +114,70 @@ def test_fleet_backend_refused_by_default(tools, policy):
     build_argv(sim, request, BridgePolicy(workspace_root=REPO, allow_fleet=True))
 
 
+def test_backend_forced_local_without_allow_fleet(tools, policy):
+    backend_tools = [t for t in tools if "backend" in t.input_schema["properties"]]
+    assert {t.name for t in backend_tools} >= {"klt_sim", "klt_netlist"}
+    fleet = BridgePolicy(workspace_root=REPO, allow_fleet=True)
+    for tool in backend_tools:
+        args = {
+            d: "x.json" for d in tool.input_schema.get("required", []) if d != "backend"
+        }
+        argv = build_argv(tool, args, policy)
+        assert argv[argv.index("--backend") + 1] == "local", tool.name
+        assert "--backend" not in build_argv(tool, args, fleet), tool.name
+        local = build_argv(tool, {**args, "backend": "local"}, policy)
+        assert local.count("--backend") == 1
+
+
+def test_option_injection_refused(tools, policy):
+    from klayout_tools.mcp_tools import ToolCallRefused
+
+    sim = _tool(tools, "klt_sim")
+    with pytest.raises(ToolCallRefused):
+        build_argv(sim, {"request": ["req.json", "--backend", "batch"]}, policy)
+    with pytest.raises(ToolCallRefused, match="option"):
+        build_argv(sim, {"request": "--backend"}, policy)
+    with pytest.raises(ToolCallRefused):
+        build_argv(sim, {"request": "req.json", "backend": ["local", "x"]}, policy)
+    array_tool = next(
+        t
+        for t in tools
+        if any(
+            p.get("type") == "array" and d in t.path_dests
+            for d, p in t.input_schema["properties"].items()
+        )
+    )
+    dest = next(
+        d
+        for d, p in array_tool.input_schema["properties"].items()
+        if p.get("type") == "array" and d in array_tool.path_dests
+    )
+    # Satisfy the tool's other required arguments so the refusal under test is
+    # the option check, not "missing required argument(s)".
+    props = array_tool.input_schema["properties"]
+    others = {
+        d: ["x"] if props[d].get("type") == "array" else "x"
+        for d in array_tool.input_schema.get("required", [])
+        if d != dest
+    }
+    with pytest.raises(ToolCallRefused, match="option"):
+        build_argv(array_tool, {**others, dest: ["a", "-x"]}, policy)
+
+
+def test_injection_refused_before_subprocess(tools, policy, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("subprocess launched")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    outcome = execute(
+        _tool(tools, "klt_sim"),
+        {"request": ["req.json", "--backend", "batch"]},
+        policy,
+    )
+    assert outcome.is_error and outcome.exit_code == 2
+    assert outcome.payload["schema_version"] == 1
+
+
 def test_execute_matches_cli_json(tools, policy):
     outcome = execute(_tool(tools, "klt_layers"), {"file": GDS}, policy)
     assert not outcome.is_error
@@ -192,7 +256,7 @@ def test_stdio_round_trip():
         text=True,
         check=True,
     )
-    assert not good.isError
-    assert good.structuredContent == json.loads(cli.stdout)
-    assert bad.isError
-    assert bad.structuredContent["error"]["command"] == "layers"
+    assert not good.is_error
+    assert good.structured_content == json.loads(cli.stdout)
+    assert bad.is_error
+    assert bad.structured_content["error"]["command"] == "layers"

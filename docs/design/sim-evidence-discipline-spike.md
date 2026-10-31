@@ -131,7 +131,7 @@ For each of item 3's five sub-items, ask which of two things is missing:
 
 | # | Sub-item | Kind | Disposition |
 | - | -------- | ---- | ----------- |
-| A | Append-only records with supersession chains | policy (storage/retention) | **Documented convention** |
+| A | Append-only records with supersession chains | policy (storage/retention) | **Documented convention** — *amended (#4043): reversed; `klt evidence lint` now enforces it, see `docs/cli/evidence.md`* |
 | B | Netlist snapshot per record | data-completeness gap | **`klt sim` contract addition** — follow-up issue filed (see below) |
 | C | PDK-pin (hash) enforcement | policy (expected-value + fail behavior) | **Documented convention** |
 | D | Subset-reason requirements | policy (what counts as "full" coverage) | **Documented convention** |
@@ -192,7 +192,7 @@ is wrapped, unmodified, inside a small per-run **evidence record** and
 committed to git:
 
 ```
-evidence/sim/<block>/<corner-scope-slug>/<recorded_at>-<request_sha>.json
+evidence/sim/<block>/<corner-scope-slug>/<YYYYMMDD>-<HHMMSS>-<short-sha>.json
 ```
 
 - `<block>` — the design under test (e.g. `bandgap`).
@@ -209,7 +209,14 @@ evidence/sim/<block>/<corner-scope-slug>/<recorded_at>-<request_sha>.json
   classification `klt signoff`'s own envelope-kind detector already uses to
   tell a `klt pex` response from a `klt sim` response
   ([`signoff.md`](../cli/signoff.md#item-7-is-kind-restricted-klt-pex)).
-- `<recorded_at>` — UTC timestamp of when the record was written, e.g.
+- `<YYYYMMDD>-<HHMMSS>-<short-sha>` — **amended by #4044**: the record id
+  is the UTC write time plus the git short SHA of the repo it is written
+  into (the form every chip-repo fork already uses), minted by
+  `klt evidence record`; the constant lives in
+  `klayout_tools.evidence_record.RECORD_ID_PATTERN`. The original
+  `<recorded_at>-<request_sha>` form below was never implemented; the
+  request hash lives in the wrapper's `request_sha256` instead. Original
+  text, for the timestamp half: UTC timestamp of when the record was written, e.g.
   `20260802T193000Z`. Neither `klt sim`'s nor `klt pex`'s own JSON carries a
   run timestamp (a repo-wide grep of both schemas confirms it: no
   `timestamp`/`generated_at` field exists anywhere in
@@ -387,6 +394,13 @@ smaller by design, not a subset). The convention:
   disallowed too, so `subset_reason` can't be padded onto a full run and
   ignored later).
 
+**Update (issue #4045, survey gap G3):** the split is now explicit. `klt` owns
+the *mechanical* check — [`klt corner-matrix check`](../cli/corner-matrix.md)
+diffs a repo-committed matrix file against a request or report and emits
+`matrix_size`, `observed_count`, `missing[]`, `extra[]`, `duplicate[]`. The
+repo still owns *which* matrix is full and the `subset_reason` policy; the
+check reports, it does not judge.
+
 This check needs no pex-specific variant: `klt pex` emits a top-level
 `corner_count` of its own (the number of distinct `corner_id` values across
 `delta[]` — [`pex.md`](../cli/pex.md) → "Top-level fields"), so
@@ -500,9 +514,12 @@ no-degradation rows) is explained from the extraction's own added R/C.
   implemented here; `klt pex`'s `extraction`/`provenance` fields the
   `extraction_pin` mapping above uses are unmodified, already-shipped
   fields (Epic #709 Phase 1a, #801).
-- The evidence-record wrapper shape above is illustrative, not a `klt`
-  subcommand or schema `klt sim`/`klt pex` validates — no code in this
-  repository reads or writes `evidence-record/1` files. A block repo is
+- The evidence-record wrapper shape above is illustrative for `klt sim`/
+  `klt pex` (neither validates it). Since #4044 the **writer** exists:
+  `klt evidence record` ([`../cli/evidence.md`](../cli/evidence.md)), which
+  adds `git`, `environment`, `artifacts` and `extensions` fields to the
+  wrapper. Nothing in this repository yet *reads* `evidence-record/1` files
+  beyond that writer's own shape check (the linter is #4043). A block repo is
   free to name fields differently as long as the guarantees (append-only,
   supersession, pin enforcement including the extraction-method/deck pin on
   `klt pex` records, subset-reason, spread) hold.
