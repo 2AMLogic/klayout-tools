@@ -3552,7 +3552,18 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "`extraction.tie_declared_pins`."
         ),
     )
-    pex_parser.add_argument("layout", help="path to a GDSII or OASIS layout file")
+    pex_parser.add_argument(
+        "layout",
+        # `?` (issue #4692): a bare `--attach <manifest>` rebuilds the request
+        # from the manifest; every other form requires it (checked in
+        # `cli/pex_cmd.py`, so the error rides the JSON envelope).
+        nargs="?",
+        default=None,
+        help=(
+            "path to a GDSII or OASIS layout file (required unless "
+            "--attach is given alone)"
+        ),
+    )
     pex_parser.add_argument(
         "testbenches",
         # `*`, not `+` (issue #2478): `--measure-command` replaces the
@@ -3685,10 +3696,11 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     pex_parser.add_argument(
         "--deck",
-        required=True,
+        default=None,
         help=(
             f"extraction deck to run (currently: {_deck_names_str()}), "
-            "passed through to `klt extract --parasitics`"
+            "passed through to `klt extract --parasitics`. Required unless "
+            "--attach is given alone (issue #4692)."
         ),
     )
     pex_parser.add_argument(
@@ -3817,7 +3829,23 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "recorded job(s) and the normal pex report is produced. A "
             "manifest recorded for different inputs is refused "
             "(`resume_fingerprint_mismatch`), as is an incomplete one "
-            "(`pex_manifest_incomplete`) (issue #4619)."
+            "(`pex_manifest_incomplete`) (issue #4619). Given alone -- no "
+            "layout, --deck or testbenches -- the request a schema-2 "
+            "`--submit-only` run recorded in the manifest is reused "
+            "(issue #4692); an older manifest is refused "
+            "(`pex_manifest_no_request`)."
+        ),
+    )
+    pex_parser.add_argument(
+        "--envelope-out",
+        dest="envelope_out",
+        metavar="PATH",
+        default=None,
+        help=(
+            "also write the JSON envelope (the success/`submitted` report, or "
+            "the error envelope) to PATH, whatever --format is. `-o` is "
+            "unchanged: it receives the extracted netlist, never the "
+            "envelope (issue #4692)."
         ),
     )
     pex_parser.add_argument(

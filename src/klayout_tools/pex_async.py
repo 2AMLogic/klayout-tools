@@ -20,7 +20,7 @@ from typing import Any
 MANIFEST_NAME = "pex-submit.json"
 
 #: Schema of the manifest and of the ``submitted`` status payload.
-ASYNC_SCHEMA_VERSION = 1
+ASYNC_SCHEMA_VERSION = 2
 
 #: ``PexError.code`` values this module raises.
 MANIFEST_INVALID_CODE = "pex_manifest_invalid"
@@ -28,6 +28,7 @@ FINGERPRINT_MISMATCH_CODE = "resume_fingerprint_mismatch"
 LEG_MISSING_CODE = "pex_attach_leg_missing"
 MANIFEST_INCOMPLETE_CODE = "pex_manifest_incomplete"
 ASYNC_UNSUPPORTED_CODE = "pex_async_unsupported"
+MANIFEST_NO_REQUEST_CODE = "pex_manifest_no_request"
 
 
 def validate_async_flags(
@@ -67,6 +68,26 @@ def validate_async_flags(
         raise PexError(reason, code=ASYNC_UNSUPPORTED_CODE)
 
 
+def load_request(manifest_path: str) -> dict[str, Any]:
+    """The ``klt pex`` request a ``--submit-only`` run recorded in its
+    manifest, for a bare ``--attach`` (issue #4692). A manifest without one
+    (written before schema 2) is refused by name."""
+    from .pex import PexError
+
+    manifest = AsyncLegs._load(manifest_path)
+    request = manifest.get("request")
+    if not isinstance(request, dict):
+        raise PexError(
+            f"--attach: manifest '{manifest_path}' (schema_version "
+            f"{manifest.get('schema_version')}) records no request, so a bare "
+            "--attach cannot rebuild the run; re-run `klt pex --attach` with "
+            "the original layout, --deck and testbench arguments, or submit "
+            "again to write a schema-2 manifest",
+            code=MANIFEST_NO_REQUEST_CODE,
+        )
+    return request
+
+
 class AsyncLegs:
     """Routes every pex ``run_sim`` leg: blocking (``mode=None``), submit
     (``"submit"``) or attach (``"attach"``)."""
@@ -77,7 +98,9 @@ class AsyncLegs:
         submit_only: bool,
         attach: str | None,
         work_dir: str,
+        request: Mapping[str, Any] | None = None,
     ) -> None:
+        self._request = dict(request) if request is not None else None
         self.mode = "submit" if submit_only else "attach" if attach else None
         self.submitting = self.mode == "submit"
         self.manifest_path = (
@@ -237,6 +260,8 @@ class AsyncLegs:
             ],
             "legs": self._legs,
         }
+        if self._request is not None:
+            payload["request"] = self._request
         path = self.manifest_path or ""
         tmp_path = f"{path}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as handle:

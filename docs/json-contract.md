@@ -1970,6 +1970,10 @@ artifacts:
 }
 ```
 
+`klt pex` additionally merges the lock's structured owner into `error`
+(issue #4692; additive): `owner_pid` and `owner_acquired_at` (`null` when
+unknown), `locked_directory` and `relation` (`same`/`ancestor`/`descendant`).
+
 - **Exit code and streams.** Contention is an application error without a
   report: exit `1`, stdout empty, the envelope above on stderr (`--format
   text`: `klt <command>: <message>`). The exit-code table is unchanged; tell

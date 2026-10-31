@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--hosts <n>] [--resume] [--submit-only | --attach <pex-submit.json>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--hosts <n>] [--resume] [--submit-only | --attach <pex-submit.json>] [--envelope-out <envelope.json>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -39,10 +39,18 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   invocation (there are two per run, one per side). Default `1800`, the same
   cap [`signoff.md`](signoff.md) puts on a command-backed evidence entry.
   Requires `--measure-command`.
-- `--deck` — required, passed through to `klt extract --parasitics`.
+- `--deck` — required (except for a bare `--attach`), passed through to `klt extract --parasitics`.
 - `--output` / `-o` — path to write the extracted SPICE netlist. Same default
   as `klt extract`: `<layout>` with its extension replaced by `.spice`, next
   to the input.
+  `-o` is always the *netlist*, never the JSON envelope (`--format json`
+  writes the envelope to stdout); to keep the envelope in a file use
+  `--envelope-out`.
+- `--envelope-out PATH` — also write the JSON envelope to `PATH` whatever
+  `--format` is: the success / `submitted` report, or the error envelope on
+  failure (byte-identical to what `--format json` emits on stdout / stderr).
+  A path that cannot be written is an exit-`1` error. Additive
+  ([#4692](https://github.com/2AMLogic/klayout-tools/issues/4692)).
 - `--top` / `--pdk` / `--pdk-root` — passed through to `klt extract`; see
   [`extract.md`](extract.md).
 - `--outdir` — overrides where this command writes its own generated
@@ -100,6 +108,17 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   interrupted (the error names the missing legs);
   `resume_fingerprint_mismatch` when the extracted netlist or a testbench
   request changed since the submit. Omitted, the report is unchanged.
+  **Bare `--attach`**
+  ([#4692](https://github.com/2AMLogic/klayout-tools/issues/4692)):
+  a schema-2 `--submit-only` manifest also records the invocation's `request`
+  (layout, testbenches, `--deck` and every flag that shapes the run, paths
+  made absolute). `klt pex --attach pex-submit.json` with no layout, `--deck`
+  or testbenches rebuilds the run from it, from any working directory. Any
+  positional or `--deck` given alongside `--attach` keeps the original
+  behaviour (inputs re-given, hashes verified). A manifest written before
+  schema 2 has no `request`: a bare `--attach` of it fails with
+  `pex_manifest_no_request`. Without `--attach`, layout and `--deck` stay
+  required (exit `2`).
   **Incremental manifest and re-running a submit**
   ([#4686](https://github.com/2AMLogic/klayout-tools/issues/4686)):
   `pex-submit.json` is rewritten atomically after every leg is submitted, with
