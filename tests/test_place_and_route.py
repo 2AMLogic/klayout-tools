@@ -436,7 +436,7 @@ def test_load_request_rejects_unknown_top_level_key(tmp_path, key):
 def test_load_request_accepts_comment_and_every_allowed_key(tmp_path):
     from klayout_tools.place_and_route import _ALLOWED_REQUEST_KEYS
 
-    assert len(_ALLOWED_REQUEST_KEYS) == 23
+    assert len(_ALLOWED_REQUEST_KEYS) == 26
     request = _base_request(_comment="note", schema="klt.place_and_route.request/1")
     for key in _ALLOWED_REQUEST_KEYS:
         request.setdefault(key, {} if key in ("backend", "batch", "outputs") else 1)
@@ -7686,6 +7686,83 @@ def test_route_critical_nets_percentage_rejects_invalid_values(
     _stub_merge_def_to_gds(monkeypatch)
 
     with pytest.raises(PlaceAndRouteError, match="route_critical_nets_percentage"):
+        run_place_and_route(request_path)
+
+
+def test_congestion_and_density_knobs_default_to_prior_tcl(tmp_path, monkeypatch):
+    """Issue #4716: omitted fields leave the generated Tcl unchanged."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    place_lines = _script_lines(_stage_script(request_path, "place"))
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    assert any(
+        line.startswith("global_placement -density 0.6 ") for line in place_lines
+    )
+    assert "global_route -verbose" in route_lines
+    assert report["applied"] == {
+        "placement_density": 0.6,
+        "route_congestion_iterations": None,
+        "route_allow_congestion": False,
+    }
+
+
+def test_congestion_and_density_knobs_emitted_when_requested(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        placement_density=0.45,
+        route_congestion_iterations=60,
+        route_allow_congestion=True,
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    place_lines = _script_lines(_stage_script(request_path, "place"))
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    assert any(
+        line.startswith("global_placement -density 0.45 ") for line in place_lines
+    )
+    assert (
+        "global_route -verbose -congestion_iterations 60 -allow_congestion"
+        in route_lines
+    )
+    assert report["applied"] == {
+        "placement_density": 0.45,
+        "route_congestion_iterations": 60,
+        "route_allow_congestion": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("placement_density", 0),
+        ("placement_density", -0.1),
+        ("placement_density", 1.5),
+        ("placement_density", True),
+        ("placement_density", "0.5"),
+        ("route_congestion_iterations", 0),
+        ("route_congestion_iterations", -3),
+        ("route_congestion_iterations", 2.5),
+        ("route_congestion_iterations", True),
+        ("route_allow_congestion", 1),
+        ("route_allow_congestion", "true"),
+    ],
+)
+def test_congestion_and_density_knobs_reject_invalid_values(
+    tmp_path, monkeypatch, field, value
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch, **{field: value})
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    with pytest.raises(PlaceAndRouteError, match=field):
         run_place_and_route(request_path)
 
 

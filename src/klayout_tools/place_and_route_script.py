@@ -946,6 +946,9 @@ def _stage_script_lines(
     output_dir: str,
     route_critical_nets_percentage: int,
     max_antenna_repair_iterations: int,
+    placement_density: float | None = None,
+    route_congestion_iterations: int | None = None,
+    route_allow_congestion: bool = False,
     library: dict[str, Any] | None = None,
     macro_liberty_paths: list[str] | None = None,
 ) -> list[str]:
@@ -955,6 +958,9 @@ def _stage_script_lines(
         _ROUTING_LAYER_RANGE,
         _ROW_RAIL_STRAP,
     )
+
+    if placement_density is None:
+        placement_density = _GLOBAL_PLACEMENT_DENSITY
 
     # Issue #2635: `request.macros[].lib`, resolved to this run's own
     # corner. Read immediately after the standard-cell `read_liberty` in
@@ -1047,7 +1053,7 @@ def _stage_script_lines(
             f"place_pins -hor_layers {io_spec['layer_h']} "
             f"-ver_layers {io_spec['layer_v']}",
             *_wire_rc_lines(io_spec, library),
-            f"global_placement -density {_GLOBAL_PLACEMENT_DENSITY} "
+            f"global_placement -density {placement_density} "
             f"-routability_driven -timing_driven -random_seed {seed}",
             "estimate_parasitics -placement",
             "repair_design",
@@ -1179,6 +1185,13 @@ def _stage_script_lines(
             global_route_call += (
                 f" -critical_nets_percentage {route_critical_nets_percentage}"
             )
+        # Issue #4716: opt-in congestion handling, each omitted by default.
+        if route_congestion_iterations is not None:
+            global_route_call += (
+                f" -congestion_iterations {route_congestion_iterations}"
+            )
+        if route_allow_congestion:
+            global_route_call += " -allow_congestion"
         # Row-rail fallback (issue #1442): only when `request.power` was
         # *not* given -- a `request.power`-bearing run already got a real
         # PDN (including, when the caller's own `straps[]` name a met1
