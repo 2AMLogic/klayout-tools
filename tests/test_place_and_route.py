@@ -11816,9 +11816,11 @@ def test_macro_halo_with_power_but_no_pg_pins_is_rejected(tmp_path, monkeypatch)
         run_place_and_route(request_path)
 
 
-def test_macro_halo_with_power_on_an_unstrapped_layer_is_rejected(
+def test_macro_halo_with_power_on_an_unstrapped_layer_connects_to_next_strap(
     tmp_path, monkeypatch
 ):
+    """Issue #4703: only the *upper* layer of the macro connect needs a core
+    strap, so a met3 pin (sky130hd straps met1/met4/met5) joins met4."""
     _write_macro_lef_with_power_pins(tmp_path / "sram.lef", pg_layer="met3")
     request_path = _setup_success_env(
         tmp_path,
@@ -11837,7 +11839,67 @@ def test_macro_halo_with_power_on_an_unstrapped_layer_is_rejected(
     )
     _stub_openroad_success(monkeypatch, stages=("floorplan",))
 
-    with pytest.raises(PlaceAndRouteError, match="strap on the macro's own P/G layer"):
+    run_place_and_route(request_path)
+
+    lines = _script_lines(
+        os.path.join(
+            os.path.dirname(request_path),
+            ".klt",
+            "place-and-route",
+            "pnr_gcd_floorplan.tcl",
+        )
+    )
+    assert "add_pdn_connect -grid {macro_u_sram} -layers {met3 met4}" in lines
+    assert not any("met3" in line and "add_pdn_stripe" in line for line in lines)
+
+
+def test_macro_halo_with_power_above_every_strap_is_rejected(tmp_path, monkeypatch):
+    _write_macro_lef_with_power_pins(tmp_path / "sram.lef", pg_layer="met6")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={"preset": "sky130hd", "power_net": "VPWR", "ground_net": "VGND"},
+        macros=[
+            {
+                "instance": "u_sram",
+                "lef": "sram.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "halo": 2.0,
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    with pytest.raises(
+        PlaceAndRouteError, match="strap \\*above\\* the macro's own P/G"
+    ):
+        run_place_and_route(request_path)
+
+
+def test_macro_halo_with_power_on_unparseable_layer_is_rejected(tmp_path, monkeypatch):
+    _write_macro_lef_with_power_pins(tmp_path / "sram.lef", pg_layer="mettop")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={"preset": "sky130hd", "power_net": "VPWR", "ground_net": "VGND"},
+        macros=[
+            {
+                "instance": "u_sram",
+                "lef": "sram.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "halo": 2.0,
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    with pytest.raises(
+        PlaceAndRouteError, match="strap \\*above\\* the macro's own P/G"
+    ):
         run_place_and_route(request_path)
 
 
@@ -11971,13 +12033,13 @@ def test_macro_pdn_connects_every_supply_pin_layer():
     ]
 
 
-def test_macro_pdn_rejects_supply_layer_missing_from_straps():
-    """A second supply layer with no matching strap is rejected up front
-    rather than silently left unconnected."""
+def test_macro_pdn_connects_unstrapped_supply_layer_to_next_strap_above():
+    """A second supply layer with no matching strap connects to the lowest
+    strap above it (issue #4703) rather than being rejected."""
     power = {"straps": [{"layer": "met1"}, {"layer": "met4"}, {"layer": "met5"}]}
-    with pytest.raises(place_and_route.PlaceAndRouteError) as excinfo:
-        place_and_route._macro_pdn_grid_lines([_pdn_macro(["met1", "met3"])], power)
-    assert "met3" in str(excinfo.value)
+    lines = place_and_route._macro_pdn_grid_lines([_pdn_macro(["met1", "met3"])], power)
+    assert "add_pdn_connect -grid {macro_u_sram} -layers {met1 met4}" in lines
+    assert "add_pdn_connect -grid {macro_u_sram} -layers {met3 met4}" in lines
 
 
 # --------------------------------------------------------------------------- #

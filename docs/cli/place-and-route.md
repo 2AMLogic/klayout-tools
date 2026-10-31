@@ -854,7 +854,13 @@ exists once it has a location):
    `add_pdn_connect` pair per halo'd macro, connecting the macro's own
    `USE POWER`/`USE GROUND` LEF pins (whichever routing layer their `PORT`
    geometry is actually on — read from the LEF, never asked for in the
-   request) up to the next strap layer above it in `power.straps`. This is
+   request) up to the next strap layer above it in `power.straps`. A pin
+   layer that is not itself a strap layer (e.g. `met3` with straps
+   `met1`/`met4`/`met5`) connects to the lowest strap above it, ordering
+   layers by their trailing number (`met3` < `met4`; `Metal3` < `Metal4`),
+   so no core strap is needed on the pin layer; a pin layer above every
+   strap, or a name with no trailing number, is a named request error
+   (issue #4703). This is
    the `v1` exclusion `request.power`'s own docstring has flagged since
    issue #1091 ("a design with hard macros needs a caller-supplied macro
    halo/grid spec"), closed by this field.
