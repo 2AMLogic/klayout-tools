@@ -10,7 +10,7 @@ so a plain `pip install 'klayout-tools[<extra>]'` needs no Rust toolchain.
 | `native/mom/`, `native/congestion/`, `native/statime/` | `klt-<crate>-native` | — | not yet (add when asked, see below) |
 
 Platforms: Linux x86_64 (manylinux_2_28) and macOS arm64 (GitHub-hosted
-`macos-14` runner). Wheels are `abi3` (`cp310-abi3`), so one wheel per platform
+`macos-15` runner). Wheels are `abi3` (`cp310-abi3`), so one wheel per platform
 covers CPython 3.10+. Other platforms fall back to the from-source build
 (`docs/cli/yield.md#building-the-native-extension`).
 
@@ -21,7 +21,7 @@ covers CPython 3.10+. Other platforms fall back to the from-source build
 2. Trusted publisher binding: owner `2AMLogic`, repository `klayout-tools`,
    workflow `publish-native.yml`, environment `pypi` (the same GitHub
    environment `publish.yml` uses).
-3. Confirm the org's GitHub plan can run `macos-14` runners.
+3. Confirm the org's GitHub plan can run `macos-15` runners.
 
 ## Release sequence
 
