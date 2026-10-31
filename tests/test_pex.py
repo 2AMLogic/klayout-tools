@@ -30,7 +30,7 @@ from pathlib import Path
 import klayout.db as kdb
 import pytest
 
-from klayout_tools import sim
+from klayout_tools import output_lock, sim
 from klayout_tools.cli import main
 from klayout_tools.pex import (
     BODY_BIAS_BIASED,
@@ -7230,6 +7230,202 @@ def test_cli_pex_submit_only_emits_submitted_payload_exit_0(
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "submitted"
     assert payload["leg_count"] == 2
+
+
+def _cli_submit(tmp_path, resistor_layout, request, *extra):
+    return main(
+        [
+            "pex",
+            str(resistor_layout),
+            request,
+            "--deck",
+            "sky130",
+            "--backend",
+            "batch",
+            "--submit-only",
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+            *extra,
+        ]
+    )
+
+
+def test_cli_pex_envelope_out_writes_submitted_envelope(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    """Issue #4692: `--envelope-out` gets the envelope; `-o` the netlist."""
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    envelope = tmp_path / "r.json"
+    netlist = tmp_path / "n.spice"
+    code = _cli_submit(
+        tmp_path,
+        resistor_layout,
+        request,
+        "--envelope-out",
+        str(envelope),
+        "-o",
+        str(netlist),
+    )
+    assert code == 0
+    assert json.loads(envelope.read_text()) == json.loads(capsys.readouterr().out)
+    assert netlist.read_text().lstrip().startswith((".SUBCKT", "*", ".subckt"))
+
+
+def test_cli_pex_envelope_out_with_text_format_still_json(
+    tmp_path, resistor_layout, monkeypatch
+):
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    envelope = tmp_path / "r.json"
+    code = main(
+        [
+            "pex",
+            str(resistor_layout),
+            request,
+            "--deck",
+            "sky130",
+            "--backend",
+            "batch",
+            "--submit-only",
+            "--outdir",
+            str(tmp_path / "art"),
+            "--envelope-out",
+            str(envelope),
+        ]
+    )
+    assert code == 0
+    assert json.loads(envelope.read_text())["status"] == "submitted"
+
+
+def test_cli_pex_envelope_out_gets_error_envelope(tmp_path, resistor_layout, capsys):
+    envelope = tmp_path / "r.json"
+    code = main(
+        [
+            "pex",
+            str(resistor_layout),
+            str(tmp_path / "missing-request.json"),
+            "--deck",
+            "sky130",
+            "--format",
+            "json",
+            "--envelope-out",
+            str(envelope),
+        ]
+    )
+    assert code == 1
+    written = json.loads(envelope.read_text())
+    assert written == json.loads(capsys.readouterr().err)
+    assert written["error"]["command"] == "pex"
+
+
+def test_cli_pex_envelope_out_unwritable_path_is_an_error(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    code = _cli_submit(
+        tmp_path,
+        resistor_layout,
+        request,
+        "--envelope-out",
+        str(tmp_path / "no-such-dir" / "r.json"),
+    )
+    assert code == 1
+    assert "--envelope-out" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_cli_pex_outdir_locked_carries_structured_owner(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    import klayout_tools.cli.pex_cmd as pex_cmd
+
+    def _locked(*args, **kwargs):
+        raise output_lock.OutputDirLockedError(
+            str(tmp_path / "art"),
+            owner_pid=4242,
+            owner_acquired_at="2026-10-31T00:00:00+00:00",
+        )
+
+    monkeypatch.setattr(pex_cmd, "run_pex", _locked)
+    request = _async_inputs(tmp_path)
+    code = _cli_submit(tmp_path, resistor_layout, request)
+    assert code == 1
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error["code"] == "outdir_locked"
+    assert error["owner_pid"] == 4242
+    assert error["owner_acquired_at"] == "2026-10-31T00:00:00+00:00"
+    assert error["relation"] == "same"
+    assert error["locked_directory"] == str(tmp_path / "art")
+
+
+def test_cli_pex_bare_attach_matches_full_args_attach(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    """Issue #4692: `--attach MANIFEST` alone rebuilds the run from the
+    manifest, even from another working directory."""
+    calls: list = []
+    _fake_async_sim(monkeypatch, calls)
+    request = _async_inputs(tmp_path)
+    assert _cli_submit(tmp_path, resistor_layout, request) == 0
+    capsys.readouterr()
+    manifest = tmp_path / "art" / "pex-submit.json"
+    assert "request" in json.loads(manifest.read_text())
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    full = main(
+        [
+            "pex",
+            str(resistor_layout),
+            request,
+            "--deck",
+            "sky130",
+            "--backend",
+            "batch",
+            "--outdir",
+            str(tmp_path / "art"),
+            "--attach",
+            str(manifest),
+            "--format",
+            "json",
+        ]
+    )
+    full_out = json.loads(capsys.readouterr().out)
+    bare = main(["pex", "--attach", str(manifest), "--format", "json"])
+    bare_out = json.loads(capsys.readouterr().out)
+    assert bare == full
+    assert bare_out["delta"] == full_out["delta"]
+    assert bare_out["status"] == full_out["status"]
+
+
+def test_cli_pex_bare_attach_of_old_manifest_is_named_error(tmp_path, capsys):
+    manifest = tmp_path / "pex-submit.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "complete": True,
+                "extracted_netlist_sha256": "x",
+                "testbenches": [],
+                "legs": [],
+            }
+        )
+    )
+    code = main(["pex", "--attach", str(manifest), "--format", "json"])
+    assert code == 1
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error["code"] == "pex_manifest_no_request"
+    assert "layout" not in error["message"].split("--attach:")[0]
+
+
+def test_cli_pex_without_attach_still_requires_layout_and_deck(capsys):
+    code = main(["pex", "--format", "json"])
+    assert code == 2
+    assert "required" in json.loads(capsys.readouterr().err)["error"]["message"]
 
 
 def _write_wrapper_pair(tmp_path, *, included_model, extracted_model, subdir=""):

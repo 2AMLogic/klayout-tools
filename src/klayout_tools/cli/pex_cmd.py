@@ -27,11 +27,13 @@ docs/cli/sim.md's "Exit codes" section.)
 """
 
 import argparse
+import os
 import shlex
 import sys
 
+from .. import pex_async
 from ..env_provenance import render_path_field
-from ..output_lock import OutputLockError
+from ..output_lock import OutputDirLockedError, OutputLockError
 from ..pex import PexError, run_pex
 from ._parsing import (
     parse_deck_options,
@@ -44,15 +46,112 @@ from ._parsing import (
 # Issue #2686: the same one-line `label_layers:` text rendering `klt extract`
 # prints for its own echo, reused rather than copied.
 from .extract_cmd import _print_label_layers
-from .output import emit_error, emit_success
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
 
 EXIT_PASS = 0
 EXIT_ROW_FAILED = 3
 EXIT_ROW_ERRORED = 4
 
+#: Namespace fields a ``--submit-only`` run does not record in its manifest
+#: (issue #4692): the verb plumbing, the output format, and the async flags
+#: themselves -- a bare ``--attach`` supplies its own.
+_REQUEST_EXCLUDED = frozenset(
+    {"command", "func", "format", "submit_only", "attach_manifest", "envelope_out"}
+)
+#: Request fields holding filesystem paths, stored absolute so a bare
+#: ``--attach`` from another working directory resolves them identically.
+_REQUEST_PATH_FIELDS = ("layout", "output", "outdir", "pdk_root", "reference_netlist")
+
+
+def _submit_request(args: argparse.Namespace) -> dict:
+    """The invocation's request, as recorded in a ``--submit-only`` manifest
+    (issue #4692): every flag that shapes the run, paths made absolute."""
+    request = {k: v for k, v in vars(args).items() if k not in _REQUEST_EXCLUDED}
+    for key in _REQUEST_PATH_FIELDS:
+        if request.get(key):
+            request[key] = os.path.abspath(request[key])
+    request["testbenches"] = [os.path.abspath(t) for t in args.testbenches]
+    return request
+
+
+def _write_envelope(path: str | None, payload: dict) -> str | None:
+    """Write ``payload`` to ``--envelope-out`` (issue #4692); an error message
+    when that fails, ``None`` otherwise (or when the flag was not given)."""
+    if path is None:
+        return None
+    try:
+        write_json_file(payload, path)
+    except OSError as exc:
+        return f"cannot write --envelope-out '{path}': {exc}"
+    return None
+
+
+def _fail(
+    args: argparse.Namespace,
+    message: str,
+    *,
+    code: str | None = None,
+    details: dict | None = None,
+    exit_code: int | None = None,
+) -> int:
+    """``emit_error`` for ``klt pex``, mirroring the envelope to
+    ``--envelope-out`` too."""
+    error: dict = {"command": "pex", "message": message}
+    if code is not None:
+        error["code"] = code
+    for key, value in (details or {}).items():
+        error.setdefault(key, value)
+    # Best effort: the original failure is what the caller must see.
+    _write_envelope(
+        getattr(args, "envelope_out", None), {"schema_version": 1, "error": error}
+    )
+    kwargs = {} if exit_code is None else {"exit_code": exit_code}
+    return emit_error("pex", message, args.format, code=code, details=details, **kwargs)
+
+
+def _lock_details(exc: OutputLockError) -> dict | None:
+    """Structured owner of a refused output directory (issue #4692); ``None``
+    for lock errors that carry none. Unknown owner fields are ``null``."""
+    if not isinstance(exc, OutputDirLockedError):
+        return None
+    return {
+        "owner_pid": exc.owner_pid,
+        "owner_acquired_at": exc.owner_acquired_at,
+        "locked_directory": exc.locked_directory,
+        "relation": exc.relation,
+    }
+
+
+def _rehydrate_bare_attach(args: argparse.Namespace) -> None:
+    """``klt pex --attach MANIFEST`` with no layout, ``--deck`` or testbenches
+    (issue #4692): take the request the ``--submit-only`` run recorded."""
+    request = pex_async.load_request(args.attach_manifest)
+    for key, value in request.items():
+        if hasattr(args, key):
+            setattr(args, key, value)
+
 
 def run(args: argparse.Namespace) -> int:
     try:
+        if (
+            args.attach_manifest
+            and args.layout is None
+            and args.deck is None
+            and not args.testbenches
+        ):
+            _rehydrate_bare_attach(args)
+        missing = [
+            flag
+            for flag, value in (("layout", args.layout), ("--deck", args.deck))
+            if value is None
+        ]
+        if missing:
+            return _fail(
+                args,
+                f"{' and '.join(missing)} required (only a bare "
+                "`--attach MANIFEST` may omit them)",
+                exit_code=EXIT_USAGE_ERROR,
+            )
         # `--deck-option`/`--pins` (issue #1558): parsed with the same shared
         # helpers `klt extract` uses (`cli/_parsing.py`), bound to this
         # command's own `PexError` so a malformed entry is this command's
@@ -176,14 +275,19 @@ def run(args: argparse.Namespace) -> int:
             # `--submit-only` / `--attach` (issue #4619): async batch runs.
             submit_only=args.submit_only,
             attach=args.attach_manifest,
+            submit_request=_submit_request(args) if args.submit_only else None,
         )
     except PexError as exc:
         # Issue #2889: a classified error (today: `schematic_flatten_*`)
         # carries `error.code`; every other PexError has `code=None`, so
         # its envelope is byte-identical to before.
-        return emit_error("pex", str(exc), args.format, code=exc.code)
+        return _fail(args, str(exc), code=exc.code)
     except OutputLockError as exc:
-        return emit_error("pex", str(exc), args.format, code=exc.code)
+        return _fail(args, str(exc), code=exc.code, details=_lock_details(exc))
+
+    write_error = _write_envelope(args.envelope_out, report)
+    if write_error is not None:
+        return _fail(args, write_error)
 
     if report["status"] == "submitted":
         # Issue #4619: submitted, not run -- there is no verdict to grade.
