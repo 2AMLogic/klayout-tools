@@ -250,7 +250,7 @@ class AsyncLegs:
         return report
 
     def _write(self, *, complete: bool) -> None:
-        payload = {
+        payload: dict[str, Any] = {
             "schema_version": ASYNC_SCHEMA_VERSION,
             "complete": complete,
             "extracted_netlist_sha256": self._extracted_netlist_sha256,
