@@ -830,6 +830,19 @@ def _write_spef(
     parasitics_report, skipped_nets = _drop_floating_duplicate_nets(
         parasitics_report, port_name_set, net_instance_pins_map, name_counts
     )
+    # Issue #4705: a SPEF with no `*D_NET` block is a header-only file that
+    # OpenSTA's `read_spef` rejects with an unrelated-looking syntax error
+    # (STA-1670). Fail here, naming the counts, rather than write it.
+    if not parasitics_report["nets"]:
+        raise ExtractError(
+            f"--spef: no *D_NET blocks to write for '{design_name}' "
+            f"({len(name_counts)} net(s) extracted, "
+            f"{len(skipped_nets)} omitted"
+            + (f": {', '.join(sorted(skipped_nets)[:5])}" if skipped_nets else "")
+            + "); a header-only SPEF is rejected by OpenSTA read_spef "
+            "(STA-1670). Check that the layout's routed shapes use the "
+            "deck's layers (e.g. the PDK ships a LEF/DEF layer map)."
+        )
     renamed_ports = _renamed_ports(net_instance_pins, port_name_set)
 
     # One two-terminal coupling `*CAP` card per distinct coupled net pair
