@@ -6517,6 +6517,19 @@ def _add_economy_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     economy_parser.add_argument(
+        "--what-if",
+        default=None,
+        dest="what_if",
+        metavar="MOVES_JSON",
+        help=(
+            "what-if floorplan estimate (issue #4661): apply instance moves "
+            "and cell reshapes from MOVES_JSON to an in-memory copy and "
+            "report the same figures plus a 'what_if' block (overlaps, "
+            "broken contacts); writes nothing, runs no DRC, legality is "
+            "never checked"
+        ),
+    )
+    economy_parser.add_argument(
         "--attribute",
         action="store_true",
         help=(

@@ -130,7 +130,8 @@
       "description": "`klt economy` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.economy_cmd",
-        "klayout_tools.economy"
+        "klayout_tools.economy",
+        "klayout_tools.economy_whatif"
       ]
     },
     "env_provenance": {

@@ -720,6 +720,26 @@ def _area_eff_block(
     return {"checks": checks, "status": overall}
 
 
+def _what_if_block(
+    kdb: Any, layout: Any, top_cell: Any, what_if: str | None
+) -> dict[str, Any] | None:
+    """Apply the ``what_if`` moves spec (if any) to the in-memory layout and
+    return the report's ``what_if`` block, or ``None`` when not requested.
+
+    Edits land on the in-memory copy ``load_layout`` just read; nothing is
+    ever written back (issue #4661).
+    """
+    if what_if is None:
+        return None
+    # Imported lazily, matching load_layout()'s own lazy `klayout.db` import
+    # convention (`_layout.py`'s module docstring).
+    from .economy_whatif import apply_what_if, load_what_if_spec
+
+    return apply_what_if(
+        kdb, layout, top_cell, load_what_if_spec(what_if, EconomyError), EconomyError
+    )
+
+
 def economy_report(
     path: str,
     top: str | None = None,
@@ -732,6 +752,7 @@ def economy_report(
     area_eff_min_utilization: float | None = None,
     area_eff_max_empty_region_fraction: float | None = None,
     area_eff_require_bbox_tightness: bool = False,
+    what_if: str | None = None,
     attribute: bool = False,
 ) -> dict[str, Any]:
     """Compute the layout-economy report for one top cell of a GDSII/OASIS
@@ -759,6 +780,13 @@ def economy_report(
     entirely when none of them are given (same optional-block convention as
     ``budget``/``reference``).
 
+    ``what_if`` is the path to a ``moves.json`` (issue #4661; schema in
+    :mod:`klayout_tools.economy_whatif`): its instance translations and cell
+    reshapes are applied to the in-memory copy of the layout before
+    measuring, and the report gains an additive ``what_if`` block. It is an
+    area/overlap estimate only -- no file is written, no DRC runs, and the
+    block's ``legality`` is always ``"not_checked"``.
+
     ``attribute`` (issue #4660) adds an ``attribution`` block partitioning
     the top bbox into direct-child instance bboxes and gap components; see
     :func:`_attribution_block`. Omitted when false.
@@ -778,6 +806,8 @@ def economy_report(
 
     top_cell = resolve_top_cell(layout, top, EconomyError)
     dbu = layout.dbu
+
+    what_if_block = _what_if_block(kdb, layout, top_cell, what_if)
 
     bbox = top_cell.bbox()
     if bbox.empty():
@@ -880,6 +910,8 @@ def economy_report(
     if area_eff is not None:
         report["area_eff"] = area_eff
 
+    if what_if_block is not None:
+        report["what_if"] = what_if_block
     if attribute:
         report["attribution"] = _attribution_block(
             kdb, layout, top_cell, bbox, dbu, annotation_pairs

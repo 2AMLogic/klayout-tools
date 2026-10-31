@@ -22,6 +22,7 @@ def run(args: argparse.Namespace) -> int:
                 args.area_eff_max_empty_region_fraction
             ),
             area_eff_require_bbox_tightness=args.area_eff_require_bbox_tightness,
+            what_if=args.what_if,
             attribute=args.attribute,
         )
     except EconomyError as exc:
@@ -35,6 +36,30 @@ def _fmt_bbox(bbox: dict) -> str:
     return (
         f"({bbox['left']:g}, {bbox['bottom']:g}) - ({bbox['right']:g}, {bbox['top']:g})"
     )
+
+
+def _print_what_if(what_if: dict | None) -> None:
+    if what_if is None:
+        return
+    print(
+        f"what_if: {len(what_if['moves_applied'])} move(s), "
+        f"{len(what_if['reshaped_cells'])} reshape(s), "
+        f"{len(what_if['overlaps'])} overlap(s), "
+        f"{len(what_if['broken_contacts'])} broken contact(s)  "
+        f"[legality: {what_if['legality']}; estimate only]"
+    )
+    for ov in what_if["overlaps"]:
+        print(
+            f"  overlap: {ov['a']['cell']}#{ov['a']['index']} x "
+            f"{ov['b']['cell']}#{ov['b']['index']} "
+            f"area={ov['overlap_area_um2']:.3f} um2"
+        )
+    for bc in what_if["broken_contacts"]:
+        label = f" '{bc['text']}'" if bc["text"] else ""
+        print(
+            f"  broken: {bc['kind']}{label} on {bc['layer']}/{bc['datatype']} "
+            f"from {bc['instance']['cell']}#{bc['instance']['index']}"
+        )
 
 
 def _print_attribution(attribution: dict | None) -> None:
@@ -138,6 +163,7 @@ def _print_text(report: dict) -> None:
             c = checks["bbox_tightness"]
             print(f"  bbox_tightness: {c['status']} (actual={c['actual']:.4f})")
 
+    _print_what_if(report.get("what_if"))
     _print_attribution(report.get("attribution"))
 
     cells = report["cells"]
