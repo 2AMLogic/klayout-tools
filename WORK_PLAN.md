@@ -7,8 +7,6 @@ Current work from GitHub labels. Long-term direction lives in [ROADMAP.md](ROADM
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#4606**: chore(loom): resync installed Loom to v0.19.1236
-- **#4652**: feat: forge-derived canary manifest, drift check and PDK/status gallery filters
 - **#4679**: ci: move native macOS arm64 runner from macos-14 to macos-15
 
 ## Very Important
@@ -37,6 +35,7 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin
 - **#4128**: Trim oversized module docstrings in signoff, place_and_route, erc, size, equiv, pdk_models (2,746 lines of phase/issue narration)
 - **#4161**: klt sim batch: all jobs exit 87 within seconds on the current fleet image; no runner stderr surfaced
+- **#4191**: place-and-route: absolute paths in report, silent mount gap, late core_margin error, no pin plan
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s)
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported
@@ -47,9 +46,9 @@ Issues currently being built (`loom:building`).
 
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
-- **#4642**: site: present every public canary block on klayout-tools.org, not three (fill blocks/canaries.json from the forge)
-- **#4672**: Consolidate duplicated finite-number validators into one shared helper
 - **#4677**: CI: move macos-14 runner pins to macos-15 before the 2026-11-02 image retirement
+- **#4696**: klt pex --submit-only writes complete:true manifest with only the schematic leg when the extracted leg cannot be submitted
+- **#4698**: synthesize/signoff: submodule parameter override, attest PATH scrubbing, recorded freshness in release
 
 ## PRs Awaiting Review
 
@@ -57,14 +56,12 @@ PRs waiting on Judge (`loom:review-requested`).
 
 - **#4334**: feat: extract gf180mcu eFuse as a two-terminal device via ResistorDevice.anode_marker
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
-- **#4684**: refactor: share JSON number predicates via _jsonnum
+- **#4697**: fix: refuse pex --submit-only when a pre-flight mismatch skips the extracted leg
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#4606**: chore(loom): resync installed Loom to v0.19.1236
-- **#4652**: feat: forge-derived canary manifest, drift check and PDK/status gallery filters
 - **#4679**: ci: move native macOS arm64 runner from macos-14 to macos-15
 
 ## Proposed
@@ -97,18 +94,17 @@ Issues carrying `loom:curated`.
 - **#4128**: Trim oversized module docstrings in signoff, place_and_route, erc, size, equiv, pdk_models (2,746 lines of phase/issue narration) *(curated)*
 - **#4161**: klt sim batch: all jobs exit 87 within seconds on the current fleet image; no runner stderr surfaced *(curated)*
 - **#4191**: place-and-route: absolute paths in report, silent mount gap, late core_margin error, no pin plan *(curated)*
-- **#4276**: klt sta (verilog mode): netlist path in generated Tcl is repo-root-relative, so run fails unless cwd is repo root *(curated)*
 - **#4277**: Live-verify klt synthesize sv_frontend=sv2v against a real sv2v (follow-up to #4228) *(curated)*
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267) *(curated)*
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck *(curated)*
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s) *(curated)*
 - **#4410**: lvs gate-level-verilog + abstract-cell netlist: dangling-output instances still error after #4323 *(curated)*
 - **#4424**: klt lvs: custom-class cap_cmomi/resistor LVS regresses from match to mismatch between daf06a51afaf and 0.8.0 (sg13cmos5l) *(curated)*
-- **#4440**: Friction: klt's OpenROAD steps need Docker, which fleet workers can't use; no fleet executor for OpenROAD regeneration *(curated)*
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
 - **#4508**: ASAP7: trim protruding VIA_* M1 pad tips to clear M1.S.2-5 (follow-up to #4495) *(curated)*
-- **#4642**: site: present every public canary block on klayout-tools.org, not three (fill blocks/canaries.json from the forge) *(curated)*
 - **#4677**: CI: move macos-14 runner pins to macos-15 before the 2026-11-02 image retirement *(curated)*
+- **#4696**: klt pex --submit-only writes complete:true manifest with only the schematic leg when the extracted leg cannot be submitted *(curated)*
+- **#4698**: synthesize/signoff: submodule parameter override, attest PATH scrubbing, recorded freshness in release *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -121,6 +117,7 @@ Issues carrying `loom:curated`.
 - **#4065**: Split sim_batch.py (5232 lines, 117 commits / 44 merges in 5 weeks) along its existing section seams *(hermit)*
 - **#4126**: Simplify run_lvs: split the 2,047-line orchestrator in lvs.py into stage helpers *(hermit)*
 - **#4233**: Remove 8 passthrough _report_path wrappers over env_provenance.repo_relative_path *(hermit)*
+- **#4693**: Remove routing_pitch.py: library-only helper with no callers *(hermit)*
 
 ## Epics
 
@@ -130,14 +127,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 3 |
+| Operator merge-risk holds | 1 |
 | Very important | 1 |
 | Important | 1 |
-| Ready (`loom:issue`) | 13 |
+| Ready (`loom:issue`) | 14 |
 | In Progress (`loom:building`) | 5 |
 | PRs awaiting review | 3 |
-| Approved PRs awaiting merge | 3 |
-| Curated | 38 |
-| Architect / Hermit proposals | 9 |
+| Approved PRs awaiting merge | 1 |
+| Curated | 37 |
+| Architect / Hermit proposals | 10 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->

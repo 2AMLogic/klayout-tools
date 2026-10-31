@@ -4,6 +4,11 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-31
 
+- **PR #4695**: refactor: use shared is_number for remaining inline JSON-number checks
+- **Issue #4687** (closed): Finish _jsonnum consolidation: replace 15 inline number-not-bool checks with is_number
+- **PR #4694**: feat(pex): add --envelope-out, structured lock owner, bare --attach
+- **Issue #4692** (closed): klt pex: -o receives the netlist not the envelope; --attach locks --outdir and re-requires all inputs
+- **Issue #4440** (closed): Friction: klt's OpenROAD steps need Docker, which fleet workers can't use; no fleet executor for OpenROAD regeneration
 - **PR #4690**: data: ingest 75 public canary blocks into the gallery
 - **PR #4688**: feat(pex): write pex-submit.json per leg and reuse shard job ids on re-submit
 - **Issue #4686** (closed): klt pex --submit-only with sharding blocks during serial shard submission; --resume re-launches under new job ids
