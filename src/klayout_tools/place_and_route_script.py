@@ -11,6 +11,7 @@ which re-exports every name here so
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from ._openroad_engine import _timing_violation_report_lines
@@ -685,6 +686,30 @@ def _macro_blockage_lines(macros: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _layer_number(layer: str) -> int | None:
+    """Trailing integer of a metal layer name (``met3`` -> 3, ``Metal4`` -> 4),
+    or ``None`` when the name carries none."""
+    match = re.search(r"(\d+)$", layer)
+    return int(match.group(1)) if match else None
+
+
+def _lowest_strap_above(lower: str, strap_layers: list[str]) -> str | None:
+    """The lowest strap layer stacked above ``lower``, a macro P/G layer that
+    is not itself a strap layer (issue #4703): only the *upper* layer of
+    ``add_pdn_connect`` must carry a core strap. Layers are ordered by
+    trailing number; ``None`` when ``lower`` has no parseable number or no
+    strap lies above it."""
+    lower_n = _layer_number(lower)
+    if lower_n is None:
+        return None
+    candidates = [
+        (n, layer)
+        for layer in strap_layers
+        if (n := _layer_number(layer)) is not None and n > lower_n
+    ]
+    return min(candidates)[1] if candidates else None
+
+
 def _macro_pdn_grid_lines(
     macros: list[dict[str, Any]], power: dict[str, Any]
 ) -> list[str]:
@@ -710,8 +735,10 @@ def _macro_pdn_grid_lines(
     layer is the next strap layer above it in ``power.straps`` (which every
     real platform config lists bottom-to-top, the same assumption the core
     grid's own consecutive-pair ``add_pdn_connect`` loop above already
-    makes). When neither can be established the request is **rejected with a
-    named error**, never silently degraded: a halo a caller asked for and
+    makes); a P/G layer that is not itself a strap layer connects to the
+    lowest strap above it by trailing layer number (issue #4703). When
+    neither can be established the request is **rejected with a named
+    error**, never silently degraded: a halo a caller asked for and
     this function quietly skipped would be a wrong answer reported as a
     right one.
 
@@ -738,12 +765,18 @@ def _macro_pdn_grid_lines(
         connects: list[str] = []
         for lower in pg_layers:
             if lower not in strap_layers:
-                raise PlaceAndRouteError(
-                    f"request.macros[].halo for instance '{macro['instance']}' "
-                    "needs a request.power strap on the macro's own P/G layer "
-                    f"'{lower}' to connect to; request.power.straps declares "
-                    + ", ".join(strap_layers)
-                )
+                above = _lowest_strap_above(lower, strap_layers)
+                if above is None:
+                    raise PlaceAndRouteError(
+                        f"request.macros[].halo for instance '{macro['instance']}' "
+                        "needs a request.power strap *above* the macro's own P/G "
+                        f"layer '{lower}' to connect up to, but "
+                        "request.power.straps declares "
+                        + ", ".join(strap_layers)
+                        + " (layers are ordered by their trailing number)"
+                    )
+                connects.append(f"{lower} {above}")
+                continue
             index = strap_layers.index(lower)
             if index + 1 >= len(strap_layers):
                 raise PlaceAndRouteError(
