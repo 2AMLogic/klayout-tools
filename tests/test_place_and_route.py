@@ -4670,7 +4670,7 @@ def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(
     assert read_lef_idx < read_verilog_idx
 
     place_macro_line = (
-        "place_macro -macro_name u_analog -location {12.5 3.0} -orientation MX -exact"
+        "place_macro -macro_name {u_analog} -location {12.5 3.0} -orientation MX -exact"
     )
     assert place_macro_line in lines
     link_design_idx = next(
@@ -11712,6 +11712,48 @@ def test_stubbed_macro_halo_with_power_emits_a_macro_pdn_grid(tmp_path, monkeypa
         < lines.index(connect_line)
         < lines.index("pdngen")
     )
+
+
+def test_stubbed_bracketed_macro_instance_is_identical_in_place_and_pdn(
+    tmp_path, monkeypatch
+):
+    """Issue #4701: a bracketed instance (single backslash per bracket) is
+    brace-quoted in both `place_macro` and `define_pdn_grid -instances`, so
+    OpenROAD receives the identical string in both."""
+    instance = "top/blk/gen\\[0\\].inst"
+    _write_macro_lef_with_power_pins(tmp_path / "sram.lef", pg_layer="met1")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={"preset": "sky130hd", "power_net": "VPWR", "ground_net": "VGND"},
+        macros=[
+            {
+                "instance": instance,
+                "lef": "sram.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "halo": {"left": 2, "bottom": 1.84, "right": 2, "top": 2},
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    run_place_and_route(request_path)
+
+    lines = _script_lines(
+        os.path.join(
+            os.path.dirname(request_path),
+            ".klt",
+            "place-and-route",
+            "pnr_gcd_floorplan.tcl",
+        )
+    )
+    assert (
+        f"place_macro -macro_name {{{instance}}} -location {{10.0 20.0}} "
+        "-orientation R0 -exact"
+    ) in lines
+    assert any(f"-instances {{{instance}}} -halo" in ln for ln in lines)
 
 
 def test_stubbed_macro_halo_without_power_emits_no_macro_pdn_grid(

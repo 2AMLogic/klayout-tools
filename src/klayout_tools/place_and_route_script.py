@@ -962,9 +962,12 @@ def _stage_script_lines(
         # and after `link_design` (the instance must already exist in the
         # linked network). Never OpenROAD's automatic macro placer
         # (`rtl_macro_placer`): a socket-driven macro's location is a
-        # caller decision, not something to optimize away.
+        # caller decision, not something to optimize away. The instance is
+        # brace-quoted, like `define_pdn_grid -instances {...}`, so a
+        # bracketed name reaches OpenROAD with the same single backslash per
+        # bracket in both lines (issue #4701).
         lines += [
-            f"place_macro -macro_name {macro['instance']} "
+            f"place_macro -macro_name {{{macro['instance']}}} "
             f"-location {{{macro['x_um']} {macro['y_um']}}} "
             f"-orientation {macro['orientation']} -exact"
             for macro in macros

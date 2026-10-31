@@ -806,7 +806,7 @@ error otherwise.
 
 | `macros[]` field | Type | Description |
 | --- | --- | --- |
-| `instance` | string | The RTL/netlist instance name this macro placement applies to. Required, and must be unique across the array — a different thing from `cell` below, the *master* name, since a design may place several instances of one master. |
+| `instance` | string | The RTL/netlist instance name this macro placement applies to, written as OpenROAD names it. A name with escaped brackets (generate-loop instance) takes a **single** backslash per bracket, e.g. `top/blk/gen\[0\].inst`; the same brace-quoted string reaches both `place_macro` and the macro PDN grid. The old three-backslash workaround no longer works. Required, and must be unique across the array — a different thing from `cell` below, the *master* name, since a design may place several instances of one master. |
 | `lef` | string | Path to the macro's LEF abstract (e.g. `klt lef-abstract`'s own `output`). Required; must declare exactly one `MACRO`. Resolved relative to the request file's own directory. |
 | `x_um` / `y_um` | number | The macro's lower-left corner, in micrometres, in `place_macro -location`'s own coordinate space. Both required. |
 | `orientation` | string | One of `R0` (default) `R90` `R180` `R270` `MX` `MY` `MXR90` `MYR90` — OpenROAD's own orientation vocabulary. |
