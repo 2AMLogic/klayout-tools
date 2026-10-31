@@ -117,9 +117,9 @@ from . import _spice_number as spice_number
 from . import env_provenance
 from ._jsonnum import is_number
 from ._paths import (
-    _fold_spice_continuations,
     _load_request_json,
     _resolve_relative,
+    fold_spice_continuations,
     validate_request_shape,
 )
 from ._provenance import build_provenance, sha256_file
@@ -353,7 +353,7 @@ def _logical_lines(text: str) -> list[str]:
     very first non-blank/non-comment line of ``text`` starts with ``+``) is
     dropped, matching this function's pre-#1741 behaviour -- unlike
     ``pex.py``/``netlist_normalize.py``, which keep such an orphan
-    continuation as a literal line. :func:`_fold_spice_continuations` keeps
+    continuation as a literal line. :func:`fold_spice_continuations` keeps
     an orphan verbatim (``+`` prefix intact) rather than dropping it, so the
     post-pass below filters any still-``+``-prefixed entry it returns.
     """
@@ -364,7 +364,7 @@ def _logical_lines(text: str) -> list[str]:
             continue
         lines.append(line)
     return [
-        line for line in _fold_spice_continuations(lines) if not line.startswith("+")
+        line for line in fold_spice_continuations(lines) if not line.startswith("+")
     ]
 
 
