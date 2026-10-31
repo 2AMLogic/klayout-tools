@@ -21,6 +21,7 @@ import re
 import tempfile
 from typing import Any
 
+from . import env_provenance
 from ._provenance import build_provenance
 from .pdk import PdkNotFoundError, find_pdk
 from .sim import SimError, _resolve_models_lib
@@ -51,7 +52,6 @@ from .size import (
     _op_point_from_confirmed,
     _parse_corner,
     _parse_device,
-    _report_path,
     _require_positive_number,
     _run_sweep,
 )
@@ -364,7 +364,9 @@ def _run_topology_size(
         "engine": "ngspice",
         "engine_version": None,
         # Issue #1274 -- see `run_size`'s own `environment` block.
-        "models_lib": _report_path(models_lib, repo_root=repo_root),
+        "models_lib": env_provenance.repo_relative_path(
+            models_lib, repo_root=repo_root
+        ),
     }
 
     def _finish(payload: dict[str, Any]) -> dict[str, Any]:

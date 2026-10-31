@@ -35,7 +35,7 @@ SynthesizeError`, the script/artifact helpers
 :func:`~klayout_tools.synthesize._read_produced_abc_timing`,
 :func:`~klayout_tools.synthesize._read_stats`,
 :func:`~klayout_tools.synthesize._read_sta_timing`,
-:func:`~klayout_tools.synthesize._report_path`) and the
+:func:`~klayout_tools.env_provenance.repo_relative_path`) and the
 ``DEFAULT_ADDER_LABEL``/``DEFAULT_ADDER_MIN_WIDTH``/``_ADDER_MODES``
 constants -- each imported *inside* the handful of functions that use them,
 never at module scope, so this module never has a load-time dependency back
@@ -64,6 +64,7 @@ import json
 import os
 from typing import Any
 
+from . import env_provenance
 from ._verilog_params import chparam_lines, read_verilog_line
 from .arith_gen import (
     ARCHITECTURES as ADDER_ARCHITECTURES,
@@ -727,7 +728,6 @@ def _measure_candidate(
         _read_produced_netlist,
         _read_sta_timing,
         _read_stats,
-        _report_path,
         _run_yosys,
         _write_constr,
         _write_script,
@@ -797,8 +797,12 @@ def _measure_candidate(
     # Issue #1844: only the values reported back in `candidates[].measured`
     # are normalized -- `netlist_path`/`script_path` above stay the real
     # absolute paths used for this trial's own I/O throughout this function.
-    measurement["netlist_path"] = _report_path(netlist_path, repo_root=repo_root)
-    measurement["script_path"] = _report_path(script_path, repo_root=repo_root)
+    measurement["netlist_path"] = env_provenance.repo_relative_path(
+        netlist_path, repo_root=repo_root
+    )
+    measurement["script_path"] = env_provenance.repo_relative_path(
+        script_path, repo_root=repo_root
+    )
     return measurement
 
 

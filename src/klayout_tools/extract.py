@@ -375,7 +375,7 @@ if TYPE_CHECKING:
 #: caller with no machine-readable handle on the file it just asked `klt` to
 #: write -- a real loss for an output path, and no gain at all for
 #: `input_verified`, which reads only `file` (`signoff.py`'s
-#: `_INPUT_ARTIFACT_FIELDS`). See `_report_path` below.
+#: `_INPUT_ARTIFACT_FIELDS`). See `env_provenance.repo_relative_path`.
 SCHEMA_VERSION = 4
 
 # `run_extract()`'s own field name -> its declared METRICS2.1-style name in
@@ -1369,37 +1369,6 @@ def _label_layers_from_report(
         ):
             overrides[role] = (value[0], value[1])
     return overrides or None
-
-
-def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
-    """Normalise this module's own ``file`` response field (issue #2659) -- a
-    thin, module-local wrapper over
-    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
-    second normalizer, so `klt extract`'s reports, `klt drc`/`klt sim`/`klt
-    pex`'s and `klt env-provenance`'s own emitter agree on exactly one
-    ``{path, scope}`` shape.
-
-    Applied to the top-level ``file`` only -- the input layout
-    ``provenance.input.content_hash`` covers, and so the one `klt signoff`'s
-    ``input_verified`` gate re-hashes for an `extract` citation
-    (``signoff.py``'s ``_INPUT_ARTIFACT_FIELDS``). ``netlist_path``,
-    ``spef_path`` and ``abstracted_cells[].lef_path`` are *output* artifacts
-    and deliberately stay plain strings -- see ``SCHEMA_VERSION`` above and
-    ``docs/json-contract.md``'s "Path fields: envelope vs. plain string".
-
-    The reader counterpart is
-    :func:`~klayout_tools._report_verify.resolve_committed_path`.
-    """
-    return env_provenance.repo_relative_path(path, repo_root=repo_root)
-
-
-def _report_repo_root(path: str) -> str | None:
-    """The repo root this run's own ``file`` field is normalised against --
-    resolved from the layout's own location, the same "walk up from the
-    input" default :func:`~klayout_tools.env_provenance.find_repo_root` uses
-    for its own caller (and the same anchor `klt pex` picks for its own
-    ``layout``)."""
-    return env_provenance.find_repo_root(os.path.dirname(os.path.abspath(path)))
 
 
 def _spef_warnings(
@@ -3980,10 +3949,10 @@ def run_extract(
     # layout's own location, the same "walk up from the input" anchor
     # `klt pex` picks for its own `layout`. `netlist_path` below is an
     # *output* path and stays a plain string (see `SCHEMA_VERSION`).
-    repo_root = _report_repo_root(path)
+    repo_root = env_provenance.repo_root_for(path)
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "file": _report_path(path, repo_root=repo_root),
+        "file": env_provenance.repo_relative_path(path, repo_root=repo_root),
         "deck": deck_name,
         "top": top_cell_name,
         "dbu_um": dbu_um,

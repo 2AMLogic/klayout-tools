@@ -252,7 +252,7 @@ __all__ = [
 #: evidence record wraps this response unmodified
 #: (`docs/design/sim-evidence-discipline-spike.md`), so an absolute path
 #: here used to leak the author's home directory/worktree layout into every
-#: such record. See `_report_path` below.
+#: such record. See `env_provenance.repo_relative_path`.
 SCHEMA_VERSION = 2
 
 #: A `.include`/`.inc` directive line, ngspice's two spellings, either
@@ -570,21 +570,6 @@ def _resistance_graph_echo(
             }
         )
     return {"r_cut_ohm": r_cut_ohm, "nets": nets}
-
-
-def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
-    """Normalise one input-path field for this module's own JSON response
-    (issue #1261) -- a thin, module-local wrapper over
-    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
-    second normalizer, so `klt pex`'s reports and `klt env-provenance`'s own
-    emitter agree on exactly one `{path, scope}` shape.
-
-    Deliberately **not** applied to the nested `pin_count_mismatch`/
-    `flat_dut_mismatch` diagnostic blocks' own `netlist` fields -- those are
-    out of this issue's confirmed scope (tracked separately if it turns out
-    to matter) and stay raw strings, unchanged.
-    """
-    return env_provenance.repo_relative_path(path or None, repo_root=repo_root)
 
 
 def _content_id(path: str | None) -> str | None:
@@ -2209,9 +2194,9 @@ def _resolve_reference_netlist_path(
 ) -> str:
     """The one ``reference_netlist`` for the run (issue #3739): ``""`` for
     ``--extract-only`` (no schematic side; every consumer of the path is
-    skipped and :func:`_report_path` / :func:`_content_id` read it as
-    ``null``), the caller's own ``--reference-netlist`` in
-    ``--measure-command`` mode, else the DUT."""
+    skipped and ``env_provenance.repo_relative_path`` /
+    :func:`_content_id` read it as ``null``), the caller's own
+    ``--reference-netlist`` in ``--measure-command`` mode, else the DUT."""
     if extract_only:
         return ""
     if measured_reference_netlist is not None:
@@ -2370,7 +2355,9 @@ def _measure_both_sides(
         )
         side_reports[side] = side_report
         sides[side.replace("-", "_")] = {
-            "netlist": _report_path(side_netlist, repo_root=repo_root),
+            "netlist": env_provenance.repo_relative_path(
+                side_netlist or None, repo_root=repo_root
+            ),
             "exit_status": exit_status,
             "corner_count": side_report["corner_count"],
             "measurement_names": side_report["measurement_names"],
@@ -2562,11 +2549,17 @@ def _testbench_inputs(
     keys as a full one. Digests are present even when a path is redacted as
     ``scope: external``."""
     return {
-        "request": _report_path(testbench_path, repo_root=repo_root),
+        "request": env_provenance.repo_relative_path(
+            testbench_path or None, repo_root=repo_root
+        ),
         "request_sha256": identity["request_sha256"],
-        "netlist": _report_path(identity["netlist"], repo_root=repo_root),
+        "netlist": env_provenance.repo_relative_path(
+            identity["netlist"] or None, repo_root=repo_root
+        ),
         "netlist_sha256": identity["netlist_sha256"],
-        "schematic_netlist": _report_path(dut_path, repo_root=repo_root),
+        "schematic_netlist": env_provenance.repo_relative_path(
+            dut_path or None, repo_root=repo_root
+        ),
         "schematic_netlist_sha256": identity["schematic_netlist_sha256"],
     }
 
@@ -2680,7 +2673,9 @@ def _flatten_schematic_dut(
             )
         )
     return flat_path, {
-        "netlist": _report_path(flat_path, repo_root=repo_root),
+        "netlist": env_provenance.repo_relative_path(
+            flat_path or None, repo_root=repo_root
+        ),
         "netlist_sha256": _content_id(flat_path),
         "subckts": result.roots,
         "inlined_instances": result.inlined_instances,
@@ -2852,8 +2847,8 @@ def _device_only_result_fields(
     if device_only_netlist_path is None:
         return {}
     return {
-        "device_only_netlist": _report_path(
-            device_only_netlist_path, repo_root=repo_root
+        "device_only_netlist": env_provenance.repo_relative_path(
+            device_only_netlist_path or None, repo_root=repo_root
         ),
         "device_only_netlist_sha256": _content_id(device_only_netlist_path),
         **(device_only_parity or {}),
@@ -3265,8 +3260,8 @@ def run_pex(
     # `work_dir` is even computed (so still unambiguously relative to the
     # caller's own invocation cwd), makes the `.include` line resolve
     # correctly regardless of `-o`/`--outdir`'s own relative/absolute shape.
-    # `_report_path` below (issue #1261) still renders this run's own
-    # `netlist`/`reference_netlist` JSON fields as repo-relative
+    # `env_provenance.repo_relative_path` (issue #1261) still renders this run's
+    # own `netlist`/`reference_netlist` JSON fields as repo-relative
     # `{path, scope}` -- an absolute `extracted_netlist_path` does not leak
     # into this module's user-facing report.
     extracted_netlist_path = os.path.abspath(extract_report["netlist_path"])
@@ -3791,9 +3786,15 @@ def run_pex(
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
-        "layout": _report_path(layout_path, repo_root=repo_root),
-        "netlist": _report_path(extracted_netlist_path, repo_root=repo_root),
-        "reference_netlist": _report_path(reference_netlist_path, repo_root=repo_root),
+        "layout": env_provenance.repo_relative_path(
+            layout_path or None, repo_root=repo_root
+        ),
+        "netlist": env_provenance.repo_relative_path(
+            extracted_netlist_path or None, repo_root=repo_root
+        ),
+        "reference_netlist": env_provenance.repo_relative_path(
+            reference_netlist_path or None, repo_root=repo_root
+        ),
         # Additive field (issue #2875): content identity of the schematic
         # DUT / `--reference-netlist` the schematic leg used.
         "reference_netlist_sha256": reference_netlist_sha256,

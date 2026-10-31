@@ -231,7 +231,8 @@ assert is_registered(_VIOLATION_COUNT_METRIC_NAME)
 #: filesystem: ``klt signoff``'s ``input_verified`` freshness gate could
 #: re-verify such a citation only on that host, and reported drift from
 #: every other checkout. The same normalization `klt sim`/`klt pex` adopted
-#: for their own input-path fields in issue #1261. See `_report_path` below.
+#: for their own input-path fields in issue #1261.
+#: See `env_provenance.repo_relative_path`.
 SCHEMA_VERSION = 3
 
 
@@ -917,31 +918,6 @@ def _curated_nothing_checked_reasons(
     if rules_checked:
         return []
     return [REASON_DECK_HAS_NO_RULES if not deck else REASON_ALL_RULES_SKIPPED]
-
-
-def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
-    """Normalise one input-path field for this module's own JSON response
-    (issue #2659) -- a thin, module-local wrapper over
-    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
-    second normalizer, so `klt drc`'s reports, `klt sim`/`klt pex`'s (issue
-    #1261) and `klt env-provenance`'s own emitter agree on exactly one
-    ``{path, scope}`` shape.
-
-    The reader counterpart is
-    :func:`~klayout_tools._report_verify.resolve_committed_path`, which both
-    ``--check`` modes here and ``klt signoff``'s ``input_verified`` gate use
-    to turn the emitted entry back into a file on *their* checkout.
-    """
-    return env_provenance.repo_relative_path(path, repo_root=repo_root)
-
-
-def _report_repo_root(path: str) -> str | None:
-    """The one repo root every input-path field a run over ``path`` echoes is
-    normalised against -- resolved once from the layout's own location, the
-    same "walk up from the input" default
-    :func:`~klayout_tools.env_provenance.find_repo_root` uses for its own
-    caller (and the same anchor `klt pex` picks for its own ``layout``)."""
-    return env_provenance.find_repo_root(os.path.dirname(os.path.abspath(path)))
 
 
 #: The curated engine's ``coverage.skipped[].reason`` for a deck rule the
@@ -2202,8 +2178,10 @@ def _assemble_report(
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         # Issue #2659: the committable `{path, scope}` shape, never the
-        # producing host's absolute path -- see `_report_path`.
-        "file": _report_path(path, repo_root=_report_repo_root(path)),
+        # producing host's absolute path -- see `env_provenance.repo_relative_path`.
+        "file": env_provenance.repo_relative_path(
+            path, repo_root=env_provenance.repo_root_for(path)
+        ),
         "deck": setup.deck_name,
         "dbu_um": setup.layout.dbu,
         "status": rollup_status(rollup, success="clean", failure="violations"),
