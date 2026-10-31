@@ -406,7 +406,7 @@ site/
   index.html            # Vite app-shell entry (dev CSR fallback + prerender template)
   package.json          # React/Vite/Tailwind/shadcn dependencies (isolated from repo root)
   package-lock.json     # pinned install for `npm ci` (CI, deploy-site.sh)
-  .gitignore            # site-local ignores: dist/, node_modules/, staged public/blocks/ + public/em/
+  .gitignore            # site-local ignores: dist/, node_modules/, staged public/blocks/
   vite.config.ts        # Vite config: React + Tailwind plugins, dev-time SSR middleware
   components.json       # shadcn/ui CLI configuration
   tsconfig.json / tsconfig.app.json / tsconfig.node.json
@@ -415,8 +415,6 @@ site/
     copy-renders.mjs    # prebuild: stages blocks/*/output/... into public/blocks/
     stage-models.mjs    # prebuild: stages checksummed sky130 SPICE model decks (issue #149)
     stage-models.test.mjs  # tests for the model-deck staging script
-    stage-em-data.mjs    # prebuild: stages geode-fem em-export JSON into public/em/ (Epic #840)
-    stage-em-data.test.mjs
     sky130-models.NOTICE.txt  # Apache-2.0 attribution staged alongside model decks
     playground-perf.mjs  # perf harness: reproduces the spike's engine timing (issue #150)
     gen-gds-layer-styles.mjs  # dev: regenerates src/lib/gds/layerStyles.generated.ts from PDK .lyp files
@@ -434,14 +432,6 @@ site/
       Footer.tsx           # site footer — build SHA, copyright, scope link
       LayoutCard.tsx        # one gallery card per block
       LayoutCard.test.tsx
-      em/                   # "Solver Validation" E&M results strip (Epic #840)
-        EmGallerySection.tsx  # section shell listing the per-fixture entries below
-        PatchAntennaGalleryEntry.tsx / PatchAntennaResult.tsx
-        SpiralInductorGalleryEntry.tsx / SpiralInductorResult.tsx
-        InterconnectCouplingGalleryEntry.tsx / InterconnectCouplingResult.tsx
-        ProvenancePanel.tsx   # solver/mesh provenance shown under each result
-        emMath.ts             # pure helpers (S-parameters, resonance) + tests
-        types.ts / index.ts
       layout/               # embedded GDS viewer overlay (#943/#1284)
         GdsViewer.tsx         # full-screen overlay chrome; lazily loads the renderer
         GdsViewer.test.tsx
@@ -473,8 +463,6 @@ site/
       types.ts             # Layout type (schema v1, mirrors klt layout-metrics)
       loadLayouts.ts        # build-time layout data loader
       loadLayouts.test.ts
-      loadEmExport.ts       # build-time em-export (field data) loader for detail pages
-      loadEmExport.test.ts
       buildInfo.ts          # build-time git SHA lookup for the footer
       buildInfo.test.ts
     lib/
