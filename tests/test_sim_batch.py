@@ -6220,6 +6220,35 @@ def test_dry_run_check_reports_the_published_runner_whatever_the_status(
     assert out["client_klt_version"] == _PRELAUNCH_CLIENT
 
 
+def test_dry_run_check_refuses_a_mismatch_under_enforce_without_a_report(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.6.0")])
+    out: dict = {}
+    with pytest.raises(sim.SimError) as raised:
+        sb.dry_run_runner_check(
+            _dry_run_request(tmp_path), corner_count=1, timeout_s=30.0, runner_out=out
+        )
+    assert raised.value.code == sb.BATCH_RUNNER_MISMATCH_CODE
+    assert "0.6.0" in str(raised.value)
+    assert _PRELAUNCH_CLIENT in str(raised.value)
+    assert out == {}
+
+
+def test_dry_run_check_reports_a_mismatch_under_warn(tmp_path, monkeypatch, capsys):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.6.0")])
+    request = _dry_run_request(tmp_path)
+    request["batch"]["runner_version_check"] = "warn"
+    out: dict = {}
+    sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0, runner_out=out)
+    assert out["status"] == "mismatch"
+    assert out["client_klt_version"] == _PRELAUNCH_CLIENT
+    assert out["images"][0]["klt_version"] == "0.6.0"
+    assert "warning" in capsys.readouterr().err
+
+
 def test_dry_run_check_warn_mode_returns_the_diagnostic(tmp_path, monkeypatch):
     _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
     _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])

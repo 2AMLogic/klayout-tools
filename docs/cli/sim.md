@@ -1886,9 +1886,14 @@ the packaged `data/` copy. See
   request the published images cannot run is refused (or, under `warn`,
   reported in `diagnostics[]`) without a submit. The report also carries
   `published_runner` (`status`: `match`/`mismatch`/`unknown`,
-  `client_klt_version`, and the candidate `images` with their `klt_version`),
-  whatever the status, so the runner `klt` the fleet accepts is readable
-  without a submit ([#4675](https://github.com/2AMLogic/klayout-tools/issues/4675)). A host with no resolvable
+  `client_klt_version`, and the candidate `images` with their `klt_version`)
+  for `match`, `unknown` and, under `runner_version_check: "warn"`,
+  `mismatch`, so the runner `klt` the fleet accepts is readable
+  without a submit ([#4675](https://github.com/2AMLogic/klayout-tools/issues/4675)).
+  A `mismatch` under the default `enforce` is refused as
+  `batch_runner_version_mismatch` instead, with no `published_runner`; the
+  client and published runner versions are in the error message
+  ([#4680](https://github.com/2AMLogic/klayout-tools/issues/4680)). A host with no resolvable
   batch configuration (no bucket or provision script) skips the check and
   dry-runs as before. `options.initial_conditions` has no
   registry row: its first-supported runner release is not recorded, so a
