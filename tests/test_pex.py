@@ -7012,6 +7012,25 @@ def test_run_pex_submit_only_refuses_static_preflight_mismatch(
     assert not (outdir / "pex-submit.json").exists()
 
 
+@pytest.mark.parametrize(
+    "code", ["flat_dut_mismatch", "pin_count_mismatch", "pin_order_mismatch"]
+)
+def test_refuse_submit_on_preflight_mismatch_names_each_code(code):
+    """Issue #4696: every static pre-flight code, pin order included, refuses."""
+    from klayout_tools.pex import _refuse_submit_on_preflight_mismatch
+
+    fired = {
+        "flat_dut_mismatch": None,
+        "pin_count_mismatch": None,
+        "pin_order_mismatch": None,
+    }
+    fired[code] = {"detail": "boom"}
+    with pytest.raises(PexError) as err:
+        _refuse_submit_on_preflight_mismatch(submitting=True, **fired)
+    assert err.value.code == code
+    _refuse_submit_on_preflight_mismatch(submitting=False, **fired)
+
+
 def test_async_legs_finish_submit_refuses_missing_leg(tmp_path):
     """Issue #4696: `complete: true` is never written with a leg missing."""
     from klayout_tools.pex_async import AsyncLegs
