@@ -284,7 +284,7 @@ if TYPE_CHECKING:
 #: citation only there and reported drift from every other checkout.
 #: `reference` is deliberately *not* part of this bump and stays the verbatim
 #: echo: it is pinned by its own `environment.reference_sha256` digest and is
-#: not the artifact `provenance.input` hashes. See `_report_path` below.
+#: not the artifact `provenance.input` hashes. See `env_provenance.repo_relative_path`.
 SCHEMA_VERSION = 2
 
 #: ``klayout`` (in-process ``NetlistComparer``) is the primary engine;
@@ -892,47 +892,6 @@ def _merge_deck_flags(
         request["deck_vars"] = dict(deck_vars)
 
 
-def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
-    """Normalise one input-path field for this module's own JSON response
-    (issue #2659) -- a thin, module-local wrapper over
-    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
-    second normalizer, so `klt lvs`'s reports, `klt drc`/`klt extract`/`klt
-    sim`/`klt pex`'s and `klt env-provenance`'s own emitter agree on exactly
-    one ``{path, scope}`` shape.
-
-    Applied to the ``layout`` field only: it is the artifact
-    ``provenance.input.content_hash`` pins and therefore the one `klt
-    signoff`'s ``input_verified`` gate re-hashes for an `lvs` citation
-    (``signoff.py``'s ``_INPUT_ARTIFACT_FIELDS``). ``reference`` stays the
-    verbatim request echo -- it is pinned by its own
-    ``environment.reference_sha256``.
-
-    Pass the *resolved* layout path (``layout_hash_source``, i.e. the file
-    actually hashed), never the request's own echo: a bare relative string
-    would be resolved against this process's cwd rather than the request
-    file's own directory, which is not what the request meant.
-    """
-    return env_provenance.repo_relative_path(path, repo_root=repo_root)
-
-
-def _report_repo_root(path: str | None) -> str | None:
-    """The repo root this run's own ``layout`` field is normalised against --
-    resolved from the **layout's** own location, not the request document's.
-
-    The field describes the layout, so its ``scope`` has to answer "is the
-    layout inside a repo", and the two are not the same question: a request
-    document may name a layout anywhere, and the inline/stdin request forms
-    have no document directory at all (``request_dir`` is this process's cwd
-    there -- see :func:`load_request_arg`), which would make the field's
-    scope depend on where `klt` happened to be invoked from. Anchoring on the
-    layout itself is also the same "walk up from the input" choice `klt
-    drc`/`klt extract`/`klt pex` make for their own input-path fields, so the
-    four verbs agree on what ``scope: "repo"`` means."""
-    if path is None:
-        return None
-    return env_provenance.find_repo_root(os.path.dirname(os.path.abspath(path)))
-
-
 def run_lvs(
     request: str,
     *,
@@ -974,8 +933,9 @@ def run_lvs(
     #2659, ``schema_version`` ``2``), built from the *resolved* layout path
     this run actually hashed into ``provenance.input.content_hash`` --
     ``scope: "repo"`` with a path relative to the repo the **layout** sits
-    in (:func:`_report_repo_root`), ``{"path": null, "scope": "external"}``
-    when it sits in none. It is therefore no longer the request's own verbatim
+    in (:func:`~klayout_tools.env_provenance.repo_root_for`),
+    ``{"path": null, "scope": "external"}`` when it sits in none. It is
+    therefore no longer the request's own verbatim
     ``layout.file``/``layout.netlist`` echo, which was anchored to whatever
     directory the producing run used and so could be re-verified only
     there: a committed `klt lvs` envelope is cited verbatim in `klt signoff`
@@ -1384,7 +1344,7 @@ def run_lvs(
         # Issue #2659: the request's own verbatim `layout.file`/
         # `layout.netlist` echo is no longer what the response reports --
         # `layout` is now built from `layout_hash_source` (the resolved
-        # path) via `_report_path`, so the field is portable across
+        # path) via `env_provenance.repo_relative_path`, so the field is portable across
         # checkouts. `_resolve_layout` still returns the echo for callers
         # that want it.
         _layout_echo,
@@ -2857,10 +2817,11 @@ def run_lvs(
         # Issue #2659: the committable `{path, scope}` shape, built from the
         # *resolved* layout path (`layout_hash_source` -- the file
         # `provenance.input.content_hash` below actually hashes), never the
-        # request's own cwd-dependent echo. See `_report_path`. `reference`
-        # stays the verbatim echo, pinned by `environment.reference_sha256`.
-        "layout": _report_path(
-            layout_hash_source, repo_root=_report_repo_root(layout_hash_source)
+        # request's own cwd-dependent echo. See `env_provenance.repo_relative_path`.
+        # `reference` stays the verbatim echo, pinned by `environment.reference_sha256`.
+        "layout": env_provenance.repo_relative_path(
+            layout_hash_source,
+            repo_root=env_provenance.repo_root_for(layout_hash_source),
         ),
         # Issue #2686: the applied `layout.label_layers` override (which GDS
         # purpose inline extraction read net/pin names from, per role) --

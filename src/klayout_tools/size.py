@@ -245,20 +245,6 @@ def load_request(request_path: str) -> dict[str, Any]:
     return request
 
 
-def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
-    """Normalise one resolved input path for this module's own JSON response
-    (issue #1274) -- a thin, module-local wrapper over
-    :func:`~klayout_tools.env_provenance.repo_relative_path`, matching
-    ``sim.py``'s helper of the same name so ``klt size``, ``klt sim``,
-    ``klt pex`` and ``klt env-provenance`` all agree on exactly one
-    ``{path, scope}`` shape. Pass an already-resolved absolute path (e.g.
-    ``_resolve_models_lib``'s answer); a bare relative string would be
-    resolved against the current process's cwd, which is not necessarily
-    what a caller meant.
-    """
-    return env_provenance.repo_relative_path(path, repo_root=repo_root)
-
-
 def _require_positive_number(value: Any, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SizeError(f"{field} must be a number")
@@ -881,7 +867,9 @@ def _run_single_device_size(
         # a PDK model library normally lives outside the repo (under the
         # user's home directory) and would leak that layout into every
         # committed report. `provenance.deck` still pins which library ran.
-        "models_lib": _report_path(models_lib, repo_root=repo_root),
+        "models_lib": env_provenance.repo_relative_path(
+            models_lib, repo_root=repo_root
+        ),
     }
 
     if len(valid_points) < 2:
@@ -1593,7 +1581,9 @@ def _run_worst_case_margin(
         "engine": "ngspice",
         "engine_version": engine_version,
         # Issue #1274 -- see `run_size`'s own `environment` block.
-        "models_lib": _report_path(models_lib, repo_root=repo_root),
+        "models_lib": env_provenance.repo_relative_path(
+            models_lib, repo_root=repo_root
+        ),
     }
 
     if not corner_curves:

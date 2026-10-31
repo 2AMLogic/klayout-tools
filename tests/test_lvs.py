@@ -23116,7 +23116,7 @@ def test_run_lvs_layout_scope_follows_the_layout_not_the_request(
 ):
     """`layout`'s scope answers "is the *layout* inside a repo", so it is
     anchored on the layout's own location rather than the request document's
-    (`_report_repo_root`). The two are genuinely different questions -- and
+    (`env_provenance.repo_root_for`). The two are genuinely different questions -- and
     the inline/stdin request forms have no document directory at all -- so
     anchoring on the request would make the field depend on where `klt` was
     invoked from. This is also the anchor `klt drc`/`klt extract`/`klt pex`

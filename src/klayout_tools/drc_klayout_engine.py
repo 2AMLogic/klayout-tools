@@ -21,6 +21,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from typing import Any
 
+from . import env_provenance
 from ._layout import load_layout, select_top_cells
 from ._provenance import build_provenance, sha256_file
 from .coverage import (
@@ -36,8 +37,6 @@ from .drc import (
     CODE_NEGATIVE_CONTROL_FAILED,
     SCHEMA_VERSION,
     DrcError,
-    _report_path,
-    _report_repo_root,
 )
 from .pdk import PdkNotFoundError, find_pdk_for_deck
 
@@ -1757,8 +1756,10 @@ def run_drc_klayout_engine(
     return {
         "schema_version": SCHEMA_VERSION,
         # Issue #2659: same `{path, scope}` normalization the curated engine's
-        # own response builder applies -- see `drc._report_path`.
-        "file": _report_path(path, repo_root=_report_repo_root(path)),
+        # own response builder applies -- see `env_provenance.repo_relative_path`.
+        "file": env_provenance.repo_relative_path(
+            path, repo_root=env_provenance.repo_root_for(path)
+        ),
         "deck": deck_file,
         "engine": "klayout",
         # Additive, and present *only* when --allow-deck-errors actually

@@ -308,7 +308,7 @@ from .synthesize_memory import collect_memory_evidence
 #: sim` (issue #1261) -- a committed evidence record wraps this response
 #: unmodified (`docs/design/sim-evidence-discipline-spike.md`), so an
 #: absolute path here used to leak the author's home directory/worktree
-#: layout into every such record. See `_report_path` below.
+#: layout into every such record. See `env_provenance.repo_relative_path`.
 #: `equivalence.artifacts.{script_path,netlist_path}` is `klt equiv`'s own
 #: response shape (echoed through unmodified) and is deliberately **not**
 #: normalized here -- doing so would be a `klt equiv` contract change,
@@ -788,23 +788,6 @@ class SynthesizeError(Exception):
     with ``structural.has_critical: true`` and exit code ``3`` -- never this
     exception. See ``docs/cli/synthesize.md``'s "Exit codes" section.
     """
-
-
-def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
-    """Normalise one output-path field for this module's own JSON response
-    (issue #1844) -- a thin, module-local wrapper over
-    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
-    second normalizer, so `klt synthesize`'s reports and `klt
-    env-provenance`'s own emitter agree on exactly one `{path, scope}`
-    shape, matching the precedent `klt pex`/`klt sim` set for issue #1261.
-
-    Deliberately applied only at the point a path is inserted into the
-    response dict -- every internal caller (`_run_yosys`, `_read_sta_timing`,
-    the equivalence gate, `_run_timing_restructuring`, `_compute_baseline`,
-    arithmetic candidate measurement) keeps using the real absolute path
-    variable for actual file I/O; only the reported *value* changes.
-    """
-    return env_provenance.repo_relative_path(path, repo_root=repo_root)
 
 
 def _script_path_text(path: str, *, repo_root: str | None) -> str:
@@ -1559,7 +1542,9 @@ def run_synthesize(
             {
                 **entry,
                 "blackbox_source": macro_input["source"],
-                "blackbox_path": _report_path(macro_input["path"], repo_root=repo_root),
+                "blackbox_path": env_provenance.repo_relative_path(
+                    macro_input["path"], repo_root=repo_root
+                ),
             }
             for entry, macro_input in zip(
                 macro_spec.macros_response(
@@ -1570,7 +1555,9 @@ def run_synthesize(
                     # evidence, and an absolute path in one leaks the
                     # author's home directory. `macros[]`'s paths are no
                     # exception; `find_absolute_path_fields` enforces it.
-                    normalize_path=lambda path: _report_path(path, repo_root=repo_root),
+                    normalize_path=lambda path: env_provenance.repo_relative_path(
+                        path, repo_root=repo_root
+                    ),
                 ),
                 macro_inputs,
                 strict=True,
@@ -1625,20 +1612,26 @@ def run_synthesize(
         # `schema_version` bump (docs/json-contract.md).
         "memory_mapping": memory_mapping,
         "blackbox_modules": blackbox_modules,
-        "netlist_path": _report_path(netlist_path, repo_root=repo_root),
+        "netlist_path": env_provenance.repo_relative_path(
+            netlist_path, repo_root=repo_root
+        ),
         # Issue #2452: SHA-256 of the exact bytes of the file `netlist_path`
         # refers to, taken from the internal absolute path (never the
         # redacted `{path, scope}` object) after signed-qualifier stripping.
         # Additive field; no `schema_version` bump.
         "netlist_sha256": sha256_file(netlist_path),
-        "script_path": _report_path(script_path, repo_root=repo_root),
+        "script_path": env_provenance.repo_relative_path(
+            script_path, repo_root=repo_root
+        ),
         # Issue #1870: the script Yosys was actually handed. Equal to
         # `script_path` whenever no `$PDK_ROOT` token was written (a liberty
         # outside the resolved install root), and the rehydrated
         # `synth_<top>.run.ys` sibling otherwise -- so "what ran" is always
         # nameable, and never has to be inferred from a filename convention.
         # Additive field, no `schema_version` bump (docs/json-contract.md).
-        "run_script_path": _report_path(executed_script_path, repo_root=repo_root),
+        "run_script_path": env_provenance.repo_relative_path(
+            executed_script_path, repo_root=repo_root
+        ),
         "provenance": provenance,
         "equivalence": equivalence,
         "restructuring": restructuring,
@@ -2012,7 +2005,7 @@ def _run_timing_restructuring(
     # the value handed back to `run_synthesize`'s response is normalized,
     # and only when it is not already `None` (no resize applied).
     if report["restructured_netlist_path"] is not None:
-        report["restructured_netlist_path"] = _report_path(
+        report["restructured_netlist_path"] = env_provenance.repo_relative_path(
             report["restructured_netlist_path"], repo_root=repo_root
         )
 
@@ -3883,7 +3876,9 @@ def _attach_latch_map_report(
     """Add the ``latch_map`` block to ``response`` when a map was requested."""
     if report is None:
         return
-    report["techmap_path"] = _report_path(techmap_path, repo_root=repo_root)
+    report["techmap_path"] = env_provenance.repo_relative_path(
+        techmap_path, repo_root=repo_root
+    )
     response["latch_map"] = report
 
 

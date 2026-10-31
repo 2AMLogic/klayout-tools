@@ -215,6 +215,21 @@ def find_repo_root(start: str | os.PathLike[str] | None = None) -> str | None:
         current = parent
 
 
+def repo_root_for(path: str | os.PathLike[str] | None) -> str | None:
+    """The repo root a run over ``path`` normalises its input-path fields
+    against -- :func:`find_repo_root` from ``path``'s own directory (``None``
+    for ``None``).
+
+    Anchoring on the input itself, not on a request document or the process
+    cwd, keeps ``scope: "repo"`` meaning the same thing for every verb that
+    emits a :func:`repo_relative_path` field (`klt drc`/`extract`/`lvs`/
+    `erc`/`pex`).
+    """
+    if path is None:
+        return None
+    return find_repo_root(os.path.dirname(os.path.abspath(path)))
+
+
 def repo_relative_path(
     path: str | os.PathLike[str] | None,
     *,
@@ -234,6 +249,13 @@ def repo_relative_path(
     ``repo_root`` defaults to :func:`find_repo_root`'s answer for ``path``'s
     own directory. With no repo root at all, every path is ``external``: the
     failure mode is losing detail, never leaking it.
+
+    Every verb emits its input/output path fields through this one
+    normalizer (no module-local wrappers) so they agree on exactly one
+    ``{path, scope}`` shape. Resolve ``path`` first (e.g. against the request
+    file's own directory); a bare relative string resolves against the
+    process cwd. The reader counterpart is
+    :func:`~klayout_tools._report_verify.resolve_committed_path`.
     """
     if path is None:
         return {"path": None, "scope": "absent"}

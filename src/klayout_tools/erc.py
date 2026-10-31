@@ -271,7 +271,8 @@ from .extract import (
 #: extract`/`klt lvs` (issue #2659): a committed `klt erc` envelope is cited
 #: verbatim by a `klt signoff` manifest, so an absolute path pinned the
 #: record to the producing host's filesystem and ``input_verified`` drifted
-#: on every other checkout. ``spec`` is unchanged. See `_report_path` below.
+#: on every other checkout. ``spec`` is unchanged.
+#: See `env_provenance.repo_relative_path`.
 SCHEMA_VERSION = 2
 
 
@@ -3939,7 +3940,9 @@ def run_erc(
         "schema_version": SCHEMA_VERSION,
         # Normalised to `{path, scope}` (issue #2703) -- the layout
         # `provenance.input.content_hash` above actually hashes.
-        "file": _report_path(file, repo_root=_report_repo_root(file)),
+        "file": env_provenance.repo_relative_path(
+            file, repo_root=env_provenance.repo_root_for(file)
+        ),
         "spec": spec_path,
         "pdk": pdk,
         # (issue #2219) Whether the per-gate antenna accumulation was
@@ -3986,21 +3989,6 @@ def run_erc(
         report["gates"] = []
         report["compact"] = compact_block
     return report
-
-
-def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
-    """Normalise ``file`` for this module's own JSON response (issue #2703) --
-    a thin wrapper over :func:`~klayout_tools.env_provenance.repo_relative_path`,
-    the same one `klt drc`/`klt extract`/`klt lvs` (issue #2659) use, so every
-    verb agrees on one ``{path, scope}`` shape. The reader counterpart is
-    :func:`~klayout_tools._report_verify.resolve_committed_path`."""
-    return env_provenance.repo_relative_path(path, repo_root=repo_root)
-
-
-def _report_repo_root(path: str) -> str | None:
-    """The repo root ``file`` is normalised against -- resolved once from the
-    layout's own location, as `klt drc` does."""
-    return env_provenance.find_repo_root(os.path.dirname(os.path.abspath(path)))
 
 
 # --------------------------------------------------------------------------- #

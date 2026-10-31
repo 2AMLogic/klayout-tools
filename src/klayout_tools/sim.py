@@ -1699,20 +1699,6 @@ def _reject_param_braces(analysis: dict[str, Any], engine: str) -> None:
         )
 
 
-def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
-    """Normalise one input-path field for this module's own JSON response
-    (issue #1261) -- a thin, module-local wrapper over
-    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
-    second normalizer, so `klt sim`'s reports and `klt env-provenance`'s own
-    emitter agree on exactly one `{path, scope}` shape. Always resolve
-    ``path`` first (e.g. against the request file's own directory, per the
-    "Netlist convention" -- see ``run_sim``'s docstring) before calling this;
-    a bare relative string is resolved against the current process's cwd,
-    which is not necessarily what a caller meant.
-    """
-    return env_provenance.repo_relative_path(path, repo_root=repo_root)
-
-
 #: A literal numeric ``AT=<x>`` on a ``.meas`` card (issue #3520). The value
 #: must be a bare SPICE number; ``at=t_flip`` / ``at=0.5*2.5u`` never match
 #: (the lookahead rejects a trailing expression character).
@@ -1888,7 +1874,7 @@ def _portable_substitutions(
         seen.add(token)
         entry: dict[str, Any] = {
             "token": token,
-            "stands_for": _report_path(root, repo_root=repo_root),
+            "stands_for": env_provenance.repo_relative_path(root, repo_root=repo_root),
         }
         if token == "$MODELS_DIR" and models_lib_sha256 is not None:
             entry["models_lib_sha256"] = models_lib_sha256
@@ -4371,7 +4357,9 @@ def _run_sim_corners(
         # `{"path": null, "scope": "external"}` rather than the absolute
         # path. `models_lib_sha256` right below (plus `provenance.deck`)
         # still pins exactly which library ran.
-        "models_lib": _report_path(models_lib, repo_root=repo_root),
+        "models_lib": env_provenance.repo_relative_path(
+            models_lib, repo_root=repo_root
+        ),
         "models_lib_sha256": sha256_file(models_lib),
         # Additive: `models_lib_sha256` is always hashed on the submitting
         # host, so for an off-host backend it is the *client's* resolution,
@@ -4510,7 +4498,9 @@ def _run_sim_corners(
         # was requested -- see `run_sim`'s docstring.
         environment["resume"] = {
             "resumed_corners": len(pre_completed),
-            "checkpoint_path": _report_path(checkpoint_path, repo_root=repo_root),
+            "checkpoint_path": env_provenance.repo_relative_path(
+                checkpoint_path, repo_root=repo_root
+            ),
             "checkpoint_retained": checkpoint_retained,
         }
 
@@ -4523,7 +4513,7 @@ def _run_sim_corners(
 
     report = {
         "schema_version": SCHEMA_VERSION,
-        "netlist": _report_path(netlist_path, repo_root=repo_root),
+        "netlist": env_provenance.repo_relative_path(netlist_path, repo_root=repo_root),
         "status": status,
         "corner_count": len(corners),
         "passed": passed,
@@ -5234,7 +5224,7 @@ def _model_file_entries(
     return [
         {
             "name": os.path.basename(path),
-            **_report_path(path, repo_root=repo_root),
+            **env_provenance.repo_relative_path(path, repo_root=repo_root),
             "sha256": sha256_file(path),
         }
         for path in paths

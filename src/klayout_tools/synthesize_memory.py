@@ -44,6 +44,7 @@ import json
 import os
 from typing import Any
 
+from . import env_provenance
 from ._verilog_params import chparam_lines, read_verilog_line
 
 #: The memory outcome vocabulary, per module and overall. Fixed (a caller may
@@ -407,7 +408,6 @@ def collect_memory_evidence(
     """
     from .synthesize import (
         SynthesizeError,
-        _report_path,
         _run_yosys,
         _write_script_text,
     )
@@ -427,7 +427,9 @@ def collect_memory_evidence(
     pre_lowering_path = os.path.join(
         output_dir, f"{hdl_toplevel}{_PRE_LOWERING_STATS_SUFFIX}"
     )
-    reported_script = _report_path(script_path, repo_root=repo_root)
+    reported_script = env_provenance.repo_relative_path(
+        script_path, repo_root=repo_root
+    )
     try:
         _write_script_text(
             script_path,
