@@ -6969,6 +6969,63 @@ def test_run_pex_submit_only_writes_manifest_without_polling(
     assert "delta" not in report
 
 
+def _mismatched_async_inputs(tmp_path, *, flat):
+    if flat:
+        dut = _write_flat_dut(tmp_path)
+        tb = tmp_path / "testbench.spice"
+        tb.write_text(f'.include "{dut}"\nVdd RA 0 DC 1.8\nRload RB 0 1k\n')
+    else:
+        dut = tmp_path / "schematic_dut.spice"
+        dut.write_text(".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES\n")
+        tb = tmp_path / "testbench.spice"
+        tb.write_text(
+            f'.include "{dut}"\n'
+            ".model res_generic_po r\n"
+            "Vdd RA 0 DC 1.8\nXres RA RB 0 RES\nRload RB 0 1k\n"
+        )
+    return str(_write_request(tmp_path / "request.json", tb))
+
+
+@pytest.mark.parametrize(
+    ("flat", "code"), [(False, "pin_count_mismatch"), (True, "flat_dut_mismatch")]
+)
+def test_run_pex_submit_only_refuses_static_preflight_mismatch(
+    tmp_path, resistor_layout, monkeypatch, flat, code
+):
+    """Issue #4696: a pre-flight diagnostic that would skip the extracted leg
+    fails the submit before any leg is launched or any manifest written."""
+    calls: list = []
+    _fake_async_sim(monkeypatch, calls)
+    request = _mismatched_async_inputs(tmp_path, flat=flat)
+    outdir = tmp_path / "art"
+    with pytest.raises(PexError) as err:
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            artifacts_dir=str(outdir),
+            backend="batch",
+            submit_only=True,
+        )
+    assert err.value.code == code
+    assert calls == []
+    assert not (outdir / "pex-submit.json").exists()
+
+
+def test_async_legs_finish_submit_refuses_missing_leg(tmp_path):
+    """Issue #4696: `complete: true` is never written with a leg missing."""
+    from klayout_tools.pex_async import AsyncLegs
+
+    legs = AsyncLegs(submit_only=True, attach=None, work_dir=str(tmp_path))
+    legs._legs.append(
+        {"testbench": "tb", "side": "schematic", "sharded": False, "attach": "j"}
+    )
+    with pytest.raises(PexError) as err:
+        legs.finish_submit(extracted_netlist_sha256="x", request_sha256={"tb": "y"})
+    assert err.value.code == "pex_manifest_incomplete"
+    assert not os.path.exists(legs.manifest_path)
+
+
 def _interrupting_async_sim(monkeypatch, calls, fail_on):
     """A fake `run_sim` whose submit of the `fail_on` side raises once."""
     import klayout_tools.pex as pex_module

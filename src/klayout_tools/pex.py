@@ -3511,6 +3511,22 @@ def run_pex(
         top_cell=extract_report["top"],
     )
 
+    # Issue #4696: a static pre-flight diagnostic skips the extracted leg, so
+    # a --submit-only run would record only the schematic leg. Refuse before
+    # any leg is submitted rather than pay for shards that can never be graded.
+    if legs.submitting:
+        for code, diagnostic in (
+            ("flat_dut_mismatch", flat_dut_mismatch),
+            ("pin_count_mismatch", pin_count_mismatch),
+            ("pin_order_mismatch", pin_order_mismatch),
+        ):
+            if diagnostic is not None:
+                raise PexError(
+                    f"--submit-only: the extracted leg cannot be submitted "
+                    f"({code}): {diagnostic.get('detail') or code}",
+                    code=code,
+                )
+
     # `--measure-command` mode (issue #2478): `testbench_paths` is empty (it
     # is validated so above), so the per-testbench loop below is a no-op and
     # the two legs are measured here instead -- once per side, by the

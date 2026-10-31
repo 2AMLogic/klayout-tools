@@ -99,7 +99,12 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   `pex_manifest_incomplete` for an `--attach` of a manifest whose submit was
   interrupted (the error names the missing legs);
   `resume_fingerprint_mismatch` when the extracted netlist or a testbench
-  request changed since the submit. Omitted, the report is unchanged.
+  request changed since the submit. A static pre-flight diagnostic that would
+  skip the extracted leg (`flat_dut_mismatch`, `pin_count_mismatch`,
+  `pin_order_mismatch`) is refused up front under `--submit-only` with that
+  name as the error `code` ([#4696](https://github.com/2AMLogic/klayout-tools/issues/4696)):
+  no leg is submitted and no manifest is written, and `complete: true` is never
+  written unless every leg is recorded. Omitted, the report is unchanged.
   **Incremental manifest and re-running a submit**
   ([#4686](https://github.com/2AMLogic/klayout-tools/issues/4686)):
   `pex-submit.json` is rewritten atomically after every leg is submitted, with
