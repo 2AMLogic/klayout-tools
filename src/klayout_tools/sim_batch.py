@@ -2967,6 +2967,20 @@ def _read_status(
     return status if isinstance(status, dict) else None
 
 
+def _remote_state_note(config: BatchConfig, job_id: str) -> str:
+    """Issue #4721: a one-shot ``status.json`` read appended to a lost
+    shard's reason, so the caller can tell whether the remote job reached a
+    terminal state (``finished`` / ``failed`` / ``timeout``: re-attaching can
+    collect it) or is still ``running`` / ``unknown`` (status unreadable)."""
+    try:
+        status = _read_status(config, job_id, _run_subprocess)
+    except Exception:  # noqa: BLE001 - a diagnostic probe must never raise
+        status = None
+    state = status.get("state") if status else None
+    label = {"done": "finished"}.get(str(state), str(state)) if state else "unknown"
+    return f" [remote job {job_id}: {label}]"
+
+
 #: Coarse cadence of the stderr heartbeat :func:`poll_status` prints while a
 #: job's state is unchanged (issue #2978). A state change prints at once.
 BATCH_HEARTBEAT_INTERVAL_S = 300.0
@@ -4293,6 +4307,24 @@ def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
             pass
 
 
+def _manifest_difference(
+    stored_fingerprint: Any, fingerprint: str, stored_hosts: Any, hosts: int
+) -> str:
+    """Issue #4721: what a shard map refusal compared. ``hosts`` is named
+    outright; the fingerprint is one opaque hash of the units, seed, netlist
+    and settings, so it can only be reported as differing (with prefixes)."""
+    parts = []
+    if stored_hosts != hosts:
+        parts.append(f"hosts: map has {stored_hosts}, request has {hosts}")
+    if stored_fingerprint != fingerprint:
+        parts.append(
+            f"fingerprint: map {str(stored_fingerprint)[:12]}, request "
+            f"{fingerprint[:12]} -- one hash of units, seed, netlist and "
+            "settings, so which of those changed is not recoverable"
+        )
+    return "; ".join(parts)
+
+
 class _ShardManifest:
     """The persisted shard-to-job-id map of a sharded batch run (issues #3300,
     #3896).
@@ -4370,9 +4402,12 @@ class _ShardManifest:
                 code=BATCH_SHARD_MANIFEST_CODE,
             ) from exc
         if stored_fingerprint != fingerprint or stored_hosts != hosts:
+            difference = _manifest_difference(
+                stored_fingerprint, fingerprint, stored_hosts, hosts
+            )
             raise SimError(
                 f"--resume: shard map {path} was written for a different "
-                "request (units, seed, hosts, netlist or settings changed); "
+                f"request ({difference}); "
                 "delete it or drop --resume",
                 code=BATCH_SHARD_MANIFEST_CODE,
             )
@@ -5413,26 +5448,34 @@ class _BatchFleetRun:
             else self.artifacts_dir
         )
         shard_config = self.shard_config()
-        return _run_batch_job(
-            config=shard_config,
-            job_id=job_id,
-            corner_points=shard_points,
-            netlist_path=self.netlist_path,
-            timeout_s=self.timeout_s,
-            keep_artifacts=self.keep_artifacts,
-            want_waveforms=self.want_waveforms,
-            artifacts_dir=shard_artifacts_dir,
-            request=self.request,
-            measurements_spec=self.measurements_spec,
-            explicit_points=shard_points,
-            request_dir=self.request_dir,
-            receipt_name=f"batch-receipt-{job_id}.json",
-            attach=attach,
-            launch_if_unlaunched=launch_if_unlaunched,
-            on_phase=self._phase_hook(index),
-            sleep=self.abortable_sleep,
-            launch_kwargs=self._launch_kwargs(shard_config, index),
-        )
+        try:
+            return _run_batch_job(
+                config=shard_config,
+                job_id=job_id,
+                corner_points=shard_points,
+                netlist_path=self.netlist_path,
+                timeout_s=self.timeout_s,
+                keep_artifacts=self.keep_artifacts,
+                want_waveforms=self.want_waveforms,
+                artifacts_dir=shard_artifacts_dir,
+                request=self.request,
+                measurements_spec=self.measurements_spec,
+                explicit_points=shard_points,
+                request_dir=self.request_dir,
+                receipt_name=f"batch-receipt-{job_id}.json",
+                attach=attach,
+                launch_if_unlaunched=launch_if_unlaunched,
+                on_phase=self._phase_hook(index),
+                sleep=self.abortable_sleep,
+                launch_kwargs=self._launch_kwargs(shard_config, index),
+            )
+        except BatchError as exc:
+            if type(exc) is not BatchError:
+                # Poll timeout / interruption already say where the job is.
+                raise
+            raise BatchError(
+                f"{exc}{_remote_state_note(shard_config, job_id)}", code=exc.code
+            ) from exc
 
     def run_shard_points(self, shard_points: list[CornerPoint]) -> _ShardResult:
         index = self.shard_indexes[_units_digest(shard_points)]
@@ -5797,8 +5840,9 @@ def _attach_batch_shards(
     if recorded is not None and recorded != sim_batch_async.request_sha256(request):
         raise SimError(
             f"--attach: shard map {manifest_path} was submitted from a "
-            "different request (request_sha256 mismatch); pass the request "
-            "the shards were submitted from",
+            f"different request (request_sha256: map {str(recorded)[:12]}, "
+            f"request {sim_batch_async.request_sha256(request)[:12]}); pass "
+            "the request the shards were submitted from",
             code=BATCH_SHARD_MANIFEST_CODE,
         )
     try:

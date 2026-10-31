@@ -3767,6 +3767,10 @@ def run_pex(
             request_sha256=request_shas,
         )
 
+    if legs.mode == "attach":
+        # Issue #4721: every leg collected -- the shard maps are spent.
+        legs.remove_collected_shard_maps()
+
     corner_count = len({row["corner_id"] for row in delta})
     coverage = _build_coverage(
         testbenches_summary=testbenches_summary, delta=delta, corner_count=corner_count
