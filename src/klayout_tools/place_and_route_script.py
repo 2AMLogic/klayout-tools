@@ -96,6 +96,20 @@ def _design_rule_constraint_lines(
     return lines
 
 
+def _pdn_instances_arg(instance: str) -> str:
+    """Convert an OpenROAD db instance name to a `define_pdn_grid -instances`
+    argument (issue #4715).
+
+    `-instances` is a list of glob patterns, unlike `place_macro -macro_name`
+    (a literal db name). So the name is glob-escaped (a backslash before each
+    of `\\ [ ] * ?`), then every backslash is doubled for the list parse. A
+    db name `g\\[0\\]` therefore becomes six backslashes before each bracket.
+    Names without those characters are returned unchanged.
+    """
+    glob_escaped = re.sub(r"([\\\[\]*?])", r"\\\1", instance)
+    return glob_escaped.replace("\\", "\\\\")
+
+
 def _io_delay_lines(
     clock_port: str | None,
     input_delay_ns: float | None,
@@ -789,7 +803,7 @@ def _macro_pdn_grid_lines(
         name = f"macro_{macro['instance']}"
         lines.append(
             f"define_pdn_grid -macro -name {{{name}}} -voltage_domains {{CORE}} "
-            f"-instances {{{macro['instance']}}} -halo "
+            f"-instances {{{_pdn_instances_arg(macro['instance'])}}} -halo "
             f"{{{halo['left']} {halo['bottom']} {halo['right']} {halo['top']}}} "
             "-grid_over_boundary"
         )
@@ -1028,9 +1042,9 @@ def _stage_script_lines(
         # linked network). Never OpenROAD's automatic macro placer
         # (`rtl_macro_placer`): a socket-driven macro's location is a
         # caller decision, not something to optimize away. The instance is
-        # brace-quoted, like `define_pdn_grid -instances {...}`, so a
-        # bracketed name reaches OpenROAD with the same single backslash per
-        # bracket in both lines (issue #4701).
+        # brace-quoted so a bracketed name is passed literally here; the
+        # `-instances` site re-escapes it for glob + list parsing (issues
+        # #4701, #4715).
         lines += [
             f"place_macro -macro_name {{{macro['instance']}}} "
             f"-location {{{macro['x_um']} {macro['y_um']}}} "
