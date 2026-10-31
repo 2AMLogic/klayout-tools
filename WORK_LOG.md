@@ -2,6 +2,14 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-31
+
+- **PR #4676**: feat(sim): report published batch runner in dry-run, state ceiling formula
+- **PR #4645**: refactor(site): remove geode-fem Solver Validation and Field Data presentation
+- **PR #4664**: feat: add --what-if floorplan estimate to klt economy
+- **Issue #4641** (closed): site: drop the geode-fem solver results from klayout-tools.org (Solver Validation strip, Field Data panels)
+- **Issue #4661** (closed): klt economy: no what-if mode to evaluate moved or re-shaped instances without regenerating the layout
+
 ### 2026-10-30
 
 - **PR #4667**: feat: snap res_array length_um to the mfg grid and enforce a minimum length
