@@ -7223,16 +7223,13 @@ def test_attach_removes_sharded_leg_maps_only_after_full_success(
         return _two_corner_schematic_report()
 
     monkeypatch.setattr(pex_module, "run_sim", _collect)
-    try:
-        run_pex(
-            resistor_layout,
-            [request],
-            "sky130",
-            artifacts_dir=outdir,
-            attach=submitted["manifest_path"],
-        )
-    except PexError:
-        pytest.skip("fake report not gradable end to end")
+    run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        attach=submitted["manifest_path"],
+    )
     assert not any(path.exists() for path in real)
 
 

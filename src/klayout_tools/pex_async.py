@@ -253,7 +253,9 @@ class AsyncLegs:
         """After a fully successful ``--attach`` (issue #4721): drop every
         sharded leg's ``batch-shards.json``. ``run_sim`` keeps the map of a
         sharded attach so an interrupted multi-leg attach can be re-run;
-        only now is nothing left to re-attach to."""
+        only now is nothing left to re-attach to. A no-op outside attach."""
+        if self.mode != "attach":
+            return
         for leg in self._legs_to_clean():
             try:
                 os.remove(leg)
