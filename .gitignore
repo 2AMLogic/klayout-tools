@@ -153,3 +153,6 @@ native/*/target/
 .coverage
 .coverage.*
 coverage.json
+
+# Repo Skills Codex-side machine-local install metadata (never committed)
+.agents/skills/repo/.install-local.json
