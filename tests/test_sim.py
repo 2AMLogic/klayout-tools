@@ -15884,3 +15884,38 @@ def test_read_osdi_abi_reads_the_exported_version_symbols(tmp_path):
     if built.returncode != 0:
         pytest.skip("cannot build a shared library here")
     assert sim._read_osdi_abi(str(lib)) == (0, 4)
+
+
+def test_with_thread_pin_prepends_num_threads_line():
+    """Issue #3619: the resolved thread count is also written as a
+    `.spiceinit` line, ahead of user lines so a user `set num_threads` wins."""
+    assert sim._with_thread_pin((), 1, "ngspice") == ("set num_threads=1",)
+    assert sim._with_thread_pin(("set num_threads=4",), 1, "ngspice") == (
+        "set num_threads=1",
+        "set num_threads=4",
+    )
+
+
+def test_with_thread_pin_is_inert_without_a_pin_or_for_xyce():
+    assert sim._with_thread_pin(("a",), None, "ngspice") == ("a",)
+    assert sim._with_thread_pin((), 1, "xyce") == ()
+
+
+def test_pinned_run_writes_num_threads_into_spiceinit(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"keep_artifacts": True, "threads_per_worker": 1},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request), artifacts_dir=str(tmp_path / "artifacts"))
+
+    (corner,) = report["corners"]
+    corner_dir = os.path.dirname(corner["artifacts"]["log"])
+    text = Path(corner_dir, ".spiceinit").read_text()
+    assert text == "set num_threads=1\n"

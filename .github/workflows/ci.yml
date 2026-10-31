@@ -64,6 +64,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Full history: the per-file size ratchet below (issue #2766)
+          # computes a PR's merge-base against its actual target branch,
+          # and a push-to-main run fetches the push's before SHA (which a
+          # force-push leaves unreachable from the new tip). ~40 MiB of
+          # pack per fetch (measured 2026-10-12) buys the ratchet its
+          # trusted comparison revision; the other steps don't care.
+          fetch-depth: 0
 
       - name: Set up uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -108,6 +116,48 @@ jobs:
         # before merging rather than trusting a snapshot taken earlier in the
         # review cycle.
         run: uv run --frozen --extra dev python scripts/check_complexity_baseline.py
+
+      - name: Per-file size ratchet (merge-base)
+        # scripts/check_file_size_baseline.py (issue #2766). Stricter than
+        # the complexity ratchet above in WHOSE baseline is trusted: that
+        # one reads complexity-baseline.json from the checkout, this one
+        # reads file-size-baseline.json from the COMPARISON REVISION, so a
+        # PR cannot loosen its own gate by editing the baseline. Fails on
+        # growth above a trusted per-file ceiling, a new oversized file, a
+        # proposed ceiling that is not exactly the file's current size, a
+        # surviving entry for a shrunken/deleted file, and new or
+        # byte-mismatched vendor content-hash exemptions. Policy and the
+        # vendor-update path: scripts/README.md.
+        #
+        # Comparison revision (see also fetch-depth: 0 on this job's
+        # checkout): PRs use the merge-base with their ACTUAL target
+        # branch -- the pull_request checkout is GitHub's merge result, so
+        # concurrent main changes are represented; pushes to main use the
+        # push's before SHA, which covers multi-commit pushes where a
+        # merge-base with main itself would compare the push against
+        # itself. A missing ref fails the step with fetch instructions
+        # rather than silently comparing against nothing. When the
+        # comparison revision predates this checker (this gate's own
+        # landing PR), the checker bootstraps the trusted baseline from
+        # that tree's measured content.
+        env:
+          PR_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags origin \
+              "refs/heads/${PR_BASE_BRANCH}:refs/remotes/origin/${PR_BASE_BRANCH}"
+            compare_rev="$(git merge-base HEAD "refs/remotes/origin/${PR_BASE_BRANCH}")"
+          else
+            if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              echo "::error::push event has no usable 'before' SHA ('$PUSH_BEFORE'); cannot determine the comparison revision" >&2
+              exit 2
+            fi
+            git fetch --no-tags origin "$PUSH_BEFORE"
+            compare_rev="$PUSH_BEFORE"
+          fi
+          uv run --frozen --extra dev python scripts/check_file_size_baseline.py \
+            --comparison-rev "$compare_rev"
 
       - name: Type-check ratchet (mypy)
         # scripts/check_type_baseline.py (issue #3221): mypy over src/ against

@@ -26,6 +26,7 @@ scripts/
   ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
   bootstrap-auditor-python.sh    # pinned, checksum-verified uv + managed CPython + host-local .venv + `klt` startup smoke for a Python-less Linux audit host (#2829)
   check-release-lag.sh           # report how far main has drifted ahead of the latest tagged release (#1020)
+  check_file_size_baseline.py    # per-file line-size ratchet vs the merge-base, with file-size-baseline.json (#2766)
   native_source_fingerprint.py   # content fingerprint of a native crate's Rust sources; CI gates native-engine legs on it (#1889)
   install-openroad-docker.sh     # install an `openroad` Docker-wrapper onto $PATH (CI provisioning, #1328)
   place-and-route-smoke.sh       # synth -> place-and-route -> GDS -> `klt lvs` -> `klt drc` smoke pipeline (#1328)
@@ -422,6 +423,98 @@ python scripts/ingest-canary.py --repo 2AMLogic/some-block --pdk sg13g2
 slug doesn't follow the `<pdk>-<name>` convention the script otherwise
 guesses from; an unknown name exits `1`, and an unguessable slug with no
 `--pdk` simply omits the field.
+
+## `check_file_size_baseline.py`
+
+Monotonic per-file line-size ratchet, gated in CI's `lint` job next to the
+complexity ratchet (issue #2766). Agent PRs tend to grow files; this stops
+the growth. It is deliberately stricter than
+[`check_complexity_baseline.py`](check_complexity_baseline.py) in one key
+way: the **trusted** baseline is read from the **comparison revision**,
+never from the working tree, so a PR cannot loosen its own gate by editing
+the committed `file-size-baseline.json` (repo root). The **proposed**
+baseline in the candidate tree must exactly mirror the candidate's
+remaining debt — both sides are checked, because only checking sizes
+against the old baseline would let stale ceilings through, and only
+trusting the proposed baseline would let a PR self-approve growth.
+
+**Scope.** Tracked first-party Python (`.py`), Rust (`.rs`), and shell
+(`.sh`) source — including tests, scripts, and examples. The vendored
+agent-tooling trees `.loom/`, `.claude/`, `.agents/` are not governed
+(same exclusion rationale as `pyproject.toml`'s `[tool.ruff]` exclude);
+neither are docs, binary fixtures, or generated reports (not source
+extensions). Counting is physical lines: blank and comment lines count,
+a final line without a trailing newline counts, an empty file is 0 lines.
+The hard limit is 500 lines: files at or under it carry no baseline
+entry; files over it carry exactly one, equal to their current size.
+
+**What fails** (exit 1): a file grows above its trusted ceiling; an
+unbaselined file exceeds the limit (new oversized file, or growth across
+the limit — including a renamed file, unless the diff proves a
+non-growing rename from a trusted-baselined path via `git diff -M` plus a
+size check against the old path's ceiling); a proposed ceiling is not
+exactly the file's current size (stale, too high after a reduction, or
+invented); an entry survives for a file that shrank to the limit or was
+deleted; a proposed debt entry or vendor hash is absent from the trusted
+baseline; a vendor hash no longer matches a candidate file's actual
+bytes. What never fails: unchanged or shrunken files (with the entry
+tightened to match, or removed at/below the limit), and any removal of
+debt entries or exemptions — tightening is always allowed, loosening
+never is. Exit 2 means the gate could not run (missing/malformed
+baseline, unresolvable comparison revision, git failure), with an
+actionable diagnostic either way.
+
+**Vendored code is identified by content hash, never by directory name.**
+A hash pin in the trusted baseline exempts a file only while its actual
+bytes hash to the pinned value: moving first-party code under a directory
+named `vendor/` exempts nothing, renaming a pinned file drops the pin,
+and changing a pinned file's bytes drops it into ordinary checking (a
+routine PR cannot add or replace pins). Reviewed upstream vendor updates
+land through the narrow **vendor-refresh exception**: when the candidate's
+entire diff against the comparison revision touches only the baseline
+file and paths the trusted baseline already pins, replacing a pin's hash
+(same path, new upstream bytes) is permitted — a PR that touches any
+first-party file alongside the refresh keeps the strict rule. The scoping
+is mechanical, so the exception cannot authorize first-party growth or
+mint a pin for a file the trusted baseline never pinned.
+
+**Bootstrap.** When the comparison revision predates this checker (true
+of this gate's own landing PR), there is no baseline file to trust; the
+trusted baseline is then derived from that tree's actual measured content
+(every governed file over the limit gets a ceiling equal to its measured
+size there) and the vendor inventory starts empty — a bootstrap grants no
+hash exemptions. Brand-new oversized files that exist only in the
+candidate (the landing PR's own implementation, say) may enter the
+baseline at exactly their measured landing size — the landing diff is the
+review, and the must-equal rule pins the ceiling to reality. The
+proposed initial baseline therefore cannot simply authorize its own
+entries: it passes only by exactly recording actual content — no
+pre-existing file's ceiling may rise above its comparison-tree size, and
+no vendor pin may be minted.
+
+**Local workflow.** Normal check mode is read-only:
+
+```
+git fetch origin main
+python scripts/check_file_size_baseline.py --comparison-rev "$(git merge-base HEAD origin/main)"
+```
+
+After shrinking a file (and only then), regenerate the proposed baseline
+— it records the candidate's actual debt and carries forward only vendor
+pins whose bytes still match; it never adds exemptions or authorizes
+growth, and the next check validates that:
+
+```
+python scripts/check_file_size_baseline.py --update-baseline
+```
+
+CI (`.github/workflows/ci.yml`, `lint` job) compares PRs against the
+merge-base with their actual target branch (the checkout is GitHub's
+merge result, so concurrent main changes are represented; the job's
+checkout uses `fetch-depth: 0` for the history) and pushes to main
+against the push's before SHA (covering multi-commit pushes). A missing
+comparison ref fails with fetch instructions instead of silently
+comparing against nothing.
 
 ## `check_import_boundaries.py`
 

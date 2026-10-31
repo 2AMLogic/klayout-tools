@@ -214,6 +214,7 @@ from .lvs_mismatch import (
     _build_net_correspondence,
     _collect_tolerance_snaps,
     _device_class_family_findings,
+    _flavour_selection_warnings,
     _make_compare_logger,
     _mismatch,
     _parse_parameter_tolerance,
@@ -329,6 +330,15 @@ CATEGORY_DEVICE_CLASS_ARITY = "device.class_arity"
 #: `device.unmatched` mismatch that a different `deck_options` value might
 #: fix (see `_device_class_family_findings`).
 CATEGORY_DEVICE_CLASS_FAMILY_UNSATISFIABLE = "device.class_family_unsatisfiable"
+#: Issue #4729: the reference names one class of an option-selected family
+#: (e.g. gf180mcu `PPOLYF_U_3K`) other than the one `deck_options` selected for
+#: this run (`ppolyf_u_1k` by default). Warning only; names both values.
+CATEGORY_DEVICE_FLAVOUR_MISMATCH = "device.flavour_mismatch"
+#: Issue #4729: parallel layout fingers (same class, L and terminals) left
+#: unmerged because `options.combine_devices` is unset, whose widths sum to the
+#: width of one reference device. One grouped error replaces the per-finger
+#: `device.unmatched`/`device.property` entries.
+CATEGORY_DEVICE_UNMERGED_FINGERS = "device.unmerged_fingers"
 #: Issue #506: `request.reference.device_bulk` reconciled a reference device
 #: class up to the layout side's terminal list before comparing -- the
 #: disclosure that a match on that class rests on a caller assertion, not on
@@ -1821,6 +1831,7 @@ def run_lvs(
     # both engines and both layout shapes: all it needs is a resolved
     # `layout.deck` and the reference netlist.
     family_findings = _device_class_family_findings(reference_netlist, layout_deck)
+    family_findings.extend(_flavour_selection_warnings(reference_netlist, layout_deck))
 
     if combine_devices_per_circuit is not None and layout_deck is not None:
         # Issue #559/#585/#1557: the same deferred resistor

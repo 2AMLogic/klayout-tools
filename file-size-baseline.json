@@ -1,0 +1,1184 @@
+{
+  "schema_version": 1,
+  "hard_limit": 500,
+  "generated_by": "scripts/check_file_size_baseline.py --update-baseline",
+  "debts": [
+    {
+      "path": "examples/critical-net-mom-fidelity/generate_and_measure.py",
+      "lines": 537
+    },
+    {
+      "path": "examples/design-pipeline/mom_current_carrying_probe.py",
+      "lines": 617
+    },
+    {
+      "path": "examples/em/block_coupling/generate.py",
+      "lines": 1148
+    },
+    {
+      "path": "examples/em/block_coupling/geode_driver/src/main.rs",
+      "lines": 611
+    },
+    {
+      "path": "examples/em/interconnect_coupling/generate.py",
+      "lines": 542
+    },
+    {
+      "path": "examples/em/patch_antenna/generate.py",
+      "lines": 580
+    },
+    {
+      "path": "examples/em/spiral_inductor/generate.py",
+      "lines": 571
+    },
+    {
+      "path": "examples/kb/pfd-charge-pump-tri-state/design-centering-validation/run_validation.py",
+      "lines": 593
+    },
+    {
+      "path": "examples/row-mix-gf180/generate.py",
+      "lines": 668
+    },
+    {
+      "path": "native/mom/src/fullwave.rs",
+      "lines": 1720
+    },
+    {
+      "path": "native/mom/src/geometry.rs",
+      "lines": 1508
+    },
+    {
+      "path": "native/mom/src/geometry/oriented_path.rs",
+      "lines": 1414
+    },
+    {
+      "path": "native/mom/src/peec.rs",
+      "lines": 1831
+    },
+    {
+      "path": "native/mom/src/solver.rs",
+      "lines": 1693
+    },
+    {
+      "path": "native/statime/src/liberty.rs",
+      "lines": 825
+    },
+    {
+      "path": "native/statime/src/sta.rs",
+      "lines": 772
+    },
+    {
+      "path": "native/techmap/src/celllib.rs",
+      "lines": 742
+    },
+    {
+      "path": "native/techmap/src/liberty.rs",
+      "lines": 845
+    },
+    {
+      "path": "native/techmap/src/map.rs",
+      "lines": 622
+    },
+    {
+      "path": "native/techmap/src/verilog.rs",
+      "lines": 613
+    },
+    {
+      "path": "native/wave/src/build.rs",
+      "lines": 655
+    },
+    {
+      "path": "native/wave/src/fst.rs",
+      "lines": 683
+    },
+    {
+      "path": "native/wave/src/parser.rs",
+      "lines": 1062
+    },
+    {
+      "path": "native/wave/src/query.rs",
+      "lines": 688
+    },
+    {
+      "path": "native/yield/src/contract.rs",
+      "lines": 674
+    },
+    {
+      "path": "native/yield/src/estimate.rs",
+      "lines": 3672
+    },
+    {
+      "path": "native/yield/src/stats.rs",
+      "lines": 793
+    },
+    {
+      "path": "scripts/aws/build-remote-sim-ami.sh",
+      "lines": 530
+    },
+    {
+      "path": "scripts/check_artifact_determinism.py",
+      "lines": 2077
+    },
+    {
+      "path": "scripts/check_ci_wall_clock.py",
+      "lines": 1298
+    },
+    {
+      "path": "scripts/check_file_size_baseline.py",
+      "lines": 955
+    },
+    {
+      "path": "scripts/check_import_boundaries.py",
+      "lines": 751
+    },
+    {
+      "path": "scripts/design_agent_benchmark.py",
+      "lines": 3454
+    },
+    {
+      "path": "scripts/design_agent_benchmark_interactive.py",
+      "lines": 758
+    },
+    {
+      "path": "scripts/design_agent_benchmark_layout.py",
+      "lines": 1234
+    },
+    {
+      "path": "scripts/design_agent_benchmark_layout_exec.py",
+      "lines": 1152
+    },
+    {
+      "path": "scripts/fetch_ci_wall_clock_history.py",
+      "lines": 589
+    },
+    {
+      "path": "scripts/gallery_signals.py",
+      "lines": 684
+    },
+    {
+      "path": "scripts/ingest-canary.py",
+      "lines": 1351
+    },
+    {
+      "path": "scripts/research/sdf_annotate_spike.py",
+      "lines": 623
+    },
+    {
+      "path": "src/klayout_tools/_openroad_engine.py",
+      "lines": 627
+    },
+    {
+      "path": "src/klayout_tools/_paths.py",
+      "lines": 526
+    },
+    {
+      "path": "src/klayout_tools/_provenance.py",
+      "lines": 1014
+    },
+    {
+      "path": "src/klayout_tools/_report_verify.py",
+      "lines": 501
+    },
+    {
+      "path": "src/klayout_tools/arith_gen.py",
+      "lines": 1011
+    },
+    {
+      "path": "src/klayout_tools/artifact_store.py",
+      "lines": 1025
+    },
+    {
+      "path": "src/klayout_tools/characterize.py",
+      "lines": 2491
+    },
+    {
+      "path": "src/klayout_tools/cli/drc_cmd.py",
+      "lines": 755
+    },
+    {
+      "path": "src/klayout_tools/cli/extract_cmd.py",
+      "lines": 1192
+    },
+    {
+      "path": "src/klayout_tools/cli/parser.py",
+      "lines": 8049
+    },
+    {
+      "path": "src/klayout_tools/cli/pdk_cmd.py",
+      "lines": 615
+    },
+    {
+      "path": "src/klayout_tools/cli/pex_cmd.py",
+      "lines": 527
+    },
+    {
+      "path": "src/klayout_tools/cli/signoff_cmd.py",
+      "lines": 1235
+    },
+    {
+      "path": "src/klayout_tools/cli/sim_cmd.py",
+      "lines": 640
+    },
+    {
+      "path": "src/klayout_tools/components.py",
+      "lines": 609
+    },
+    {
+      "path": "src/klayout_tools/coverage.py",
+      "lines": 563
+    },
+    {
+      "path": "src/klayout_tools/decks/__init__.py",
+      "lines": 679
+    },
+    {
+      "path": "src/klayout_tools/decks/asap7_rules.py",
+      "lines": 816
+    },
+    {
+      "path": "src/klayout_tools/decks/extraction.py",
+      "lines": 2261
+    },
+    {
+      "path": "src/klayout_tools/decks/gf180mcu.py",
+      "lines": 4100
+    },
+    {
+      "path": "src/klayout_tools/decks/history.py",
+      "lines": 1231
+    },
+    {
+      "path": "src/klayout_tools/decks/rules.py",
+      "lines": 860
+    },
+    {
+      "path": "src/klayout_tools/decks/sg13cmos5l.py",
+      "lines": 2062
+    },
+    {
+      "path": "src/klayout_tools/decks/sg13g2.py",
+      "lines": 2948
+    },
+    {
+      "path": "src/klayout_tools/decks/sky130.py",
+      "lines": 3139
+    },
+    {
+      "path": "src/klayout_tools/digital_fleet.py",
+      "lines": 944
+    },
+    {
+      "path": "src/klayout_tools/draw.py",
+      "lines": 648
+    },
+    {
+      "path": "src/klayout_tools/drc.py",
+      "lines": 3846
+    },
+    {
+      "path": "src/klayout_tools/drc_klayout_engine.py",
+      "lines": 1828
+    },
+    {
+      "path": "src/klayout_tools/economy.py",
+      "lines": 922
+    },
+    {
+      "path": "src/klayout_tools/env_provenance.py",
+      "lines": 748
+    },
+    {
+      "path": "src/klayout_tools/equiv.py",
+      "lines": 1395
+    },
+    {
+      "path": "src/klayout_tools/equiv_replay.py",
+      "lines": 727
+    },
+    {
+      "path": "src/klayout_tools/equiv_sequential.py",
+      "lines": 1527
+    },
+    {
+      "path": "src/klayout_tools/erc.py",
+      "lines": 4121
+    },
+    {
+      "path": "src/klayout_tools/erc_spec.py",
+      "lines": 1341
+    },
+    {
+      "path": "src/klayout_tools/eval.py",
+      "lines": 694
+    },
+    {
+      "path": "src/klayout_tools/extract.py",
+      "lines": 11837
+    },
+    {
+      "path": "src/klayout_tools/extract_abstract.py",
+      "lines": 2134
+    },
+    {
+      "path": "src/klayout_tools/extract_batch.py",
+      "lines": 650
+    },
+    {
+      "path": "src/klayout_tools/extract_finfet.py",
+      "lines": 1066
+    },
+    {
+      "path": "src/klayout_tools/extract_hierarchy.py",
+      "lines": 713
+    },
+    {
+      "path": "src/klayout_tools/extract_parasitics.py",
+      "lines": 3438
+    },
+    {
+      "path": "src/klayout_tools/extract_passive_regions.py",
+      "lines": 1176
+    },
+    {
+      "path": "src/klayout_tools/extract_report.py",
+      "lines": 919
+    },
+    {
+      "path": "src/klayout_tools/extract_resistance_graph.py",
+      "lines": 920
+    },
+    {
+      "path": "src/klayout_tools/extract_spef.py",
+      "lines": 1038
+    },
+    {
+      "path": "src/klayout_tools/extract_subcircuit.py",
+      "lines": 697
+    },
+    {
+      "path": "src/klayout_tools/formal.py",
+      "lines": 568
+    },
+    {
+      "path": "src/klayout_tools/functional_verification.py",
+      "lines": 4355
+    },
+    {
+      "path": "src/klayout_tools/functional_verification_sdf.py",
+      "lines": 2531
+    },
+    {
+      "path": "src/klayout_tools/gen.py",
+      "lines": 4403
+    },
+    {
+      "path": "src/klayout_tools/gen_compose.py",
+      "lines": 5127
+    },
+    {
+      "path": "src/klayout_tools/gen_compose_port_access.py",
+      "lines": 709
+    },
+    {
+      "path": "src/klayout_tools/gen_compose_routing.py",
+      "lines": 5525
+    },
+    {
+      "path": "src/klayout_tools/gen_describe.py",
+      "lines": 3230
+    },
+    {
+      "path": "src/klayout_tools/gen_layer_params.py",
+      "lines": 2895
+    },
+    {
+      "path": "src/klayout_tools/gen_layer_tables.py",
+      "lines": 1021
+    },
+    {
+      "path": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "lines": 579
+    },
+    {
+      "path": "src/klayout_tools/gen_pcells/esd_device.py",
+      "lines": 507
+    },
+    {
+      "path": "src/klayout_tools/gen_pcells/mos_array.py",
+      "lines": 904
+    },
+    {
+      "path": "src/klayout_tools/kb.py",
+      "lines": 597
+    },
+    {
+      "path": "src/klayout_tools/layout_plan.py",
+      "lines": 897
+    },
+    {
+      "path": "src/klayout_tools/layout_plan_execute.py",
+      "lines": 1255
+    },
+    {
+      "path": "src/klayout_tools/lef_abstract.py",
+      "lines": 1475
+    },
+    {
+      "path": "src/klayout_tools/liberty_compare.py",
+      "lines": 780
+    },
+    {
+      "path": "src/klayout_tools/liberty_writer.py",
+      "lines": 550
+    },
+    {
+      "path": "src/klayout_tools/lvs.py",
+      "lines": 7484
+    },
+    {
+      "path": "src/klayout_tools/lvs_combine.py",
+      "lines": 1610
+    },
+    {
+      "path": "src/klayout_tools/lvs_finfet.py",
+      "lines": 538
+    },
+    {
+      "path": "src/klayout_tools/lvs_gate_level.py",
+      "lines": 960
+    },
+    {
+      "path": "src/klayout_tools/lvs_mismatch.py",
+      "lines": 2578
+    },
+    {
+      "path": "src/klayout_tools/lvs_netgen.py",
+      "lines": 914
+    },
+    {
+      "path": "src/klayout_tools/lvs_power.py",
+      "lines": 823
+    },
+    {
+      "path": "src/klayout_tools/lvs_runset.py",
+      "lines": 1033
+    },
+    {
+      "path": "src/klayout_tools/macros.py",
+      "lines": 668
+    },
+    {
+      "path": "src/klayout_tools/mcp_tools.py",
+      "lines": 505
+    },
+    {
+      "path": "src/klayout_tools/metrics.py",
+      "lines": 521
+    },
+    {
+      "path": "src/klayout_tools/mom.py",
+      "lines": 716
+    },
+    {
+      "path": "src/klayout_tools/netlist.py",
+      "lines": 1221
+    },
+    {
+      "path": "src/klayout_tools/netlist_batch.py",
+      "lines": 920
+    },
+    {
+      "path": "src/klayout_tools/netlist_capacitor_recovery.py",
+      "lines": 668
+    },
+    {
+      "path": "src/klayout_tools/netlist_normalize.py",
+      "lines": 2362
+    },
+    {
+      "path": "src/klayout_tools/op_sanity.py",
+      "lines": 1849
+    },
+    {
+      "path": "src/klayout_tools/parasitic_integrity.py",
+      "lines": 906
+    },
+    {
+      "path": "src/klayout_tools/pdk.py",
+      "lines": 2588
+    },
+    {
+      "path": "src/klayout_tools/pdk_cells.py",
+      "lines": 807
+    },
+    {
+      "path": "src/klayout_tools/pdk_models.py",
+      "lines": 2323
+    },
+    {
+      "path": "src/klayout_tools/pdk_pcell.py",
+      "lines": 1034
+    },
+    {
+      "path": "src/klayout_tools/pdk_stackup.py",
+      "lines": 819
+    },
+    {
+      "path": "src/klayout_tools/pex.py",
+      "lines": 3957
+    },
+    {
+      "path": "src/klayout_tools/place_and_route.py",
+      "lines": 3406
+    },
+    {
+      "path": "src/klayout_tools/place_and_route_batch.py",
+      "lines": 714
+    },
+    {
+      "path": "src/klayout_tools/place_and_route_gds_merge.py",
+      "lines": 775
+    },
+    {
+      "path": "src/klayout_tools/place_and_route_power_audit.py",
+      "lines": 776
+    },
+    {
+      "path": "src/klayout_tools/place_and_route_request.py",
+      "lines": 2426
+    },
+    {
+      "path": "src/klayout_tools/place_and_route_script.py",
+      "lines": 1439
+    },
+    {
+      "path": "src/klayout_tools/place_and_route_sta.py",
+      "lines": 1175
+    },
+    {
+      "path": "src/klayout_tools/post_route_sta.py",
+      "lines": 4958
+    },
+    {
+      "path": "src/klayout_tools/power.py",
+      "lines": 2606
+    },
+    {
+      "path": "src/klayout_tools/power_intent.py",
+      "lines": 595
+    },
+    {
+      "path": "src/klayout_tools/precheck.py",
+      "lines": 515
+    },
+    {
+      "path": "src/klayout_tools/probit.py",
+      "lines": 838
+    },
+    {
+      "path": "src/klayout_tools/remote_fleet.py",
+      "lines": 774
+    },
+    {
+      "path": "src/klayout_tools/remote_launcher.py",
+      "lines": 1789
+    },
+    {
+      "path": "src/klayout_tools/remote_transport.py",
+      "lines": 622
+    },
+    {
+      "path": "src/klayout_tools/reset_coverage.py",
+      "lines": 527
+    },
+    {
+      "path": "src/klayout_tools/ring_check.py",
+      "lines": 585
+    },
+    {
+      "path": "src/klayout_tools/signoff.py",
+      "lines": 8395
+    },
+    {
+      "path": "src/klayout_tools/signoff_attest.py",
+      "lines": 1427
+    },
+    {
+      "path": "src/klayout_tools/signoff_generator_batch.py",
+      "lines": 705
+    },
+    {
+      "path": "src/klayout_tools/signoff_power_delivery.py",
+      "lines": 2034
+    },
+    {
+      "path": "src/klayout_tools/sim.py",
+      "lines": 14495
+    },
+    {
+      "path": "src/klayout_tools/sim_batch.py",
+      "lines": 6000
+    },
+    {
+      "path": "src/klayout_tools/sim_commands.py",
+      "lines": 925
+    },
+    {
+      "path": "src/klayout_tools/sim_decks.py",
+      "lines": 2371
+    },
+    {
+      "path": "src/klayout_tools/sim_remote.py",
+      "lines": 1146
+    },
+    {
+      "path": "src/klayout_tools/sim_search.py",
+      "lines": 573
+    },
+    {
+      "path": "src/klayout_tools/sim_staging.py",
+      "lines": 1245
+    },
+    {
+      "path": "src/klayout_tools/sim_steps.py",
+      "lines": 1323
+    },
+    {
+      "path": "src/klayout_tools/sim_tian.py",
+      "lines": 567
+    },
+    {
+      "path": "src/klayout_tools/sim_transfer.py",
+      "lines": 948
+    },
+    {
+      "path": "src/klayout_tools/sim_twoport.py",
+      "lines": 657
+    },
+    {
+      "path": "src/klayout_tools/sim_validate.py",
+      "lines": 534
+    },
+    {
+      "path": "src/klayout_tools/size.py",
+      "lines": 2115
+    },
+    {
+      "path": "src/klayout_tools/size_topology.py",
+      "lines": 1194
+    },
+    {
+      "path": "src/klayout_tools/socket_check.py",
+      "lines": 1137
+    },
+    {
+      "path": "src/klayout_tools/spice_flatten.py",
+      "lines": 847
+    },
+    {
+      "path": "src/klayout_tools/stats.py",
+      "lines": 509
+    },
+    {
+      "path": "src/klayout_tools/substrate_resistance.py",
+      "lines": 505
+    },
+    {
+      "path": "src/klayout_tools/synthesize.py",
+      "lines": 4686
+    },
+    {
+      "path": "src/klayout_tools/synthesize_arithmetic.py",
+      "lines": 848
+    },
+    {
+      "path": "src/klayout_tools/tap_distance.py",
+      "lines": 599
+    },
+    {
+      "path": "src/klayout_tools/trajectory.py",
+      "lines": 646
+    },
+    {
+      "path": "src/klayout_tools/verilog_netlist.py",
+      "lines": 1558
+    },
+    {
+      "path": "src/klayout_tools/yield_analysis.py",
+      "lines": 1319
+    },
+    {
+      "path": "src/klayout_tools/yield_campaign.py",
+      "lines": 570
+    },
+    {
+      "path": "tests/corpus/place_and_route_tt_validation/run_validation.py",
+      "lines": 547
+    },
+    {
+      "path": "tests/corpus/synth_e2e_validation/run_validation.py",
+      "lines": 599
+    },
+    {
+      "path": "tests/corpus/synth_observability/run_experiments.py",
+      "lines": 718
+    },
+    {
+      "path": "tests/golden_deck/generate_golden_deck.py",
+      "lines": 1084
+    },
+    {
+      "path": "tests/helpers/asap7_drc_fixtures.py",
+      "lines": 2529
+    },
+    {
+      "path": "tests/helpers/fastcap_oracle.py",
+      "lines": 741
+    },
+    {
+      "path": "tests/helpers/gf180mcu_comp_spike.py",
+      "lines": 872
+    },
+    {
+      "path": "tests/helpers/identity_contract_v1.py",
+      "lines": 1293
+    },
+    {
+      "path": "tests/helpers/magic_oracle.py",
+      "lines": 982
+    },
+    {
+      "path": "tests/test_arith_gen.py",
+      "lines": 516
+    },
+    {
+      "path": "tests/test_artifact_determinism.py",
+      "lines": 1498
+    },
+    {
+      "path": "tests/test_artifact_store.py",
+      "lines": 970
+    },
+    {
+      "path": "tests/test_asap7_finfet.py",
+      "lines": 1627
+    },
+    {
+      "path": "tests/test_bootstrap_auditor_python.py",
+      "lines": 603
+    },
+    {
+      "path": "tests/test_build_identity.py",
+      "lines": 702
+    },
+    {
+      "path": "tests/test_characterize.py",
+      "lines": 2283
+    },
+    {
+      "path": "tests/test_characterize_vendor_comparison.py",
+      "lines": 654
+    },
+    {
+      "path": "tests/test_check_file_size_baseline.py",
+      "lines": 1053
+    },
+    {
+      "path": "tests/test_checked_work_integration.py",
+      "lines": 559
+    },
+    {
+      "path": "tests/test_ci_apt_install.py",
+      "lines": 1074
+    },
+    {
+      "path": "tests/test_ci_wall_clock.py",
+      "lines": 2054
+    },
+    {
+      "path": "tests/test_components.py",
+      "lines": 697
+    },
+    {
+      "path": "tests/test_deck_history.py",
+      "lines": 1285
+    },
+    {
+      "path": "tests/test_design_agent_benchmark.py",
+      "lines": 3291
+    },
+    {
+      "path": "tests/test_design_agent_benchmark_layout.py",
+      "lines": 840
+    },
+    {
+      "path": "tests/test_design_agent_benchmark_layout_exec.py",
+      "lines": 641
+    },
+    {
+      "path": "tests/test_design_centering.py",
+      "lines": 560
+    },
+    {
+      "path": "tests/test_design_evidence_tiers.py",
+      "lines": 501
+    },
+    {
+      "path": "tests/test_digital_fleet.py",
+      "lines": 854
+    },
+    {
+      "path": "tests/test_digital_flow_eval_trajectory.py",
+      "lines": 696
+    },
+    {
+      "path": "tests/test_draw.py",
+      "lines": 1036
+    },
+    {
+      "path": "tests/test_drc.py",
+      "lines": 11775
+    },
+    {
+      "path": "tests/test_drc_asap7_deck.py",
+      "lines": 926
+    },
+    {
+      "path": "tests/test_drc_klayout_engine.py",
+      "lines": 3318
+    },
+    {
+      "path": "tests/test_economy.py",
+      "lines": 1062
+    },
+    {
+      "path": "tests/test_env_provenance.py",
+      "lines": 726
+    },
+    {
+      "path": "tests/test_equiv.py",
+      "lines": 3841
+    },
+    {
+      "path": "tests/test_equiv_resume.py",
+      "lines": 1093
+    },
+    {
+      "path": "tests/test_erc.py",
+      "lines": 9941
+    },
+    {
+      "path": "tests/test_eval.py",
+      "lines": 1591
+    },
+    {
+      "path": "tests/test_extract.py",
+      "lines": 27794
+    },
+    {
+      "path": "tests/test_extract_resistance_graph.py",
+      "lines": 901
+    },
+    {
+      "path": "tests/test_functional_verification.py",
+      "lines": 6588
+    },
+    {
+      "path": "tests/test_functional_verification_identity_contract.py",
+      "lines": 1307
+    },
+    {
+      "path": "tests/test_functional_verification_sdf_ifnone_edge.py",
+      "lines": 586
+    },
+    {
+      "path": "tests/test_gen.py",
+      "lines": 12392
+    },
+    {
+      "path": "tests/test_gen_compose.py",
+      "lines": 17537
+    },
+    {
+      "path": "tests/test_gen_pdk_pcell.py",
+      "lines": 1084
+    },
+    {
+      "path": "tests/test_ingest_canary.py",
+      "lines": 932
+    },
+    {
+      "path": "tests/test_ir_solver_numpy_crosscheck.py",
+      "lines": 672
+    },
+    {
+      "path": "tests/test_kb_cmd.py",
+      "lines": 1352
+    },
+    {
+      "path": "tests/test_layers.py",
+      "lines": 641
+    },
+    {
+      "path": "tests/test_layout_metrics.py",
+      "lines": 585
+    },
+    {
+      "path": "tests/test_layout_plan.py",
+      "lines": 747
+    },
+    {
+      "path": "tests/test_layout_plan_execute.py",
+      "lines": 1266
+    },
+    {
+      "path": "tests/test_lef_abstract.py",
+      "lines": 1724
+    },
+    {
+      "path": "tests/test_lef_header.py",
+      "lines": 675
+    },
+    {
+      "path": "tests/test_lvs.py",
+      "lines": 26332
+    },
+    {
+      "path": "tests/test_lvs_device_provenance.py",
+      "lines": 1398
+    },
+    {
+      "path": "tests/test_lvs_klayout_runset.py",
+      "lines": 576
+    },
+    {
+      "path": "tests/test_lvs_magic_oracle.py",
+      "lines": 839
+    },
+    {
+      "path": "tests/test_lvs_native_extraction_cross_check.py",
+      "lines": 790
+    },
+    {
+      "path": "tests/test_lvs_native_extraction_cross_check_gf180mcu.py",
+      "lines": 800
+    },
+    {
+      "path": "tests/test_macros.py",
+      "lines": 543
+    },
+    {
+      "path": "tests/test_mom.py",
+      "lines": 1554
+    },
+    {
+      "path": "tests/test_mom_capacitance_oracle.py",
+      "lines": 883
+    },
+    {
+      "path": "tests/test_mom_validation.py",
+      "lines": 798
+    },
+    {
+      "path": "tests/test_netlist.py",
+      "lines": 1845
+    },
+    {
+      "path": "tests/test_netlist_batch.py",
+      "lines": 1119
+    },
+    {
+      "path": "tests/test_op_sanity.py",
+      "lines": 1820
+    },
+    {
+      "path": "tests/test_output_lock.py",
+      "lines": 677
+    },
+    {
+      "path": "tests/test_parasitic_integrity.py",
+      "lines": 799
+    },
+    {
+      "path": "tests/test_pdk.py",
+      "lines": 3303
+    },
+    {
+      "path": "tests/test_pdk_cells.py",
+      "lines": 1183
+    },
+    {
+      "path": "tests/test_pdk_pcell_diagnostics.py",
+      "lines": 800
+    },
+    {
+      "path": "tests/test_pdk_stackup.py",
+      "lines": 881
+    },
+    {
+      "path": "tests/test_pex.py",
+      "lines": 7558
+    },
+    {
+      "path": "tests/test_place_and_route.py",
+      "lines": 12414
+    },
+    {
+      "path": "tests/test_place_and_route_batch.py",
+      "lines": 614
+    },
+    {
+      "path": "tests/test_place_and_route_min_area.py",
+      "lines": 542
+    },
+    {
+      "path": "tests/test_post_route_sta.py",
+      "lines": 7821
+    },
+    {
+      "path": "tests/test_power.py",
+      "lines": 4271
+    },
+    {
+      "path": "tests/test_precheck.py",
+      "lines": 864
+    },
+    {
+      "path": "tests/test_provenance.py",
+      "lines": 859
+    },
+    {
+      "path": "tests/test_remote_fleet.py",
+      "lines": 725
+    },
+    {
+      "path": "tests/test_remote_launcher.py",
+      "lines": 1953
+    },
+    {
+      "path": "tests/test_render.py",
+      "lines": 746
+    },
+    {
+      "path": "tests/test_restructure.py",
+      "lines": 599
+    },
+    {
+      "path": "tests/test_ring_check.py",
+      "lines": 714
+    },
+    {
+      "path": "tests/test_sg13cmos5l_deck.py",
+      "lines": 2618
+    },
+    {
+      "path": "tests/test_sg13g2_deck.py",
+      "lines": 2412
+    },
+    {
+      "path": "tests/test_signoff.py",
+      "lines": 18445
+    },
+    {
+      "path": "tests/test_signoff_generator_batch.py",
+      "lines": 728
+    },
+    {
+      "path": "tests/test_sim.py",
+      "lines": 15886
+    },
+    {
+      "path": "tests/test_sim_batch.py",
+      "lines": 8343
+    },
+    {
+      "path": "tests/test_sim_batch_async.py",
+      "lines": 841
+    },
+    {
+      "path": "tests/test_sim_commands.py",
+      "lines": 514
+    },
+    {
+      "path": "tests/test_sim_crossings.py",
+      "lines": 557
+    },
+    {
+      "path": "tests/test_sim_decks.py",
+      "lines": 2367
+    },
+    {
+      "path": "tests/test_sim_nodeset.py",
+      "lines": 877
+    },
+    {
+      "path": "tests/test_sim_params.py",
+      "lines": 897
+    },
+    {
+      "path": "tests/test_sim_save_mode.py",
+      "lines": 627
+    },
+    {
+      "path": "tests/test_sim_staging.py",
+      "lines": 955
+    },
+    {
+      "path": "tests/test_sim_steps.py",
+      "lines": 1718
+    },
+    {
+      "path": "tests/test_sim_tian.py",
+      "lines": 873
+    },
+    {
+      "path": "tests/test_sim_transfer.py",
+      "lines": 526
+    },
+    {
+      "path": "tests/test_sim_transfer_meas.py",
+      "lines": 764
+    },
+    {
+      "path": "tests/test_sim_twoport.py",
+      "lines": 735
+    },
+    {
+      "path": "tests/test_size.py",
+      "lines": 3437
+    },
+    {
+      "path": "tests/test_socket_check.py",
+      "lines": 988
+    },
+    {
+      "path": "tests/test_stats.py",
+      "lines": 700
+    },
+    {
+      "path": "tests/test_substrate_resistance.py",
+      "lines": 580
+    },
+    {
+      "path": "tests/test_synthesize.py",
+      "lines": 7443
+    },
+    {
+      "path": "tests/test_synthesize_arithmetic.py",
+      "lines": 566
+    },
+    {
+      "path": "tests/test_trajectory.py",
+      "lines": 555
+    },
+    {
+      "path": "tests/test_yield.py",
+      "lines": 2825
+    },
+    {
+      "path": "tests/test_yield_campaign.py",
+      "lines": 1033
+    }
+  ],
+  "vendor_hashes": []
+}
