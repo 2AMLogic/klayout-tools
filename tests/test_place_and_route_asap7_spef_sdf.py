@@ -30,13 +30,13 @@ from pathlib import Path
 import pytest
 
 from klayout_tools.place_and_route import run_place_and_route
-from klayout_tools.place_and_route_request import PlaceAndRouteError
 
 _ASAP7 = Path(__file__).resolve().parent.parent / "pdks/lambdapdk/lambdapdk/asap7"
 _RVT = _ASAP7 / "libs/asap7sc7p5t_rvt"
 _LIB_GZ = _RVT / "nldm/asap7sc7p5t_INVBUF_RVT_TT_nldm.lib.gz"
 _CELL_LEF = _RVT / "lef/asap7sc7p5t_28_R.lef"
 _TECH_LEF = _ASAP7 / "base/apr/asap7_tech.lef"
+_LAYERMAP = _ASAP7 / "base/apr/asap7.layermap"
 _CELL_GDS_GZ = _RVT / "gds/asap7sc7p5t_28_R.gds.gz"
 _CELL_LIBRARY = "asap7sc7p5t_rvt"
 _INV = "INVx1_ASAP7_75t_R"
@@ -45,7 +45,9 @@ if shutil.which("openroad") is None:
     _SKIP_REASON = "openroad is not installed on this machine"
 elif os.environ.get("KLT_SKIP_OPENROAD_TESTS") == "1":
     _SKIP_REASON = "KLT_SKIP_OPENROAD_TESTS=1 is set"
-elif not all(p.is_file() for p in (_LIB_GZ, _CELL_LEF, _TECH_LEF, _CELL_GDS_GZ)):
+elif not all(
+    p.is_file() for p in (_LIB_GZ, _CELL_LEF, _TECH_LEF, _CELL_GDS_GZ, _LAYERMAP)
+):
     _SKIP_REASON = (
         "pinned lambdapdk ASAP7 libraries not found under pdks/lambdapdk -- "
         "run scripts/fetch-pdks.sh to enable this test"
@@ -95,7 +97,12 @@ def _gunzip(src: Path, dest: Path) -> None:
 def _make_asap7_install(root: Path) -> None:
     """Minimal open_pdks-shaped ``asap7A`` variant from the pinned lambdapdk."""
     lib = root / "asap7A/libs.ref" / _CELL_LIBRARY
-    (root / "asap7A/libs.tech").mkdir(parents=True)
+    klayout_tech = root / "asap7A/libs.tech/klayout/tech"
+    klayout_tech.mkdir(parents=True)
+    # Without a LEF/DEF layer map the DEF->GDS merge falls back to KLayout's
+    # sequential layer numbering, which the asap7 extraction deck cannot see
+    # (issue #4705): extraction then finds no routed nets.
+    shutil.copy(_LAYERMAP, klayout_tech / "asap7A.map")
     # The INVBUF liberty is the one library group holding the inverter and
     # the clock buffer; the other ASAP7 liberties are separate groups and
     # cannot be concatenated into one file.
@@ -141,12 +148,6 @@ def _request() -> dict:
     }
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=PlaceAndRouteError,
-    reason="#4705: klt extract writes an empty SPEF for the routed ASAP7 block "
-    "and OpenSTA rejects it (STA-1670); drop this marker when #4705 is fixed",
-)
 def test_asap7_route_with_post_route_spef_and_sdf(
     tmp_path, monkeypatch, record_property
 ):
