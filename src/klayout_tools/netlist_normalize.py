@@ -2114,6 +2114,41 @@ def _convert_plain_r_card(
     return card
 
 
+def _convert_plain_c_card(
+    line: str,
+    subckt_to_binding: dict[str, DeviceLookup] | None,
+    geometry_style: str | None,
+    placeholder_value_classes: dict[str, str],
+    param_scopes: ParamScopes,
+    subckt_scope: str,
+    call_overrides: CallOverrides,
+) -> str:
+    """Give a foundry-style ``C<name> n1 n2 <model> W=.. L=.. [M=..]`` card (no
+    value token) the shape KLayout's reader needs, by routing it through the
+    ``X``-call capacitor conversion (issue #4729). A card with a value token,
+    or whose model names no curated capacitor, is returned unchanged."""
+    tokens = _tokenize(line.strip())
+    positional, _ = _split_params(tokens)
+    # name + 2 terminals + model
+    if len(positional) != 4 or not subckt_to_binding:
+        return line
+    lookup = subckt_to_binding.get(positional[-1]) or subckt_to_binding.get(
+        positional[-1].lower()
+    )
+    if lookup is None or lookup.kind != "capacitor":
+        return line
+    as_x = "X" + tokens[0][1:] + line.strip()[len(tokens[0]) :]
+    return _convert_x_card(
+        as_x,
+        subckt_to_binding,
+        geometry_style=geometry_style,
+        placeholder_value_classes=placeholder_value_classes,
+        param_scopes=param_scopes,
+        subckt_scope=subckt_scope,
+        call_overrides=call_overrides,
+    )
+
+
 def convert_reference_netlist(
     text: str,
     *,
@@ -2232,6 +2267,18 @@ def convert_reference_netlist(
                 out.append(line)
         elif sim_model_classes and first and first[0] in "Mm":
             out.append(_rewrite_m_card_model(line, sim_model_classes))
+        elif subckt_to_binding and first and first[0] in "Cc":
+            out.append(
+                _convert_plain_c_card(
+                    line,
+                    subckt_to_binding,
+                    geometry_style,
+                    placeholder_value_classes,
+                    param_scopes,
+                    subckt_scope,
+                    call_overrides,
+                )
+            )
         elif plain_resistor_classes and first and first[0] in "Rr":
             out.append(
                 _convert_plain_r_card(

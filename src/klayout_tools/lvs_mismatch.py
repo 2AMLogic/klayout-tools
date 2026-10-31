@@ -735,6 +735,70 @@ def _flavour_families(deck: Any) -> list[tuple[str, str, list[str]]]:
     return families
 
 
+def _flavour_selection_warnings(
+    reference_netlist: Any, deck: Any
+) -> list[dict[str, Any]]:
+    """Issue #4729: warn when the reference instantiates exactly one class of a
+    shared-geometry flavour family (:func:`_flavour_families`) and it is not the
+    class this run's ``deck_options`` selected -- e.g. a reference naming
+    ``PPOLYF_U_3K`` while ``poly_res`` defaulted to ``1k``.
+
+    The class is a whole-run deck option, never read from the drawn geometry, so
+    the layout is extracted under the selected name and the compare reports a
+    ``device.class`` cascade; this warning names both values and the option
+    value that would select the reference's class. Warning only: it never
+    changes ``status`` and the verdict is unaffected.
+    """
+    from .lvs import CATEGORY_DEVICE_FLAVOUR_MISMATCH
+
+    if reference_netlist is None or deck is None:
+        return []
+    instantiated: dict[str, str] = {}
+    for circuit in reference_netlist.each_circuit():
+        for device in circuit.each_device():
+            device_class = device.device_class()
+            if device_class is not None:
+                instantiated.setdefault(device_class.name.upper(), device_class.name)
+    if not instantiated:
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for kind, entries_of_kind in (
+        ("resistor", getattr(deck, "resistors", ())),
+        ("capacitor", getattr(deck, "capacitors", ())),
+    ):
+        for entry in entries_of_kind:
+            option = getattr(entry, "flavour_option", None)
+            flavours = getattr(entry, "flavours", ())
+            if option is None or len(flavours) < 2:
+                continue
+            found = [f for f in flavours if f.name.upper() in instantiated]
+            if len(found) != 1 or found[0].name.upper() == entry.name.upper():
+                continue  # none, several (handled elsewhere) or the selected one
+            wanted = found[0]
+            entries.append(
+                _mismatch(
+                    CATEGORY_DEVICE_FLAVOUR_MISMATCH,
+                    "warning",
+                    f"the reference instantiates '{instantiated[wanted.name.upper()]}' "
+                    f"but the deck option '{option}' selected '{entry.name}' for "
+                    f"this run; the {kind} class is a whole-run deck option, not "
+                    "read from the layout. Set "
+                    f'`layout.deck_options.{option}: "{wanted.value}"` if the '
+                    "design was built for that class",
+                    "both",
+                    details={
+                        "option": option,
+                        "device_kind": kind,
+                        "selected_class": entry.name,
+                        "reference_class": instantiated[wanted.name.upper()],
+                        "suggested_value": wanted.value,
+                    },
+                )
+            )
+    return entries
+
+
 def _device_class_family_findings(
     reference_netlist: Any, deck: Any
 ) -> list[dict[str, Any]]:
@@ -978,6 +1042,136 @@ def _split_dangling_output_ambiguity(logger: Any) -> _DanglingSplit:
     return _DanglingSplit(kept_nets, kept_keys, remaining_subs, entries)
 
 
+class _UnmergedFingers(NamedTuple):
+    """Result of :func:`_group_unmerged_fingers` (issue #4729)."""
+
+    consumed: set[int]
+    entries: list[dict[str, Any]]
+
+
+def _device_param(device: Any, name: str) -> float | None:
+    for definition in device.device_class().parameter_definitions():
+        if definition.name.upper() == name:
+            return device.parameter(definition.id())
+    return None
+
+
+def _device_terminal_key(device: Any) -> tuple[Any, ...] | None:
+    """Hashable terminal connectivity of ``device`` (net cluster ids, source
+    and drain treated as interchangeable), or ``None`` if a terminal floats."""
+    nets: dict[str, int | None] = {}
+    for terminal in device.device_class().terminal_definitions():
+        net = device.net_for_terminal(terminal.id())
+        nets[terminal.name.upper()] = None if net is None else net.cluster_id
+    if None in nets.values():
+        return None
+    if "S" in nets and "D" in nets:
+        nets["S"], nets["D"] = sorted((nets["S"], nets["D"]))  # type: ignore[type-var]
+    return tuple(sorted(nets.items()))
+
+
+def _group_unmerged_fingers(
+    unmatched: Sequence[tuple[Any, Any]],
+    param_pairs: Sequence[tuple[Any, Any]],
+) -> _UnmergedFingers:
+    """Issue #4729: diagnose parallel fingers left unmerged (no
+    ``options.combine_devices``) against a reference holding one device of the
+    summed width.
+
+    Layout candidates are the one-sided layout-unmatched devices plus the layout
+    side of ``device.property`` pairs; reference candidates are the one-sided
+    reference-unmatched devices plus the reference side of those pairs. Layout
+    devices of the same class, length and terminal nets whose widths sum to a
+    reference device's width (and number at least two) are reported as one
+    ``device.unmerged_fingers`` finding naming the group, replacing the
+    per-finger ``device.unmatched``/``device.property`` entries. Nothing is
+    guessed: unequal summed width, differing length or differing terminal nets
+    leave the group untouched. Error severity is kept -- only the wording and
+    grouping change.
+    """
+    from .lvs import CATEGORY_DEVICE_UNMERGED_FINGERS, _name_or_none
+
+    layout_devices = [a for a, b in unmatched if b is None]
+    layout_devices += [a for a, _b in param_pairs]
+    reference_devices = [b for a, b in unmatched if a is None]
+    reference_devices += [b for _a, b in param_pairs]
+    paired_reference = {id(a): b for a, b in param_pairs}
+
+    groups: dict[tuple[Any, ...], list[Any]] = {}
+    for device in layout_devices:
+        width = _device_param(device, "W")
+        length = _device_param(device, "L")
+        key = _device_terminal_key(device)
+        if width is None or length is None or key is None:
+            continue
+        circuit = device.circuit() if hasattr(device, "circuit") else None
+        groups.setdefault(
+            (
+                device.device_class().name,
+                circuit.name if circuit is not None else None,
+                round(length, 9),
+                key,
+            ),
+            [],
+        ).append(device)
+
+    consumed: set[int] = set()
+    entries: list[dict[str, Any]] = []
+    used_reference: set[int] = set()
+    for key, fingers in groups.items():
+        if len(fingers) < 2:
+            continue
+        total = sum(_device_param(f, "W") or 0.0 for f in fingers)
+        target = next(
+            (
+                r
+                for r in reference_devices
+                if id(r) not in used_reference
+                and r.device_class().name == key[0]
+                and (rl := _device_param(r, "L")) is not None
+                and round(rl, 9) == key[2]
+                and (rw := _device_param(r, "W")) is not None
+                and not _values_differ(total, rw)
+            ),
+            None,
+        )
+        if target is None:
+            continue
+        used_reference.add(id(target))
+        consumed.update(id(f) for f in fingers)
+        consumed.add(id(target))
+        for finger in fingers:
+            if id(finger) in paired_reference:
+                consumed.add(id(paired_reference[id(finger)]))
+        names = [_name_or_none(f) for f in fingers]
+        entries.append(
+            _mismatch(
+                CATEGORY_DEVICE_UNMERGED_FINGERS,
+                "error",
+                f"{len(fingers)} parallel layout fingers of class '{key[0]}' "
+                f"(same terminals, L={key[2]:g}) sum to W={total:g}, the width "
+                "of one reference device; the fingers were not merged. Set "
+                "options.combine_devices: true to compare them as one device "
+                "(see docs/cli/lvs.md, 'device.unmerged_fingers')",
+                "both",
+                device={
+                    "layout": names[0],
+                    "reference": _name_or_none(target),
+                    "class": key[0],
+                },
+                details={
+                    "fingers": names,
+                    "finger_count": len(fingers),
+                    "summed_w_um": total,
+                    "reference_w_um": _device_param(target, "W"),
+                    "l_um": key[2],
+                    "suggested_option": "options.combine_devices",
+                },
+            )
+        )
+    return _UnmergedFingers(consumed, entries)
+
+
 def _build_mismatches(
     logger: Any,
     layout_netlist: Any | None = None,
@@ -1053,7 +1247,17 @@ def _build_mismatches(
         )
     )
 
+    unmerged = _group_unmerged_fingers(
+        [(a, b) for a, b in logger.device_mismatches if a is None or b is None],
+        list(logger.param_mismatches),
+    )
+    mismatches.extend(unmerged.entries)
+
     for a, b in logger.device_mismatches:
+        if (a is not None and id(a) in unmerged.consumed) or (
+            b is not None and id(b) in unmerged.consumed
+        ):
+            continue
         arity_mismatch = _device_class_arity_mismatch(a, b)
         if arity_mismatch is not None:
             # Issue #504: both `a`/`b` are present here (the comparer found
@@ -1103,6 +1307,8 @@ def _build_mismatches(
         )
 
     for a, b in logger.param_mismatches:
+        if id(a) in unmerged.consumed:
+            continue
         mismatches.extend(_classify_param_mismatch(a, b, excluded_parameters))
 
     for a, b in logger.class_mismatches:
@@ -1786,6 +1992,37 @@ def _degraded_param_pair(
     )
 
 
+#: Display names of the geometry-derived MOS parameters (source/drain area and
+#: perimeter) that follow from ``w_um`` -- grouped under a ``w_um`` finding
+#: instead of listed as separate errors (issue #4729).
+_DERIVED_FROM_W = frozenset({"as", "ad", "ps", "pd"})
+
+
+def _fold_derived_param_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fold ``as``/``ad``/``ps``/``pd`` ``device.property`` entries into the
+    same pair's ``w_um`` entry as ``details.derived`` (issue #4729).
+
+    Additive: the ``w_um`` entry keeps its shape and gains ``details``; a pair
+    whose ``w_um`` does not differ keeps its derived entries as they were
+    (they are then the only signal). Folded entries stay errors' evidence --
+    nothing about the verdict changes.
+    """
+    primary = next(
+        (e for e in entries if (e.get("property") or {}).get("name") == "w_um"), None
+    )
+    if primary is None:
+        return entries
+    derived = [
+        e["property"]
+        for e in entries
+        if (e.get("property") or {}).get("name") in _DERIVED_FROM_W
+    ]
+    if not derived:
+        return entries
+    primary["details"] = {**(primary.get("details") or {}), "derived": derived}
+    return [e for e in entries if e["property"]["name"] not in _DERIVED_FROM_W]
+
+
 def _classify_param_mismatch(
     a: Any,
     b: Any,
@@ -1836,6 +2073,7 @@ def _classify_param_mismatch(
                     },
                 )
             )
+    entries = _fold_derived_param_entries(entries)
     if not entries:
         # The comparer's own (stricter) tolerance flagged a difference this
         # module's parameter-by-parameter epsilon didn't reproduce -- report
