@@ -44,6 +44,8 @@ from collections.abc import Callable
 from statistics import NormalDist
 from typing import Any
 
+from ._jsonnum import is_finite_number
+
 SCHEMA_VERSION = 1
 
 DEFAULT_CONFIDENCE = 0.95
@@ -664,11 +666,7 @@ def _load(path: str) -> tuple[Any, str]:
 
 
 def _number(value: Any, where: str) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-    ):
+    if not is_finite_number(value):
         raise ThresholdError(f"{where} must be a finite number, got {value!r}")
     return float(value)
 

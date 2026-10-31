@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_passes, sim_twoport
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 
 #: Reason tokens a failed ``search`` entry's diagnostic message leads with.
@@ -139,11 +140,7 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
 
 def _number(name: Any, body: dict[str, Any], key: str) -> float:
     value = body.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SimError(
-            f"measurement '{name}': search.{key} must be a finite number; got {value!r}"
-        )
-    if not math.isfinite(value):
+    if not is_finite_number(value):
         raise SimError(
             f"measurement '{name}': search.{key} must be a finite number; got {value!r}"
         )

@@ -256,6 +256,7 @@ from typing import Any
 
 from . import env_provenance
 from . import macros as macro_spec
+from ._jsonnum import is_finite_number
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -2266,7 +2267,7 @@ def _validate_load_value(value: Any, field: str) -> float | None:
     non-boolean number ``>= 0``."""
     if value is None:
         return None
-    if not _is_finite_number(value) or value < 0:
+    if not is_finite_number(value) or value < 0:
         raise PostRouteStaError(f"{field} must be a finite non-negative number")
     return float(value)
 
@@ -2276,18 +2277,9 @@ def _validate_transition_value(value: Any, field: str) -> float | None:
     non-boolean number ``>= 0`` (``0`` is an ideal edge)."""
     if value is None:
         return None
-    if not _is_finite_number(value) or value < 0:
+    if not is_finite_number(value) or value < 0:
         raise PostRouteStaError(f"{field} must be a finite non-negative number")
     return float(value)
-
-
-def _is_finite_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and value == value  # NaN
-        and value not in (float("inf"), float("-inf"))
-    )
 
 
 def _validate_port_delay_maps(
@@ -2383,7 +2375,7 @@ def _parse_port_delay_entry(field: str, port: str, entry: Any) -> dict[str, floa
         if bound not in entry:
             continue
         bound_value = entry[bound]
-        if not _is_finite_number(bound_value):
+        if not is_finite_number(bound_value):
             raise PostRouteStaError(
                 f"{field}[{port!r}].{bound} must be a finite number "
                 f"(got {bound_value!r})"
