@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-31
 
+- **PR #4684**: refactor: share JSON number predicates via _jsonnum
+- **Issue #4672** (closed): Consolidate duplicated finite-number validators into one shared helper
 - **PR #4683**: docs(sim): state dry-run published_runner is absent for an enforced mismatch
 - **Issue #4680** (closed): sim dry-run: published_runner absent when version mismatch is refused under enforce
 - **PR #4681**: fix: stop Liberty attribute values at '{' to avoid cell-list truncation
