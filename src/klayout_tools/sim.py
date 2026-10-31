@@ -4058,9 +4058,13 @@ def _run_sim_corners(
     )
 
     if dry_run:
+        published_runner: dict[str, Any] = {}
         feature_diagnostic = (
             dry_run_runner_check(
-                request, corner_count=len(dispatch_points), timeout_s=timeout_s
+                request,
+                corner_count=len(dispatch_points),
+                timeout_s=timeout_s,
+                runner_out=published_runner,
             )
             if backend == "batch"
             else None
@@ -4068,6 +4072,7 @@ def _run_sim_corners(
         return _build_dry_run_report(
             request,
             feature_diagnostic=feature_diagnostic,
+            published_runner=published_runner or None,
             engine=engine,
             backend=backend,
             hosts=hosts,
@@ -4866,6 +4871,7 @@ def _build_dry_run_report(
     monte_carlo_info: dict[str, Any] | None,
     staged_model_environment: dict[str, list[dict[str, Any]]],
     feature_diagnostic: dict[str, Any] | None = None,
+    published_runner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``klt sim --dry-run`` response (issue #3064): the request as
     :func:`_run_sim_corners` expanded it, with nothing simulated or submitted.
@@ -4906,6 +4912,8 @@ def _build_dry_run_report(
         "staged_files": staged_model_environment.get("staged_model_inputs", []),
         "warnings": warnings,
     }
+    if published_runner is not None:
+        report["published_runner"] = published_runner
     if feature_diagnostic is not None:
         report["diagnostics"] = [feature_diagnostic]
     return report

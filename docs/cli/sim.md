@@ -884,8 +884,8 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
-| `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit. Any other value is rejected before any S3 write. |
-| `batch.max_units_per_job` | integer ≥ 1 | Opt-in cap on the units of one job ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)); `--max-units-per-job` overrides it. With `remote.hosts: 1` the request is split into `ceil(units / N)` balanced jobs, even when it would have fit one. Rejected before any S3 write with `error.code: "batch_max_units_per_job_invalid"` when not a positive integer, when combined with `job_ceiling_check: "enforce"`, or when the resulting jobs would still exceed the ceiling. |
+| `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit (each holds at most `max_units_per_job = floor((max_job_seconds - 120) / options.timeout_s)` units). Any other value is rejected before any S3 write. |
+| `batch.max_units_per_job` | integer ≥ 1 | Opt-in cap on the units of one job ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)); `--max-units-per-job` overrides it. With `remote.hosts: 1` the request is split into `ceil(units / N)` balanced jobs, even when it would have fit one. The largest valid cap is `floor((max_job_seconds - 120) / options.timeout_s)` (`max_job_seconds` defaults to `3600`), so a fixed cap is only valid up to a given `options.timeout_s`; a request that must be valid across clients or timeouts should omit it and use `job_ceiling_check: "split"`. Rejected before any S3 write with `error.code: "batch_max_units_per_job_invalid"` when not a positive integer, when combined with `job_ceiling_check: "enforce"`, or when the resulting jobs would still exceed the ceiling. |
 | `batch.max_concurrent_jobs` | integer ≥ 1 | Opt-in bound on the shard jobs in flight at once for a sharded run (`remote.hosts > 1`, or a split) ([#3914](https://github.com/2AMLogic/klayout-tools/issues/3914)); `--max-concurrent-jobs` overrides it. Unset submits every shard at once, as before. With a cap of K, at most K jobs sit between submit and collected; the remaining shards start as earlier ones finish, and the merge order, `fleet[]`, `batch-shards.json` and `--resume` are unchanged. The effective value is echoed as `environment.remote.max_concurrent_jobs` only when set. Use it to stay under the fleet's instance cap (`BATCH_MAX_CONCURRENT_INSTANCES`) instead of letting refused shards come back as `lost_shard`; it composes with `capacity_wait_s` (a retry of a refused launch, drawing on the run-wide budget) and with `--resume`, which re-submits only the `lost_shard` / failed units. Rejected before any S3 write with `error.code: "batch_max_concurrent_jobs_invalid"` when not a positive integer. |
 
 ### Asynchronous submit and status (`--submit-only`, `--job-status`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073))
@@ -1871,7 +1871,11 @@ the packaged `data/` copy. See
   the build instance. The script refuses to publish an image whose version
   it could not read. `--emit-manifest-entry <ami_id> <klt_version>` prints
   the entry a build would write, with no AWS call. Entries written before
-  #2851 have neither field, which means unknown.
+  #2851 have neither field, which means unknown. **Every rebake must
+  update the packaged `data/remote-sim-ami-manifest.json`** with the new
+  entry's `klt_version`/`klt_ref`; an entry without them leaves the
+  pre-submit check unable to fire, so a skewed client only fails after the
+  submit (runner-side exit 87).
 - **Which images.** For each `(pdk, region)` pair, the check uses the most
   recently built entry, the same entry `resolve_ami()` would pick. Only the
   request's `models.pdk` is considered (every PDK when it names none), and
@@ -1880,7 +1884,11 @@ the packaged `data/` copy. See
 - **`--dry-run`.** `klt sim --backend batch --dry-run` runs this same
   pre-launch check (version mismatch and request-feature gaps), so a
   request the published images cannot run is refused (or, under `warn`,
-  reported in `diagnostics[]`) without a submit. A host with no resolvable
+  reported in `diagnostics[]`) without a submit. The report also carries
+  `published_runner` (`status`: `match`/`mismatch`/`unknown`,
+  `client_klt_version`, and the candidate `images` with their `klt_version`),
+  whatever the status, so the runner `klt` the fleet accepts is readable
+  without a submit ([#4675](https://github.com/2AMLogic/klayout-tools/issues/4675)). A host with no resolvable
   batch configuration (no bucket or provision script) skips the check and
   dry-runs as before. `options.initial_conditions` has no
   registry row: its first-supported runner release is not recorded, so a

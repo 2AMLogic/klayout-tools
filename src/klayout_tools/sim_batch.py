@@ -2109,7 +2109,11 @@ def _resolve_batch_config(
 
 
 def dry_run_runner_check(
-    request: dict[str, Any], *, corner_count: int, timeout_s: float
+    request: dict[str, Any],
+    *,
+    corner_count: int,
+    timeout_s: float,
+    runner_out: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """The pre-launch runner checks for ``klt sim --backend batch --dry-run``
     (issue #4120): the same :func:`_resolve_batch_config` comparison a real
@@ -2120,6 +2124,11 @@ def dry_run_runner_check(
     host with no resolvable batch configuration (no bucket, no provision
     script) cannot run the check and is left to dry-run clean, as before;
     only the runner version/feature refusals propagate.
+
+    When ``runner_out`` is given it is filled with the published runner
+    identity (``status``, ``client_klt_version``, ``images``) whatever the
+    status -- ``match`` and ``unknown`` included -- so the report can answer
+    "which ``klt`` does the fleet accept" without a submit (issue #4675).
     """
     from .sim import SimError
 
@@ -2134,6 +2143,13 @@ def dry_run_runner_check(
         ):
             raise
         return None
+    if runner_out is not None:
+        assessment = _assess_published_runner(request, config)
+        runner_out.update(
+            status=assessment["status"],
+            client_klt_version=assessment["client_klt_version"],
+            images=assessment["images"],
+        )
     return config.feature_diagnostic
 
 
@@ -2446,8 +2462,10 @@ def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
             f"request.batch.max_units_per_job {requested} leaves a job of "
             f"{largest} units, over the {per_job}-unit limit the fleet's "
             f"{assessment['max_job_seconds']:g}s whole-job ceiling allows at "
-            f"options.timeout_s {assessment['per_unit_timeout_s']:g}s; use at "
-            f"most {per_job}",
+            f"options.timeout_s {assessment['per_unit_timeout_s']:g}s "
+            "(max_units_per_job = floor((max_job_seconds - 120) / "
+            f"options.timeout_s)); use at most {per_job}, or omit the cap and "
+            'set job_ceiling_check to "split"',
             code=BATCH_MAX_UNITS_CODE,
         )
     return hosts
