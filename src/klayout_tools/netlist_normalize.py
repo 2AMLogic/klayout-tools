@@ -2149,6 +2149,45 @@ def _convert_plain_c_card(
     )
 
 
+def _convert_plain_card(
+    line: str,
+    first: str,
+    sim_model_classes,
+    subckt_to_binding,
+    geometry_style,
+    placeholder_value_classes,
+    param_scopes,
+    subckt_scope,
+    call_overrides,
+    plain_resistor_classes,
+    resistor_values,
+) -> str:
+    """Route one non-``X`` element card (plain ``M``/``C``/``R``) to its
+    converter; any other card passes through unchanged."""
+    letter = first[:1]
+    if sim_model_classes and letter in ("M", "m"):
+        return _rewrite_m_card_model(line, sim_model_classes)
+    if subckt_to_binding and letter in ("C", "c"):
+        return _convert_plain_c_card(
+            line,
+            subckt_to_binding,
+            geometry_style,
+            placeholder_value_classes,
+            param_scopes,
+            subckt_scope,
+            call_overrides,
+        )
+    if plain_resistor_classes and letter in ("R", "r"):
+        return _convert_plain_r_card(
+            line,
+            plain_resistor_classes,
+            geometry_style,
+            resistor_values,
+            placeholder_value_classes,
+        )
+    return line
+
+
 def convert_reference_netlist(
     text: str,
     *,
@@ -2265,32 +2304,22 @@ def convert_reference_netlist(
             except _UnknownSubcircuitError as exc:
                 unknown_subckts.append(exc)
                 out.append(line)
-        elif sim_model_classes and first and first[0] in "Mm":
-            out.append(_rewrite_m_card_model(line, sim_model_classes))
-        elif subckt_to_binding and first and first[0] in "Cc":
+        else:
             out.append(
-                _convert_plain_c_card(
+                _convert_plain_card(
                     line,
+                    first,
+                    sim_model_classes,
                     subckt_to_binding,
                     geometry_style,
                     placeholder_value_classes,
                     param_scopes,
                     subckt_scope,
                     call_overrides,
-                )
-            )
-        elif plain_resistor_classes and first and first[0] in "Rr":
-            out.append(
-                _convert_plain_r_card(
-                    line,
                     plain_resistor_classes,
-                    geometry_style,
                     resistor_values,
-                    placeholder_value_classes,
                 )
             )
-        else:
-            out.append(line)
     if unknown_subckts:
         raise _aggregate_unknown_subcircuits(unknown_subckts)
     return ReferenceConversion("\n".join(out) + "\n", placeholder_value_classes)
