@@ -3231,7 +3231,11 @@ non-exact disagreement is a *deliberate, previously documented* refinement
 this deck already carries a code-comment citation for — `res_high_po`'s
 two-term fit (issue #518) and `cap_mim`/`cap_mim_m4`'s perimeter term (issue
 #512) — discovered independently by this cross-check, not introduced by it.
-No *undocumented* disagreement was found on the 7 rules actually run. See
+No *undocumented* disagreement was found on the 7 rules actually run.
+(Superseded revision, historical: Re-qualified 2026-10-29 under open_pdks `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` (ciel 2.6.1), issue #3420: `tests/test_lvs_native_extraction_cross_check.py` and
+the gf180mcu counterpart re-run under f6eeac7 with KLayout from the system
+package, all passing with no new disagreement; the figures above stay as
+measured under `c6d73a3`.) See
 `tests/test_lvs_native_extraction_cross_check.py`'s own module docstring for
 the full per-rule table and each test's docstring for the underlying
 geometry/coefficient detail.
