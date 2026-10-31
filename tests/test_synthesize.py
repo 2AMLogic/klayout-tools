@@ -1628,6 +1628,16 @@ def test_liberty_cell_names_quoted_and_malformed(tmp_path):
     assert synthesize._liberty_cell_names(unclosed) is None
 
 
+def test_liberty_cell_names_survives_missing_semicolon_before_group(tmp_path):
+    lib = _write(
+        tmp_path / "m.lib",
+        "library (x) {\n cell (A) {\n area : 0.23\n"
+        " pg_pin (VDD) { pg_type : primary_power ; }\n }\n"
+        " cell (B) {\n }\n cell (C) {\n }\n}\n",
+    )
+    assert synthesize._liberty_cell_names(lib) == frozenset({"A", "B", "C"})
+
+
 def test_compute_leakage_unreadable_liberty_degrades_to_none(tmp_path):
     total, by_type = synthesize._compute_leakage(
         str(tmp_path / "nope.lib"), {"buf_1": 1}

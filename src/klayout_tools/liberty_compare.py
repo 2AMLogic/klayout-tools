@@ -213,8 +213,16 @@ class _Parser:
             follower = self._next()
             if follower == ":":
                 value_tokens: list[str] = []
-                while self._peek() not in (";", "}", None):
+                value_start = self.pos
+                while self._peek() not in (";", "}", "{", None):
                     value_tokens.append(self._next())
+                if self._peek() == "{":
+                    # Missing ';' before a child group: hand the group header
+                    # (name + parenthesised args) back to the next iteration.
+                    header = _trailing_group_header(value_tokens)
+                    if header:
+                        del value_tokens[-header:]
+                        self.pos = value_start + len(value_tokens)
                 if self._peek() == ";":
                     self.pos += 1
                 group.attributes[name] = _unquote(" ".join(value_tokens))
@@ -256,6 +264,16 @@ class _Parser:
                 current = []
             else:
                 current.append(token)
+
+
+def _trailing_group_header(tokens: list[str]) -> int:
+    """Length of a trailing ``name ( args )`` run in ``tokens``, else 0."""
+    if not tokens or tokens[-1] != ")":
+        return 0
+    for index in range(len(tokens) - 2, 0, -1):
+        if tokens[index] == "(":
+            return len(tokens) - index + 1
+    return 0
 
 
 def _unquote(text: str) -> str:
