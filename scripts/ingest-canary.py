@@ -103,6 +103,20 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CACHE_DIR = REPO_ROOT / ".cache" / "canary-repos"
 DEFAULT_BLOCKS_DIR = REPO_ROOT / "blocks"
+DEFAULT_MANIFEST = DEFAULT_BLOCKS_DIR / "canaries.json"
+
+# A public repo of this org is a canary block when it is named `<pdk>-<name>`
+# for one of these PDK prefixes (`--check-manifest` / `--sync-manifest`). Value
+# = `layout.json`'s `pdk` (None where `klt` has no deck of that name; the site
+# then derives the family from the slug).
+CANARY_ORG = "2AMLogic"
+CANARY_PDK_PREFIXES: dict[str, str | None] = {
+    "asap7-": None,
+    "gf180-": "gf180mcu",
+    "sg13cmos5l-": None,
+    "sg13g2-": "sg13g2",
+    "sky130-": "sky130",
+}
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
@@ -1066,6 +1080,90 @@ def load_manifest(path: Path) -> list[dict[str, Any]]:
     return data
 
 
+def list_public_repos(org: str = CANARY_ORG) -> list[str]:
+    """Names of every public repo in `org`, via `gh repo list`. Raises
+    `IngestError` on any `gh` failure (never a silently empty list, which
+    would read as "every listed repo went private"). Monkeypatched by tests."""
+    result = subprocess.run(
+        [
+            "gh",
+            "repo",
+            "list",
+            org,
+            "--visibility",
+            "public",
+            "--limit",
+            "1000",
+            "--json",
+            "name",
+            "--jq",
+            ".[].name",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or "no error output"
+        raise IngestError(
+            f"could not list public repos of {org} via `gh repo list` "
+            f"(exit {result.returncode}): {stderr}"
+        )
+    names = result.stdout.split()
+    if not names:
+        raise IngestError(f"`gh repo list {org}` returned no public repos")
+    return names
+
+
+def canary_repo_names(public_repos: list[str]) -> list[str]:
+    """The public repos that are canary blocks: named `<pdk>-<name>` for a
+    PDK in `CANARY_PDK_PREFIXES` (sorted)."""
+    return sorted(n for n in public_repos if n.startswith(tuple(CANARY_PDK_PREFIXES)))
+
+
+def sync_manifest(
+    entries: list[dict[str, Any]], public_repos: list[str]
+) -> list[dict[str, Any]]:
+    """The manifest for the current forge state: every public canary repo,
+    sorted, keeping an existing entry's `slug`/`pdk`/`ref` pin. Entries whose
+    repo is not a (public) canary repo are dropped."""
+    existing = {e["repo"]: e for e in entries}
+    out = []
+    for name in canary_repo_names(public_repos):
+        repo = f"{CANARY_ORG}/{name}"
+        if repo in existing:
+            out.append(existing[repo])
+            continue
+        prefix = name.split("-", 1)[0] + "-"
+        out.append(
+            {
+                "repo": repo,
+                "slug": name,
+                "pdk": CANARY_PDK_PREFIXES[prefix],
+                "ref": None,
+            }
+        )
+    return out
+
+
+def check_manifest(entries: list[dict[str, Any]], public_repos: list[str]) -> list[str]:
+    """Drift problems between the manifest and the forge (empty when clean):
+    a public canary repo missing from the manifest, or a listed repo that is
+    no longer public."""
+    public = set(public_repos)
+    listed = {e["repo"] for e in entries}
+    problems = []
+    for name in canary_repo_names(public_repos):
+        if f"{CANARY_ORG}/{name}" not in listed:
+            problems.append(
+                f"public canary repo {CANARY_ORG}/{name} is not in the manifest"
+            )
+    for entry in entries:
+        owner, _, name = entry["repo"].partition("/")
+        if owner != CANARY_ORG or name not in public:
+            problems.append(f"listed repo {entry['repo']} is no longer public")
+    return problems
+
+
 def ingest_manifest(
     entries: list[dict[str, Any]],
     *,
@@ -1094,6 +1192,60 @@ def ingest_manifest(
     return results
 
 
+def _run_manifest_maintenance(args: argparse.Namespace) -> int:
+    """Handle --sync-manifest / --check-manifest (no ingest)."""
+    manifest_path = args.manifest or DEFAULT_MANIFEST
+    try:
+        public = list_public_repos()
+        if args.sync_manifest:
+            synced = sync_manifest(load_manifest(manifest_path), public)
+            manifest_path.write_text(
+                "[\n" + ",\n".join("  " + json.dumps(e) for e in synced) + "\n]\n"
+            )
+            print(f"ingest-canary: wrote {len(synced)} entries to {manifest_path}")
+        if args.check_manifest:
+            problems = check_manifest(load_manifest(manifest_path), public)
+            for problem in problems:
+                print(f"ingest-canary: {problem}", file=sys.stderr)
+            if problems:
+                return 1
+            print(f"ingest-canary: manifest {manifest_path} matches the forge")
+    except IngestError as exc:
+        print(f"ingest-canary: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_manifest_ingest(args: argparse.Namespace) -> int:
+    """Ingest every entry of --manifest; a failing entry does not stop the rest."""
+    try:
+        entries = load_manifest(args.manifest)
+    except IngestError as exc:
+        print(f"ingest-canary: {exc}", file=sys.stderr)
+        return 1
+    failed = 0
+    for entry, layout, error in ingest_manifest(
+        entries,
+        blocks_dir=args.blocks_dir,
+        cache_dir=args.cache_dir,
+        dry_run=args.dry_run,
+    ):
+        if error is not None:
+            failed += 1
+            print(f"{entry['slug']}: FAILED: {error}", file=sys.stderr)
+        else:
+            assert layout is not None
+            verb = "would write" if args.dry_run else "ok"
+            print(f"{entry['slug']}: {verb} (status={layout['status']!r})")
+    if failed:
+        print(
+            f"ingest-canary: {failed}/{len(entries)} entries failed",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0] if __doc__ else ""
@@ -1107,6 +1259,23 @@ def main(argv: list[str] | None = None) -> int:
             "Ingest every entry of a canary manifest (blocks/canaries.json) "
             "instead of a single --repo. A failing entry is reported and the "
             "rest still run; exit is non-zero if any failed."
+        ),
+    )
+    parser.add_argument(
+        "--check-manifest",
+        action="store_true",
+        help=(
+            "Drift check, no ingest: exit 1 when a public canary repo of "
+            f"{CANARY_ORG} is missing from the manifest (--manifest, default "
+            "blocks/canaries.json) or a listed repo is no longer public."
+        ),
+    )
+    parser.add_argument(
+        "--sync-manifest",
+        action="store_true",
+        help=(
+            "Rewrite the manifest from the forge (every public canary repo; "
+            "existing pins kept). Run with --check-manifest to verify."
         ),
     )
     parser.add_argument(
@@ -1142,35 +1311,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print, do not write")
     args = parser.parse_args(argv)
 
+    if args.check_manifest or args.sync_manifest:
+        if args.repo:
+            parser.error("--check-manifest/--sync-manifest take no --repo")
+        return _run_manifest_maintenance(args)
     if args.manifest is not None:
         if args.repo:
             parser.error("--manifest and --repo are mutually exclusive")
-        try:
-            entries = load_manifest(args.manifest)
-        except IngestError as exc:
-            print(f"ingest-canary: {exc}", file=sys.stderr)
-            return 1
-        failed = 0
-        for entry, layout, error in ingest_manifest(
-            entries,
-            blocks_dir=args.blocks_dir,
-            cache_dir=args.cache_dir,
-            dry_run=args.dry_run,
-        ):
-            if error is not None:
-                failed += 1
-                print(f"{entry['slug']}: FAILED: {error}", file=sys.stderr)
-            else:
-                assert layout is not None
-                verb = "would write" if args.dry_run else "ok"
-                print(f"{entry['slug']}: {verb} (status={layout['status']!r})")
-        if failed:
-            print(
-                f"ingest-canary: {failed}/{len(entries)} entries failed",
-                file=sys.stderr,
-            )
-            return 1
-        return 0
+        return _run_manifest_ingest(args)
     if not args.repo:
         parser.error("one of --repo or --manifest is required")
 

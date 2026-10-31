@@ -284,6 +284,29 @@ that needs no solver checkout. These exports are solver fixtures and
 evidence; klayout-tools.org does not render or stage them (the solver's
 validation story belongs with the solver, issue #4641).
 
+## Canary manifest derivation (issue #4642)
+
+`canaries.json` lists every public canary block repo of the `2AMLogic` org.
+It is derived from the forge, not typed by hand:
+
+```bash
+# public repos named <pdk>-<name>, PDK in {asap7, gf180, sg13cmos5l, sg13g2, sky130}
+gh repo list 2AMLogic --visibility public --limit 1000 --json name --jq '.[].name'
+python scripts/ingest-canary.py --sync-manifest     # rewrite canaries.json (pins kept)
+python scripts/ingest-canary.py --check-manifest    # drift check, also run in CI
+```
+
+The rule is the repo **name** prefix, not a description prefix: most canary
+repos describe themselves "... — 2AM Logic canary block", and only 9 start
+with `Canary —`, so a description match would silently drop the rest.
+`--check-manifest` exits 1 when a public canary repo is missing from the
+manifest or a listed repo is no longer public. Private repos are never listed
+(the ingest's public-repo gate stays the enforcement). `pdk` is the
+`layout.json` family (`sky130`, `gf180mcu`, `sg13g2`); `asap7` and
+`sg13cmos5l` have no `klt` deck, so they are `null` and the site derives the
+family from the slug. `sky130-ota-5t` is an in-repo worked example, not a
+canary repo, so it is not in the manifest.
+
 ## Adding a canary / what the site shows
 
 [`canaries.json`](canaries.json) is the single source of truth for which

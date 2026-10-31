@@ -127,6 +127,18 @@ jobs:
         # klayout_tools. GATES -- do not add continue-on-error.
         run: uv run --frozen --extra dev python scripts/check_import_boundaries.py
 
+      - name: Canary manifest matches the forge
+        # `ingest-canary.py --check-manifest` (issue #4642): fails when a public
+        # 2AMLogic canary repo is missing from blocks/canaries.json, or a listed
+        # repo is no longer public. Only reads public repo names, so the
+        # read-only GITHUB_TOKEN a fork PR gets is enough. A `gh` failure is a
+        # failure (never a silent pass). Fix: `scripts/ingest-canary.py
+        # --sync-manifest`, then ingest the new entries (blocks/README.md).
+        # GATES -- do not add continue-on-error.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --frozen --extra dev python scripts/ingest-canary.py --check-manifest
+
       - name: Committed examples/ carry no absolute host paths
         # `klt env-provenance lint-envelope` (issue #2224) over every
         # committed JSON artifact under examples/. GATES -- exit 3 means a
