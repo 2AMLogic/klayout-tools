@@ -521,6 +521,11 @@ override keeps the ambient environment. A netlist that itself runs
 environment is read). `engine: "xyce"` is not given the variable. The value in
 force is reported as `environment.threads_per_worker` (absent when the ambient
 environment decided).
+The resolved count is also written as `set num_threads=N` into each corner's
+generated `.spiceinit` ([#3619](https://github.com/2AMLogic/klayout-tools/issues/3619)):
+on the batch fleet (ngspice-46) `OMP_NUM_THREADS` alone did not prevent
+oversubscription, while `set num_threads=1` did. An `options.ngspice_init` line
+is written after it and wins.
 
 **Useful on a workstation, harmful on a shared worker.** `local-parallel`
 trades CPU/memory for wall-clock time — fine on a dedicated development
