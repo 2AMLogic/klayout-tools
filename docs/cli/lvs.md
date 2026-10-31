@@ -714,6 +714,16 @@ the model token is rewritten to the deck's device class (`nfet`/`pfet`), so a
 PDK-shipped CDL reference compares like its `X`-call form. An `M` card naming
 any other model passes through unchanged (issue #3882).
 
+Likewise, a foundry-style `R` card with no value token, such as
+`R_RCG NC GND_VCO GND_VCO ppolyf_u_3k W=1.0u L=5.6u`, is rewritten when its
+model names one of the deck's resistor classes: the value token is inserted
+(the `0` placeholder, or the deck-computed value for classes listed in
+`resistor_value_classes`) and `W`/`L` carry across, exactly like the `X`-call
+resistor route. Cards with a value token, or naming any other model, pass
+through unchanged, and without `reference.deck` nothing is rewritten. Under
+`form: "plain-element"` such a card fails to parse, and the error names
+`form: "subckt-call"` plus `deck` as the fix (issue #4670).
+
 Device subcircuit names resolve through the same curated table `klt extract
 --pdk` uses (`klayout_tools.pdk_models`), so the common case needs no map.
 When a device name is not one of the curated devices, supply it explicitly:
