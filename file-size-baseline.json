@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 8049
+      "lines": 8025
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -217,7 +217,7 @@
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 640
+      "lines": 598
     },
     {
       "path": "src/klayout_tools/components.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 14445
+      "lines": 14413
     },
     {
       "path": "src/klayout_tools/sim_batch.py",

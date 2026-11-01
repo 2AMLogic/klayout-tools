@@ -46,6 +46,7 @@
       "modules": [
         "klayout_tools.cli",
         "klayout_tools.cli.__main__",
+        "klayout_tools.cli._argv_flags",
         "klayout_tools.cli._parsing",
         "klayout_tools.cli._request_document",
         "klayout_tools.cli.color",
@@ -551,6 +552,7 @@
         "klayout_tools.asap7_bsimcmg",
         "klayout_tools.cli.sim_cmd",
         "klayout_tools.cli.sim_merge_cmd",
+        "klayout_tools.cli.sim_pdk_text",
         "klayout_tools.cli.sim_plan_cmd",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
@@ -578,6 +580,7 @@
         "klayout_tools.sim_portable",
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
+        "klayout_tools.sim_request_overrides",
         "klayout_tools.sim_search",
         "klayout_tools.sim_set",
         "klayout_tools.sim_slug",

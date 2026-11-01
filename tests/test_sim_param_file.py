@@ -1,11 +1,13 @@
 """``models.param_file`` (issue #4759): resolved like ``models.lib`` and
 ``.include``d ahead of the ``.lib`` cards of every generated deck."""
 
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from klayout_tools import sim
+import test_op_sanity as _ops
+from klayout_tools import op_sanity, sim
 
 
 def _deck(tmp_path: Path, point) -> list[str]:
@@ -131,3 +133,40 @@ def test_param_file_missing_is_refused(tmp_path):
 
     with pytest.raises(Exception, match="not found"):
         _stage_job(tmp_path, request)
+
+
+def test_param_file_reaches_the_op_lint_deck(tmp_path, monkeypatch):
+    """Issue #4759: `models.param_file` must be `.include`d in the op-lint
+    deck, ahead of the netlist (and any `.lib` cards), as in the `klt sim` decks."""
+    param = tmp_path / "design.ngspice"
+    param.write_text("* params\n")
+    lib = tmp_path / "models.lib"
+    lib.write_text("* lib\n")
+    request = _ops._write_request(
+        tmp_path,
+        _ops._GOOD_NETLIST,
+        models={"lib": str(lib), "param_file": str(param)},
+    )
+    decks: list[list[str]] = []
+    real_run = subprocess.run
+    _ops._install_fake_ngspice(
+        monkeypatch,
+        {"XM1": _ops._SATURATED_NMOS, "XM2": _ops._SATURATED_PMOS},
+        node_voltages={"vdd": 1.8, "in": 0.9, "bias": 0.6, "out": 1.2},
+    )
+    fake_run = op_sanity.subprocess.run
+
+    def recording_run(cmd, **kwargs):
+        if "-b" not in cmd:
+            return real_run(cmd, **kwargs)
+        decks.append(Path(cmd[cmd.index("-b") + 1]).read_text().splitlines())
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(op_sanity.subprocess, "run", recording_run)
+
+    op_sanity.run_op_sanity(str(request))
+
+    (deck,) = decks
+    inc = deck.index(f".include {param}")
+    body = next(i for i, line in enumerate(deck) if "body.spice" in line)
+    assert inc < body < deck.index(".control")
