@@ -97,6 +97,15 @@ def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
+    if getattr(args, "pdk_root", None) is not None:
+        for flag, name in (("op_lint", "--op-lint"), ("job_status", "--job-status")):
+            if getattr(args, flag, None) not in (None, False):
+                return emit_error(
+                    "sim",
+                    f"--pdk-root has no effect with {name}",
+                    args.format,
+                    exit_code=EXIT_USAGE_ERROR,
+                )
     return None
 
 
@@ -133,6 +142,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             attach_job_id=getattr(args, "attach_job_id", None),
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
             command_approvals=getattr(args, "command_approvals", None),
+            pdk_root=getattr(args, "pdk_root", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -277,6 +287,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--submit-only", getattr(args, "submit_only", False)),
             ("--job-status", getattr(args, "job_status", None)),
             ("--wait-for-capacity", getattr(args, "wait_for_capacity", None)),
+            ("--pdk-root", getattr(args, "pdk_root", None)),
         )
         if value is not None and value is not False and value != ""
     ]
@@ -439,7 +450,7 @@ def _print_pdk(report: dict) -> None:
         print(
             f"pdk: WARNING: variant also installed under "
             f"{', '.join(ambiguous)} -- resolution is first-match-wins; "
-            f"pin models.pdk_root to choose deliberately"
+            f"pin --pdk-root (or models.pdk_root) to choose deliberately"
         )
 
 

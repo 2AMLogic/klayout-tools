@@ -2327,6 +2327,7 @@ def run_sim(
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
     command_approvals: str | None = None,
+    pdk_root: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the request at ``request_path`` and return its report.
@@ -2335,7 +2336,8 @@ def run_sim(
     operator-approved argv steps run in isolated unit directories, locally
     or as one batch job -- see :mod:`klayout_tools.sim_commands`.
     ``command_approvals`` is the trusted approvals file (else
-    ``$KLT_SIM_COMMAND_APPROVALS``).
+    ``$KLT_SIM_COMMAND_APPROVALS``). ``pdk_root`` (issue #4758) pins the PDK
+    install root like ``models.pdk_root`` and wins over it; corner requests only.
 
     ``run_sim`` dispatches over two request kinds (docs/cli/sim.md):
 
@@ -2584,6 +2586,10 @@ def run_sim(
     # corner dir and ngspice would never find its deck. Absolutise once here.
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
+    if pdk_root is not None and (
+        sim_commands.COMMANDS_FIELD in request or sim_decks.DECKS_FIELD in request
+    ):
+        raise SimError("--pdk-root only applies to corner requests (with `models`)")
     if sim_commands.COMMANDS_FIELD in request:
         return _dispatch_command_request(
             request,
@@ -2644,6 +2650,7 @@ def run_sim(
         submit_only=submit_only,
         attach_job_id=attach_job_id,
         capacity_wait_s=capacity_wait_s,
+        pdk_root=pdk_root,
         _ownership=_ownership,
     )
 
@@ -2980,6 +2987,27 @@ def _with_max_concurrent_override(
     }
 
 
+def _with_pdk_root_override(
+    request: dict[str, Any], pdk_root: str | None
+) -> dict[str, Any]:
+    """Fold the ``--pdk-root`` CLI override into ``request.models.pdk_root``
+    (issue #4758), leaving the loaded request untouched. The flag wins over the
+    request field and is resolved against the CWD (not the request directory),
+    so every downstream ``models.pdk_root`` consumer sees the pin unchanged."""
+    if pdk_root is None:
+        return request
+    models = request.get("models")
+    if not isinstance(models, dict):
+        raise SimError(
+            "--pdk-root needs a request with a `models` block (nothing in this "
+            "request resolves a PDK)"
+        )
+    return {
+        **request,
+        "models": {**models, "pdk_root": os.path.abspath(os.path.expanduser(pdk_root))},
+    }
+
+
 def _with_capacity_wait_override(
     request: dict[str, Any], capacity_wait_s: float | None
 ) -> dict[str, Any]:
@@ -3154,6 +3182,7 @@ def _prepare_sim_request(
     max_concurrent_jobs: int | None,
     capacity_wait_s: float | None,
     dry_run: bool,
+    pdk_root: str | None = None,
 ) -> _ResolvedSimRequest:
     """The up-front validate-and-resolve phase of :func:`_run_sim_corners`.
 
@@ -3163,6 +3192,7 @@ def _prepare_sim_request(
     request = _with_max_units_override(load_request(request_path), max_units_per_job)
     request = _with_max_concurrent_override(request, max_concurrent_jobs)
     request = _with_capacity_wait_override(request, capacity_wait_s)
+    request = _with_pdk_root_override(request, pdk_root)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
     # field this run's own JSON response echoes (`netlist`,
@@ -3770,6 +3800,7 @@ def _run_sim_corners(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
+    pdk_root: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
@@ -3791,6 +3822,7 @@ def _run_sim_corners(
         max_concurrent_jobs=max_concurrent_jobs,
         capacity_wait_s=capacity_wait_s,
         dry_run=dry_run,
+        pdk_root=pdk_root,
     )
     analysis = resolved.analysis
     artifacts_dir = resolved.artifacts_dir

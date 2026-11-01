@@ -1005,6 +1005,15 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "Ignored without --op-lint."
         ),
     )
+    _add_pdk_args(
+        sim_parser,
+        include_pdk=False,
+        pdk_root_help=(
+            "pin the PDK install root for this run, as if the request had "
+            "models.pdk_root (wins over it; relative paths resolve against the "
+            "CWD); disables the first-match-wins search and its ambiguity warning"
+        ),
+    )
     _add_format_arg(sim_parser)
     sim_parser.set_defaults(func=sim_cmd.run)
 
