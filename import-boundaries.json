@@ -705,7 +705,9 @@
       "description": "`klt yield` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.yield_cmd",
-        "klayout_tools.yield_analysis"
+        "klayout_tools.yield_analysis",
+        "klayout_tools.yield_provenance",
+        "klayout_tools.yield_sampling_fields"
       ]
     },
     "yield_campaign": {
