@@ -199,6 +199,14 @@ from .sim_remote import (
 )
 from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
+from .sim_request_overrides import (
+    _with_capacity_wait_override as _with_capacity_wait_override,
+)
+from .sim_request_overrides import (
+    _with_max_concurrent_override as _with_max_concurrent_override,
+)
+from .sim_request_overrides import _with_max_units_override as _with_max_units_override
+from .sim_request_overrides import _with_pdk_root_override as _with_pdk_root_override
 from .sim_slug import _NON_FILENAME_CHARS_RE as _NON_FILENAME_CHARS_RE
 from .sim_slug import _PARAMS_ID_RE as _PARAMS_ID_RE
 from .sim_slug import _SLUG_HASH_CHARS as _SLUG_HASH_CHARS
@@ -2953,78 +2961,6 @@ def _with_forwarded_budget(
     if backend not in _OFFHOST_BACKENDS:
         return request
     return {**request, "options": {**options, "wall_clock_budget_s": budget_s}}
-
-
-def _with_max_units_override(
-    request: dict[str, Any], max_units_per_job: int | None
-) -> dict[str, Any]:
-    """Fold the ``--max-units-per-job`` CLI override into ``request.batch``
-    (issue #3446), leaving the loaded request untouched."""
-    if max_units_per_job is None:
-        return request
-    return {
-        **request,
-        "batch": {
-            **(request.get("batch") or {}),
-            "max_units_per_job": max_units_per_job,
-        },
-    }
-
-
-def _with_max_concurrent_override(
-    request: dict[str, Any], max_concurrent_jobs: int | None
-) -> dict[str, Any]:
-    """Fold the ``--max-concurrent-jobs`` CLI override into ``request.batch``
-    (issue #3914), leaving the loaded request untouched."""
-    if max_concurrent_jobs is None:
-        return request
-    return {
-        **request,
-        "batch": {
-            **(request.get("batch") or {}),
-            "max_concurrent_jobs": max_concurrent_jobs,
-        },
-    }
-
-
-def _with_pdk_root_override(
-    request: dict[str, Any], pdk_root: str | None
-) -> dict[str, Any]:
-    """Fold the ``--pdk-root`` CLI override into ``request.models.pdk_root``
-    (issue #4758), leaving the loaded request untouched. The flag wins over the
-    request field and is resolved against the CWD (not the request directory),
-    so every downstream ``models.pdk_root`` consumer sees the pin unchanged."""
-    if pdk_root is None:
-        return request
-    models = request.get("models")
-    if not isinstance(models, dict):
-        raise SimError(
-            "--pdk-root needs a request with a `models` block (nothing in this "
-            "request resolves a PDK)"
-        )
-    return {
-        **request,
-        "models": {**models, "pdk_root": os.path.abspath(os.path.expanduser(pdk_root))},
-    }
-
-
-def _with_capacity_wait_override(
-    request: dict[str, Any], capacity_wait_s: float | None
-) -> dict[str, Any]:
-    """Fold the ``--wait-for-capacity`` CLI override into
-    ``request.batch.capacity_wait_s`` (issue #3564), leaving the loaded request
-    untouched. The flag wins over the request field, and the value is validated
-    by the one resolver the field uses, so a bad value is refused before any
-    S3 write."""
-    if capacity_wait_s is None:
-        return request
-    from .sim_batch import _resolve_capacity_wait_s
-
-    value = _resolve_capacity_wait_s({"capacity_wait_s": capacity_wait_s})
-    return {
-        **request,
-        "batch": {**(request.get("batch") or {}), "capacity_wait_s": value},
-    }
 
 
 def _check_expected_netlist_identity(
