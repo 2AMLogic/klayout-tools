@@ -84,3 +84,50 @@ def test_resolve_missing_file_is_a_sim_error(tmp_path):
         sim._resolve_param_file(
             [sim.CornerPoint("tt", {}, 27)], {"param_file": "nope"}, str(tmp_path)
         )
+
+
+# --------------------------------------------------------------------------- #
+# Batch staging of `models.param_file` (kept out of test_sim_staging.py for the
+# file-size ratchet)
+# --------------------------------------------------------------------------- #
+
+
+def _stage_job(tmp_path: Path, request: dict):
+    from klayout_tools import sim_staging as st
+
+    netlist = tmp_path / "tb.spice"
+    netlist.write_text("* tb\n")
+    return st.stage_sim_job(
+        request,
+        str(netlist),
+        request_dir=str(tmp_path),
+        netlist_staged_name="netlist.cir",
+        reserved_names=("request.json",),
+        backend="batch",
+    )
+
+
+def test_param_file_is_staged_and_rewritten(tmp_path):
+    (tmp_path / "m.lib").write_text("* lib\n")
+    (tmp_path / "design.ngspice").write_text(".param fnoicor=1\n")
+    request = {
+        "models": {"lib": "m.lib", "param_file": "design.ngspice"},
+        "options": {"stage_model_inputs": True},
+    }
+
+    job = _stage_job(tmp_path, request)
+
+    staged_param = job.request["models"]["param_file"]
+    assert not Path(staged_param).is_absolute()
+    assert staged_param in {item.staged_name for item in job.model_files}
+
+
+def test_param_file_missing_is_refused(tmp_path):
+    (tmp_path / "m.lib").write_text("* lib\n")
+    request = {
+        "models": {"lib": "m.lib", "param_file": "nope.ngspice"},
+        "options": {"stage_model_inputs": True},
+    }
+
+    with pytest.raises(Exception, match="not found"):
+        _stage_job(tmp_path, request)

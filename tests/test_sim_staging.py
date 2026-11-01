@@ -953,36 +953,3 @@ def test_netlist_lib_refusal_text_does_not_suggest_literal_pdk_root(
     with pytest.raises(st.IncludeStagingError) as exc:
         _stage(netlist)
     assert "e.g. `$PDK_ROOT/...`" not in str(exc.value)
-
-
-# --------------------------------------------------------------------------- #
-# `models.param_file` (issue #4759)
-# --------------------------------------------------------------------------- #
-
-
-def test_param_file_is_staged_and_rewritten(tmp_path):
-    _write(tmp_path, "m.lib", "* lib\n")
-    _write(tmp_path, "design.ngspice", ".param fnoicor=1\n")
-    netlist = _write(tmp_path, "tb.spice", "* tb\n")
-    request = {
-        "models": {"lib": "m.lib", "param_file": "design.ngspice"},
-        "options": {"stage_model_inputs": True},
-    }
-
-    job = _job(request, netlist, tmp_path)
-
-    staged_param = job.request["models"]["param_file"]
-    assert not os.path.isabs(staged_param)
-    assert staged_param in {item.staged_name for item in job.model_files}
-
-
-def test_param_file_missing_is_refused(tmp_path):
-    _write(tmp_path, "m.lib", "* lib\n")
-    netlist = _write(tmp_path, "tb.spice", "* tb\n")
-    request = {
-        "models": {"lib": "m.lib", "param_file": "nope.ngspice"},
-        "options": {"stage_model_inputs": True},
-    }
-
-    with pytest.raises(Exception, match="not found"):
-        _job(request, netlist, tmp_path)
