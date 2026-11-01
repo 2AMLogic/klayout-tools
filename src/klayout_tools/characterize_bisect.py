@@ -122,12 +122,18 @@ def build_deck(
         t_start = d50 - rd * _frac(d_rising, thresholds)
         clk_points = [(0.0, idle)]
         for start in (prime, t_clk):
-            clk_points += [
-                (start, idle),
-                (start + rc, active),
-                (start + pulse_w, active),
-                (start + pulse_w + rc, idle),
-            ]
+            clk_points += [(start, idle), (start + rc, active)]
+            if start == prime:
+                clk_points += [
+                    (start + pulse_w, active),
+                    (start + pulse_w + rc, idle),
+                ]
+            else:
+                # The measured edge is the last event: the clock stays
+                # active to the end of the run. A trailing falling edge
+                # lands on a PWL breakpoint that ngspice 42 cannot step to
+                # near a metastable bisection probe (timestep too small).
+                clk_points.append((stop, active))
         if case.kind == "setup":
             d_points = [
                 (0.0, old_level),

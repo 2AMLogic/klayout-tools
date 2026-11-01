@@ -33,10 +33,14 @@
       "modules": [
         "klayout_tools.characterize",
         "klayout_tools.characterize_arcs",
+        "klayout_tools.characterize_bisect",
         "klayout_tools.characterize_cards",
+        "klayout_tools.characterize_constraints",
+        "klayout_tools.characterize_instances",
         "klayout_tools.characterize_sequential",
         "klayout_tools.cli.characterize_cmd",
         "klayout_tools.liberty_compare",
+        "klayout_tools.liberty_render_pin",
         "klayout_tools.liberty_writer"
       ]
     },
