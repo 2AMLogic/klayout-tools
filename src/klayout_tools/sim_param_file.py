@@ -38,7 +38,7 @@ def resolve_param_file(
 
 
 def param_file_environment(
-    param_file: str | None, relative_path: Callable[[str], str]
+    param_file: str | None, relative_path: Callable[[str], dict[str, Any]]
 ) -> dict[str, Any]:
     """Additive ``environment`` provenance; empty when the field is unset."""
     if param_file is None:
