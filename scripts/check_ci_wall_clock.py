@@ -647,6 +647,134 @@ def _jobs_from_payload(payload: object) -> list[dict]:
     return jobs
 
 
+# A carried-over job (a `--failed` rerun keeps the earlier attempt's passing
+# jobs in the payload, restamped with the new `run_attempt` but with their old
+# timestamps) can only be told apart from a fresh one by having started before
+# the attempt did. Allow a little clock skew between the two API fields.
+_ATTEMPT_START_SKEW_SECONDS = 2
+
+
+@dataclass(frozen=True)
+class AttemptSelection:
+    """Which `/jobs` rows belong to the run's current attempt (#4751).
+
+    `filter=latest` is not "the current attempt": rows of earlier attempts stay
+    in the payload next to the fresh ones, and measuring them makes a breach
+    that a full rerun can never clear.
+    """
+
+    attempt: int | None
+    current: list[dict]
+    stale: list[dict]  # `run_attempt` differs from the run's own attempt
+    carried: list[dict]  # tagged current, but started before this attempt did
+    nothing_new: bool = False  # only carried-over rows could be measured
+
+    def note(self) -> str | None:
+        if self.attempt is None:
+            return None
+        parts = []
+        if self.stale:
+            parts.append(
+                f"{len(self.stale)} row(s) from earlier attempts dropped, not measured"
+            )
+        if self.nothing_new:
+            parts.append(
+                f"NOTHING NEW WAS MEASURED: every measurable job was carried "
+                f"over from before attempt {self.attempt} began (a --failed "
+                f"rerun of this job alone), so these are the earlier "
+                f"attempt's timings re-read, not a fresh sample"
+            )
+        elif self.carried:
+            parts.append(
+                f"{len(self.carried)} job(s) carried over unchanged from an "
+                f"earlier attempt dropped, not measured"
+            )
+        return "; ".join(parts) or None
+
+
+def current_attempt(run_payload: object | None) -> int | None:
+    """The run's own attempt: the run JSON's `run_attempt`, else the env var."""
+    candidates = []
+    if isinstance(run_payload, dict):
+        candidates.append(run_payload.get("run_attempt"))
+    candidates.append(os.environ.get("GITHUB_RUN_ATTEMPT"))
+    for value in candidates:
+        try:
+            attempt = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if attempt > 0:
+            return attempt
+    return None
+
+
+def select_attempt(
+    payload: object, attempt: int | None, attempt_started: datetime | None
+) -> AttemptSelection:
+    """Split the payload into current-attempt rows and the rest.
+
+    Fails open: with no known attempt, or a job lacking `run_attempt`, the job
+    is kept, which is the pre-#4751 behaviour.
+    """
+    jobs = _jobs_from_payload(payload)
+    if attempt is None:
+        return AttemptSelection(None, jobs, [], [])
+    current: list[dict] = []
+    stale: list[dict] = []
+    carried: list[dict] = []
+    for job in jobs:
+        job_attempt = job.get("run_attempt") if isinstance(job, dict) else None
+        if isinstance(job_attempt, int) and job_attempt != attempt:
+            stale.append(job)
+            continue
+        started = job.get("started_at") if isinstance(job, dict) else None
+        if attempt_started is not None and isinstance(started, str) and started:
+            try:
+                begun = _parse_iso(started)
+            except ValueError:
+                begun = None  # measure_jobs reports the unparseable stamp
+            if begun is not None and (
+                (attempt_started - begun).total_seconds() > _ATTEMPT_START_SKEW_SECONDS
+            ):
+                carried.append(job)
+                continue
+        current.append(job)
+    return AttemptSelection(attempt, current, stale, carried)
+
+
+def measure_current_attempt(
+    payload: object,
+    budget: dict,
+    *,
+    exclude: frozenset[str],
+    run_payload: object | None,
+) -> tuple[list[JobTiming], datetime, datetime, AttemptSelection]:
+    attempt_started = None
+    if isinstance(run_payload, dict):
+        stamp = run_payload.get("run_started_at")
+        if isinstance(stamp, str) and stamp:
+            try:
+                attempt_started = _parse_iso(stamp)
+            except ValueError as exc:
+                raise CannotRun(
+                    f"run payload's 'run_started_at' is unparseable: {exc}"
+                ) from exc
+    sel = select_attempt(payload, current_attempt(run_payload), attempt_started)
+    try:
+        timings, first, last = measure_jobs(sel.current, budget, exclude=exclude)
+    except CannotRun:
+        if not sel.carried:
+            raise
+        # A --failed rerun of the budget job alone: the only fresh row is this
+        # job itself. Re-read the carried-over rows so the breach still shows,
+        # but say plainly that nothing new was measured.
+        timings, first, last = measure_jobs(sel.carried, budget, exclude=exclude)
+        sel = AttemptSelection(
+            sel.attempt, sel.current, sel.stale, sel.carried, nothing_new=True
+        )
+    return timings, first, last, sel
+
+
 def _step_seconds(step: dict) -> int:
     """A step's duration, or 0 when it is missing/unparseable.
 
@@ -985,9 +1113,9 @@ def _breach_guidance(breaches: list[Breach], *, cache_missed: bool) -> list[str]
             "     no number has to be hand-edited for that.",
             "  3. If you believe the pool was busy and this check could not see it",
             "     (contention from workloads outside this repo's own Actions",
-            "     history is invisible here), RE-RUN this job. A clean re-run of",
-            "     the same commit both passes and, if it breaches again, marks the",
-            "     breach confirmed rather than noise.",
+            "     history is invisible here), re-run the WHOLE run (or push a",
+            "     fresh head). A clean full re-run measures every job again and",
+            "     passes; re-running only this job re-reads the same timings.",
             "  4. Only edit the committed ceilings when a job is on the `fixed",
             "     ceiling` basis; the rolling rows are derived, not declared.",
         ]
@@ -1011,11 +1139,14 @@ def render_text(
     report_only: bool,
     model: Model | None = None,
     total_basis: str = "fixed",
+    attempt_note: str | None = None,
 ) -> str:
     model = model or Model(cfg=dict(DEFAULT_ROLLING))
     width = max([len(t.name) for t in timings] + [len("total job-seconds (compute)")])
     lines = [f"CI wall-clock budget -- {len(timings)} job(s) measured"]
     lines += [f"  {line}" for line in _model_summary(model, total_basis)]
+    if attempt_note:
+        lines.append(f"  attempt: {attempt_note}")
     lines += [
         "",
         f"  {'job'.ljust(width)}  {'actual':>8}  {'budget':>8}  basis",
@@ -1123,10 +1254,14 @@ def main(argv: list[str] | None = None) -> int:
         exclude = frozenset(budget.get("exclude_jobs", [])) | frozenset(
             args.exclude_job
         )
-        timings, first_start, last_end = measure_jobs(
-            load_json(args.jobs_json), budget, exclude=exclude
+        run_payload = load_json(args.run_json) if args.run_json else None
+        timings, first_start, last_end, selection = measure_current_attempt(
+            load_json(args.jobs_json),
+            budget,
+            exclude=exclude,
+            run_payload=run_payload,
         )
-        started_at = run_start(load_json(args.run_json) if args.run_json else None)
+        started_at = run_start(run_payload)
         model = build_model(load_history(args.history_json), budget, exclude=exclude)
         timings = apply_model(timings, model)
     except CannotRun as exc:
@@ -1179,6 +1314,14 @@ def main(argv: list[str] | None = None) -> int:
                 "same_tree_runs": len(model.same_tree_runs),
             },
             "total_job_seconds": total_seconds,
+            "attempt": {
+                "run_attempt": selection.attempt,
+                "stale_attempt_rows_dropped": len(selection.stale),
+                "carried_over_rows_dropped": (
+                    0 if selection.nothing_new else len(selection.carried)
+                ),
+                "nothing_new_measured": selection.nothing_new,
+            },
             "total_job_budget_seconds": total_budget,
             "total_job_budget_basis": total_basis,
             "total_cache_miss_seconds": total_cache_miss_seconds,
@@ -1232,6 +1375,7 @@ def main(argv: list[str] | None = None) -> int:
             report_only=args.report_only,
             model=model,
             total_basis=total_basis,
+            attempt_note=selection.note(),
         )
         print(report)
 
@@ -1275,6 +1419,7 @@ def main(argv: list[str] | None = None) -> int:
             report_only=args.report_only,
             model=model,
             total_basis=total_basis,
+            attempt_note=selection.note(),
         )
         try:
             with open(summary_path, "a", encoding="utf-8") as handle:
