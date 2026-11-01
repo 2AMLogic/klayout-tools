@@ -652,6 +652,7 @@
         "klayout_tools.restructure",
         "klayout_tools.sta",
         "klayout_tools.synthesize",
+        "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
         "klayout_tools.synthesize_memory"
       ]
