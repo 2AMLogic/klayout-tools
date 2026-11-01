@@ -252,3 +252,15 @@ def test_dff_constraints_end_to_end(tmp_path):
         assert -1.0 < value < 2.0
     lib = next((tmp_path / "out").glob("*.lib")).read_text()
     assert "timing_type : setup_rising;" in lib and "timing_type : hold_rising;" in lib
+
+    # AC2: the emitted .lib must round-trip through statime's Liberty reader.
+    # "skipped" (extension not built) is honest; "fail" never is.
+    roundtrip = report["liberty"]["roundtrip"]
+    assert roundtrip["status"] in ("pass", "skipped")
+    assert roundtrip["status"] != "fail", roundtrip["message"]
+    try:
+        import klt_statime_native  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        assert roundtrip["status"] == "pass", roundtrip["message"]
