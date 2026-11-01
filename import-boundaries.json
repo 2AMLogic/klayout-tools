@@ -335,9 +335,11 @@
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_mismatch",
+        "klayout_tools.lvs_mismatch_tolerance",
         "klayout_tools.lvs_netgen",
         "klayout_tools.lvs_power",
         "klayout_tools.lvs_runset",
+        "klayout_tools.lvs_short_nets",
         "klayout_tools.lvs_supply",
         "klayout_tools.lvs_timeout"
       ]
@@ -368,7 +370,8 @@
         "klayout_tools.netlist_batch",
         "klayout_tools.netlist_capacitor_recovery",
         "klayout_tools.netlist_digest",
-        "klayout_tools.netlist_normalize"
+        "klayout_tools.netlist_normalize",
+        "klayout_tools.netlist_normalize_scan"
       ]
     },
     "pdk": {
@@ -574,6 +577,7 @@
         "klayout_tools.sim_remote",
         "klayout_tools.sim_search",
         "klayout_tools.sim_set",
+        "klayout_tools.sim_slug",
         "klayout_tools.sim_snm",
         "klayout_tools.sim_snm_meas",
         "klayout_tools.sim_staging",
