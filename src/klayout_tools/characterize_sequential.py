@@ -170,3 +170,36 @@ def data_pwl_line(
         (times["data_lo"] + ramp_ns, lo_v),
     ]
     return _pwl(name, node, points)
+
+
+def stimulus_schedule(
+    sequential: bool, settle: float, max_ramp: float
+) -> tuple[float, float, float, dict[str, float] | None, float]:
+    """Edge times ``(rise_start, fall_start, stop_ns, clock_times, pulse_w)``.
+
+    Sequential cells get three clock pulses: a priming pulse (output captures
+    its low state), then the two measured pulses -- data moves to the
+    output-high state while the clock is low, the next active edge makes the
+    output rise, data returns to the low state, and the last active edge makes
+    it fall. ``rise_start``/``fall_start`` are the two measured active edges,
+    so cap probes and windows keep working.
+    """
+    pulse_w = max_ramp + settle
+    if not sequential:
+        rise_start = settle
+        fall_start = rise_start + max_ramp + settle
+        return rise_start, fall_start, fall_start + max_ramp + settle, None, pulse_w
+    prime_start = settle
+    data_hi_start = prime_start + pulse_w + max_ramp
+    rise_start = data_hi_start + max_ramp + settle
+    data_lo_start = rise_start + pulse_w + max_ramp
+    fall_start = data_lo_start + max_ramp + settle
+    clock_times = {
+        "prime": prime_start,
+        "data_hi": data_hi_start,
+        "rise": rise_start,
+        "data_lo": data_lo_start,
+        "fall": fall_start,
+        "width": pulse_w,
+    }
+    return rise_start, fall_start, fall_start + pulse_w, clock_times, pulse_w
