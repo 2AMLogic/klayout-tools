@@ -1016,6 +1016,39 @@ def _ramp_ns(transition_ns: float, thresholds: liberty_writer.Thresholds) -> flo
     return transition_ns / thresholds.slew_derate_from_library / span
 
 
+def _stimulus_schedule(
+    sequential: bool, settle: float, max_ramp: float
+) -> tuple[float, float, float, dict[str, float] | None, float]:
+    """Edge times ``(rise_start, fall_start, stop_ns, clock_times, pulse_w)``.
+
+    Sequential cells get three clock pulses: a priming pulse (output captures
+    its low state), then the two measured pulses -- data moves to the
+    output-high state while the clock is low, the next active edge makes the
+    output rise, data returns to the low state, and the last active edge makes
+    it fall. ``rise_start``/``fall_start`` are the two measured active edges,
+    so cap probes and windows keep working.
+    """
+    pulse_w = max_ramp + settle
+    if not sequential:
+        rise_start = settle
+        fall_start = rise_start + max_ramp + settle
+        return rise_start, fall_start, fall_start + max_ramp + settle, None, pulse_w
+    prime_start = settle
+    data_hi_start = prime_start + pulse_w + max_ramp
+    rise_start = data_hi_start + max_ramp + settle
+    data_lo_start = rise_start + pulse_w + max_ramp
+    fall_start = data_lo_start + max_ramp + settle
+    clock_times = {
+        "prime": prime_start,
+        "data_hi": data_hi_start,
+        "rise": rise_start,
+        "data_lo": data_lo_start,
+        "fall": fall_start,
+        "width": pulse_w,
+    }
+    return rise_start, fall_start, fall_start + pulse_w, clock_times, pulse_w
+
+
 def _build_stimulus_plan(
     *,
     cell: dict[str, Any],
@@ -1059,34 +1092,9 @@ def _build_stimulus_plan(
     settle = options["settle_ns"]
     max_ramp = max(ramps)
     sequential = cell["clock_pin"] is not None
-    pulse_w = max_ramp + settle
-    if sequential:
-        # Three clock pulses: a priming pulse (output captures its low
-        # state), then the two measured pulses -- data moves to the
-        # output-high state while the clock is low, the next active edge
-        # makes the output rise, data returns to the low state, and the
-        # last active edge makes it fall. `rise_start`/`fall_start` are the
-        # two measured active edges, so cap probes and windows keep working.
-        prime_start = settle
-        data_hi_start = prime_start + pulse_w + max_ramp
-        rise_start = data_hi_start + max_ramp + settle
-        data_lo_start = rise_start + pulse_w + max_ramp
-        fall_start = data_lo_start + max_ramp + settle
-        stop_ns = fall_start + pulse_w
-        clock_times = {
-            "prime": prime_start,
-            "data_hi": data_hi_start,
-            "rise": rise_start,
-            "data_lo": data_lo_start,
-            "fall": fall_start,
-            "width": pulse_w,
-        }
-    else:
-        rise_start = settle
-        fall_start = rise_start + max_ramp + settle
-        stop_ns = fall_start + max_ramp + settle
-        clock_times = None
-
+    rise_start, fall_start, stop_ns, clock_times, pulse_w = _stimulus_schedule(
+        sequential, settle, max_ramp
+    )
     lines = [
         "* klt characterize -- generated testbench, do not edit",
         f"* cell: {cell['name']} (.subckt {cell['subckt']})",
@@ -1120,14 +1128,15 @@ def _build_stimulus_plan(
     # Each window starts before its own edge and ends after the output has
     # settled (the settle check below enforces that), so the whole switching
     # event -- short-circuit current included -- lands inside it.
-    windows = {
-        "RISE": (rise_start, fall_start),
-        "FALL": (fall_start, stop_ns),
-    }
     if sequential:
         windows = {
             "RISE": (rise_start, rise_start + pulse_w),
             "FALL": (fall_start, fall_start + pulse_w),
+        }
+    else:
+        windows = {
+            "RISE": (rise_start, fall_start),
+            "FALL": (fall_start, stop_ns),
         }
 
     measurements: list[dict[str, Any]] = []

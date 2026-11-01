@@ -22,6 +22,29 @@ def _spice_number(value: float) -> str:
     return liberty_writer.format_number(value, precision=10)
 
 
+def _resolve_statics(
+    statics: Any, inputs: list[str], clock_pin: str, where: str
+) -> tuple[tuple[str, bool], ...]:
+    """Validate ``static_inputs`` into sorted ``(pin, bool)`` pairs."""
+    if statics is None:
+        return ()
+    if not isinstance(statics, dict):
+        raise SequentialSpecError(
+            f"{where}.static_inputs must be an object mapping pin name -> boolean"
+        )
+    resolved: list[tuple[str, bool]] = []
+    for name in sorted(statics):
+        if name not in inputs or name == clock_pin:
+            raise SequentialSpecError(
+                f"{where}.static_inputs names {name!r}, which is not a "
+                "declared non-clock input pin"
+            )
+        if not isinstance(statics[name], bool):
+            raise SequentialSpecError(f"{where}.static_inputs.{name} must be a boolean")
+        resolved.append((name, statics[name]))
+    return tuple(resolved)
+
+
 def resolve_sequential(
     spec: dict[str, Any], pins: tuple[dict[str, Any], ...], where: str
 ) -> tuple[str | None, str, tuple[tuple[str, bool], ...]]:
@@ -48,24 +71,7 @@ def resolve_sequential(
         raise SequentialSpecError(
             f'{where}.clock_edge must be "rising" or "falling" (got {edge!r})'
         )
-    resolved: list[tuple[str, bool]] = []
-    if statics is not None:
-        if not isinstance(statics, dict):
-            raise SequentialSpecError(
-                f"{where}.static_inputs must be an object mapping pin name -> boolean"
-            )
-        for name in sorted(statics):
-            if name not in inputs or name == clock_pin:
-                raise SequentialSpecError(
-                    f"{where}.static_inputs names {name!r}, which is not a "
-                    "declared non-clock input pin"
-                )
-            if not isinstance(statics[name], bool):
-                raise SequentialSpecError(
-                    f"{where}.static_inputs.{name} must be a boolean"
-                )
-            resolved.append((name, statics[name]))
-    return clock_pin, edge, tuple(resolved)
+    return clock_pin, edge, _resolve_statics(statics, inputs, clock_pin, where)
 
 
 def derive_sequential_arcs(cell: dict[str, Any]) -> tuple[DerivedArc, ...]:
