@@ -433,7 +433,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 7484
+      "lines": 7450
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -449,7 +449,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_mismatch.py",
-      "lines": 2578
+      "lines": 2551
     },
     {
       "path": "src/klayout_tools/lvs_netgen.py",
@@ -493,7 +493,7 @@
     },
     {
       "path": "src/klayout_tools/netlist_normalize.py",
-      "lines": 2362
+      "lines": 2347
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 14495
+      "lines": 14448
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -941,7 +941,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26332
+      "lines": 26242
     },
     {
       "path": "tests/test_lvs_device_provenance.py",
@@ -1085,7 +1085,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15886
+      "lines": 15866
     },
     {
       "path": "tests/test_sim_batch.py",

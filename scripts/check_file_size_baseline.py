@@ -23,19 +23,18 @@ Two baselines are inputs to every check:
    or under the hard limit (or deleted) must have no entry, and every
    vendor hash must match the actual bytes of a candidate file.
 
-Checking only candidate sizes against the old baseline would let stale
-proposed ceilings through; trusting only the proposed baseline would let a
-PR self-approve growth. Both sides are checked.
+Checking only candidate sizes would let stale proposed ceilings through;
+trusting only the proposed baseline would let a PR self-approve growth.
 
 What fails (exit 1):
 
-- a governed tracked file grows above its trusted ceiling;
+- a governed tracked file grows above its trusted ceiling (or, if larger,
+  its size in the comparison tree: re-seed race, #4748);
 - an unbaselined file exceeds the hard limit (new oversized file, or an
   old file that grew across the limit) -- unless the diff proves a
   non-growing rename from a trusted-baselined path;
 - a proposed ceiling is stale: not exactly the file's current size;
-- a proposed entry survives for a file that shrank to the limit or was
-  deleted;
+- a proposed entry survives for a file that shrank to the limit/was deleted;
 - a proposed debt entry or vendor hash is not present in the trusted
   baseline (a PR cannot mint new debt or new exemptions), subject to the
   narrow vendor-refresh exception below;
@@ -48,14 +47,13 @@ its proposed entry tightened to match, or removed once at/below the
 limit), and the removal of debt entries or vendor hashes. Tightening is
 always allowed; loosening never is.
 
-Counting is physical lines: blank lines and comment lines count, and a
-final line without a trailing newline counts as a line. An empty file is
-0 lines. Governed source is tracked first-party Python (`.py`), Rust
-(`.rs`), and shell (`.sh`), including tests, scripts, and examples; the
-vendored agent-tooling trees listed in `EXCLUDED_PREFIXES` (the same ones
-`pyproject.toml`'s `[tool.ruff]` exclude scopes ruff to code this repo
-owns) are not governed, nor are docs, binary fixtures, or generated
-reports (not source extensions).
+Counting is physical lines: blank and comment lines count, as does a
+final line without a trailing newline. An empty file is 0 lines. Governed
+source is tracked first-party Python (`.py`), Rust (`.rs`), and shell
+(`.sh`), including tests, scripts, and examples; the vendored
+agent-tooling trees in `EXCLUDED_PREFIXES` (the same ones `pyproject.toml`'s
+`[tool.ruff]` exclude scopes ruff to) are not governed, nor are docs,
+binary fixtures, or generated reports.
 
 Vendored code is identified by **content hash, never by directory name**:
 a hash exemption in the trusted baseline covers a candidate file only when
@@ -69,10 +67,8 @@ against the comparison revision touches only the baseline file itself and
 paths already pinned in the trusted vendor inventory, replacing a pinned
 entry's hash (same path, new reviewed upstream bytes) is permitted. A PR
 that touches any first-party file alongside the vendor refresh keeps the
-strict rule. This is the "reviewed upstream vendor updates update the
-trusted inventory separately" path: it is mechanically scoped so it can
-never authorize first-party growth or mint a pin for a file the trusted
-baseline never pinned.
+strict rule. It can never authorize first-party growth or mint a pin for
+a file the trusted baseline never pinned.
 
 **Bootstrap** is the case where the comparison revision predates this
 checker (no baseline file at that revision -- true of this gate's own
@@ -84,10 +80,9 @@ oversized files that only exist in the candidate (the landing PR's own
 implementation, say) may enter the baseline at exactly their measured
 landing size -- the landing diff is the review, and the must-equal rule
 pins the ceiling to reality, so nothing beyond the visible diff is
-authorized. What bootstrap forbids outright: raising any pre-existing
-file's ceiling above its comparison-tree size, and minting vendor pins.
-The proposed initial baseline therefore cannot simply authorize its own
-entries; it passes only by exactly recording actual content.
+authorized. Bootstrap forbids raising any pre-existing file's ceiling
+above its comparison-tree size, and minting vendor pins.
+The proposed initial baseline passes only by exactly recording content.
 
 Usage::
 
@@ -574,6 +569,7 @@ def _candidate_debt_failures(
     trusted: Baseline,
     renames: dict[str, str],
     exemptions: dict[str, str],
+    comparison_sizes: dict[str, int] | None = None,
 ) -> tuple[dict[str, int], list[str]]:
     """Which governed files may carry debt, and does any exceed its
     trusted permission? Returns (expected debts, failures)."""
@@ -606,10 +602,11 @@ def _candidate_debt_failures(
             )
             continue
         expected_debts[path] = size
-        if size > ceiling:
+        allowed = max(ceiling, (comparison_sizes or {}).get(path, 0))
+        if size > allowed:
             failures.append(
                 f"{path}: grew to {size} lines, above its trusted "
-                f"ceiling of {ceiling} lines; shrink it back to {ceiling} "
+                f"ceiling of {ceiling} lines; shrink it back to {allowed} "
                 "lines or fewer"
             )
     return expected_debts, failures
@@ -704,6 +701,7 @@ def compare(
     renames: dict[str, str],
     changed_paths: set[str],
     baseline_name: str,
+    comparison_sizes: dict[str, int] | None = None,
 ) -> list[str]:
     """Return sorted, actionable failure lines; empty means the candidate
     passes."""
@@ -719,7 +717,7 @@ def compare(
         exemptions.update(proposed.vendor_hashes)
 
     expected_debts, failures = _candidate_debt_failures(
-        candidate, trusted, renames, exemptions
+        candidate, trusted, renames, exemptions, comparison_sizes
     )
     failures.extend(_mirror_failures(proposed, expected_debts, candidate))
     failures.extend(_vendor_pin_failures(proposed, trusted, refresh, candidate))
@@ -785,8 +783,10 @@ def _cmd_check(repo_root: Path, baseline_path: Path, comparison_rev: str) -> int
         seed_bootstrap_debt_for_new_files(trusted, candidate)
 
     renames, changed_paths = diff_against_rev(repo_root, rev)
+    blobs = read_rev_blobs(repo_root, rev, sorted(trusted.debts))
+    sizes = {p: count_lines(d) for p, d in blobs.items()}
     failures = compare(
-        candidate, proposed, trusted, renames, changed_paths, baseline_name
+        candidate, proposed, trusted, renames, changed_paths, baseline_name, sizes
     )
 
     mode = (
