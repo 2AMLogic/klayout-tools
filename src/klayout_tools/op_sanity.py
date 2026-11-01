@@ -138,6 +138,7 @@ from .sim import (
     _resolve_models_lib,
     _resolve_netlist_include,
     _resolve_osdi_preload,
+    _resolve_param_file,
     _scale_supply_waveforms,
     _supply_alter_lines,
 )
@@ -1525,6 +1526,9 @@ def run_op_sanity(
         # `models.lib` -- needed only when some selected section actually
         # reads from it (`_needs_models_lib`).
         _resolve_corner_section_libs(biased_points, models, request_dir)
+        # Issue #4759: `models.param_file` rides on the points like the
+        # section libs, so this deck gets the same `.include` as `klt sim`.
+        _resolve_param_file([point, *biased_points], models, request_dir)
         if any(_needs_models_lib(biased) for biased in biased_points):
             models_lib = _resolve_models_lib(models, request_dir)
     except SimError as exc:

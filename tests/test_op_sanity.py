@@ -1177,6 +1177,40 @@ def test_osdi_preload_reaches_the_op_lint_deck(tmp_path, monkeypatch):
     assert deck.index(".control") < pre < deck.index("op")
 
 
+def test_param_file_reaches_the_op_lint_deck(tmp_path, monkeypatch):
+    """Issue #4759: `models.param_file` must be `.include`d in the op-lint
+    deck, ahead of the netlist (and any `.lib` cards), as in the `klt sim` decks."""
+    param = tmp_path / "design.ngspice"
+    param.write_text("* params\n")
+    lib = tmp_path / "models.lib"
+    lib.write_text("* lib\n")
+    request = _write_request(
+        tmp_path,
+        _GOOD_NETLIST,
+        models={"lib": str(lib), "param_file": str(param)},
+    )
+    decks: list[list[str]] = []
+    _install_fake_ngspice(
+        monkeypatch,
+        {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+        node_voltages={"vdd": 1.8, "in": 0.9, "bias": 0.6, "out": 1.2},
+    )
+    fake_run = op_sanity.subprocess.run
+
+    def recording_run(cmd, **kwargs):
+        decks.append(Path(cmd[cmd.index("-b") + 1]).read_text().splitlines())
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(op_sanity.subprocess, "run", recording_run)
+
+    op_sanity.run_op_sanity(str(request))
+
+    (deck,) = decks
+    inc = deck.index(f".include {param}")
+    body = next(i for i, line in enumerate(deck) if "body.spice" in line)
+    assert inc < body < deck.index(".control")
+
+
 _PWL_NETLIST = _GOOD_NETLIST.replace("Vdd vdd 0 DC {vdd}", "Vdd vdd 0 PWL(0 0 1u 1.8)")
 
 
