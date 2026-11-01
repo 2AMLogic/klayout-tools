@@ -648,6 +648,10 @@ def _declared_lib_refs(request: dict[str, Any]) -> Iterator[tuple[str, str, Any]
     models = request.get("models") or {}
     if models.get("lib") is not None:
         yield "models.lib", "model library", models.get("lib")
+    if models.get("param_file") is not None:
+        # Issue #4759: staged like the library so a batch job does not
+        # depend on a host-absolute path.
+        yield "models.param_file", "model parameter file", models.get("param_file")
     corners = request.get("corners") or {}
     declared = [
         ("process", index, entry)
@@ -767,6 +771,8 @@ def _rewrite_worker_request(
     models = worker.get("models")
     if isinstance(models, dict) and models.get("lib") in lib_names:
         models["lib"] = lib_names[models["lib"]]
+    if isinstance(models, dict) and models.get("param_file") in lib_names:
+        models["param_file"] = lib_names[models["param_file"]]
     worker_corners = worker.get("corners") or {}
     process_entries = list(worker_corners.get("process") or []) + [
         unit.get("process")
