@@ -114,6 +114,15 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_wall_clock_attempt import (  # noqa: E402
+    AttemptSelection,
+    current_attempt,
+    select_attempt,
+)
+from ci_wall_clock_attempt import as_json as attempt_as_json  # noqa: E402
+from ci_wall_clock_guidance import breach_guidance  # noqa: E402
+
 # The budget file's own schema (`.github/ci-wall-clock-budget.json`). Still 1:
 # #2615 only *added* an optional `rolling_window` block, so a budget file
 # written before it stays readable and simply runs with the rolling model off.
@@ -647,101 +656,6 @@ def _jobs_from_payload(payload: object) -> list[dict]:
     return jobs
 
 
-# A carried-over job (a `--failed` rerun keeps the earlier attempt's passing
-# jobs in the payload, restamped with the new `run_attempt` but with their old
-# timestamps) can only be told apart from a fresh one by having started before
-# the attempt did. Allow a little clock skew between the two API fields.
-_ATTEMPT_START_SKEW_SECONDS = 2
-
-
-@dataclass(frozen=True)
-class AttemptSelection:
-    """Which `/jobs` rows belong to the run's current attempt (#4751).
-
-    `filter=latest` is not "the current attempt": rows of earlier attempts stay
-    in the payload next to the fresh ones, and measuring them makes a breach
-    that a full rerun can never clear.
-    """
-
-    attempt: int | None
-    current: list[dict]
-    stale: list[dict]  # `run_attempt` differs from the run's own attempt
-    carried: list[dict]  # tagged current, but started before this attempt did
-    nothing_new: bool = False  # only carried-over rows could be measured
-
-    def note(self) -> str | None:
-        if self.attempt is None:
-            return None
-        parts = []
-        if self.stale:
-            parts.append(
-                f"{len(self.stale)} row(s) from earlier attempts dropped, not measured"
-            )
-        if self.nothing_new:
-            parts.append(
-                f"NOTHING NEW WAS MEASURED: every measurable job was carried "
-                f"over from before attempt {self.attempt} began (a --failed "
-                f"rerun of this job alone), so these are the earlier "
-                f"attempt's timings re-read, not a fresh sample"
-            )
-        elif self.carried:
-            parts.append(
-                f"{len(self.carried)} job(s) carried over unchanged from an "
-                f"earlier attempt dropped, not measured"
-            )
-        return "; ".join(parts) or None
-
-
-def current_attempt(run_payload: object | None) -> int | None:
-    """The run's own attempt: the run JSON's `run_attempt`, else the env var."""
-    candidates = []
-    if isinstance(run_payload, dict):
-        candidates.append(run_payload.get("run_attempt"))
-    candidates.append(os.environ.get("GITHUB_RUN_ATTEMPT"))
-    for value in candidates:
-        try:
-            attempt = int(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            continue
-        if attempt > 0:
-            return attempt
-    return None
-
-
-def select_attempt(
-    payload: object, attempt: int | None, attempt_started: datetime | None
-) -> AttemptSelection:
-    """Split the payload into current-attempt rows and the rest.
-
-    Fails open: with no known attempt, or a job lacking `run_attempt`, the job
-    is kept, which is the pre-#4751 behaviour.
-    """
-    jobs = _jobs_from_payload(payload)
-    if attempt is None:
-        return AttemptSelection(None, jobs, [], [])
-    current: list[dict] = []
-    stale: list[dict] = []
-    carried: list[dict] = []
-    for job in jobs:
-        job_attempt = job.get("run_attempt") if isinstance(job, dict) else None
-        if isinstance(job_attempt, int) and job_attempt != attempt:
-            stale.append(job)
-            continue
-        started = job.get("started_at") if isinstance(job, dict) else None
-        if attempt_started is not None and isinstance(started, str) and started:
-            try:
-                begun = _parse_iso(started)
-            except ValueError:
-                begun = None  # measure_jobs reports the unparseable stamp
-            if begun is not None and (
-                (attempt_started - begun).total_seconds() > _ATTEMPT_START_SKEW_SECONDS
-            ):
-                carried.append(job)
-                continue
-        current.append(job)
-    return AttemptSelection(attempt, current, stale, carried)
-
-
 def measure_current_attempt(
     payload: object,
     budget: dict,
@@ -759,7 +673,9 @@ def measure_current_attempt(
                 raise CannotRun(
                     f"run payload's 'run_started_at' is unparseable: {exc}"
                 ) from exc
-    sel = select_attempt(payload, current_attempt(run_payload), attempt_started)
+    sel = select_attempt(
+        _jobs_from_payload(payload), current_attempt(run_payload), attempt_started
+    )
     try:
         timings, first, last = measure_jobs(sel.current, budget, exclude=exclude)
     except CannotRun:
@@ -1071,62 +987,6 @@ def _render_cache_misses(cache_missed: list[JobTiming]) -> list[str]:
     ]
 
 
-def _breach_guidance(breaches: list[Breach], *, cache_missed: bool) -> list[str]:
-    """What the reader should do about `breaches` (a non-empty list)."""
-    kinds = {b.kind for b in breaches}
-    failing = [b for b in breaches if b.kind == "compute" and b.confirmed]
-    guidance: list[str] = []
-    if kinds == {"queue"}:
-        guidance += [
-            "",
-            "Compute is WITHIN budget -- this is a scheduling/queue breach, not a",
-            "code regression. Optimising these jobs would achieve nothing (issue",
-            "#1971): look at runner-pool contention instead. Reported, not gated:",
-            "a queue-only breach exits 0 and does not fail this build.",
-        ]
-        if cache_missed:
-            guidance.append(
-                "The cache miss above also inflates wall clock, which -- unlike "
-                "compute -- is measured whole."
-            )
-    elif "compute" in kinds and not failing:
-        guidance += [
-            "",
-            "Every compute breach above is UNCONFIRMED: another run of this same",
-            "commit measured the same job inside a quiet-pool threshold, so this",
-            "run measured the pool, not the code (issue #2615). Reported, not",
-            "gated: this exits 0.",
-        ]
-    elif "compute" in kinds:
-        guidance += [
-            "",
-            "This is a COMPUTE breach: the work took longer than the rolling",
-            "baseline of recent runs allows, and the pool was not measurably busy",
-            "at the time. What to do, in order:",
-            "  1. Read the `basis` column. `rolling` compares against the median",
-            "     of recent baseline-branch runs; `fixed ceiling` means that job",
-            "     has too little history yet and is on the committed fallback in",
-            "     .github/ci-wall-clock-budget.json.",
-            "  2. If the slowdown is real, shrink the job -- or, if the new cost",
-            "     is justified, say so in the PR. A rolling baseline absorbs a",
-            "     justified increase on its own within a few baseline-branch runs;",
-            "     no number has to be hand-edited for that.",
-            "  3. If you believe the pool was busy and this check could not see it",
-            "     (contention from workloads outside this repo's own Actions",
-            "     history is invisible here), re-run the WHOLE run (or push a",
-            "     fresh head). A clean full re-run measures every job again and",
-            "     passes; re-running only this job re-reads the same timings.",
-            "  4. Only edit the committed ceilings when a job is on the `fixed",
-            "     ceiling` basis; the rolling rows are derived, not declared.",
-        ]
-        if cache_missed:
-            guidance.append(
-                "Cache-miss rebuild time is ALREADY excluded above, so this "
-                "breach is not the cache service."
-            )
-    return guidance
-
-
 def render_text(
     timings: list[JobTiming],
     breaches: list[Breach],
@@ -1192,7 +1052,7 @@ def render_text(
     )
     for b in breaches:
         lines.append(f"  - {b.message}")
-    lines += _breach_guidance(breaches, cache_missed=bool(cache_missed))
+    lines += breach_guidance(breaches, cache_missed=bool(cache_missed))
     return "\n".join(lines)
 
 
@@ -1314,14 +1174,7 @@ def main(argv: list[str] | None = None) -> int:
                 "same_tree_runs": len(model.same_tree_runs),
             },
             "total_job_seconds": total_seconds,
-            "attempt": {
-                "run_attempt": selection.attempt,
-                "stale_attempt_rows_dropped": len(selection.stale),
-                "carried_over_rows_dropped": (
-                    0 if selection.nothing_new else len(selection.carried)
-                ),
-                "nothing_new_measured": selection.nothing_new,
-            },
+            "attempt": attempt_as_json(selection),
             "total_job_budget_seconds": total_budget,
             "total_job_budget_basis": total_basis,
             "total_cache_miss_seconds": total_cache_miss_seconds,

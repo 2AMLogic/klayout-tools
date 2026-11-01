@@ -121,7 +121,7 @@
     },
     {
       "path": "scripts/check_ci_wall_clock.py",
-      "lines": 1298
+      "lines": 1296
     },
     {
       "path": "scripts/check_file_size_baseline.py",
