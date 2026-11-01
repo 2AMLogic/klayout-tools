@@ -1,0 +1,31 @@
+* klt characterize worked example -- synthetic positive-edge D flip-flop
+* (transmission-gate master/slave; not a real PDK -- see generate.py).
+* Q = sb follows D after a rising CLK edge.
+
+.subckt dff_demo Q CLK D VDD VSS
+* clock phases
+MNc1 clkb CLK VSS VSS nfet_demo w=1u l=0.15u
+MPc1 clkb CLK VDD VDD pfet_demo w=2u l=0.15u
+MNc2 clkp clkb VSS VSS nfet_demo w=1u l=0.15u
+MPc2 clkp clkb VDD VDD pfet_demo w=2u l=0.15u
+* master: transparent while CLK low
+MNm D clkb m VSS nfet_demo w=1u l=0.15u
+MPm D clkp m VDD pfet_demo w=2u l=0.15u
+MN1 mb m VSS VSS nfet_demo w=1u l=0.15u
+MP1 mb m VDD VDD pfet_demo w=2u l=0.15u
+MN2 mm mb VSS VSS nfet_demo w=1u l=0.15u
+MP2 mm mb VDD VDD pfet_demo w=2u l=0.15u
+* master feedback: closed while CLK high
+MNmf mm clkp m VSS nfet_demo w=0.5u l=0.3u
+MPmf mm clkb m VDD pfet_demo w=1u l=0.3u
+* slave: transparent while CLK high
+MNs mb clkp s VSS nfet_demo w=1u l=0.15u
+MPs mb clkb s VDD pfet_demo w=2u l=0.15u
+MN3 Q s VSS VSS nfet_demo w=2u l=0.15u
+MP3 Q s VDD VDD pfet_demo w=4u l=0.15u
+MN4 ss Q VSS VSS nfet_demo w=1u l=0.15u
+MP4 ss Q VDD VDD pfet_demo w=2u l=0.15u
+* slave feedback: closed while CLK low
+MNsf ss clkb s VSS nfet_demo w=0.5u l=0.3u
+MPsf ss clkp s VDD pfet_demo w=1u l=0.3u
+.ends dff_demo

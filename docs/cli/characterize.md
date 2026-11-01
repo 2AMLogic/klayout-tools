@@ -77,7 +77,7 @@ command did not measure it", never as an assertion about the cell:
 | Not emitted | Where it belongs |
 |---|---|
 | more than one corner per invocation / per file | invoke once per corner; see "Multiple corners" below |
-| sequential-cell constraint arcs (`setup_*`/`hold_*`/`recovery_*`), `ff`/`latch` groups | not yet filed — a sequential cell is **refused**, not mis-characterized (see "Sequential cells are refused") |
+| sequential-cell constraint arcs (`setup_*`/`hold_*`/`recovery_*`), `ff`/`latch` groups | #4756 (clock-to-output arcs are supported; see "Sequential cells: clock-to-output only") |
 | `when`-qualified arc/power splitting, `bus`/`bundle` pins, input-pin (hidden) `internal_power` | not yet filed |
 
 ## How it works
@@ -180,23 +180,38 @@ delay definition, not a measurement failure; real libraries bound it with
 `default_max_transition` rather than by clamping. This command emits what it
 measured and never clamps.
 
-### Sequential cells are refused
+### Sequential cells: clock-to-output only
 
-There is no attempt to characterize a flip-flop or latch. A sequential
-cell's output `function` references an internal state node (`IQ`, `IQN`) that
-is not a declared input pin, and that is a hard error:
+A cell that declares `cell.clock_pin` is characterized as a sequential cell
+(issue #4755). Without `clock_pin`, a sequential cell is still **refused**:
+its output `function` references an internal state node (`IQ`, `IQN`) that is
+not a declared input pin, and that stays a hard error (`... which is not a
+declared input pin of this cell`) rather than a mis-characterized
+combinational arc.
 
-```
-klt characterize: cell 'dff_demo' pin 'Q': Liberty function "IQ" references
-'IQ', which is not a declared input pin of this cell (declared: CLK, D) -- a
-sequential cell or missing pin metadata, not a combinational arc this command
-can characterize
-```
+| Field | Meaning |
+|---|---|
+| `cell.clock_pin` | Declared input pin that clocks the cell. Makes the cell sequential. |
+| `cell.clock_edge` | `"rising"` (default) or `"falling"` — the active edge. |
+| `cell.static_inputs` | Optional `{pin: bool}` held constant for every non-clock input the output `function` does not reference (e.g. `{"RESET_B": true}`); all other unreferenced inputs are held low. |
 
-A refusal is the point: a setup/hold constraint is a fundamentally different
-measurement (a bisection search over a clock/data separation, not a grid
-sweep), and silently characterizing a clock-to-Q path as a combinational arc
-would produce a `.lib` that looks complete and is unusable.
+For a sequential cell each output pin's `function` is its **next-state
+expression over the data pins** (`D` for a `Q`, `!D` for a `QN`) — not an
+`IQ`-style state reference. The clock pin may not appear in it. One arc per
+output pin is emitted: `related_pin` = the clock, `timing_type :
+rising_edge` (or `falling_edge`), `timing_sense : non_unate`, with all six
+NLDM tables measured on the same slew × load grid (slew = clock slew). The
+response arc carries `timing_type`. The output pin's Liberty `function` is
+not emitted for these cells.
+
+The testbench drives three clock pulses: a priming pulse that captures the
+output-low state, a pulse after the data moved to the output-high state
+(→ `cell_rise`/`rise_transition`), and a pulse after it returned
+(→ `cell_fall`/`fall_transition`). Still **not supported**: setup/hold/
+recovery/removal constraint arcs (tracked in #4756), `ff`/`latch` groups,
+min-pulse-width, `when`-qualified arcs, async set/reset arcs. Worked example:
+`examples/characterize/request-dff.json`. Internal-power tables for these
+arcs cover the active clock edge's window only and are first-order.
 
 ### Multiple corners
 
