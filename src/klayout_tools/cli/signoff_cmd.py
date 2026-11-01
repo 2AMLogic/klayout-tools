@@ -139,6 +139,7 @@ from ..signoff_attest import (
     failed_output_tail,
     write_attestation,
 )
+from ..signoff_attest_input import input_line
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
     GeneratorExecution,
@@ -451,13 +452,7 @@ def _print_attestation_text(result: dict) -> None:
     print(f"attest: T1 item {result['t1_item']}  status: {result['status']}")
     attestation = result["attestation"]
     print(f"checks: {attestation['passed_count']}/{attestation['check_count']} passed")
-    binding = result["provenance"]["input"]
-    label = "stream" if result["t1_item"] == STREAM_ATTESTABLE_ITEM else "inventory"
-    if "paths" in binding:
-        # Item 1 binds its whole input set (#4764): name the set, not one file.
-        print(f"input set: {len(binding['paths'])} files ({binding['content_hash']})")
-    else:
-        print(f"{label}: {binding['path']['path']} ({binding['content_hash']})")
+    print(input_line(result, STREAM_ATTESTABLE_ITEM))
     print()
     for check in attestation["checks"]:
         print(_attestation_check_line(check))
