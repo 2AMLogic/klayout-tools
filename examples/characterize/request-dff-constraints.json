@@ -1,0 +1,55 @@
+{
+  "cell": {
+    "name": "dff_demo",
+    "netlist": "dff.spice",
+    "clock_pin": "CLK",
+    "pins": [
+      {
+        "name": "CLK",
+        "direction": "input"
+      },
+      {
+        "name": "D",
+        "direction": "input"
+      },
+      {
+        "name": "Q",
+        "direction": "output",
+        "function": "D"
+      }
+    ],
+    "power_pins": {
+      "vdd": "VDD",
+      "gnd": "VSS"
+    },
+    "area": 20.0,
+    "constrained_pins": [
+      "D"
+    ]
+  },
+  "corner": {
+    "name": "tt_1p80V_25C",
+    "process": "tt",
+    "supply_v": 1.8,
+    "temperature_c": 25
+  },
+  "grid": {
+    "input_transition_ns": [
+      0.02,
+      0.24
+    ],
+    "output_load_pf": [
+      0.005,
+      0.03
+    ]
+  },
+  "models": {
+    "lib": "models.lib"
+  },
+  "library": {
+    "name": "characterize_dff_constraints_demo_tt_1p80V_25C"
+  },
+  "options": {
+    "timeout_s": 600
+  }
+}

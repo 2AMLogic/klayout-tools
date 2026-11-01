@@ -66,6 +66,21 @@ from ._paths import _load_request_json, _resolve_relative, fold_spice_continuati
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
 from .characterize_cards import _POWER_CARDS, measurement_cards, power_cards
+from .characterize_constraints import (
+    ConstraintError,
+    resolve_constrained_pins,
+    resolve_constraint_options,
+    run_constraints,
+)
+from .characterize_instances import (
+    _capacitance_instance_lines,
+    _capacitance_side_state,
+    _full_side_state,
+    _leakage_instance_lines,
+    _leakage_states,
+    _metered_rail_nodes,
+    _rail_nodes,
+)
 from .characterize_sequential import (
     SequentialSpecError,
     clock_pwl_line,
@@ -359,7 +374,60 @@ def _characterize_cell(
     leakage = _build_leakage(plan, values, corner)
     pin_capacitance = _build_pin_capacitance(plan, values, corner)
 
+    def run_deck(text: str, measurements: list, label: str, stop_ns: float) -> dict:
+        deck_dir = os.path.join(work_dir, "constraints", label)
+        os.makedirs(deck_dir, exist_ok=True)
+        deck_path = os.path.join(deck_dir, "testbench.spice")
+        with open(deck_path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        deck_plan = {
+            "measurements": measurements,
+            "window": {**plan["window"], "stop_ns": stop_ns},
+        }
+        deck_request = _build_sim_request(
+            request=request,
+            request_dir=request_dir,
+            testbench_path=deck_path,
+            corner=corner,
+            plan=deck_plan,
+            options=options,
+            keep_artifacts=keep_artifacts,
+        )
+        request_path = os.path.join(deck_dir, "sim-request.json")
+        with open(request_path, "w", encoding="utf-8") as handle:
+            json.dump(deck_request, handle, indent=2)
+            handle.write("\n")
+        try:
+            report = sim.run_sim(
+                request_path,
+                artifacts_dir=os.path.join(deck_dir, "sim"),
+                backend=backend,
+            )
+        except sim.SimError as exc:
+            raise CharacterizeError(f"constraint simulation failed: {exc}") from exc
+        return _extract_measurements(report, request_path, allow_missing=True)
+
+    constraints = None
+    if cell["constrained_pins"]:
+        try:
+            constraints = run_constraints(
+                cell=cell,
+                arcs=arcs,
+                grid_ns=grid["input_transition_ns"],
+                rail_nodes=_rail_nodes(cell),
+                vdd=corner["supply_v"],
+                thresholds=thresholds,
+                ramps_ns=options["ramps_ns"],
+                settle_ns=options["settle_ns"],
+                load_pf=min(grid["output_load_pf"]),
+                options=options["constraint"],
+                run_deck=run_deck,
+            )
+        except ConstraintError as exc:
+            raise CharacterizeError(str(exc)) from exc
+
     return {
+        "constraints": constraints,
         "cell": cell,
         "arcs": arcs,
         "plan": plan,
@@ -490,6 +558,11 @@ def _resolve_cell_spec(
     except SequentialSpecError as exc:
         raise CharacterizeError(str(exc)) from exc
 
+    try:
+        constrained_pins = resolve_constrained_pins(spec, pins, clock_pin, where)
+    except ConstraintError as exc:
+        raise CharacterizeError(str(exc)) from exc
+
     declared = {pin["name"] for pin in pins} | set(power.values())
     missing = [terminal for terminal in terminals if terminal not in declared]
     if missing:
@@ -523,6 +596,7 @@ def _resolve_cell_spec(
         "clock_pin": clock_pin,
         "clock_edge": clock_edge,
         "static_inputs": static_inputs,
+        "constrained_pins": constrained_pins,
     }
 
 
@@ -807,7 +881,12 @@ def _resolve_options(
     keep_artifacts = spec.get("keep_artifacts", False)
     if not isinstance(keep_artifacts, bool):
         raise CharacterizeError("request.options.keep_artifacts must be a boolean")
+    try:
+        constraint_options = resolve_constraint_options(spec)
+    except ConstraintError as exc:
+        raise CharacterizeError(str(exc)) from exc
     return {
+        "constraint": constraint_options,
         "settle_ns": settle_ns,
         "tran_step_ns": step_ns,
         "timeout_s": timeout_s,
@@ -1084,12 +1163,7 @@ def _build_stimulus_plan(
     lines.append(f".include {cell['netlist_path']}")
     lines.append(f"Vdd vdd 0 DC {_spice_number(vdd)}")
 
-    vdd_terminal = cell["power_pins"]["vdd"]
-    gnd_terminal = cell["power_pins"]["gnd"]
-    rail_nodes = {vdd_terminal: "vdd", gnd_terminal: "0"}
-    for key, terminal in cell["power_pins"].items():
-        if key not in ("vdd", "gnd"):
-            rail_nodes.setdefault(terminal, "vdd" if "v" in key.lower() else "0")
+    rail_nodes = _rail_nodes(cell)
 
     # Integration windows: the first input edge (rising) owns
     # [rise_start, fall_start], the second (falling) owns [fall_start, stop].
@@ -1253,36 +1327,6 @@ def _build_stimulus_plan(
     }
 
 
-def _full_side_state(
-    arc: DerivedArc, cell: dict[str, Any]
-) -> tuple[tuple[str, bool], ...]:
-    """Every input pin other than the arc's related pin, with the constant it
-    is held at.
-
-    Pins the output's ``function`` does not reference (a second output's
-    inputs on a multi-output cell, an unused pin) are held **low** -- a
-    floating input on a CMOS gate is not a valid operating point, so leaving
-    one undriven is never an option.
-    """
-    derived = arc.side_input_map
-    return tuple(
-        (pin, derived.get(pin, False))
-        for pin in cell["input_pins"]
-        if pin != arc.related_pin
-    )
-
-
-def _metered_rail_nodes(
-    tag: str, cell: dict[str, Any], rail_nodes: dict[str, str]
-) -> dict[str, str]:
-    """``rail_nodes`` with the cell's primary ``vdd``/``gnd`` terminals moved
-    onto this instance's private ammeter nodes."""
-    nodes = dict(rail_nodes)
-    nodes[cell["power_pins"]["vdd"]] = f"pd_{tag}"
-    nodes[cell["power_pins"]["gnd"]] = f"pg_{tag}"
-    return nodes
-
-
 def _instance_lines(
     *,
     tag: str,
@@ -1359,140 +1403,6 @@ def _instance_lines(
             f"C{tag}_{_slug(output)} {node_of[output]} 0 {_spice_number(load_pf)}p"
         )
     return lines
-
-
-def _capacitance_side_state(
-    pin_name: str, arcs: tuple[DerivedArc, ...], cell: dict[str, Any]
-) -> tuple[tuple[str, bool], ...]:
-    """The state the cell's *other* inputs are held at while ``pin_name``'s
-    capacitance is measured.
-
-    The acceptance bar (issue #2512) is "the same side-input states the
-    timing arcs use", so this reuses the first derived arc whose
-    ``related_pin`` is this pin -- the same state, in the same deterministic
-    order, that arc's delay tables were measured at. That matters: an input
-    of a NAND held at the *controlling* state would see no output movement
-    and therefore no Miller charge, reporting a capacitance well below the
-    one the pin actually presents in the situation a timing analysis cares
-    about.
-
-    An input pin no arc names (an unused pin, or a second output's input on a
-    multi-output cell) has no such state; its neighbours are held low, the
-    same fallback :func:`_full_side_state` applies to an unreferenced pin.
-    """
-    for arc in arcs:
-        if arc.related_pin == pin_name:
-            return _full_side_state(arc, cell)
-    return tuple((pin, False) for pin in cell["input_pins"] if pin != pin_name)
-
-
-def _capacitance_instance_lines(
-    *,
-    tag: str,
-    cell: dict[str, Any],
-    pin_name: str,
-    side_state: tuple[tuple[str, bool], ...],
-    rail_nodes: dict[str, str],
-    vdd: float,
-    ramp_ns: float,
-    load_pf: float,
-    rise_start: float,
-    fall_start: float,
-) -> list[str]:
-    """One never-metered-supply instance whose single job is to let the charge
-    drawn by ``pin_name`` be integrated.
-
-    The pin is fed from a ramp source through a 0 V ammeter (``Vcm<tag>``),
-    so ``i(Vcm<tag>)`` is the current flowing *into* the pin; its integral
-    over an input edge is the charge that edge moved. Supplies go straight to
-    the shared rails -- this instance contributes to no power or leakage
-    measurement, so it needs no ammeter pair of its own.
-    """
-    side_map = dict(side_state)
-    node_of: dict[str, str] = {}
-    for pin in cell["pins"]:
-        name = pin["name"]
-        if pin["direction"] == "output":
-            node_of[name] = f"o_{tag}_{_slug(name)}"
-        elif name == pin_name:
-            node_of[name] = f"ci_{tag}"
-        else:
-            node_of[name] = "vdd" if side_map[name] else "0"
-
-    nodes = [
-        node_of.get(terminal) or rail_nodes[terminal] for terminal in cell["terminals"]
-    ]
-    lines = [
-        f"Vc{tag} cs_{tag} 0 PWL(0 0 "
-        f"{_spice_number(rise_start)}n 0 "
-        f"{_spice_number(rise_start + ramp_ns)}n {_spice_number(vdd)} "
-        f"{_spice_number(fall_start)}n {_spice_number(vdd)} "
-        f"{_spice_number(fall_start + ramp_ns)}n 0)",
-        # 0 V ammeter in series with the pin: i(Vcm<tag>) is the current the
-        # source delivers INTO the pin.
-        f"Vcm{tag} cs_{tag} ci_{tag} DC 0",
-        f"X{tag} {' '.join(nodes)} {cell['subckt']}",
-    ]
-    for output in cell["output_pins"]:
-        lines.append(
-            f"C{tag}_{_slug(output)} {node_of[output]} 0 {_spice_number(load_pf)}p"
-        )
-    return lines
-
-
-def _leakage_states(cell: dict[str, Any]) -> tuple[tuple[tuple[str, bool], ...], ...]:
-    """Every assignment of the cell's input pins, in a fixed order (the first
-    input is the most significant bit), each as ``((pin, value), ...)``.
-
-    Exhaustive over ``2**n`` for the same reason arc derivation is: a
-    standard cell has a handful of inputs, and a vendor ``.lib`` reports one
-    ``leakage_power`` group per state.
-    """
-    inputs = cell["input_pins"]
-    states = []
-    for code in range(2 ** len(inputs)):
-        states.append(
-            tuple(
-                (pin, bool((code >> (len(inputs) - 1 - position)) & 1))
-                for position, pin in enumerate(inputs)
-            )
-        )
-    return tuple(states)
-
-
-def _leakage_instance_lines(
-    *,
-    tag: str,
-    cell: dict[str, Any],
-    state: tuple[tuple[str, bool], ...],
-    rail_nodes: dict[str, str],
-) -> list[str]:
-    values = dict(state)
-    node_of: dict[str, str] = {}
-    for pin in cell["pins"]:
-        name = pin["name"]
-        if pin["direction"] == "output":
-            node_of[name] = f"o_{tag}_{_slug(name)}"
-        else:
-            # A high input is tied to the *metered* supply node, not the
-            # shared rail: its gate leakage is drawn from the supply too, and
-            # static power is every source's V * I -- a low input's source
-            # sits at 0 V and delivers none. Measured on IHP sg13g2_inv_1
-            # with A high, routing the input around the ammeter under-reports
-            # the state's leakage by roughly a third (the NMOS gate current).
-            node_of[name] = f"pl_{tag}" if values[name] else "0"
-    nodes = []
-    for terminal in cell["terminals"]:
-        if terminal in node_of:
-            nodes.append(node_of[terminal])
-        elif terminal == cell["power_pins"]["vdd"]:
-            nodes.append(f"pl_{tag}")
-        else:
-            nodes.append(rail_nodes[terminal])
-    return [
-        f"Vpl{tag} vdd pl_{tag} DC 0",
-        f"X{tag} {' '.join(nodes)} {cell['subckt']}",
-    ]
 
 
 def _spice_number(value: float) -> str:
@@ -1592,8 +1502,8 @@ def _rebase_models(models: dict[str, Any], request_dir: str) -> dict[str, Any]:
 
 
 def _extract_measurements(
-    sim_report: dict[str, Any], sim_report_path: str
-) -> dict[str, float]:
+    sim_report: dict[str, Any], sim_report_path: str, allow_missing: bool = False
+) -> dict[str, Any]:
     corners = sim_report.get("corners") or []
     if len(corners) != 1:
         raise CharacterizeError(
@@ -1601,7 +1511,13 @@ def _extract_measurements(
             "`klt characterize` is single-corner by construction"
         )
     entry = corners[0]
-    if entry.get("status") != "pass":
+    # A constraint probe that fails to capture leaves its `.meas` without a
+    # crossing; `klt sim` grades that corner `error` with only `measurement`
+    # diagnostics. That is the probe's answer, not a simulation failure.
+    only_missing_meas = allow_missing and all(
+        d.get("code") == "measurement" for d in entry.get("diagnostics") or []
+    )
+    if entry.get("status") != "pass" and not only_missing_meas:
         diagnostics = entry.get("diagnostics") or []
         detail = "; ".join(
             f"{item.get('code')}: {item.get('message')}" for item in diagnostics[:3]
@@ -1612,12 +1528,16 @@ def _extract_measurements(
             + (f" ({detail})" if detail else "")
             + f" -- full simulation report: {sim_report_path}"
         )
-    values: dict[str, float] = {}
+    values: dict[str, Any] = {}
     missing: list[str] = []
     for measurement in entry.get("measurements") or []:
         value = measurement.get("value")
         if value is None:
-            missing.append(measurement["name"])
+            # Constraint probes treat "no crossing" as a failed capture.
+            if allow_missing:
+                values[measurement["name"]] = None
+            else:
+                missing.append(measurement["name"])
             continue
         values[measurement["name"]] = float(value)
     if missing:
@@ -2043,6 +1963,7 @@ def _build_liberty_cell(
         )
 
     measured_caps = result["pin_capacitance"]
+    constraint_arcs = (result.get("constraints") or {}).get("liberty", {})
     pins = []
     for pin in cell["pins"]:
         resolved = _resolve_pin_capacitance(pin, measured_caps)
@@ -2079,6 +2000,7 @@ def _build_liberty_cell(
                 ),
                 arcs=tuple(arcs_by_output.get(pin["name"], ())),
                 internal_power=tuple(power_by_output.get(pin["name"], ())),
+                constraints=constraint_arcs.get(pin["name"], ()),
             )
         )
     leakage = result["leakage"]
@@ -2315,6 +2237,7 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
             for index, arc in enumerate(result["arcs"])
         ],
         "leakage": result["leakage"],
+        "constraints": (result.get("constraints") or {}).get("entries", []),
         "simulation": {
             "testbench": result["testbench_path"],
             "request": result["sim_request_path"],
