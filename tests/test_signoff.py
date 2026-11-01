@@ -16110,10 +16110,25 @@ def test_attest_generates_an_anchored_generic_envelope(tmp_path, item):
     assert envelope["kind"] == "generic"
     assert envelope["status"] == "pass"
     assert envelope["t1_item"] == item
-    assert envelope["provenance"]["input"] == {
-        "path": {"path": f"attest/item{item}.json", "scope": "repo"},
-        "content_hash": _hash_of(inventory),
-    }
+    if item == 1:
+        # Item 1 binds the whole input set (#4764): sources, derived, inventory.
+        members = envelope["provenance"]["input"]["paths"]
+        names = [m["path"]["path"] for m in members]
+        assert names == sorted(names)
+        assert f"attest/item{item}.json" in names
+        assert "design/ota.sch" in names
+        assert "netlist/ota.spice" in names
+        assert "path" not in envelope["provenance"]["input"]
+        assert envelope["provenance"]["input"]["content_hash"] == (
+            signoff_module.input_set_digest(
+                (m["path"]["path"], m["content_hash"]) for m in members
+            )
+        )
+    else:
+        assert envelope["provenance"]["input"] == {
+            "path": {"path": f"attest/item{item}.json", "scope": "repo"},
+            "content_hash": _hash_of(inventory),
+        }
     attestation = envelope["attestation"]
     assert attestation["producer"] == "klt signoff --attest"
     assert attestation["inventory_schema_version"] == 1
@@ -16502,7 +16517,13 @@ def test_attested_envelope_is_met_for_its_item_and_refused_on_the_others(
     assert bound["status"] == "met"
     binding = bound["citation"]["artifact_binding"]
     assert binding["t1_item"] == item
-    assert binding["path"] == {"path": f"attest/item{item}.json", "scope": "repo"}
+    if item == 1:
+        assert binding["path"] is None  # set binding (#4764)
+        assert f"attest/item{item}.json" in [
+            m["path"]["path"] for m in binding["members"]
+        ]
+    else:
+        assert binding["path"] == {"path": f"attest/item{item}.json", "scope": "repo"}
     assert binding["input_verified"] is True
     assert binding["attestation"]["producer"] == "klt signoff --attest"
     assert (
@@ -18177,7 +18198,7 @@ def _graded_attestation(repo: Path, item: int = 1, **grade_kwargs) -> dict:
         evidence={
             str(item): {
                 "file": str(envelope_path),
-                "content_hash": _hash_of(inventory),
+                "content_hash": envelope["provenance"]["input"]["content_hash"],
             }
         }
     )
@@ -18190,7 +18211,11 @@ def test_untouched_attested_tree_stays_met_without_extra_fields(tmp_path, item):
 
     assert graded["status"] == "met"
     assert "detail" not in graded or not graded["detail"]
-    assert "members" not in graded["citation"]["artifact_binding"]
+    if item == 1:  # set binding lists every member, all verified (#4764)
+        members = graded["citation"]["artifact_binding"]["members"]
+        assert {m["status"] for m in members} == {"verified"}
+    else:
+        assert "members" not in graded["citation"]["artifact_binding"]
 
 
 @pytest.mark.parametrize("path", ["design/ota.sch", "netlist/ota.spice"])
@@ -18203,7 +18228,7 @@ def test_editing_an_attested_source_or_derived_file_is_stale(tmp_path, path):
         evidence={
             "1": {
                 "file": str(repo / "evidence" / "item1.json"),
-                "content_hash": _hash_of(inventory),
+                "content_hash": envelope["provenance"]["input"]["content_hash"],
             }
         }
     )
@@ -18215,20 +18240,21 @@ def test_editing_an_attested_source_or_derived_file_is_stale(tmp_path, path):
     assert graded["status"] == "unmet"
     assert graded["reason"] == "stale_evidence"
     members = graded["detail"]["artifact_binding"]["members"]
-    assert [(m["path"], m["status"]) for m in members] == [(path, "stale")]
+    assert [
+        (m["path"]["path"], m["status"]) for m in members if m["status"] != "verified"
+    ] == [(path, "stale")]
 
 
 def test_deleting_an_attested_file_is_unverifiable_provenance(tmp_path):
     repo = _attest_repo(tmp_path)
     inventory = _write_inventory(repo, 1)
-    (repo / "evidence" / "item1.json").write_text(
-        json.dumps(build_attestation(1, inventory))
-    )
+    envelope = build_attestation(1, inventory)
+    (repo / "evidence" / "item1.json").write_text(json.dumps(envelope))
     manifest = _manifest(
         evidence={
             "1": {
                 "file": str(repo / "evidence" / "item1.json"),
-                "content_hash": _hash_of(inventory),
+                "content_hash": envelope["provenance"]["input"]["content_hash"],
             }
         }
     )
@@ -18239,9 +18265,9 @@ def test_deleting_an_attested_file_is_unverifiable_provenance(tmp_path):
     assert graded["status"] == "unmet"
     assert graded["reason"] == "unverifiable_provenance"
     members = graded["detail"]["artifact_binding"]["members"]
-    assert [(m["path"], m["status"]) for m in members] == [
-        ("design/bias.sch", "unverifiable")
-    ]
+    assert [
+        (m["path"]["path"], m["status"]) for m in members if m["status"] != "verified"
+    ] == [("design/bias.sch", "unverifiable")]
 
 
 # --- Issue #4354: item 4 accepts a list of per-cell `klt lvs` reports -------
@@ -18443,3 +18469,22 @@ def test_attest_command_timeout_s_refused(bad):
 
     with pytest.raises(signoff_attest.AttestationError, match=r"f\.timeout_s"):
         signoff_attest._command_spec({"argv": ["x"], "timeout_s": bad}, "f", ".")
+
+
+@pytest.mark.parametrize("edit", ["design/ota.sch", "netlist/ota.spice", "inventory"])
+def test_attest_item1_digest_changes_when_any_member_is_edited(tmp_path, edit):
+    """#4764: a source, derived or inventory edit moves the pinned digest."""
+    repo = _attest_repo(tmp_path)
+    inventory = _write_inventory(repo, 1)
+    before = build_attestation(1, inventory)
+    again = build_attestation(1, inventory)
+    assert before == again  # byte-stable on an unchanged tree
+
+    target = Path(inventory) if edit == "inventory" else repo / edit
+    target.write_text(target.read_text() + "\n")
+    after = build_attestation(1, inventory)
+
+    assert (
+        after["provenance"]["input"]["content_hash"]
+        != before["provenance"]["input"]["content_hash"]
+    )

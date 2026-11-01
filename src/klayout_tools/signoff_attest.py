@@ -85,6 +85,7 @@ from .signoff import (
     _finite_json_float,
     _generic_item_binding_refusal,
     _reject_json_constant,
+    input_set_digest,
 )
 
 #: The attestation-inventory schema versions this build reads. An inventory
@@ -1085,6 +1086,9 @@ def build_attestation(
     checks = _run_checks(item, root, normalized, committed_checks)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
+    provenance_input, input_hash = _provenance_input(
+        item, root, normalized, inventory_rel, inventory_hash
+    )
     envelope: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "kind": "generic",
@@ -1108,14 +1112,56 @@ def build_attestation(
             "klayout_version": None,
             "pdk": None,
             "deck": None,
-            "input": {
+            "input": provenance_input,
+        },
+    }
+    _self_check(envelope, item, input_hash)
+    return envelope
+
+
+def _provenance_input(
+    item: int,
+    root: str,
+    normalized: Mapping[str, Any],
+    inventory_rel: str,
+    inventory_hash: str,
+) -> tuple[dict[str, Any], str]:
+    """The envelope's ``provenance.input`` and the digest a manifest pins.
+
+    Item 1 binds the whole input set (every source, every derived file and the
+    inventory itself) through ``provenance.input.paths`` so editing any member
+    makes the manifest row ``stale_evidence``. A member that cannot be read is
+    left out: its ``present`` check already fails the attestation. Other items
+    bind the inventory alone."""
+    if item != 1:
+        return (
+            {
                 "path": {"path": inventory_rel, "scope": "repo"},
                 "content_hash": inventory_hash,
             },
-        },
+            inventory_hash,
+        )
+    member_paths = {
+        *normalized["sources"],
+        *(entry["path"] for entry in normalized["derived"]),
+        inventory_rel,
     }
-    _self_check(envelope, item, inventory_hash)
-    return envelope
+    members: list[tuple[str, str]] = []
+    for path in sorted(member_paths, key=lambda value: value.encode("utf-8")):
+        digest = sha256_file(os.path.join(root, path))
+        if digest is not None:
+            members.append((path, f"sha256:{digest}"))
+    combined = input_set_digest(members)
+    return (
+        {
+            "paths": [
+                {"path": {"path": path, "scope": "repo"}, "content_hash": digest}
+                for path, digest in members
+            ],
+            "content_hash": combined,
+        },
+        combined,
+    )
 
 
 def _self_check(envelope: Mapping[str, Any], item: int, content_hash: str) -> None:

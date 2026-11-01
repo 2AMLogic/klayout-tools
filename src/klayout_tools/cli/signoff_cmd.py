@@ -453,7 +453,11 @@ def _print_attestation_text(result: dict) -> None:
     print(f"checks: {attestation['passed_count']}/{attestation['check_count']} passed")
     binding = result["provenance"]["input"]
     label = "stream" if result["t1_item"] == STREAM_ATTESTABLE_ITEM else "inventory"
-    print(f"{label}: {binding['path']['path']} ({binding['content_hash']})")
+    if "paths" in binding:
+        # Item 1 binds its whole input set (#4764): name the set, not one file.
+        print(f"input set: {len(binding['paths'])} files ({binding['content_hash']})")
+    else:
+        print(f"{label}: {binding['path']['path']} ({binding['content_hash']})")
     print()
     for check in attestation["checks"]:
         print(_attestation_check_line(check))
