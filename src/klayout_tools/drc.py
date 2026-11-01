@@ -700,6 +700,8 @@ def _derived_region_unscoped(
             return base_region.overlapping(marker_region)
         # Whole `base` polygons touching no marker geometry at all -- the
         # unmarked ("_LV") half of the pair.
+        if derived.exclude_holed:  # #2835: rings have their own rules
+            base_region = base_region.merged().with_holes(0, 1, False)
         return base_region.not_interacting(marker_region)
     # "sized_intersection" (the default, issue #345): shapes of
     # `intersect_with` that already touch the *unsized* `base` region
@@ -1087,6 +1089,7 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
                     "base": _fmt_layer(derived.base),
                     "intersect_with": _fmt_layer(derived.intersect_with),
                     "sized_by_um": derived.sized_by_um,
+                    **({"exclude_holed": True} if derived.exclude_holed else {}),
                     **(
                         {}
                         if derived.context is None
@@ -3153,44 +3156,40 @@ def _validate_derived_layer(rule: DrcRule) -> None:
     (issue #2688), which would silently degrade to a plain ``base`` check.
     """
     derived = rule.derived_layer
-    if derived is not None and derived.mode not in _DERIVED_LAYER_MODES:
+    if derived is None:
+        return
+    if derived.mode not in _DERIVED_LAYER_MODES:
         raise DrcError(
             f"rule '{rule.id}': unknown derived_layer mode "
             f"'{derived.mode}' (known: {', '.join(sorted(_DERIVED_LAYER_MODES))})"
         )
-    if (
-        derived is not None
-        and derived.mode == "union"
-        and derived.intersect_with is None
-    ):
+    if derived.mode == "union" and derived.intersect_with is None:
         raise DrcError(
             f"rule '{rule.id}': derived_layer mode 'union' requires intersect_with"
         )
-    if derived is not None and derived.context not in _DERIVED_CONTEXTS:
+    if derived.exclude_holed and derived.mode != "not_interacting":
+        raise DrcError(f"rule '{rule.id}': exclude_holed needs mode 'not_interacting'")
+    if derived.context not in _DERIVED_CONTEXTS:
         raise DrcError(
             f"rule '{rule.id}': unknown derived_layer context "
             f"'{derived.context}' (known: near, far, or unset)"
         )
-    if derived is not None and (derived.context is None) == bool(
-        derived.context_layers
-    ):
+    if (derived.context is None) == bool(derived.context_layers):
         raise DrcError(
             f"rule '{rule.id}': derived_layer context and context_layers "
             "must be set together"
         )
-    if derived is not None and derived.context2 not in _DERIVED_CONTEXTS:
+    if derived.context2 not in _DERIVED_CONTEXTS:
         raise DrcError(
             f"rule '{rule.id}': unknown derived_layer context2 "
             f"'{derived.context2}' (known: near, far, or unset)"
         )
-    if derived is not None and (derived.context2 is None) == bool(
-        derived.context2_layers
-    ):
+    if (derived.context2 is None) == bool(derived.context2_layers):
         raise DrcError(
             f"rule '{rule.id}': derived_layer context2 and context2_layers "
             "must be set together"
         )
-    if derived is not None and derived.context2 is not None and derived.context is None:
+    if derived.context2 is not None and derived.context is None:
         raise DrcError(
             f"rule '{rule.id}': derived_layer context2 requires context "
             "(stage 2 applies after stage 1)"

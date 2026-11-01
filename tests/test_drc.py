@@ -373,9 +373,9 @@ def test_attribute_to_instance_straddling_and_top_level_are_null():
 def _sky130_deck_layer_tuples() -> set[tuple[int, int]]:
     tuples: set[tuple[int, int]] = set()
     for rule in get_deck("sky130"):
-        tuples.add(rule.layer)
-        if rule.other_layer is not None:
-            tuples.add(rule.other_layer)
+        d = rule.derived_layer
+        extra = (d.base, d.intersect_with, *d.context_layers) if d else ()
+        tuples.update(lay for lay in (rule.layer, rule.other_layer, *extra) if lay)
     return tuples
 
 
@@ -3715,7 +3715,7 @@ def test_run_drc_sky130_tap_enclosing_licon_escaped_cut_violation(tmp_path):
         tmp_path,
         "tap_enclosing_licon_violation",
         [kdb.Box(0, 0, 2000, 1000)],  # tap ring segment
-        [kdb.Box(1900, 400, 2100, 600)],  # cut hangs 100 dbu out the right edge
+        [kdb.Box(1930, 400, 2100, 570)],  # 170 dbu cut hangs 100 dbu out the right edge
     )
 
     report = run_drc(str(path), "sky130")
@@ -3738,7 +3738,7 @@ def test_run_drc_sky130_tap_enclosing_licon_clean(tmp_path):
         tmp_path,
         "tap_enclosing_licon_clean",
         [kdb.Box(0, 0, 2000, 1000)],  # tap ring segment
-        [kdb.Box(400, 400, 600, 600)],  # 400 dbu clear of every tap edge
+        [kdb.Box(400, 400, 570, 570)],  # 170 dbu cut, clear of every tap edge
     )
 
     report = run_drc(str(path), "sky130")

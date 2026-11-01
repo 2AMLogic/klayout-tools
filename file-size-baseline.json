@@ -273,7 +273,7 @@
     },
     {
       "path": "src/klayout_tools/drc.py",
-      "lines": 3846
+      "lines": 3845
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
@@ -389,7 +389,7 @@
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
-      "lines": 2895
+      "lines": 2883
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",

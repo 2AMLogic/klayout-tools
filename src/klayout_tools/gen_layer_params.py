@@ -1386,33 +1386,12 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #: layer present in *both* sources agrees, so an entry can be deleted once its
 #: deck rule carries the bound.
 #:
-#: - ``sky130`` ``licon1`` (66/44) 0.17um -- ``sky130A_mr.drc`` ``licon.1``
-#:   ("min/max. licon length : 0.17um",
-#:   ``licon.not(prec_resistor).drc(length != 0.17)``), identical to
-#:   ``sky130.lydrc``'s own ``licon.1``
-#:   (``licon.not(...).edges.without_length(0.17)``, "minimum/maximum width of
-#:   licon : 0.17um"); this deck's ``licon1.width.1`` carries the minimum half
-#:   (issue #2594). The one upstream exemption is a licon on a **precision
-#:   poly resistor** (``prec_resistor = (rpm | urpm) & psdm &
-#:   poly.interacting(poly_rs)``), whose cuts are instead held to 0.19um/2.0um
-#:   edges by ``licon.1b/c``. ``res_array``'s ``flavor="high"``/``"xhigh"``
-#:   are the only requests that draw ``rpm``/``urpm`` at all
-#:   (:data:`_PDK_RES_FLAVOR_LAYERS`), and their end contacts were already
-#:   drawn at neither exempt size (0.22um) before this entry, so clamping to
-#:   0.17um neither introduces nor fixes that case -- it is a context-
-#:   dependent size this layer-keyed table structurally cannot express;
-#:   issue #2449 resolves it per request via
-#:   :data:`_PDK_RES_FLAVOR_END_CONTACT_UM` (and zeroes this clamp for those
-#:   requests in :func:`_resistor_layer_params`).
-#: - ``sky130`` ``mcon`` (67/44) 0.17um -- ``sky130.lydrc`` ``ct.1``
-#:   (``mcon.edges.without_length(0.17)``, "minimum/maximum width of mcon :
-#:   0.17um"), split in ``sky130A_mr.drc`` into ``ct.1_a`` ("minimum width of
-#:   mcon : 0.17um") and ``ct.1_b`` ("maximum length of mcon : 0.17um"); this
-#:   deck's ``mcon.width.1`` carries the minimum half (issue #2594).
-#:   ``sky130A_mr.drc`` narrows its halves to mcon outside ``areaid:ce`` and
-#:   handles ring-shaped mcon separately (``ct.3``/``ct.3_a``); ``sky130.lydrc``
-#:   applies the same 0.17um unconditionally, and no generator draws an
-#:   ``areaid`` layer or a ring-shaped cut, so the clamp is unconditional here.
+#: - ``sky130`` ``licon1`` (66/44) and ``mcon`` (67/44) 0.17um --
+#:   ``sky130A_mr.drc`` ``licon.1`` / ``ct.1_a``+``ct.1_b``. Since issue #2835
+#:   the deck's own ``threshold_max_dbu`` carries the same bound (exempting
+#:   precision-resistor licons, ring and ``areaid:ce`` mcon via a derived
+#:   layer); ``res_array`` end contacts are resolved per request via
+#:   :data:`_PDK_RES_FLAVOR_END_CONTACT_UM` (issue #2449).
 #: - sky130 ``via`` (68/44) 0.15um and sg13g2 ``Cont``/``Via1``-``Via4``
 #:   (``Cnt.a``, ``V1.a``-``V4.a``) used to be listed here; issue #2388's
 #:   backfill moved them into the deck as ``threshold_max_dbu``, which
@@ -1443,7 +1422,16 @@ def _deck_cut_max_size_um(family: str, layer: tuple[int, int]) -> float | None:
         if rule.check == "width"
         and rule.layer == layer
         and rule.other_layer is None
-        and rule.derived_layer is None
+        and (
+            rule.derived_layer is None
+            # A `not_interacting` exemption narrowing (#2835: licon1/mcon
+            # minus precision-resistor / ring / areaid:ce exceptions) still
+            # bounds the *ordinary* cut this generator draws.
+            or (
+                rule.derived_layer.mode == "not_interacting"
+                and rule.derived_layer.base == layer
+            )
+        )
         and rule.threshold_max_dbu is not None
     ]
     return round(min(bounds), 6) if bounds else None

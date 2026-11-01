@@ -216,8 +216,7 @@ class DerivedLayer:
     "inside ThickGateOx but outside DigiBnd", and ``near`` then ``near`` its
     exact complement within ``near``. Stage 2 requires stage 1, and is
     validated like it (``context2`` and ``context2_layers`` set together).
-    Absent layers contribute an empty region (``near`` yields nothing,
-    ``far`` keeps everything) and never cause the rule to be skipped.
+    Absent layers are empty regions (``near``: nothing, ``far``: all); no skip.
     """
 
     base: tuple[int, int]
@@ -230,6 +229,7 @@ class DerivedLayer:
     context2_layers: tuple[tuple[int, int], ...] = ()
     context2_sized_by_um: float = 0.0
     context2: str | None = None
+    exclude_holed: bool = False  # #2835: not_interacting only; drop ring polygons
 
 
 @dataclass(frozen=True)

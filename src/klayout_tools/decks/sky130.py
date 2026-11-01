@@ -817,18 +817,18 @@ DECK: list[DrcRule] = [
         # had no width rule of any kind here, only enclosure rules), and so
         # the fixed-size table has a deck minimum to agree with.
         #
-        # No `threshold_max_dbu` yet (issue #2388): via.width.1 below has
-        # taken its max half, but this rule's is still deferred -- see the
-        # compound-layer narrowing note below.
-        # Two approximations stay even once it lands, both the same shape
-        # via.width.1 already documents: the *rectangularity* half
-        # ("licon.1_c", "licon should be rectangle") cannot be expressed as a
-        # bounding-box bound, and the precision-poly-resistor exemption above
-        # (`prec_resistor`, whose licons are 0.19um/2.0um per "licon.1b/c")
-        # is a compound-layer narrowing this engine does not evaluate --
-        # harmless for a *minimum* of 0.17um, since both exempt sizes exceed
-        # it, but a reason a future `threshold_max_dbu` here would need the
-        # narrowing first. See docs/cli/drc.md's "sky130" approximation notes.
+        # Max half (#2835): min/max 0.17um apply to licon1 cuts touching no
+        # rpm/urpm marker (upstream `licon.not(prec_resistor)`); exempt cuts
+        # lose the minimum too. Lenient: any rpm/urpm touch exempts.
+        threshold_max_dbu=170,
+        derived_layer=DerivedLayer(
+            base=(66, 44),  # licon1.drawing
+            sized_by_um=0.0,
+            intersect_with=(86, 20),  # rpm.drawing
+            mode="not_interacting",
+            context_layers=((79, 20),),  # urpm.drawing
+            context="far",
+        ),
         scope="licon",  # sky130.lydrc "licon.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "licon.1"),
     ),
@@ -960,17 +960,17 @@ DECK: list[DrcRule] = [
         # PDK-generic 0.22um contact budget, over the upstream maximum, and
         # this deck had no mcon width rule of any kind to notice.
         #
-        # No `threshold_max_dbu` yet: still deferred under issue #2388
-        # (via.width.1 below has taken its own).
-        # Approximations that stay regardless, both mirroring via.width.1's:
-        # the rectangularity half ("ct.1 : non-ring mcon should be
-        # rectangular") is not a bounding-box bound, and sky130A_mr.drc's
-        # areaid:ce / ring-shaped-mcon narrowings ("ct.3"/"ct.3_a" cover
-        # ring-shaped mcon separately, at 0.17-0.175um) are compound-layer
-        # expressions this engine does not evaluate -- note sky130.lydrc's own
-        # "ct.1" applies the same 0.17um unconditionally, and this curated
-        # deck models no areaid.* layer anywhere (see met2.enclosing.via.1's
-        # own note on "m2.4_b").
+        # Max half (#2835): 0.17um applies to hole-free mcon polygons touching
+        # no areaid:ce (81/2) (rings: ct.3/ct.3_a); exempt cuts lose the
+        # minimum too. Lenient: touching areaid:ce exempts.
+        threshold_max_dbu=170,
+        derived_layer=DerivedLayer(
+            base=(67, 44),  # mcon.drawing
+            sized_by_um=0.0,
+            intersect_with=(81, 2),  # areaid.ce
+            mode="not_interacting",
+            exclude_holed=True,
+        ),
         scope="ct",  # sky130.lydrc "ct.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "ct.1"),
     ),
