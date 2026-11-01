@@ -133,11 +133,13 @@ from ..signoff_attest import (
     STREAM_ATTESTABLE_ITEM,
     attach_output_tails,
     build_attestation,
-    build_stream_attestation,
     check_attestation,
-    check_stream_attestation,
     failed_output_tail,
     write_attestation,
+)
+from ..signoff_attest_stream import (
+    build_stream_attestation,
+    check_stream_attestation,
 )
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
@@ -291,14 +293,10 @@ def _run_describe_grader(
 def _attest_flag_problem(
     args: argparse.Namespace, inventory: str | None, stream: str | None
 ) -> str | None:
-    """The refusal message for an invalid ``--attest`` flag combination (item 2
-    takes ``--input``; items 1, 8, 9 and 10 take ``--inventory``), else ``None``."""
+    """The refusal message for an invalid ``--attest`` flag combination, else
+    ``None``. Item 2 takes ``--input`` plus an optional ``--inventory`` of
+    declared checks; items 1, 8, 9 and 10 take ``--inventory``."""
     if args.attest == STREAM_ATTESTABLE_ITEM:
-        if inventory:
-            return (
-                "--inventory does not apply to --attest 2: the layout stream is "
-                "the artifact -- pass it with --input <stream>"
-            )
         if not stream:
             return (
                 "--attest 2 requires --input <stream> (the committed GDS/OASIS "
@@ -342,12 +340,14 @@ def _compute_attestation(
                 generator=generator,
                 regenerated_hash=regenerated_hash,
                 hash_kind=hash_kind,
+                inventory_path=inventory,
             )
         return build_stream_attestation(
             stream,
             generator=generator,
             regenerated_hash=regenerated_hash,
             hash_kind=hash_kind,
+            inventory_path=inventory,
         )
     assert inventory is not None
     if committed is not None:

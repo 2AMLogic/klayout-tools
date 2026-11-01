@@ -1651,7 +1651,9 @@ grades it through the existing binding rules with no special path.
 
 #### Item 2: attest a committed layout stream (`--input`, issue #4188)
 
-Item 2 (Layout) has no inventory — the committed stream is the artifact:
+Item 2 (Layout) needs no inventory — the committed stream is the artifact
+(an optional inventory of declared checks is described
+[below](#item-2-declared-checks-optional---inventory-issue-4767)):
 
 ```bash
 klt signoff --attest 2 --input layout/top.gds -o evidence/item2.json \
@@ -1676,10 +1678,47 @@ together and populate `provenance.regeneration` (`--hash-kind geometry`
 compares the timestamp-independent geometry digest instead of raw bytes).
 The generator is echoed, never run; the grader reports a hash that differs
 from the committed stream as `stale_artifact`. `--check COMMITTED` re-attests
-and diffs as for items 1/9/10. `--input` is refused with items 1/9/10 and
-`--inventory` with item 2. A cited item-2 envelope carries the same
-`artifact_binding.attestation` disclosure (`inventory_schema_version` is
-`null`, as there is no inventory).
+and diffs as for items 1/9/10. `--input` is refused with items 1/9/10.
+A cited item-2 envelope carries the same `artifact_binding.attestation`
+disclosure (`inventory_schema_version` is `null` unless a declared-checks
+inventory was given).
+
+##### Item 2 declared checks (optional `--inventory`, issue #4767)
+
+The three built-in checks say nothing about *what is drawn*. To have the
+attestation cite your own geometric / net-width / cut-count checker, pass an
+inventory alongside `--input`:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "t1-attestation-inventory",
+  "t1_item": 2,
+  "checks": [
+    {"name": "power-width",
+     "argv": ["python", "tools/check_widths.py", "layout/top.gds"],
+     "timeout_s": 120}
+  ]
+}
+```
+
+```bash
+klt signoff --attest 2 --input layout/top.gds --inventory evidence/item2-inv.json -o evidence/item2.json
+```
+
+`checks` is a non-empty list with the same entry shape as item 10 (`name`,
+`argv` run directly with no shell, optional `cwd`, `timeout_s`, `local_only`).
+Each command runs after the built-in checks and is recorded in
+`attestation.checks[]` as a `role: "audit"` command check (argv, cwd,
+`exit_status`, `passed`); any non-zero exit makes the envelope `fail` (exit
+`3`). The stream is **not** an inventory field and is not injected: write its
+path in each `argv`, relative to `cwd` (default: the repository root). The
+inventory must sit in the same repository as the stream; its pinned path,
+hash and schema version are recorded under `attestation.inventory`. With
+`--check`, `local_only` commands are skipped and their committed outcome is
+carried, as for item 10. Without `--inventory` the envelope is unchanged.
+klt ships no built-in geometry engine for these checks — the declared command
+is the authority.
 
 #### How manifest `file` paths resolve
 

@@ -4288,9 +4288,9 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         "--inventory",
         metavar="FILE",
         help=(
-            "with --attest: path to the versioned attestation inventory "
-            "(schema_version 1, kind 't1-attestation-inventory') inside a "
-            "git repository; the envelope pins this file's raw-byte sha256."
+            "with --attest: the versioned attestation inventory (kind "
+            "'t1-attestation-inventory') in a git repo; the envelope pins its "
+            "sha256. Optional for --attest 2: declared layout 'checks'."
         ),
     )
     signoff_parser.add_argument(
