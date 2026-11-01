@@ -10442,9 +10442,24 @@ def _extract_netlist(
     # so the heads pick up their nets from ordinary contact/metal routing.
     # The body itself is deliberately never `connect`ed to anything: that is
     # precisely what stops it being a short.
-    for index, (spec, body, terminal) in enumerate(resistors):
+    split_terminals: list[tuple[kdb.Region, kdb.Region]] = []
+    for index, (spec, body, terminal, split) in enumerate(resistors):
         l2n.register(body, f"res{index}_body")
-        if spec.bulk_to_substrate:
+        if split is not None:
+            # Split-terminal device (issue #4312): anode and cathode abut
+            # around the link, so they are registered as separate layers
+            # (and connected to `contact` separately below) while the
+            # extractor's `tA`/`tB` pick out which is which.
+            anode, cathode = split
+            l2n.register(anode, f"res{index}_anode")
+            l2n.register(cathode, f"res{index}_cathode")
+            l2n.register(terminal, f"res{index}_terminals")
+            l2n.extract_devices(
+                kdb.DeviceExtractorResistor(spec.name, spec.sheet_rho_ohm_sq),
+                {"R": body, "C": terminal, "tA": anode, "tB": cathode},
+            )
+            split_terminals.append(split)
+        elif spec.bulk_to_substrate:
             l2n.extract_devices(
                 kdb.DeviceExtractorResistorWithBulk(spec.name, spec.sheet_rho_ohm_sq),
                 {"R": body, "C": terminal, "W": nfet_body},
@@ -10575,6 +10590,9 @@ def _extract_netlist(
         l2n.connect(f_nfet_sd, contact)
         l2n.connect(f_pfet_sd, contact)
     l2n.connect(poly, contact)
+    for anode, cathode in split_terminals:
+        l2n.connect(anode, contact)
+        l2n.connect(cathode, contact)
 
     if metals:
         l2n.connect(contact, metals[0])

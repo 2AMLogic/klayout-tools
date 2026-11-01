@@ -3327,8 +3327,9 @@ _GF180MCU_MOS_LVS_SOURCE_PATH = (
 #   `capacitor(...)` area coefficients are 4.4e-15 F/um^2 (03v3) and 2.3e-15
 #   F/um^2 (06v0).
 # - `moscap_exclude` marker set: transcribed below as `_MOS_CAP_EXCLUDES`,
-#   minus `lvs_source` (100/8): this curated deck deliberately reads nothing
-#   else on layer number 100 (its `dummy` convention marker is 100/50, see
+#   minus `lvs_source` (100/8): this curated deck reads nothing else on layer
+#   number 100 besides the eFuse anode marker (issue #4312, the `efuse`
+#   resistor below) and its `dummy` convention marker (100/50, see
 #   `test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer`), and an
 #   LVS-source annotation over a MOS capacitor is not modelled.
 #
@@ -3681,6 +3682,28 @@ EXTRACTION_DECK = ExtractionDeck(
             provenance=_gf180mcu_lvs_provenance(
                 "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs",
                 "gf180mcu_fd_pr__ppolyf_u_1k",
+            ),
+        ),
+        # eFuse (issue #4312): `efuse_derivations.lvs` / `efuse_extraction.lvs`
+        # derive `cathode = poly2.inside(efuse_mk).not(lvs_source | plfuse)`,
+        # `anode = poly2.and(lvs_source).inside(efuse_mk)` and
+        # `efuse_link = poly2.and(plfuse).inside(efuse_mk)`, then
+        # `extract_devices(resistor('efuse', 28.5714), {'R' => efuse_link,
+        # 'C' => anode | cathode, 'tA' => anode, 'tB' => cathode})` with
+        # `ignore_parameter('efuse', 'R')` -- the link's value is not
+        # compared, so an LVS request scopes the class with
+        # `options.compare_parameters` (`{"efuse": []}`). Anode and cathode
+        # abut around the link, hence the split-terminal `anode_marker` form.
+        ResistorDevice(
+            name="efuse",  # gf180mcu_fd_pr__efuse (subckt "efuse")
+            body=(30, 0),  # Poly2
+            marker=(125, 5),  # plfuse -- the link
+            sheet_rho_ohm_sq=28.5714,  # efuse_extraction.lvs
+            requires=((80, 5),),  # efuse_mk -- the scope
+            anode_marker=(100, 8),  # lvs_source
+            provenance=_gf180mcu_lvs_provenance(
+                "libs.tech/klayout/tech/lvs/rule_decks/efuse_extraction.lvs",
+                "gf180mcu_fd_pr__efuse",
             ),
         ),
         # Drawn metal resistors `rm1`/`rm2`/`rm3` (issue #1640, mirroring
