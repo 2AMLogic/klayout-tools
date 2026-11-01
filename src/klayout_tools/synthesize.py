@@ -347,6 +347,13 @@ _ABC_STIME_RE = re.compile(
     r'WireLoad\s*=\s*"(?P<wire_load>[^"]*)".*?Delay\s*=\s*(?P<delay_ps>[\d.]+)\s*ps'
 )
 
+#: Yosys's per-region banner in the captured ABC log (verified live against
+#: Yosys 0.68+; issue #4743): ``4.1. Extracting gate netlist of module
+#: `\top' to `<abc-temp-dir>/input.blif'..``. The most recent one before an
+#: ``stime`` line names the module that ABC run mapped. Yosys escapes public
+#: names with a leading backslash, which is stripped.
+_ABC_MODULE_RE = re.compile(r"Extracting gate netlist of module `\\?([^']+)'")
+
 #: Per-cell-library ABC constraint inputs -- ``(set_driving_cell cell,
 #: set_load femtofarads)`` -- written to the ``<top>_abc.constr`` file this
 #: module passes as ``abc -constr``. Same not-derivable-from-the-install,
@@ -3484,7 +3491,11 @@ def _read_abc_timing(
     When a run produces several ``stime`` reports (Yosys invokes ABC once
     per combinational region), the **maximum** reported delay is used --
     the critical path across the whole design, not whichever region
-    happened to be mapped last.
+    happened to be mapped last. Every report is also listed, in log order, as
+    ``regions: [{"module": "top", "critical_path_ps": 130.4}, ...]``
+    (issue #4743); ``module`` is the ``Extracting gate netlist of module``
+    banner preceding that ``stime`` line, or ``null`` when the log carries
+    none. The maximum over ``regions`` equals ``critical_path_ps``.
     """
     if abc_log_path is None or not os.path.isfile(abc_log_path):
         return None
@@ -3494,12 +3505,21 @@ def _read_abc_timing(
     except OSError:
         return None
 
+    modules = [(m.start(), m.group(1)) for m in _ABC_MODULE_RE.finditer(log_text)]
     best: tuple[float, str] | None = None
+    regions: list[dict[str, Any]] = []
     for match in _ABC_STIME_RE.finditer(log_text):
         try:
             delay_ps = float(match.group("delay_ps"))
         except ValueError:  # pragma: no cover - regex only matches numbers
             continue
+        preceding = [name for pos, name in modules if pos < match.start()]
+        regions.append(
+            {
+                "module": preceding[-1] if preceding else None,
+                "critical_path_ps": delay_ps,
+            }
+        )
         if best is None or delay_ps > best[0]:
             best = (delay_ps, match.group("wire_load"))
     if best is None:
@@ -3511,6 +3531,7 @@ def _read_abc_timing(
         "wire_load": None if wire_load.lower() == "none" else wire_load,
         "critical_path_ps": critical_path_ps,
         "delay_target_ps": delay_target_ps,
+        "regions": regions,
     }
 
 
