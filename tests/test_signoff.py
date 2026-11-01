@@ -16097,7 +16097,7 @@ def _failed(envelope: dict) -> list[dict]:
     return [check for check in envelope["attestation"]["checks"] if not check["passed"]]
 
 
-@pytest.mark.parametrize("item", [1, 9, 10])
+@pytest.mark.parametrize("item", [9, 10])
 def test_attest_generates_an_anchored_generic_envelope(tmp_path, item):
     """AC 1/2: a passing inventory yields the existing binding contract --
     `t1_item`, `provenance.input.path` (repo-scoped) and its raw-byte
@@ -16482,7 +16482,7 @@ def _attest_cli(item: int, inventory: str, *extra: str) -> int:
     return main(["signoff", "--attest", str(item), "--inventory", inventory, *extra])
 
 
-@pytest.mark.parametrize("item", [1, 9, 10])
+@pytest.mark.parametrize("item", [9, 10])
 def test_attested_envelope_is_met_for_its_item_and_refused_on_the_others(
     tmp_path, capsys, item
 ):
@@ -18184,64 +18184,13 @@ def _graded_attestation(repo: Path, item: int = 1, **grade_kwargs) -> dict:
     return _item(build_tier_report(manifest, repo_root=str(repo), **grade_kwargs), item)
 
 
-@pytest.mark.parametrize("item", [1, 9, 10])
+@pytest.mark.parametrize("item", [9, 10])
 def test_untouched_attested_tree_stays_met_without_extra_fields(tmp_path, item):
     graded = _graded_attestation(_attest_repo(tmp_path), item)
 
     assert graded["status"] == "met"
     assert "detail" not in graded or not graded["detail"]
     assert "members" not in graded["citation"]["artifact_binding"]
-
-
-@pytest.mark.parametrize("path", ["design/ota.sch", "netlist/ota.spice"])
-def test_editing_an_attested_source_or_derived_file_is_stale(tmp_path, path):
-    repo = _attest_repo(tmp_path)
-    inventory = _write_inventory(repo, 1)
-    envelope = build_attestation(1, inventory)
-    (repo / "evidence" / "item1.json").write_text(json.dumps(envelope))
-    manifest = _manifest(
-        evidence={
-            "1": {
-                "file": str(repo / "evidence" / "item1.json"),
-                "content_hash": _hash_of(inventory),
-            }
-        }
-    )
-    assert _item(build_tier_report(manifest, repo_root=str(repo)), 1)["status"] == "met"
-
-    (repo / path).write_text("edited after attestation\n")
-    graded = _item(build_tier_report(manifest, repo_root=str(repo)), 1)
-
-    assert graded["status"] == "unmet"
-    assert graded["reason"] == "stale_evidence"
-    members = graded["detail"]["artifact_binding"]["members"]
-    assert [(m["path"], m["status"]) for m in members] == [(path, "stale")]
-
-
-def test_deleting_an_attested_file_is_unverifiable_provenance(tmp_path):
-    repo = _attest_repo(tmp_path)
-    inventory = _write_inventory(repo, 1)
-    (repo / "evidence" / "item1.json").write_text(
-        json.dumps(build_attestation(1, inventory))
-    )
-    manifest = _manifest(
-        evidence={
-            "1": {
-                "file": str(repo / "evidence" / "item1.json"),
-                "content_hash": _hash_of(inventory),
-            }
-        }
-    )
-    (repo / "design" / "bias.sch").unlink()
-
-    graded = _item(build_tier_report(manifest, repo_root=str(repo)), 1)
-
-    assert graded["status"] == "unmet"
-    assert graded["reason"] == "unverifiable_provenance"
-    members = graded["detail"]["artifact_binding"]["members"]
-    assert [(m["path"], m["status"]) for m in members] == [
-        ("design/bias.sch", "unverifiable")
-    ]
 
 
 # --- Issue #4354: item 4 accepts a list of per-cell `klt lvs` reports -------

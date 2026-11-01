@@ -1644,10 +1644,25 @@ Item 2 is attested from a layout stream rather than an inventory — see
 artifact-anchored envelope above. It reads a versioned **attestation
 inventory**, runs the mechanical checks that inventory declares for the
 item, and emits a `generic` envelope whose `status` is `"pass"` only when
-every check passed. The envelope pins the inventory itself
+every check passed. Items 8, 9 and 10 pin the inventory itself
 (`provenance.input.path` = `{"path": "<repo-relative>", "scope": "repo"}`,
 `provenance.input.content_hash` = its raw-byte SHA-256), so `--manifest`
-grades it through the existing binding rules with no special path.
+grades them through the existing binding rules with no special path.
+
+**Item 1 pins its whole input set** (issue #4764): `provenance.input.paths`
+holds one `{"path": {"path": "<repo-relative>", "scope": "repo"},
+"content_hash"}` member per inventory `sources` entry, per `derived` entry,
+and the inventory file itself, sorted by path; `provenance.input.content_hash`
+is the combined set digest (see "Set binding" above), and
+`provenance.input.path` is not emitted. A source, derived or inventory edit
+therefore renders the manifest row `unmet` / `stale_evidence` (the changed
+member is named in `detail.artifact_binding.members`) without running
+`--attest --check`. A member that cannot be read is left out of the set; its
+`present` check already fails the attestation.
+
+> **Pin change.** Existing manifests citing an item-1 envelope must re-pin the
+> evidence `content_hash` to the new `provenance.input.content_hash`; the old
+> inventory-only hash now grades `stale_evidence`.
 
 #### Item 2: attest a committed layout stream (`--input`, issue #4188)
 
@@ -1795,9 +1810,12 @@ refused: there is no path to pin).
 - The inventory's hash is computed from the same bytes that are parsed, so
   the pin and the checks always describe one revision of the inventory.
 - Each `present` check records the inventoried file's own `content_hash`
-  (or `null` when it is missing). The bound artifact is the inventory, so a
-  changed *source* does not change the manifest pin. `--check` catches that
-  drift through these per-file hashes; run it in CI.
+  (or `null` when it is missing). For items 8, 9 and 10 the bound artifact is
+  the inventory, so a changed *source* does not change the manifest pin;
+  `--check` catches that drift through these per-file hashes, so run it in
+  CI. Item 1 is different: its pin is the combined digest over sources,
+  derived files and the inventory (sorted by path), so any member edit changes
+  it.
 
 #### Item 8: characterization report
 

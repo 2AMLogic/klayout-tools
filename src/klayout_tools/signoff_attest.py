@@ -83,6 +83,7 @@ from .signoff import (
     _generic_item_binding_refusal,
     _reject_json_constant,
 )
+from .signoff_attest_input import input_binding
 
 #: The attestation-inventory schema versions this build reads. An inventory
 #: declaring any other version is refused (exit ``1``) rather than read with
@@ -1095,6 +1096,7 @@ def build_attestation(
     checks = _run_checks(item, root, normalized, committed_checks)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
+    prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
     envelope: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "kind": "generic",
@@ -1118,13 +1120,10 @@ def build_attestation(
             "klayout_version": None,
             "pdk": None,
             "deck": None,
-            "input": {
-                "path": {"path": inventory_rel, "scope": "repo"},
-                "content_hash": inventory_hash,
-            },
+            "input": prov,
         },
     }
-    _self_check(envelope, item, inventory_hash)
+    _self_check(envelope, item, digest)
     return envelope
 
 

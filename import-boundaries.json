@@ -542,6 +542,7 @@
         "klayout_tools.cli.signoff_cmd",
         "klayout_tools.signoff",
         "klayout_tools.signoff_attest",
+        "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_foundry_cell",
