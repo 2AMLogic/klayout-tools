@@ -178,6 +178,8 @@ from .sim_decks import run_deck_request
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
 from .sim_errors import SimError as SimError
+from .sim_param_file import _corner_lib_lines as _corner_lib_lines
+from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
 
 #: The remaining names below are not called directly from this module's own
@@ -3080,6 +3082,7 @@ class _ResolvedSimRequest:
     ngspice_options: Any
     osdi_preload: Any
     osdi_runner_environment: Any
+    param_file: Any
     portable_artifacts: Any
     preflight_warning: Any
     provenance_pdk: Any
@@ -3627,6 +3630,7 @@ def _prepare_sim_request(
     corner_section_libs = _resolve_corner_section_libs(
         corner_points, resolution_models, request_dir
     )
+    param_file = _resolve_param_file(corner_points, resolution_models, request_dir)
 
     # Gated on the *actually dispatched* `corner_points`, not `corners_spec`,
     # so a fleet shard reconstructed from `_explicit_points` (which pops
@@ -3695,6 +3699,7 @@ def _prepare_sim_request(
         ngspice_options=ngspice_options,
         osdi_preload=osdi_preload,
         osdi_runner_environment=osdi_runner_environment,
+        param_file=param_file,
         portable_artifacts=portable_artifacts,
         preflight_warning=preflight_warning,
         provenance_pdk=provenance_pdk,
@@ -3794,6 +3799,7 @@ def _run_sim_corners(
     ngspice_options = resolved.ngspice_options
     osdi_preload = resolved.osdi_preload
     osdi_runner_environment = resolved.osdi_runner_environment
+    param_file = resolved.param_file
     portable_artifacts = resolved.portable_artifacts
     preflight_warning = resolved.preflight_warning
     provenance_pdk = resolved.provenance_pdk
@@ -4358,6 +4364,12 @@ def _run_sim_corners(
         ),
         "netlist_sha256": sha256_file(netlist_path),
     }
+    environment.update(
+        param_file_environment(
+            param_file,
+            lambda p: env_provenance.repo_relative_path(p, repo_root=repo_root),
+        )
+    )
     environment.update(_threads_environment(effective_threads))
     environment.update(_corner_coverage_environment(request, corner_points))
     # Issue #2799: `netlist_sha256` covers only the top-level file, so also
@@ -4995,6 +5007,11 @@ def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
     return resolved
 
 
+def _resolve_param_file(points: list[CornerPoint], models: Any, request_dir: str):
+    """``models.param_file`` (#4759); see :mod:`klayout_tools.sim_param_file`."""
+    return resolve_param_file(points, models, request_dir, _resolve_lib_ref)
+
+
 def _resolve_lib_ref(lib: str, models: dict[str, Any], request_dir: str) -> str:
     """Apply ``models.lib``'s own resolution rule (see
     :func:`_resolve_models_lib`) to one library reference, without the
@@ -5288,6 +5305,7 @@ class CornerPoint:
         "process_sections",
         "process_section_libs",
         "process_section_libs_resolved",
+        "param_file",
         "supply_v",
         "temperature_c",
         "params",
@@ -5329,6 +5347,8 @@ class CornerPoint:
         self.process_sections = process_sections
         self.process_section_libs = process_section_libs
         self.process_section_libs_resolved = process_section_libs_resolved
+        # Issue #4759: host-absolute ``models.param_file``; never serialised.
+        self.param_file: str | None = None
         self.supply_v = supply_v
         self.temperature_c = temperature_c
         self.sample_index = sample_index
@@ -5789,29 +5809,6 @@ def _parse_process_section(section: Any) -> tuple[str, str | None]:
             "string 'section'"
         )
     return name, lib
-
-
-def _corner_lib_lines(point: CornerPoint, models_lib: str | None) -> list[str]:
-    """The ``.lib`` cards selecting this corner's model sections, in
-    declaration order -- the one place every generated deck
-    (:func:`_write_corner_deck`, :func:`_write_xyce_deck`, and
-    ``op_sanity._write_op_deck``) derives them from, so a sweep, its
-    cross-validation oracle, and ``--op-lint`` can never disagree about which
-    model cards a corner selects.
-
-    Three shapes, in order: a multi-section bundle (one line per section,
-    each against its own per-section library when it declared one --
-    :meth:`CornerPoint.section_lib`), a bare-string process corner (one line
-    against ``models_lib``), or no process axis at all (no lines).
-    """
-    if point.process_sections is not None:
-        return [
-            f".lib {point.section_lib(index, models_lib)} {section}"
-            for index, section in enumerate(point.process_sections)
-        ]
-    if point.process is not None:
-        return [f".lib {models_lib} {point.process}"]
-    return []
 
 
 # --------------------------------------------------------------------------- #

@@ -574,6 +574,7 @@
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_noise",
+        "klayout_tools.sim_param_file",
         "klayout_tools.sim_passes",
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
@@ -2376,6 +2377,12 @@
         "exporter": "klayout_tools.sim",
         "symbol": "_resolve_osdi_preload",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_param_file",
+        "reason": "Reviewed (issue #4759): op-lint resolves models.param_file with the same models.lib rule as klt sim; sits beside the other grandfathered _resolve_* imports until they move to a shared module."
       },
       {
         "consumer": "klayout_tools.op_sanity",

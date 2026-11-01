@@ -91,6 +91,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._provenance import sha256_file
+from .sim_param_file import declared_model_refs, rewrite_model_refs
 
 #: A ``.include``/``.inc`` directive line -- ngspice's two spellings, target
 #: either quoted or bare. Deliberately the same shape ``pex.py``'s own
@@ -646,8 +647,7 @@ def _declared_lib_refs(request: dict[str, Any]) -> Iterator[tuple[str, str, Any]
     """``(field, label, ref)`` for every model-library reference the request
     declares, in :func:`_collect_model_roots`'s order."""
     models = request.get("models") or {}
-    if models.get("lib") is not None:
-        yield "models.lib", "model library", models.get("lib")
+    yield from declared_model_refs(models)  # + param_file (#4759)
     corners = request.get("corners") or {}
     declared = [
         ("process", index, entry)
@@ -765,8 +765,7 @@ def _rewrite_worker_request(
     resolved entries (issue #3819) verbatim among the staged names."""
     worker = copy.deepcopy(request)
     models = worker.get("models")
-    if isinstance(models, dict) and models.get("lib") in lib_names:
-        models["lib"] = lib_names[models["lib"]]
+    rewrite_model_refs(models, lib_names)
     worker_corners = worker.get("corners") or {}
     process_entries = list(worker_corners.get("process") or []) + [
         unit.get("process")
