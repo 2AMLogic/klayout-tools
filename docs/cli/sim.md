@@ -150,6 +150,15 @@ on `ngspice`, and an off-host runner that reports no `engine_version` fails
 closed — but `unsupported_analysis` does not, as decks have no `analysis`
 block.
 
+**Pinning the PDK install root from the CLI (`--pdk-root`, issue #4758).**
+`klt sim --pdk-root DIR request.json` behaves as if the request had
+`models.pdk_root = DIR`: the flag wins over the request field, a relative `DIR`
+resolves against the CWD (not the request directory), and the resolution takes
+that root without the first-match-wins search, so the PDK ambiguity warning does
+not fire. The pinned root shows in `provenance.pdk`. Corner requests only:
+`decks`/`commands` requests, `--batch-set`, `--op-lint` and `--job-status`
+refuse it. A nonexistent `DIR` fails with the usual PDK-not-found error.
+
 **Pinning the PDK revision (`models.pdk_version`, issue #4046).** The
 request's `models` block may carry an optional `models.pdk_version` string,
 sibling of `models.pdk` / `models.pdk_root`, with the same value forms as
