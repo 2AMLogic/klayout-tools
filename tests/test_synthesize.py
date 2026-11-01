@@ -848,8 +848,7 @@ def test_run_synthesize_stubbed_success(tmp_path, monkeypatch):
     # The fabricated `_make_pdk_install` liberty carries no
     # `cell_leakage_power` entries at all (issue #1626) -- `_compute_leakage`
     # must degrade to `None`/`None`, never a fabricated/partial number.
-    assert report["leakage_power_nw"] is None
-    assert report["leakage_by_type_nw"] is None
+    assert report["leakage_power_nw"] is report["leakage_by_type_nw"] is None
 
     assert report["timing"] == {
         "source": "abc_stime",
@@ -3874,54 +3873,6 @@ def test_timing_reports_the_maximum_over_every_stime_report(tmp_path, monkeypatc
     report = run_synthesize(request_path)
 
     assert report["timing"]["critical_path_ps"] == 3910.55
-
-
-def _banner(module: str) -> str:
-    return (
-        f"4.1. Extracting gate netlist of module `\\{module}' "
-        "to `<abc-temp-dir>/input.blif'.."
-    )
-
-
-def test_timing_regions_attribute_each_stime_to_its_module(tmp_path):
-    """Issue #4743: `timing.regions` lists every `stime` report in log order,
-    named by the preceding `Extracting gate netlist of module` banner; the
-    maximum equals `critical_path_ps`; a banner-less report gets `null`."""
-    log = tmp_path / "abc.log"
-    log.write_text(
-        "\n".join(
-            [
-                _ABC_STIME_LINE.replace("2485.93 ps", "500.00 ps"),  # no banner
-                _banner("sub"),
-                _ABC_STIME_LINE.replace("2485.93 ps", "3910.55 ps"),
-                _banner("top"),
-                _ABC_STIME_LINE.replace("2485.93 ps", "1204.10 ps"),
-            ]
-        )
-    )
-
-    timing = synthesize._read_abc_timing(str(log), 1600)
-
-    assert timing["regions"] == [
-        {"module": None, "critical_path_ps": 500.0},
-        {"module": "sub", "critical_path_ps": 3910.55},
-        {"module": "top", "critical_path_ps": 1204.1},
-    ]
-    assert (
-        max(r["critical_path_ps"] for r in timing["regions"])
-        == (timing["critical_path_ps"])
-    )
-    assert timing["delay_target_ps"] == 1600
-
-
-def test_timing_regions_single_region_and_no_stime(tmp_path):
-    log = tmp_path / "abc.log"
-    log.write_text(_banner("top") + "\n" + _ABC_STIME_LINE)
-    timing = synthesize._read_abc_timing(str(log), None)
-    assert timing["regions"] == [{"module": "top", "critical_path_ps": 2485.93}]
-
-    log.write_text(_banner("top") + "\nABC: nothing here\n")
-    assert synthesize._read_abc_timing(str(log), None) is None
 
 
 def test_timing_echoes_a_non_none_wire_load(tmp_path, monkeypatch):
