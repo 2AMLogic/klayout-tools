@@ -89,6 +89,8 @@ from . import (
     yield_sensitivity_cmd,
     yield_threshold_cmd,
 )
+from ._argv_flags import _REQUEST_ARGV_FLAG_EXCLUDE as _REQUEST_ARGV_FLAG_EXCLUDE
+from ._argv_flags import _record_request_argv_flags as _record_request_argv_flags
 from .color import add_color_args
 
 
@@ -173,41 +175,6 @@ def _no_subcommand_handler(parser: argparse.ArgumentParser):
         return 2
 
     return _handler
-
-
-#: ``dest`` values excluded from :func:`_record_request_argv_flags`' table:
-#: ``help`` is not an input, ``format`` only shapes output, and
-#: ``check``/``rerun`` select the separate re-verification mode (already
-#: mutually exclusive with the positional input slot at the argparse level).
-_REQUEST_ARGV_FLAG_EXCLUDE = ("help", "format", "check", "rerun")
-
-
-def _record_request_argv_flags(
-    parser: argparse.ArgumentParser,
-    *,
-    exclude: tuple[str, ...] = _REQUEST_ARGV_FLAG_EXCLUDE,
-) -> None:
-    """Record this subparser's own input flags on the parsed namespace, so
-    ``cli/_request_document.reject_argv_flags`` can enforce the stated
-    "a request document is mutually exclusive with this command's own input
-    flags" precedence rule (issue #1867).
-
-    Derived from the subparser's own actions rather than a hand-maintained
-    list, so a flag added to ``klt drc``/``klt extract`` later is covered
-    without anyone remembering to update a second table. Stored as
-    ``{dest: (option_string, default)}`` -- the option string is taken from
-    the action rather than reconstructed from ``dest``, since several
-    repeatable flags deliberately differ (``--critical-net`` accumulates into
-    ``critical_nets``, ``--matched-group`` into ``matched_groups``).
-
-    Call once, *after* every ``add_argument`` on the subparser.
-    """
-    flags = {
-        action.dest: (action.option_strings[-1], action.default)
-        for action in parser._actions
-        if action.option_strings and action.dest not in exclude
-    }
-    parser.set_defaults(request_argv_flags=flags)
 
 
 def _add_pdk_args(
@@ -1003,6 +970,15 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "corner), or 'all' to also bias every other corner and report "
             "the worst Vds-Vdsat margin per corner in corner_margins. "
             "Ignored without --op-lint."
+        ),
+    )
+    _add_pdk_args(
+        sim_parser,
+        include_pdk=False,
+        pdk_root_help=(
+            "pin the PDK install root for this run, as if the request had "
+            "models.pdk_root (wins over it; relative paths resolve against the "
+            "CWD); disables the first-match-wins search and its ambiguity warning"
         ),
     )
     _add_format_arg(sim_parser)

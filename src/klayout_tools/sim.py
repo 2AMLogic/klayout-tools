@@ -199,6 +199,14 @@ from .sim_remote import (
 )
 from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
+from .sim_request_overrides import (
+    _with_capacity_wait_override as _with_capacity_wait_override,
+)
+from .sim_request_overrides import (
+    _with_max_concurrent_override as _with_max_concurrent_override,
+)
+from .sim_request_overrides import _with_max_units_override as _with_max_units_override
+from .sim_request_overrides import _with_pdk_root_override as _with_pdk_root_override
 from .sim_slug import _NON_FILENAME_CHARS_RE as _NON_FILENAME_CHARS_RE
 from .sim_slug import _PARAMS_ID_RE as _PARAMS_ID_RE
 from .sim_slug import _SLUG_HASH_CHARS as _SLUG_HASH_CHARS
@@ -2327,6 +2335,7 @@ def run_sim(
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
     command_approvals: str | None = None,
+    pdk_root: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the request at ``request_path`` and return its report.
@@ -2335,7 +2344,8 @@ def run_sim(
     operator-approved argv steps run in isolated unit directories, locally
     or as one batch job -- see :mod:`klayout_tools.sim_commands`.
     ``command_approvals`` is the trusted approvals file (else
-    ``$KLT_SIM_COMMAND_APPROVALS``).
+    ``$KLT_SIM_COMMAND_APPROVALS``). ``pdk_root`` (issue #4758) pins the PDK
+    install root like ``models.pdk_root`` and wins over it; corner requests only.
 
     ``run_sim`` dispatches over two request kinds (docs/cli/sim.md):
 
@@ -2584,6 +2594,10 @@ def run_sim(
     # corner dir and ngspice would never find its deck. Absolutise once here.
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
+    if pdk_root is not None and (
+        sim_commands.COMMANDS_FIELD in request or sim_decks.DECKS_FIELD in request
+    ):
+        raise SimError("--pdk-root only applies to corner requests (with `models`)")
     if sim_commands.COMMANDS_FIELD in request:
         return _dispatch_command_request(
             request,
@@ -2644,6 +2658,7 @@ def run_sim(
         submit_only=submit_only,
         attach_job_id=attach_job_id,
         capacity_wait_s=capacity_wait_s,
+        pdk_root=pdk_root,
         _ownership=_ownership,
     )
 
@@ -2948,57 +2963,6 @@ def _with_forwarded_budget(
     return {**request, "options": {**options, "wall_clock_budget_s": budget_s}}
 
 
-def _with_max_units_override(
-    request: dict[str, Any], max_units_per_job: int | None
-) -> dict[str, Any]:
-    """Fold the ``--max-units-per-job`` CLI override into ``request.batch``
-    (issue #3446), leaving the loaded request untouched."""
-    if max_units_per_job is None:
-        return request
-    return {
-        **request,
-        "batch": {
-            **(request.get("batch") or {}),
-            "max_units_per_job": max_units_per_job,
-        },
-    }
-
-
-def _with_max_concurrent_override(
-    request: dict[str, Any], max_concurrent_jobs: int | None
-) -> dict[str, Any]:
-    """Fold the ``--max-concurrent-jobs`` CLI override into ``request.batch``
-    (issue #3914), leaving the loaded request untouched."""
-    if max_concurrent_jobs is None:
-        return request
-    return {
-        **request,
-        "batch": {
-            **(request.get("batch") or {}),
-            "max_concurrent_jobs": max_concurrent_jobs,
-        },
-    }
-
-
-def _with_capacity_wait_override(
-    request: dict[str, Any], capacity_wait_s: float | None
-) -> dict[str, Any]:
-    """Fold the ``--wait-for-capacity`` CLI override into
-    ``request.batch.capacity_wait_s`` (issue #3564), leaving the loaded request
-    untouched. The flag wins over the request field, and the value is validated
-    by the one resolver the field uses, so a bad value is refused before any
-    S3 write."""
-    if capacity_wait_s is None:
-        return request
-    from .sim_batch import _resolve_capacity_wait_s
-
-    value = _resolve_capacity_wait_s({"capacity_wait_s": capacity_wait_s})
-    return {
-        **request,
-        "batch": {**(request.get("batch") or {}), "capacity_wait_s": value},
-    }
-
-
 def _check_expected_netlist_identity(
     expect_identity: Any,
     netlist_identity: str | None,
@@ -3154,6 +3118,7 @@ def _prepare_sim_request(
     max_concurrent_jobs: int | None,
     capacity_wait_s: float | None,
     dry_run: bool,
+    pdk_root: str | None = None,
 ) -> _ResolvedSimRequest:
     """The up-front validate-and-resolve phase of :func:`_run_sim_corners`.
 
@@ -3163,6 +3128,7 @@ def _prepare_sim_request(
     request = _with_max_units_override(load_request(request_path), max_units_per_job)
     request = _with_max_concurrent_override(request, max_concurrent_jobs)
     request = _with_capacity_wait_override(request, capacity_wait_s)
+    request = _with_pdk_root_override(request, pdk_root)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
     # field this run's own JSON response echoes (`netlist`,
@@ -3770,6 +3736,7 @@ def _run_sim_corners(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
+    pdk_root: str | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
@@ -3791,6 +3758,7 @@ def _run_sim_corners(
         max_concurrent_jobs=max_concurrent_jobs,
         capacity_wait_s=capacity_wait_s,
         dry_run=dry_run,
+        pdk_root=pdk_root,
     )
     analysis = resolved.analysis
     artifacts_dir = resolved.artifacts_dir
