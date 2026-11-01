@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt characterize` clock-to-output arcs** (issue #4755, documented in
+  [`docs/cli/characterize.md`](docs/cli/characterize.md)): a cell declaring
+  `cell.clock_pin` (plus optional `clock_edge`, `static_inputs`) now yields one
+  `timing_type : rising_edge`/`falling_edge` arc per output pin; the response
+  arc gains an additive `timing_type` field. Cells without `clock_pin` are
+  still refused. Setup/hold remain unsupported (#4756).
+
 - **`klt economy --attribute`** (issue #4660, documented in
   [`docs/cli/economy.md`](docs/cli/economy.md)): opt-in additive `attribution`
   block partitioning the top bbox into direct-child instance bboxes and
