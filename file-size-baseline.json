@@ -189,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/characterize.py",
-      "lines": 2456
+      "lines": 2379
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
@@ -429,7 +429,7 @@
     },
     {
       "path": "src/klayout_tools/liberty_writer.py",
-      "lines": 550
+      "lines": 544
     },
     {
       "path": "src/klayout_tools/lvs.py",

@@ -77,7 +77,7 @@ command did not measure it", never as an assertion about the cell:
 | Not emitted | Where it belongs |
 |---|---|
 | more than one corner per invocation / per file | invoke once per corner; see "Multiple corners" below |
-| sequential-cell constraint arcs (`setup_*`/`hold_*`/`recovery_*`), `ff`/`latch` groups | #4756 (clock-to-output arcs are supported; see "Sequential cells: clock-to-output only") |
+| `recovery_*`/`removal_*` arcs, `ff`/`latch` groups | not filed (clock-to-output and setup/hold are supported; see "Sequential cells") |
 | `when`-qualified arc/power splitting, `bus`/`bundle` pins, input-pin (hidden) `internal_power` | not yet filed |
 
 ## How it works
@@ -180,7 +180,7 @@ delay definition, not a measurement failure; real libraries bound it with
 `default_max_transition` rather than by clamping. This command emits what it
 measured and never clamps.
 
-### Sequential cells: clock-to-output only
+### Sequential cells: clock-to-output and setup/hold
 
 A cell that declares `cell.clock_pin` is characterized as a sequential cell
 (issue #4755). Without `clock_pin`, a sequential cell is still **refused**:
@@ -208,10 +208,55 @@ The testbench drives three clock pulses: a priming pulse that captures the
 output-low state, a pulse after the data moved to the output-high state
 (→ `cell_rise`/`rise_transition`), and a pulse after it returned
 (→ `cell_fall`/`fall_transition`). Still **not supported**: setup/hold/
-recovery/removal constraint arcs (tracked in #4756), `ff`/`latch` groups,
+recovery/removal constraint arcs, `ff`/`latch` groups, latch time borrowing,
 min-pulse-width, `when`-qualified arcs, async set/reset arcs. Worked example:
 `examples/characterize/request-dff.json`. Internal-power tables for these
 arcs cover the active clock edge's window only and are first-order.
+
+#### Setup/hold constraint arcs (issue #4756)
+
+`cell.constrained_pins` (an array of data input pins; requires
+`cell.clock_pin`) adds setup and hold constraints of each listed pin against
+the clock. Each pin yields four response entries in the cell's
+`constraints[]` — setup and hold for a rising and a falling data edge — and,
+in the `.lib`, a `timing_type : setup_rising` and a `hold_rising` group (or
+`*_falling` for a falling-edge clock) on the data pin with
+`rise_constraint`/`fall_constraint` tables over
+`constrained_pin_transition` × `related_pin_transition` (both axes are
+`grid.input_transition_ns`; `output_load_pf` does not apply — the minimum grid
+load is used).
+
+Each constraint is found by **bisection** over the data-edge-to-clock-edge
+separation (50% to 50%). A probe passes when the output still makes the
+expected transition **and** its clock-to-output delay is within
+`(1 + constraint_degradation)` of the delay with the data edge far from the
+clock (the reference). Setup is the smallest passing separation with the data
+edge *before* the clock edge; hold is the smallest passing separation with
+the data edge *after* the clock edge, so hold is negative when the cell
+tolerates the data moving before the clock edge. The reported value is the
+passing side of the final bracket, so it is within `constraint_tolerance_ns`
+of the true boundary and never optimistic. All grid points of an iteration
+share one `klt sim` run (`2 + ceil(log2(window/tolerance))` runs per cell).
+
+| Option (`options.*`) | Default | Meaning |
+|---|---|---|
+| `constraint_degradation` | `0.1` | Allowed clock-to-output delay push-out, as a fraction of the reference, in `(0, 1]`. |
+| `constraint_window_ns` | `[-1.0, 2.0]` | `[low, high]` separation search window; `low < 0 < high`. |
+| `constraint_tolerance_ns` | `0.002` | Bisection stops when the bracket is narrower than this. |
+
+Each `constraints[]` entry carries `pin`, `related_pin`, `output_pin`, `kind`
+(`setup`/`hold`), `data_edge` (`rise`/`fall`), `timing_type`, `constraint`
+(`index_1` = data transition, `index_2` = clock transition, `values`, ns),
+`reference_delay_ns`, `degradation`, `tolerance_ns` and `iterations`. The
+field is additive: it is `[]` for a cell with no `constrained_pins`.
+
+**Failure to converge is a named error, never a fabricated value.** If, at any
+grid point, the output does not make the expected transition even at the
+window's wide end, or the cell still captures at its narrow end, the run fails
+with a message naming the pin, kind, edge and slews (widen
+`constraint_window_ns`, or check `function`/`static_inputs`). A constrained
+pin must be a data pin some output's next-state `function` toggles with alone.
+Worked example: `examples/characterize/request-dff-constraints.json`.
 
 ### Multiple corners
 
