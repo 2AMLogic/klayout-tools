@@ -72,11 +72,17 @@ from ._report_verify import load_committed_report as _load_committed_report
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .decks import ExtractionDeck, UnknownExtractionDeckError, deck_source_path
 from .decks import get_extraction_deck as _get_extraction_deck
+from .erc_disclosure import (
+    FLOATING_GATE_ALLOWED_KEY,
+    _disclosed_undeclared_classes,
+    _ties_disclosure_reason,
+    excuse_floating_gates,
+    floating_gate_provenance,
+    floating_gate_work,
+    validate_floating_gate_allowed,
+)
 from .erc_spec import (
     _SPEC_KEYS,
-    _TIES_DISCLOSURE_COVERAGE_REASON,
-    DISCLOSURE_KIND_UNEXPRESSIBLE,
-    REASON_NO_TIES_DECLARED,
     ErcError,
     _validate_antenna_limits,
     _validate_nets,
@@ -483,34 +489,6 @@ REASON_EMPTY_WELL_REGION = "empty_well_region"
 _WELL_ASSERTION_MIN_UNCOVERED_FRACTION = 0.01
 
 
-def _ties_disclosure_reason(ties_disclosure: dict[str, Any] | None) -> str:
-    """The ``erc_coverage.inapplicable`` reason for undeclared
-    ``erc.missing_tie`` work, given the spec's ``ties_disclosure`` (or its
-    absence) -- see :func:`_connectivity_coverage`."""
-    if not ties_disclosure:
-        return REASON_NO_TIES_DECLARED
-    return _TIES_DISCLOSURE_COVERAGE_REASON[
-        ties_disclosure.get("kind", DISCLOSURE_KIND_UNEXPRESSIBLE)
-    ]
-
-
-def _disclosed_undeclared_classes(
-    ties_disclosure: dict[str, Any] | None,
-) -> list[str]:
-    """The tie classes a top-level ``ties_disclosure`` names as undeclared
-    (``undeclared_classes``, issue #2541) -- ``[]`` when the spec declared
-    no disclosure, or a disclosure that names none.
-
-    Already validated by :func:`_validate_ties_disclosure` (non-empty
-    strings, no duplicates, none of them a declared ``ties[]`` name), so
-    this is a plain read: the list exists precisely so the undeclared work
-    has an identity :func:`_connectivity_coverage` can record a reason
-    against."""
-    if not ties_disclosure:
-        return []
-    return list(ties_disclosure.get("undeclared_classes") or [])
-
-
 def _spec_declared_layers(
     stackup: list[dict[str, Any]],
     vias: list[dict[str, Any]],
@@ -671,6 +649,7 @@ def _connectivity_coverage(
     undeclared_stream_layers: list[str] | None = None,
     well_assertion_coverage: list[dict[str, Any]] | None = None,
     compact: bool = False,
+    excused_gates: frozenset[str] | set[str] = frozenset(),
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -811,14 +790,8 @@ def _connectivity_coverage(
     degenerate = degenerate_ties or {}
     asserted = asserted_ties or set()
     well_asserted = well_asserted_ties or set()
-    if compact:
-        # (issue #2965) One aggregate id in place of one per gate; the count
-        # is `compact.floating_gate_checked`. Kept non-empty when any gate
-        # exists so the roll-up never sees a spurious "nothing checked".
-        checked = [work_id("erc.floating_gate")] if gates else []
-    else:
-        checked = [work_id("erc.floating_gate", gate["gate_id"]) for gate in gates]
-    inapplicable: list[dict[str, str]] = []
+    # (issues #2965, #4820) Excused gates are disclosed (`inapplicable`), not checked.
+    checked, inapplicable = floating_gate_work(gates, excused_gates, compact)
     skipped: list[dict[str, str]] = []
     checked_by_assertion: list[str] = []
     checked_by_well_assertion: list[str] = []
@@ -1361,7 +1334,9 @@ def _antenna_remedy(
 
 
 def _floating_gate_findings(
-    floating_gates: list[tuple[dict[str, Any], Any, bool]], gate_role: str
+    floating_gates: list[tuple[dict[str, Any], Any, bool]],
+    gate_role: str,
+    excused: frozenset[str] | set[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """``erc.floating_gate`` findings (issue #861): every gate whose
     accumulation stops immediately after the gate role -- zero connected
@@ -1377,7 +1352,7 @@ def _floating_gate_findings(
     either way."""
     findings: list[dict[str, Any]] = []
     for gate_entry, gate_region, is_floating in floating_gates:
-        if not is_floating:
+        if not is_floating or gate_entry["gate_id"] in excused:  # issue #4820
             continue
         findings.append(
             _finding(
@@ -3169,7 +3144,9 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
     on any defect.
     """
     spec = _load_spec_json(spec_path, ErcError)
-    _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", ErcError)
+    _reject_unknown_keys(
+        spec, _SPEC_KEYS + (FLOATING_GATE_ALLOWED_KEY,), spec_path, "", ErcError
+    )
     stackup = _validate_stackup(spec, spec_path)
     stackup_names = [entry["name"] for entry in stackup]
     vias = _validate_vias(spec, spec_path, stackup_names)
@@ -3192,6 +3169,7 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
         ErcError,
     )
     spec_antenna_limits = _validate_antenna_limits(spec, spec_path, stackup)
+    validate_floating_gate_allowed(spec, spec_path)  # issue #4820
     return (
         spec,
         stackup,
@@ -3454,6 +3432,7 @@ def run_erc(
         devices,
         spec_antenna_limits,
     ) = _parse_erc_spec(spec_path)
+    fg_allowed = validate_floating_gate_allowed(spec, spec_path)
     antenna_limits = _merge_antenna_limits(antenna_limits, pdk, spec_antenna_limits)
 
     layout = load_layout(file, ErcError)
@@ -3646,11 +3625,9 @@ def run_erc(
     # ERC finding checks (issue #861, Phase 1c) -- see this module's
     # docstring, "ERC finding checks", for what each rule detects.
     erc_findings: list[dict[str, Any]] = []
-    erc_findings.extend(
-        _floating_gate_findings(
-            list(zip(gates, gate_regions, gate_floating, strict=True)), gate_role
-        )
-    )
+    floating = list(zip(gates, gate_regions, gate_floating, strict=True))
+    excused, fg_echo = excuse_floating_gates(floating, fg_allowed, dbu, _bbox_dict)
+    erc_findings.extend(_floating_gate_findings(floating, gate_role, excused))
     # (issue #2497) The same pass returns the per-declared-net island counts
     # behind those findings -- the report's own `nets[]` section, populated
     # on the passing path too. See `_declared_net_entry`. (issue #2524) It
@@ -3824,6 +3801,7 @@ def run_erc(
         ),
         well_assertion_coverage,
         compact,
+        excused,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)
@@ -3913,6 +3891,7 @@ def run_erc(
     # that bit, exactly as `provenance.devices[].body_area_um2 == 0.0` is.
     # Always present; `[]` when no declared net asked for one.
     provenance["net_exclusions"] = net_exclusions
+    provenance.update(floating_gate_provenance(fg_allowed, fg_echo))  # issue #4820
 
     # `provenance.label_layers` (issue #2415): the measured effect of every
     # `stackup[].label_layer` declaration, in stackup order -- the same
