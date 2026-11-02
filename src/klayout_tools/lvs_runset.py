@@ -116,41 +116,6 @@ def _device_label(device: Any) -> str | None:
     return _name(device) or str(device.id())
 
 
-def _refuse_unsupported(
-    request: dict[str, Any], layout_spec: dict[str, Any], ref_spec: dict[str, Any]
-) -> None:
-    from .lvs import LvsError
-
-    for field in ("hints", "parameter_tolerance"):
-        if request.get(field) is not None:
-            raise LvsError(
-                f"request.{field} is only supported for engine 'klayout' -- "
-                f"the {RUNSET_ENGINE} engine delegates the whole compare to "
-                "the PDK's own runset"
-            )
-    for side, spec, allowed, why in (
-        ("layout", layout_spec, ("file", "top"), "the runset does its own extraction"),
-        (
-            "reference",
-            ref_spec,
-            ("netlist", "top"),
-            "the reference must be a SPICE netlist in the runset's own dialect",
-        ),
-    ):
-        extra = [k for k in spec if k not in allowed]
-        if extra:
-            raise LvsError(
-                f"{side}.{extra[0]} is not supported by engine '{RUNSET_ENGINE}' "
-                f"({why}; only {side}.{' and '.join(allowed)} apply)"
-            )
-    if "file" not in layout_spec:
-        raise LvsError(
-            f"engine '{RUNSET_ENGINE}' requires layout.file (a GDS/OASIS stream)"
-        )
-    if "netlist" not in ref_spec:
-        raise LvsError(f"engine '{RUNSET_ENGINE}' requires reference.netlist")
-
-
 def _existing_file(raw: Any, request_dir: str, label: str) -> str:
     from .lvs import LvsError
 
@@ -201,7 +166,9 @@ def _validate_request(
 ) -> tuple[str, str, str, dict[str, str], dict[str, Any]]:
     """Validate the request shape; return ``(layout, reference, deck_file,
     deck_vars, options)`` with paths resolved. Raises ``LvsError``."""
-    _refuse_unsupported(request, request["layout"], request["reference"])
+    from .lvs_runset_reference import refuse_unsupported
+
+    refuse_unsupported(request, request["layout"], request["reference"])
     deck_file = _existing_file(request.get("deck_file"), request_dir, "deck_file")
     layout = _existing_file(request["layout"]["file"], request_dir, "layout.file")
     reference = _existing_file(
@@ -911,38 +878,44 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     timeout_s = float(options.get("runset_timeout_s", RUNSET_DEFAULT_TIMEOUT_S))
     binary = _resolve_klayout_binary(options, request_dir)
 
+    from .lvs import _reference_conversion_echo
+    from .lvs_runset_reference import convert_reference
+
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-runset-")
     try:
+        # Issue #4805: a ``subckt-call`` reference is converted into work_dir.
+        runset_reference = convert_reference(reference, request["reference"], work_dir)
         lvsdb_path, completed = _run_runset(
             binary=binary,
             deck_file=deck_file,
             layout=layout,
-            reference=reference,
+            reference=runset_reference,
             top=top,
             deck_vars=deck_vars,
             timeout_s=timeout_s,
             work_dir=work_dir,
         )
         try:
-            verdict = read_lvsdb_verdict(lvsdb_path, reference)
+            verdict = read_lvsdb_verdict(lvsdb_path, runset_reference)
         except LvsError as exc:
             if completed.returncode == 0:
                 raise
             # A crash after extraction left a db with no cross-reference:
             # keep the exit-status diagnosis, not just the db-read message.
             raise LvsError(_nonzero_exit_message(binary, completed)) from exc
+        # Checked on the file the runset saw, before work_dir goes away.
+        declared = verdict["coverage"]["declared_device_classes"]
+        unresolved = _unresolved_reference_calls(
+            runset_reference,
+            request["reference"].get("top"),
+            {str(n).upper() for side in declared.values() for n in side or []}
+            | _deck_device_list(deck_file),
+        )
     finally:
         import shutil
 
         shutil.rmtree(work_dir, ignore_errors=True)
 
-    declared = verdict["coverage"]["declared_device_classes"]
-    unresolved = _unresolved_reference_calls(
-        reference,
-        request["reference"].get("top"),
-        {str(n).upper() for side in declared.values() for n in side or []}
-        | _deck_device_list(deck_file),
-    )
     mismatches = verdict["mismatches"] + unresolved
     if unresolved:
         verdict["status"] = STATUS_MISMATCH
@@ -976,6 +949,9 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": RUNSET_ENGINE,
+        **_reference_conversion_echo(
+            request["reference"].get("form", "plain-element"), request["reference"]
+        ),
         "layout": request["layout"]["file"],
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],

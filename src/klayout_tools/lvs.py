@@ -3293,16 +3293,16 @@ def _reconstruct_runset_request(
     reference_spec: dict[str, Any] = {"netlist": committed.get("reference")}
     if committed.get("reference_top"):
         reference_spec["top"] = committed["reference_top"]
+    reference_spec.update(_reference_conversion_replay(committed))  # issue #4805
     request: dict[str, Any] = {
         "engine": RUNSET_ENGINE,
         "layout": layout_spec,
         "reference": reference_spec,
         "deck_file": committed.get("deck_file"),
     }
-    if committed.get("deck_vars"):
-        request["deck_vars"] = committed["deck_vars"]
-    if committed.get("options"):
-        request["options"] = committed["options"]
+    for key in ("deck_vars", "options"):
+        if committed.get(key):
+            request[key] = committed[key]
     return request
 
 
