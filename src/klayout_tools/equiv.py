@@ -1,313 +1,50 @@
-"""Prove or refute combinational or sequential equivalence between two
-RTL/gate-level netlists via Yosys, headless.
+"""Prove or refute equivalence between two RTL/gate-level netlists via
+Yosys, headless.
 
 Pure library: :func:`run_equiv` returns plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never prints, mirroring ``lvs.py``/
 ``sim.py``/``synthesize.py``. Serialisation and human-readable formatting
-live in the CLI command module (``cli/equiv_cmd.py``).
+live in the CLI command module (``cli/equiv_cmd.py``). The full behaviour
+spec (request/response schema, engines, exit codes) is
+``docs/cli/equiv.md``.
 
-This is Phase 0 of the formal-equivalence epic
-([#707](https://github.com/2AMLogic/klayout-tools/issues/707)) -- the
-correctness loop-closer #704 (RTL synthesis) and #700 (place-and-route) both
-name as their own verification step. Scope is deliberately narrow
-(**combinational only**): #707's later phases extend this to sequential
-designs (temporal induction / bounded model checking via SymbiYosys); a
-design containing registers, latches, or memories is rejected up front with
-a clear scope error (see :func:`_sequential_error_message`) rather than
-silently running a per-cycle-only combinational check and reporting a
-misleadingly confident verdict.
+Public entry points: :func:`run_equiv`, :func:`load_request` /
+:func:`load_request_arg`, :func:`check_equiv_report` (``--check``),
+:func:`rerun_equiv_report` (``--rerun``) and
+:func:`~klayout_tools.equiv_stage.load_committed_stage1` (``--resume``).
 
-Two existing ``klt`` commands are this module's structural precedent, for
-different parts of the shape:
+Engines (``request.engine``):
 
-- ``klt lvs`` (``lvs.py``) is the closest structural match: two
-  representations in, a match/mismatch verdict out.
-- ``klt sim``'s exit-code trichotomy (0 pass / 3 target-unmet / 4
-  evaluator-errored) is the precedent for the **inconclusive-on-timeout**
-  outcome this module's own scope requires: a solver timeout must never be
-  reported as ``"equivalent"``, so it gets its own status (`"inconclusive"`)
-  distinct from a proven counterexample (`"counterexample"`), following
-  ``sim``'s pattern of adding a fourth outcome rather than overloading a
-  3-way split.
+- ``"yosys"`` (default): combinational only, via Yosys's ``miter -equiv`` /
+  ``sat -prove-asserts`` flow. A design with registers, latches or memories
+  is rejected up front (see :func:`_sequential_error_message`).
+- ``"yosys-sequential"``: register-correspondence sequential equivalence
+  via Yosys's ``equiv_make``/``equiv_induct`` family, with a bounded
+  cut-point refinement loop (``equiv_sequential._MAX_STAGE1_REFINEMENTS``) and a bounded
+  SAT search as stage 2. Not SymbiYosys: ``sby`` has no equivalence mode.
 
-## Engine: Yosys's built-in ``miter``/``sat`` equivalence flow
+Invariants that live only in code, and must be preserved:
 
-``request.engine`` exists from day one (only ``"yosys"`` is implemented) so
-a later engine (e.g. a full SymbiYosys ``mode equiv`` invocation for
-sequential designs) is an additive enum value, per every other ``klt``
-digital-flow verb's own precedent (``synthesize.py``,
-``functional_verification.py``).
-
-This environment (and this repo's CI, ``.github/workflows/ci.yml``) has a
-real ``yosys`` binary but no ``sby``/SymbiYosys install -- SymbiYosys adds
-essentially nothing over plain Yosys for the **combinational** MVP this
-issue scopes (its main value is orchestrating multi-step *sequential*
-proofs -- BMC/k-induction -- which is explicitly out of scope here). Rather
-than stub the orchestration behind an interface no build of this repo can
-exercise, this module orchestrates Yosys's own `equiv`-family primitives
-directly -- the same `miter -equiv` / `sat -prove-asserts` recipe the Yosys
-manual's own equivalence-checking chapter documents, and the same one
-SymbiYosys's `mode equiv` itself expands to for a single-cycle proof. A
-`sby`/SymbiYosys-backed `"engine": "symbiyosys"` for sequential designs is
-left for a later phase of #707, once it can be exercised.
-
-Two subprocesses are actually run:
-
-1. ``yosys -s <script>`` -- builds a miter circuit
-   (``gold`` != ``gate`` for any legal input assignment) and asks Yosys's
-   own SAT backend (built-in MiniSat, no external SAT-solver dependency) to
-   prove or refute it. Never trusted blindly on its own (see next point).
-2. On a refutation (a counterexample was found), ``iverilog``/``vvp`` runs
-   the *actual* concrete counterexample vector through the two flattened
-   netlists Yosys itself just proved diverge, independently of the SAT
-   solver, and confirms the divergence really reproduces -- this is the
-   "counterexample is executable" discipline the epic's own reality-
-   grounding section requires. ``klt sim``'s simulation-invocation path
-   (``sim.py``) is SPICE/analog-specific (``ngspice -b`` on a resistor/
-   transistor-level netlist) and is not the right tool for a gate-level RTL
-   vector; ``iverilog``/``vvp`` is the digital equivalent already wired up
-   as a first-class dependency by ``klt functional-verification``
-   (``functional_verification.py``) -- reused here, not SPICE. **When that
-   independent replay does *not* reproduce a divergence
-   (``confirmed_by_simulation: False``), the reported ``status`` is
-   downgraded to ``"inconclusive"``, never left as ``"counterexample"``**
-   (issue #1349) -- an unreproduced solver counterexample is not a
-   demonstrated functional difference, it is evidence of an unsound
-   miter/``$equiv`` artifact, and reporting it as a proven refutation would
-   violate this module's own "a counterexample is executable" discipline
-   rather than satisfy it. ``confirmed_by_simulation: None`` (simulation
-   could not be attempted at all, e.g. no ``iverilog`` on ``$PATH``) is left
-   alone -- there is no simulation evidence either way in that case, so the
-   solver's own verdict stands.
-
-## Replay backend: ``request.sim_backend`` (issue #2223)
-
-Which simulator runs step 2's counterexample/vector *replay* -- an
-orthogonal axis to ``request.engine``, which selects the *proof* engine:
-
-- ``"iverilog"`` (default, and the **canonical** backend for evidence):
-  exactly the ``iverilog``/``vvp`` path described above, unchanged.
-- ``"verilator"``: replays the same generated testbench through
-  ``verilator --binary`` instead. Icarus is an event-driven interpreter
-  while Verilator compiles to C++, so on a long vector/trace the compiled
-  path is dramatically faster (a downstream RTL bring-up measured 8:56 vs.
-  1:22, ~6.4x, and the gap grows with vector length).
-- ``"both"``: runs *both*, adopts neither silently. The canonical
-  (``iverilog``) run populates ``counterexample.simulation`` exactly as
-  today; the Verilator run populates the additive
-  ``counterexample.simulation_cross_check``. **The two must agree**: if
-  they reach different confirmation verdicts -- or differ on replayed
-  output bits in a way the declared backend-specific fields do not explain
-  -- the disagreement is reported as an error-severity
-  ``sim_backend_disagreement`` diagnostic, ``confirmed_by_simulation`` is
-  reset to ``None`` (neither backend's verdict is adopted), and the
-  reported ``status`` is downgraded to ``"inconclusive"``. A backend
-  disagreement is never a pass and never a silently-preferred fast path.
-
-The one declared backend-specific difference is **value modelling**:
-Icarus is 4-state (an undriven register reads ``x``), Verilator is 2-state
-(it reads ``0``). Each replay records its own ``four_state`` flag, and a
-bit difference that occurs *only* where the 4-state canonical run reported
-``x``/``z`` is classified ``explained_by: "two_state_backend"`` rather than
-counted as a disagreement.
-
-When ``verilator`` is not installed, nothing is fabricated: the
-Verilator-only backend degrades to the same ``simulation_unavailable``
-diagnostic a missing ``iverilog`` already produces, and ``"both"`` records
-``agreement: "unavailable"`` and leaves the canonical verdict standing --
-byte-for-byte the behavior this module had before the backend existed.
-
-## Engine: ``"yosys-sequential"`` -- register-correspondence sequential
-equivalence (Phase 2, #1313)
-
-A second engine, additive to ``"yosys"`` above (the combinational-only
-engine keeps rejecting sequential designs outright, unchanged): proves
-**register-correspondence** sequential equivalence -- the case where
-``gold``/``gate`` share an identical set of state elements (flip-flops),
-matched 1:1 by name, and only the *combinational* logic between them
-differs. This is deliberately narrower than general sequential equivalence
-(retiming, register cloning, FSM re-encoding): it is the evidence-matched
-shape ``docs/design/sequential-equivalence-survey.md`` (SS2) found this
-repo's own place-and-route pipeline actually produces (buffer insertion and
-drive-strength resizing only -- zero register-count change, measured on a
-real corpus run), and mirrors Yosys's own manual, which recommends exactly
-this ``equiv_make``/``equiv_simple``/``equiv_induct``/``equiv_status``
-family for this case.
-
-**Not SymbiYosys (``sby``).** The survey's own §4.2 proposed driving this
-via "``sby``'s ``mode equiv``" -- that mode does not exist. `sby` (as of
-the pinned `v0.67`, verified live in this task) only implements
-``bmc``/``prove``/``cover``/``live``/``prep`` modes (see
-``sby_core.py``'s own ``self.opt_mode not in [...]`` check); the
-``equiv_make``/``equiv_induct`` command family lives in Yosys itself and is
-normally orchestrated by a *separate* YosysHQ project, ``eqy``, which is not
-installed in this repo (a heavier dependency: a from-source C++ plugin
-build, not just a pinned Python launcher) and was not needed -- these are
-plain built-in Yosys passes, invocable directly via ``yosys -s <script>``,
-the same "orchestrate Yosys's own primitives directly, no extra dependency
-this repo can't exercise" choice ``equiv.py``'s combinational engine already
-made for ``miter``/``sat``.
-
-**Two stages, because ``equiv_status`` cannot itself report a
-counterexample.** Read literally, Yosys's ``equiv_status`` pass has exactly
-two states per ``$equiv`` cell -- "proven" (collapsed to a tautology) or
-"unproven" (verified against Yosys's own ``passes/equiv/equiv_status.cc``
-source, live in this task) -- never a definite "refuted". Register
-correspondence via temporal induction (``equiv_induct``) is a *proof*
-technique, not a counterexample-*finding* one: "unproven" honestly means
-"this technique could not decide", not "these designs differ".
-
-1. **Stage 1 (the named technique):** ``equiv_make`` pairs corresponding
-   gold/gate wires by name; ``clk2fflogic`` lowers every clocked flip-flop
-   to Yosys's formal-verification-friendly ``$ff`` model (handles both
-   single- and multi-clock, sync- and async-reset designs uniformly, unlike
-   hand-rolling one specific reset style); ``equiv_simple`` resolves what it
-   can with plain per-cell SAT; ``equiv_induct`` resolves the rest by
-   temporal induction over the design's own state elements; ``equiv_status``
-   reports the final tally. All ``$equiv`` cells proven -> ``"equivalent"``.
-   Stage 1 re-runs itself under **cut-point refinement** when it does not --
-   see the next section.
-
-### Stage 1 cut-point refinement (issue #1353)
-
-``equiv_make`` pairs wires **by name**, and a physical-design transformation
-is under no obligation to preserve internal wire names: OpenROAD's own
-resizing, repair-buffer insertion and gate cloning routinely leave a
-same-named internal wire carrying a *different* Boolean value on the two
-sides, even though the two designs are output-equivalent. Each such pair
-becomes an internal ``$equiv`` cell that can never be proven -- not because
-the designs differ, but because the pairing itself was wrong. Because a
-``$equiv`` cell is also a **cut point** (downstream cones on both sides read
-the ``$equiv`` output rather than their own driver), a wrongly-paired wire
-does not merely add noise: it injects a false assumption into every proof
-downstream of it, which is exactly why Yosys refuses to call the run proven
-while any ``$equiv`` cell is unproven.
-
-Stage 1 therefore runs as a small **counterexample-guided refinement loop**
-(bounded by :data:`_MAX_STAGE1_REFINEMENTS`, sharing one ``timeout_s``
-budget across all of its passes):
-
-1. Run the recipe above. If every ``$equiv`` cell is proven -> ``"equivalent"``.
-2. Otherwise, collect the wire names Yosys reported unproven, **drop every
-   name that is a top-level port**, and re-run ``equiv_make`` with the
-   remainder passed via ``-blacklist`` so no ``$equiv`` cell (and so no cut
-   point) is created for them at all.
-3. Repeat until proven, until no new name is added, or until the iteration
-   cap is hit -- then fall through to stage 2 exactly as before.
-
-**This is sound, and strictly stronger than not doing it.** Blacklisting
-only ever *removes* cut points, i.e. removes assumptions: every obligation
-that survives is proven from more of the two designs' real logic, never
-less. Top-level ports are never blacklisted, so the obligations that
-actually define equivalence -- "gold and gate produce the same outputs" --
-are always still proven, never dropped. A genuinely-broken gate netlist
-cannot be laundered into ``"equivalent"`` by this loop: with the port
-obligations retained, the loop simply fails to converge and stage 2's
-bounded SAT search runs as before (verified live against a deliberately
-mutated real post-route netlist -- see ``docs/cli/equiv.md``'s
-"Re-running the real pre/post-route canary").
-
-That soundness argument rests entirely on step 2's "**except any name that
-is a top-level port**" filter, which in turn rests on
-:func:`_parse_module_ports` seeing *every* port. Verilog **escaped
-identifiers** (``\\q.x``, ``\\q[0]`` -- how a synthesis/P&R flow spells a
-name containing ``.``/``[``/``]``/``/``) are terminated by whitespace, so
-Yosys writes them as ``output \\q.x ;``; a parser that does not allow for
-that space silently loses the port, the loop blacklists it as if it were an
-internal wire, and a genuinely-different design is reported ``"equivalent"``
-(issue #1999). :data:`_PORT_DECL_RE` therefore matches both spellings.
-
-``artifacts.stage1_blacklist_path`` records exactly which wires were
-dropped, so a reader can audit the weakened obligation set rather than
-having to trust it; an ``equiv_cutpoint_refinement`` info diagnostic reports
-the count.
-2. **Stage 2 (only runs when stage 1 leaves cells unproven):** rebuilds the
-   same gold/gate pairing with ``equiv_make -make_assert`` (turning each
-   matched pair into an ``$assert`` instead of an ``$equiv`` cell), then
-   runs a genuinely bounded (not inductive) ``sat -seq <N> -set-init-zero
-   -prove-asserts`` search for an actual violating trace, up to the same
-   depth ``equiv_induct`` used. ``-set-init-zero`` anchors both sides to an
-   identical, defined starting register state -- without it, this task's
-   own live experiments reproduced a well-known false-positive class
-   (SS3.5 of the survey): an *unconstrained* free initial register state on
-   each side diverges trivially, with no bearing on whether the two designs
-   actually behave differently once reachable from reset. A genuine
-   violation found within the bound is a **real, demonstrated**
-   counterexample (this bounded search is a complete decision procedure
-   *within its own depth*, unlike induction); finding none is reported
-   ``"inconclusive"`` (a bounded, all-zero-start search finding nothing
-   does not establish the general, unbounded claim register-correspondence
-   induction itself could not prove) -- **never** silently upgraded to
-   ``"equivalent"``, this module's own scope requirement restated for the
-   sequential engine.
-
-A genuine stage-2 counterexample is independently confirmed by simulation
-exactly as the combinational engine's own counterexample is (see above),
-generalised to multi-cycle: the confirmation testbench replays the entire
-captured cycle-by-cycle input sequence (not a single vector) through the
-same flattened gold/gate netlist via ``iverilog``/``vvp`` and checks the
-solver-reported divergence reproduces somewhere in the trace -- see
-:func:`_confirm_sequential_counterexample`'s own docstring for why "somewhere
-in the trace" rather than "at the identical cycle index" (the same
-X-vs-zero-init mismatch between a real Verilog simulation's own default
-register reset value and ``-set-init-zero``'s SAT-side assumption). Exactly
-as the combinational engine does, an unreproduced stage-2 counterexample
-(``confirmed_by_simulation: False``) downgrades the reported ``status`` to
-``"inconclusive"`` rather than the unsound ``"counterexample"`` (issue
-#1349) -- verified live against a real ``equiv_make``-name-mismatch case
-this engine's own bounded search can otherwise trip on (a real post-route
-netlist's resizer/repair-buffer-renamed internal wires; see
-``docs/cli/equiv.md``'s "Re-running the real pre/post-route canary").
-
-## Resumable runs: ``--resume`` (issue #2280)
-
-Long evidence runs die mid-way in autonomous-agent fleets (rate limits,
-session reaping) -- issue #2280's two gf180-surge incidents. ``--resume``
-gives ``klt equiv`` an idempotent re-entry contract modeled on ``klt sim``'s
-own ``--resume`` checkpoint machinery (issue #473), adapted to what a Yosys
-proof can actually checkpoint: **stages**, not corners.
-
-- The ``"yosys-sequential"`` engine's stage 1 (the
-  ``equiv_make``/``equiv_induct`` induction proof, including its bounded
-  cut-point refinement loop) commits a stage record --
-  ``.klt/equiv/stage1.commit.json`` -- atomically (temp file +
-  ``os.replace``, the same never-partially-written discipline
-  ``sim._Checkpoint`` uses) only after the stage reaches a classified
-  outcome. A later ``klt equiv --resume`` run whose request fingerprint
-  matches the record's skips stage 1 entirely: an ``all_proven`` record
-  produces the final ``"equivalent"`` envelope without re-running Yosys at
-  all; an ``unproven_cells`` record re-enters directly at stage 2.
-- The combinational engine is a single Yosys subprocess -- it has no
-  earlier stage artifact to re-enter from, so ``--resume`` is accepted and
-  re-runs its one stage (documented, so an agent fleet can issue one
-  uniform retry command regardless of engine).
-- **A stage record is never verdict-bearing unless it is fully
-  corroborated.** The loader (:func:`load_committed_stage1`) rejects --
-  and the resume re-runs the stage -- for: a ``partial: true`` record (the
-  marker written when a stage attempt died or timed out before
-  classifying), a fingerprint mismatch (the request changed since the
-  commit), any missing/mistyped field, a missing committed log artifact,
-  or a log whose own bytes do not corroborate the recorded classification
-  (an ``all_proven`` record whose log lacks Yosys's success line can never
-  satisfy the resume). A discarded record is never silent: the resumed
-  envelope carries a ``resume_stage_record_discarded`` warning diagnostic
-  naming the reason.
-- **An envelope, by contrast, is never partial.** A run that dies mid-way
-  emits nothing; the stage artifacts it left behind carry the ``partial``
-  marking instead. A committed ``--format json`` envelope exists only for
-  a run that reached a verdict. This is the negative-control property
-  issue #2280's acceptance criteria require: partial artifacts can never
-  satisfy a verdict check, structurally, because the only code path from
-  a stage record to an envelope ``status`` runs the full loader
-  validation above.
-
-A resumed run's envelope is byte-identical to the uninterrupted run's
-except in the fields the guide declares as run-scoped: ``elapsed_s``, the
-additive ``resume`` block (present only when ``--resume`` was given,
-mirroring ``klt sim``'s ``environment.resume`` convention), and --
-when the resume happens on a different host -- the host-scoped
-``provenance.klt_version``/``engine_version`` identity fields
-(``docs/guides/remote-evidence-runs.md``).
+- A solver timeout is never ``"equivalent"``: it reports ``"inconclusive"``,
+  distinct from a proven ``"counterexample"``.
+- A solver counterexample is replayed independently through ``iverilog``/
+  ``vvp`` (or Verilator, per ``request.sim_backend``). If the replay does
+  not reproduce the divergence (``confirmed_by_simulation: False``) the
+  status is downgraded to ``"inconclusive"``; ``None`` (no simulator
+  available) leaves the solver's verdict standing. With
+  ``sim_backend="both"`` a disagreement between the two backends also
+  downgrades to ``"inconclusive"``.
+- Cut-point refinement only removes assumptions and never blacklists a
+  top-level port, so a genuinely different design cannot be laundered into
+  ``"equivalent"``. That depends on ``equiv_sequential._parse_module_ports``
+  seeing every port, including Verilog escaped identifiers (``\\q.x ;``);
+  ``equiv_sequential._PORT_DECL_RE`` matches both spellings.
+- Stage 2 uses ``-set-init-zero`` to avoid false positives from an
+  unconstrained initial register state, and a bounded search that finds
+  nothing is ``"inconclusive"``, never ``"equivalent"``.
+- ``--resume`` skips stage 1 only for a fully corroborated stage record
+  (see ``equiv_stage.load_committed_stage1``); a discarded record emits a
+  ``resume_stage_record_discarded`` warning. An envelope is never partial.
 """
 
 from __future__ import annotations
