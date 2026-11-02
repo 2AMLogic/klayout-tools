@@ -56,6 +56,7 @@ from typing import Any
 
 from . import sim_crossings
 from .sim_errors import SimError
+from .sim_forms import validate_exclusive_form
 
 #: Reason tokens a failed ``step_resolution`` entry's diagnostic leads with.
 ERROR_CODES = (
@@ -102,22 +103,7 @@ def step_resolution_measurements(
 # --------------------------------------------------------------------------- #
 
 
-def validate_form_exclusive(spec: dict[str, Any]) -> bool:
-    """For an entry declaring ``step_resolution``: refuse any other form beside
-    it and validate the body. Returns ``True`` for such an entry."""
-    if not is_step_resolution(spec):
-        return False
-    name = spec.get("name")
-    if name is None:
-        raise SimError("each request.measurements[] entry requires 'name'")
-    others = [form for form in _FORMS if spec.get(form) is not None]
-    if others:
-        raise SimError(
-            f"measurement '{name}' declares 'step_resolution' together with "
-            f"'{others[0]}': they are alternative forms of a measurement -- "
-            "declare exactly one (use a separate measurements[] entry for "
-            "the other)"
-        )
+def _validate_exclusive_body(name: Any, spec: dict[str, Any]) -> None:
     if spec.get("optional") is True:
         raise SimError(
             f"measurement '{name}': 'optional' is not supported on "
@@ -125,7 +111,14 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
             "absent data)"
         )
     validate_step_resolution_spec(name, spec["step_resolution"])
-    return True
+
+
+def validate_form_exclusive(spec: dict[str, Any]) -> bool:
+    """For an entry declaring ``step_resolution``: refuse any other form beside
+    it and validate the body. Returns ``True`` for such an entry."""
+    return validate_exclusive_form(
+        spec, "step_resolution", _FORMS, _validate_exclusive_body
+    )
 
 
 def _seconds(name: Any, body: dict[str, Any], key: str) -> float | None:
