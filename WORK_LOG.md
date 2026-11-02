@@ -4,6 +4,14 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-31
 
+- **PR #4735**: ci: add trusted-baseline per-file size ratchet
+- **Issue #2766** (closed): ci: monotonic per-file size ratchet checked against the merge-base
+- **PR #4734**: fix(sim): also pin ngspice threads via .spiceinit set num_threads
+- **PR #4733**: fix(sim): decouple batch PDK validation from the remote AMI set
+- **PR #4732**: docs(sim): record live fleet receipts for corners.params and options.nodeset
+- **Issue #3676** (closed): Batch fleet runner image predates corners.params / options.nodeset (live parity unmeasured)
+- **PR #4731**: feat(lvs): group unmerged fingers, fold derived params, flag flavour mismatch, read valueless C cards
+- **Issue #4729** (closed): klt lvs: unmerged parallel fingers, whole-run resistor class and valueless C cards make a correct layout report 57 errors
 - **PR #4727**: fix(ci): harden curl retries in fetch-cell-netlists.sh
 - **Issue #4726** (closed): test flake: Fetch real gallery-cell SPICE netlists fails on Tests (Python 3.12)
 - **PR #4722**: fix: keep shard maps through sharded attach and name map/request differences
