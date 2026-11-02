@@ -261,8 +261,24 @@ otherwise vanish from the reference and merge its nets (e.g. an xschem
 `X... sky130_fd_pr__cap_mim_m3_1` MIM cap). The engine emits the same
 `reference.unresolved_subckt_call` error finding as the `"klayout"` engine
 (see that category's description) naming the instance and subcircuit, and the
-status is `mismatch`. `reference.device_map` remains unsupported for this
-engine; pairing such devices through the runset is not yet implemented.
+status is `mismatch`.
+
+**Pairing schematic devices with the runset's extracted ones (issue #4805).**
+`reference.form: "subckt-call"` (with optional `reference.deck` and
+`reference.device_map`, same meaning as for the `"klayout"` engine) converts
+the reference into a temporary plain-element netlist before it is passed to
+the runset as `schematic`; your file is not modified and no hand-derived copy is
+needed. A sky130 schematic MIM cap `XC1 a b sky130_fd_pr__cap_mim_m3_1 W=10u L=5u`
+becomes `C1 a b 0 sky130_fd_pr__model__cap_mim A=50P P=30U` (W/L in
+micrometres turned into area and perimeter in SI units), and is no longer
+reported as an unresolved call. The applied mapping is recorded in the
+report's `reference_conversion` block (`form`, `deck`, `device_map`), and
+`--check --rerun` replays it. Without `form`, behaviour is unchanged; any other
+`reference.*` key (or `deck`/`device_map` without `form: "subckt-call"`) is still
+refused. The positional value of the converted card is the placeholder `0`
+(the extracted MIM class has no C); the runset's own compare decides whether it
+is ignored. Confirm the card is accepted by your `sky130.lvs` before relying
+on it.
 
 **The verdict is taken from the `.lvsdb`, not the process.** The database is
 read back with `klayout.db.LayoutVsSchematic.read()` + `xref()`. A PDK driver
