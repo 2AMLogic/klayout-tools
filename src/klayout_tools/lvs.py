@@ -3147,6 +3147,16 @@ def _input_hash_check(
         "path": path,
         "resolved": os.path.abspath(path),
         "found_relative_to_report": found_relative_to_report,
+        # Issue #4795: name the directory the relative path was anchored to
+        # and, when the input is next to the report, the one that works.
+        "resolved_against": None if os.path.isabs(path) else os.getcwd(),
+        "hint": (
+            None
+            if found_relative_to_report is None
+            else "run --check from the report's directory, or pass --layout/"
+            "an absolute path; request-file-relative paths resolve against "
+            f"{os.path.dirname(os.path.abspath(report_path))}"
+        ),
     }
     return check
 

@@ -57,6 +57,7 @@ from ._report_verify import (
     LIST_ITEM,
     build_rerun_result,
     diff_verdict_fields,
+    hash_check,
     load_committed_report,
     strip_path_patterns,
 )
@@ -5750,7 +5751,22 @@ def _grade_evidence(
             },
         )
     if pin_state == _PIN_STALE:
-        return "unmet", _REASON_STALE_EVIDENCE, None, {}
+        # Issue #4795: name the failed comparison (field / expected / actual,
+        # the entry shape `--check` emits) so the author can tell which input
+        # to regenerate or re-pin. Additive: `detail` was `{}` before.
+        return (
+            "unmet",
+            _REASON_STALE_EVIDENCE,
+            None,
+            {
+                "content_hash_pin": _PIN_STALE,
+                "hash_check": hash_check(
+                    "provenance.input.content_hash",
+                    spec.get("content_hash"),
+                    resolution["content_hash"],
+                ),
+            },
+        )
 
     citation = {**_citation(resolution), **citation_extra}
     execution_detail: dict[str, Any] = {}

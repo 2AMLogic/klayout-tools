@@ -15990,6 +15990,9 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
     assert os.path.realpath(missing["found_relative_to_report"]) == os.path.realpath(
         pair / "ref.spice"
     )
+    # Issue #4795: the diagnostic names the anchor directory and the one that works.
+    assert os.path.realpath(missing["resolved_against"]) == os.path.realpath(tmp_path)
+    assert str(pair) in missing["hint"] or os.path.realpath(pair) in missing["hint"]
     assert by_field["environment.layout_sha256"]["match"] is True
     assert "input_not_found" not in by_field["environment.layout_sha256"]
 
@@ -16055,6 +16058,8 @@ def test_check_lvs_report_deleted_input_has_no_report_relative_fallback(tmp_path
     assert missing["path"] == layout_path
     assert missing["resolved"] == layout_path
     assert missing["found_relative_to_report"] is None
+    assert missing["resolved_against"] is None  # absolute path: no anchor
+    assert missing["hint"] is None
     assert "input_not_found" not in by_field["environment.reference_sha256"]
 
 
