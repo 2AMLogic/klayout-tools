@@ -232,6 +232,11 @@ from .lvs_netgen import (
     _resolve_netgen_setup,
     _run_netgen_lvs,
 )
+from .lvs_pin_anchors import (
+    _apply_top_level_pin_anchors,
+    _retry_with_neutral_family_names,
+    _TopLevelPinAnchor,
+)
 from .lvs_power import (
     _body_verification_report,
     _body_verification_unchecked,
@@ -2303,6 +2308,40 @@ def run_lvs(
                 )
                 if compare_result or compare_timeout:
                     break
+
+        # Issue #4798: one neutral-name retry for repeated-label pin families
+        # (see `_retry_with_neutral_family_names`). Hands the first-pass state
+        # back unchanged unless the retry reaches a real `match`.
+        (
+            compare_result,
+            logger,
+            same_nets_hints,
+            equivalent_pins_applied,
+            constant_bindings,
+            constant_warnings,
+            anchored_pins,
+            anchor_warnings,
+        ) = _retry_with_neutral_family_names(
+            request,
+            layout_circuit,
+            reference_circuit,
+            layout_netlist,
+            reference_netlist,
+            first_pass=(
+                compare_result,
+                logger,
+                same_nets_hints,
+                equivalent_pins_applied,
+                constant_bindings,
+                constant_warnings,
+                anchored_pins,
+                anchor_warnings,
+            ),
+            first_pass_timeout=compare_timeout,
+            anchor_top_level_pins=anchor_top_level_pins,
+            compare_timeout_s=compare_timeout_s,
+            compare_context=compare_context,
+        )
 
         mismatches = _build_mismatches(
             logger,
@@ -5591,32 +5630,6 @@ def _constant_nets_disclosure(
 # --------------------------------------------------------------------------- #
 
 
-#: Issue #2692: how many anchored pin names the
-#: :data:`CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED` disclosure lists before
-#: truncating (``pins_truncated: true``). A routed block anchors every bit of
-#: every boundary bus, which on a bus-heavy design is hundreds of names --
-#: enough to bury the rest of ``mismatches[]`` if the entry dumped all of
-#: them. The entry's own ``pin_count`` is always the exact, untruncated total
-#: (same discipline as :data:`_POWER_INSTANCE_SAMPLE_LIMIT`).
-_ANCHORED_PIN_SAMPLE_LIMIT = 20
-
-
-class _TopLevelPinAnchor(NamedTuple):
-    """One top-level pin name whose net was anchored across the two sides
-    (issue #2692) -- the automatic counterpart of a hand-written
-    ``hints.same_nets`` pair, carrying the pin name that licensed it.
-
-    ``layout_net``/``reference_net`` are ``Net.expanded_name()`` values, the
-    same spelling :func:`_apply_hints` records its declared pairs under (and
-    the spelling ``_build_mismatches`` reconciles against the comparer's own
-    pairing events).
-    """
-
-    pin: str
-    layout_net: str
-    reference_net: str
-
-
 def _anchor_top_level_pins_enabled(requested: bool | None, reference_form: str) -> bool:
     """Whether top-level pin anchoring runs (issue #2692).
 
@@ -5635,144 +5648,6 @@ def _anchor_top_level_pins_enabled(requested: bool | None, reference_form: str) 
     if requested is not None:
         return requested
     return reference_form == "gate-level-verilog"
-
-
-def _pin_nets_by_name(circuit: Any) -> dict[str, Any]:
-    """``{<upper-cased pin name>: <net>}`` for every named top-level pin of
-    ``circuit`` that resolves to a net (issue #2692).
-
-    Upper-cased for the same reason :func:`_circuit_pin_names` upper-cases:
-    the two sides reach this module through readers that disagree about case
-    (``NetlistSpiceReader`` normalises to upper case; a netlist handed over
-    from ``klt extract``'s in-process extraction does not), so folding both
-    to one case is what lets a layout pin line up with its reference
-    counterpart at all.
-
-    A name declared by **more than one** pin on the same circuit is dropped
-    rather than anchored: with two candidate nets there is no single pairing
-    the name licenses, and guessing one would be exactly the unsound
-    name-matching this anchoring exists to avoid. An unnamed pin, and a pin
-    that resolves to no net at all, are skipped for the same reason.
-    """
-    nets: dict[str, Any] = {}
-    ambiguous: set[str] = set()
-    for pin in circuit.each_pin():
-        name = (pin.name() or "").upper()
-        net = circuit.net_for_pin(pin.id())
-        if not name or net is None:
-            continue
-        if name in nets:
-            ambiguous.add(name)
-        nets[name] = net
-    for name in ambiguous:
-        del nets[name]
-    return nets
-
-
-def _apply_top_level_pin_anchors(
-    comparer: Any,
-    layout_circuit: Any,
-    reference_circuit: Any,
-    *,
-    enabled: bool,
-    declared: Sequence[tuple[str, str]] | None = None,
-) -> tuple[list[_TopLevelPinAnchor], list[dict[str, Any]]]:
-    """Anchor every top-level pin name declared on both sides by name
-    (issue #2692), returning ``(anchors, disclosure_warnings)``.
-
-    **The gap this closes.** ``NetlistComparer`` pairs nets by *topology*;
-    top-level pin names are never used as anchors. So two nets with identical
-    topology are interchangeable, and swapping them compares clean. On a
-    black-box (pin-only) macro that covers a whole bus: every bit wired
-    straight from a top-level pin to a macro pin -- the ordinary shape of an
-    SRAM's data/address bus, or any IP bus taken to the chip boundary -- is
-    topologically indistinguishable from its neighbours, so a bit-reversed
-    (or otherwise permuted) layout-side bus reported ``status: "match"`` with
-    ``mismatch_count: 0``. The same holds for two bits tied to constant nets
-    (``__CONST0__``/``__CONST1__``).
-
-    The fix uses the mechanism ``hints.same_nets`` already exposes by hand,
-    applied automatically: for each pin name present on both sides,
-    ``NetlistComparer.same_nets(..., must_match=True)`` ties the layout net
-    that pin lands on to the reference net of the same-named pin. A swap then
-    contradicts an assertion the comparer must honor, and the compare reports
-    ``mismatch`` -- with the refused pairing surfaced as a ``hints.rejected``
-    entry by ``_build_mismatches``, exactly as a hand-written hint's refusal
-    is (``details.anchored_top_level_pin`` tells the two apart).
-
-    A pin name present on only **one** side is not an error, matching the
-    convention ``options.combine_devices``/``reference.device_bulk`` already
-    use -- only names resolvable on both sides are anchored (a
-    ``gate-level-verilog`` reference carries no power/ground pins at all, so
-    the layout's rails simply fall out of scope here).
-
-    ``declared`` is the ``hints.same_nets`` pairs :func:`_apply_hints`
-    already applied. A net named by one of them is left alone: the caller's
-    own explicit declaration is the authority on that net, and anchoring it
-    a second time would either duplicate the pairing or, where the two
-    disagree, report one refusal twice.
-
-    Returns ``([], [])`` untouched when ``enabled`` is false, so a request
-    that opts out (or any form this does not default on for) is
-    byte-identical to before this hook existed.
-    """
-    if not enabled:
-        return [], []
-    layout_nets = _pin_nets_by_name(layout_circuit)
-    reference_nets = _pin_nets_by_name(reference_circuit)
-    spoken_for = {name for pair in declared or () for name in pair}
-    anchors: list[_TopLevelPinAnchor] = []
-    for pin_name in sorted(set(layout_nets) & set(reference_nets)):
-        net_a = layout_nets[pin_name]
-        net_b = reference_nets[pin_name]
-        layout_name = net_a.expanded_name()
-        reference_name = net_b.expanded_name()
-        if layout_name in spoken_for or reference_name in spoken_for:
-            continue
-        comparer.same_nets(layout_circuit, reference_circuit, net_a, net_b, True)
-        anchors.append(_TopLevelPinAnchor(pin_name, layout_name, reference_name))
-    return anchors, _top_level_pin_anchor_warnings(anchors)
-
-
-def _top_level_pin_anchor_warnings(
-    anchors: Sequence[_TopLevelPinAnchor],
-) -> list[dict[str, Any]]:
-    """The single ``severity: "warning"``
-    :data:`CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED` disclosure for a run
-    that anchored at least one top-level pin (issue #2692), or ``[]``.
-
-    Always a warning: anchoring never *creates* a mismatch on its own -- it
-    removes a degree of freedom the comparer would otherwise have used, so a
-    verdict reached with it is strictly stronger than one without. The entry
-    exists so a ``"match"`` that rests on name-anchored boundary pins is
-    distinguishable from one reached by topology alone (and so a reader of a
-    committed report can tell the hook ran at all).
-    """
-    if not anchors:
-        return []
-    pins = [anchor.pin for anchor in anchors]
-    sample = pins[:_ANCHORED_PIN_SAMPLE_LIMIT]
-    return [
-        _mismatch(
-            CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED,
-            "warning",
-            f"{len(pins)} top-level pin name(s) declared on both sides were "
-            "anchored by name before comparing (options."
-            "anchor_top_level_pins): each one's layout net is asserted to "
-            "match the reference net of the same-named pin, which the "
-            "comparer's own topology-only net pairing does not otherwise "
-            "require. Without it, two boundary nets with identical topology "
-            "(e.g. two bits of a black-box macro's bus) are interchangeable "
-            "and a swap between them compares clean -- see docs/cli/lvs.md, "
-            '"Top-level pin anchoring"',
-            "both",
-            details={
-                "pins": sample,
-                "pin_count": len(pins),
-                "pins_truncated": len(sample) < len(pins),
-            },
-        )
-    ]
 
 
 def _parse_anchor_top_level_pins(

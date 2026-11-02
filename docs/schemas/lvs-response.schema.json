@@ -459,7 +459,7 @@
         },
         "details": {
           "type": ["object", "null"],
-          "description": "Category-specific data (e.g. device.class_arity terminals, device.bulk_reconciled, netgen {raw}, net.supply_fragmented {supply, fragment_count}, topology.top_level_pins_anchored {pins, pin_count, pins_truncated}, topology.dangling_output_ambiguous {cell_type, instance_count, layout_instances, reference_instances} or {net_event_count}). Shape varies by category and is additive.",
+          "description": "Category-specific data (e.g. device.class_arity terminals, device.bulk_reconciled, netgen {raw}, net.supply_fragmented {supply, fragment_count}, topology.top_level_pins_anchored {pins, pin_count, pins_truncated, skipped_repeated_label_pins?, repeated_label_pin_families?}, topology.dangling_output_ambiguous {cell_type, instance_count, layout_instances, reference_instances} or {net_event_count}). Shape varies by category and is additive.",
           "additionalProperties": true
         },
         "circuit": {"$ref": "#/$defs/name_pair"},

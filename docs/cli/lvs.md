@@ -655,6 +655,21 @@ on only one side is never an error and is simply not anchored (the layout's
 the routine example), and a name declared by more than one pin on the same
 circuit is skipped rather than guessed at.
 
+**Repeated-label pin families (issue #4798).** Several units whose pins carry
+one label are written by the extractor as `PAD`, `PAD$1`, ...; which `$k` sits
+on which unit follows extractor order and can change after an unrelated edit.
+Such a `BASE`/`BASE$k` family is never name-anchored (a lone `X$1` with no
+`X` sibling is not a family). Separately, KLayout's comparer uses same-named
+nets as tie-break hints on symmetric designs and does not backtrack, so a
+swapped `$k` pairing can report false `device.unmatched` even with anchoring
+off. When the first compare mismatches and a family exists, `klt lvs` runs
+**one** more compare with the family nets renamed to neutral unique names on
+both sides (topology only). Only a real `match` there is reported, with a
+`severity: "warning"` `topology.top_level_pins_anchored` entry whose `details`
+gain the additive key `repeated_label_pin_families` (skipped families are
+listed under `skipped_repeated_label_pins` when anchoring ran). If the retry
+also mismatches, the first-pass result is reported unchanged.
+
 Every run that anchors at least one pin discloses it as a single
 `severity: "warning"`
 [`topology.top_level_pins_anchored`](#topologytop_level_pins_anchored-top-level-pin-names-were-used-as-compare-anchors)
