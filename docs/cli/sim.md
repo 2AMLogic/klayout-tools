@@ -1837,7 +1837,7 @@ established. `runner_compatibility` itself stays a major.minor gate.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292)).**
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292); `step_resolution`, [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
 undriven), so
@@ -4646,6 +4646,65 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
   first `klt` release segment `0.8.1`): see "Mandatory features" under
   "Runner/client `klt` version skew".
 - **Out of scope.** RJ/DJ jitter decomposition and bathtub curves.
+
+## Edge-window step report (`measurements[].step_resolution`)
+
+Issue [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773). `.tran`
+takes one global `tmax`, so a switching-converter run that needs ~100 ps only
+near each edge cannot ask for it, and a request cannot otherwise *verify* the
+step the solver took there. `step_resolution` is the verification half: a
+**report only** that never changes the solve.
+
+```json
+{"analysis": {"kind": "tran", "args": "1n 600u"},
+ "measurements": [
+   {"name": "edge_step", "unit": "s",
+    "step_resolution": {"signal": "v(sw)", "level": 2.5, "edge": "either",
+                        "window": "10n"},
+    "limits": {"max": 1e-9}}]}
+```
+
+- **Form.** `step_resolution` is an object
+  `{signal, level, window, edge?, from?, to?, max?}`. `signal`/`level`/`edge`/
+  `from`/`to`/`max` behave as for `crossings` (`edge` defaults to `either`);
+  `window` is the required positive half-width (seconds or a SPICE literal such
+  as `"10n"`). Unknown keys, `step_resolution` beside any other value form,
+  `optional: true`, and any `analysis.kind` other than `tran` are refused up
+  front (exit 1). `engine: "xyce"` and `analysis_steps` are refused.
+- **Method.** Each interpolated crossing of `level` is located; its gap is the
+  largest `time[i] - time[i-1]` over the sample intervals overlapping
+  `[t - window, t + window]` (an interval straddling the window boundary
+  counts).
+- **Value.** `value` is the overall largest gap in seconds, graded against
+  `limits` like any scalar. An additive `step_resolution` sibling carries
+  `{max_gap, crossings: [{time, max_gap}], count, truncated}` (the list is
+  capped at `max`; `max_gap` covers every crossing).
+- **Errors.** `status: "error"`, `value: null`, and a `code: "measurement"`
+  diagnostic led by `[step_resolution_vector_missing]` (the signal did not
+  resolve or its rawfile was unreadable) or `[step_resolution_no_crossings]`.
+- **Backends.** Reduced in Python inside the corner run from a corner-local
+  rawfile (`step_resolution_<k>.raw`), so `local`, `remote` and `batch` agree.
+  It is a mandatory runner feature (`step_resolution`, first `klt` release
+  segment `0.8.1`).
+
+### Measured: what does bound the edge step?
+
+Measured with ngspice-42, `klt sim --backend local`, on a pulse-driven RC
+(`PULSE(0 1 100n 1n 1n 200n 400n)`, R = 1 k, C = 1 pF, `.tran 1n 1u`),
+`window` = 5 ns, `level` = 0.5 on the input, five edges:
+
+| Run | Largest gap near an edge |
+|---|---|
+| `args: "1n 1u"` (default `tmax`) | 1.0 ns at all five edges |
+| `args: "1n 1u 0 100p"` (`tmax` = 100 ps) | 0.1 ns at all five edges |
+| `args: "1n 1u 0 10n"` (loose `tmax`) | 9.76, 9.20, 7.15, 9.20, 7.15 ns |
+| loose `tmax` + a PWL breakpoint helper source with corners at the first two edges | 8.76, 8.74, 9.99, 9.20, 7.15 ns |
+
+`tmax` bounds the step everywhere (and so costs points everywhere). A PWL
+helper source did **not** bound the edge step: at the two edges it covered the
+gap only moved from 9.8/9.2 ns to 8.8/8.7 ns, and an uncovered edge was
+unchanged. This is one small circuit; check your own deck with the
+measurement rather than assuming either result transfers.
 
 ## Bisection / threshold search (`measurements[].search`)
 

@@ -110,6 +110,7 @@ from . import (
     sim_portable,
     sim_search,
     sim_snm_meas,
+    sim_step_resolution,
     sim_steps,
     sim_stimulus,
     sim_stress,
@@ -118,6 +119,7 @@ from . import (
     sim_tian,
     sim_transfer_meas,
     sim_twoport,
+    sim_xyce_refusals,
 )
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
@@ -1693,6 +1695,8 @@ def _resolve_analysis_and_measurements(
     sim_snm_meas.validate_snm_context(measurements_spec, analysis)
     # Issue #4292: an eye fold is a transient-time quantity too.
     sim_eye.validate_eye_context(measurements_spec, analysis)
+    # Issue #4773: a step-resolution report is a transient-time quantity too.
+    sim_step_resolution.validate_step_resolution_context(measurements_spec, analysis)
     # Issue #4121: a search entry needs the scalar single-analysis deck.
     sim_search.validate_search_context(measurements_spec, analysis)
     # Issue #2938: a `noise` entry is lowered to an `expr` (plus helper
@@ -2173,6 +2177,9 @@ def _required_save_vectors(
         texts = [spec.get("spice"), spec.get("expr")]
         if isinstance(crossings, dict):
             texts.append(crossings.get("signal"))
+        step_res = spec.get("step_resolution")
+        if isinstance(step_res, dict):
+            texts.append(step_res.get("signal"))
         for text in texts:
             if not isinstance(text, str):
                 continue
@@ -3489,6 +3496,9 @@ def _prepare_sim_request(
         snm_declared=bool(sim_snm_meas.snm_measurements(measurements_spec)),
         search_declared=bool(sim_search.search_measurements(measurements_spec)),
         eye_declared=bool(sim_eye.eye_measurements(measurements_spec)),
+        step_resolution_declared=bool(
+            sim_step_resolution.step_resolution_measurements(measurements_spec)
+        ),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -7914,109 +7924,6 @@ class _Checkpoint:
 # --------------------------------------------------------------------------- #
 
 
-def _refuse_xyce_control_block_measurements(
-    *,
-    expr_declared: bool,
-    crossings_declared: bool,
-    cycle_mean_declared: bool,
-    energy_declared: bool,
-    stress_declared: bool = False,
-    transfer_declared: bool = False,
-    snm_declared: bool = False,
-    search_declared: bool = False,
-    eye_declared: bool = False,
-) -> None:
-    """The ``engine: "xyce"`` refusals for measurement forms that exist only
-    as commands in klt's generated ngspice ``.control`` block (``expr``,
-    issue #2533; ``crossings``, issue #2868; ``energy``, issue #3033). Split out of
-    :func:`_enforce_xyce_support_boundary` to keep that gate under the
-    complexity limit."""
-    if expr_declared:
-        # Issue #2533: an `expr` measurement is emitted as ngspice
-        # `let`/`print` commands inside the generated `.control` block, and
-        # the Xyce deck has no control block to carry them (see
-        # `_write_xyce_deck`'s docstring). Refused by name rather than
-        # silently dropped: a corner that ran without its `expr` lines would
-        # report every such measurement as "produced no value", which reads
-        # as a circuit regression rather than an unsupported request field.
-        raise SimError(
-            "measurements[].expr is not supported for engine 'xyce': it is "
-            "evaluated by ngspice `let`/`print` commands inside a `.control` "
-            "block, and the Xyce deck has none (its analysis is a plain "
-            "top-level dot card); use engine 'ngspice', or express the "
-            "quantity as a `.meas` card in measurements[].spice"
-        )
-    if crossings_declared:
-        # Issue #2868: the series is dumped by ngspice `let`/`write`
-        # commands in the generated `.control` block -- same boundary as
-        # `expr`, refused by name for the same reason.
-        raise SimError(
-            "measurements[].crossings is not supported for engine 'xyce': "
-            "the signal is dumped by ngspice `let`/`write` commands inside a "
-            "`.control` block, and the Xyce deck has none; use engine "
-            "'ngspice'"
-        )
-    if cycle_mean_declared:
-        # Issue #2947: same `.control` let/write boundary as `crossings`.
-        raise SimError(
-            "measurements[].cycle_mean is not supported for engine 'xyce': "
-            "the signals are dumped by ngspice `let`/`write` commands inside "
-            "a `.control` block, and the Xyce deck has none; use engine "
-            "'ngspice'"
-        )
-    if energy_declared:
-        # Issue #3033: the source current/voltage are dumped by ngspice
-        # `let`/`write` commands in the generated `.control` block -- same
-        # boundary as `crossings`.
-        raise SimError(
-            "measurements[].energy is not supported for engine 'xyce': the "
-            "source current and voltage are dumped by ngspice `let`/`write` "
-            "commands inside a `.control` block, and the Xyce deck has none; "
-            "use engine 'ngspice'"
-        )
-    if stress_declared:
-        # Issue #4592: the node-pair voltage is dumped by ngspice
-        # `let`/`write` commands in the generated `.control` block -- same
-        # boundary as `energy`.
-        raise SimError(
-            "measurements[].stress is not supported for engine 'xyce': the "
-            "node voltages are dumped by ngspice `let`/`write` commands "
-            "inside a `.control` block, and the Xyce deck has none; use "
-            "engine 'ngspice'"
-        )
-    if transfer_declared:
-        # Issue #2923: same `.control` let/write boundary as `cycle_mean`.
-        raise SimError(
-            "measurements[].transfer is not supported for engine 'xyce': the "
-            "AC vectors are dumped by ngspice `let`/`write` commands inside a "
-            "`.control` block, and the Xyce deck has none; use engine "
-            "'ngspice'"
-        )
-    if snm_declared:
-        # Issue #3895: same `.control` let/write boundary as `transfer`.
-        raise SimError(
-            "measurements[].snm is not supported for engine 'xyce': the sweep "
-            "vectors are dumped by ngspice `let`/`write` commands inside a "
-            "`.control` block, and the Xyce deck has none; use engine "
-            "'ngspice'"
-        )
-    if search_declared:
-        # Issue #4121: the bisection is an ngspice `.control` `while` loop.
-        raise SimError(
-            "measurements[].search is not supported for engine 'xyce': the "
-            "bisection runs as an ngspice `.control` `while` loop, and the "
-            "Xyce deck has no control block; use engine 'ngspice'"
-        )
-    if eye_declared:
-        # Issue #4292: same `.control` let/write boundary as `crossings`.
-        raise SimError(
-            "measurements[].eye is not supported for engine 'xyce': the "
-            "signal is dumped by ngspice `let`/`write` commands inside a "
-            "`.control` block, and the Xyce deck has none; use engine "
-            "'ngspice'"
-        )
-
-
 def _refuse_xyce_params_axis(corners_spec: dict[str, Any]) -> None:
     """The ``engine: "xyce"`` refusal for ``corners.params``. Split out of
     :func:`_enforce_xyce_support_boundary` to keep that gate under the
@@ -8113,6 +8020,7 @@ def _enforce_xyce_support_boundary(
     snm_declared: bool = False,
     search_declared: bool = False,
     eye_declared: bool = False,
+    step_resolution_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -8174,7 +8082,7 @@ def _enforce_xyce_support_boundary(
             "Verilog-A models as its own compiled plugins (`-plugin`), not "
             "OSDI shared libraries; use engine 'ngspice' or drop the option"
         )
-    _refuse_xyce_control_block_measurements(
+    sim_xyce_refusals.refuse_control_block_measurements(
         expr_declared=expr_measurements_declared,
         crossings_declared=crossings_declared,
         cycle_mean_declared=cycle_mean_declared,
@@ -8184,6 +8092,7 @@ def _enforce_xyce_support_boundary(
         snm_declared=snm_declared,
         search_declared=search_declared,
         eye_declared=eye_declared,
+        step_resolution_declared=step_resolution_declared,
     )
     for declared, message in (
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
@@ -10101,6 +10010,9 @@ def _run_corner(
     )
     snms = sim_snm_meas.extract_corner_snms(measurements_spec, corner_dir)
     eyes = sim_eye.extract_corner_eyes(measurements_spec, corner_dir)
+    step_resolutions = sim_step_resolution.extract_corner_step_resolutions(
+        measurements_spec, corner_dir
+    )
     searches = sim_search.extract_corner_searches(measurements_spec, log_text)
     # Issue #3160: each pass's rawfile is decoded once, shared by the tian
     # reduction below and the corner's `passes` field.
@@ -10125,6 +10037,7 @@ def _run_corner(
             transfers=transfers,
             snms=snms,
             eyes=eyes,
+            step_resolutions=step_resolutions,
             searches=searches,
             tians=tians,
             engine_diagnostics=diagnostics,
@@ -10473,6 +10386,9 @@ def _corner_measurement_results(
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
     snms: dict[int, sim_snm_meas.SnmOutcome] | None = None,
     eyes: dict[int, sim_eye.EyeOutcome] | None = None,
+    step_resolutions: (
+        dict[int, sim_step_resolution.StepResolutionOutcome] | None
+    ) = None,
     searches: dict[int, sim_search.SearchOutcome] | None = None,
     tians: dict[int, sim_tian.TianOutcome] | None = None,
     engine_diagnostics: list[dict[str, Any]] | None = None,
@@ -10536,6 +10452,11 @@ def _corner_measurement_results(
         (sim_tian.is_tian, _tian_measurement_result, tians),
         (sim_snm_meas.is_snm, _snm_measurement_result, snms),
         (sim_eye.is_eye, _eye_measurement_result, eyes),
+        (
+            sim_step_resolution.is_step_resolution,
+            _step_resolution_measurement_result,
+            step_resolutions,
+        ),
         (sim_search.is_search, _search_measurement_result, searches),
     )
     for position, spec in enumerate(measurements_spec):
@@ -11000,6 +10921,64 @@ def _eye_measurement_result(
         "status": m_status,
         "margin": margin,
         "eye": outcome.report(),
+    }
+    return result, grading_diagnostics
+
+
+def _step_resolution_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_step_resolution.StepResolutionOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``step_resolution`` measurement's response entry (issue #4773).
+
+    ``value`` is the overall largest time-sample gap (seconds) near the
+    crossings, graded through :func:`_grade_measurement_value` like any scalar;
+    the per-crossing list rides the additive ``step_resolution`` sibling. A
+    failure is ``status: "error"``, ``value: null`` with a
+    ``code: "measurement"`` diagnostic whose message starts with a
+    ``[<reason>]`` token from
+    :data:`klayout_tools.sim_step_resolution.ERROR_CODES`."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.value is None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no step_resolution value"
+        )
+        reason = (
+            outcome.code
+            if outcome is not None and outcome.code is not None
+            else "step_resolution_vector_missing"
+        )
+        if save_mode == "netlist" and reason == "step_resolution_vector_missing":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {
+                "severity": "error",
+                "code": "measurement",
+                "message": f"[{reason}] {message}",
+            }
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(
+        spec, outcome.value
+    )
+    result = {
+        "name": name,
+        "value": outcome.value,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "step_resolution": outcome.report(),
     }
     return result, grading_diagnostics
 
@@ -11890,6 +11869,9 @@ def _corner_deck_control_lines(
     transfer_lines = sim_transfer_meas.control_lines(measurements_spec, corner_dir)
     snm_lines = sim_snm_meas.control_lines(measurements_spec, corner_dir)
     eye_lines = sim_eye.control_lines(measurements_spec, corner_dir)
+    step_resolution_lines = sim_step_resolution.control_lines(
+        measurements_spec, corner_dir
+    )
     search_lines = sim_search.control_lines(measurements_spec)
     complex_vector_lines = sim_complex_vectors.control_lines(
         complex_vectors, corner_dir
@@ -11903,6 +11885,7 @@ def _corner_deck_control_lines(
         or transfer_lines
         or snm_lines
         or eye_lines
+        or step_resolution_lines
         or complex_vector_lines
     ):
         lines.append("set filetype=ascii")
@@ -11933,6 +11916,7 @@ def _corner_deck_control_lines(
     lines.extend(transfer_lines)
     lines.extend(snm_lines)
     lines.extend(eye_lines)
+    lines.extend(step_resolution_lines)
     lines.extend(complex_vector_lines)
     # Issue #4121: last, so no later line reads the main analysis' plot after
     # the search has moved ngspice's current plot.

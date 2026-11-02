@@ -593,6 +593,7 @@
         "klayout_tools.sim_snm",
         "klayout_tools.sim_snm_meas",
         "klayout_tools.sim_staging",
+        "klayout_tools.sim_step_resolution",
         "klayout_tools.sim_steps",
         "klayout_tools.sim_stimulus",
         "klayout_tools.sim_stress",
@@ -603,7 +604,8 @@
         "klayout_tools.sim_transfer",
         "klayout_tools.sim_transfer_meas",
         "klayout_tools.sim_twoport",
-        "klayout_tools.sim_validate"
+        "klayout_tools.sim_validate",
+        "klayout_tools.sim_xyce_refusals"
       ]
     },
     "size": {
