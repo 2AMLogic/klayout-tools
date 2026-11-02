@@ -92,6 +92,7 @@ _SPEC_KEYS = (
     "ties_disclosure",
     "devices",
     "antenna_limits",
+    "dummy_gate_boxes",
 )
 _STACKUP_KEYS = ("name", "layer", "label_layer", "active_layer", "role")
 _NET_KEYS = (
@@ -748,7 +749,7 @@ def _parse_um_boxes(
     entry: dict[str, Any],
     key: str,
     spec_path: str,
-    index: int,
+    index: int | None,
     section: str = "ties",
 ) -> list[tuple[float, float, float, float]]:
     """One spec entry's ``[left, bottom, right, top]`` micrometre box list
@@ -773,17 +774,20 @@ def _parse_um_boxes(
     ``nets[1].unlabelled_allowed_boxes[0]``) rather than at whichever array
     happened to be the first user of this parser.
     """
+    # `index is None` names a top-level key (``dummy_gate_boxes``, issue
+    # #4828): the path in error messages is then just ``key``.
+    prefix = key if index is None else f"{section}[{index}].{key}"
     raw = entry.get(key, [])
     if raw is None:
         raw = []
     if not isinstance(raw, list):
         raise ErcError(
-            f"spec '{spec_path}': {section}[{index}].{key} must be an array of "
+            f"spec '{spec_path}': {prefix} must be an array of "
             "[left, bottom, right, top] micrometre boxes"
         )
     boxes: list[tuple[float, float, float, float]] = []
     for j, value in enumerate(raw):
-        field = f"{section}[{index}].{key}[{j}]"
+        field = f"{prefix}[{j}]"
         if (
             not isinstance(value, list)
             or len(value) != 4
@@ -800,6 +804,20 @@ def _parse_um_boxes(
             )
         boxes.append((left, bottom, right, top))
     return boxes
+
+
+def _parse_dummy_gate_boxes(
+    spec: dict[str, Any], spec_path: str
+) -> list[tuple[float, float, float, float]]:
+    """Top-level ``dummy_gate_boxes`` (optional, issue #4828): micrometre
+    ``[left, bottom, right, top]`` boxes declaring *intentional* dummy gates
+    (tap / well-tie cells, cell edges) so ``erc.floating_gate`` can gate a
+    real standard-cell layout. A floating gate is excused only when its whole
+    merged gate-role region lies inside one box (see
+    :func:`~klayout_tools.erc._dummy_gate_excused`). Same literal-geometry
+    shape and validation as ``unlabelled_allowed_boxes``; omitted/``null``/
+    ``[]`` -> ``[]``."""
+    return _parse_um_boxes(spec, "dummy_gate_boxes", spec_path, None)
 
 
 def _parse_tap_boxes(

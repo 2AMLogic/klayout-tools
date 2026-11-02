@@ -749,6 +749,11 @@ bump, matching this block's own additive-envelope convention. See
 [`docs/cli/erc.md`](cli/erc.md)'s "Deck-driven device-marker
 auto-detection".
 
+Issue #4828 adds `provenance.dummy_gate_exclusions` (`{boxes,
+excluded_gates}`), the additive echo of the optional `dummy_gate_boxes` spec
+key that excuses intentional dummy gates from `erc.floating_gate`; no
+`schema_version` bump. See [`docs/cli/erc.md`](cli/erc.md).
+
 Issue #2524 adds a third verb-local key on the same principle,
 `provenance.net_exclusions`: one entry per `nets[]` spec declaration that
 carried `unlabelled_allowed_boxes` (`{net, boxes, excluded_islands,

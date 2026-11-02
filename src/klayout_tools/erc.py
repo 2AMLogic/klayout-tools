@@ -78,6 +78,7 @@ from .erc_spec import (
     DISCLOSURE_KIND_UNEXPRESSIBLE,
     REASON_NO_TIES_DECLARED,
     ErcError,
+    _parse_dummy_gate_boxes,
     _validate_antenna_limits,
     _validate_nets,
     _validate_stackup,
@@ -1358,6 +1359,25 @@ def _antenna_remedy(
             "accumulated charge"
         ),
     }
+
+
+def _dummy_gate_excused(
+    kdb: Any,
+    layout: Any,
+    gate_region: Any,
+    boxes: list[tuple[float, float, float, float]],
+) -> bool:
+    """Whether ``gate_region`` (a gate's merged gate-role region) lies
+    entirely inside one declared ``dummy_gate_boxes`` box (issue #4828).
+    Per-gate and per-box: a box that only grazes a gate, or two boxes that
+    each cover half of it, excuse nothing."""
+    from ._layout import clip_box as _clip_box
+
+    for box_um in boxes:
+        box = kdb.Region(_clip_box(kdb, box_um, layout.dbu))
+        if (gate_region - box).is_empty():
+            return True
+    return False
 
 
 def _floating_gate_findings(
@@ -3192,6 +3212,9 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
         ErcError,
     )
     spec_antenna_limits = _validate_antenna_limits(spec, spec_path, stackup)
+    # Validated here so `--validate-spec` rejects a bad box too; `run_erc`
+    # re-reads the (already valid) list from `spec`.
+    _parse_dummy_gate_boxes(spec, spec_path)
     return (
         spec,
         stackup,
@@ -3646,6 +3669,22 @@ def run_erc(
     # ERC finding checks (issue #861, Phase 1c) -- see this module's
     # docstring, "ERC finding checks", for what each rule detects.
     erc_findings: list[dict[str, Any]] = []
+    # (issue #4828) Declared `dummy_gate_boxes` excuse a floating gate that
+    # lies wholly inside one box. Applied to the predicate before
+    # `_floating_gate_findings`, so the `findings_only` path is identical.
+    dummy_boxes = _parse_dummy_gate_boxes(spec, spec_path)
+    excused_gate_ids: list[str] = []
+    if dummy_boxes:
+        import klayout.db as kdb
+
+        for i, (gate_entry, gate_region) in enumerate(
+            zip(gates, gate_regions, strict=True)
+        ):
+            if gate_floating[i] and _dummy_gate_excused(
+                kdb, layout, gate_region, dummy_boxes
+            ):
+                gate_floating[i] = False
+                excused_gate_ids.append(gate_entry["gate_id"])
     erc_findings.extend(
         _floating_gate_findings(
             list(zip(gates, gate_regions, gate_floating, strict=True)), gate_role
@@ -3913,6 +3952,15 @@ def run_erc(
     # that bit, exactly as `provenance.devices[].body_area_um2 == 0.0` is.
     # Always present; `[]` when no declared net asked for one.
     provenance["net_exclusions"] = net_exclusions
+
+    # `provenance.dummy_gate_exclusions` (issue #4828): the declared
+    # `dummy_gate_boxes` and the floating gates they excused, so the carve-out
+    # is auditable. Always present; `{"boxes": [], "excluded_gates": []}`
+    # when undeclared.
+    provenance["dummy_gate_exclusions"] = {
+        "boxes": [list(box) for box in dummy_boxes],
+        "excluded_gates": excused_gate_ids,
+    }
 
     # `provenance.label_layers` (issue #2415): the measured effect of every
     # `stackup[].label_layer` declaration, in stackup order -- the same

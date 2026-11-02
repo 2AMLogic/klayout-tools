@@ -9939,3 +9939,83 @@ def test_unlabelled_allow_device_connected_rejects_bad_declarations(
         ErcError, match=rf"nets\[0\]\.unlabelled_allow_device_connected.*{match}"
     ):
         run_erc(str(gds), str(spec))
+
+
+# --- dummy_gate_boxes (issue #4828) -----------------------------------------
+# `_basic_fixture`: gate A (contacted) at 0..1 x 0..2 um; gate B (floating)
+# at 10..10.5 x 0..1 um.
+
+
+def _dummy_spec(tmp_path, boxes):
+    gds = tmp_path / "d.gds"
+    spec = tmp_path / "d.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+    if boxes is not None:
+        data = json.loads(spec.read_text())
+        data["dummy_gate_boxes"] = boxes
+        spec.write_text(json.dumps(data))
+    return gds, spec
+
+
+def _floating_ids(report):
+    return [
+        f["gate_id"] for f in report["erc_findings"] if f["rule"] == "erc.floating_gate"
+    ]
+
+
+@pytest.mark.parametrize("findings_only", [False, True])
+def test_dummy_gate_box_excuses_floating_gate(tmp_path, findings_only):
+    gds, spec = _dummy_spec(tmp_path, [[9.9, -0.1, 10.6, 1.1]])
+    report = run_erc(str(gds), str(spec), findings_only=findings_only)
+    assert _floating_ids(report) == []
+    assert report["provenance"]["dummy_gate_exclusions"] == {
+        "boxes": [[9.9, -0.1, 10.6, 1.1]],
+        "excluded_gates": ["gate1"],
+    }
+
+
+def test_dummy_gate_undeclared_unchanged(tmp_path):
+    gds, spec = _dummy_spec(tmp_path, None)
+    report = run_erc(str(gds), str(spec))
+    assert _floating_ids(report) == ["gate1"]
+    assert report["provenance"]["dummy_gate_exclusions"] == {
+        "boxes": [],
+        "excluded_gates": [],
+    }
+
+
+def test_dummy_gate_empty_array_unchanged(tmp_path):
+    gds, spec = _dummy_spec(tmp_path, [])
+    assert _floating_ids(run_erc(str(gds), str(spec))) == ["gate1"]
+
+
+def test_dummy_gate_partial_box_does_not_excuse(tmp_path):
+    gds, spec = _dummy_spec(tmp_path, [[9.9, -0.1, 10.3, 1.1]])
+    assert _floating_ids(run_erc(str(gds), str(spec))) == ["gate1"]
+
+
+def test_dummy_gate_straddling_two_boxes_not_excused(tmp_path):
+    gds, spec = _dummy_spec(
+        tmp_path, [[9.9, -0.1, 10.25, 1.1], [10.25, -0.1, 10.6, 1.1]]
+    )
+    assert _floating_ids(run_erc(str(gds), str(spec))) == ["gate1"]
+
+
+def test_dummy_gate_coincident_box_excuses(tmp_path):
+    gds, spec = _dummy_spec(tmp_path, [[10, 0, 10.5, 1]])
+    assert _floating_ids(run_erc(str(gds), str(spec))) == []
+
+
+def test_dummy_gate_box_does_not_affect_contacted_gate(tmp_path):
+    gds, spec = _dummy_spec(tmp_path, [[-1, -1, 3, 3]])
+    report = run_erc(str(gds), str(spec))
+    assert _floating_ids(report) == ["gate1"]
+    assert report["provenance"]["dummy_gate_exclusions"]["excluded_gates"] == []
+
+
+@pytest.mark.parametrize("bad", [[[0, 0, 1]], [[1, 0, 0, 1]], [["a", 0, 1, 1]], "nope"])
+def test_dummy_gate_invalid_box_is_spec_error(tmp_path, bad):
+    gds, spec = _dummy_spec(tmp_path, bad)
+    with pytest.raises(ErcError, match="dummy_gate_boxes"):
+        run_erc(str(gds), str(spec))

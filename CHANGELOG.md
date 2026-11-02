@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt erc` can declare intentional dummy gates** (issue #4828, documented
+  in [`docs/cli/erc.md`](docs/cli/erc.md)): the optional top-level spec key
+  `dummy_gate_boxes` (micrometre `[left, bottom, right, top]` boxes) excuses
+  a floating gate lying wholly inside one box from `erc.floating_gate`, so
+  signoff can gate on the rule for standard-cell layouts. The declaration and
+  the excused `gate_id`s are echoed in the additive
+  `provenance.dummy_gate_exclusions`. Unchanged when the key is absent.
 - **`klt lvs` folds Liberty/CDL pin-name case in a `gate-level-verilog`
   reference** (issue #4815, documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)):
   a library-cell scalar port with no exact pin match (`.RESETN` against CDL
