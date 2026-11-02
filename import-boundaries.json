@@ -341,6 +341,7 @@
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_gate_level",
+        "klayout_tools.lvs_gate_level_convert",
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_mismatch_tolerance",
         "klayout_tools.lvs_netgen",
@@ -538,7 +539,8 @@
         "klayout_tools.routing_pitch",
         "klayout_tools.touchstone",
         "klayout_tools.verilog_module_names",
-        "klayout_tools.verilog_netlist"
+        "klayout_tools.verilog_netlist",
+        "klayout_tools.verilog_pin_bind"
       ]
     },
     "signoff": {

@@ -207,6 +207,11 @@ from .lvs_gate_level import (
     _supply_net_spellings,  # noqa: F401
     _supply_pin_universe,
 )
+from .lvs_gate_level_convert import (  # noqa: F401
+    CATEGORY_REFERENCE_GATE_LEVEL_PIN_CASE_FOLDED,
+    _convert_gate_level_reference,
+    _gate_level_port_case_fold_warnings,
+)
 from .lvs_mismatch import (
     _annotate_case_collision_merges,
     _apply_tolerance_snaps,
@@ -269,9 +274,6 @@ from .verilog_module_names import reference_module_names
 from .verilog_netlist import (
     VerilogNetlistError,
     collect_gate_level_port_aliases,
-    convert_gate_level_verilog,
-    convert_gate_level_verilog_expanded,
-    parse_subckt_blocks,
     parse_subckt_pin_orders,
 )
 
@@ -1598,6 +1600,9 @@ def run_lvs(
     # a plain `assign` alias. Consumed by `_apply_gate_level_port_aliases`
     # right below, before anything else reads `reference_netlist`.
     reference_gate_level_port_aliases: dict[str, dict[str, str]] = {}
+    # Issue #4815: fold records from the gate-level conversion's
+    # case-insensitive pin binding, disclosed as warnings below.
+    reference_gate_level_case_folds: list[dict[str, str]] = []
     # Issue #2136: the library-derived power-pin universe plus the layout
     # nets those pins land on, used below to mark a `net_correspondence[]`
     # entry that pairs a layout supply net with a reference net that is not
@@ -1623,6 +1628,7 @@ def run_lvs(
             else None
         ),
         gate_level_port_aliases=reference_gate_level_port_aliases,
+        gate_level_port_case_folds=reference_gate_level_case_folds,
         finfet=finfet_layout,
         finfet_top=reference_spec.get("top"),
         mos_flavour_classes=compare_mos_flavour,
@@ -2732,6 +2738,12 @@ def run_lvs(
         # the power-only prune above), not a `NetlistComparer` event, so it
         # is appended here rather than folded into `_build_mismatches`.
         mismatches.extend(gate_level_port_alias_warnings)
+
+    # Issue #4815: same append-here rationale -- a request-side pin-name
+    # binding made while converting the reference, never a comparer event.
+    mismatches.extend(
+        _gate_level_port_case_fold_warnings(reference_gate_level_case_folds)
+    )
 
     # Issue #2854: same append-here rationale as `family_findings` above --
     # a promoted pin net carrying 2+ declared pin names is a pre-compare
@@ -4645,6 +4657,7 @@ def _read_reference_netlist(
     pin_orders: dict[str, list[str]] | None = None,
     placeholder_value_classes: dict[str, str] | None = None,
     gate_level_port_aliases: dict[str, dict[str, str]] | None = None,
+    gate_level_port_case_folds: list[dict[str, str]] | None = None,
     finfet: bool = False,
     finfet_top: str | None = None,
     resistor_value_classes: Sequence[str] | None = None,
@@ -4794,7 +4807,9 @@ def _read_reference_netlist(
                 library, pdk_variant, pdk_root, pin_order_files=pin_order_files
             ).pin_orders
         try:
-            converted = _convert_gate_level_reference(text, pin_orders, finfet)
+            converted = _convert_gate_level_reference(
+                text, pin_orders, finfet, gate_level_port_case_folds
+            )
         except VerilogNetlistError as exc:
             raise LvsError(
                 f"could not convert gate-level-verilog reference netlist "
@@ -4884,21 +4899,6 @@ def _read_reference_netlist(
     return netlist
 
 
-def _convert_gate_level_reference(
-    text: str, pin_orders: Mapping[str, Any], finfet: bool
-) -> str:
-    """Gate-level Verilog -> SPICE: pin-only stubs, or (issue #4462, FinFET
-    deck extracting transistors with exact `nfin`) each library cell expanded
-    to its CDL body."""
-    if finfet:
-        return convert_gate_level_verilog_expanded(
-            text,
-            pin_order_lookup=pin_orders.get,
-            cell_body_lookup=_library_cell_body_lookup(pin_orders),
-        )
-    return convert_gate_level_verilog(text, pin_order_lookup=pin_orders.get)
-
-
 def _stub_gate_level_power_connectivity(
     enabled: bool,
     layout_netlist: Any,
@@ -4925,29 +4925,6 @@ def _stub_gate_level_power_connectivity(
             layout_abstraction.lef_paths if layout_abstraction is not None else ()
         ),
     )
-
-
-def _library_cell_body_lookup(pin_orders: Mapping[str, Any]):
-    """``cell -> '.SUBCKT .. .ENDS' text`` read from the file that declared
-    the cell (issue #4462); each source file is parsed once."""
-    sources: Mapping[str, str] = getattr(pin_orders, "cell_sources", {})
-    parsed: dict[str, dict[str, str]] = {}
-
-    def lookup(cell: str) -> str | None:
-        path = sources.get(cell)
-        if path is None:
-            return None
-        if path not in parsed:
-            try:
-                with open(path, encoding="utf-8", errors="replace") as handle:
-                    parsed[path] = parse_subckt_blocks(handle.read())
-            except OSError as exc:
-                raise LvsError(
-                    f"could not read library cell source '{path}': {exc}"
-                ) from exc
-        return parsed[path].get(cell)
-
-    return lookup
 
 
 #: `<library>`'s pin-order source, in resolution order (issue #1336) --

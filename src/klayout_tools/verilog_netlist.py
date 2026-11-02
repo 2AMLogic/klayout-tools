@@ -156,6 +156,7 @@ from dataclasses import dataclass, field
 from typing import cast
 
 from .verilog_module_names import apply_module_names
+from .verilog_pin_bind import _bind_connections
 
 #: Verilog block (`/* ... */`) and line (`// ...`) comments, stripped before
 #: any other parsing. `re.S` so a block comment can span newlines.
@@ -1249,6 +1250,7 @@ def convert_gate_level_verilog(
     text: str,
     *,
     pin_order_lookup,
+    port_case_folds: list[dict[str, str]] | None = None,
 ) -> str:
     """Convert gate-level Verilog ``text`` to plain-element-shaped SPICE
     ``klt lvs`` can read directly via ``NetlistSpiceReader`` (issue #1336).
@@ -1274,10 +1276,17 @@ def convert_gate_level_verilog(
     names are first known, by :func:`_bind_connections`: a library cell's
     `<PORT>[<index>]` pins in descending numeric index order, a parsed
     sub-module's bit-expanded ports in their declared order.
+
+    ``port_case_folds`` (issue #4815), when given, is extended with one
+    ``{"cell", "instance", "from", "to"}`` record per library-cell scalar
+    port bound to a pin that differs from it only by letter case (see
+    :func:`_bind_connections`).
     """
     modules = parse_gate_level_verilog(text)
     real_orders = _library_pin_orders(modules, pin_order_lookup)
-    bound, stub_pin_order = _bind_all_instances(modules, real_orders)
+    bound, stub_pin_order = _bind_all_instances(
+        modules, real_orders, port_case_folds=port_case_folds
+    )
 
     out: list[str] = []
     for module, module_bound in zip(modules, bound, strict=True):
@@ -1342,6 +1351,7 @@ def convert_gate_level_verilog_expanded(
     *,
     pin_order_lookup,
     cell_body_lookup,
+    port_case_folds: list[dict[str, str]] | None = None,
 ) -> str:
     """Like :func:`convert_gate_level_verilog`, but every library cell is
     written as its real transistor-level ``.SUBCKT`` block (``cell_body_lookup
@@ -1357,7 +1367,9 @@ def convert_gate_level_verilog_expanded(
     skip."""
     modules = parse_gate_level_verilog(text)
     real_orders = _library_pin_orders(modules, pin_order_lookup)
-    bound, _ = _bind_all_instances(modules, real_orders)
+    bound, _ = _bind_all_instances(
+        modules, real_orders, port_case_folds=port_case_folds
+    )
 
     bodies: dict[str, str] = {}
     for cell in real_orders:
@@ -1429,7 +1441,10 @@ def _library_pin_orders(
 
 
 def _bind_all_instances(
-    modules: list[dict[str, object]], real_orders: dict[str, list[str]]
+    modules: list[dict[str, object]],
+    real_orders: dict[str, list[str]],
+    *,
+    port_case_folds: list[dict[str, str]] | None = None,
 ) -> tuple[list[list[dict[str, str]]], dict[str, list[str]]]:
     """``(bound, stub_pin_order)``: every instance's ``{<pin>: <net>}``
     binding (:func:`_bind_connections`), per module, in instance order; and
@@ -1445,12 +1460,17 @@ def _bind_all_instances(
         for instance in module["instances"]:  # type: ignore[attr-defined]
             cell = instance["cell"]
             library = cell in real_orders
-            pins = (
+            pins: list[str] = (
                 real_orders[cell]
                 if library
-                else _sub_module_by_name(modules, cell)["ports"]
+                else _sub_module_by_name(modules, cell)["ports"]  # type: ignore[assignment]
             )
-            pin_nets, unknown = _bind_connections(instance, pins, library=library)  # type: ignore[arg-type]
+            pin_nets, unknown = _bind_connections(
+                instance,  # type: ignore[arg-type]
+                pins,
+                library=library,
+                port_case_folds=port_case_folds,
+            )
             if library:
                 used_pins[cell].update(pin_nets)
                 unknown_pins[cell].update(unknown)
@@ -1467,74 +1487,6 @@ def _bind_all_instances(
             )
         stub_pin_order[cell] = [pin for pin in real_order if pin in used_pins[cell]]
     return bound, stub_pin_order
-
-
-def _port_bit_pins(port: str, pins: list[str], *, library: bool) -> list[str]:
-    """``port``'s per-bit pins among ``pins`` (every `<port>[<index>]`
-    entry), MSB-first (issue #2657).
-
-    A parsed sub-module's ports were bit-expanded by :func:`_expand_range`
-    from its own `[msb:lsb]` declaration, so their declared order already is
-    MSB-first, ascending range included. A library cell's pins come from a
-    `.subckt`/`.cdl` header, whose bit names carry the Verilog index but
-    whose header position carries nothing Verilog defines, so they are
-    sorted by that index, highest first: the `[N-1:0]` convention every real
-    vector-ported macro checked uses (see the module docstring)."""
-    pattern = re.compile(rf"^{re.escape(port)}\[(-?\d+)\]$")
-    hits = [
-        (int(match.group(1)), pin)
-        for pin in pins
-        if (match := pattern.match(pin)) is not None
-    ]
-    if library:
-        hits.sort(key=lambda hit: hit[0], reverse=True)
-    return [pin for _, pin in hits]
-
-
-def _bind_connections(
-    instance: dict[str, object], pins: list[str], *, library: bool
-) -> tuple[dict[str, str], set[str]]:
-    """``({<real pin>: <net>}, {<unknown port>, ...})`` for one instance
-    calling a cell/module with declared ``pins``.
-
-    A scalar connection binds to its pin by name, as it always has. A
-    multi-bit one (issue #2657) is zipped MSB-first onto the port's per-bit
-    pins (:func:`_port_bit_pins`) -- or onto a scalar pin of that name, when
-    one bit wide. A bit-count mismatch either way is an error naming the
-    instance, port and both widths, never a silent truncate or pad. A port
-    with no pin at all is returned as unknown for the caller to report (a
-    library cell's error aggregates every such port across every instance
-    of the cell type).
-    """
-    pin_set = set(pins)
-    pin_nets: dict[str, str] = {}
-    unknown: set[str] = set()
-    connections: dict[str, str | list[str]] = instance["connections"]  # type: ignore[assignment]
-    for port, net in connections.items():
-        if isinstance(net, str) and port in pin_set:
-            bit_pins = [port]
-        else:
-            bit_pins = _port_bit_pins(port, pins, library=library)
-            if not bit_pins and port in pin_set:
-                bit_pins = [port]
-        if not bit_pins:
-            unknown.add(port)
-            continue
-        bits = net if isinstance(net, list) else [net]
-        if len(bits) != len(bit_pins):
-            raise VerilogNetlistError(
-                f"instance '{instance['name']}' ('{instance['cell']}') port "
-                f"'{port}' is {len(bit_pins)} bit(s) wide ({bit_pins[0]} .. "
-                f"{bit_pins[-1]}) but its connection is {len(bits)} bit(s) wide"
-            )
-        for pin, bit in zip(bit_pins, bits, strict=True):
-            if pin in pin_nets:
-                raise VerilogNetlistError(
-                    f"instance '{instance['name']}' ('{instance['cell']}') "
-                    f"connects pin '{pin}' twice"
-                )
-            pin_nets[pin] = bit
-    return pin_nets, unknown
 
 
 def _sub_module_by_name(
