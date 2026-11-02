@@ -259,6 +259,7 @@ from .netlist_capacitor_recovery import (
 from .pdk import PdkNotFoundError, find_pdk, list_pdks
 from .pdk_models import MOS_FLAVOUR_PROPERTY, flavoured_mos_class_name
 from .place_and_route_portable import portable_response
+from .verilog_module_names import reference_module_names
 from .verilog_netlist import (
     VerilogNetlistError,
     collect_gate_level_port_aliases,
@@ -3012,10 +3013,9 @@ def run_lvs(
             "layout_sha256": sha256_file(layout_hash_source),
             "reference_sha256": sha256_file(reference_netlist_path),
             "extracted_netlist": extracted_netlist_path,
+            **reference_module_names(reference_netlist_path, reference_form),
         },
-        # Issue #2693: built just above the return (rather than inline here)
-        # so the `gate-level-verilog` form's `pin_order_sources` can be added
-        # to it without duplicating this whole call per form.
+        # Issue #2693: built above the return (per-form `pin_order_sources`).
         "provenance": provenance,
         "mismatches": mismatches,
         "net_correspondence": net_correspondence,
