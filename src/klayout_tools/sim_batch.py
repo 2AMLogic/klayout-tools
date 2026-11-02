@@ -4415,9 +4415,15 @@ class _ShardManifest:
                 "that may already have finished)",
                 code=BATCH_SHARD_MANIFEST_CODE,
             ) from exc
-        if stored_fingerprint != fingerprint or stored_hosts != hosts:
+        # Issue #4821: ``hosts`` is not part of the request's identity. A
+        # resume splits only the *remaining* units, so the shard count
+        # shrinks every attempt; the fingerprint (units, seed, netlist,
+        # settings) alone decides whether the map belongs to this request,
+        # and each entry's ``units_sha256`` still guards its own re-attach.
+        # The map is rewritten with this attempt's ``hosts`` on the next flush.
+        if stored_fingerprint != fingerprint:
             difference = _manifest_difference(
-                stored_fingerprint, fingerprint, stored_hosts, hosts
+                stored_fingerprint, fingerprint, stored_hosts, stored_hosts
             )
             raise SimError(
                 f"--resume: shard map {path} was written for a different "

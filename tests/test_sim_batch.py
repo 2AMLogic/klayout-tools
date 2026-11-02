@@ -7321,13 +7321,20 @@ def test_resume_refusal_names_fingerprint_difference(tmp_path, monkeypatch):
     assert "hosts:" not in str(err.value)
 
 
-def test_resume_refusal_names_hosts_difference(tmp_path, monkeypatch):
-    _, fleet, _ = _shard_resume_fixture(tmp_path, monkeypatch)
-    fleet()
-    with pytest.raises(sim.SimError) as err:
-        fleet(resume=True, hosts=1)
-    assert "hosts: map has 2, request has 1" in str(err.value)
-    assert "fingerprint:" not in str(err.value)
+def test_resume_with_a_different_hosts_count_is_not_refused(tmp_path, monkeypatch):
+    """Issue #4821: a resume splits only the remaining units, so a smaller
+    shard count than the map recorded is the normal case, not a mismatch --
+    and it stays repeatable."""
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    first, _, _ = fleet()
+    assert json.loads(manifest_path.read_text())["hosts"] == 2
+
+    for _ in range(3):
+        corners, _, _ = fleet(resume=True, hosts=1)
+        assert json.loads(manifest_path.read_text())["hosts"] == 1
+        assert [c["corner_id"] for c in corners] == [c["corner_id"] for c in first]
+        corners, _, _ = fleet(resume=True, hosts=2)
+        assert [c["corner_id"] for c in corners] == [c["corner_id"] for c in first]
 
 
 @pytest.mark.parametrize(
@@ -7514,8 +7521,8 @@ def test_resume_resubmits_a_shard_whose_job_terminally_failed(tmp_path, monkeypa
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"shard_fingerprint": "fp-2"}, {"hosts": 4}],
-    ids=["request-changed", "hosts-changed"],
+    [{"shard_fingerprint": "fp-2"}],
+    ids=["request-changed"],
 )
 def test_resume_against_another_requests_shard_map_is_refused(
     tmp_path, monkeypatch, overrides
