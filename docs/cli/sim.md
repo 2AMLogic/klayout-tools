@@ -331,7 +331,9 @@ Consequences:
   installed ngspice defaults to.
 - `expr` reduces a vector analysis to a **scalar** (`vecmax()`, `mean()`,
   `<expr>[0]`, ...); it is not a point-interpolation facility. To read a
-  transient value at a time, use a `.meas ... FIND ... AT=` card.
+  transient value at a time, use a `.meas ... FIND ... AT=` card; to use a
+  value sampled at a time as a crossing threshold, use the sampled-offset
+  `crossings.level` (`{"sample_at": ..., "offset": ...}`).
 
 Tested recipe (PDK-free; exact value `2000.1 / 3000.1 = 0.6666777774074197`).
 `divider.spice`:
@@ -4208,10 +4210,22 @@ declaration returns the whole ordered list instead:
 | Key      | Required | Meaning |
 | -------- | -------- | ------- |
 | `signal` | yes      | One-line ngspice vector expression (`"v(ro1)"`, `"v(outp) - v(outn)"`, `"i(vdd)"`), evaluated against the transient's saved vectors. |
-| `level`  | yes      | Finite number, in the signal's own unit — or a supply-relative `{"frac_of": "<supply_v key>", "fraction": 0.5}` (issue #3918, see below). |
+| `level`  | yes      | Finite number, in the signal's own unit — or a supply-relative `{"frac_of": "<supply_v key>", "fraction": 0.5}` (issue #3918, see below) — or a sampled-offset `{"sample_at": "50n", "offset": -0.9}` (issue #4813, see below). |
 | `edge`   | no       | `"rise"` (default), `"fall"`, or `"either"`. |
 | `from`/`to` | no    | Window, inclusive, in seconds: a number or a SPICE time literal (`"10n"`). A crossing outside it is not counted. |
 | `max`    | no       | Cap on the returned times, integer in `[1, 100000]`; default `1000`. |
+
+**Sampled-offset `level`.** `{"sample_at": "50n", "offset": -0.9}` is the
+signal's own value at `sample_at` (a number of seconds or a SPICE time literal),
+linearly interpolated between the two bracketing samples, plus `offset` (a
+finite number in the signal's unit). Use it for "first time the signal falls
+0.9 V below where it was at 50 ns", which a `.meas` card cannot express (it
+cannot reference another measurement). The resolved threshold is echoed as
+`level` inside the corner's `crossings` object. Exactly the keys `sample_at`
+and `offset` are allowed (anything else is exit 1, before any corner runs). A
+`sample_at` outside the simulated time range makes that measurement
+`status: "error"` with a `measurement` diagnostic naming it. Resolution happens
+in the corner code, so it works unchanged on `remote`/`batch`.
 
 **Supply-relative `level`.** `{"frac_of": "vdd", "fraction": 0.5}` is
 `fraction × corners.supply_v["vdd"]` for the corner being measured, so a

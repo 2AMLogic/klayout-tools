@@ -433,7 +433,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 7449
+      "lines": 7301
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -461,7 +461,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_runset.py",
-      "lines": 1033
+      "lines": 1009
     },
     {
       "path": "src/klayout_tools/macros.py",
@@ -529,7 +529,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3406
+      "lines": 3405
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -545,7 +545,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2426
+      "lines": 2325
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
@@ -701,7 +701,7 @@
     },
     {
       "path": "src/klayout_tools/verilog_netlist.py",
-      "lines": 1558
+      "lines": 1510
     },
     {
       "path": "src/klayout_tools/yield_analysis.py",

@@ -32,6 +32,15 @@ from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 from .place_and_route_groups import reject_unknown_group_keys, validate_group_geometry
+from .place_and_route_layers import (
+    _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK,
+)
+from .place_and_route_layers import (
+    _signal_layer_range,
+)
+from .place_and_route_layers import (
+    _signal_routing_layers as _signal_routing_layers,
+)
 
 #: Valid ``request.macros[].orientation`` values -- OpenROAD's own
 #: orientation vocabulary (the same set ``place_macro``/``place_cell``
@@ -49,82 +58,6 @@ _FLOORPLAN_METHOD_FIELDS: dict[str, tuple[str, ...]] = {
     "utilization": ("utilization_pct",),
     "explicit": ("die_area_um", "core_area_um"),
     "def": ("def_path",),
-}
-
-
-#: Per-cell-library **routing-layer stack**, bottom-up -- every layer the
-#: platform's own tech LEF declares ``TYPE ROUTING``, in stack order (issue
-#: #2473). :data:`_ROUTING_LAYER_RANGE` above names only the two endpoints of
-#: the *signal* range ``set_routing_layers -signal`` opens; this table is what
-#: lets :func:`_signal_routing_layers` expand that range into the concrete
-#: layer set, and therefore what lets :func:`_validate_io` reject an
-#: ``io.layer_h``/``io.layer_v`` naming a real routing layer the router is
-#: nevertheless never allowed to route signals on.
-#:
-#: Why that matters (issue #2473's own root cause): a top-level pin is only
-#: reachable if the router can draw *conductor of that layer* up to it.
-#: ``place_pins`` will happily place a port on a below-range layer, and
-#: OpenROAD then writes the port rectangle to that layer's LEF ``PIN``/
-#: ``LEFPIN`` purpose -- for sky130's ``li1`` that is GDS ``67/16``, not the
-#: ``67/20`` conductor an extraction deck reads -- while the actual routing
-#: reaches the cell pin from above through ``mcon``. The result is a DRC-clean
-#: GDS whose top-level pins do not electrically exist in ``klt extract``'s
-#: output, with `klt lvs` still reporting ``"match"`` because its structural
-#: comparer does not need pins. Rejecting the request is two minutes of
-#: routing cheaper than discovering that downstream.
-#:
-#: Same verified-not-guessed posture as every other reference table in this
-#: module, one source per entry:
-#:
-#: - ``sky130_fd_sc_hd`` -> ``li1``, ``met1``..``met5``. Verified live
-#:   against a real sky130A install (volare,
-#:   ``libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef``): its
-#:   six ``TYPE ROUTING`` layers are ``li1``, ``met1``, ``met2``, ``met3``,
-#:   ``met4``, ``met5``, declared in that order. ``li1`` sitting *below*
-#:   this library's own ``MIN_ROUTING_LAYER ?= met1`` is exactly what
-#:   :data:`_ROUTING_LAYER_RANGE`'s own docstring already records ("its
-#:   cells pin out on ``li1``, below ``met1`` entirely").
-#: - ``gf180mcu_fd_sc_mcu9t5v0``/``gf180mcu_fd_sc_mcu7t5v0`` -> ``Metal1``..
-#:   ``Metal5``, from the same platform tech LEF
-#:   (``lef/gf180mcu_5LM_1TM_9K_9t_tech.lef``) :data:`_ROUTING_LAYER_RANGE`
-#:   already cites for declaring "``Metal1``..``Metal5`` as its five ``TYPE
-#:   ROUTING`` layers", with ``Metal1`` deliberately left out of the signal
-#:   range for pin access.
-#: - ``sg13g2_stdcell`` -> ``Metal1``..``Metal5``, ``TopMetal1``,
-#:   ``TopMetal2``, from the same ``libs.ref/sg13g2_stdcell/lef/
-#:   sg13g2_tech.lef`` :data:`_ROUTING_LAYER_RANGE` already cites for
-#:   declaring "exactly seven routing layers", again with ``Metal1``
-#:   reserved for pin access.
-#:
-#: A ``cell_library`` absent from this table (or whose
-#: :data:`_ROUTING_LAYER_RANGE` endpoints are not both in its stack) simply
-#: skips the check -- an unverified library keeps the pre-#2473 behaviour
-#: rather than being rejected on a guess.
-_ROUTING_LAYER_STACK: dict[str, tuple[str, ...]] = {
-    "sky130_fd_sc_hd": ("li1", "met1", "met2", "met3", "met4", "met5"),
-    "gf180mcu_fd_sc_mcu9t5v0": (
-        "Metal1",
-        "Metal2",
-        "Metal3",
-        "Metal4",
-        "Metal5",
-    ),
-    "gf180mcu_fd_sc_mcu7t5v0": (
-        "Metal1",
-        "Metal2",
-        "Metal3",
-        "Metal4",
-        "Metal5",
-    ),
-    "sg13g2_stdcell": (
-        "Metal1",
-        "Metal2",
-        "Metal3",
-        "Metal4",
-        "Metal5",
-        "TopMetal1",
-        "TopMetal2",
-    ),
 }
 
 
@@ -660,43 +593,9 @@ def validate_tech_lef_track_offsets(
         )
 
 
-def _signal_routing_layers(cell_library: str) -> tuple[str, ...] | None:
-    """Expand :data:`_ROUTING_LAYER_RANGE`'s ``"<low>-<high>"`` endpoints for
-    ``cell_library`` into the concrete, ordered set of layers
-    ``set_routing_layers -signal`` actually opens for signal routing (issue
-    #2473), using :data:`_ROUTING_LAYER_STACK` for the stack order.
-
-    ``None`` -- meaning "no opinion, skip any check built on this" -- when
-    either table has no entry for this library, or when the range's own
-    endpoints are not both present in the stack (a table drift this function
-    refuses to paper over by guessing). Never raises: this is a *narrowing*
-    guard's input, and an unverified library must keep behaving exactly as it
-    did before the guard existed.
-    """
-
-    # Deferred: defined in `place_and_route.py`, which imports this module at
-    # its own module scope (same pattern as `place_and_route_sta.py`).
-    from .place_and_route import _ROUTING_LAYER_RANGE
-
-    stack = _ROUTING_LAYER_STACK.get(cell_library)
-    layer_range = _ROUTING_LAYER_RANGE.get(cell_library)
-    if stack is None or layer_range is None:
-        return None
-    low, _, high = layer_range.partition("-")
-    if low not in stack or high not in stack:
-        return None
-    low_index = stack.index(low)
-    high_index = stack.index(high)
-    if low_index > high_index:
-        return None
-    return stack[low_index : high_index + 1]
-
-
-def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
-
-    # Deferred: defined in `place_and_route.py`, which imports this module at
-    # its own module scope (same pattern as `place_and_route_sta.py`).
-    from .place_and_route import _ROUTING_LAYER_RANGE
+def _validate_io(
+    io_spec: Any, cell_library: str, library: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
 
     if io_spec is None:
         return None
@@ -729,7 +628,7 @@ def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
     # left to OpenROAD's own loud error, and an unverified `cell_library`
     # (absent from either reference table) skips the check entirely -- so no
     # request that worked before can be rejected on a guess.
-    routable = _signal_routing_layers(cell_library)
+    routable = _signal_routing_layers(cell_library, library)
     if routable is not None:
         stack = _ROUTING_LAYER_STACK[cell_library]
         for field, value in (("layer_h", layer_h), ("layer_v", layer_v)):
@@ -738,7 +637,7 @@ def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
             raise PlaceAndRouteError(
                 f"request.io.{field} '{value}' is outside the signal routing "
                 f"range for cell_library '{cell_library}' "
-                f"({_ROUTING_LAYER_RANGE[cell_library]}): the router never "
+                f"({_signal_layer_range(cell_library, library)}): the router never "
                 f"draws signal conductor on '{value}', so a top-level pin "
                 f"placed there gets only a DEF PINS port rectangle on that "
                 f"layer's LEF PIN/LEFPIN purpose with no conductor under it "
