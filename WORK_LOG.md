@@ -2,8 +2,42 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-11-02
+
+- **PR #4736**: feat(yield): echo run provenance and per-measurement spec_row in yield reports
+- **Issue #2840** (closed): Friction: klt yield reports carry no seed / corner-matrix / spec-row provenance for T1 item 6's recorded-seed requirement
+
+### 2026-11-01
+
+- **PR #4768**: feat: allow declared layout checks for signoff --attest 2 via inventory
+- **PR #4766**: feat: bind signoff item-1 attestation to its full input set
+- **PR #4765**: feat: characterize setup/hold constraint arcs by bisection
+- **PR #4762**: feat(sim): add models.param_file include ahead of .lib cards
+- **PR #4761**: feat(sim): accept --pdk-root to pin the PDK install root
+- **PR #4757**: feat: characterize clock-to-output arcs for cells declaring clock_pin
+- **PR #4753**: fix: measure only the current attempt's jobs in the wall-clock budget check
+- **PR #4752**: chore(loom): resync installed Loom to v0.19.1247
+- **PR #4750**: fix: let file-size ratchet ceilings rise to the comparison tree's measured size
+- **PR #4749**: chore(loom): resync installed Loom to v0.19.1246
+- **PR #4747**: refactor: move helper blocks to sibling modules to restore file-size ceilings
+- **PR #4744**: feat(synthesize): report per-region ABC critical paths in timing.regions
+- **PR #4741**: Bump Repo Skills 0.24.7 -> 0.25.1
+- **Issue #4767** (closed): signoff --attest 2 grades only readability, non-empty top cell and dbu; no geometric or net-width check on the layout stream
+- **Issue #4764** (closed): signoff --attest does not bind inventory members: manifest render stays 'met' after a source edit
+- **Issue #4760** (closed): Friction: klt netlist --check needs --ignore-comments because the export embeds the checkout's absolute sch_path
+- **Issue #4759** (closed): Friction: klt sim cannot supply the PDK's design.ngspice parameters; a tran request fails with undefined-parameter errors
+- **Issue #4758** (closed): Friction: klt sim local backend has no way to pin the PDK install when two installs provide a variant
+- **Issue #4756** (closed): characterize: setup/hold constraint arcs for sequential cells (split from #4755)
+- **Issue #4755** (closed): characterize: refuses sequential cells, so an SRAM macro's Liberty gets one CLK->Q arc only (sg13g2-sram#79 Views row)
+- **Issue #4754** (closed): test flake: Tests (Python 3.13) pytest step hangs to 55m cancel (PR #4745)
+- **Issue #4751** (closed): CI wall-clock budget: a rerun never clears a breach because stale-attempt jobs stay in the /jobs payload
+- **Issue #4748** (closed): file-size ratchet: let a proposed ceiling rise to the comparison tree's measured size, never above it (re-seed race, #4740)
+- **Issue #4746** (closed): Shrink the six files back under their trusted size ceilings so main is green again (option c of the #4740 decision; 384 lines across lvs_mismatch, netlist_normalize, sim, lvs, test_sim, test_lvs)
+- **Issue #4743** (closed): klt synthesize: clock_period_ns does not visibly drive mapping; no timing-driven option
+
 ### 2026-10-31
 
+- **Issue #2773** (closed): Champion: Merge-Risk Hold Digest
 - **PR #4735**: ci: add trusted-baseline per-file size ratchet
 - **Issue #2766** (closed): ci: monotonic per-file size ratchet checked against the merge-base
 - **PR #4734**: fix(sim): also pin ngspice threads via .spiceinit set num_threads
