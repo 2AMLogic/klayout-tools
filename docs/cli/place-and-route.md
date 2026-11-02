@@ -2204,6 +2204,16 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
 
 ## Response
 
+> **Committing a report as evidence?** The default response carries
+> absolute host paths (`def_path`, `unrouted_def_path`, `gds_path`,
+> `verilog_path`, `power.placed.def_path`, `layer_map.path`, ...) because
+> `klt extract --def-pins` and `klt signoff` chain on those strings, so a
+> committed default report fails `klt env-provenance lint-envelope`. Set
+> `"portable_paths": true` in the request (issue #3820, see the
+> [Request](#request) table) to get a host-independent report that passes
+> the lint with an empty allow-list. The default stays absolute; there is
+> no `schema_version` bump either way.
+
 ```json
 {
   "schema_version": 1,
