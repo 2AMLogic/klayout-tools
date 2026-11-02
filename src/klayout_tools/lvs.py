@@ -121,6 +121,7 @@ import contextlib
 import fnmatch
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -2301,6 +2302,72 @@ def run_lvs(
                 )
                 if compare_result or compare_timeout:
                     break
+
+        if not compare_result and not compare_timeout:
+            # Issue #4798: `PAD`/`PAD$1`/... share one label, so which `$k` sits
+            # on which unit is extractor order, not design intent. On a
+            # symmetric design `NetlistComparer` takes same-named nets as
+            # tie-break hints and does not backtrack, so a swapped `$k` pairing
+            # reports false `device.unmatched`. Retry ONCE with those nets
+            # renamed to unrelated unique names (topology decides); accept only
+            # a real `match`, otherwise keep the first-pass result untouched.
+            layout_family = _repeated_label_pin_nets(layout_circuit)
+            reference_family = _repeated_label_pin_nets(reference_circuit)
+            if layout_family or reference_family:
+                retry_logger = _make_compare_logger(layout_circuit, reference_circuit)
+                retry_comparer = kdb.NetlistComparer(retry_logger)
+                retry_comparer.same_circuits(layout_circuit, reference_circuit)
+                retry_hints, retry_equivalent = _apply_hints(
+                    retry_comparer,
+                    request.get("hints") or {},
+                    layout_circuit,
+                    reference_circuit,
+                )
+                retry_constants, retry_constant_warnings = _apply_constant_nets(
+                    retry_comparer,
+                    request.get("hints") or {},
+                    layout_circuit,
+                    reference_circuit,
+                    declared=retry_hints,
+                )
+                retry_anchored, retry_anchor_warnings = _apply_top_level_pin_anchors(
+                    retry_comparer,
+                    layout_circuit,
+                    reference_circuit,
+                    enabled=anchor_top_level_pins,
+                    declared=[
+                        *retry_hints,
+                        *_constant_binding_pairs(retry_constants),
+                    ],
+                )
+                # Hints/anchors above resolved names to net objects already, so
+                # renaming now cannot disturb them.
+                restore = _rename_nets_neutral(layout_family, "L") + (
+                    _rename_nets_neutral(reference_family, "R")
+                )
+                try:
+                    retry_result, retry_timeout = _guarded_compare(
+                        retry_comparer,
+                        layout_netlist,
+                        reference_netlist,
+                        compare_timeout_s,
+                        compare_context,
+                    )
+                finally:
+                    for net, name in restore:
+                        net.name = name
+                if retry_result and not retry_timeout:
+                    compare_result = True
+                    logger = retry_logger
+                    same_nets_hints = retry_hints
+                    equivalent_pins_applied = retry_equivalent
+                    constant_bindings = retry_constants
+                    constant_warnings = retry_constant_warnings
+                    anchored_pins = retry_anchored
+                    anchor_warnings = _with_repeated_label_retry_disclosure(
+                        retry_anchor_warnings,
+                        sorted(set(layout_family) | set(reference_family)),
+                    )
 
         mismatches = _build_mismatches(
             logger,
@@ -5638,9 +5705,12 @@ def _anchor_top_level_pins_enabled(requested: bool | None, reference_form: str) 
     return reference_form == "gate-level-verilog"
 
 
-def _pin_nets_by_name(circuit: Any) -> dict[str, Any]:
-    """``{<upper-cased pin name>: <net>}`` for every named top-level pin of
-    ``circuit`` that resolves to a net (issue #2692).
+_REPEATED_LABEL_SUFFIX = re.compile(r"^(.+)\$(\d+)$")
+
+
+def _pin_nets_by_name(circuit: Any) -> tuple[dict[str, Any], set[str]]:
+    """``({<upper-cased pin name>: <net>}, <repeated-label families>)`` for the
+    named top-level pins of ``circuit`` that resolve to a net (issue #2692).
 
     Upper-cased for the same reason :func:`_circuit_pin_names` upper-cases:
     the two sides reach this module through readers that disagree about case
@@ -5654,20 +5724,104 @@ def _pin_nets_by_name(circuit: Any) -> dict[str, Any]:
     the name licenses, and guessing one would be exactly the unsound
     name-matching this anchoring exists to avoid. An unnamed pin, and a pin
     that resolves to no net at all, are skipped for the same reason.
+
+    The same rule extends to **repeated-label families** (issue #4798): the
+    extractor writes several pins labelled ``PAD`` as ``PAD``, ``PAD$1``, ...
+    and which ``$k`` lands on which unit follows extractor order, not unit
+    identity. When two or more pins share a base name this way, every member
+    is dropped from the returned mapping and the base name is reported in the
+    second element so the caller can disclose the skip. A lone ``X$1`` with no
+    sibling is not a family and stays anchored.
     """
     nets: dict[str, Any] = {}
     ambiguous: set[str] = set()
+    by_base: dict[str, set[str]] = {}
     for pin in circuit.each_pin():
         name = (pin.name() or "").upper()
         net = circuit.net_for_pin(pin.id())
         if not name or net is None:
             continue
+        suffixed = _REPEATED_LABEL_SUFFIX.match(name)
+        by_base.setdefault(suffixed.group(1) if suffixed else name, set()).add(name)
         if name in nets:
             ambiguous.add(name)
         nets[name] = net
     for name in ambiguous:
         del nets[name]
-    return nets
+    families = {base for base, members in by_base.items() if len(members) > 1}
+    for base in families:
+        for member in by_base[base]:
+            nets.pop(member, None)
+    return nets, families
+
+
+def _repeated_label_pin_nets(circuit: Any) -> dict[str, list[Any]]:
+    """``{<BASE>: [<net>, ...]}`` for each repeated-label pin family
+    (``BASE``, ``BASE$1``, ... -- issue #4798) of ``circuit``'s pins, the
+    nets deduplicated. Single pins are not families."""
+    members: dict[str, dict[str, Any]] = {}
+    for pin in circuit.each_pin():
+        name = (pin.name() or "").upper()
+        net = circuit.net_for_pin(pin.id())
+        if not name or net is None:
+            continue
+        suffixed = _REPEATED_LABEL_SUFFIX.match(name)
+        members.setdefault(suffixed.group(1) if suffixed else name, {})[name] = net
+    return {
+        base: list({id(net): net for net in named.values()}.values())
+        for base, named in members.items()
+        if len(named) > 1
+    }
+
+
+def _rename_nets_neutral(
+    families: Mapping[str, Sequence[Any]], side: str
+) -> list[tuple[Any, str]]:
+    """Give every family net a side-specific unique name; return
+    ``[(net, original_name)]`` so the caller can restore them."""
+    restore: list[tuple[Any, str]] = []
+    counter = 0
+    for base in sorted(families):
+        for net in families[base]:
+            restore.append((net, net.name))
+            net.name = f"__RLF_{side}{counter}"
+            counter += 1
+    return restore
+
+
+def _with_repeated_label_retry_disclosure(
+    anchor_warnings: list[dict[str, Any]], families: Sequence[str]
+) -> list[dict[str, Any]]:
+    """Add the retry disclosure (issue #4798): extend the
+    ``topology.top_level_pins_anchored`` entry's ``details`` with
+    ``repeated_label_pin_families``, or emit one when anchoring made none."""
+    note = (
+        "repeated-label pin famil(ies) "
+        + ", ".join(families)
+        + " (BASE, BASE$1, ...): the first compare mismatched, and a single "
+        "retry with those nets renamed to neutral unique names matched, so "
+        "this match is decided by topology alone -- the $k pairing is "
+        "extractor-order dependent"
+    )
+    if anchor_warnings:
+        entry = anchor_warnings[0]
+        entry["details"]["repeated_label_pin_families"] = list(families)
+        entry["description"] += "; " + note
+        return anchor_warnings
+    return [
+        _mismatch(
+            CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED,
+            "warning",
+            note,
+            "both",
+            details={
+                "pins": [],
+                "pin_count": 0,
+                "pins_truncated": False,
+                "repeated_label_pin_families": list(families),
+            },
+        )
+    ]
 
 
 def _apply_top_level_pin_anchors(
@@ -5719,8 +5873,14 @@ def _apply_top_level_pin_anchors(
     """
     if not enabled:
         return [], []
-    layout_nets = _pin_nets_by_name(layout_circuit)
-    reference_nets = _pin_nets_by_name(reference_circuit)
+    layout_nets, layout_families = _pin_nets_by_name(layout_circuit)
+    reference_nets, reference_families = _pin_nets_by_name(reference_circuit)
+    families = layout_families | reference_families
+    # A family seen on only one side must not anchor against the other side's
+    # same-named single pin either (issue #4798).
+    for family in families:
+        layout_nets.pop(family, None)
+        reference_nets.pop(family, None)
     spoken_for = {name for pair in declared or () for name in pair}
     anchors: list[_TopLevelPinAnchor] = []
     for pin_name in sorted(set(layout_nets) & set(reference_nets)):
@@ -5732,11 +5892,12 @@ def _apply_top_level_pin_anchors(
             continue
         comparer.same_nets(layout_circuit, reference_circuit, net_a, net_b, True)
         anchors.append(_TopLevelPinAnchor(pin_name, layout_name, reference_name))
-    return anchors, _top_level_pin_anchor_warnings(anchors)
+    return anchors, _top_level_pin_anchor_warnings(anchors, sorted(families))
 
 
 def _top_level_pin_anchor_warnings(
     anchors: Sequence[_TopLevelPinAnchor],
+    skipped_families: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """The single ``severity: "warning"``
     :data:`CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED` disclosure for a run
@@ -5749,10 +5910,27 @@ def _top_level_pin_anchor_warnings(
     distinguishable from one reached by topology alone (and so a reader of a
     committed report can tell the hook ran at all).
     """
-    if not anchors:
+    if not anchors and not skipped_families:
         return []
     pins = [anchor.pin for anchor in anchors]
     sample = pins[:_ANCHORED_PIN_SAMPLE_LIMIT]
+    details: dict[str, Any] = {
+        "pins": sample,
+        "pin_count": len(pins),
+        "pins_truncated": len(sample) < len(pins),
+    }
+    family_note = ""
+    if skipped_families:
+        # Issue #4798: `PAD`/`PAD$1`/... are one repeated label whose `$k`
+        # numbering is extractor order, so name-anchoring them would turn an
+        # ordering artefact into a hard assertion (false device.unmatched).
+        details["skipped_repeated_label_pins"] = list(skipped_families)
+        family_note = (
+            "; repeated-label pin famil(ies) "
+            + ", ".join(skipped_families)
+            + " (BASE, BASE$1, ...) were NOT anchored because the $k pairing "
+            "is extractor-order dependent and topology decides those nets"
+        )
     return [
         _mismatch(
             CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED,
@@ -5765,13 +5943,9 @@ def _top_level_pin_anchor_warnings(
             "require. Without it, two boundary nets with identical topology "
             "(e.g. two bits of a black-box macro's bus) are interchangeable "
             "and a swap between them compares clean -- see docs/cli/lvs.md, "
-            '"Top-level pin anchoring"',
+            '"Top-level pin anchoring"' + family_note,
             "both",
-            details={
-                "pins": sample,
-                "pin_count": len(pins),
-                "pins_truncated": len(sample) < len(pins),
-            },
+            details=details,
         )
     ]
 
