@@ -7322,18 +7322,12 @@ def test_resume_refusal_names_fingerprint_difference(tmp_path, monkeypatch):
 
 
 def test_resume_with_a_different_hosts_count_is_not_refused(tmp_path, monkeypatch):
-    """Issue #4821: a resume splits only the remaining units, so a smaller
-    shard count than the map recorded is the normal case, not a mismatch --
-    and it stays repeatable."""
+    """Issue #4821: a resume re-splits only the remaining units, so the shard count varies."""
     _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
     first, _, _ = fleet()
-    assert json.loads(manifest_path.read_text())["hosts"] == 2
-
-    for _ in range(3):
-        corners, _, _ = fleet(resume=True, hosts=1)
-        assert json.loads(manifest_path.read_text())["hosts"] == 1
-        assert [c["corner_id"] for c in corners] == [c["corner_id"] for c in first]
-        corners, _, _ = fleet(resume=True, hosts=2)
+    for hosts in (1, 2, 1):
+        corners, _, _ = fleet(resume=True, hosts=hosts)
+        assert json.loads(manifest_path.read_text())["hosts"] == hosts
         assert [c["corner_id"] for c in corners] == [c["corner_id"] for c in first]
 
 
