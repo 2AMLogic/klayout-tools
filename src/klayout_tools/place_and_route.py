@@ -98,6 +98,9 @@ from .place_and_route_gds_merge import (
     _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
+from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
+from .place_and_route_layers import _signal_layer_range
+from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
 
 # The PDN/floorplan joint pre-flight (issue #2170): derives `pdngen`'s own
 # minimum core dimension from `request.power.straps[]` and compares it with
@@ -183,9 +186,6 @@ from .place_and_route_request import (
     _PORT_CONNECTION_RE as _PORT_CONNECTION_RE,
 )
 from .place_and_route_request import (
-    _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK,
-)
-from .place_and_route_request import (
     PlaceAndRouteError as PlaceAndRouteError,
 )
 from .place_and_route_request import (
@@ -217,9 +217,6 @@ from .place_and_route_request import (
 )
 from .place_and_route_request import (
     _resolve_pdn_preset as _resolve_pdn_preset,
-)
-from .place_and_route_request import (
-    _signal_routing_layers as _signal_routing_layers,
 )
 from .place_and_route_request import (
     _strip_verilog_comments as _strip_verilog_comments,
@@ -1849,11 +1846,6 @@ def _run_single_corner(
     route_congestion_iterations = _validate_route_congestion_iterations(
         request.get("route_congestion_iterations")
     )
-    signal_layers: str | None = (
-        library["route_layers"]
-        if library is not None and "route_layers" in library
-        else _ROUTING_LAYER_RANGE.get(cell_library)
-    )
     route_allow_congestion = _validate_route_allow_congestion(
         request.get("route_allow_congestion")
     )
@@ -2469,10 +2461,8 @@ def _run_single_corner(
             "placement_density": placement_density,
             "route_congestion_iterations": route_congestion_iterations,
             "route_allow_congestion": route_allow_congestion,
-            # Issue #4802: the range passed to `set_routing_layers -signal`
-            # (`request.library.route_layers` if given, else the built-in
-            # per-library range); `null` only for a library with neither.
-            "signal_layers": signal_layers,
+            # Issue #4802: range given to `set_routing_layers -signal`.
+            "signal_layers": _signal_layer_range(cell_library, library),
         },
         # Additive field (issue #2781): see `_coverage_declaration`.
         "coverage": _coverage_declaration(),

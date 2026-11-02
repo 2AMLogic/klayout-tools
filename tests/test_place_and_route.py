@@ -793,11 +793,9 @@ def test_signal_routing_layers_covers_every_supported_library():
         routable = place_and_route._signal_routing_layers(cell_library)
         assert routable is not None, cell_library
         low, _, high = layer_range.partition("-")
-        assert routable[0] == low
-        assert routable[-1] == high
+        assert (routable[0], routable[-1]) == (low, high)
         stack = place_and_route._ROUTING_LAYER_STACK[cell_library]
-        # Every library reserves at least its bottom layer for pin access,
-        # which is exactly the class of io-layer mistake #2473 reports.
+        # Every library reserves its bottom layer for pin access (#2473).
         assert set(routable).issubset(stack)
         assert stack[0] not in routable
 
