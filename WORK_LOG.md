@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-02
 
+- **PR #4774**: feat(sim): add step_resolution measurement reporting time-step gaps near edges
+- **Issue #4773** (closed): klt sim: no way to bound the .tran step only inside switching-edge windows
 - **PR #4736**: feat(yield): echo run provenance and per-measurement spec_row in yield reports
 - **Issue #2840** (closed): Friction: klt yield reports carry no seed / corner-matrix / spec-row provenance for T1 item 6's recorded-seed requirement
 
