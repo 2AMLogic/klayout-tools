@@ -7322,13 +7322,12 @@ def test_resume_refusal_names_fingerprint_difference(tmp_path, monkeypatch):
 
 
 def test_resume_with_a_different_hosts_count_is_not_refused(tmp_path, monkeypatch):
-    """Issue #4821: a resume re-splits only the remaining units, so the shard count varies."""
+    """Issue #4821: resume re-splits only remaining units, so shard count varies."""
     _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
-    first, _, _ = fleet()
+    first = [c["corner_id"] for c in fleet()[0]]
     for hosts in (1, 2, 1):
-        corners, _, _ = fleet(resume=True, hosts=hosts)
+        assert [c["corner_id"] for c in fleet(resume=True, hosts=hosts)[0]] == first
         assert json.loads(manifest_path.read_text())["hosts"] == hosts
-        assert [c["corner_id"] for c in corners] == [c["corner_id"] for c in first]
 
 
 @pytest.mark.parametrize(

@@ -4415,7 +4415,7 @@ class _ShardManifest:
                 "that may already have finished)",
                 code=BATCH_SHARD_MANIFEST_CODE,
             ) from exc
-        # Issue #4821: ``hosts`` is not identity; a resume re-splits only remaining units.
+        # Issue #4821: ``hosts`` is not identity; resume re-splits remaining units.
         if stored_fingerprint != fingerprint:
             difference = _manifest_difference(
                 stored_fingerprint, fingerprint, stored_hosts, stored_hosts
