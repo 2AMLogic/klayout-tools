@@ -383,6 +383,38 @@ def _via_fixed_size_um(variant: str, via_layer: tuple[int, int]) -> float:
 _VIA_LANDING_SIZE_UM = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
 
 
+# Die/chip boundary layer (``prBoundary.boundary``) shared by sky130 and
+# gf180mcu; ``options.boundary`` (#3998) draws one rectangle here so density
+# decks have a reference extent.
+_BOUNDARY_LAYER: tuple[int, int] = (235, 4)
+
+
+def _parse_boundary(raw: Any) -> dict[str, float] | None:
+    """Validate ``options.boundary`` (#3998) -> ``{x0,y0,x1,y1}`` or None."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise GenComposeError("options.boundary must be a JSON object")
+    bbox = raw.get("bbox_um")
+    if not isinstance(bbox, dict):
+        raise GenComposeError(
+            "options.boundary.bbox_um is required: an object with x0/y0/x1/y1"
+        )
+    out: dict[str, float] = {}
+    for key in ("x0", "y0", "x1", "y1"):
+        value = bbox.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise GenComposeError(
+                f"options.boundary.bbox_um.{key} must be a number, got {value!r}"
+            )
+        out[key] = float(value)
+    if out["x1"] <= out["x0"] or out["y1"] <= out["y0"]:
+        raise GenComposeError(
+            f"options.boundary.bbox_um must have x1 > x0 and y1 > y0, got {bbox!r}"
+        )
+    return out
+
+
 class GenComposeError(Exception):
     """Raised when a composition request cannot be fulfilled.
 
@@ -3174,6 +3206,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         raise GenComposeError("request.options must be a JSON object")
     cell_name = options.get("cell_name") or "gen_compose_0"
     output_path = options.get("output") or f"{cell_name}.gds"
+    boundary_bbox_um = _parse_boundary(options.get("boundary"))
 
     output_dir = os.path.dirname(os.path.abspath(output_path))
     if output_dir and not os.path.isdir(output_dir):
@@ -4471,6 +4504,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         array_placement=array_placement_gds,
         via_drop_size_um=via_drop_size_um,
         landing_pad_size_um=landing_pad_size_um,
+        boundary_bbox_um=boundary_bbox_um,
     )
     warnings.extend(dbu_rescale_warnings)
 
@@ -4720,6 +4754,7 @@ def _write_composed_gds(
     via_drop_size_um: dict[tuple[int, int], float] | None = None,
     landing_pad_size_um: dict[tuple[tuple[int, int], tuple[int, int]], float]
     | None = None,
+    boundary_bbox_um: dict[str, float] | None = None,
 ) -> tuple[float, list[str]]:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
     every block's own top cell as a translated sub-cell instance, plus any
@@ -5122,6 +5157,18 @@ def _write_composed_gds(
             top.shapes(pin_layer_index).insert(
                 kdb.Text(pin["net"], kdb.Trans(pin_point))
             )
+
+    if boundary_bbox_um is not None:
+        # options.boundary (#3998): one caller-given rectangle on 235/4,
+        # independent of the placed content's extent.
+        top.shapes(layout.layer(*_BOUNDARY_LAYER)).insert(
+            kdb.Box(
+                int(round(boundary_bbox_um["x0"] / dbu)),
+                int(round(boundary_bbox_um["y0"] / dbu)),
+                int(round(boundary_bbox_um["x1"] / dbu)),
+                int(round(boundary_bbox_um["y1"] / dbu)),
+            )
+        )
 
     write_layout(layout, output_path, GenComposeError)
     return layout.dbu, dbu_rescale_warnings
