@@ -51,6 +51,7 @@ from typing import Any
 
 from . import sim_crossings
 from .sim_errors import SimError
+from .sim_forms import validate_exclusive_form
 
 #: Reason tokens a failed ``eye`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -102,21 +103,12 @@ def eye_measurements(measurements_spec: list[dict[str, Any]]) -> list[dict[str, 
 def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     """For an entry declaring ``eye``: refuse any other form beside it and
     validate the body. Returns ``True`` when the entry is an eye entry."""
-    if not is_eye(spec):
-        return False
-    name = spec.get("name")
-    if name is None:
-        raise SimError("each request.measurements[] entry requires 'name'")
-    others = [form for form in _FORMS if spec.get(form) is not None]
-    if others:
-        raise SimError(
-            f"measurement '{name}' declares 'eye' together with "
-            f"'{others[0]}': they are alternative forms of a measurement -- "
-            "declare exactly one (use a separate measurements[] entry for "
-            "the other)"
-        )
-    validate_eye_spec(name, spec["eye"])
-    return True
+    return validate_exclusive_form(
+        spec,
+        "eye",
+        _FORMS,
+        lambda name, spec: validate_eye_spec(name, spec["eye"]),
+    )
 
 
 def _seconds(name: Any, body: dict[str, Any], key: str) -> float | None:
