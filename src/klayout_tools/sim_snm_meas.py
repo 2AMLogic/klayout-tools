@@ -34,6 +34,7 @@ from typing import Any
 
 from . import sim_raw, sim_snm
 from .sim_errors import SimError
+from .sim_forms import validate_exclusive_form
 
 #: Reason tokens a failed ``snm`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -109,21 +110,12 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     """For an entry declaring ``snm``: refuse any other form beside it and
     validate the body. Returns ``True`` when the entry is an snm entry (so the
     caller has nothing more to validate)."""
-    if not is_snm(spec):
-        return False
-    name = spec.get("name")
-    if name is None:
-        raise SimError("each request.measurements[] entry requires 'name'")
-    others = [form for form in _FORMS if spec.get(form) is not None]
-    if others:
-        raise SimError(
-            f"measurement '{name}' declares 'snm' together with "
-            f"'{others[0]}': they are alternative forms of a measurement -- "
-            "declare exactly one (use a separate measurements[] entry for "
-            "the other)"
-        )
-    validate_snm_spec(name, spec["snm"])
-    return True
+    return validate_exclusive_form(
+        spec,
+        "snm",
+        _FORMS,
+        lambda name, spec: validate_snm_spec(name, spec["snm"]),
+    )
 
 
 def validate_snm_spec(name: Any, body: Any) -> None:
