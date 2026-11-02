@@ -8,6 +8,7 @@ the offset between A's pad and B's pad. No assembled layout is written.
 ```
 klt interface-check <a.gds> <b.gds> --place DX,DY --pins REGEX
                     [--pin-layer-a L/D] [--pin-layer-b L/D] [--tol-um UM]
+                    [--pair A_REGEX=B_TEMPLATE ...]
                     [--top-a CELL] [--top-b CELL] [--format text|json]
 ```
 
@@ -22,12 +23,20 @@ klt interface-check <a.gds> <b.gds> --place DX,DY --pins REGEX
   may use different layers.
 - `--tol-um` -- largest pad-to-pad gap still counted as mated (default `0`:
   the pads must overlap or touch).
+- `--pair A_REGEX=B_TEMPLATE` -- repeatable. Mate complementary names: an A
+  label that fully matches `A_REGEX` pairs with the B label named by the
+  `re.Match.expand` template (`\1`, `\g<n>`), e.g.
+  `--pair 'n_out\[(\d+)\]=s_in[\1]'`. Split on the last `=`; the first
+  matching pair wins. Both names must also match `--pins`. Invalid
+  regex/template exits 1.
 - `--top-a`, `--top-b` -- top cell of each stream; required when a stream has
   more than one top cell. Hierarchy is flattened.
 
 ## Matching rules
 
-- Labels are paired by identical string. A label present in only one stream is
+- Labels are paired by identical string, unless `--pair` maps A's name to a
+  different B name (reported under A's name, with B's name in `b_name`;
+  unmapped pins have `b_name == name`). A label present in only one stream is
   `no_partner`.
 - A label's **pad** is the merged polygon on the pin layer that contains the
   label point (a point on the pad edge counts as contained). If none contains
@@ -55,8 +64,9 @@ JSON (`schema_version` 1, shared envelope, see
   "dbu_um": {"a": 0.001, "b": 0.001},
   "status": "fail",
   "pin_count": 4, "ok_count": 3, "misaligned_count": 1, "no_partner_count": 0,
+  "pairs": [],
   "pins": [
-    {"name": "OUT[2]", "status": "misaligned",
+    {"name": "OUT[2]", "b_name": "OUT[2]", "status": "misaligned",
      "offset_um": [0.0, 3.0], "gap_um": 2.0,
      "a": {"layer": "10/0", "label_um": [1.0, 110.5],
            "pad_bbox_um": [0.0, 110.0, 2.0, 111.0]},
@@ -102,7 +112,7 @@ run.
 - `mirror=` / `repeat=NxM@(px,py)` placement: repeat is expressed by
   per-index pin names (`OUT[k]` on both sides).
 - Via-stack allowance / cross-layer mating: one layer per side.
-- Rotation, name remapping between A and B, any PDK deck.
+- Rotation, name-pair files (`--map FILE`), any PDK deck.
 
 Related: [`klt socket-check`](socket-check.md) validates one stream against a
 descriptor of its own outline and pins; `interface-check` compares two streams

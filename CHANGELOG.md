@@ -23,6 +23,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `reviewed_not_statistical: true` to waive the string-pattern scan (never
   the key scan) for that row, echoed in the output. Additive; JSON-form
   manifests grade unchanged.
+
+- **`klt lvs` accepts escaped module names in a `gate-level-verilog`
+  reference** (issue #4810, documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)):
+  a Yosys `\$paramod\child\W=s32'd64` module declaration no longer fails
+  before the compare. Names are mapped to legal SPICE subckt names (hash
+  suffix on collision), consistently at declaration and instantiation, and the
+  report gains the additive `environment.reference_module_names`
+  (`{original: mapped}`, present only when a name was mapped).
 - **`klt signoff --attest 1` binds the whole input set** (issue #4764,
   documented in [`docs/cli/signoff.md`](docs/cli/signoff.md)): the item-1
   envelope now emits `provenance.input.paths` (every inventory source, every

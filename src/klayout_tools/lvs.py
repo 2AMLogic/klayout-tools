@@ -147,6 +147,7 @@ from ._report_verify import (
     resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
+from ._report_verify_hints import input_not_found_entry
 from .decks import (
     InvalidDeckOptionError,
     UnknownExtractionDeckError,
@@ -259,6 +260,7 @@ from .netlist_capacitor_recovery import (
 from .pdk import PdkNotFoundError, find_pdk, list_pdks
 from .pdk_models import MOS_FLAVOUR_PROPERTY, flavoured_mos_class_name
 from .place_and_route_portable import portable_response
+from .verilog_module_names import reference_module_names
 from .verilog_netlist import (
     VerilogNetlistError,
     collect_gate_level_port_aliases,
@@ -3012,10 +3014,9 @@ def run_lvs(
             "layout_sha256": sha256_file(layout_hash_source),
             "reference_sha256": sha256_file(reference_netlist_path),
             "extracted_netlist": extracted_netlist_path,
+            **reference_module_names(reference_netlist_path, reference_form),
         },
-        # Issue #2693: built just above the return (rather than inline here)
-        # so the `gate-level-verilog` form's `pin_order_sources` can be added
-        # to it without duplicating this whole call per form.
+        # Issue #2693: built above the return (per-form `pin_order_sources`).
         "provenance": provenance,
         "mismatches": mismatches,
         "net_correspondence": net_correspondence,
@@ -3143,11 +3144,9 @@ def _input_hash_check(
         candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
         if os.path.isfile(candidate):
             found_relative_to_report = os.path.abspath(candidate)
-    check["input_not_found"] = {
-        "path": path,
-        "resolved": os.path.abspath(path),
-        "found_relative_to_report": found_relative_to_report,
-    }
+    check["input_not_found"] = input_not_found_entry(
+        path, report_path, found_relative_to_report
+    )
     return check
 
 
