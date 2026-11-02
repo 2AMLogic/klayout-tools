@@ -50,6 +50,8 @@ from ..sim import SimError, load_request, run_sim
 from ..sim_batch_async import read_job_status
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
+from .sim_pdk_text import _print_pdk as _print_pdk
+from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
 
 EXIT_PASS = 0
 EXIT_MEASUREMENT_FAILED = 3
@@ -97,6 +99,15 @@ def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
+    if getattr(args, "pdk_root", None) is not None:
+        for flag, name in (("op_lint", "--op-lint"), ("job_status", "--job-status")):
+            if getattr(args, flag, None) not in (None, False):
+                return emit_error(
+                    "sim",
+                    f"--pdk-root has no effect with {name}",
+                    args.format,
+                    exit_code=EXIT_USAGE_ERROR,
+                )
     return None
 
 
@@ -133,6 +144,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             attach_job_id=getattr(args, "attach_job_id", None),
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
             command_approvals=getattr(args, "command_approvals", None),
+            pdk_root=getattr(args, "pdk_root", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -277,6 +289,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--submit-only", getattr(args, "submit_only", False)),
             ("--job-status", getattr(args, "job_status", None)),
             ("--wait-for-capacity", getattr(args, "wait_for_capacity", None)),
+            ("--pdk-root", getattr(args, "pdk_root", None)),
         )
         if value is not None and value is not False and value != ""
     ]
@@ -411,61 +424,6 @@ def _print_op_lint_text(report: dict) -> None:
                 f"diagnostic: {diagnostic['severity']} {diagnostic['code']} - "
                 f"{diagnostic['message']}"
             )
-
-
-def _print_pdk(report: dict) -> None:
-    """Echo the resolved PDK beside `models_lib` in text output (issue #2564).
-
-    Which PDK *build* the models actually came from used to be JSON-only
-    (`provenance.pdk`), so an interactive run could not see that the resolved
-    install was not the one the caller had pinned. Print it by its
-    reproducible identity -- variant, `open_pdks` stamp, and the search-order
-    step that won -- never the absolute root, keeping the same path-privacy
-    posture `render_path_field` gives `netlist`/`models_lib` above. When more
-    than one install held the variant, flag it outright: the absolute roots
-    are in the accompanying stderr warning
-    (`klayout_tools.pdk.ambiguity_warning`). No-op for a run that resolved no
-    PDK (the usual case for a request with no process axis).
-    """
-    pdk_block = (report.get("provenance") or {}).get("pdk")
-    if pdk_block is None:
-        return
-    print(
-        f"pdk: {pdk_block['name']} {pdk_block['version'] or '-'} "
-        f"(via {pdk_block['source']})"
-    )
-    ambiguous = pdk_block.get("ambiguous_sources")
-    if ambiguous:
-        print(
-            f"pdk: WARNING: variant also installed under "
-            f"{', '.join(ambiguous)} -- resolution is first-match-wins; "
-            f"pin models.pdk_root to choose deliberately"
-        )
-
-
-def _print_worker_pdk(report: dict) -> None:
-    """Surface the batch runner's PDK stamp comparison in text output (issue
-    #3946). Which library the simulator read used to be JSON-only
-    (`environment.remote.worker_environment`), so a run on a different PDK
-    revision than the one the client resolved read like a run on the client's.
-    No-op for a report without a worker capture (non-batch backends)."""
-    remote = (report.get("environment") or {}).get("remote") or {}
-    worker = remote.get("worker_environment")
-    if not isinstance(worker, dict):
-        return
-    comparison = worker.get("pdk_stamp_comparison")
-    if isinstance(comparison, dict) and comparison.get("status"):
-        line = f"pdk_stamp: {comparison['status']}"
-        if comparison.get("reason"):
-            line += f" ({comparison['reason']})"
-        if comparison.get("basis"):
-            line += f" [basis: {comparison['basis']}]"
-        print(line)
-        if comparison.get("warning"):
-            print(f"warning: {comparison['warning']}")
-    pdk = worker.get("pdk")
-    if isinstance(pdk, dict):
-        print(f"models_staged: {str(pdk.get('models_staged') is True).lower()}")
 
 
 def _print_commands_text(report: dict) -> None:

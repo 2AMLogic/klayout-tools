@@ -14,9 +14,11 @@ from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import (
     AttestationError,
     build_attestation,
+    render_envelope,
+)
+from klayout_tools.signoff_attest_stream import (
     build_stream_attestation,
     check_stream_attestation,
-    render_envelope,
 )
 
 _GENERATOR = "python gen.py -o layout/top.gds"
@@ -299,3 +301,119 @@ def test_inventory_items_unchanged_still_reject_item2():
     with pytest.raises(AttestationError):
         build_attestation(2, "nonexistent.json")
     assert attest_module.ATTESTABLE_ITEMS == (1, 8, 9, 10)
+
+
+# --- declared checks via optional --inventory (issue #4767) ---------------- #
+
+
+def _inv(repo: Path, checks: list, **extra) -> str:
+    path = repo / "evidence" / "item2-inv.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "t1-attestation-inventory",
+                "t1_item": 2,
+                "checks": checks,
+                **extra,
+            }
+        )
+    )
+    return str(path)
+
+
+_PASS = {"name": "ok", "argv": ["python3", "-c", "pass"]}
+_FAIL = {"name": "bad", "argv": ["python3", "-c", "import sys; sys.exit(4)"]}
+
+
+def test_declared_checks_recorded_and_pass(tmp_path):
+    repo, stream = _stream(tmp_path)
+    inv = _inv(repo, [_PASS])
+    env = build_stream_attestation(stream, inventory_path=inv)
+    assert env["status"] == "pass"
+    last = env["attestation"]["checks"][-1]
+    assert last["role"] == "audit" and last["name"] == "ok"
+    assert last["argv"] == _PASS["argv"] and last["exit_status"] == 0
+    assert env["attestation"]["check_count"] == 4
+    assert env["attestation"]["inventory"]["path"]["path"] == "evidence/item2-inv.json"
+
+
+def test_declared_check_failure_fails_envelope(tmp_path):
+    repo, stream = _stream(tmp_path)
+    inv = _inv(repo, [_PASS, _FAIL])
+    env = build_stream_attestation(stream, inventory_path=inv)
+    assert env["status"] == "fail"
+    assert env["attestation"]["checks"][-1]["exit_status"] == 4
+    code = main(
+        [
+            "signoff",
+            "--attest",
+            "2",
+            "--input",
+            stream,
+            "--inventory",
+            inv,
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 3
+
+
+def test_no_inventory_envelope_unchanged(tmp_path):
+    repo, stream = _stream(tmp_path)
+    env = build_stream_attestation(stream)
+    assert "inventory" not in env["attestation"]
+    assert env["attestation"]["check_count"] == 3
+
+
+def test_declared_check_timeout(tmp_path):
+    repo, stream = _stream(tmp_path)
+    slow = {
+        "name": "slow",
+        "argv": ["python3", "-c", "import time; time.sleep(5)"],
+        "timeout_s": 0.5,
+    }
+    env = build_stream_attestation(stream, inventory_path=_inv(repo, [slow]))
+    last = env["attestation"]["checks"][-1]
+    assert env["status"] == "fail" and last["error"] == "timeout"
+
+
+def test_declared_checks_check_mode_drift_and_local_only(tmp_path):
+    repo, stream = _stream(tmp_path)
+    local = {**_FAIL, "name": "local", "local_only": True}
+    inv = _inv(repo, [_PASS, {**_PASS, "name": "lo", "local_only": True}])
+    env = build_stream_attestation(stream, inventory_path=inv)
+    committed = repo / "evidence" / "item2.json"
+    committed.write_text(render_envelope(env))
+    result = check_stream_attestation(stream, str(committed), inventory_path=inv)
+    assert result["status"] == "match"
+    assert [c["name"] for c in result["skipped_checks"]] == ["lo"]
+    # Editing the inventory is drift.
+    inv2 = _inv(repo, [_PASS, local])
+    drift = check_stream_attestation(stream, str(committed), inventory_path=inv2)
+    assert drift["status"] != "match"
+
+
+@pytest.mark.parametrize(
+    "inventory",
+    [
+        {"checks": []},
+        {"checks": [_PASS, _PASS]},
+        {"checks": [_PASS], "t1_item": 9},
+        {"checks": [_PASS], "stream": "layout/other.gds"},
+        {"checks": [{"name": "x"}]},
+    ],
+)
+def test_malformed_item2_inventory_refused(tmp_path, inventory):
+    repo, stream = _stream(tmp_path)
+    doc = {
+        "schema_version": 1,
+        "kind": "t1-attestation-inventory",
+        "t1_item": 2,
+        **inventory,
+    }
+    path = repo / "evidence" / "bad.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(AttestationError):
+        build_stream_attestation(stream, inventory_path=str(path))

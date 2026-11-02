@@ -114,6 +114,15 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_wall_clock_attempt import (  # noqa: E402
+    AttemptSelection,
+    current_attempt,
+    select_attempt,
+)
+from ci_wall_clock_attempt import as_json as attempt_as_json  # noqa: E402
+from ci_wall_clock_guidance import breach_guidance  # noqa: E402
+
 # The budget file's own schema (`.github/ci-wall-clock-budget.json`). Still 1:
 # #2615 only *added* an optional `rolling_window` block, so a budget file
 # written before it stays readable and simply runs with the rolling model off.
@@ -647,6 +656,41 @@ def _jobs_from_payload(payload: object) -> list[dict]:
     return jobs
 
 
+def measure_current_attempt(
+    payload: object,
+    budget: dict,
+    *,
+    exclude: frozenset[str],
+    run_payload: object | None,
+) -> tuple[list[JobTiming], datetime, datetime, AttemptSelection]:
+    attempt_started = None
+    if isinstance(run_payload, dict):
+        stamp = run_payload.get("run_started_at")
+        if isinstance(stamp, str) and stamp:
+            try:
+                attempt_started = _parse_iso(stamp)
+            except ValueError as exc:
+                raise CannotRun(
+                    f"run payload's 'run_started_at' is unparseable: {exc}"
+                ) from exc
+    sel = select_attempt(
+        _jobs_from_payload(payload), current_attempt(run_payload), attempt_started
+    )
+    try:
+        timings, first, last = measure_jobs(sel.current, budget, exclude=exclude)
+    except CannotRun:
+        if not sel.carried:
+            raise
+        # A --failed rerun of the budget job alone: the only fresh row is this
+        # job itself. Re-read the carried-over rows so the breach still shows,
+        # but say plainly that nothing new was measured.
+        timings, first, last = measure_jobs(sel.carried, budget, exclude=exclude)
+        sel = AttemptSelection(
+            sel.attempt, sel.current, sel.stale, sel.carried, nothing_new=True
+        )
+    return timings, first, last, sel
+
+
 def _step_seconds(step: dict) -> int:
     """A step's duration, or 0 when it is missing/unparseable.
 
@@ -943,62 +987,6 @@ def _render_cache_misses(cache_missed: list[JobTiming]) -> list[str]:
     ]
 
 
-def _breach_guidance(breaches: list[Breach], *, cache_missed: bool) -> list[str]:
-    """What the reader should do about `breaches` (a non-empty list)."""
-    kinds = {b.kind for b in breaches}
-    failing = [b for b in breaches if b.kind == "compute" and b.confirmed]
-    guidance: list[str] = []
-    if kinds == {"queue"}:
-        guidance += [
-            "",
-            "Compute is WITHIN budget -- this is a scheduling/queue breach, not a",
-            "code regression. Optimising these jobs would achieve nothing (issue",
-            "#1971): look at runner-pool contention instead. Reported, not gated:",
-            "a queue-only breach exits 0 and does not fail this build.",
-        ]
-        if cache_missed:
-            guidance.append(
-                "The cache miss above also inflates wall clock, which -- unlike "
-                "compute -- is measured whole."
-            )
-    elif "compute" in kinds and not failing:
-        guidance += [
-            "",
-            "Every compute breach above is UNCONFIRMED: another run of this same",
-            "commit measured the same job inside a quiet-pool threshold, so this",
-            "run measured the pool, not the code (issue #2615). Reported, not",
-            "gated: this exits 0.",
-        ]
-    elif "compute" in kinds:
-        guidance += [
-            "",
-            "This is a COMPUTE breach: the work took longer than the rolling",
-            "baseline of recent runs allows, and the pool was not measurably busy",
-            "at the time. What to do, in order:",
-            "  1. Read the `basis` column. `rolling` compares against the median",
-            "     of recent baseline-branch runs; `fixed ceiling` means that job",
-            "     has too little history yet and is on the committed fallback in",
-            "     .github/ci-wall-clock-budget.json.",
-            "  2. If the slowdown is real, shrink the job -- or, if the new cost",
-            "     is justified, say so in the PR. A rolling baseline absorbs a",
-            "     justified increase on its own within a few baseline-branch runs;",
-            "     no number has to be hand-edited for that.",
-            "  3. If you believe the pool was busy and this check could not see it",
-            "     (contention from workloads outside this repo's own Actions",
-            "     history is invisible here), RE-RUN this job. A clean re-run of",
-            "     the same commit both passes and, if it breaches again, marks the",
-            "     breach confirmed rather than noise.",
-            "  4. Only edit the committed ceilings when a job is on the `fixed",
-            "     ceiling` basis; the rolling rows are derived, not declared.",
-        ]
-        if cache_missed:
-            guidance.append(
-                "Cache-miss rebuild time is ALREADY excluded above, so this "
-                "breach is not the cache service."
-            )
-    return guidance
-
-
 def render_text(
     timings: list[JobTiming],
     breaches: list[Breach],
@@ -1011,11 +999,14 @@ def render_text(
     report_only: bool,
     model: Model | None = None,
     total_basis: str = "fixed",
+    attempt_note: str | None = None,
 ) -> str:
     model = model or Model(cfg=dict(DEFAULT_ROLLING))
     width = max([len(t.name) for t in timings] + [len("total job-seconds (compute)")])
     lines = [f"CI wall-clock budget -- {len(timings)} job(s) measured"]
     lines += [f"  {line}" for line in _model_summary(model, total_basis)]
+    if attempt_note:
+        lines.append(f"  attempt: {attempt_note}")
     lines += [
         "",
         f"  {'job'.ljust(width)}  {'actual':>8}  {'budget':>8}  basis",
@@ -1061,7 +1052,7 @@ def render_text(
     )
     for b in breaches:
         lines.append(f"  - {b.message}")
-    lines += _breach_guidance(breaches, cache_missed=bool(cache_missed))
+    lines += breach_guidance(breaches, cache_missed=bool(cache_missed))
     return "\n".join(lines)
 
 
@@ -1123,10 +1114,14 @@ def main(argv: list[str] | None = None) -> int:
         exclude = frozenset(budget.get("exclude_jobs", [])) | frozenset(
             args.exclude_job
         )
-        timings, first_start, last_end = measure_jobs(
-            load_json(args.jobs_json), budget, exclude=exclude
+        run_payload = load_json(args.run_json) if args.run_json else None
+        timings, first_start, last_end, selection = measure_current_attempt(
+            load_json(args.jobs_json),
+            budget,
+            exclude=exclude,
+            run_payload=run_payload,
         )
-        started_at = run_start(load_json(args.run_json) if args.run_json else None)
+        started_at = run_start(run_payload)
         model = build_model(load_history(args.history_json), budget, exclude=exclude)
         timings = apply_model(timings, model)
     except CannotRun as exc:
@@ -1179,6 +1174,7 @@ def main(argv: list[str] | None = None) -> int:
                 "same_tree_runs": len(model.same_tree_runs),
             },
             "total_job_seconds": total_seconds,
+            "attempt": attempt_as_json(selection),
             "total_job_budget_seconds": total_budget,
             "total_job_budget_basis": total_basis,
             "total_cache_miss_seconds": total_cache_miss_seconds,
@@ -1232,6 +1228,7 @@ def main(argv: list[str] | None = None) -> int:
             report_only=args.report_only,
             model=model,
             total_basis=total_basis,
+            attempt_note=selection.note(),
         )
         print(report)
 
@@ -1275,6 +1272,7 @@ def main(argv: list[str] | None = None) -> int:
             report_only=args.report_only,
             model=model,
             total_basis=total_basis,
+            attempt_note=selection.note(),
         )
         try:
             with open(summary_path, "a", encoding="utf-8") as handle:

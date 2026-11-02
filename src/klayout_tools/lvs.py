@@ -241,6 +241,7 @@ from .lvs_power import (
     _with_stub_power_connectivity_reason,
 )
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
+from .lvs_short_nets import _short_nets_disclosure as _short_nets_disclosure
 from .lvs_supply import parse_supply_nets, supply_fragmentation_findings
 from .lvs_timeout import (
     COMPARE_TIMEOUT_CODE,
@@ -6654,52 +6655,6 @@ def _short_nets_merge_nets(
             }
         )
     return merged
-
-
-def _short_nets_disclosure(
-    merged: list[dict[str, Any]],
-    dropped: list[dict[str, str]],
-) -> dict[str, Any]:
-    """Build the single :data:`CATEGORY_HINTS_SHORT_NETS_APPLIED` entry
-    disclosing what ``hints.short_nets`` resolved (issue #2653).
-
-    Split out of :func:`_apply_short_nets_hint` for the same
-    complexity-ratchet reason as the two apply helpers above; no independent
-    caller. Always ``severity: "warning"`` -- see :func:`_apply_short_nets_hint`
-    for why the disclosure, not the transform, is the point.
-    """
-    description_parts = []
-    if merged:
-        groups_text = "; ".join(
-            f"{entry['members']} -> '{entry['merged_net']}'" for entry in merged
-        )
-        description_parts.append(
-            f"merged {len(merged)} reference net group(s) ({groups_text})"
-        )
-    if dropped:
-        names_text = ", ".join(f"'{entry['name']}'" for entry in dropped)
-        description_parts.append(
-            f"dropped {len(dropped)} reference device(s) ({names_text})"
-        )
-
-    return _mismatch(
-        CATEGORY_HINTS_SHORT_NETS_APPLIED,
-        "warning",
-        "request.hints.short_nets resolved the reference to one concrete "
-        "mask-option state before comparing: "
-        + " and ".join(description_parts)
-        + " -- this resolution was asserted by the request, not read "
-        "from the reference netlist's own device values, so this "
-        "dimension of the compare is not independently verified (see "
-        "docs/cli/lvs.md, 'hints.short_nets_applied')",
-        "reference",
-        device=None,
-        net=None,
-        details={
-            "merged_nets": merged,
-            "dropped_devices": dropped,
-        },
-    )
 
 
 #: Issue #1907: the *primary* (compared) parameter of each device family whose
