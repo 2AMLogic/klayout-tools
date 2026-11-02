@@ -118,6 +118,20 @@ def settled_measurements(
     return [spec for spec in measurements_spec if is_settled(spec)]
 
 
+def signal_texts(spec: dict[str, Any]) -> list[Any]:
+    """The signal expressions a ``settled`` entry references (clock plus the
+    mean/peak signals), for ``options.save_vectors`` auto-detection."""
+    settled = spec.get("settled")
+    if not isinstance(settled, dict):
+        return []
+    texts: list[Any] = [settled.get("clock")]
+    for key in ("mean", "peak"):
+        tracked = settled.get(key)
+        if isinstance(tracked, dict):
+            texts.append(tracked.get("signal"))
+    return texts
+
+
 # --------------------------------------------------------------------------- #
 # Request validation
 # --------------------------------------------------------------------------- #

@@ -75,6 +75,7 @@ real failure.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import itertools
 import json
@@ -1698,7 +1699,6 @@ def _resolve_analysis_and_measurements(
     sim_eye.validate_eye_context(measurements_spec, analysis)
     # Issue #4773: a step-resolution report is a transient-time quantity too.
     sim_step_resolution.validate_step_resolution_context(measurements_spec, analysis)
-    # Issue #4780: a settled verdict compares transient windows.
     sim_settled.validate_settled_context(measurements_spec, analysis)
     # Issue #4121: a search entry needs the scalar single-analysis deck.
     sim_search.validate_search_context(measurements_spec, analysis)
@@ -2183,13 +2183,7 @@ def _required_save_vectors(
         step_res = spec.get("step_resolution")
         if isinstance(step_res, dict):
             texts.append(step_res.get("signal"))
-        settled = spec.get("settled")
-        if isinstance(settled, dict):
-            texts.append(settled.get("clock"))
-            for key in ("mean", "peak"):
-                tracked = settled.get(key)
-                if isinstance(tracked, dict):
-                    texts.append(tracked.get("signal"))
+        texts.extend(sim_settled.signal_texts(spec))
         for text in texts:
             if not isinstance(text, str):
                 continue
@@ -10942,43 +10936,26 @@ def _eye_measurement_result(
     return result, grading_diagnostics
 
 
-def _step_resolution_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_step_resolution.StepResolutionOutcome | None,
-    *,
-    save_mode: str,
+def _vector_measurement_result(
+    spec: dict[str, Any], outcome: Any, *, save_mode: str, key: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``step_resolution`` measurement's response entry (issue #4773).
-
-    ``value`` is the overall largest time-sample gap (seconds) near the
-    crossings, graded through :func:`_grade_measurement_value` like any scalar;
-    the per-crossing list rides the additive ``step_resolution`` sibling. A
-    failure is ``status: "error"``, ``value: null`` with a
-    ``code: "measurement"`` diagnostic whose message starts with a
-    ``[<reason>]`` token from
-    :data:`klayout_tools.sim_step_resolution.ERROR_CODES`."""
+    """Response entry for a ``step_resolution``/``settled`` measurement; the
+    detail rides the additive ``key`` sibling. A failure is ``status:
+    "error"`` with a ``[<reason>]``-prefixed ``measurement`` diagnostic."""
     name = spec["name"]
     unit = spec.get("unit")
     if outcome is None or outcome.value is None:
         message = (
             outcome.error
             if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no step_resolution value"
+            else f"measurement '{name}' produced no {key} value"
         )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "step_resolution_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "step_resolution_vector_missing":
+        missing = f"{key}_vector_missing"
+        reason = outcome.code if outcome is not None and outcome.code else missing
+        if save_mode == "netlist" and reason == missing:
             message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
+        result = {"name": name, "value": None, "unit": unit}
+        result.update(status="error", margin=None)
         return result, [
             {
                 "severity": "error",
@@ -10989,72 +10966,18 @@ def _step_resolution_measurement_result(
     m_status, margin, grading_diagnostics = _grade_measurement_value(
         spec, outcome.value
     )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "step_resolution": outcome.report(),
-    }
+    result = {"name": name, "value": outcome.value, "unit": unit}
+    result.update(status=m_status, margin=margin, **{key: outcome.report()})
     return result, grading_diagnostics
 
 
-def _settled_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_settled.SettledOutcome | None,
-    *,
-    save_mode: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``settled`` measurement's response entry (issue #4780).
-
-    ``value`` is 1.0 when the last two windows agree within tolerance and 0.0
-    when they do not -- "not settled" is a graded result, not an error -- and
-    the per-window detail rides the additive ``settled`` sibling. A failure is
-    ``status: "error"``, ``value: null`` with a ``code: "measurement"``
-    diagnostic whose message starts with a ``[<reason>]`` token from
-    :data:`klayout_tools.sim_settled.ERROR_CODES`."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no settled value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "settled_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "settled_vector_missing":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(
-        spec, outcome.value
-    )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "settled": outcome.report(),
-    }
-    return result, grading_diagnostics
+#: Per-kind builders (#4773, #4780); ``settled`` value 1.0/0.0 = (not) settled.
+_step_resolution_measurement_result = functools.partial(
+    _vector_measurement_result, key="step_resolution"
+)
+_settled_measurement_result = functools.partial(
+    _vector_measurement_result, key="settled"
+)
 
 
 def _search_measurement_result(
