@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .output_lock import OutputLockError
-from .sim import SimError, run_sim
+from .sim import SimError, _with_capacity_wait_override, run_sim
 from .sim_batch import BATCH_CONCURRENCY_CAP_CODE, BATCH_NO_CAPACITY_CODE
 
 SET_SCHEMA_VERSION = 1
@@ -151,7 +151,10 @@ def _run_one(
     manifest: _Manifest | None = None,
     capacity_retries: int = 0,
     sleep: Callable[[float], None] = time.sleep,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
+    if dry_run:
+        return _run_one_dry(index, path, run, run_kwargs)
     entry: dict[str, Any] = {
         "index": index,
         "request": path,
@@ -202,6 +205,40 @@ def _run_one(
     return entry
 
 
+def _run_one_dry(
+    index: int,
+    path: str,
+    run: Callable[..., dict[str, Any]],
+    run_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """One request of a ``--dry-run`` set (issue #4771): validate and plan only.
+
+    No artifacts directory, report file or manifest is touched, and ``run`` is
+    called with ``dry_run=True`` so nothing is uploaded or launched. A request
+    that fails validation is an ``error`` entry (exit ``4``); siblings proceed.
+    """
+    entry: dict[str, Any] = {
+        "index": index,
+        "request": path,
+        "status": "error",
+        "exit_code": 4,
+        "job_id": None,
+        "job_ids": [],
+        "report": None,
+        "error": None,
+        "plan": None,
+    }
+    try:
+        plan = run(path, backend="batch", dry_run=True, **run_kwargs)
+    except (SimError, OutputLockError) as exc:
+        entry["error"] = {"message": str(exc), "code": getattr(exc, "code", None)}
+    except Exception as exc:  # one request must never sink its siblings
+        entry["error"] = {"message": f"{type(exc).__name__}: {exc}", "code": None}
+    else:
+        entry.update(status="valid", exit_code=0, plan=plan)
+    return entry
+
+
 def run_sim_set(
     request_paths: list[str],
     *,
@@ -228,11 +265,62 @@ def run_sim_set(
     if isinstance(capacity_retries, bool) or capacity_retries < 0:
         raise SimError(f"--capacity-retries must be >= 0 (got {capacity_retries!r})")
 
+    # Refuse a bad --wait-for-capacity once, before any request is submitted.
+    _with_capacity_wait_override({}, run_kwargs.get("capacity_wait_s"))
+    dry_run = bool(run_kwargs.get("dry_run"))
+    if dry_run:
+        # A dry run launches nothing, so there is nothing to resume or retry,
+        # and no directory, manifest or report may be written.
+        run_kwargs = {
+            k: v for k, v in run_kwargs.items() if k not in ("resume", "dry_run")
+        }
+        return _finish_set(
+            _run_set_requests(
+                request_paths,
+                [""] * len(request_paths),
+                max_in_flight,
+                run,
+                run_kwargs,
+                None,
+                0,
+                sleep,
+                True,
+            ),
+            min(max_in_flight, len(request_paths)),
+            True,
+        )
+
     dirs = _request_dirs(request_paths, outdir)
     manifest_dir = outdir if outdir is not None else os.path.dirname(dirs[0])
     manifest = _Manifest(
         os.path.join(manifest_dir, MANIFEST_FILENAME), request_paths, dirs
     )
+    workers = min(max_in_flight, len(request_paths))
+    requests = _run_set_requests(
+        request_paths,
+        dirs,
+        max_in_flight,
+        run,
+        run_kwargs,
+        manifest,
+        capacity_retries,
+        sleep,
+        False,
+    )
+    return _finish_set(requests, workers, False)
+
+
+def _run_set_requests(
+    request_paths: list[str],
+    dirs: list[str],
+    max_in_flight: int,
+    run: Callable[..., dict[str, Any]],
+    run_kwargs: dict[str, Any],
+    manifest: _Manifest | None,
+    capacity_retries: int,
+    sleep: Callable[[float], None],
+    dry_run: bool,
+) -> list[dict[str, Any]]:
     workers = min(max_in_flight, len(request_paths))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
@@ -246,11 +334,16 @@ def run_sim_set(
                 manifest,
                 capacity_retries,
                 sleep,
+                dry_run,
             )
             for i, path in enumerate(request_paths)
         ]
-        requests = [future.result() for future in futures]
+        return [future.result() for future in futures]
 
+
+def _finish_set(
+    requests: list[dict[str, Any]], workers: int, dry_run: bool
+) -> dict[str, Any]:
     errored = sum(1 for r in requests if r["status"] == "error")
     failed = sum(1 for r in requests if r["status"] == "fail")
     worst = max((r["exit_code"] for r in requests), default=0)
@@ -258,9 +351,11 @@ def run_sim_set(
         status = "error"
     elif failed:
         status = "fail"
+    elif dry_run:
+        status = "valid"
     else:
         status = "pass"
-    return {
+    report = {
         "schema_version": SET_SCHEMA_VERSION,
         "status": status,
         "request_count": len(requests),
@@ -272,3 +367,6 @@ def run_sim_set(
         ),
         "requests": requests,
     }
+    if dry_run:
+        report["dry_run"] = True
+    return report

@@ -1116,7 +1116,9 @@ made. Things worth knowing:
   if the request asks for a wait). It applies to the blocking path and to
   `--submit-only`; an invalid value is refused before any S3 write, like the
   request field. It requires the `batch` backend and is refused with `--attach`,
-  `--job-status` and `--batch-set` (use `--capacity-retries`); it applies to
+  `--job-status`; with `--batch-set` it applies to every request in the set (a
+  bad value is refused before any submit, and `--capacity-retries` re-submits
+  refused requests after the in-request wait); it applies to
   deck-list requests too. On expiry the run fails with the existing `batch_no_capacity` /
   `batch_concurrency_cap` code. `--submit-only`'s reported `request_sha256`
   covers the request with this override folded in.
@@ -1187,6 +1189,17 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   still `interrupted` is re-polled first, so resuming it can wait up to another
   `batch.interrupted_grace_s` (default 1800 s) before its replacement is
   submitted. The aggregate envelope is unchanged.
+- **Dry run (`--dry-run`,
+  [#4771](https://github.com/2AMLogic/klayout-tools/issues/4771)).** Every
+  request is validated and planned exactly as a single `klt sim --dry-run`
+  would, and **nothing** is uploaded, launched or written: no
+  `set-manifest.json`, no per-request directory or `report.json`.
+  `--resume` and `--capacity-retries` are ignored. The envelope carries
+  `dry_run: true` and `status: "valid"` (exit `0`); each entry has
+  `status: "valid"` and its dry-run report under `plan`. A request that fails
+  validation is an `error` entry (exit `4`) and its siblings are unaffected.
+- **`--wait-for-capacity SECONDS`** is applied to every request in the set
+  (see above).
 - **Per-request reports.** Each request writes its full single-request report
   to `report.json` in its own directory, `<outdir>/<request-stem>/` (without
   `-o`: `.klt/sim/<request-stem>/` next to the request file).

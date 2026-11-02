@@ -288,7 +288,6 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),
             ("--job-status", getattr(args, "job_status", None)),
-            ("--wait-for-capacity", getattr(args, "wait_for_capacity", None)),
             ("--pdk-root", getattr(args, "pdk_root", None)),
         )
         if value is not None and value is not False and value != ""
@@ -323,6 +322,8 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             resume=args.resume,
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
+            dry_run=getattr(args, "dry_run", False),
+            capacity_wait_s=getattr(args, "wait_for_capacity", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -332,6 +333,16 @@ def _run_batch_set(args: argparse.Namespace) -> int:
 
 
 def _print_set_text(report: dict) -> None:
+    if report.get("dry_run"):
+        print(f"klt sim --batch-set --dry-run: {report['status']}")
+        for entry in report["requests"]:
+            print(f"  {entry['request']}  [{entry['status']}]")
+            if entry.get("plan"):
+                _print_dry_run_text(entry["plan"])
+            elif entry["error"]:
+                error = entry["error"]
+                print(f"    {error['code'] or 'error'}: {error['message']}")
+        return
     print(
         f"status: {report['status']}  requests: {report['request_count']}  "
         f"submitted: {report['submitted']}  refused: {report['refused']}  "
