@@ -2895,6 +2895,47 @@ instead of a `klt yield` citation:
 - Rows are keyed by `id` so a later partial-coverage outcome (issue #2908)
   can extend this block; that outcome is not implemented here.
 
+**Release note.** The `not_applicable` form was introduced in **0.8.0**
+(issue #2865). A grader older than that (for example the still-common 0.7.0
+pin) does not know the form and grades a `not_applicable` entry
+`unmet`/`unreadable_evidence`, indistinguishable from a corrupt file; that
+cannot be changed in an already-released grader, so pin `klayout-tools>=0.8.0`
+before using it.
+
+**Markdown spec source (issue #4793).** A block whose ratified spec is a
+markdown document cites it directly, with no JSON projection:
+
+```json
+"spec": {"file": "SPEC.md", "content_hash": "sha256:...",
+         "format": "markdown-table", "id_column": "Param"}
+```
+
+- `format` is `"json"` (default; the keys may be omitted) or
+  `"markdown-table"`, which requires a string `id_column`. `id_column` is
+  invalid with `"json"`.
+- Ratification comes from the first `Status: <value>` line (case-insensitive;
+  `**Status:** ratified` and list-item forms also match); it must be
+  `ratified`, else `not_applicable_spec_unratified`.
+- Rows come from the first pipe table whose header has an `id_column` cell
+  (followed by an alignment row such as `|---|:--:|`). Row ids are that
+  column's cells (whitespace trimmed); each row is scanned like a JSON row
+  with the header names as keys, so a non-empty `Offset`/`Sigma`/`Yield`
+  column, or `3σ` in a cell, is `not_applicable_statistical_row`. `\|` is a
+  literal pipe; CRLF files are handled.
+- A missing status line, missing table or `id_column`, an empty or duplicate
+  id is `invalid_evidence` (`detail.problem`); a table with no rows is
+  `not_applicable_statement_incomplete`. Only the first table is read.
+- The granted `not_applicable.spec` block additionally carries `format` and
+  `id_column` (additive; JSON-form output is unchanged).
+
+**Reviewed assertion (issue #4793).** The text-pattern scan also fires on a
+negated mention ("no sigma or yield bound applies"). A statement row may set
+`"reviewed_not_statistical": true` to record the author's acknowledgement; for
+that row id it suppresses only the *string-value* pattern hits, in the
+statement `class` and in the matching spec row's values. It never suppresses
+a statistical *key* or a truthy `statistical` key. The flag is echoed on the
+granted statement row, so the waiver is auditable.
+
 A granted item renders `status: "not_applicable"`, `reason: null`,
 `citation: null`, and a `not_applicable` object
 (`{"spec": {"file", "content_hash", "status", "row_count"}, "statement":
@@ -3841,7 +3882,7 @@ actually ran and failed):
 | ------------------------ | :--------------------------: | ------- |
 | `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
 | `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`; or, issue #2342, one carrying a `"pointer"` that is not a string). |
-| `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. |
+| `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. A `not_applicable` object (item 6) also lands here under a grader older than 0.8.0, which predates that form. |
 | `"unrecognized_envelope"` | yes | The resolved evidence parsed as JSON but is not a JSON object, does not match any recognised `klt` envelope shape, or matches one but is malformed for it — missing a required field, or carrying one of the wrong type (see "Envelope validation" above). |
 | `"envelope_version_skew"` | yes | **(issue #2198)** The resolved evidence *is* a `klt` envelope, carrying a kind's **primary** marker but none of the shape discriminators that marker is paired with — the shape a response written before those (additive) fields existed has. Today this applies to one kind: **`sta`**, whose `geometry_source` marker shipped with the verb but whose `timing_status`/`corners` discriminators are additive (issues #1865/#1915), so any `klt sta` response committed before them lands here. Refused exactly like `"unrecognized_envelope"` — it is never graded as that kind's evidence — but reported distinguishably, because the remedy differs: re-run the check under the current `klt`, rather than fix a citation pointing at the wrong artifact. A kind whose markers are *both* original (`place-and-route`'s `stage_reached`+`power`) has no version-skew shape and is unaffected. See "Digital-flow evidence" above. |
 | `"invalid_pointer"`       | yes | **(issue #2342)** The evidence entry carried a `"pointer"` (an RFC 6901 JSON Pointer naming where inside the cited document the envelope lives) that did not resolve to a JSON object: malformed syntax (no leading `/`, a `~` followed by neither `0` nor `1`), a path the document does not contain, or a value that is not an object (a string, number, array, or `null` — none of which can ever be a `klt` envelope). Deliberately distinct from `"unrecognized_envelope"`: nothing was ever classified, so this says nothing about the cited bytes, and the remedy is to fix the pointer rather than the citation. See "Citing an envelope nested inside a composite report" above. |
@@ -3858,7 +3899,7 @@ actually ran and failed):
 | `"wrong_item"`            | yes | **(issue #2718)** The evidence resolved to a *passing* `generic` envelope whose declared `t1_item` names a different item than the one it is cited for: an attestation replayed across items. Rendered for every item that accepts `generic` (1, 2, 8, 9, 10). An item-8 envelope with no `t1_item` is unaffected. Cite the attestation made for this item. |
 | `"not_applicable_wrong_partition"` | yes | **(issue #2865)** **Item 6 only.** The `not_applicable` form was used on an analog partition (or a pure `analog` block); only a digital partition may. |
 | `"not_applicable_spec_unratified"` | yes | **(issue #2865)** The cited spec's `status` is not `"ratified"`. `detail.spec_status` echoes it. |
-| `"not_applicable_statistical_row"` | yes | **(issue #2865)** The cited spec (or the statement's own `class`) carries a row marked `statistical`, or one with a sigma/yield/Cpk/offset/mismatch/Monte Carlo key or a `3σ`/accuracy/matching/offset-style value. `detail.row` names the row, `detail.field` the offending key path. The scan is a conservative backstop: a false positive refuses. |
+| `"not_applicable_statistical_row"` | yes | **(issue #2865)** The cited spec (or the statement's own `class`) carries a row marked `statistical`, or one with a sigma/yield/Cpk/offset/mismatch/Monte Carlo key or a `3σ`/accuracy/matching/offset-style value. `detail.row` names the row, `detail.field` the offending key path. The scan is a conservative backstop: a false positive refuses; a statement row's `reviewed_not_statistical: true` waives the string-value hits (not key hits) for that row (issue #4793). |
 | `"not_applicable_statement_incomplete"` | yes | **(issue #2865)** The statement does not account for exactly the spec's rows: `detail.uncovered_row_ids` (spec rows with no statement row), `detail.unknown_row_ids` (statement rows naming no spec row), a row missing `class`/`reason`, or a spec with no rows at all. |
 | `"no_pdn"`                | no  | **Item 11 only** (issue #2025). The cited `klt place-and-route` response says no power grid was built at all: `power.pdn` is not `true`. Re-run P&R with a `request.power` block. |
 | `"no_tapcell_master"`     | no  | **Item 11 only** (issue #4199). The grid was built (`power.pdn: true`) but `power.tapcell_master` is null and the response does not state `power.tapless: true` (a tapped library whose tap step did not run, or a pre-#4199 envelope). Re-run P&R; a library documented tapless (`sg13g2_stdcell`) states `tapless: true` and grades. |

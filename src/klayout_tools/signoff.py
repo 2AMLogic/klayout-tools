@@ -1257,7 +1257,7 @@ _NA_STATISTICAL_TEXT_RE = re.compile(
 )
 
 
-def _na_scan_dict(value: dict[str, Any], path: str) -> str | None:
+def _na_scan_dict(value: dict[str, Any], path: str, text: bool) -> str | None:
     """:func:`_na_scan_statistical` for a JSON object."""
     for key, child in value.items():
         key_path = f"{path}.{key}" if path else str(key)
@@ -1274,13 +1274,13 @@ def _na_scan_dict(value: dict[str, Any], path: str) -> str | None:
         )
         if keyed:
             return key_path
-        hit = _na_scan_statistical(child, key_path)
+        hit = _na_scan_statistical(child, key_path, text)
         if hit is not None:
             return hit
     return None
 
 
-def _na_scan_statistical(value: Any, path: str) -> str | None:
+def _na_scan_statistical(value: Any, path: str, text: bool = True) -> str | None:
     """Conservative scan of one spec/statement row for anything statistical.
 
     Returns a ``path`` description of the first hit, or ``None``. A key named
@@ -1289,17 +1289,18 @@ def _na_scan_statistical(value: Any, path: str) -> str | None:
     Carlo hits on any non-empty value; any string value mentioning one of
     those (or ``3σ``, accuracy, matching) hits. False positives refuse, which
     is the safe direction -- the author fixes the row's wording or cites real
-    ``klt yield`` evidence.
+    ``klt yield`` evidence. ``text=False`` skips the string-value pattern only
+    (issue #4793: a reviewed row); key and ``statistical`` hits still fire.
     """
     if isinstance(value, dict):
-        return _na_scan_dict(value, path)
+        return _na_scan_dict(value, path, text)
     if isinstance(value, list):
         for index, child in enumerate(value):
-            hit = _na_scan_statistical(child, f"{path}[{index}]")
+            hit = _na_scan_statistical(child, f"{path}[{index}]", text)
             if hit is not None:
                 return hit
         return None
-    if isinstance(value, str) and _NA_STATISTICAL_TEXT_RE.search(value):
+    if text and isinstance(value, str) and _NA_STATISTICAL_TEXT_RE.search(value):
         return path
     return None
 
@@ -1320,7 +1321,86 @@ def _na_document(
             "document": label,
             "problem": "needs a string 'file' and a string 'content_hash'",
         }
-    return {"file": raw["file"], "content_hash": raw["content_hash"]}, None
+    ref = {"file": raw["file"], "content_hash": raw["content_hash"]}
+    if label == "spec" and ("format" in raw or "id_column" in raw):
+        fmt = raw.get("format", _NA_FORMAT_JSON)
+        column = raw.get("id_column")
+        if fmt not in (_NA_FORMAT_JSON, _NA_FORMAT_MARKDOWN):
+            return None, {
+                "document": label,
+                "problem": f"'format' must be 'json' or '{_NA_FORMAT_MARKDOWN}'",
+            }
+        if fmt == _NA_FORMAT_MARKDOWN:
+            if not isinstance(column, str) or not column.strip():
+                return None, {
+                    "document": label,
+                    "problem": "a markdown-table spec needs a string 'id_column'",
+                }
+            ref["format"] = fmt
+            ref["id_column"] = column.strip()
+        elif column is not None:
+            return None, {
+                "document": label,
+                "problem": "'id_column' applies only to format 'markdown-table'",
+            }
+    return ref, None
+
+
+_NA_FORMAT_JSON = "json"
+_NA_FORMAT_MARKDOWN = "markdown-table"
+_NA_MD_STATUS_RE = re.compile(
+    r"^\s*(?:[-*>]\s*)?[*_]*status[*_]*\s*:\s*[*_]*\s*([A-Za-z][\w-]*)",
+    re.IGNORECASE,
+)
+_NA_MD_PIPE_RE = re.compile(r"(?<!\\)\|")
+
+
+def _na_md_cells(line: str) -> list[str]:
+    """Cells of one pipe-table line (``\\|`` is a literal pipe)."""
+    body = line.strip()
+    body = body[1:] if body.startswith("|") else body
+    body = body[:-1] if body.endswith("|") and not body.endswith("\\|") else body
+    return [cell.replace("\\|", "|").strip() for cell in _NA_MD_PIPE_RE.split(body)]
+
+
+def _na_md_is_alignment(line: str) -> bool:
+    cells = _na_md_cells(line)
+    return bool(cells) and all(re.fullmatch(r":?-+:?", c) for c in cells)
+
+
+def _na_parse_markdown(
+    text: str, id_column: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Markdown spec -> ``({"status", "rows"}, None)`` or ``(None, problem)``.
+
+    ``status`` is the first ``Status: <word>`` line; the rows are those of the
+    first pipe table whose header has an ``id_column`` cell, each row a
+    ``{header: cell}`` dict with ``id`` set from that column (issue #4793).
+    """
+    lines = text.splitlines()
+    status = next((m.group(1) for m in map(_NA_MD_STATUS_RE.match, lines) if m), None)
+    if status is None:
+        return None, "no 'Status: <value>' line found"
+    for index, line in enumerate(lines[:-1]):
+        if not line.lstrip().startswith("|"):
+            continue
+        header = _na_md_cells(line)
+        if id_column not in header or not _na_md_is_alignment(lines[index + 1]):
+            continue
+        rows: list[dict[str, Any]] = []
+        for body in lines[index + 2 :]:
+            if not body.lstrip().startswith("|"):
+                break
+            cells = _na_md_cells(body)
+            row = {h: c for h, c in zip(header, cells, strict=False) if h}
+            row["id"] = (
+                cells[header.index(id_column)]
+                if len(cells) > header.index(id_column)
+                else ""
+            )
+            rows.append(row)
+        return {"status": status, "rows": rows}, None
+    return None, f"no pipe table with an '{id_column}' header cell found"
 
 
 def _na_load(
@@ -1342,6 +1422,19 @@ def _na_load(
                 "actual_content_hash": actual,
             },
         )
+    if ref.get("format") == _NA_FORMAT_MARKDOWN:
+        try:
+            with open(ref["file"], encoding="utf-8") as handle:
+                parsed, problem = _na_parse_markdown(handle.read(), ref["id_column"])
+        except (OSError, ValueError):
+            return None, _REASON_UNREADABLE_EVIDENCE, {"document": label}
+        if parsed is None:
+            return (
+                None,
+                _REASON_INVALID_EVIDENCE,
+                {"document": label, "problem": problem},
+            )
+        return parsed, None, {}
     try:
         with open(ref["file"], encoding="utf-8") as handle:
             doc = json.load(handle)
@@ -1415,8 +1508,26 @@ def _na_spec_shape_refusal(spec_rows: Any) -> _NaRefusal | None:
     return None
 
 
-def _na_spec_refusal(spec_doc: dict[str, Any]) -> _NaRefusal | None:
-    """Ratification, row shape and the statistical scan of the spec."""
+def _na_reviewed_ids(statement_rows: Any) -> set[str]:
+    """Ids of statement rows carrying ``reviewed_not_statistical: true``."""
+    if not isinstance(statement_rows, list):
+        return set()
+    return {
+        row["id"]
+        for row in statement_rows
+        if isinstance(row, dict)
+        and isinstance(row.get("id"), str)
+        and row.get("reviewed_not_statistical") is True
+    }
+
+
+def _na_spec_refusal(
+    spec_doc: dict[str, Any], reviewed: frozenset[str] | set[str] = frozenset()
+) -> _NaRefusal | None:
+    """Ratification, row shape and the statistical scan of the spec.
+
+    A row id in ``reviewed`` skips the string-value pattern only (issue #4793).
+    """
     status_value = spec_doc.get("status")
     if not (
         isinstance(status_value, str) and status_value.strip().lower() == "ratified"
@@ -1429,7 +1540,7 @@ def _na_spec_refusal(spec_doc: dict[str, Any]) -> _NaRefusal | None:
     if shape is not None:
         return shape
     for row in cast("list[dict[str, Any]]", spec_rows):
-        hit = _na_scan_statistical(row, "")
+        hit = _na_scan_statistical(row, "", row["id"] not in reviewed)
         if hit is not None:
             return _na_refusal(
                 _REASON_NOT_APPLICABLE_STATISTICAL_ROW,
@@ -1456,7 +1567,8 @@ def _na_statement_refusal(
         )
     for row in statement_rows:
         # The statement's own class must not concede a statistical row.
-        if _na_scan_statistical({"class": row["class"]}, "") is not None:
+        reviewed = row.get("reviewed_not_statistical") is True
+        if _na_scan_statistical({"class": row["class"]}, "", not reviewed) is not None:
             return _na_refusal(
                 _REASON_NOT_APPLICABLE_STATISTICAL_ROW,
                 {"row": row["id"], "field": "class", "document": "statement"},
@@ -1484,6 +1596,13 @@ def _grade_not_applicable(
             "spec":      {"file": "spec.json", "content_hash": "sha256:..."},
             "statement": {"file": "na.json",   "content_hash": "sha256:..."}}}
 
+    ``spec`` may instead be a markdown document (issue #4793): add
+    ``"format": "markdown-table", "id_column": "<header cell>"``; the status
+    comes from a ``Status: ratified`` line and the rows from the first pipe
+    table with that header. A statement row may carry
+    ``"reviewed_not_statistical": true`` to waive the text-pattern scan (never
+    the key scan) for that row id.
+
     ``spec`` is the block's ratified target spec (``{"status": "ratified",
     "rows": [{"id": ...}, ...]}``); ``statement`` is the committed claim that
     no row is statistical (``{"rows": [{"id", "class", "reason"}, ...]}``,
@@ -1502,7 +1621,7 @@ def _grade_not_applicable(
         return cast(_NaRefusal, refusal)
     spec_ref, statement_ref, spec_doc, statement_doc = loaded
 
-    refusal = _na_spec_refusal(spec_doc)
+    refusal = _na_spec_refusal(spec_doc, _na_reviewed_ids(statement_doc.get("rows")))
     if refusal is not None:
         return refusal
     spec_rows = spec_doc["rows"]
@@ -1512,18 +1631,31 @@ def _grade_not_applicable(
         return refusal
     statement_rows = cast("list[dict[str, Any]]", raw_statement_rows)
 
+    spec_block: dict[str, Any] = {
+        "file": spec_ref["file"],
+        "content_hash": spec_ref["content_hash"],
+        "status": "ratified",
+        "row_count": len(spec_rows),
+    }
+    if "format" in spec_ref:
+        spec_block["format"] = spec_ref["format"]
+        spec_block["id_column"] = spec_ref["id_column"]
     block = {
-        "spec": {
-            "file": spec_ref["file"],
-            "content_hash": spec_ref["content_hash"],
-            "status": "ratified",
-            "row_count": len(spec_rows),
-        },
+        "spec": spec_block,
         "statement": {
             "file": statement_ref["file"],
             "content_hash": statement_ref["content_hash"],
             "rows": [
-                {"id": r["id"], "class": r["class"], "reason": r["reason"]}
+                {
+                    "id": r["id"],
+                    "class": r["class"],
+                    "reason": r["reason"],
+                    **(
+                        {"reviewed_not_statistical": True}
+                        if r.get("reviewed_not_statistical") is True
+                        else {}
+                    ),
+                }
                 for r in statement_rows
             ],
         },

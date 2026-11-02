@@ -14,6 +14,15 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff` item 6 `not_applicable` accepts a markdown spec and a
+  reviewed assertion** (issue #4793, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)): the `spec` reference takes
+  optional `"format": "markdown-table"` + `"id_column"` (ratification from a
+  `Status:` line, row ids from the first pipe table; granted output echoes
+  `format`/`id_column`), and a statement row may set
+  `reviewed_not_statistical: true` to waive the string-pattern scan (never
+  the key scan) for that row, echoed in the output. Additive; JSON-form
+  manifests grade unchanged.
 - **`klt signoff --attest 1` binds the whole input set** (issue #4764,
   documented in [`docs/cli/signoff.md`](docs/cli/signoff.md)): the item-1
   envelope now emits `provenance.input.paths` (every inventory source, every
