@@ -119,6 +119,7 @@ from . import (
     sim_tian,
     sim_transfer_meas,
     sim_twoport,
+    sim_xyce_refusals,
 )
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
@@ -7923,118 +7924,6 @@ class _Checkpoint:
 # --------------------------------------------------------------------------- #
 
 
-def _refuse_xyce_control_block_measurements(
-    *,
-    expr_declared: bool,
-    crossings_declared: bool,
-    cycle_mean_declared: bool,
-    energy_declared: bool,
-    stress_declared: bool = False,
-    transfer_declared: bool = False,
-    snm_declared: bool = False,
-    search_declared: bool = False,
-    eye_declared: bool = False,
-    step_resolution_declared: bool = False,
-) -> None:
-    """The ``engine: "xyce"`` refusals for measurement forms that exist only
-    as commands in klt's generated ngspice ``.control`` block (``expr``,
-    issue #2533; ``crossings``, issue #2868; ``energy``, issue #3033). Split out of
-    :func:`_enforce_xyce_support_boundary` to keep that gate under the
-    complexity limit."""
-    if expr_declared:
-        # Issue #2533: an `expr` measurement is emitted as ngspice
-        # `let`/`print` commands inside the generated `.control` block, and
-        # the Xyce deck has no control block to carry them (see
-        # `_write_xyce_deck`'s docstring). Refused by name rather than
-        # silently dropped: a corner that ran without its `expr` lines would
-        # report every such measurement as "produced no value", which reads
-        # as a circuit regression rather than an unsupported request field.
-        raise SimError(
-            "measurements[].expr is not supported for engine 'xyce': it is "
-            "evaluated by ngspice `let`/`print` commands inside a `.control` "
-            "block, and the Xyce deck has none (its analysis is a plain "
-            "top-level dot card); use engine 'ngspice', or express the "
-            "quantity as a `.meas` card in measurements[].spice"
-        )
-    if crossings_declared:
-        # Issue #2868: the series is dumped by ngspice `let`/`write`
-        # commands in the generated `.control` block -- same boundary as
-        # `expr`, refused by name for the same reason.
-        raise SimError(
-            "measurements[].crossings is not supported for engine 'xyce': "
-            "the signal is dumped by ngspice `let`/`write` commands inside a "
-            "`.control` block, and the Xyce deck has none; use engine "
-            "'ngspice'"
-        )
-    if cycle_mean_declared:
-        # Issue #2947: same `.control` let/write boundary as `crossings`.
-        raise SimError(
-            "measurements[].cycle_mean is not supported for engine 'xyce': "
-            "the signals are dumped by ngspice `let`/`write` commands inside "
-            "a `.control` block, and the Xyce deck has none; use engine "
-            "'ngspice'"
-        )
-    if energy_declared:
-        # Issue #3033: the source current/voltage are dumped by ngspice
-        # `let`/`write` commands in the generated `.control` block -- same
-        # boundary as `crossings`.
-        raise SimError(
-            "measurements[].energy is not supported for engine 'xyce': the "
-            "source current and voltage are dumped by ngspice `let`/`write` "
-            "commands inside a `.control` block, and the Xyce deck has none; "
-            "use engine 'ngspice'"
-        )
-    if stress_declared:
-        # Issue #4592: the node-pair voltage is dumped by ngspice
-        # `let`/`write` commands in the generated `.control` block -- same
-        # boundary as `energy`.
-        raise SimError(
-            "measurements[].stress is not supported for engine 'xyce': the "
-            "node voltages are dumped by ngspice `let`/`write` commands "
-            "inside a `.control` block, and the Xyce deck has none; use "
-            "engine 'ngspice'"
-        )
-    if transfer_declared:
-        # Issue #2923: same `.control` let/write boundary as `cycle_mean`.
-        raise SimError(
-            "measurements[].transfer is not supported for engine 'xyce': the "
-            "AC vectors are dumped by ngspice `let`/`write` commands inside a "
-            "`.control` block, and the Xyce deck has none; use engine "
-            "'ngspice'"
-        )
-    if snm_declared:
-        # Issue #3895: same `.control` let/write boundary as `transfer`.
-        raise SimError(
-            "measurements[].snm is not supported for engine 'xyce': the sweep "
-            "vectors are dumped by ngspice `let`/`write` commands inside a "
-            "`.control` block, and the Xyce deck has none; use engine "
-            "'ngspice'"
-        )
-    if search_declared:
-        # Issue #4121: the bisection is an ngspice `.control` `while` loop.
-        raise SimError(
-            "measurements[].search is not supported for engine 'xyce': the "
-            "bisection runs as an ngspice `.control` `while` loop, and the "
-            "Xyce deck has no control block; use engine 'ngspice'"
-        )
-    if eye_declared:
-        # Issue #4292: same `.control` let/write boundary as `crossings`.
-        raise SimError(
-            "measurements[].eye is not supported for engine 'xyce': the "
-            "signal is dumped by ngspice `let`/`write` commands inside a "
-            "`.control` block, and the Xyce deck has none; use engine "
-            "'ngspice'"
-        )
-    if step_resolution_declared:
-        # Issue #4773: same `.control` let/write boundary as `crossings`.
-        raise SimError(
-            "measurements[].step_resolution is not supported for engine "
-            "'xyce': the signal is dumped by ngspice `let`/`write` commands "
-            "inside a `.control` block, and the Xyce deck has none; use "
-            "engine 'ngspice'"
-        )
-
-
 def _refuse_xyce_params_axis(corners_spec: dict[str, Any]) -> None:
     """The ``engine: "xyce"`` refusal for ``corners.params``. Split out of
     :func:`_enforce_xyce_support_boundary` to keep that gate under the
@@ -8193,7 +8082,7 @@ def _enforce_xyce_support_boundary(
             "Verilog-A models as its own compiled plugins (`-plugin`), not "
             "OSDI shared libraries; use engine 'ngspice' or drop the option"
         )
-    _refuse_xyce_control_block_measurements(
+    sim_xyce_refusals.refuse_control_block_measurements(
         expr_declared=expr_measurements_declared,
         crossings_declared=crossings_declared,
         cycle_mean_declared=cycle_mean_declared,

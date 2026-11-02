@@ -613,11 +613,11 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 14413
+      "lines": 14397
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 6000
+      "lines": 5991
     },
     {
       "path": "src/klayout_tools/sim_commands.py",

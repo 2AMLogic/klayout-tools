@@ -694,43 +694,24 @@ def _runner_gate_release(version: str) -> str | None:
 #: (``measurements[].snm``, #3895), and ``search`` (``measurements[].search``,
 #: #4121). ``eye`` (``measurements[].eye``, #4292) landed after ``v0.8.0``, so
 #: its first release segment is ``0.8.1``.
+def _declared(finder: Callable[[list[Any]], Any]) -> Callable[[dict[str, Any]], bool]:
+    """Detector: the request declares at least one measurement ``finder`` finds."""
+    return lambda request: bool(finder(request.get("measurements") or []))
+
+
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
         lambda request: request.get("analysis_steps") is not None,
     ),
-    "transfer": (
-        (0, 7, 1),
-        lambda request: bool(
-            sim_transfer_meas.transfer_measurements(request.get("measurements") or [])
-        ),
-    ),
-    "snm": (
-        (0, 7, 1),
-        lambda request: bool(
-            sim_snm_meas.snm_measurements(request.get("measurements") or [])
-        ),
-    ),
-    "eye": (
-        (0, 8, 1),
-        lambda request: bool(
-            sim_eye.eye_measurements(request.get("measurements") or [])
-        ),
-    ),
+    "transfer": ((0, 7, 1), _declared(sim_transfer_meas.transfer_measurements)),
+    "snm": ((0, 7, 1), _declared(sim_snm_meas.snm_measurements)),
+    "eye": ((0, 8, 1), _declared(sim_eye.eye_measurements)),
     "step_resolution": (
         (0, 8, 1),
-        lambda request: bool(
-            sim_step_resolution.step_resolution_measurements(
-                request.get("measurements") or []
-            )
-        ),
+        _declared(sim_step_resolution.step_resolution_measurements),
     ),
-    "search": (
-        (0, 7, 1),
-        lambda request: bool(
-            sim_search.search_measurements(request.get("measurements") or [])
-        ),
-    ),
+    "search": ((0, 7, 1), _declared(sim_search.search_measurements)),
     "stimulus": (
         (0, 7, 1),
         lambda request: request.get("stimulus") is not None,
