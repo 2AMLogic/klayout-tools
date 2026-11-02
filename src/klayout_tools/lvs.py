@@ -3282,6 +3282,8 @@ def _reconstruct_runset_request(
     reference_spec: dict[str, Any] = {"netlist": committed.get("reference")}
     if committed.get("reference_top"):
         reference_spec["top"] = committed["reference_top"]
+    # Issue #4805: replay a ``subckt-call`` reference conversion.
+    reference_spec.update(_reference_conversion_replay(committed))
     request: dict[str, Any] = {
         "engine": RUNSET_ENGINE,
         "layout": layout_spec,
