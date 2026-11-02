@@ -155,6 +155,8 @@ import re
 from dataclasses import dataclass, field
 from typing import cast
 
+from .verilog_module_names import apply_module_names
+
 #: Verilog block (`/* ... */`) and line (`// ...`) comments, stripped before
 #: any other parsing. `re.S` so a block comment can span newlines.
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
@@ -344,14 +346,7 @@ def _parse_header(statement: str) -> tuple[str, list[str]]:
             f"'module' declaration has no port list: {statement.strip()[:80]!r}"
         )
     name = rest[:open_paren].strip()
-    if _ESCAPED_IDENT_RE.fullmatch(name) and not _IDENT_RE.fullmatch(name):
-        raise VerilogNetlistError(
-            f"'module' declaration uses an escaped identifier ({name!r}), "
-            "which this reader does not support (e.g. a Yosys "
-            "'\\$paramod$<hash>\\<name>' module); flatten the netlist or "
-            "rename the module first"
-        )
-    if not _IDENT_RE.fullmatch(name):
+    if not (_IDENT_RE.fullmatch(name) or _ESCAPED_IDENT_RE.fullmatch(name)):
         raise VerilogNetlistError(f"'module' declaration has no valid name: {rest!r}")
     close_paren = rest.rfind(")")
     if close_paren == -1 or close_paren < open_paren:
@@ -1105,6 +1100,11 @@ def _resolve_alias(net: str, aliases: dict[str, str]) -> str:
 
 
 def parse_gate_level_verilog(text: str) -> list[dict[str, object]]:
+    """The module list of :func:`_parse_with_names` (issue #4810)."""
+    return _parse_with_names(text)[0]
+
+
+def _parse_with_names(text: str) -> tuple[list[dict[str, object]], dict[str, str]]:
     """Parse gate-level Verilog ``text`` into a list of module descriptions,
     one per ``module``/``endmodule`` block, in file order.
 
@@ -1168,7 +1168,7 @@ def parse_gate_level_verilog(text: str) -> list[dict[str, object]]:
                 "port_aliases": _port_aliases(module.ports, module.aliases),
             }
         )
-    return modules
+    return modules, apply_module_names(modules)
 
 
 def collect_gate_level_port_aliases(text: str) -> dict[str, dict[str, str]]:
