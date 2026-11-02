@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
 from klayout_tools import lvs
-from klayout_tools.verilog_netlist import VerilogNetlistError, _parse_header
+from klayout_tools.verilog_netlist import _parse_header
 
 CATEGORY = lvs.CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS
 
@@ -132,6 +130,7 @@ def test_unbalanced_counts_stay_errors():
     assert any(e["severity"] == "error" for e in entries)
 
 
-def test_escaped_module_name_gets_a_clear_error():
-    with pytest.raises(VerilogNetlistError, match="escaped identifier"):
-        _parse_header("module \\$paramod$abc\\top (a, b)")
+def test_escaped_module_name_is_accepted():
+    name, ports = _parse_header("module \\$paramod$abc\\top (a, b)")
+    assert name == "$paramod$abc\\top"
+    assert ports == ["a", "b"]

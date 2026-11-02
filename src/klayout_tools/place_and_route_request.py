@@ -31,6 +31,7 @@ from . import macros as macro_spec
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
+from .place_and_route_groups import reject_unknown_group_keys, validate_group_geometry
 from .place_and_route_layers import (
     _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK,
 )
@@ -671,9 +672,7 @@ def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
 def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise PlaceAndRouteError(f"{where} must be a JSON object")
-    unknown = sorted(set(entry) - {"name", "instances", "max_extent_um"})
-    if unknown:
-        raise PlaceAndRouteError(f"{where} has unknown key(s): {', '.join(unknown)}")
+    reject_unknown_group_keys(entry, where, PlaceAndRouteError)
     name = entry.get("name")
     if not (isinstance(name, str) and name.strip()):
         raise PlaceAndRouteError(f"{where}.name must be a non-empty string")
@@ -694,6 +693,7 @@ def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str
     if bound is not None:
         _check_max_extent_um(bound, where)
         item["max_extent_um"] = bound
+    item.update(validate_group_geometry(entry, instances, where, PlaceAndRouteError))
     return item
 
 
