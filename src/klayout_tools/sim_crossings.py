@@ -148,10 +148,37 @@ def _validate_level(name: Any, level: Any) -> None:
         )
 
 
+def is_sampled_offset(level: Any) -> bool:
+    """Whether ``level`` is the sampled-offset form ``{sample_at, offset}``
+    (issue #4813): the signal's own value at a time, plus an offset."""
+    return isinstance(level, dict) and ("sample_at" in level or "offset" in level)
+
+
+def _validate_sampled_offset(name: Any, level: dict[str, Any]) -> None:
+    where = f"measurement '{name}': crossings.level"
+    if set(level) != {"sample_at", "offset"}:
+        raise SimError(
+            f"{where} sampled-offset form takes exactly the keys "
+            '"sample_at" and "offset", e.g. {"sample_at": "50n", '
+            f'"offset": -0.9}} (got keys {sorted(level)})'
+        )
+    _window_bound(name, level, "sample_at", label="crossings.level.sample_at")
+    offset = level["offset"]
+    if not is_number(offset) or not math.isfinite(offset):
+        raise SimError(
+            f"{where}.offset must be a finite number in the signal's own "
+            f"unit (got {offset!r})"
+        )
+
+
 def _validate_crossings_level(name: Any, level: Any) -> None:
-    """``crossings.level``: a finite number, or (issue #3918) a
+    """``crossings.level``: a finite number, a ``{sample_at, offset}``
+    sampled-offset level (issue #4813), or (issue #3918) a
     ``{frac_of, fraction}`` fraction of a ``corners.supply_v`` key resolved per
     corner. Whether the key exists is checked once the corners are known."""
+    if is_sampled_offset(level):
+        _validate_sampled_offset(name, level)
+        return
     if not sim_supply_relative.is_supply_relative(level):
         _validate_level(name, level)
         return
@@ -194,7 +221,9 @@ def _validate_max(name: Any, value: Any) -> None:
         )
 
 
-def _window_bound(name: Any, body: dict[str, Any], key: str) -> float | None:
+def _window_bound(
+    name: Any, body: dict[str, Any], key: str, *, label: str | None = None
+) -> float | None:
     """``crossings.from``/``.to`` in seconds: a number, or a SPICE time
     literal such as ``"10n"``. ``None`` when absent."""
     from .sim import _parse_spice_seconds
@@ -209,7 +238,8 @@ def _window_bound(name: Any, body: dict[str, Any], key: str) -> float | None:
         seconds = _parse_spice_seconds(raw)
     if seconds is None or not math.isfinite(seconds):
         raise SimError(
-            f"measurement '{name}': crossings.{key} must be a time in seconds "
+            f"measurement '{name}': {label or 'crossings.' + key} must be a "
+            "time in seconds "
             f'-- a number or a SPICE time literal such as "10n" (got {raw!r})'
         )
     return seconds
@@ -340,6 +370,31 @@ def _interpolate(
     return t0 + (level - y0) * (t1 - t0) / (y1 - y0)
 
 
+def _resolve_sampled_offset(
+    name: Any, level: dict[str, Any], scale: list[float], values: list[float]
+) -> float:
+    """``signal(sample_at) + offset``, the sample linearly interpolated between
+    its two bracketing points. Raises ``ValueError`` (message = the
+    measurement diagnostic) when ``sample_at`` is outside the simulated range."""
+    at = _window_bound(name, level, "sample_at")
+    assert at is not None  # validated as required before any run
+    count = min(len(scale), len(values))
+    if count == 0 or not scale[0] <= at <= scale[count - 1]:
+        span = f"[{scale[0]!r}, {scale[count - 1]!r}] s" if count else "empty"
+        raise ValueError(
+            f"measurement '{name}': crossings.level.sample_at ({at!r} s) is "
+            f"outside the simulated time range {span}"
+        )
+    sampled = values[count - 1]
+    for index in range(1, count):
+        if at <= scale[index]:
+            t0, t1 = scale[index - 1], scale[index]
+            y0, y1 = values[index - 1], values[index]
+            sampled = y1 if t1 == t0 else y0 + (y1 - y0) * (at - t0) / (t1 - t0)
+            break
+    return sampled + float(level["offset"])
+
+
 def extract_corner_crossings(
     measurements_spec: list[dict[str, Any]],
     corner_dir: str,
@@ -396,7 +451,17 @@ def _extract_one(
     name = spec["name"]
     raw_level = body["level"]
     resolved_level: float | None = None
-    if sim_supply_relative.is_supply_relative(raw_level):
+    if is_sampled_offset(raw_level):
+        try:
+            resolved_level = _resolve_sampled_offset(
+                name,
+                raw_level,
+                [point[0] for point in points],
+                [point[1] for point in points],
+            )
+        except ValueError as exc:
+            return CrossingsOutcome(error=str(exc))
+    elif sim_supply_relative.is_supply_relative(raw_level):
         try:
             resolved_level = sim_supply_relative.resolve(
                 raw_level, f"measurement '{name}': crossings.level", supply_v
