@@ -77,6 +77,7 @@ from .erc_disclosure import (
     _disclosed_undeclared_classes,
     _ties_disclosure_reason,
     excuse_floating_gates,
+    floating_gate_provenance,
     floating_gate_work,
     validate_floating_gate_allowed,
 )
@@ -3890,8 +3891,7 @@ def run_erc(
     # that bit, exactly as `provenance.devices[].body_area_um2 == 0.0` is.
     # Always present; `[]` when no declared net asked for one.
     provenance["net_exclusions"] = net_exclusions
-    if fg_allowed:  # issue #4820; omitted when undeclared (byte-identical)
-        provenance["floating_gate_allowed"] = fg_echo
+    provenance.update(floating_gate_provenance(fg_allowed, fg_echo))  # issue #4820
 
     # `provenance.label_layers` (issue #2415): the measured effect of every
     # `stackup[].label_layer` declaration, in stackup order -- the same

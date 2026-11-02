@@ -167,6 +167,7 @@
       "modules": [
         "klayout_tools.cli.erc_cmd",
         "klayout_tools.erc",
+        "klayout_tools.erc_disclosure",
         "klayout_tools.erc_spec"
       ]
     },
@@ -1779,6 +1780,12 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.erc_disclosure",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Issue #4820: floating_gate_allowed spec validation split out of erc.py, which already imports this helper; promote to a public name when _paths is next reworked."
     },
     {
       "consumer": "klayout_tools.place_and_route",

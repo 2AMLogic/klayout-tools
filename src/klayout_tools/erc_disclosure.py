@@ -150,7 +150,7 @@ def excuse_floating_gates(
 
 
 def floating_gate_work(
-    gates: list[dict[str, Any]], excused: set[str], compact: bool
+    gates: list[dict[str, Any]], excused: frozenset[str] | set[str], compact: bool
 ) -> tuple[list[str], list[dict[str, str]]]:
     """``(checked, inapplicable)`` for the per-gate ``erc.floating_gate``
     work. Excused gates are disclosed, never checked; ``compact`` (issue
@@ -169,3 +169,11 @@ def floating_gate_work(
         if g["gate_id"] in excused
     ]
     return checked, inapplicable
+
+
+def floating_gate_provenance(
+    allowed: list[dict[str, Any]], echo: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The ``provenance`` fragment for ``floating_gate_allowed`` (issue
+    #4820); empty when the spec declared none, so output stays byte-identical."""
+    return {"floating_gate_allowed": echo} if allowed else {}
