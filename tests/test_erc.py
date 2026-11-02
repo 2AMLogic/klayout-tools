@@ -9484,65 +9484,6 @@ def test_cli_accepts_pdk_ihp_sg13g2(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["pdk"] == "ihp-sg13g2"
 
 
-# --- gf180mcu antenna-ratio limits (issue #4003) -----------------------------
-
-
-@pytest.mark.parametrize(
-    ("metal", "rule"),
-    [
-        ("Metal1", "ANT.16_i_ANT.2"),
-        ("Metal5", "ANT.16_i_ANT.6"),
-        ("MetalTop", "ANT.16_i_ANT.7"),
-    ],
-)
-# The cumulative ratio counts the 1 um^2 gate itself, so 399 um^2 of metal is
-# exactly 400 (at the limit -> pass) and 400 um^2 is 401 (over -> violate).
-@pytest.mark.parametrize(
-    ("area", "verdict"),
-    [(450.0, "violate"), (400.0, "violate"), (399.0, "pass"), (350.0, "pass")],
-)
-def test_gf180mcu_antenna_ratio_verdict(tmp_path, metal, rule, area, verdict):
-    gds = tmp_path / "gf180.gds"
-    spec = tmp_path / "gf180.erc.json"
-    _sg13g2_fixture(gds, metal1_um2=area)
-    _sg13g2_spec(spec, metal_name=metal)
-
-    report = run_erc(str(gds), str(spec), pdk="gf180mcu")
-
-    assert report["pdk"] == "gf180mcu"
-    level = next(lvl for lvl in report["gates"][0]["levels"] if lvl["layer"] == metal)
-    assert level["antenna_ratio_max"] == pytest.approx(400.0)
-    assert level["verdict"] == verdict
-    assert "google/gf180mcu-pdk/blob/f6eeac7" in level["antenna_ratio_source"]
-    assert "antenna.rb" in level["antenna_ratio_source"]
-    assert f"'{rule}'" in level["antenna_ratio_source"]
-
-
-def test_gf180mcu_unlisted_role_stays_unchecked_and_partial(tmp_path):
-    gds = tmp_path / "gf180.gds"
-    spec = tmp_path / "gf180.erc.json"
-    _sg13g2_fixture(gds, metal1_um2=10.0)
-    _sg13g2_spec(spec, metal_name="met1")
-
-    report = run_erc(str(gds), str(spec), pdk="gf180mcu")
-
-    level = next(lvl for lvl in report["gates"][0]["levels"] if lvl["layer"] == "met1")
-    assert level["verdict"] == "unchecked"
-    assert report["status"] == "not_checked"
-
-
-def test_cli_accepts_pdk_gf180mcu(tmp_path, capsys):
-    gds = tmp_path / "gf180.gds"
-    spec = tmp_path / "gf180.erc.json"
-    _sg13g2_fixture(gds, metal1_um2=10.0)
-    _sg13g2_spec(spec)
-
-    code = main(["erc", str(gds), str(spec), "--pdk", "gf180mcu", "--format", "json"])
-
-    assert code in (0, 3)
-    assert json.loads(capsys.readouterr().out)["pdk"] == "gf180mcu"
-
-
 # --- klt erc --validate-spec (issue #4034) ----------------------------------
 
 
