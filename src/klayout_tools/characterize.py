@@ -65,6 +65,30 @@ from . import liberty_writer, sim
 from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
+from .characterize_cards import _POWER_CARDS, measurement_cards, power_cards
+from .characterize_constraints import (
+    ConstraintError,
+    resolve_constrained_pins,
+    resolve_constraint_options,
+    run_constraints,
+)
+from .characterize_instances import (
+    _capacitance_instance_lines,
+    _capacitance_side_state,
+    _full_side_state,
+    _leakage_instance_lines,
+    _leakage_states,
+    _metered_rail_nodes,
+    _rail_nodes,
+)
+from .characterize_sequential import (
+    SequentialSpecError,
+    clock_pwl_line,
+    data_pwl_line,
+    derive_sequential_arcs,
+    resolve_sequential,
+    stimulus_schedule,
+)
 from .env_provenance import repo_relative_path
 from .pdk import PdkNotFoundError, find_pdk
 
@@ -350,7 +374,60 @@ def _characterize_cell(
     leakage = _build_leakage(plan, values, corner)
     pin_capacitance = _build_pin_capacitance(plan, values, corner)
 
+    def run_deck(text: str, measurements: list, label: str, stop_ns: float) -> dict:
+        deck_dir = os.path.join(work_dir, "constraints", label)
+        os.makedirs(deck_dir, exist_ok=True)
+        deck_path = os.path.join(deck_dir, "testbench.spice")
+        with open(deck_path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        deck_plan = {
+            "measurements": measurements,
+            "window": {**plan["window"], "stop_ns": stop_ns},
+        }
+        deck_request = _build_sim_request(
+            request=request,
+            request_dir=request_dir,
+            testbench_path=deck_path,
+            corner=corner,
+            plan=deck_plan,
+            options=options,
+            keep_artifacts=keep_artifacts,
+        )
+        request_path = os.path.join(deck_dir, "sim-request.json")
+        with open(request_path, "w", encoding="utf-8") as handle:
+            json.dump(deck_request, handle, indent=2)
+            handle.write("\n")
+        try:
+            report = sim.run_sim(
+                request_path,
+                artifacts_dir=os.path.join(deck_dir, "sim"),
+                backend=backend,
+            )
+        except sim.SimError as exc:
+            raise CharacterizeError(f"constraint simulation failed: {exc}") from exc
+        return _extract_measurements(report, request_path, allow_missing=True)
+
+    constraints = None
+    if cell["constrained_pins"]:
+        try:
+            constraints = run_constraints(
+                cell=cell,
+                arcs=arcs,
+                grid_ns=grid["input_transition_ns"],
+                rail_nodes=_rail_nodes(cell),
+                vdd=corner["supply_v"],
+                thresholds=thresholds,
+                ramps_ns=options["ramps_ns"],
+                settle_ns=options["settle_ns"],
+                load_pf=min(grid["output_load_pf"]),
+                options=options["constraint"],
+                run_deck=run_deck,
+            )
+        except ConstraintError as exc:
+            raise CharacterizeError(str(exc)) from exc
+
     return {
+        "constraints": constraints,
         "cell": cell,
         "arcs": arcs,
         "plan": plan,
@@ -476,6 +553,15 @@ def _resolve_cell_spec(
 
     pins = _resolve_pins(spec, subckt, where)
     power = _resolve_power_pins(spec, terminals, pins, where)
+    try:
+        clock_pin, clock_edge, static_inputs = resolve_sequential(spec, pins, where)
+    except SequentialSpecError as exc:
+        raise CharacterizeError(str(exc)) from exc
+
+    try:
+        constrained_pins = resolve_constrained_pins(spec, pins, clock_pin, where)
+    except ConstraintError as exc:
+        raise CharacterizeError(str(exc)) from exc
 
     declared = {pin["name"] for pin in pins} | set(power.values())
     missing = [terminal for terminal in terminals if terminal not in declared]
@@ -507,6 +593,10 @@ def _resolve_cell_spec(
         ),
         "area": spec.get("area"),
         "where": where,
+        "clock_pin": clock_pin,
+        "clock_edge": clock_edge,
+        "static_inputs": static_inputs,
+        "constrained_pins": constrained_pins,
     }
 
 
@@ -791,7 +881,12 @@ def _resolve_options(
     keep_artifacts = spec.get("keep_artifacts", False)
     if not isinstance(keep_artifacts, bool):
         raise CharacterizeError("request.options.keep_artifacts must be a boolean")
+    try:
+        constraint_options = resolve_constraint_options(spec)
+    except ConstraintError as exc:
+        raise CharacterizeError(str(exc)) from exc
     return {
+        "constraint": constraint_options,
         "settle_ns": settle_ns,
         "tran_step_ns": step_ns,
         "timeout_s": timeout_s,
@@ -848,6 +943,11 @@ def _resolve_arcs_for(
 ) -> tuple[DerivedArc, ...]:
     if override is not None:
         return _arcs_from_request(override, cell, where)
+    if cell["clock_pin"] is not None:
+        try:
+            return derive_sequential_arcs(cell)
+        except SequentialSpecError as exc:
+            raise CharacterizeError(str(exc)) from exc
 
     arcs: list[DerivedArc] = []
     for pin in cell["pins"]:
@@ -1038,10 +1138,10 @@ def _build_stimulus_plan(
     ramps = options["ramps_ns"]
     settle = options["settle_ns"]
     max_ramp = max(ramps)
-    rise_start = settle
-    fall_start = rise_start + max_ramp + settle
-    stop_ns = fall_start + max_ramp + settle
-
+    sequential = cell["clock_pin"] is not None
+    rise_start, fall_start, stop_ns, clock_times, pulse_w = stimulus_schedule(
+        sequential, settle, max_ramp
+    )
     lines = [
         "* klt characterize -- generated testbench, do not edit",
         f"* cell: {cell['name']} (.subckt {cell['subckt']})",
@@ -1063,22 +1163,23 @@ def _build_stimulus_plan(
     lines.append(f".include {cell['netlist_path']}")
     lines.append(f"Vdd vdd 0 DC {_spice_number(vdd)}")
 
-    vdd_terminal = cell["power_pins"]["vdd"]
-    gnd_terminal = cell["power_pins"]["gnd"]
-    rail_nodes = {vdd_terminal: "vdd", gnd_terminal: "0"}
-    for key, terminal in cell["power_pins"].items():
-        if key not in ("vdd", "gnd"):
-            rail_nodes.setdefault(terminal, "vdd" if "v" in key.lower() else "0")
+    rail_nodes = _rail_nodes(cell)
 
     # Integration windows: the first input edge (rising) owns
     # [rise_start, fall_start], the second (falling) owns [fall_start, stop].
     # Each window starts before its own edge and ends after the output has
     # settled (the settle check below enforces that), so the whole switching
     # event -- short-circuit current included -- lands inside it.
-    windows = {
-        "RISE": (rise_start, fall_start),
-        "FALL": (fall_start, stop_ns),
-    }
+    if sequential:
+        windows = {
+            "RISE": (rise_start, rise_start + pulse_w),
+            "FALL": (fall_start, fall_start + pulse_w),
+        }
+    else:
+        windows = {
+            "RISE": (rise_start, fall_start),
+            "FALL": (fall_start, stop_ns),
+        }
 
     measurements: list[dict[str, Any]] = []
     points: list[dict[str, Any]] = []
@@ -1100,15 +1201,19 @@ def _build_stimulus_plan(
                         load_pf=load_pf,
                         rise_start=rise_start,
                         fall_start=fall_start,
+                        clock_times=clock_times,
+                        clock_edge=cell["clock_edge"],
                     )
                 )
-                cards = _measurement_cards(
+                cards = measurement_cards(
                     tag=tag,
                     arc=arc,
                     vdd=vdd,
                     thresholds=thresholds,
+                    clock_edge=cell["clock_edge"],
+                    edge_starts=(rise_start, fall_start),
                 )
-                cards.extend(_power_cards(tag=tag, arc=arc, windows=windows))
+                cards.extend(power_cards(tag=tag, arc=arc, windows=windows))
                 measurements.extend(cards)
                 points.append(
                     {
@@ -1222,36 +1327,6 @@ def _build_stimulus_plan(
     }
 
 
-def _full_side_state(
-    arc: DerivedArc, cell: dict[str, Any]
-) -> tuple[tuple[str, bool], ...]:
-    """Every input pin other than the arc's related pin, with the constant it
-    is held at.
-
-    Pins the output's ``function`` does not reference (a second output's
-    inputs on a multi-output cell, an unused pin) are held **low** -- a
-    floating input on a CMOS gate is not a valid operating point, so leaving
-    one undriven is never an option.
-    """
-    derived = arc.side_input_map
-    return tuple(
-        (pin, derived.get(pin, False))
-        for pin in cell["input_pins"]
-        if pin != arc.related_pin
-    )
-
-
-def _metered_rail_nodes(
-    tag: str, cell: dict[str, Any], rail_nodes: dict[str, str]
-) -> dict[str, str]:
-    """``rail_nodes`` with the cell's primary ``vdd``/``gnd`` terminals moved
-    onto this instance's private ammeter nodes."""
-    nodes = dict(rail_nodes)
-    nodes[cell["power_pins"]["vdd"]] = f"pd_{tag}"
-    nodes[cell["power_pins"]["gnd"]] = f"pg_{tag}"
-    return nodes
-
-
 def _instance_lines(
     *,
     tag: str,
@@ -1264,15 +1339,32 @@ def _instance_lines(
     load_pf: float,
     rise_start: float,
     fall_start: float,
+    clock_times: dict[str, float] | None = None,
+    clock_edge: str = "rising",
 ) -> list[str]:
     side_map = dict(side_state)
+    low_map = dict(arc.fall_side_inputs)
     node_of: dict[str, str] = {}
+    data_sources: list[str] = []
     for pin in cell["pins"]:
         name = pin["name"]
         if pin["direction"] == "output":
             node_of[name] = f"o_{tag}_{_slug(name)}"
         elif name == arc.related_pin:
             node_of[name] = f"i_{tag}"
+        elif clock_times is not None and low_map.get(name, False) != side_map[name]:
+            node_of[name] = f"d_{tag}_{_slug(name)}"
+            data_sources.append(
+                data_pwl_line(
+                    f"V{tag}d_{_slug(name)}",
+                    node_of[name],
+                    low=low_map[name],
+                    high=side_map[name],
+                    vdd=vdd,
+                    ramp_ns=ramp_ns,
+                    times=clock_times,
+                )
+            )
         else:
             node_of[name] = "vdd" if side_map[name] else "0"
 
@@ -1280,12 +1372,26 @@ def _instance_lines(
     nodes = [
         node_of.get(terminal) or metered[terminal] for terminal in cell["terminals"]
     ]
+    if clock_times is None:
+        source = (
+            f"V{tag} i_{tag} 0 PWL(0 0 "
+            f"{_spice_number(rise_start)}n 0 "
+            f"{_spice_number(rise_start + ramp_ns)}n {_spice_number(vdd)} "
+            f"{_spice_number(fall_start)}n {_spice_number(vdd)} "
+            f"{_spice_number(fall_start + ramp_ns)}n 0)"
+        )
+    else:
+        source = clock_pwl_line(
+            f"V{tag}",
+            f"i_{tag}",
+            vdd=vdd,
+            ramp_ns=ramp_ns,
+            times=clock_times,
+            edge=clock_edge,
+        )
     lines = [
-        f"V{tag} i_{tag} 0 PWL(0 0 "
-        f"{_spice_number(rise_start)}n 0 "
-        f"{_spice_number(rise_start + ramp_ns)}n {_spice_number(vdd)} "
-        f"{_spice_number(fall_start)}n {_spice_number(vdd)} "
-        f"{_spice_number(fall_start + ramp_ns)}n 0)",
+        source,
+        *data_sources,
         # 0 V ammeters: i(Vpd) is the current the supply delivers INTO the
         # cell's vdd pin, i(Vpg) the current flowing OUT of its gnd pin.
         f"Vpd{tag} vdd pd_{tag} DC 0",
@@ -1297,245 +1403,6 @@ def _instance_lines(
             f"C{tag}_{_slug(output)} {node_of[output]} 0 {_spice_number(load_pf)}p"
         )
     return lines
-
-
-def _capacitance_side_state(
-    pin_name: str, arcs: tuple[DerivedArc, ...], cell: dict[str, Any]
-) -> tuple[tuple[str, bool], ...]:
-    """The state the cell's *other* inputs are held at while ``pin_name``'s
-    capacitance is measured.
-
-    The acceptance bar (issue #2512) is "the same side-input states the
-    timing arcs use", so this reuses the first derived arc whose
-    ``related_pin`` is this pin -- the same state, in the same deterministic
-    order, that arc's delay tables were measured at. That matters: an input
-    of a NAND held at the *controlling* state would see no output movement
-    and therefore no Miller charge, reporting a capacitance well below the
-    one the pin actually presents in the situation a timing analysis cares
-    about.
-
-    An input pin no arc names (an unused pin, or a second output's input on a
-    multi-output cell) has no such state; its neighbours are held low, the
-    same fallback :func:`_full_side_state` applies to an unreferenced pin.
-    """
-    for arc in arcs:
-        if arc.related_pin == pin_name:
-            return _full_side_state(arc, cell)
-    return tuple((pin, False) for pin in cell["input_pins"] if pin != pin_name)
-
-
-def _capacitance_instance_lines(
-    *,
-    tag: str,
-    cell: dict[str, Any],
-    pin_name: str,
-    side_state: tuple[tuple[str, bool], ...],
-    rail_nodes: dict[str, str],
-    vdd: float,
-    ramp_ns: float,
-    load_pf: float,
-    rise_start: float,
-    fall_start: float,
-) -> list[str]:
-    """One never-metered-supply instance whose single job is to let the charge
-    drawn by ``pin_name`` be integrated.
-
-    The pin is fed from a ramp source through a 0 V ammeter (``Vcm<tag>``),
-    so ``i(Vcm<tag>)`` is the current flowing *into* the pin; its integral
-    over an input edge is the charge that edge moved. Supplies go straight to
-    the shared rails -- this instance contributes to no power or leakage
-    measurement, so it needs no ammeter pair of its own.
-    """
-    side_map = dict(side_state)
-    node_of: dict[str, str] = {}
-    for pin in cell["pins"]:
-        name = pin["name"]
-        if pin["direction"] == "output":
-            node_of[name] = f"o_{tag}_{_slug(name)}"
-        elif name == pin_name:
-            node_of[name] = f"ci_{tag}"
-        else:
-            node_of[name] = "vdd" if side_map[name] else "0"
-
-    nodes = [
-        node_of.get(terminal) or rail_nodes[terminal] for terminal in cell["terminals"]
-    ]
-    lines = [
-        f"Vc{tag} cs_{tag} 0 PWL(0 0 "
-        f"{_spice_number(rise_start)}n 0 "
-        f"{_spice_number(rise_start + ramp_ns)}n {_spice_number(vdd)} "
-        f"{_spice_number(fall_start)}n {_spice_number(vdd)} "
-        f"{_spice_number(fall_start + ramp_ns)}n 0)",
-        # 0 V ammeter in series with the pin: i(Vcm<tag>) is the current the
-        # source delivers INTO the pin.
-        f"Vcm{tag} cs_{tag} ci_{tag} DC 0",
-        f"X{tag} {' '.join(nodes)} {cell['subckt']}",
-    ]
-    for output in cell["output_pins"]:
-        lines.append(
-            f"C{tag}_{_slug(output)} {node_of[output]} 0 {_spice_number(load_pf)}p"
-        )
-    return lines
-
-
-def _leakage_states(cell: dict[str, Any]) -> tuple[tuple[tuple[str, bool], ...], ...]:
-    """Every assignment of the cell's input pins, in a fixed order (the first
-    input is the most significant bit), each as ``((pin, value), ...)``.
-
-    Exhaustive over ``2**n`` for the same reason arc derivation is: a
-    standard cell has a handful of inputs, and a vendor ``.lib`` reports one
-    ``leakage_power`` group per state.
-    """
-    inputs = cell["input_pins"]
-    states = []
-    for code in range(2 ** len(inputs)):
-        states.append(
-            tuple(
-                (pin, bool((code >> (len(inputs) - 1 - position)) & 1))
-                for position, pin in enumerate(inputs)
-            )
-        )
-    return tuple(states)
-
-
-def _leakage_instance_lines(
-    *,
-    tag: str,
-    cell: dict[str, Any],
-    state: tuple[tuple[str, bool], ...],
-    rail_nodes: dict[str, str],
-) -> list[str]:
-    values = dict(state)
-    node_of: dict[str, str] = {}
-    for pin in cell["pins"]:
-        name = pin["name"]
-        if pin["direction"] == "output":
-            node_of[name] = f"o_{tag}_{_slug(name)}"
-        else:
-            # A high input is tied to the *metered* supply node, not the
-            # shared rail: its gate leakage is drawn from the supply too, and
-            # static power is every source's V * I -- a low input's source
-            # sits at 0 V and delivers none. Measured on IHP sg13g2_inv_1
-            # with A high, routing the input around the ammeter under-reports
-            # the state's leakage by roughly a third (the NMOS gate current).
-            node_of[name] = f"pl_{tag}" if values[name] else "0"
-    nodes = []
-    for terminal in cell["terminals"]:
-        if terminal in node_of:
-            nodes.append(node_of[terminal])
-        elif terminal == cell["power_pins"]["vdd"]:
-            nodes.append(f"pl_{tag}")
-        else:
-            nodes.append(rail_nodes[terminal])
-    return [
-        f"Vpl{tag} vdd pl_{tag} DC 0",
-        f"X{tag} {' '.join(nodes)} {cell['subckt']}",
-    ]
-
-
-def _measurement_cards(
-    *,
-    tag: str,
-    arc: DerivedArc,
-    vdd: float,
-    thresholds: liberty_writer.Thresholds,
-) -> list[dict[str, Any]]:
-    output_node = f"o_{tag}_{_slug(arc.output_pin)}"
-    input_node = f"i_{tag}"
-
-    # Which *input* edge produces the rising output edge, under this arc's
-    # own measured polarity.
-    rise_input_edge = "RISE" if arc.measured_sense == "positive_unate" else "FALL"
-    fall_input_edge = "FALL" if arc.measured_sense == "positive_unate" else "RISE"
-
-    v_in_rise = vdd * thresholds.input_threshold_pct_rise / 100.0
-    v_in_fall = vdd * thresholds.input_threshold_pct_fall / 100.0
-    v_out_rise = vdd * thresholds.output_threshold_pct_rise / 100.0
-    v_out_fall = vdd * thresholds.output_threshold_pct_fall / 100.0
-    v_slew_lo_rise = vdd * thresholds.slew_lower_threshold_pct_rise / 100.0
-    v_slew_hi_rise = vdd * thresholds.slew_upper_threshold_pct_rise / 100.0
-    v_slew_lo_fall = vdd * thresholds.slew_lower_threshold_pct_fall / 100.0
-    v_slew_hi_fall = vdd * thresholds.slew_upper_threshold_pct_fall / 100.0
-
-    trig_rise_v = v_in_rise if rise_input_edge == "RISE" else v_in_fall
-    trig_fall_v = v_in_rise if fall_input_edge == "RISE" else v_in_fall
-
-    cards = [
-        (
-            f"{tag}_dr",
-            f"TRIG v({input_node}) VAL={_spice_number(trig_rise_v)} "
-            f"{rise_input_edge}=1 "
-            f"TARG v({output_node}) VAL={_spice_number(v_out_rise)} RISE=1",
-        ),
-        (
-            f"{tag}_df",
-            f"TRIG v({input_node}) VAL={_spice_number(trig_fall_v)} "
-            f"{fall_input_edge}=1 "
-            f"TARG v({output_node}) VAL={_spice_number(v_out_fall)} FALL=1",
-        ),
-        (
-            f"{tag}_tr",
-            f"TRIG v({output_node}) VAL={_spice_number(v_slew_lo_rise)} RISE=1 "
-            f"TARG v({output_node}) VAL={_spice_number(v_slew_hi_rise)} RISE=1",
-        ),
-        (
-            f"{tag}_tf",
-            f"TRIG v({output_node}) VAL={_spice_number(v_slew_hi_fall)} FALL=1 "
-            f"TARG v({output_node}) VAL={_spice_number(v_slew_lo_fall)} FALL=1",
-        ),
-    ]
-    return [
-        {"name": name, "spice": f".meas tran {name} {body}", "unit": "s"}
-        for name, body in cards
-    ]
-
-
-#: The four supply-charge integrals per grid point, and what each measures:
-#: ``(suffix, ammeter prefix, output edge)``. ``qv*`` is charge drawn from
-#: the vdd rail, ``qg*`` charge returned to the gnd rail, over the window
-#: of the input edge that produces the named *output* edge.
-_POWER_CARDS = (
-    ("qvr", "Vpd", "rise"),
-    ("qgr", "Vpg", "rise"),
-    ("qvf", "Vpd", "fall"),
-    ("qgf", "Vpg", "fall"),
-)
-
-
-def _power_cards(
-    *,
-    tag: str,
-    arc: DerivedArc,
-    windows: dict[str, tuple[float, float]],
-) -> list[dict[str, Any]]:
-    """``INTEG`` cards for the four per-edge rail charges of one grid point.
-
-    The output-rise window is the *input* edge's window that produces it --
-    the rising input's for a positive-unate measured polarity, the falling
-    input's otherwise -- mirroring :func:`_measurement_cards`'s trigger
-    choice so a table can never pair one edge's delay with the other edge's
-    energy.
-    """
-    rise_input_edge = "RISE" if arc.measured_sense == "positive_unate" else "FALL"
-    fall_input_edge = "FALL" if arc.measured_sense == "positive_unate" else "RISE"
-    window_of = {
-        "rise": windows[rise_input_edge],
-        "fall": windows[fall_input_edge],
-    }
-    cards = []
-    for suffix, ammeter, edge in _POWER_CARDS:
-        start, stop = window_of[edge]
-        cards.append(
-            {
-                "name": f"{tag}_{suffix}",
-                "spice": (
-                    f".meas tran {tag}_{suffix} INTEG i({ammeter}{tag}) "
-                    f"FROM={_spice_number(start)}n TO={_spice_number(stop)}n"
-                ),
-                "unit": "C",
-            }
-        )
-    return cards
 
 
 def _spice_number(value: float) -> str:
@@ -1635,8 +1502,8 @@ def _rebase_models(models: dict[str, Any], request_dir: str) -> dict[str, Any]:
 
 
 def _extract_measurements(
-    sim_report: dict[str, Any], sim_report_path: str
-) -> dict[str, float]:
+    sim_report: dict[str, Any], sim_report_path: str, allow_missing: bool = False
+) -> dict[str, Any]:
     corners = sim_report.get("corners") or []
     if len(corners) != 1:
         raise CharacterizeError(
@@ -1644,7 +1511,13 @@ def _extract_measurements(
             "`klt characterize` is single-corner by construction"
         )
     entry = corners[0]
-    if entry.get("status") != "pass":
+    # A constraint probe that fails to capture leaves its `.meas` without a
+    # crossing; `klt sim` grades that corner `error` with only `measurement`
+    # diagnostics. That is the probe's answer, not a simulation failure.
+    only_missing_meas = allow_missing and all(
+        d.get("code") == "measurement" for d in entry.get("diagnostics") or []
+    )
+    if entry.get("status") != "pass" and not only_missing_meas:
         diagnostics = entry.get("diagnostics") or []
         detail = "; ".join(
             f"{item.get('code')}: {item.get('message')}" for item in diagnostics[:3]
@@ -1655,12 +1528,16 @@ def _extract_measurements(
             + (f" ({detail})" if detail else "")
             + f" -- full simulation report: {sim_report_path}"
         )
-    values: dict[str, float] = {}
+    values: dict[str, Any] = {}
     missing: list[str] = []
     for measurement in entry.get("measurements") or []:
         value = measurement.get("value")
         if value is None:
-            missing.append(measurement["name"])
+            # Constraint probes treat "no crossing" as a failed capture.
+            if allow_missing:
+                values[measurement["name"]] = None
+            else:
+                missing.append(measurement["name"])
             continue
         values[measurement["name"]] = float(value)
     if missing:
@@ -2074,6 +1951,7 @@ def _build_liberty_cell(
                 cell_fall=per_table["cell_fall"],
                 rise_transition=per_table["rise_transition"],
                 fall_transition=per_table["fall_transition"],
+                timing_type=arc.timing_type,
             )
         )
         power_by_output.setdefault(arc.output_pin, []).append(
@@ -2085,6 +1963,7 @@ def _build_liberty_cell(
         )
 
     measured_caps = result["pin_capacitance"]
+    constraint_arcs = (result.get("constraints") or {}).get("liberty", {})
     pins = []
     for pin in cell["pins"]:
         resolved = _resolve_pin_capacitance(pin, measured_caps)
@@ -2093,7 +1972,13 @@ def _build_liberty_cell(
                 name=pin["name"],
                 direction=pin["direction"],
                 capacitance_pf=resolved["capacitance_pf"],
-                function=pin["function"],
+                # A sequential output's `function` is a next-state expression,
+                # not a Liberty pin function -- never emit it as one.
+                function=(
+                    None
+                    if cell["clock_pin"] is not None and pin["direction"] == "output"
+                    else pin["function"]
+                ),
                 max_capacitance_pf=(
                     max(grid["output_load_pf"])
                     if pin["direction"] == "output"
@@ -2115,6 +2000,7 @@ def _build_liberty_cell(
                 ),
                 arcs=tuple(arcs_by_output.get(pin["name"], ())),
                 internal_power=tuple(power_by_output.get(pin["name"], ())),
+                constraints=constraint_arcs.get(pin["name"], ()),
             )
         )
     leakage = result["leakage"]
@@ -2338,6 +2224,7 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
                 "related_pin": arc.related_pin,
                 "timing_sense": arc.timing_sense,
                 "measured_sense": arc.measured_sense,
+                "timing_type": arc.timing_type,
                 "side_inputs": {
                     pin: value for pin, value in _full_side_state(arc, cell)
                 },
@@ -2350,6 +2237,7 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
             for index, arc in enumerate(result["arcs"])
         ],
         "leakage": result["leakage"],
+        "constraints": (result.get("constraints") or {}).get("entries", []),
         "simulation": {
             "testbench": result["testbench_path"],
             "request": result["sim_request_path"],

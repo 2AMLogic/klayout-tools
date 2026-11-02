@@ -848,14 +848,14 @@ def test_run_synthesize_stubbed_success(tmp_path, monkeypatch):
     # The fabricated `_make_pdk_install` liberty carries no
     # `cell_leakage_power` entries at all (issue #1626) -- `_compute_leakage`
     # must degrade to `None`/`None`, never a fabricated/partial number.
-    assert report["leakage_power_nw"] is None
-    assert report["leakage_by_type_nw"] is None
+    assert report["leakage_power_nw"] is report["leakage_by_type_nw"] is None
 
     assert report["timing"] == {
         "source": "abc_stime",
         "wire_load": None,
         "critical_path_ps": 2485.93,
         "delay_target_ps": None,
+        "regions": [{"module": None, "critical_path_ps": 2485.93}],
     }
 
     # The `sta` field (issue #925) always exists in the response shape, but

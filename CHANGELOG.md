@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --attest 1` binds the whole input set** (issue #4764,
+  documented in [`docs/cli/signoff.md`](docs/cli/signoff.md)): the item-1
+  envelope now emits `provenance.input.paths` (every inventory source, every
+  derived file, and the inventory) and drops `provenance.input.path`;
+  `provenance.input.content_hash` becomes the combined set digest. A source
+  edit now grades `stale_evidence` in `--manifest`. **Existing manifests
+  citing an item-1 envelope must re-pin `content_hash`.** No `schema_version`
+  bump: the shape stays within the generic-evidence set binding the grader
+  already accepts (#3044). Items 9/10 are unchanged.
+
+- **`klt characterize` clock-to-output arcs** (issue #4755, documented in
+  [`docs/cli/characterize.md`](docs/cli/characterize.md)): a cell declaring
+  `cell.clock_pin` (plus optional `clock_edge`, `static_inputs`) now yields one
+  `timing_type : rising_edge`/`falling_edge` arc per output pin; the response
+  arc gains an additive `timing_type` field. Cells without `clock_pin` are
+  still refused. Setup/hold remain unsupported (#4756).
+
 - **`klt economy --attribute`** (issue #4660, documented in
   [`docs/cli/economy.md`](docs/cli/economy.md)): opt-in additive `attribution`
   block partitioning the top bbox into direct-child instance bboxes and

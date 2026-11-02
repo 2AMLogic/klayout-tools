@@ -138,6 +138,7 @@ from .sim import (
     _resolve_models_lib,
     _resolve_netlist_include,
     _resolve_osdi_preload,
+    _resolve_param_file,
     _scale_supply_waveforms,
     _supply_alter_lines,
 )
@@ -1520,11 +1521,10 @@ def run_op_sanity(
     models = request.get("models") or {}
     models_lib: str | None = None
     try:
-        # Issue #2522: resolve (and existence-check) any per-section corner
-        # library this point's bundle names, then the request's own
-        # `models.lib` -- needed only when some selected section actually
-        # reads from it (`_needs_models_lib`).
+        # Issues #2522/#4759: resolve per-section corner libs and
+        # `models.param_file`, then `models.lib` iff a section reads it.
         _resolve_corner_section_libs(biased_points, models, request_dir)
+        _resolve_param_file([point, *biased_points], models, request_dir)
         if any(_needs_models_lib(biased) for biased in biased_points):
             models_lib = _resolve_models_lib(models, request_dir)
     except SimError as exc:

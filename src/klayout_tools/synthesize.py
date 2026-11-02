@@ -276,6 +276,7 @@ from .sta import StaError, compute_critical_path
 # `ADDER_ARCHITECTURES`, which moved there with its only callers.
 # `synthesize_arithmetic.py` imports this module's own helpers back at call
 # time, never at load time, so this import direction is the only one.
+from .synthesize_abc_timing import parse_abc_regions
 from .synthesize_arithmetic import ADDER_ARCHITECTURES as ADDER_ARCHITECTURES
 from .synthesize_arithmetic import (
     _candidate_measurement,
@@ -337,15 +338,6 @@ _ADDER_MODES = ("auto", DEFAULT_ADDER_LABEL)
 #: measurement is dominated by mapping noise -- the issue's own "sub-16-bit
 #: micro-optimisation" non-goal, with a little headroom.
 DEFAULT_ADDER_MIN_WIDTH = 8
-
-#: ABC's own ``stime -p`` summary line, as it reaches the Yosys log (and,
-#: via ``tee -q -o``, the captured ABC log this module parses):
-#: ``ABC: WireLoad = "none"  Gates = 297 ( 5.7 %)   Cap = 6.2 ff ( 12.4 %)
-#: Area = 1986.91 ( 66.3 %)   Delay = 2485.93 ps  ( 32.3 %)``. Verified live
-#: (Yosys 0.68+48, sky130_fd_sc_hd, issue #807).
-_ABC_STIME_RE = re.compile(
-    r'WireLoad\s*=\s*"(?P<wire_load>[^"]*)".*?Delay\s*=\s*(?P<delay_ps>[\d.]+)\s*ps'
-)
 
 #: Per-cell-library ABC constraint inputs -- ``(set_driving_cell cell,
 #: set_load femtofarads)`` -- written to the ``<top>_abc.constr`` file this
@@ -3484,7 +3476,11 @@ def _read_abc_timing(
     When a run produces several ``stime`` reports (Yosys invokes ABC once
     per combinational region), the **maximum** reported delay is used --
     the critical path across the whole design, not whichever region
-    happened to be mapped last.
+    happened to be mapped last. Every report is also listed, in log order, as
+    ``regions: [{"module": "top", "critical_path_ps": 130.4}, ...]``
+    (issue #4743); ``module`` is the ``Extracting gate netlist of module``
+    banner preceding that ``stime`` line, or ``null`` when the log carries
+    none. The maximum over ``regions`` equals ``critical_path_ps``.
     """
     if abc_log_path is None or not os.path.isfile(abc_log_path):
         return None
@@ -3494,23 +3490,20 @@ def _read_abc_timing(
     except OSError:
         return None
 
-    best: tuple[float, str] | None = None
-    for match in _ABC_STIME_RE.finditer(log_text):
-        try:
-            delay_ps = float(match.group("delay_ps"))
-        except ValueError:  # pragma: no cover - regex only matches numbers
-            continue
-        if best is None or delay_ps > best[0]:
-            best = (delay_ps, match.group("wire_load"))
-    if best is None:
+    regions = parse_abc_regions(log_text)
+    if not regions:
         return None
 
-    critical_path_ps, wire_load = best
+    worst = max(regions, key=lambda r: r.delay_ps)
+    critical_path_ps, wire_load = worst.delay_ps, worst.wire_load
     return {
         "source": "abc_stime",
         "wire_load": None if wire_load.lower() == "none" else wire_load,
         "critical_path_ps": critical_path_ps,
         "delay_target_ps": delay_target_ps,
+        "regions": [
+            {"module": r.module, "critical_path_ps": r.delay_ps} for r in regions
+        ],
     }
 
 
