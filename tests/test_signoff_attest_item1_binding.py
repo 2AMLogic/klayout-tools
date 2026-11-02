@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import signoff as signoff_module
+from klayout_tools._provenance import sha256_file
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import build_attestation
 from test_signoff import (
@@ -135,3 +136,24 @@ def test_digest_changes_when_any_member_is_edited(tmp_path, edit):
         after["provenance"]["input"]["content_hash"]
         != before["provenance"]["input"]["content_hash"]
     )
+
+
+def test_envelope_hash_pin_explains_what_to_pin(tmp_path):
+    repo, _inventory, envelope, manifest = _attested(tmp_path)
+    evidence = repo / "evidence" / "item1.json"
+    manifest["evidence"]["1"]["content_hash"] = "sha256:" + sha256_file(str(evidence))
+    item = _item(build_tier_report(manifest), 1)
+    assert item["reason"] == "stale_evidence"
+    detail = item["detail"]
+    assert detail["hash_check"]["match"] is False
+    assert detail["pin_is_envelope_file_hash"] is True
+    assert "attest/item1.json" in detail["compared_against"]
+    assert "not the hash of the evidence envelope file" in detail["hint"]
+
+
+def test_other_stale_pin_has_hint_without_envelope_flag(tmp_path):
+    repo, _inventory, _envelope, manifest = _attested(tmp_path)
+    manifest["evidence"]["1"]["content_hash"] = "sha256:" + "0" * 64
+    detail = _item(build_tier_report(manifest), 1)["detail"]
+    assert "pin_is_envelope_file_hash" not in detail
+    assert detail["hint"].startswith("content_hash must be")
