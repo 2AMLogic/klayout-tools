@@ -772,7 +772,9 @@ def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
 def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise PlaceAndRouteError(f"{where} must be a JSON object")
-    unknown = sorted(set(entry) - {"name", "instances", "max_extent_um"})
+    unknown = sorted(
+        set(entry) - {"name", "instances", "max_extent_um", "region_um", "order"}
+    )
     if unknown:
         raise PlaceAndRouteError(f"{where} has unknown key(s): {', '.join(unknown)}")
     name = entry.get("name")
@@ -795,7 +797,60 @@ def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str
     if bound is not None:
         _check_max_extent_um(bound, where)
         item["max_extent_um"] = bound
+    region = entry.get("region_um")
+    if region is not None:
+        _check_region_um(region, where)
+        item["region_um"] = list(region)
+    order = entry.get("order")
+    if order is not None:
+        item["order"] = _check_group_order(order, instances, where)
     return item
+
+
+def _is_finite_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
+
+
+def _check_region_um(region: Any, where: str) -> None:
+    if not (
+        isinstance(region, list)
+        and len(region) == 4
+        and all(_is_finite_number(v) for v in region)
+        and region[0] < region[2]
+        and region[1] < region[3]
+    ):
+        raise PlaceAndRouteError(
+            f"{where}.region_um must be [x0, y0, x1, y1] finite numbers "
+            "with x0 < x1 and y0 < y1"
+        )
+
+
+def _check_group_order(order: Any, instances: list[str], where: str) -> dict[str, Any]:
+    if not isinstance(order, dict):
+        raise PlaceAndRouteError(f"{where}.order must be a JSON object")
+    unknown = sorted(set(order) - {"axis", "pitch_um"})
+    if unknown:
+        raise PlaceAndRouteError(
+            f"{where}.order has unknown key(s): {', '.join(unknown)}"
+        )
+    axis = order.get("axis")
+    if axis not in ("x", "y"):
+        raise PlaceAndRouteError(f"{where}.order.axis must be 'x' or 'y'")
+    result: dict[str, Any] = {"axis": axis}
+    pitch = order.get("pitch_um")
+    if pitch is not None:
+        if not _is_finite_number(pitch) or pitch <= 0:
+            raise PlaceAndRouteError(f"{where}.order.pitch_um must be a number > 0")
+        result["pitch_um"] = pitch
+    if any(ch in name for name in instances for ch in "*?"):
+        raise PlaceAndRouteError(
+            f"{where}.order requires exact instance names (no glob patterns)"
+        )
+    return result
 
 
 def _check_max_extent_um(bound: Any, where: str) -> None:
