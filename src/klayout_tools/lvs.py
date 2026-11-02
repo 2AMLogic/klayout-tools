@@ -190,7 +190,6 @@ from .lvs_gate_level import (
     _apply_gate_level_port_aliases,
     _boundary_supply_nets,  # noqa: F401
     _circuit_pin_names,  # noqa: F401
-    _gate_level_port_case_fold_warnings,
     _gate_level_power_pin_evidence,  # noqa: F401
     _gate_level_power_pin_evidence_detail,  # noqa: F401
     _gate_level_power_pin_names,  # noqa: F401
@@ -207,6 +206,11 @@ from .lvs_gate_level import (
     _subcircuit_ref_name,  # noqa: F401
     _supply_net_spellings,  # noqa: F401
     _supply_pin_universe,
+)
+from .lvs_gate_level_convert import (  # noqa: F401
+    CATEGORY_REFERENCE_GATE_LEVEL_PIN_CASE_FOLDED,
+    _convert_gate_level_reference,
+    _gate_level_port_case_fold_warnings,
 )
 from .lvs_mismatch import (
     _annotate_case_collision_merges,
@@ -265,9 +269,6 @@ from .verilog_module_names import reference_module_names
 from .verilog_netlist import (
     VerilogNetlistError,
     collect_gate_level_port_aliases,
-    convert_gate_level_verilog,
-    convert_gate_level_verilog_expanded,
-    parse_subckt_blocks,
     parse_subckt_pin_orders,
 )
 
@@ -472,10 +473,6 @@ CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS = "topology.dangling_output_ambiguou
 #: .connect_pin`) before comparing, so it is not reported as
 #: `pin.unmatched`/`net.unmatched` -- see `_apply_gate_level_port_aliases`.
 CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = "topology.reference_port_alias_joined"
-#: Issue #4815: a `reference.form: "gate-level-verilog"` library-cell pin
-#: connection was bound to the one resolved pin differing from it only by
-#: letter case (Liberty-spelled synthesis output vs. CDL-spelled pin order).
-CATEGORY_REFERENCE_GATE_LEVEL_PIN_CASE_FOLDED = "reference.gate_level_pin_case_folded"
 #: Issue #2692: `options.anchor_top_level_pins` tied each top-level pin name
 #: declared on *both* sides to its own net on the other side
 #: (`NetlistComparer.same_nets(..., must_match=True)`, the same mechanism
@@ -4863,27 +4860,6 @@ def _read_reference_netlist(
     return netlist
 
 
-def _convert_gate_level_reference(
-    text: str,
-    pin_orders: Mapping[str, Any],
-    finfet: bool,
-    port_case_folds: list[dict[str, str]] | None = None,
-) -> str:
-    """Gate-level Verilog -> SPICE: pin-only stubs, or (issue #4462, FinFET
-    deck extracting transistors with exact `nfin`) each library cell expanded
-    to its CDL body."""
-    if finfet:
-        return convert_gate_level_verilog_expanded(
-            text,
-            pin_order_lookup=pin_orders.get,
-            cell_body_lookup=_library_cell_body_lookup(pin_orders),
-            port_case_folds=port_case_folds,
-        )
-    return convert_gate_level_verilog(
-        text, pin_order_lookup=pin_orders.get, port_case_folds=port_case_folds
-    )
-
-
 def _stub_gate_level_power_connectivity(
     enabled: bool,
     layout_netlist: Any,
@@ -4910,29 +4886,6 @@ def _stub_gate_level_power_connectivity(
             layout_abstraction.lef_paths if layout_abstraction is not None else ()
         ),
     )
-
-
-def _library_cell_body_lookup(pin_orders: Mapping[str, Any]):
-    """``cell -> '.SUBCKT .. .ENDS' text`` read from the file that declared
-    the cell (issue #4462); each source file is parsed once."""
-    sources: Mapping[str, str] = getattr(pin_orders, "cell_sources", {})
-    parsed: dict[str, dict[str, str]] = {}
-
-    def lookup(cell: str) -> str | None:
-        path = sources.get(cell)
-        if path is None:
-            return None
-        if path not in parsed:
-            try:
-                with open(path, encoding="utf-8", errors="replace") as handle:
-                    parsed[path] = parse_subckt_blocks(handle.read())
-            except OSError as exc:
-                raise LvsError(
-                    f"could not read library cell source '{path}': {exc}"
-                ) from exc
-        return parsed[path].get(cell)
-
-    return lookup
 
 
 #: `<library>`'s pin-order source, in resolution order (issue #1336) --
