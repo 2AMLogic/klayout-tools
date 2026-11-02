@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+from collections.abc import Sequence
 from typing import Any
 
 EDGE_TO_REGION = {
@@ -409,7 +410,7 @@ def read_def_instance_groups(
 
 
 def _within_region(
-    origins: list[tuple[int | None, int | None]],
+    origins: Sequence[tuple[int | None, int | None]],
     region: list[float],
     scale: int,
     hits: set[str],
