@@ -4,6 +4,7 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-02
 
+- **Issue #4777** (closed): Friction: klayout-tools[yield]==0.8.0 still does not resolve; klt-yield-native absent from PyPI (#2900 closed)
 - **PR #4774**: feat(sim): add step_resolution measurement reporting time-step gaps near edges
 - **Issue #4773** (closed): klt sim: no way to bound the .tran step only inside switching-edge windows
 - **PR #4736**: feat(yield): echo run provenance and per-measurement spec_row in yield reports
