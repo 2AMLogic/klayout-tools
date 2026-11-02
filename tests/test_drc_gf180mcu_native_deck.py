@@ -20,8 +20,11 @@ def _install(tmp_path, variant: str, drc_files: tuple[str, ...]) -> str:
 
 def _args(root, pdk_name, **kw):
     ns = dict(
-        deck_file=None, deck_var=None, min_klayout_version=None,
-        pdk=pdk_name, pdk_root=root,
+        deck_file=None,
+        deck_var=None,
+        min_klayout_version=None,
+        pdk=pdk_name,
+        pdk_root=root,
     )
     ns.update(kw)
     return argparse.Namespace(**ns)
@@ -82,8 +85,20 @@ def test_cli_klayout_engine_uses_main_script_and_reports_it(
     monkeypatch.setattr(drc_cmd, "run_drc_klayout_engine", fake_engine)
     gds = tmp_path / "a.gds"
     gds.write_bytes(b"")
-    main(["drc", str(gds), "--engine", "klayout", "--pdk", "gf180mcuD",
-          "--pdk-root", root, "--format", "json"])
+    main(
+        [
+            "drc",
+            str(gds),
+            "--engine",
+            "klayout",
+            "--pdk",
+            "gf180mcuD",
+            "--pdk-root",
+            root,
+            "--format",
+            "json",
+        ]
+    )
     out = json.loads(capsys.readouterr().out)
     assert seen["deck_vars"] == {"variant": "gf180mcuD"}
     assert seen["min_klayout_version"] == "0.30.9"
