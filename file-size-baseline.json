@@ -513,7 +513,7 @@
     },
     {
       "path": "src/klayout_tools/pdk_models.py",
-      "lines": 2323
+      "lines": 2089
     },
     {
       "path": "src/klayout_tools/pdk_pcell.py",
