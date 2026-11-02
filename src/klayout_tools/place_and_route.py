@@ -98,6 +98,9 @@ from .place_and_route_gds_merge import (
     _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
+from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
+from .place_and_route_layers import _signal_layer_range
+from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
 
 # The PDN/floorplan joint pre-flight (issue #2170): derives `pdngen`'s own
 # minimum core dimension from `request.power.straps[]` and compares it with
@@ -183,9 +186,6 @@ from .place_and_route_request import (
     _PORT_CONNECTION_RE as _PORT_CONNECTION_RE,
 )
 from .place_and_route_request import (
-    _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK,
-)
-from .place_and_route_request import (
     PlaceAndRouteError as PlaceAndRouteError,
 )
 from .place_and_route_request import (
@@ -217,9 +217,6 @@ from .place_and_route_request import (
 )
 from .place_and_route_request import (
     _resolve_pdn_preset as _resolve_pdn_preset,
-)
-from .place_and_route_request import (
-    _signal_routing_layers as _signal_routing_layers,
 )
 from .place_and_route_request import (
     _strip_verilog_comments as _strip_verilog_comments,
@@ -1823,13 +1820,13 @@ def _run_single_corner(
     sweep_corners = _validate_sweep_corners(pdk_spec.get("sweep_corners"))
 
     floorplan = _validate_floorplan(request["floorplan"])
-    io_spec = _validate_io(request.get("io"), cell_library)
+    library = _validate_library(request.get("library"))
+    io_spec = _validate_io(request.get("io"), cell_library, library)
     # Issue #3885: a pattern naming no real port is an error, never a silent
     # no-op.
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
     instance_groups = _validate_instance_groups(request.get("instance_groups"))
-    library = _validate_library(request.get("library"))
     power = _validate_power(request.get("power"), cell_library, library)
     (
         clock_port,
@@ -2464,6 +2461,8 @@ def _run_single_corner(
             "placement_density": placement_density,
             "route_congestion_iterations": route_congestion_iterations,
             "route_allow_congestion": route_allow_congestion,
+            # Issue #4802: range given to `set_routing_layers -signal`.
+            "signal_layers": _signal_layer_range(cell_library, library),
         },
         # Additive field (issue #2781): see `_coverage_declaration`.
         "coverage": _coverage_declaration(),

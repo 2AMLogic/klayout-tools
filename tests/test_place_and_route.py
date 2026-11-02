@@ -793,11 +793,9 @@ def test_signal_routing_layers_covers_every_supported_library():
         routable = place_and_route._signal_routing_layers(cell_library)
         assert routable is not None, cell_library
         low, _, high = layer_range.partition("-")
-        assert routable[0] == low
-        assert routable[-1] == high
+        assert (routable[0], routable[-1]) == (low, high)
         stack = place_and_route._ROUTING_LAYER_STACK[cell_library]
-        # Every library reserves at least its bottom layer for pin access,
-        # which is exactly the class of io-layer mistake #2473 reports.
+        # Every library reserves its bottom layer for pin access (#2473).
         assert set(routable).issubset(stack)
         assert stack[0] not in routable
 
@@ -7707,6 +7705,7 @@ def test_congestion_and_density_knobs_default_to_prior_tcl(tmp_path, monkeypatch
         "placement_density": 0.6,
         "route_congestion_iterations": None,
         "route_allow_congestion": False,
+        "signal_layers": "met1-met5",
     }
 
 
@@ -7736,6 +7735,7 @@ def test_congestion_and_density_knobs_emitted_when_requested(tmp_path, monkeypat
         "placement_density": 0.45,
         "route_congestion_iterations": 60,
         "route_allow_congestion": True,
+        "signal_layers": "met1-met5",
     }
 
 
