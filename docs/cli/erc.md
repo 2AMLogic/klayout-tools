@@ -2431,6 +2431,33 @@ Until the spec can model the gate cut and direct LIG-on-gate contact, do not
 read these two rules on ASAP7 as a layout verdict; use `klt lvs` for
 connectivity.
 
+**Declaring a gate-level carve-out (issue #4820).** A transistor gate wired only
+through local interconnect cannot be expressed as connected, so
+`erc.floating_gate` can be excused per gate with the top-level
+`floating_gate_allowed` spec key:
+
+```json
+"floating_gate_allowed": [
+  {"box": [left, bottom, right, top], "reason": "LIG-only gates, no V0 cut"}
+]
+```
+
+- `box` is a micrometre box (same shape as `nets[].unlabelled_allowed_boxes`);
+  `reason` is required and non-empty; unknown keys, inverted boxes and empty
+  reasons are spec errors. `null` / `[]` / omitted leave the report byte-identical.
+- A floating gate whose whole gate-role region lies **inside** one box raises no
+  `erc.floating_gate` finding; a gate only partly inside, or outside, still does.
+- The excusal is a **disclosure, not a pass**: the gate's
+  `erc.floating_gate:["gateN"]` id moves from `erc_coverage.checked` to
+  `erc_coverage.inapplicable` with reason `floating_gate_disclosed`, and
+  `erc_status` / `erc_finding_count` come from the surviving findings only.
+  With `--compact` the aggregate `checked` id stays only while some gate was
+  really evaluated.
+- `provenance.floating_gate_allowed` (present only when the key is declared)
+  echoes every box with its `reason`, `matched_gates` (0 = stale box) and the
+  excused `gates[]` (`gate_id`, `bbox`, `reason`). Raw `gates[].levels[]` stay raw.
+- `--findings-only` and full runs give identical findings and exclusions.
+
 ## Antenna-violation fix guidance (Phase 3, issue #908)
 
 Every `levels[]` entry with `verdict: "violate"` gains a `remedy` object
