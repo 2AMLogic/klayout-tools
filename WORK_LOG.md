@@ -4,6 +4,33 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-02
 
+- **PR #4816**: feat: bind gate-level Verilog library pins case-insensitively when unambiguous
+- **PR #4818**: fix: drop positional 0 from runset-bound MIM reference cards
+- **PR #4801**: fix(lvs): retry once with neutral names for repeated-label pin families
+- **PR #4807**: feat(lvs): convert subckt-call references for the klayout-runset engine
+- **PR #4809**: feat(place-and-route): echo signal layer range, validate io layers against route_layers cap
+- **PR #4814**: feat(sim): add sampled-offset form for crossings.level
+- **PR #4812**: feat: accept escaped module names in gate-level Verilog LVS references
+- **PR #4800**: feat: explain stale signoff pins and unresolved lvs --check inputs
+- **PR #4811**: docs: trim pdk_models.py module docstring to purpose and code-only invariants
+- **PR #4808**: feat: report instance-group region and order in place-and-route
+- **PR #4806**: feat: add --pair to interface-check for complementary pin names
+- **PR #4799**: docs: trim equiv.py module docstring to purpose and code-only invariants
+- **PR #4791**: refactor: share exclusive measurement-form check across sim form modules
+- **PR #4794**: docs: point committed place-and-route reports at portable_paths
+- **Issue #4815** (closed): Friction: gate-level-verilog LVS pin resolution is case-sensitive between Liberty-spelled Verilog and CDL pin order
+- **Issue #4817** (closed): Live-verify klayout-runset subckt-call MIM conversion against a real sky130.lvs (follow-up to #4805)
+- **Issue #4798** (closed): klt lvs: repeated-label pin pairing (PAD / PAD$1 ...) changes with unrelated layout edits and yields false device.unmatched
+- **Issue #4805** (closed): klt lvs: no supported way to pair schematic MIM caps (W/L) with runset-extracted A/P devices
+- **Issue #4802** (closed): Friction: place-and-route cannot cap the signal routing layers (fixed Metal2-Metal5 range)
+- **Issue #4813** (closed): klt sim: no way to express a crossing at a data-dependent level (.meas cannot read another .meas; expr cannot interpolate)
+- **Issue #4810** (closed): Friction: gate-level-verilog LVS reader rejects escaped-identifier module names (Yosys $paramod)
+- **Issue #4795** (closed): signoff --manifest: item 4 renders stale_evidence for lvs reports that klt lvs --check and klt signoff <report> both accept
+- **Issue #4128** (closed): Trim oversized module docstrings in signoff, place_and_route, erc, size, equiv, pdk_models (2,746 lines of phase/issue narration)
+- **Issue #4804** (closed): place-and-route: no placement regions / FIXED ordered instances for instance groups (only max_extent_um)
+- **Issue #4803** (closed): Friction: interface-check cannot pair complementary pin names (n_out with s_in) across abutting blocks
+- **Issue #4790** (closed): Consolidate six duplicated validate_form_exclusive() copies into one shared helper
+- **Issue #4191** (closed): place-and-route: absolute paths in report, silent mount gap, late core_margin error, no pin plan
 - **PR #4788**: chore(deps): bump the npm-minor-patch group across 1 directory with 4 updates
 - **PR #4787**: chore(deps): bump ruff from 0.17.0 to 0.17.1 in the uv-minor-patch group across 1 directory
 - **PR #4786**: chore(deps): bump the cargo-minor-patch group across 1 directory with 2 updates
