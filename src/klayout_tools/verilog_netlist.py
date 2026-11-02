@@ -1510,6 +1510,30 @@ def _port_bit_pins(port: str, pins: list[str], *, library: bool) -> list[str]:
     return [pin for _, pin in hits]
 
 
+def _case_fold_pin(
+    instance: dict[str, object],
+    port: str,
+    pins: list[str],
+    port_case_folds: list[dict[str, str]] | None,
+) -> list[str]:
+    """``[<pin>]`` when exactly one pin differs from scalar ``port`` only by
+    letter case (recorded in ``port_case_folds`` when given), else ``[]``
+    (no match, or ambiguous case-twins)."""
+    folded = [pin for pin in pins if pin.casefold() == port.casefold()]
+    if len(folded) != 1:
+        return []
+    if port_case_folds is not None:
+        port_case_folds.append(
+            {
+                "cell": str(instance["cell"]),
+                "instance": str(instance["name"]),
+                "from": port,
+                "to": folded[0],
+            }
+        )
+    return folded
+
+
 def _bind_connections(
     instance: dict[str, object],
     pins: list[str],
@@ -1548,18 +1572,7 @@ def _bind_connections(
             if not bit_pins and port in pin_set:
                 bit_pins = [port]
             if not bit_pins and library and isinstance(net, str):
-                folded = [pin for pin in pins if pin.casefold() == port.casefold()]
-                if len(folded) == 1:
-                    bit_pins = folded
-                    if port_case_folds is not None:
-                        port_case_folds.append(
-                            {
-                                "cell": str(instance["cell"]),
-                                "instance": str(instance["name"]),
-                                "from": port,
-                                "to": folded[0],
-                            }
-                        )
+                bit_pins = _case_fold_pin(instance, port, pins, port_case_folds)
         if not bit_pins:
             unknown.add(port)
             continue
