@@ -247,8 +247,8 @@ on solving §4:**
 both**, rather than building a third comparison mechanism: for each golden
 pair from item 1, run the fixture through both the curated engine and
 `--engine klayout` against the PDK's real native deck (sky130 today; gf180mcu
-once its `run_drc.py` assembly gap is separately resolved — see `drc.md`'s
-own noted limitation) and assert agreement on violate/clean status. This
+now that `--engine klayout` resolves its `tech/drc/gf180mcu.drc` main script, issue
+#4002 — see `drc.md`'s Engine section; needs KLayout >= 0.30.9) and assert agreement on violate/clean status. This
 delivers the issue's "cross-check against the existing deck" goal without a
 parser, and is exactly the harness that would later validate a compiler's
 output *if* one is ever built, once §4's vocabulary gaps are closed enough
@@ -317,10 +317,9 @@ all.
 - Surveying IHP-Open-PDK/SG13G2's native DRC deck shape — that belongs to
   #524 landing first (or a dedicated follow-on), not to this proposal
   inventing it secondhand.
-- Resolving gf180mcu's `--engine klayout` "no single runnable deck" gap
-  (`run_drc.py` assembly) — a real, separately-scoped prerequisite for
-  extending §5's cross-check harness to gf180mcu, already documented as a
-  known limitation in `drc.md`, not new information from this proposal.
+- Resolving gf180mcu's `--engine klayout` deck (done in issue #4002 via the
+  PDK's `gf180mcu.drc` main script; documented in `drc.md`) — a prerequisite
+  for extending §5's cross-check harness to gf180mcu, not part of this proposal.
 - Waiting on or building Epic #520's Tiny Tapeout corpus harness — noted as
   a forward-looking validation target in §3, not a blocker for the
   recommendation above.

@@ -412,10 +412,8 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
             )
     if not args.deck:
         raise DrcError("argument --deck is required for --engine both")
-    deck_file = args.deck_file
-    if deck_file is None:
-        deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
-    return run_drc_crosscheck(
+    deck_file, deck_vars, min_version, native = _resolve_native_deck(args)
+    result = run_drc_crosscheck(
         args.file,
         args.deck,
         deck_file,
@@ -424,16 +422,58 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
         pdk_root=args.pdk_root,
         native_kwargs={
             "timeout_s": args.timeout_s,
-            "deck_vars": _parse_deck_vars(args.deck_var),
+            "deck_vars": deck_vars,
             "allow_deck_errors": args.allow_deck_errors,
             "allow_missing_host_tools": args.allow_missing_host_tools,
             "expected_rule_categories": args.expect_rule_categories,
-            "min_klayout_version": args.min_klayout_version,
+            "min_klayout_version": min_version,
             "expected_rule_category_names": _expected_rule_category_names(args),
             "negative_control": args.negative_control,
             "negative_control_categories": _negative_control_categories(args),
         },
     )
+    if native is not None and isinstance(result, dict):
+        result["native_deck"] = native
+    return result
+
+
+def _resolve_native_deck(
+    args: argparse.Namespace,
+) -> tuple[str | None, dict[str, str], str | None, dict | None]:
+    """Resolve ``(deck_file, deck_vars, min_klayout_version, native_deck)``
+    for the native engine (issue #4002).
+
+    ``--deck-file`` wins untouched. Otherwise the variant-named deck
+    (:func:`pdk.drc_deck_file`, unchanged for sky130/IHP) is tried, then the
+    PDK's family main script (gf180mcu), whose default ``variant`` global
+    and version floor apply unless the caller set them (``--deck-var`` and
+    ``--min-klayout-version`` override). ``native_deck`` is the additive
+    report block, ``None`` when the family script was not used.
+    """
+    deck_vars = _parse_deck_vars(args.deck_var)
+    min_version = args.min_klayout_version
+    if args.deck_file is not None:
+        return args.deck_file, deck_vars, min_version, None
+    deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
+    if deck_file is not None:
+        return deck_file, deck_vars, min_version, None
+    found = pdk_module.native_drc_main_script(variant=args.pdk, root=args.pdk_root)
+    if found is None:
+        return None, deck_vars, min_version, None
+    defaulted = {k: v for k, v in found["deck_vars"].items() if k not in deck_vars}
+    deck_vars = {**defaulted, **deck_vars}
+    floor_defaulted = min_version is None
+    if floor_defaulted:
+        min_version = found["min_klayout_version"]
+    native = {
+        "kind": found["kind"],
+        "variant": found["variant"],
+        "deck_file": found["deck_file"],
+        "deck_vars_defaulted": defaulted,
+        "min_klayout_version": min_version,
+        "min_klayout_version_defaulted": floor_defaulted,
+    }
+    return found["deck_file"], deck_vars, min_version, native
 
 
 def _run_klayout_engine(args: argparse.Namespace) -> dict:
@@ -458,33 +498,34 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
             "runset does not share the curated rule registry (see "
             "docs/cli/drc.md, 'Rule listing and selection')"
         )
-    deck_file = args.deck_file
-    if deck_file is None:
-        deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
+    deck_file, deck_vars, min_version, native = _resolve_native_deck(args)
     if deck_file is None:
         raise DrcError(
             "no PDK-native klayout DRC deck script found for this PDK "
             "variant -- pass --deck-file to point at one directly (see "
             "docs/cli/drc.md, 'Engine' -> 'klayout')"
         )
-    return run_drc_klayout_engine(
+    result = run_drc_klayout_engine(
         args.file,
         deck_file,
         top=args.top,
         timeout_s=args.timeout_s,
-        deck_vars=_parse_deck_vars(args.deck_var),
+        deck_vars=deck_vars,
         pdk_variant=args.pdk,
         pdk_root=args.pdk_root,
         deck_name=args.deck or None,
         allow_deck_errors=args.allow_deck_errors,
         allow_missing_host_tools=args.allow_missing_host_tools,
         expected_rule_categories=args.expect_rule_categories,
-        min_klayout_version=args.min_klayout_version,
+        min_klayout_version=min_version,
         expected_rule_category_names=_expected_rule_category_names(args),
         negative_control=args.negative_control,
         negative_control_categories=_negative_control_categories(args),
         max_violations=args.max_violations,
     )
+    if native is not None:
+        result["native_deck"] = native
+    return result
 
 
 def _run(args: argparse.Namespace) -> dict:

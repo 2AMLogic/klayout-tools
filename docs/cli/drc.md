@@ -638,18 +638,23 @@ directly-runnable `<variant>.lydrc`/`.drc` script from the same
 `libs.tech/klayout/drc/` directory `klt pdk find` already discovers —
 mirroring `klt lvs`'s `netgen_setup_file()` PDK-asset resolver one asset
 area over. Verified against a real, `volare`-fetched sky130A install: sky130
-ships exactly this shape, a single self-contained `sky130A.lydrc`. A PDK
-that instead ships its native deck as topic fragments under
-`drc/rule_decks/*.drc` plus a Python assembly/CLI wrapper (`drc/run_drc.py`,
-gf180mcu's real shape) has no single ready-to-run file this resolver can
-find without either reassembling those fragments itself — the harder,
-riskier "concatenate prologue/rule-tables/epilogue by hand" path this
-engine's design deliberately avoids — or driving `run_drc.py`'s own bespoke
-CLI contract, which is out of scope for this uniform `--engine klayout`
-flag. For that shape, resolution returns nothing and `klt drc` exits with an
-actionable error naming `--deck-file` as the way forward; a caller who has
-already produced a merged deck (e.g. by running the PDK's own `run_drc.py
---macro_gen` ahead of time) can still reach it that way.
+ships exactly this shape, a single self-contained `sky130A.lydrc`. gf180mcu ships a
+different shape (verified against a real fetched install, issue #4002): one
+family main script, `libs.tech/klayout/tech/drc/gf180mcu.drc`, that picks the
+metal stack from a `variant` `-rd` global. When no variant-named deck exists,
+`klt drc --engine klayout|both --pdk gf180mcuD` (no `--deck-file`) resolves
+that script, defaults `--deck-var variant=<pdk variant>` (override with your
+own `--deck-var`), and applies a default `--min-klayout-version 0.30.9` (the
+PDK README's note; KLayout 0.28.16 was observed aborting the deck with "Heap
+lost: the DeepShapeStore container no longer exists"), so an old application
+fails up front with `klayout_version_too_old`. The report gains an additive
+`native_deck` block (kind, variant, script path, defaulted globals, floor) and
+the usual `provenance.deck` hash/options. The rule groups executed are the
+report's `coverage.rule_categories`; pair with `--expect-rule-categories` to
+fail on an empty run. An older gf180mcu layout (fragments under
+`drc/rule_decks/*.drc` plus `drc/run_drc.py`) is not driven: resolution
+returns nothing and you pass a `run_drc.py --macro_gen` output via
+`--deck-file`.
 
 A flat, single-PDK install (IHP-Open-PDK's SG13G2/SG13CMOS5L, see
 [`docs/cli/pdk.md`](pdk.md)'s "Scope") nests its native deck one directory
