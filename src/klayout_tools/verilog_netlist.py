@@ -1460,10 +1460,10 @@ def _bind_all_instances(
         for instance in module["instances"]:  # type: ignore[attr-defined]
             cell = instance["cell"]
             library = cell in real_orders
-            pins = (
+            pins: list[str] = (
                 real_orders[cell]
                 if library
-                else _sub_module_by_name(modules, cell)["ports"]
+                else _sub_module_by_name(modules, cell)["ports"]  # type: ignore[assignment]
             )
             pin_nets, unknown = _bind_connections(
                 instance,  # type: ignore[arg-type]
