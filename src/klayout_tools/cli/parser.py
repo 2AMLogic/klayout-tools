@@ -7254,6 +7254,18 @@ def _add_interface_check_parser(subparsers: argparse._SubParsersAction) -> None:
         help="largest pad-to-pad gap still counted as mated (default 0: overlap/touch)",
     )
     parser.add_argument(
+        "--pair",
+        action="append",
+        default=None,
+        metavar="A_REGEX=B_TEMPLATE",
+        help=(
+            "pair complementary names: an A label fully matching A_REGEX mates "
+            "with the B label named by the re.Match.expand template, e.g. "
+            "'n_out\\[(\\d+)\\]=s_in[\\1]'; repeatable, first match wins; "
+            "both names must match --pins"
+        ),
+    )
+    parser.add_argument(
         "--top-a", default=None, help="top cell of A (required if several)"
     )
     parser.add_argument(

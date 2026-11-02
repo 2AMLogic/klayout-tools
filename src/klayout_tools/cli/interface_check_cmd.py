@@ -18,6 +18,7 @@ import argparse
 from ..interface_check import (
     InterfaceCheckError,
     parse_layer,
+    parse_pair,
     parse_place,
     run_interface_check,
 )
@@ -36,6 +37,7 @@ def run(args: argparse.Namespace) -> int:
         layer_b = (
             parse_layer(args.pin_layer_b, "--pin-layer-b") if args.pin_layer_b else None
         )
+        pairs = [parse_pair(spec) for spec in (args.pair or [])]
         report = run_interface_check(
             args.a,
             args.b,
@@ -46,6 +48,7 @@ def run(args: argparse.Namespace) -> int:
             tol_um=args.tol_um,
             top_a=args.top_a,
             top_b=args.top_b,
+            pairs=pairs,
         )
     except InterfaceCheckError as exc:
         return emit_error("interface-check", str(exc), args.format)
@@ -73,4 +76,7 @@ def _print_text(report: dict) -> None:
             detail = f" offset=({dx}, {dy}) gap={pin['gap_um']}"
         elif pin["reason"]:
             detail = f" ({pin['reason']})"
-        print(f"  {pin['name']}: {pin['status']}{detail}")
+        name = pin["name"]
+        if pin.get("b_name", name) != name:
+            name = f"{name} <-> {pin['b_name']}"
+        print(f"  {name}: {pin['status']}{detail}")
