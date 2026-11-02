@@ -2303,71 +2303,39 @@ def run_lvs(
                 if compare_result or compare_timeout:
                     break
 
-        if not compare_result and not compare_timeout:
-            # Issue #4798: `PAD`/`PAD$1`/... share one label, so which `$k` sits
-            # on which unit is extractor order, not design intent. On a
-            # symmetric design `NetlistComparer` takes same-named nets as
-            # tie-break hints and does not backtrack, so a swapped `$k` pairing
-            # reports false `device.unmatched`. Retry ONCE with those nets
-            # renamed to unrelated unique names (topology decides); accept only
-            # a real `match`, otherwise keep the first-pass result untouched.
-            layout_family = _repeated_label_pin_nets(layout_circuit)
-            reference_family = _repeated_label_pin_nets(reference_circuit)
-            if layout_family or reference_family:
-                retry_logger = _make_compare_logger(layout_circuit, reference_circuit)
-                retry_comparer = kdb.NetlistComparer(retry_logger)
-                retry_comparer.same_circuits(layout_circuit, reference_circuit)
-                retry_hints, retry_equivalent = _apply_hints(
-                    retry_comparer,
-                    request.get("hints") or {},
-                    layout_circuit,
-                    reference_circuit,
-                )
-                retry_constants, retry_constant_warnings = _apply_constant_nets(
-                    retry_comparer,
-                    request.get("hints") or {},
-                    layout_circuit,
-                    reference_circuit,
-                    declared=retry_hints,
-                )
-                retry_anchored, retry_anchor_warnings = _apply_top_level_pin_anchors(
-                    retry_comparer,
-                    layout_circuit,
-                    reference_circuit,
-                    enabled=anchor_top_level_pins,
-                    declared=[
-                        *retry_hints,
-                        *_constant_binding_pairs(retry_constants),
-                    ],
-                )
-                # Hints/anchors above resolved names to net objects already, so
-                # renaming now cannot disturb them.
-                restore = _rename_nets_neutral(layout_family, "L") + (
-                    _rename_nets_neutral(reference_family, "R")
-                )
-                try:
-                    retry_result, retry_timeout = _guarded_compare(
-                        retry_comparer,
-                        layout_netlist,
-                        reference_netlist,
-                        compare_timeout_s,
-                        compare_context,
-                    )
-                finally:
-                    for net, name in restore:
-                        net.name = name
-                if retry_result and not retry_timeout:
-                    compare_result = True
-                    logger = retry_logger
-                    same_nets_hints = retry_hints
-                    equivalent_pins_applied = retry_equivalent
-                    constant_bindings = retry_constants
-                    constant_warnings = retry_constant_warnings
-                    anchored_pins = retry_anchored
-                    anchor_warnings = _with_repeated_label_retry_disclosure(
-                        retry_anchor_warnings,
-                        sorted(set(layout_family) | set(reference_family)),
-                    )
+        # Issue #4798: one neutral-name retry for repeated-label pin families
+        # (see `_retry_with_neutral_family_names`). Hands the first-pass state
+        # back unchanged unless the retry reaches a real `match`.
+        (
+            compare_result,
+            logger,
+            same_nets_hints,
+            equivalent_pins_applied,
+            constant_bindings,
+            constant_warnings,
+            anchored_pins,
+            anchor_warnings,
+        ) = _retry_with_neutral_family_names(
+            request,
+            layout_circuit,
+            reference_circuit,
+            layout_netlist,
+            reference_netlist,
+            first_pass=(
+                compare_result,
+                logger,
+                same_nets_hints,
+                equivalent_pins_applied,
+                constant_bindings,
+                constant_warnings,
+                anchored_pins,
+                anchor_warnings,
+            ),
+            first_pass_timeout=compare_timeout,
+            anchor_top_level_pins=anchor_top_level_pins,
+            compare_timeout_s=compare_timeout_s,
+            compare_context=compare_context,
+        )
 
         mismatches = _build_mismatches(
             logger,
@@ -5787,6 +5755,97 @@ def _rename_nets_neutral(
             net.name = f"__RLF_{side}{counter}"
             counter += 1
     return restore
+
+
+def _retry_with_neutral_family_names(
+    request: Mapping[str, Any],
+    layout_circuit: Any,
+    reference_circuit: Any,
+    layout_netlist: Any,
+    reference_netlist: Any,
+    *,
+    first_pass: tuple[Any, ...],
+    first_pass_timeout: CompareTimeout | None,
+    anchor_top_level_pins: bool | None,
+    compare_timeout_s: float | None,
+    compare_context: Mapping[str, Any],
+) -> tuple[Any, ...]:
+    """Issue #4798: retry a mismatched compare ONCE with repeated-label pin
+    nets renamed to unrelated unique names (topology decides).
+
+    ``PAD``/``PAD$1``/... share one label, so which ``$k`` sits on which unit
+    is extractor order, not design intent. On a symmetric design
+    ``NetlistComparer`` takes same-named nets as tie-break hints and does not
+    backtrack, so a swapped ``$k`` pairing reports false ``device.unmatched``.
+
+    ``first_pass`` is ``(compare_result, logger, same_nets_hints,
+    equivalent_pins_applied, constant_bindings, constant_warnings,
+    anchored_pins, anchor_warnings)`` of the first compare and is returned
+    unchanged when the first pass already matched or timed out, when neither
+    side has such a family, or when the retry does not produce a real
+    ``match``. Otherwise the same-shaped tuple of the matching retry (with
+    the disclosure added) is returned.
+    """
+    if first_pass[0] or first_pass_timeout:
+        return first_pass
+    import klayout.db as kdb
+
+    layout_family = _repeated_label_pin_nets(layout_circuit)
+    reference_family = _repeated_label_pin_nets(reference_circuit)
+    if not (layout_family or reference_family):
+        return first_pass
+    hints = request.get("hints") or {}
+    retry_logger = _make_compare_logger(layout_circuit, reference_circuit)
+    retry_comparer = kdb.NetlistComparer(retry_logger)
+    retry_comparer.same_circuits(layout_circuit, reference_circuit)
+    retry_hints, retry_equivalent = _apply_hints(
+        retry_comparer, hints, layout_circuit, reference_circuit
+    )
+    retry_constants, retry_constant_warnings = _apply_constant_nets(
+        retry_comparer,
+        hints,
+        layout_circuit,
+        reference_circuit,
+        declared=retry_hints,
+    )
+    retry_anchored, retry_anchor_warnings = _apply_top_level_pin_anchors(
+        retry_comparer,
+        layout_circuit,
+        reference_circuit,
+        enabled=anchor_top_level_pins,
+        declared=[*retry_hints, *_constant_binding_pairs(retry_constants)],
+    )
+    # Hints/anchors above resolved names to net objects already, so renaming
+    # now cannot disturb them.
+    restore = _rename_nets_neutral(layout_family, "L") + (
+        _rename_nets_neutral(reference_family, "R")
+    )
+    try:
+        retry_result, retry_timeout = _guarded_compare(
+            retry_comparer,
+            layout_netlist,
+            reference_netlist,
+            compare_timeout_s,
+            compare_context,
+        )
+    finally:
+        for net, name in restore:
+            net.name = name
+    if not retry_result or retry_timeout:
+        return first_pass
+    return (
+        True,
+        retry_logger,
+        retry_hints,
+        retry_equivalent,
+        retry_constants,
+        retry_constant_warnings,
+        retry_anchored,
+        _with_repeated_label_retry_disclosure(
+            retry_anchor_warnings,
+            sorted(set(layout_family) | set(reference_family)),
+        ),
+    )
 
 
 def _with_repeated_label_retry_disclosure(
