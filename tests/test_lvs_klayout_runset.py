@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 
 import klayout.db as kdb
 import pytest
@@ -58,11 +59,10 @@ def _write_lvsdb(
     l2n.connect(bulk)
     l2n.extract_netlist()
     ref = kdb.Netlist()
-    # sky130.lvs's own reader delegate takes a value-less C card; the stock
-    # reader needs a value, so hand it one (issue #4817).
-    text = open(schem).read().replace(" sky130_fd_pr__model", " 0 sky130_fd_pr__model")
+    # The stock reader needs a C-card value the deck's reader doesn't (#4817).
     patched = schem + ".stock.sp"
-    open(patched, "w").write(text)
+    with open(schem) as src, open(patched, "w") as dst:
+        dst.write(src.read().replace(" sky130_fd_pr__model", " 0 sky130_fd_pr__model"))
     ref.read(patched, kdb.NetlistSpiceReader())
     l2n.reference = ref
     if compare:
@@ -486,15 +486,10 @@ def test_real_binary_version_probe():
 
 def _spice_netlist(text: str) -> kdb.Netlist:
     netlist = kdb.Netlist()
-    reader_input = kdb.NetlistSpiceReader()
-    import os
-    import tempfile
-
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "n.sp")
-        with open(path, "w") as fh:
-            fh.write(text)
-        netlist.read(path, reader_input)
+        open(path, "w").write(text)
+        netlist.read(path, kdb.NetlistSpiceReader())
     return netlist
 
 

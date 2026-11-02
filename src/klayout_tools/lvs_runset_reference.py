@@ -74,7 +74,9 @@ def _drop_capacitor_placeholder(text: str, placeholder_classes: dict[str, str]) 
     ``A``/``P`` (live-verified, issue #4817), while ``C1 a b <model> A= P=``
     compares ``match``."""
     classes = {
-        name.lower() for name, kind in placeholder_classes.items() if kind == "capacitor"
+        name.lower()
+        for name, kind in placeholder_classes.items()
+        if kind == "capacitor"
     }
     if not classes:
         return text
