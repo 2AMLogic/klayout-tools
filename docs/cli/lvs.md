@@ -1490,7 +1490,15 @@ name that embeds a flattened `generate`/`genvar` hierarchy path, e.g.
 `my_array[0].u_inst/_01_`, never re-read as a bit-select of a bus
 `my_array` (issue #1371). A genuine bit-select of an escaped net is
 written the way Verilog requires, with the terminating whitespace explicit:
-`\bus [3]`. A hierarchical module (uncommon for `verilog_path`,
+`\bus [3]`. A **module declaration** may also use an escaped name — e.g.
+Yosys's parameterized-submodule `\$paramod\child\W=s32'd64` (issue #4810).
+It is mapped to a legal SPICE subckt name by replacing every character outside
+`[A-Za-z0-9_]` with `_` (`_paramod_child_W_s32_d64`); if two declared names
+would then collide, each affected name gets a short stable hash suffix
+(`_<sha256[:8]>`). The same mapping is applied to the declaration and every
+instantiation, and the report records `environment.reference_module_names`
+(`{original: mapped}`; present only when at least one name was mapped). The
+Verilog file is never rewritten. A hierarchical module (uncommon for `verilog_path`,
 which is always a single flat module post-place-and-route, but not assumed
 away) converts correctly too — an instantiated cell type that matches
 another parsed `module` in the same file is treated as a genuine

@@ -202,7 +202,12 @@
         "netgen_binary": {"oneOf": [{"$ref": "#/$defs/path_value"}, {"type": "null"}], "description": "Resolved netgen executable; null for the klayout engine."},
         "layout_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "reference_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "extracted_netlist": {"oneOf": [{"$ref": "#/$defs/path_value"}, {"type": "null"}]}
+        "extracted_netlist": {"oneOf": [{"$ref": "#/$defs/path_value"}, {"type": "null"}]},
+        "reference_module_names": {
+          "type": "object",
+          "description": "Present only when a gate-level-verilog reference declared a module under an escaped identifier: {original module name: SPICE subckt name it was mapped to}.",
+          "additionalProperties": {"type": "string"}
+        }
       },
       "additionalProperties": true
     },
