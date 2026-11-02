@@ -50,6 +50,7 @@ from typing import (
     get_type_hints,
 )
 
+from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
 from ._jsonnum import is_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
@@ -57,7 +58,6 @@ from ._report_verify import (
     LIST_ITEM,
     build_rerun_result,
     diff_verdict_fields,
-    hash_check,
     load_committed_report,
     strip_path_patterns,
 )
@@ -5726,9 +5726,8 @@ def _grade_evidence(
         )
 
     # Issue #2718: a generic citation's declared item identity and, for the
-    # artifact-anchored items, its artifact binding -- checked only for an
-    # item that accepts "generic" at all, so items 3-7/11 keep rendering
-    # `wrong_kind` from `_build_tier_item`'s opt-in gate exactly as before.
+    # artifact-anchored items, its artifact binding -- checked only for items
+    # accepting "generic", so items 3-7/11 keep rendering `wrong_kind` as before.
     binding_refusal = _generic_item_binding_refusal(check_kind, item_id, envelope, spec)
     if binding_refusal is not None:
         return "unmet", binding_refusal, None, {}
@@ -5751,22 +5750,7 @@ def _grade_evidence(
             },
         )
     if pin_state == _PIN_STALE:
-        # Issue #4795: name the failed comparison (field / expected / actual,
-        # the entry shape `--check` emits) so the author can tell which input
-        # to regenerate or re-pin. Additive: `detail` was `{}` before.
-        return (
-            "unmet",
-            _REASON_STALE_EVIDENCE,
-            None,
-            {
-                "content_hash_pin": _PIN_STALE,
-                "hash_check": hash_check(
-                    "provenance.input.content_hash",
-                    spec.get("content_hash"),
-                    resolution["content_hash"],
-                ),
-            },
-        )
+        return "unmet", _REASON_STALE_EVIDENCE, None, hints.stale_pin(spec, resolution)
 
     citation = {**_citation(resolution), **citation_extra}
     execution_detail: dict[str, Any] = {}

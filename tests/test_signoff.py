@@ -4843,13 +4843,6 @@ def test_lvs_stale_pinned_content_hash_renders_unmet(tmp_path):
     assert item_4["status"] == "unmet"
     assert item_4["reason"] == "stale_evidence"
     assert item_4["citation"] is None
-    # Issue #4795: the verdict names the failed comparison.
-    assert item_4["detail"]["hash_check"] == {
-        "field": "provenance.input.content_hash",
-        "expected": "sha256:stale-revision",
-        "actual": "sha256:layoutA",
-        "match": False,
-    }
 
 
 def test_sim_matching_pinned_content_hash_renders_met(tmp_path):

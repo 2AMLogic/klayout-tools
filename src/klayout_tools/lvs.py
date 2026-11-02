@@ -147,6 +147,7 @@ from ._report_verify import (
     resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
+from ._report_verify_hints import input_not_found_entry
 from .decks import (
     InvalidDeckOptionError,
     UnknownExtractionDeckError,
@@ -3143,21 +3144,9 @@ def _input_hash_check(
         candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
         if os.path.isfile(candidate):
             found_relative_to_report = os.path.abspath(candidate)
-    check["input_not_found"] = {
-        "path": path,
-        "resolved": os.path.abspath(path),
-        "found_relative_to_report": found_relative_to_report,
-        # Issue #4795: name the directory the relative path was anchored to
-        # and, when the input is next to the report, the one that works.
-        "resolved_against": None if os.path.isabs(path) else os.getcwd(),
-        "hint": (
-            None
-            if found_relative_to_report is None
-            else "run --check from the report's directory, or pass --layout/"
-            "an absolute path; request-file-relative paths resolve against "
-            f"{os.path.dirname(os.path.abspath(report_path))}"
-        ),
-    }
+    check["input_not_found"] = input_not_found_entry(
+        path, report_path, found_relative_to_report
+    )
     return check
 
 
