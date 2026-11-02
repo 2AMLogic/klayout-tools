@@ -23,7 +23,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   `reviewed_not_statistical: true` to waive the string-pattern scan (never
   the key scan) for that row, echoed in the output. Additive; JSON-form
   manifests grade unchanged.
-
 - **`klt lvs` accepts escaped module names in a `gate-level-verilog`
   reference** (issue #4810, documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)):
   a Yosys `\$paramod\child\W=s32'd64` module declaration no longer fails
