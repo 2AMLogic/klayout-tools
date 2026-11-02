@@ -344,6 +344,7 @@
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_mismatch_tolerance",
         "klayout_tools.lvs_netgen",
+        "klayout_tools.lvs_pin_anchors",
         "klayout_tools.lvs_power",
         "klayout_tools.lvs_runset",
         "klayout_tools.lvs_short_nets",
