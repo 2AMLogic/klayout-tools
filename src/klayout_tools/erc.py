@@ -930,17 +930,57 @@ _SG13G2_ANTENNA_SOURCE_URL = (
     "libs.tech/klayout/tech/drc/rule_decks/sg13g2_tech_default.json"
 )
 
+#: gf180mcu antenna-ratio limit (maximum ratio *without* a protection diode),
+#: from google/gf180mcu-pdk at commit f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
+#: (the same pin as `decks/gf180mcu.py`'s `_GF180MCU_KLAYOUT_DRC_DECK_COMMIT`),
+#: `libs.tech/klayout/tech/drc/rule_decks/antenna.rb`. Every metal level has
+#: the same limit, 400: Metal1 `ANT.16_i_ANT.2`, Metal2 `.3`, Metal3 `.4`,
+#: Metal4 `.5`, Metal5 `.6`, MetalTop `.7` (the thick-gate `ANT.16_ii_*`
+#: variants carry the same 400). The limit does not vary by stack, so one
+#: table covers 3LM/4LM/5LM/6LM; a role is only graded when the spec names it.
+#:
+#: Approximation to be aware of: the deck's metal rules measure
+#: `perimeter(layer) * thickness / gate area` (0.54 um thickness; the
+#: deck's `metal_top_thickness` for the topmost metal), *not* `klt erc`'s
+#: cumulative connected *area* / gate area. This is the same
+#: connectivity-area-only approximation the sky130 table carries; the verdict
+#: here is not exactly equivalent to the deck's own check. The deck also
+#: applies a diode credit (`darea * mf`, mf = 2 thin / 15 thick gate); with
+#: no diode it reduces to the plain 400, which is what is used here.
+#:
+#: Not graded (not representable as a `levels[]` verdict): `ANT.1` (Poly2
+#: perimeter / gate, 200), `ANT.8` (Contact / gate, 10), the via ratios
+#: `ANT.16_*_ANT.9`..`ANT.13` (Via1..Via5 area / gate, 20), the
+#: MIM-referenced `ANT.16_iii_*` rules, and the with-diode credit (`klt erc`
+#: does not model protection diodes).
+_GF180MCU_ANTENNA_RATIO_MAX_EGAR: dict[str, tuple[float, str]] = {
+    "Metal1": (400.0, "ANT.16_i_ANT.2"),
+    "Metal2": (400.0, "ANT.16_i_ANT.3"),
+    "Metal3": (400.0, "ANT.16_i_ANT.4"),
+    "Metal4": (400.0, "ANT.16_i_ANT.5"),
+    "Metal5": (400.0, "ANT.16_i_ANT.6"),
+    "MetalTop": (400.0, "ANT.16_i_ANT.7"),
+}
+
+_GF180MCU_ANTENNA_SOURCE_URL = (
+    "https://github.com/google/gf180mcu-pdk/blob/"
+    "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7/"
+    "libs.tech/klayout/tech/drc/rule_decks/antenna.rb"
+)
+
 #: PDK name -> (role name -> (limit, source rule id)) lookup for `--pdk`.
-#: sky130 and ihp-sg13g2; gf180mcu/sg13cmos5l/asap7 antenna limits are
+#: sky130, ihp-sg13g2 and gf180mcu; sg13cmos5l/asap7 antenna limits are
 #: candidate follow-ons, not silently dropped.
 _ANTENNA_LIMITS_BY_PDK: dict[str, dict[str, tuple[float, str]]] = {
     "sky130": _SKY130_ANTENNA_RATIO_MAX_EGAR,
     "ihp-sg13g2": _SG13G2_ANTENNA_RATIO_MAX_EGAR,
+    "gf180mcu": _GF180MCU_ANTENNA_RATIO_MAX_EGAR,
 }
 
 _ANTENNA_SOURCE_URL_BY_PDK: dict[str, str] = {
     "sky130": _SKY130_ANTENNA_SOURCE_URL,
     "ihp-sg13g2": _SG13G2_ANTENNA_SOURCE_URL,
+    "gf180mcu": _GF180MCU_ANTENNA_SOURCE_URL,
 }
 
 #: Tail of `levels[].antenna_ratio_source`, naming which limit of the cited
@@ -948,6 +988,7 @@ _ANTENNA_SOURCE_URL_BY_PDK: dict[str, str] = {
 _ANTENNA_SOURCE_NOTE_BY_PDK: dict[str, str] = {
     "sky130": "'Max EA/A w/o diode' column",
     "ihp-sg13g2": "IHP-Open-PDK v0.3.0, w/o-diode limit",
+    "gf180mcu": "gf180mcu-pdk f6eeac7, w/o-diode limit (area approximates perimeter)",
 }
 
 
@@ -1017,8 +1058,7 @@ def _resolve_deck(deck: str | None) -> ExtractionDeck | None:
     needs no filesystem PDK install to read. Deliberately a *separate* flag
     from ``--pdk`` (which selects only the built-in antenna-ratio limit
     table, see :func:`_resolve_antenna_limits`) -- the two answer unrelated
-    questions and ``--pdk`` has no ``gf180mcu`` entry today, while the
-    extraction-deck registry does.
+    questions: ``--pdk gf180mcu`` and ``--deck gf180mcu`` are independent.
 
     Returns ``None`` when ``deck`` is ``None`` -- no auto-detection is
     attempted, and every device-related output (``gates[]``, every antenna
@@ -3327,7 +3367,7 @@ def run_erc(
     matching rule and precedence, and ``docs/cli/erc.md``'s "Deck-driven
     device-marker auto-detection" for the full picture. Deliberately
     independent of ``pdk``: ``pdk`` selects only the antenna-ratio limit
-    table, has no ``gf180mcu`` entry, and resolves nothing when a deck name
+    table and resolves nothing when a deck name
     would be valid for extraction but not for the antenna table (or vice
     versa). Omitted (the default) -> no auto-detection is attempted, and
     every output this feature could touch (``gates[]``, every antenna
@@ -3752,7 +3792,7 @@ def run_erc(
     #
     # `status` above is a roll-up of *both* questions, and its coverage input
     # is antenna-only, so on a PDK with no antenna-ratio table (any PDK other
-    # than sky130 and ihp-sg13g2, or `--pdk` omitted entirely) it is
+    # than sky130, ihp-sg13g2 and gf180mcu, or `--pdk` omitted entirely) it is
     # `"not_checked"`/exit 4
     # no matter what the connectivity rules found: a run whose connectivity
     # rules all passed is then indistinguishable, by `status` and by exit
