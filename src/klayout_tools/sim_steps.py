@@ -184,6 +184,7 @@ _UNSUPPORTED_IN_STEPS: tuple[tuple[str, str, bool], ...] = (
     ("optional", "for a measurement that may legitimately be absent", True),
     ("cycle_mean", '(kind "tran") for a cycle-aligned mean', False),
     ("eye", '(kind "tran") for an eye measurement', False),
+    ("step_resolution", '(kind "tran") for a step-resolution report', False),
     ("noise", '(kind "noise") for a noise-spectrum measurement', False),
 )
 

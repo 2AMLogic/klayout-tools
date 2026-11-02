@@ -111,6 +111,7 @@ from . import (
     sim_search,
     sim_snm_meas,
     sim_staging,
+    sim_step_resolution,
     sim_transfer_meas,
     sim_twoport,
 )
@@ -716,6 +717,14 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
             sim_eye.eye_measurements(request.get("measurements") or [])
         ),
     ),
+    "step_resolution": (
+        (0, 8, 1),
+        lambda request: bool(
+            sim_step_resolution.step_resolution_measurements(
+                request.get("measurements") or []
+            )
+        ),
+    ),
     "search": (
         (0, 7, 1),
         lambda request: bool(
@@ -770,6 +779,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "snm",
         "search",
         "eye",
+        "step_resolution",
         "stimulus",
         "dual_injection",
         "complex_vectors",
