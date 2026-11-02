@@ -10,6 +10,8 @@ Exit codes (see ``docs/cli/ring-check.md`` for the full table):
         empty/unknown --cells, malformed --region) -- returned by ``emit_error`` as
         ``output.ERROR_EXIT_CODE``
     3 - ran successfully, the ring is broken
+    4 - ran successfully but nothing could be checked (``--pdk`` for a PDK
+        with no published seal-ring rules: ``status: "not_checked"``)
 (2 is reserved for argparse usage errors, as with every other ``klt`` subcommand.)
 """
 
@@ -17,16 +19,21 @@ from __future__ import annotations
 
 import argparse
 
-from ..ring_check import RingCheckError, run_ring_check
+from ..ring_check import RingCheckError, run_ring_check, run_seal_ring_check
 from ._parsing import load_json_path_or_inline, load_region, parse_layer_pairs
 from .output import emit_error, emit_success, render_table
 
 EXIT_CONTINUOUS = 0
 EXIT_BROKEN = 3
+EXIT_NOT_CHECKED = 4
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.pdk is not None:
+        return _run_pdk(args)
     try:
+        if args.layers is None:
+            raise RingCheckError("one of --layers or --pdk is required")
         layers = _load_layers(args.layers)
         region_um = _load_region(args.region)
         report = run_ring_check(
@@ -43,6 +50,42 @@ def run(args: argparse.Namespace) -> int:
     emit_success(report, args.format, _print_text)
 
     return EXIT_BROKEN if report["status"] == "broken" else EXIT_CONTINUOUS
+
+
+def _run_pdk(args: argparse.Namespace) -> int:
+    try:
+        if args.layers is not None:
+            raise RingCheckError("--pdk and --layers are mutually exclusive")
+        if args.region is not None or args.cells is not None or args.ignore_enclosed:
+            raise RingCheckError(
+                "--region, --cells and --ignore-enclosed apply to --layers mode only"
+            )
+        report = run_seal_ring_check(args.file, args.pdk, top=args.top)
+    except RingCheckError as exc:
+        return emit_error("ring-check", str(exc), args.format)
+
+    emit_success(report, args.format, _print_pdk_text)
+    if report["status"] == "broken":
+        return EXIT_BROKEN
+    return EXIT_NOT_CHECKED if report["status"] == "not_checked" else EXIT_CONTINUOUS
+
+
+def _print_pdk_text(report: dict) -> None:
+    print(f"file: {report['file']}")
+    print(f"pdk: {report['pdk']}")
+    print(f"status: {report['status']}")
+    if report["reason"]:
+        print(f"reason: {report['reason']}")
+    print(f"violations: {report['violation_count']}")
+    for rule in report["rules"]:
+        extra = f" ({rule['reason']})" if rule["reason"] else ""
+        print(f"  {rule['id']}: {rule['status']}{extra} [{rule['source']['file']}]")
+    for entry in report["violations"]:
+        b = entry["bbox"]
+        print(
+            f"  {entry['rule']} {entry['cell']} ({b['left']},{b['bottom']})-"
+            f"({b['right']},{b['top']}): {entry['description']}"
+        )
 
 
 def _load_layers(value: str) -> list[tuple[int, int]]:

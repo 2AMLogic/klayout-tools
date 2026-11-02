@@ -7360,13 +7360,26 @@ def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     ring_check_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
     ring_check_parser.add_argument(
+        "--pdk",
+        default=None,
+        help=(
+            "check the drawn seal ring against a PDK's seal-ring rules "
+            "(sg13g2, sky130, gf180mcu) instead of a caller layer set; "
+            "mutually exclusive with --layers. A PDK with no published "
+            "seal-ring rules reports status 'not_checked' (exit 4), never a "
+            "pass. Not validated by argparse (unknown PDK exits 1). See "
+            "docs/cli/ring-check.md."
+        ),
+    )
+    ring_check_parser.add_argument(
         "--layers",
-        required=True,
+        default=None,
         help=(
             "ring layer set as a path to a JSON file, or an inline JSON array "
             "of [layer, datatype] pairs (e.g. '[[33, 0], [66, 44]]'); the "
             "shapes on these layers are merged and their union must form the "
-            "annulus. Not validated by argparse -- an empty/malformed value "
+            "annulus. Required unless --pdk is given. Not validated by argparse -- "
+            "an empty/malformed value "
             "exits 1 with a clean error, per docs/cli/ring-check.md's "
             "exit-code contract, rather than argparse's usage-error exit 2."
         ),
