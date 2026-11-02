@@ -109,6 +109,7 @@ from . import (
     remote_transport,
     sim_eye,
     sim_search,
+    sim_settled,
     sim_snm_meas,
     sim_staging,
     sim_step_resolution,
@@ -711,6 +712,7 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 8, 1),
         _declared(sim_step_resolution.step_resolution_measurements),
     ),
+    "settled": ((0, 8, 1), _declared(sim_settled.settled_measurements)),
     "search": ((0, 7, 1), _declared(sim_search.search_measurements)),
     "stimulus": (
         (0, 7, 1),
@@ -761,6 +763,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "search",
         "eye",
         "step_resolution",
+        "settled",
         "stimulus",
         "dual_injection",
         "complex_vectors",

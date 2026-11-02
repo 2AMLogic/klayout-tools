@@ -168,8 +168,8 @@ _STEP_MARKER_RE = re.compile(
 #: order refusals are checked in, so it is part of the error contract.
 #:
 #: - crossings (#2868), energy (#3033), stress (#4592), cycle_mean (#2947),
-#:   eye (#4292), step_resolution (#4773): each reads one transient plot's
-#:   rawfile and has no per-step equivalent.
+#:   eye (#4292), step_resolution (#4773), settled (#4780): each reads one
+#:   transient plot's rawfile and has no per-step equivalent.
 #: - search (#4121): the bisection loop lives in the scalar deck only.
 #: - optional (#2925): implemented for the scalar analysis only; a step
 #:   measurement's no-value paths also carry ``step_failed`` /
@@ -184,6 +184,7 @@ _UNSUPPORTED_IN_STEPS: tuple[tuple[str, str, bool], ...] = (
     ("cycle_mean", '(kind "tran") for a cycle-aligned mean', False),
     ("eye", '(kind "tran") for an eye measurement', False),
     ("step_resolution", '(kind "tran") for a step-resolution report', False),
+    ("settled", '(kind "tran") for a settled-window verdict', False),
     ("noise", '(kind "noise") for a noise-spectrum measurement', False),
 )
 

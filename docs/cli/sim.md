@@ -1837,7 +1837,7 @@ established. `runner_compatibility` itself stays a major.minor gate.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292); `step_resolution`, [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773)).**
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292); `step_resolution`, [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773); `settled`, [#4780](https://github.com/2AMLogic/klayout-tools/issues/4780)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
 undriven), so
@@ -4705,6 +4705,62 @@ helper source did **not** bound the edge step: at the two edges it covered the
 gap only moved from 9.8/9.2 ns to 8.8/8.7 ns, and an uncovered edge was
 unchanged. This is one small circuit; check your own deck with the
 measurement rather than assuming either result transfers.
+
+## Settled-window verdict (`measurements[].settled`)
+
+Issue [#4780](https://github.com/2AMLogic/klayout-tools/issues/4780). A
+switching-converter bench needs a "settled" verdict from a long `.tran`: the
+last two windows of N clock cycles must agree on the mean of one node and the
+peak of another. `settled` makes "not settled" a graded result instead of a
+hand-rolled post-processor over `waveform.raw.json`.
+
+```json
+{"analysis": {"kind": "tran", "args": "10n 400u"},
+ "measurements": [
+   {"name": "settled",
+    "settled": {"clock": "v(clk)", "level": 0.9, "edge": "rise", "cycles": 8,
+                "mean": {"signal": "v(vout)", "tol_pct": 1.0},
+                "peak": {"signal": "i(l1)",  "tol_pct": 5.0},
+                "from": 1e-4},
+    "limits": {"min": 1}}]}
+```
+
+- **Form.** `settled` is an object `{clock, level, cycles, mean, peak, edge?,
+  from?}`. `clock`/`level`/`from` behave as for `cycle_mean` (`edge` is `rise`
+  or `fall`, default `rise`); `cycles` is an integer >= 1; `mean` and `peak`
+  are each `{signal, tol_pct}` with `tol_pct` a finite number >= 0 in percent.
+  Unknown keys, `settled` beside any other value form, `optional: true`, and
+  any `analysis.kind` other than `tran` are refused up front (exit 1).
+  `engine: "xyce"` and `analysis_steps` are refused.
+- **Windows.** A window is `cycles` consecutive clock cycles aligned on the
+  clock edges; windows run back to back from `from` (default: the first edge).
+  Only complete windows count. Each reports the time-weighted mean of
+  `mean.signal` (as for `cycle_mean`) and the peak (maximum absolute value) of
+  `peak.signal`.
+- **Verdict.** Only the last two windows are compared:
+  `|Δmean|/|mean| * 100 <= mean.tol_pct` and
+  `|Δpeak|/|peak| * 100 <= peak.tol_pct`, the denominator being the last
+  window's value. **Zero values:** if the last window's value is exactly 0 the
+  delta is 0 when the previous window is identical and infinite otherwise;
+  there is no absolute fallback, so a signal whose mean is ~0 never settles on
+  its mean (judge it by its peak instead).
+- **Value.** `value` is `1.0` when settled and `0.0` when not, graded against
+  `limits` like any scalar, so "not settled" is a `fail`, not an error. An
+  additive `settled` sibling carries `{settled, worst_delta_pct,
+  mean_delta_pct, peak_delta_pct, windows_total, windows: [{t_start, t_end,
+  mean, peak}]}`; `windows` keeps the last 100, and an infinite delta is
+  `null`.
+- **Errors.** `status: "error"`, `value: null`, and a `code: "measurement"`
+  diagnostic led by `[settled_insufficient_windows]` (fewer than 3 complete
+  windows: run the `.tran` longer or reduce `cycles`),
+  `[settled_no_clock_crossing]` (the clock never crosses `level` at or after
+  `from`) or `[settled_vector_missing]` (a signal did not resolve or its
+  rawfile was unreadable).
+- **Backends.** Reduced in Python inside the corner run from a corner-local
+  rawfile (`settled_<k>.raw`), so `local`, `remote` and `batch` agree and no
+  waveform artifact is needed. The measurement is part of the checkpoint
+  fingerprint, so `options.resume` covers it. It is a mandatory runner feature
+  (`settled`, first `klt` release segment `0.8.1`).
 
 ## Bisection / threshold search (`measurements[].search`)
 
