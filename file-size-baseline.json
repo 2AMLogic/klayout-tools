@@ -433,7 +433,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 7325
+      "lines": 7324
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -513,7 +513,7 @@
     },
     {
       "path": "src/klayout_tools/pdk_models.py",
-      "lines": 2323
+      "lines": 2089
     },
     {
       "path": "src/klayout_tools/pdk_pcell.py",
