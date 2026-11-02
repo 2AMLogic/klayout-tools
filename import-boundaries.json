@@ -126,6 +126,7 @@
       "kind": "verb",
       "description": "`klt drc` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli._drc_native",
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.drc",
         "klayout_tools.drc_crosscheck",
@@ -409,6 +410,7 @@
         "klayout_tools.pdk_descriptor",
         "klayout_tools.pdk_families",
         "klayout_tools.pdk_models",
+        "klayout_tools.pdk_native_drc",
         "klayout_tools.pdk_pcell",
         "klayout_tools.pdk_stackup"
       ]

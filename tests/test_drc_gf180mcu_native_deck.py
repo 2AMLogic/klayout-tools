@@ -7,6 +7,8 @@ import json
 
 from klayout_tools import pdk
 from klayout_tools.cli import drc_cmd, main
+from klayout_tools.cli._drc_native import resolve_native_deck
+from klayout_tools.pdk_native_drc import native_drc_main_script
 
 
 def _install(tmp_path, variant: str, drc_files: tuple[str, ...]) -> str:
@@ -32,7 +34,7 @@ def _args(root, pdk_name, **kw):
 
 def test_main_script_resolved_with_variant_default(tmp_path):
     root = _install(tmp_path, "gf180mcuD", ("gf180mcu.drc",))
-    found = pdk.native_drc_main_script(variant="gf180mcuD", root=root)
+    found = native_drc_main_script(variant="gf180mcuD", root=root)
     assert found["deck_file"].endswith("gf180mcu.drc")
     assert found["deck_vars"] == {"variant": "gf180mcuD"}
     assert found["min_klayout_version"] == "0.30.9"
@@ -42,20 +44,20 @@ def test_main_script_resolved_with_variant_default(tmp_path):
 
 def test_missing_main_script_returns_none(tmp_path):
     root = _install(tmp_path, "gf180mcuD", ())
-    assert pdk.native_drc_main_script(variant="gf180mcuD", root=root) is None
+    assert native_drc_main_script(variant="gf180mcuD", root=root) is None
 
 
 def test_sky130_resolution_unchanged(tmp_path):
     root = _install(tmp_path, "sky130A", ("sky130A.lydrc", "gf180mcu.drc"))
-    deck, vars_, floor, native = drc_cmd._resolve_native_deck(_args(root, "sky130A"))
+    deck, vars_, floor, native = resolve_native_deck(_args(root, "sky130A"))
     assert deck.endswith("sky130A.lydrc")
     assert (vars_, floor, native) == ({}, None, None)
-    assert pdk.native_drc_main_script(variant="sky130A", root=root) is None
+    assert native_drc_main_script(variant="sky130A", root=root) is None
 
 
 def test_deck_file_override_wins(tmp_path):
     root = _install(tmp_path, "gf180mcuD", ("gf180mcu.drc",))
-    deck, vars_, floor, native = drc_cmd._resolve_native_deck(
+    deck, vars_, floor, native = resolve_native_deck(
         _args(root, "gf180mcuD", deck_file="x.drc")
     )
     assert (deck, vars_, floor, native) == ("x.drc", {}, None, None)
@@ -63,7 +65,7 @@ def test_deck_file_override_wins(tmp_path):
 
 def test_user_deck_var_and_floor_override_defaults(tmp_path):
     root = _install(tmp_path, "gf180mcuD", ("gf180mcu.drc",))
-    deck, vars_, floor, native = drc_cmd._resolve_native_deck(
+    deck, vars_, floor, native = resolve_native_deck(
         _args(root, "gf180mcuD", deck_var=["variant=E"], min_klayout_version="0.30.1")
     )
     assert vars_ == {"variant": "E"}
