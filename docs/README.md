@@ -51,6 +51,7 @@ docs/
     gen.md
     kb.md
     array-check.md
+    fill.md
     keepout-check.md
     layers.md
     layout-metrics.md
