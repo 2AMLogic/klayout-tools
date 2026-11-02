@@ -58,7 +58,12 @@ def _write_lvsdb(
     l2n.connect(bulk)
     l2n.extract_netlist()
     ref = kdb.Netlist()
-    ref.read(schem, kdb.NetlistSpiceReader())
+    # sky130.lvs's own reader delegate takes a value-less C card; the stock
+    # reader needs a value, so hand it one (issue #4817).
+    text = open(schem).read().replace(" sky130_fd_pr__model", " 0 sky130_fd_pr__model")
+    patched = schem + ".stock.sp"
+    open(patched, "w").write(text)
+    ref.read(patched, kdb.NetlistSpiceReader())
     l2n.reference = ref
     if compare:
         l2n.compare(kdb.NetlistComparer())

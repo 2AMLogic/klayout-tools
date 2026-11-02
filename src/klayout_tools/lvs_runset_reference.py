@@ -65,13 +65,40 @@ def refuse_unsupported(
         raise LvsError(f"engine '{RUNSET_ENGINE}' requires reference.netlist")
 
 
+def _drop_capacitor_placeholder(text: str, placeholder_classes: dict[str, str]) -> str:
+    """Remove the positional ``0`` value from converted capacitor cards.
+
+    The ``"klayout"`` engine ignores the placeholder, but a PDK runset's own
+    SPICE reader takes it literally: against the real sky130 ``sky130.lvs`` the
+    card ``C1 a b 0 <model> A= P=`` reads ``0`` as an extra net and drops
+    ``A``/``P`` (live-verified, issue #4817), while ``C1 a b <model> A= P=``
+    compares ``match``."""
+    classes = {
+        name.lower() for name, kind in placeholder_classes.items() if kind == "capacitor"
+    }
+    if not classes:
+        return text
+    lines = []
+    for line in text.split("\n"):
+        tokens = line.split()
+        if (
+            len(tokens) > 4
+            and tokens[0][:1] in "Cc"
+            and tokens[3] == "0"
+            and tokens[4].lower() in classes
+        ):
+            line = " ".join(tokens[:3] + tokens[4:])
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def convert_reference(reference: str, ref_spec: dict[str, Any], work_dir: str) -> str:
     """Write the ``subckt-call`` conversion of ``reference`` into ``work_dir``
     and return its path (``reference`` itself for any other form).
 
     Reuses the ``"klayout"`` engine's conversion, so the schematic MIM call
     ``X.. <pdk>__cap_mim_m3_1 W= L=`` becomes the plain card the runset's own
-    extraction pairs with (``C.. a b 0 <pdk>__model__cap_mim A= P=``)."""
+    extraction pairs with (``C.. a b <pdk>__model__cap_mim A= P=``)."""
     from .lvs import LvsError
     from .netlist_normalize import (
         NormalizeError,
@@ -91,9 +118,12 @@ def convert_reference(reference: str, ref_spec: dict[str, Any], work_dir: str) -
     # The converted copy lives in work_dir: keep relative .include paths valid.
     text = quote_spice_includes(text, os.path.dirname(os.path.abspath(reference)))
     try:
-        converted = convert_reference_netlist(
+        result = convert_reference_netlist(
             text, deck=ref_spec.get("deck"), device_map=ref_spec.get("device_map")
-        ).text
+        )
+        converted = _drop_capacitor_placeholder(
+            result.text, result.placeholder_value_classes
+        )
     except NormalizeError as exc:
         raise LvsError(
             f"could not convert subckt-call reference netlist '{reference}' to "

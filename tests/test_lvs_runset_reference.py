@@ -45,8 +45,10 @@ def test_subckt_call_converts_mim_for_the_runset(tmp_path, fake_klayout):
     finally:
         lvs_runset._run_runset = real
     # W=10u L=5u -> A=50 um^2 = 50P, P=2*(10+5)=30 um = 30U (numeric, not assumed).
-    assert "C1 a b 0 sky130_fd_pr__model__cap_mim A=50P P=30U" in seen["text"]
+    assert "C1 a b sky130_fd_pr__model__cap_mim A=50P P=30U" in seen["text"]
     assert "XC1" not in seen["text"]
+    # Issue #4817: the real sky130.lvs reader takes a positional ``0`` as a net.
+    assert " 0 " not in seen["text"].split("C1", 1)[1].split("\n", 1)[0]
     assert not _unresolved(report)
     assert report["reference_conversion"] == {
         "form": "subckt-call",
