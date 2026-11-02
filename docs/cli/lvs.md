@@ -269,16 +269,18 @@ status is `mismatch`.
 the reference into a temporary plain-element netlist before it is passed to
 the runset as `schematic`; your file is not modified and no hand-derived copy is
 needed. A sky130 schematic MIM cap `XC1 a b sky130_fd_pr__cap_mim_m3_1 W=10u L=5u`
-becomes `C1 a b 0 sky130_fd_pr__model__cap_mim A=50P P=30U` (W/L in
+becomes `C1 a b sky130_fd_pr__model__cap_mim A=50P P=30U` (W/L in
 micrometres turned into area and perimeter in SI units), and is no longer
 reported as an unresolved call. The applied mapping is recorded in the
 report's `reference_conversion` block (`form`, `deck`, `device_map`), and
 `--check --rerun` replays it. Without `form`, behaviour is unchanged; any other
 `reference.*` key (or `deck`/`device_map` without `form: "subckt-call"`) is still
-refused. The positional value of the converted card is the placeholder `0`
-(the extracted MIM class has no C); the runset's own compare decides whether it
-is ignored. Confirm the card is accepted by your `sky130.lvs` before relying
-on it.
+refused. The `"klayout"` engine's positional `0` placeholder is dropped for this engine:
+a PDK runset's own SPICE reader takes it literally (as an extra net, losing
+`A`/`P`). Live-verified (issue #4817) with klayout 0.28.16 and the open_pdks
+`sky130A` `sky130.lvs` (`c6d73a35f524`) on a `klt gen cap_array` 10x5 um MIM
+cap with `a`/`b` labels on met3 (70/5) and met4 (71/5): with the `0` the compare
+was `mismatch` (`device.property`, net `0` unmatched); without it, `match`.
 
 **The verdict is taken from the `.lvsdb`, not the process.** The database is
 read back with `klayout.db.LayoutVsSchematic.read()` + `xref()`. A PDK driver
