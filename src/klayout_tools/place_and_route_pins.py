@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+from collections.abc import Sequence
 from typing import Any
 
 EDGE_TO_REGION = {
@@ -387,13 +388,77 @@ def read_def_instance_groups(
                 bbox["x_max_um"] - bbox["x_min_um"], bbox["y_max_um"] - bbox["y_min_um"]
             )
             within = span <= bound
-        results.append(
-            {
-                "name": group["name"],
-                "matched": len(hits),
-                "bbox": bbox,
-                "max_extent_um": bound,
-                "within_extent": within,
-            }
-        )
+        result: dict[str, Any] = {
+            "name": group["name"],
+            "matched": len(hits),
+            "bbox": bbox,
+            "max_extent_um": bound,
+            "within_extent": within,
+        }
+        region = group.get("region_um")
+        if region is not None:
+            result["region_um"] = region
+            unmatched = any(not match_pins(pat, names) for pat in group["instances"])
+            result["within_region"] = (
+                None if unmatched else _within_region(origins, region, scale, hits)
+            )
+        order = group.get("order")
+        if order is not None:
+            result["order"] = _measure_order(group["instances"], placed, order, scale)
+        results.append(result)
     return results
+
+
+def _within_region(
+    origins: Sequence[tuple[int | None, int | None]],
+    region: list[float],
+    scale: int,
+    hits: set[str],
+) -> bool | None:
+    """All placed origins inside the (closed) rectangle; ``None`` if no
+    member is placed or any matched member is unplaced."""
+    if not origins or len(origins) != len(hits):
+        return None
+    x0, y0, x1, y1 = region
+    return all(
+        x0 <= x / scale <= x1 and y0 <= y / scale <= y1
+        for x, y in origins
+        if x is not None and y is not None
+    )
+
+
+def _measure_order(
+    members: list[str],
+    placed: list[tuple[str, int | None, int | None]],
+    order: dict[str, Any],
+    scale: int,
+) -> dict[str, Any]:
+    """Order/pitch of exact-named ``members`` along ``order['axis']``."""
+    axis = order["axis"]
+    pitch = order.get("pitch_um")
+    by_name = {name: (x, y) for name, x, y in placed}
+    coords: list[float | None] = []
+    for member in members:
+        x, y = by_name.get(member, (None, None))
+        value = x if axis == "x" else y
+        coords.append(None if value is None else value / scale)
+    block: dict[str, Any] = {
+        "axis": axis,
+        "members": list(members),
+        "ordered": None,
+        "pitch_um_measured": [],
+        "pitch_ok": None,
+    }
+    if pitch is not None:
+        block["pitch_um"] = pitch
+    known = [c for c in coords if c is not None]
+    if len(known) != len(coords):
+        return block
+    deltas = [round(b - a, 4) for a, b in zip(known, known[1:], strict=False)]
+    block["pitch_um_measured"] = deltas
+    block["ordered"] = all(d > 0 for d in deltas) or all(d < 0 for d in deltas)
+    if pitch is not None:
+        block["pitch_ok"] = all(
+            abs(abs(d) - pitch) <= ABUTMENT_TOLERANCE_UM for d in deltas
+        )
+    return block

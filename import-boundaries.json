@@ -427,6 +427,7 @@
         "klayout_tools.place_and_route",
         "klayout_tools.place_and_route_batch",
         "klayout_tools.place_and_route_gds_merge",
+        "klayout_tools.place_and_route_groups",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pins",
@@ -513,6 +514,7 @@
         "klayout_tools._paths",
         "klayout_tools._provenance",
         "klayout_tools._report_verify",
+        "klayout_tools._report_verify_hints",
         "klayout_tools._spice_number",
         "klayout_tools._text",
         "klayout_tools._unionfind",
@@ -532,6 +534,7 @@
         "klayout_tools.resistor_mesh",
         "klayout_tools.routing_pitch",
         "klayout_tools.touchstone",
+        "klayout_tools.verilog_module_names",
         "klayout_tools.verilog_netlist"
       ]
     },
