@@ -75,6 +75,7 @@ real failure.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import itertools
 import json
@@ -109,6 +110,7 @@ from . import (
     sim_passes,
     sim_portable,
     sim_search,
+    sim_settled,
     sim_snm_meas,
     sim_step_resolution,
     sim_steps,
@@ -1697,6 +1699,7 @@ def _resolve_analysis_and_measurements(
     sim_eye.validate_eye_context(measurements_spec, analysis)
     # Issue #4773: a step-resolution report is a transient-time quantity too.
     sim_step_resolution.validate_step_resolution_context(measurements_spec, analysis)
+    sim_settled.validate_settled_context(measurements_spec, analysis)
     # Issue #4121: a search entry needs the scalar single-analysis deck.
     sim_search.validate_search_context(measurements_spec, analysis)
     # Issue #2938: a `noise` entry is lowered to an `expr` (plus helper
@@ -2180,6 +2183,7 @@ def _required_save_vectors(
         step_res = spec.get("step_resolution")
         if isinstance(step_res, dict):
             texts.append(step_res.get("signal"))
+        texts.extend(sim_settled.signal_texts(spec))
         for text in texts:
             if not isinstance(text, str):
                 continue
@@ -3499,6 +3503,7 @@ def _prepare_sim_request(
         step_resolution_declared=bool(
             sim_step_resolution.step_resolution_measurements(measurements_spec)
         ),
+        settled_declared=bool(sim_settled.settled_measurements(measurements_spec)),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -8021,6 +8026,7 @@ def _enforce_xyce_support_boundary(
     search_declared: bool = False,
     eye_declared: bool = False,
     step_resolution_declared: bool = False,
+    settled_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -8093,6 +8099,7 @@ def _enforce_xyce_support_boundary(
         search_declared=search_declared,
         eye_declared=eye_declared,
         step_resolution_declared=step_resolution_declared,
+        settled_declared=settled_declared,
     )
     for declared, message in (
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
@@ -10013,6 +10020,7 @@ def _run_corner(
     step_resolutions = sim_step_resolution.extract_corner_step_resolutions(
         measurements_spec, corner_dir
     )
+    settleds = sim_settled.extract_corner_settleds(measurements_spec, corner_dir)
     searches = sim_search.extract_corner_searches(measurements_spec, log_text)
     # Issue #3160: each pass's rawfile is decoded once, shared by the tian
     # reduction below and the corner's `passes` field.
@@ -10038,6 +10046,7 @@ def _run_corner(
             snms=snms,
             eyes=eyes,
             step_resolutions=step_resolutions,
+            settleds=settleds,
             searches=searches,
             tians=tians,
             engine_diagnostics=diagnostics,
@@ -10389,6 +10398,7 @@ def _corner_measurement_results(
     step_resolutions: (
         dict[int, sim_step_resolution.StepResolutionOutcome] | None
     ) = None,
+    settleds: dict[int, sim_settled.SettledOutcome] | None = None,
     searches: dict[int, sim_search.SearchOutcome] | None = None,
     tians: dict[int, sim_tian.TianOutcome] | None = None,
     engine_diagnostics: list[dict[str, Any]] | None = None,
@@ -10457,6 +10467,7 @@ def _corner_measurement_results(
             _step_resolution_measurement_result,
             step_resolutions,
         ),
+        (sim_settled.is_settled, _settled_measurement_result, settleds),
         (sim_search.is_search, _search_measurement_result, searches),
     )
     for position, spec in enumerate(measurements_spec):
@@ -10925,43 +10936,26 @@ def _eye_measurement_result(
     return result, grading_diagnostics
 
 
-def _step_resolution_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_step_resolution.StepResolutionOutcome | None,
-    *,
-    save_mode: str,
+def _vector_measurement_result(
+    spec: dict[str, Any], outcome: Any, *, save_mode: str, key: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``step_resolution`` measurement's response entry (issue #4773).
-
-    ``value`` is the overall largest time-sample gap (seconds) near the
-    crossings, graded through :func:`_grade_measurement_value` like any scalar;
-    the per-crossing list rides the additive ``step_resolution`` sibling. A
-    failure is ``status: "error"``, ``value: null`` with a
-    ``code: "measurement"`` diagnostic whose message starts with a
-    ``[<reason>]`` token from
-    :data:`klayout_tools.sim_step_resolution.ERROR_CODES`."""
+    """Response entry for a ``step_resolution``/``settled`` measurement; the
+    detail rides the additive ``key`` sibling. A failure is ``status:
+    "error"`` with a ``[<reason>]``-prefixed ``measurement`` diagnostic."""
     name = spec["name"]
     unit = spec.get("unit")
     if outcome is None or outcome.value is None:
         message = (
             outcome.error
             if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no step_resolution value"
+            else f"measurement '{name}' produced no {key} value"
         )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "step_resolution_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "step_resolution_vector_missing":
+        missing = f"{key}_vector_missing"
+        reason = outcome.code if outcome is not None and outcome.code else missing
+        if save_mode == "netlist" and reason == missing:
             message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
+        result = {"name": name, "value": None, "unit": unit}
+        result.update(status="error", margin=None)
         return result, [
             {
                 "severity": "error",
@@ -10972,15 +10966,18 @@ def _step_resolution_measurement_result(
     m_status, margin, grading_diagnostics = _grade_measurement_value(
         spec, outcome.value
     )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "step_resolution": outcome.report(),
-    }
+    result = {"name": name, "value": outcome.value, "unit": unit}
+    result.update(status=m_status, margin=margin, **{key: outcome.report()})
     return result, grading_diagnostics
+
+
+#: Per-kind builders (#4773, #4780); ``settled`` value 1.0/0.0 = (not) settled.
+_step_resolution_measurement_result = functools.partial(
+    _vector_measurement_result, key="step_resolution"
+)
+_settled_measurement_result = functools.partial(
+    _vector_measurement_result, key="settled"
+)
 
 
 def _search_measurement_result(
@@ -11872,6 +11869,7 @@ def _corner_deck_control_lines(
     step_resolution_lines = sim_step_resolution.control_lines(
         measurements_spec, corner_dir
     )
+    settled_lines = sim_settled.control_lines(measurements_spec, corner_dir)
     search_lines = sim_search.control_lines(measurements_spec)
     complex_vector_lines = sim_complex_vectors.control_lines(
         complex_vectors, corner_dir
@@ -11886,6 +11884,7 @@ def _corner_deck_control_lines(
         or snm_lines
         or eye_lines
         or step_resolution_lines
+        or settled_lines
         or complex_vector_lines
     ):
         lines.append("set filetype=ascii")
@@ -11917,6 +11916,7 @@ def _corner_deck_control_lines(
     lines.extend(snm_lines)
     lines.extend(eye_lines)
     lines.extend(step_resolution_lines)
+    lines.extend(settled_lines)
     lines.extend(complex_vector_lines)
     # Issue #4121: last, so no later line reads the main analysis' plot after
     # the search has moved ngspice's current plot.

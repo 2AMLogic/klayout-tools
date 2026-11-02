@@ -19,6 +19,7 @@ def refuse_control_block_measurements(
     search_declared: bool = False,
     eye_declared: bool = False,
     step_resolution_declared: bool = False,
+    settled_declared: bool = False,
 ) -> None:
     """The ``engine: "xyce"`` refusals for measurement forms that exist only
     as commands in klt's generated ngspice ``.control`` block (``expr``,
@@ -117,6 +118,14 @@ def refuse_control_block_measurements(
             "'xyce': the signal is dumped by ngspice `let`/`write` commands "
             "inside a `.control` block, and the Xyce deck has none; use "
             "engine 'ngspice'",
+        ),
+        (
+            settled_declared,
+            # Issue #4780: same `.control` let/write boundary as `crossings`.
+            "measurements[].settled is not supported for engine 'xyce': the "
+            "signals are dumped by ngspice `let`/`write` commands inside a "
+            "`.control` block, and the Xyce deck has none; use engine "
+            "'ngspice'",
         ),
     ):
         if declared:
