@@ -52,6 +52,7 @@ from ..sim_set import DEFAULT_MAX_IN_FLIGHT, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
+from .sim_set_text import print_set_text
 
 EXIT_PASS = 0
 EXIT_MEASUREMENT_FAILED = 3
@@ -328,34 +329,8 @@ def _run_batch_set(args: argparse.Namespace) -> int:
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
-    emit_success(report, args.format, _print_set_text)
+    emit_success(report, args.format, print_set_text)
     return max((r["exit_code"] for r in report["requests"]), default=EXIT_PASS)
-
-
-def _print_set_text(report: dict) -> None:
-    if report.get("dry_run"):
-        print(f"klt sim --batch-set --dry-run: {report['status']}")
-        for entry in report["requests"]:
-            print(f"  {entry['request']}  [{entry['status']}]")
-            if entry.get("plan"):
-                _print_dry_run_text(entry["plan"])
-            elif entry["error"]:
-                error = entry["error"]
-                print(f"    {error['code'] or 'error'}: {error['message']}")
-        return
-    print(
-        f"status: {report['status']}  requests: {report['request_count']}  "
-        f"submitted: {report['submitted']}  refused: {report['refused']}  "
-        f"max_in_flight: {report['max_in_flight']}"
-    )
-    for entry in report["requests"]:
-        line = f"  {entry['request']}  [{entry['status']}]"
-        if entry["job_ids"]:
-            line += f"  job={','.join(entry['job_ids'])}"
-        error = entry["error"]
-        if error:
-            line += f"  {error['code'] or 'error'}: {error['message']}"
-        print(line)
 
 
 def _run_op_lint(args: argparse.Namespace) -> int:
