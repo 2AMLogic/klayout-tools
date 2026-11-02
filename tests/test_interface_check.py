@@ -290,3 +290,101 @@ def test_cli_text_output(tmp_path, capsys):
     code = main(["interface-check", a, b, "--place=-10,100", "--pins", _PINS])
     assert code == 3
     assert "OUT[0]: misaligned offset=(0.0, 3.0)" in capsys.readouterr().out
+
+
+# ---- --pair (complementary names, issue #4803) ---------------------------
+
+_CPINS = r"[ns]_(?:in|out)\[\d+\]"
+_PAIR = [(r"n_out\[(\d+)\]", r"s_in[\1]")]
+
+
+def _comp_a(n=3, dy=0.0):
+    return [
+        (f"n_out[{k}]", 0.0, k * _PITCH + dy, 2.0, k * _PITCH + dy + 1.0)
+        for k in range(n)
+    ]
+
+
+def _comp_b(n=3):
+    return [(f"s_in[{k}]", 0.0, k * _PITCH, 2.0, k * _PITCH + 1.0) for k in range(n)]
+
+
+def test_pair_complementary_names_pass(tmp_path):
+    a = _write(tmp_path / "a.gds", _comp_a())
+    b = _write(tmp_path / "b.gds", _comp_b())
+    report = run_interface_check(a, b, (0.0, 0.0), _CPINS, pairs=_PAIR)
+    assert report["status"] == "pass"
+    assert [p["name"] for p in report["pins"]] == [f"n_out[{k}]" for k in range(3)]
+    assert [p["b_name"] for p in report["pins"]] == [f"s_in[{k}]" for k in range(3)]
+    assert report["pairs"] == [{"a": _PAIR[0][0], "b": _PAIR[0][1]}]
+
+
+def test_pair_misaligned(tmp_path):
+    a = _write(tmp_path / "a.gds", _comp_a(dy=3.0))
+    b = _write(tmp_path / "b.gds", _comp_b())
+    report = run_interface_check(a, b, (0.0, 0.0), _CPINS, pairs=_PAIR)
+    assert report["misaligned_count"] == 3
+
+
+def test_pair_missing_partner_and_unclaimed_b(tmp_path):
+    a = _write(tmp_path / "a.gds", _comp_a(3))
+    b = _write(tmp_path / "b.gds", _comp_b(2) + [("s_in[7]", 0.0, 50.0, 2.0, 51.0)])
+    report = run_interface_check(a, b, (0.0, 0.0), _CPINS, pairs=_PAIR)
+    by = {p["name"]: p for p in report["pins"]}
+    assert by["n_out[2]"]["status"] == "no_partner"
+    assert by["n_out[2]"]["b_name"] == "s_in[2]"
+    assert by["s_in[7]"]["status"] == "no_partner"
+    assert by["s_in[7]"]["a"] is None
+
+
+def test_no_pair_unchanged_and_b_name_equals_name(tmp_path):
+    a = _write(tmp_path / "a.gds", _strip())
+    b = _write(tmp_path / "b.gds", _array())
+    report = run_interface_check(a, b, _PLACE, _PINS)
+    assert report["status"] == "pass"
+    assert report["pairs"] == []
+    assert all(p["b_name"] == p["name"] for p in report["pins"])
+
+
+def test_pair_duplicate_names_keep_occurrence(tmp_path):
+    a = _write(
+        tmp_path / "a.gds",
+        [("n_out[0]", 0.0, 0.0, 2.0, 1.0), ("n_out[0]", 0.0, 5.0, 2.0, 6.0)],
+    )
+    b = _write(
+        tmp_path / "b.gds",
+        [("s_in[0]", 0.0, 0.0, 2.0, 1.0), ("s_in[0]", 0.0, 5.0, 2.0, 6.0)],
+    )
+    report = run_interface_check(a, b, (0.0, 0.0), _CPINS, pairs=_PAIR)
+    assert [p["name"] for p in report["pins"]] == ["n_out[0]#1", "n_out[0]#2"]
+    assert [p["b_name"] for p in report["pins"]] == ["s_in[0]#1", "s_in[0]#2"]
+    assert report["status"] == "pass"
+
+
+@pytest.mark.parametrize(
+    "spec", ["no-equals", "=x", "(unclosed=x", r"a(\d)=\2", r"a=\g<nope>"]
+)
+def test_bad_pair_is_error(spec):
+    from klayout_tools.interface_check import parse_pair
+
+    with pytest.raises(InterfaceCheckError):
+        parse_pair(spec)
+
+
+def test_parse_pair_splits_on_last_equals():
+    from klayout_tools.interface_check import parse_pair
+
+    assert parse_pair(r"a=b=c\g<0>") == ("a=b", r"c\g<0>")
+
+
+def test_cli_pair_flag_and_text(tmp_path, capsys):
+    a = _write(tmp_path / "a.gds", _comp_a())
+    b = _write(tmp_path / "b.gds", _comp_b())
+    base = ["interface-check", a, b, "--place", "0,0", "--pins", _CPINS]
+    assert main([*base, "--pair", r"n_out\[(\d+)\]=s_in[\1]", "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["pairs"][0]["b"] == r"s_in[\1]"
+    assert main([*base, "--pair", r"n_out\[(\d+)\]=s_in[\1]"]) == 0
+    assert "n_out[0] <-> s_in[0]: ok" in capsys.readouterr().out
+    assert main([*base, "--pair", "bad", "--format", "json"]) == 1
+    capsys.readouterr()
+    assert main([*base, "--format", "json"]) == 3

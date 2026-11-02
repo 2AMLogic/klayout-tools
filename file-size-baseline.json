@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 8025
+      "lines": 8019
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -289,7 +289,7 @@
     },
     {
       "path": "src/klayout_tools/equiv.py",
-      "lines": 1395
+      "lines": 1132
     },
     {
       "path": "src/klayout_tools/equiv_replay.py",
