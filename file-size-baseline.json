@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 8025
+      "lines": 8019
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -289,7 +289,7 @@
     },
     {
       "path": "src/klayout_tools/equiv.py",
-      "lines": 1395
+      "lines": 1132
     },
     {
       "path": "src/klayout_tools/equiv_replay.py",
@@ -433,7 +433,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 7450
+      "lines": 7449
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -513,7 +513,7 @@
     },
     {
       "path": "src/klayout_tools/pdk_models.py",
-      "lines": 2323
+      "lines": 2089
     },
     {
       "path": "src/klayout_tools/pdk_pcell.py",
@@ -633,7 +633,7 @@
     },
     {
       "path": "src/klayout_tools/sim_search.py",
-      "lines": 573
+      "lines": 565
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
@@ -645,7 +645,7 @@
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
-      "lines": 567
+      "lines": 559
     },
     {
       "path": "src/klayout_tools/sim_transfer.py",
