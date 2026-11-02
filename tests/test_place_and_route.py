@@ -7707,6 +7707,7 @@ def test_congestion_and_density_knobs_default_to_prior_tcl(tmp_path, monkeypatch
         "placement_density": 0.6,
         "route_congestion_iterations": None,
         "route_allow_congestion": False,
+        "signal_layers": "met1-met5",
     }
 
 
@@ -7736,6 +7737,7 @@ def test_congestion_and_density_knobs_emitted_when_requested(tmp_path, monkeypat
         "placement_density": 0.45,
         "route_congestion_iterations": 60,
         "route_allow_congestion": True,
+        "signal_layers": "met1-met5",
     }
 
 

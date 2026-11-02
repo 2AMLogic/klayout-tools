@@ -659,11 +659,17 @@ def validate_tech_lef_track_offsets(
         )
 
 
-def _signal_routing_layers(cell_library: str) -> tuple[str, ...] | None:
+def _signal_routing_layers(
+    cell_library: str, library: dict[str, Any] | None = None
+) -> tuple[str, ...] | None:
     """Expand :data:`_ROUTING_LAYER_RANGE`'s ``"<low>-<high>"`` endpoints for
     ``cell_library`` into the concrete, ordered set of layers
     ``set_routing_layers -signal`` actually opens for signal routing (issue
     #2473), using :data:`_ROUTING_LAYER_STACK` for the stack order.
+
+    A validated ``request.library.route_layers`` (``"<low>-<high>"``, issue
+    #4127) overrides the built-in range (issue #4802), so a signal-layer cap
+    is what the io-layer check compares against.
 
     ``None`` -- meaning "no opinion, skip any check built on this" -- when
     either table has no entry for this library, or when the range's own
@@ -678,7 +684,10 @@ def _signal_routing_layers(cell_library: str) -> tuple[str, ...] | None:
     from .place_and_route import _ROUTING_LAYER_RANGE
 
     stack = _ROUTING_LAYER_STACK.get(cell_library)
-    layer_range = _ROUTING_LAYER_RANGE.get(cell_library)
+    if library is not None and "route_layers" in library:
+        layer_range = library["route_layers"]
+    else:
+        layer_range = _ROUTING_LAYER_RANGE.get(cell_library)
     if stack is None or layer_range is None:
         return None
     low, _, high = layer_range.partition("-")
@@ -691,7 +700,9 @@ def _signal_routing_layers(cell_library: str) -> tuple[str, ...] | None:
     return stack[low_index : high_index + 1]
 
 
-def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
+def _validate_io(
+    io_spec: Any, cell_library: str, library: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
 
     # Deferred: defined in `place_and_route.py`, which imports this module at
     # its own module scope (same pattern as `place_and_route_sta.py`).
@@ -728,8 +739,13 @@ def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
     # left to OpenROAD's own loud error, and an unverified `cell_library`
     # (absent from either reference table) skips the check entirely -- so no
     # request that worked before can be rejected on a guess.
-    routable = _signal_routing_layers(cell_library)
+    routable = _signal_routing_layers(cell_library, library)
     if routable is not None:
+        signal_range = (
+            library["route_layers"]
+            if library is not None and "route_layers" in library
+            else _ROUTING_LAYER_RANGE[cell_library]
+        )
         stack = _ROUTING_LAYER_STACK[cell_library]
         for field, value in (("layer_h", layer_h), ("layer_v", layer_v)):
             if value in routable or value not in stack:
@@ -737,7 +753,7 @@ def _validate_io(io_spec: Any, cell_library: str) -> dict[str, Any] | None:
             raise PlaceAndRouteError(
                 f"request.io.{field} '{value}' is outside the signal routing "
                 f"range for cell_library '{cell_library}' "
-                f"({_ROUTING_LAYER_RANGE[cell_library]}): the router never "
+                f"({signal_range}): the router never "
                 f"draws signal conductor on '{value}', so a top-level pin "
                 f"placed there gets only a DEF PINS port rectangle on that "
                 f"layer's LEF PIN/LEFPIN purpose with no conductor under it "

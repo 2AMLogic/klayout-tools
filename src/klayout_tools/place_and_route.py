@@ -1823,13 +1823,13 @@ def _run_single_corner(
     sweep_corners = _validate_sweep_corners(pdk_spec.get("sweep_corners"))
 
     floorplan = _validate_floorplan(request["floorplan"])
-    io_spec = _validate_io(request.get("io"), cell_library)
+    library = _validate_library(request.get("library"))
+    io_spec = _validate_io(request.get("io"), cell_library, library)
     # Issue #3885: a pattern naming no real port is an error, never a silent
     # no-op.
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
     instance_groups = _validate_instance_groups(request.get("instance_groups"))
-    library = _validate_library(request.get("library"))
     power = _validate_power(request.get("power"), cell_library, library)
     (
         clock_port,
@@ -1848,6 +1848,11 @@ def _run_single_corner(
     placement_density = _validate_placement_density(request.get("placement_density"))
     route_congestion_iterations = _validate_route_congestion_iterations(
         request.get("route_congestion_iterations")
+    )
+    signal_layers: str | None = (
+        library["route_layers"]
+        if library is not None and "route_layers" in library
+        else _ROUTING_LAYER_RANGE.get(cell_library)
     )
     route_allow_congestion = _validate_route_allow_congestion(
         request.get("route_allow_congestion")
@@ -2464,6 +2469,10 @@ def _run_single_corner(
             "placement_density": placement_density,
             "route_congestion_iterations": route_congestion_iterations,
             "route_allow_congestion": route_allow_congestion,
+            # Issue #4802: the range passed to `set_routing_layers -signal`
+            # (`request.library.route_layers` if given, else the built-in
+            # per-library range); `null` only for a library with neither.
+            "signal_layers": signal_layers,
         },
         # Additive field (issue #2781): see `_coverage_declaration`.
         "coverage": _coverage_declaration(),
