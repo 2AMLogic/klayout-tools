@@ -160,6 +160,7 @@ For a draw that did not come from `klt sim`:
 | `inconclusive` | integer | Optional count of draws whose value *existed* but was not trustworthy — the only category here that is not a missing value. On the `klt sim` report path this is **derived** from the report's own `"inconclusive"` status grading (see above); a plain sample-set document has no per-sample status channel, so the count is supplied here instead, exactly like the three fields above it. Gets `errored`'s denominator treatment (excluded from both the numerator and denominator of `yield.empirical`), and excluded from `distribution`/`capability` — a number nobody trusts must not move the mean, sigma, or Cpk. See ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
 | `limits` | object | `min`/`max`/`target_yield`, each optional — but at least one of `min`/`max` must be resolvable (here or via `--limits`). Optional `exclusive_min`/`exclusive_max` booleans (default `false`) make the corresponding bound *strict* (`>`/`<` instead of the default `>=`/`<=`) — for spec rows ratified as strict inequalities. Setting one with no corresponding `min`/`max` value is an error. |
 | `source_corners` | array\<string\> | Optional; the originating corners the draw was pooled from. |
+| `spec_row` | string | Optional; an opaque label tying this measurement to a ratified spec row / decision record. Echoed verbatim on the report entry, never graded. See ["Run provenance and `spec_row`"](#run-provenance-and-spec_row). |
 | `negative_control` | object | Optional; see "Negative control" below. |
 | `analytic_cross_check` | object | Optional; see "Analytic cross-check" below. |
 | `sampling` | object | Optional; see "Sampling strategies (variance reduction)" below. |
@@ -323,6 +324,51 @@ Exit codes: `0` derived (document on stdout); `1` could not derive (any
 error above; JSON error envelope on stderr under `--format json`, stdout
 empty); `2` usage error (argparse — e.g. `--negative-control` missing).
 
+### Run provenance and `spec_row`
+
+T1 Monte Carlo evidence needs a recorded seed, sample count, negative control
+and a statement of which process corners the MC was combined with. The report
+carries these itself, so the committed artifact `klt signoff` cites states
+them ([#2840](https://github.com/2AMLogic/klayout-tools/issues/2840)).
+
+A sample-set document may carry an optional run-level **`provenance`** object
+(deliberately not named `campaign`: `klt yield-campaign` already emits a
+differently-shaped top-level `campaign` object). It is echoed verbatim
+(unknown keys included) into the report's `source.provenance`; only the types
+are validated, nothing is graded:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `seed` | integer | RNG seed of the draw (`0` is valid). |
+| `rng` | string | Simulator / generator identity. |
+| `draws_per_population` | positive integer | Draws in each population (nominal, negative control). |
+| `common_random_numbers` | boolean | Whether the same draws were reused across populations. |
+| `corner_matrix` | array\<string\> | The process corners the MC was combined with (may be empty). |
+
+A malformed field (`seed: "abc"`, `corner_matrix: "tt"`) is a `YieldError`:
+exit `1`, JSON error envelope.
+
+`spec_row` (string, optional) may be set on a `measurements[]` entry of the
+sample-set document or of a sim-report rollup entry, or on a `--limits`
+measurement (the `--limits` value wins). It is echoed as
+`measurements[].spec_row` (`null` when unset). Use a stable id for the
+ratified row; it is the field a signoff consumer can match against a declared
+row set (consumption is tracked separately in #2908).
+
+**Sim report vs sample set.** A `klt sim` report input echoes its own
+`environment.monte_carlo` (`{n, seed, vary}`) into `source.monte_carlo`, and
+`source.provenance` is `null` unless the report also carries a top-level
+`provenance` object. A sample-set input has `source.monte_carlo: null` and
+takes its seed from `provenance`. `klt yield-samples` copies the nominal
+report's `environment.monte_carlo` into the derived document's `provenance`
+(`seed`, and `n` as `draws_per_population`) when well-typed, so the seed
+survives the two-step flow; add `rng`, `corner_matrix` etc. by hand.
+
+**Schema version: no bump.** Both additions are optional, additive keys
+(`source.provenance`, `measurements[].spec_row`, both `null` when absent)
+added outside the native response, whose `schema_version` check is
+unchanged; grading is untouched.
+
 ### Deriving a sample set from a per-draw CSV (`klt yield-csv`)
 
 A Monte Carlo harness that is not a `klt sim` request (a shell-driven ngspice
@@ -387,7 +433,8 @@ limits the sample document carried — it is the caller's explicit spec.
 }
 ```
 
-- `measurements` (object, required) — keyed by measurement name.
+- `measurements` (object, required) — keyed by measurement name. Each value
+  may also carry a `spec_row` string (echoed, see above).
 - The four run-level keys are defaults; a CLI flag beats the file, which
   beats the documented default. A run-level `target_yield` applies to every
   measurement that does not state its own.
@@ -1088,6 +1135,7 @@ item-6 claim for the full ratified spec row.
     "kind": "sample-set",
     "netlist": null,
     "monte_carlo": null,
+    "provenance": null,
     "sample_count": 600
   },
   "schema_version": 1,
@@ -1196,7 +1244,7 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `schema_version` | integer | Version of this command's JSON shape (starts at `1`; per-command, per [`docs/json-contract.md`](../json-contract.md)). |
 | `samples` | string | Echo of the `<samples>` argument. |
 | `limits` | string \| null | Echo of `--limits`, or `null`. |
-| `source` | object | `kind` (`"sim-report"` or `"sample-set"`), `netlist` (string \| `null`) and `monte_carlo` (echoed from a sim report, else `null`), and `sample_count` (usable samples analysed across every reported measurement). |
+| `source` | object | `kind` (`"sim-report"` or `"sample-set"`), `netlist` (string \| `null`), `monte_carlo` (echoed from a sim report, else `null`), `provenance` (the echoed [run provenance](#run-provenance-and-spec_row) block, else `null`), and `sample_count` (usable samples analysed across every reported measurement). |
 | `confidence` | number | Effective two-sided confidence level. |
 | `target_ci_halfwidth` | number | Effective sample-size target. |
 | `min_samples` | integer | Effective per-measurement minimum. |
@@ -1226,6 +1274,7 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `inconclusive` | integer | Draws whose value *existed* but was not trustworthy — `klt sim` graded the measurement, or its whole corner, `"inconclusive"` (a plausibility-bound violation, or an `options.fail_on_diagnostic` disqualification). The only category here that is not a missing value, and the only one derived from the input report rather than supplied by the caller (on the sim-report path). **Gets `errored`'s denominator treatment**: excluded from both the numerator and denominator of `yield.empirical`, and from `distribution`/`capability` — the same exclusion `klt sim`'s own Monte Carlo rollup applies to the same draw, so the two verbs report the same population. Non-zero adds its own distinct per-measurement warning (naming the rate against the full draw) and a matching run-level one — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
 | `limits` | object | The **merged** limits actually used (`min`/`max`/`target_yield`/`target_sigma`/`min_converged_samples`, each present only when set; `exclusive_min`/`exclusive_max` are echoed back only when `true` — the default `false` is omitted). |
 | `source_corners` | array\<string\> | Originating corners the draw was pooled from. |
+| `spec_row` | string \| null | Echo of the input's `spec_row` label (the `--limits` one wins), else `null`. |
 | `distribution` | object | See "Distribution fit" above. |
 | `yield` | object | `empirical` (always present -- its own `n` is `n + failed_unmeasurable`, not `n` alone, once `failed_unmeasurable` is non-zero; `censored`/`inconclusive` never change it), `normal` (`null` when the fit is degenerate), and `variance_reduced` (`null` unless `sampling.strategy` is `latin_hypercube`/`importance`) — see "Two yield estimates" and "Sampling strategies (variance reduction)". |
 | `capability` | object | See "Capability" above. |
