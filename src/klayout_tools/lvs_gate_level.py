@@ -651,6 +651,43 @@ def _apply_gate_level_port_aliases(
     return entries
 
 
+def _gate_level_port_case_fold_warnings(
+    folds: Sequence[Mapping[str, str]],
+) -> list[dict[str, Any]]:
+    """Issue #4815: one ``severity: "warning"``
+    :data:`CATEGORY_REFERENCE_GATE_LEVEL_PIN_CASE_FOLDED` entry per distinct
+    (cell, Verilog port, resolved pin), with an instance count -- the
+    disclosure for ``convert_gate_level_verilog``'s case-insensitive pin
+    binding. Empty when nothing was folded (the common case)."""
+
+    from .lvs import CATEGORY_REFERENCE_GATE_LEVEL_PIN_CASE_FOLDED
+
+    grouped: dict[tuple[str, str, str], int] = {}
+    for fold in folds:
+        key = (fold["cell"], fold["from"], fold["to"])
+        grouped[key] = grouped.get(key, 0) + 1
+    return [
+        _mismatch(
+            CATEGORY_REFERENCE_GATE_LEVEL_PIN_CASE_FOLDED,
+            "warning",
+            f"gate-level-verilog reference connects library cell '{cell}' "
+            f"pin '{source}' on {count} instance(s), but the resolved pin "
+            f"list spells it '{target}' -- bound case-insensitively "
+            f"(unambiguous: no other pin of the cell differs from it only "
+            f"by case) (see docs/cli/lvs.md, "
+            '"reference.gate_level_pin_case_folded")',
+            "reference",
+            details={
+                "cell": cell,
+                "from": source,
+                "to": target,
+                "instance_count": count,
+            },
+        )
+        for (cell, source, target), count in sorted(grouped.items())
+    ]
+
+
 def _purge_named_circuits(netlist: Any, removed_names: Sequence[str]) -> None:
     """Remove every circuit named in ``removed_names`` from ``netlist``,
     along with every subcircuit instance of it, then purge any net left

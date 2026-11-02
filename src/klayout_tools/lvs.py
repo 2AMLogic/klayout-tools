@@ -190,6 +190,7 @@ from .lvs_gate_level import (
     _apply_gate_level_port_aliases,
     _boundary_supply_nets,  # noqa: F401
     _circuit_pin_names,  # noqa: F401
+    _gate_level_port_case_fold_warnings,
     _gate_level_power_pin_evidence,  # noqa: F401
     _gate_level_power_pin_evidence_detail,  # noqa: F401
     _gate_level_power_pin_names,  # noqa: F401
@@ -471,6 +472,10 @@ CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS = "topology.dangling_output_ambiguou
 #: .connect_pin`) before comparing, so it is not reported as
 #: `pin.unmatched`/`net.unmatched` -- see `_apply_gate_level_port_aliases`.
 CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = "topology.reference_port_alias_joined"
+#: Issue #4815: a `reference.form: "gate-level-verilog"` library-cell pin
+#: connection was bound to the one resolved pin differing from it only by
+#: letter case (Liberty-spelled synthesis output vs. CDL-spelled pin order).
+CATEGORY_REFERENCE_GATE_LEVEL_PIN_CASE_FOLDED = "reference.gate_level_pin_case_folded"
 #: Issue #2692: `options.anchor_top_level_pins` tied each top-level pin name
 #: declared on *both* sides to its own net on the other side
 #: (`NetlistComparer.same_nets(..., must_match=True)`, the same mechanism
@@ -1593,6 +1598,9 @@ def run_lvs(
     # a plain `assign` alias. Consumed by `_apply_gate_level_port_aliases`
     # right below, before anything else reads `reference_netlist`.
     reference_gate_level_port_aliases: dict[str, dict[str, str]] = {}
+    # Issue #4815: fold records from the gate-level conversion's
+    # case-insensitive pin binding, disclosed as warnings below.
+    reference_gate_level_case_folds: list[dict[str, str]] = []
     # Issue #2136: the library-derived power-pin universe plus the layout
     # nets those pins land on, used below to mark a `net_correspondence[]`
     # entry that pairs a layout supply net with a reference net that is not
@@ -1618,6 +1626,7 @@ def run_lvs(
             else None
         ),
         gate_level_port_aliases=reference_gate_level_port_aliases,
+        gate_level_port_case_folds=reference_gate_level_case_folds,
         finfet=finfet_layout,
         finfet_top=reference_spec.get("top"),
         mos_flavour_classes=compare_mos_flavour,
@@ -2693,6 +2702,12 @@ def run_lvs(
         # the power-only prune above), not a `NetlistComparer` event, so it
         # is appended here rather than folded into `_build_mismatches`.
         mismatches.extend(gate_level_port_alias_warnings)
+
+    # Issue #4815: same append-here rationale -- a request-side pin-name
+    # binding made while converting the reference, never a comparer event.
+    mismatches.extend(
+        _gate_level_port_case_fold_warnings(reference_gate_level_case_folds)
+    )
 
     # Issue #2854: same append-here rationale as `family_findings` above --
     # a promoted pin net carrying 2+ declared pin names is a pre-compare
@@ -4606,6 +4621,7 @@ def _read_reference_netlist(
     pin_orders: dict[str, list[str]] | None = None,
     placeholder_value_classes: dict[str, str] | None = None,
     gate_level_port_aliases: dict[str, dict[str, str]] | None = None,
+    gate_level_port_case_folds: list[dict[str, str]] | None = None,
     finfet: bool = False,
     finfet_top: str | None = None,
     resistor_value_classes: Sequence[str] | None = None,
@@ -4755,7 +4771,9 @@ def _read_reference_netlist(
                 library, pdk_variant, pdk_root, pin_order_files=pin_order_files
             ).pin_orders
         try:
-            converted = _convert_gate_level_reference(text, pin_orders, finfet)
+            converted = _convert_gate_level_reference(
+                text, pin_orders, finfet, gate_level_port_case_folds
+            )
         except VerilogNetlistError as exc:
             raise LvsError(
                 f"could not convert gate-level-verilog reference netlist "
@@ -4846,7 +4864,10 @@ def _read_reference_netlist(
 
 
 def _convert_gate_level_reference(
-    text: str, pin_orders: Mapping[str, Any], finfet: bool
+    text: str,
+    pin_orders: Mapping[str, Any],
+    finfet: bool,
+    port_case_folds: list[dict[str, str]] | None = None,
 ) -> str:
     """Gate-level Verilog -> SPICE: pin-only stubs, or (issue #4462, FinFET
     deck extracting transistors with exact `nfin`) each library cell expanded
@@ -4856,8 +4877,11 @@ def _convert_gate_level_reference(
             text,
             pin_order_lookup=pin_orders.get,
             cell_body_lookup=_library_cell_body_lookup(pin_orders),
+            port_case_folds=port_case_folds,
         )
-    return convert_gate_level_verilog(text, pin_order_lookup=pin_orders.get)
+    return convert_gate_level_verilog(
+        text, pin_order_lookup=pin_orders.get, port_case_folds=port_case_folds
+    )
 
 
 def _stub_gate_level_power_connectivity(

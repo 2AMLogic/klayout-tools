@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` folds Liberty/CDL pin-name case in a `gate-level-verilog`
+  reference** (issue #4815, documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)):
+  a library-cell scalar port with no exact pin match (`.RESETN` against CDL
+  `RESETn`) binds to the single pin differing only by letter case, disclosed
+  as the additive `reference.gate_level_pin_case_folded` warning category
+  (never changes `status`). Ambiguous case-twin pin lists are still refused.
 - **`klt lvs` accepts escaped module names in a `gate-level-verilog`
   reference** (issue #4810, documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)):
   a Yosys `\$paramod\child\W=s32'd64` module declaration no longer fails
