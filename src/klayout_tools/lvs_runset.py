@@ -66,8 +66,6 @@ RESERVED_RUNSET_VARS = ("input", "schematic", "report", "top", "topcell")
 #: rather than silently ignored (an option the caller believes is in force
 #: but is not would be worse than not supporting it).
 _ALLOWED_OPTIONS = ("runset_timeout_s", "klayout_binary")
-#: Issue #4805: ``reference.form`` values this engine accepts.
-_RUNSET_REFERENCE_FORMS = ("plain-element", "subckt-call")
 
 _ERROR_LINE_RE = re.compile(r"^\s*ERROR\b", re.IGNORECASE)
 
@@ -116,97 +114,6 @@ def _device_label(device: Any) -> str | None:
     if device is None:
         return None
     return _name(device) or str(device.id())
-
-
-def _refuse_unsupported(
-    request: dict[str, Any], layout_spec: dict[str, Any], ref_spec: dict[str, Any]
-) -> None:
-    from .lvs import LvsError
-
-    for field in ("hints", "parameter_tolerance"):
-        if request.get(field) is not None:
-            raise LvsError(
-                f"request.{field} is only supported for engine 'klayout' -- "
-                f"the {RUNSET_ENGINE} engine delegates the whole compare to "
-                "the PDK's own runset"
-            )
-    # Issue #4805: ``reference.form: "subckt-call"`` (+ ``deck``/``device_map``)
-    # converts the reference with the "klayout" engine's own conversion before
-    # the runset sees it; every other ``reference.*`` key stays refused.
-    ref_form = ref_spec.get("form", "plain-element")
-    if ref_form not in _RUNSET_REFERENCE_FORMS:
-        raise LvsError(
-            f"reference.form {ref_form!r} is not supported by engine "
-            f"'{RUNSET_ENGINE}' (supported: "
-            f"{', '.join(repr(f) for f in _RUNSET_REFERENCE_FORMS)})"
-        )
-    ref_allowed: tuple[str, ...] = ("netlist", "top", "form")
-    if ref_form == "subckt-call":
-        ref_allowed += ("deck", "device_map")
-    if "device_map" in ref_spec and not isinstance(ref_spec["device_map"], dict):
-        raise LvsError("request.reference.device_map must be a JSON object")
-    for side, spec, allowed, why in (
-        ("layout", layout_spec, ("file", "top"), "the runset does its own extraction"),
-        (
-            "reference",
-            ref_spec,
-            ref_allowed,
-            "the reference must be a SPICE netlist in the runset's own dialect, "
-            'or reference.form "subckt-call" to convert one',
-        ),
-    ):
-        extra = [k for k in spec if k not in allowed]
-        if extra:
-            raise LvsError(
-                f"{side}.{extra[0]} is not supported by engine '{RUNSET_ENGINE}' "
-                f"({why}; only {side}.{', '.join(allowed)} apply)"
-            )
-    if "file" not in layout_spec:
-        raise LvsError(
-            f"engine '{RUNSET_ENGINE}' requires layout.file (a GDS/OASIS stream)"
-        )
-    if "netlist" not in ref_spec:
-        raise LvsError(f"engine '{RUNSET_ENGINE}' requires reference.netlist")
-
-
-def _convert_reference(reference: str, ref_spec: dict[str, Any], work_dir: str) -> str:
-    """Issue #4805: write the ``subckt-call`` conversion of ``reference`` into
-    ``work_dir`` and return its path (``reference`` itself for any other form).
-
-    Reuses the ``"klayout"`` engine's conversion, so the schematic MIM call
-    ``X.. <pdk>__cap_mim_m3_1 W= L=`` becomes the plain card the runset's own
-    extraction pairs with (``C.. a b 0 <pdk>__model__cap_mim A= P=``)."""
-    from .lvs import LvsError
-    from .netlist_normalize import (
-        NormalizeError,
-        convert_reference_netlist,
-        quote_spice_includes,
-    )
-
-    if ref_spec.get("form", "plain-element") != "subckt-call":
-        return reference
-    try:
-        with open(reference, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
-    except OSError as exc:
-        raise LvsError(
-            f"could not read reference netlist '{reference}': {exc}"
-        ) from exc
-    # The converted copy lives in work_dir: keep relative .include paths valid.
-    text = quote_spice_includes(text, os.path.dirname(os.path.abspath(reference)))
-    try:
-        converted = convert_reference_netlist(
-            text, deck=ref_spec.get("deck"), device_map=ref_spec.get("device_map")
-        ).text
-    except NormalizeError as exc:
-        raise LvsError(
-            f"could not convert subckt-call reference netlist '{reference}' to "
-            f"plain-element form: {exc}"
-        ) from exc
-    out = os.path.join(work_dir, "reference_converted.sp")
-    with open(out, "w", encoding="utf-8") as handle:
-        handle.write(converted)
-    return out
 
 
 def _existing_file(raw: Any, request_dir: str, label: str) -> str:
@@ -259,7 +166,9 @@ def _validate_request(
 ) -> tuple[str, str, str, dict[str, str], dict[str, Any]]:
     """Validate the request shape; return ``(layout, reference, deck_file,
     deck_vars, options)`` with paths resolved. Raises ``LvsError``."""
-    _refuse_unsupported(request, request["layout"], request["reference"])
+    from .lvs_runset_reference import refuse_unsupported
+
+    refuse_unsupported(request, request["layout"], request["reference"])
     deck_file = _existing_file(request.get("deck_file"), request_dir, "deck_file")
     layout = _existing_file(request["layout"]["file"], request_dir, "layout.file")
     reference = _existing_file(
@@ -969,9 +878,13 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     timeout_s = float(options.get("runset_timeout_s", RUNSET_DEFAULT_TIMEOUT_S))
     binary = _resolve_klayout_binary(options, request_dir)
 
+    from .lvs import _reference_conversion_echo
+    from .lvs_runset_reference import convert_reference
+
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-runset-")
     try:
-        runset_reference = _convert_reference(reference, request["reference"], work_dir)
+        # Issue #4805: a ``subckt-call`` reference is converted into work_dir.
+        runset_reference = convert_reference(reference, request["reference"], work_dir)
         lvsdb_path, completed = _run_runset(
             binary=binary,
             deck_file=deck_file,
@@ -990,8 +903,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             # A crash after extraction left a db with no cross-reference:
             # keep the exit-status diagnosis, not just the db-read message.
             raise LvsError(_nonzero_exit_message(binary, completed)) from exc
-        # Checked on the file the runset saw (the converted one, when
-        # converting), before work_dir goes away.
+        # Checked on the file the runset saw, before work_dir goes away.
         declared = verdict["coverage"]["declared_device_classes"]
         unresolved = _unresolved_reference_calls(
             runset_reference,
@@ -1033,8 +945,6 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         ),
     }
     provenance["runset"] = runset_block
-
-    from .lvs import _reference_conversion_echo
 
     return {
         "schema_version": SCHEMA_VERSION,
