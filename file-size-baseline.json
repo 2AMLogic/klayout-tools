@@ -289,7 +289,7 @@
     },
     {
       "path": "src/klayout_tools/equiv.py",
-      "lines": 1395
+      "lines": 1132
     },
     {
       "path": "src/klayout_tools/equiv_replay.py",
