@@ -4,6 +4,14 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-02
 
+- **PR #4788**: chore(deps): bump the npm-minor-patch group across 1 directory with 4 updates
+- **PR #4787**: chore(deps): bump ruff from 0.17.0 to 0.17.1 in the uv-minor-patch group across 1 directory
+- **PR #4786**: chore(deps): bump the cargo-minor-patch group across 1 directory with 2 updates
+- **PR #4785**: chore(deps): bump pyo3 from 0.29.3 to 0.30.1 in /native/yield
+- **PR #4784**: chore(deps): bump pyo3 from 0.29.3 to 0.30.1 in /native/statime
+- **PR #4782**: chore(deps): bump pyo3 from 0.29.3 to 0.30.1 in /native/congestion
+- **PR #4781**: feat(sim): add measurements[].settled steady-state verdict over the last two clock-cycle windows
+- **Issue #4780** (closed): klt sim: no built-in cycle-window steady-state (settled) check for .tran of switching circuits
 - **Issue #4777** (closed): Friction: klayout-tools[yield]==0.8.0 still does not resolve; klt-yield-native absent from PyPI (#2900 closed)
 - **PR #4774**: feat(sim): add step_resolution measurement reporting time-step gaps near edges
 - **Issue #4773** (closed): klt sim: no way to bound the .tran step only inside switching-edge windows
