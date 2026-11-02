@@ -1590,6 +1590,10 @@ def test_run_drc_sg13g2_coverage_lists_unmodeled_pad_and_latchup_rules(tmp_path)
     gf = get_unmodeled_rules("gf180mcu")
     assert gf == sorted(gf)
     assert {"ESD.7", "ESD.10", "MT30.1a", "MSLOT.1"} <= set(gf)
+    # DRM 9.2 bond-pad guidelines are disclosed (issue #4001); coded PAD.4 is not.
+    assert {"PAD.1", "PAD.2", "PAD.5", "PAD.19a", "PAD.19b", "PAD.20"} <= set(gf)
+    assert "PAD.4" not in gf
+    assert not any(r.startswith("PAD.") for r in get_unmodeled_rules("sky130"))
     assert not any(r.startswith(("Pad.", "LU.")) for r in gf)
     assert get_unmodeled_rules("no-such-deck") == []
 
