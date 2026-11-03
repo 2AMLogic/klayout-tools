@@ -53,17 +53,11 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Callable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._layout import write_layout
 from ._provenance import build_provenance
-from .gen_asap7 import (
-    asap7_finfet_describe,
-    asap7_finfet_layer_params,
-    asap7_finfet_validate,
-)
+from .gen_asap7 import ASAP7_FINFET_SPEC
 from .gen_cap_vpp import (
     _cap_vpp_array_describe,
     _cap_vpp_array_layer_params,
@@ -335,6 +329,7 @@ from .gen_pcells import (
     _build_resistor_strip_pcell,
     _build_well_island_pcell,
 )
+from .gen_spec import _GeneratorSpec
 from .pdk import PdkNotFoundError, find_pdk, resolve_pdk_dbu
 
 if TYPE_CHECKING:
@@ -4192,32 +4187,6 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
 # --------------------------------------------------------------------------- #
 
 
-@dataclass(frozen=True)
-class _GeneratorSpec:
-    """Generator-specific knowledge the generic harness (:func:`_produce`)
-    doesn't have: sanity-check bounds, how to describe the produced
-    geometry as the response envelope's ``device_count``/``ports``/
-    ``drc_hints`` fields, and how to resolve its hidden layer params against
-    a resolved PDK (see :func:`_device_layer_params` and friends).
-    """
-
-    name: str
-    summary: str
-    #: Fallback output database unit (um) -- used only when the resolved
-    #: PDK's own tech LEF declares no ``DATABASE MICRONS`` value (or ships
-    #: no readable tech LEF at all), since :func:`_produce` prefers
-    #: :func:`~klayout_tools.pdk.resolve_pdk_dbu`'s PDK-derived answer
-    #: (issue #1496). Every registered generator declares ``0.001``, the dbu
-    #: `klt gen` unconditionally wrote at before that change.
-    dbu: float
-    validate: Callable[[dict[str, Any]], None]
-    describe: Callable[[dict[str, Any], float, dict[str, Any]], dict[str, Any]]
-    layer_params: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
-    #: Flatten the PCell variant into the top cell (``asap7_finfet``: ``klt
-    #: extract``'s FinFET path finds no devices in a hierarchical stream).
-    flatten_output: bool = False
-
-
 #: Maps ``PCellParameterDeclaration`` type constants to the JSON type names
 #: reported by ``klt gen --list``.
 _PARAM_TYPE_NAMES = {
@@ -4414,20 +4383,5 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         describe=_diode_describe,
         layer_params=_diode_layer_params,
     ),
-    "asap7_finfet": _GeneratorSpec(
-        name="asap7_finfet",
-        summary=(
-            "ASAP7 FinFET nFET/pFET: params.nfin fins per gate finger x "
-            "params.nf fingers on the 27 nm fin / 54 nm gate grids, with a "
-            "dummy gate at each end, SDT/LISD/V0/M1 source+drain straps and "
-            "a LIG/V0/M1 gate contact; S/D/G ports on M1. Extracted nfin is "
-            "the total over fingers (nfin * nf). ASAP7 PDK only; taps and "
-            "guard rings are not generated yet (issue #2762)."
-        ),
-        dbu=0.00025,
-        validate=asap7_finfet_validate,
-        describe=asap7_finfet_describe,
-        layer_params=asap7_finfet_layer_params,
-        flatten_output=True,
-    ),
+    "asap7_finfet": ASAP7_FINFET_SPEC,
 }

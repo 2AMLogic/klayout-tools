@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .gen_spec import _GeneratorSpec
+
 ASAP7_DBU_UM = 0.00025
 
 DEVICES = ("nfet", "pfet")
@@ -254,3 +256,21 @@ def asap7_finfet_describe(
             "nfin_total": info["nfin_total"],
         },
     }
+
+
+ASAP7_FINFET_SPEC = _GeneratorSpec(
+    name="asap7_finfet",
+    summary=(
+        "ASAP7 FinFET nFET/pFET: params.nfin fins per gate finger x "
+        "params.nf fingers on the 27 nm fin / 54 nm gate grids, with a "
+        "dummy gate at each end, SDT/LISD/V0/M1 source+drain straps and "
+        "a LIG/V0/M1 gate contact; S/D/G ports on M1. Extracted nfin is "
+        "the total over fingers (nfin * nf). ASAP7 PDK only; taps and "
+        "guard rings are not generated yet (issue #2762)."
+    ),
+    dbu=0.00025,
+    validate=asap7_finfet_validate,
+    describe=asap7_finfet_describe,
+    layer_params=asap7_finfet_layer_params,
+    flatten_output=True,
+)
