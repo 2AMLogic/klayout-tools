@@ -76,7 +76,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -90,6 +89,7 @@ from . import (
     remote_transport,
     sim_batch,
     sim_batch_async,
+    sim_deck_expand,
     sim_remote,
     sim_staging,
 )
@@ -582,7 +582,7 @@ def _scan_deck_closure(
             )
         text = raw.decode("utf-8", errors="replace")
         for index, line in enumerate(text.splitlines(), start=1):
-            directive_target = _closure_directive_target(
+            directive_target = sim_deck_expand.closure_directive_target(
                 line, where=f"{where} line {index}"
             )
             if directive_target is None:
@@ -617,46 +617,9 @@ def _scan_deck_closure(
                 occupied, rel_dest, resolved, where=f"{where} line {index}"
             )
             includes.append({"staged": resolved, "name": rel_dest})
-            queue.append((resolved, rel_dest))
+            if directive != "`pre_osdi`":  # a binary library holds no directives
+                queue.append((resolved, rel_dest))
     return includes, host_resolved
-
-
-def _closure_directive_target(line: str, *, where: str) -> tuple[str, str] | None:
-    """The file a deck line references, as ``(directive, target)``, or
-    ``None`` for a line that names no file.
-
-    ``.include``/``.inc`` always name one. ``.lib`` is two-faced (the same
-    split ``sim_staging._Stager._parse_lib`` makes, #2668): one token is a
-    section *definition* (``.lib tt`` ... ``.endl``) and names no file; two
-    tokens are a file-bearing ``.lib <file> <section>`` reference -- the
-    model-reference form PDK corner selection uses -- whose file must be
-    staged, left to the executing host, or rejected exactly like an include
-    target. Any other ``.lib`` shape is rejected by name rather than
-    guessed at, so it cannot slip past the pre-launch check."""
-    from .sim import SimError
-
-    match = sim_staging._INCLUDE_RE.match(line)
-    if match is not None:
-        return "`.include`", sim_staging._unquote(match.group("target"))
-    lib_match = sim_staging._LIB_RE.match(line)
-    if lib_match is None:
-        return None
-    try:
-        tokens = shlex.split(lib_match.group("rest"))
-    except ValueError as exc:
-        tokens = []
-        problem = str(exc)
-    else:
-        problem = f"{len(tokens)} argument(s)"
-    if len(tokens) == 1:
-        return None
-    if len(tokens) == 2:
-        return "`.lib`", tokens[0]
-    raise SimError(
-        f"{where}: unsupported `.lib` directive form ({problem}) -- deck-list "
-        "requests understand `.lib <section>` definitions and "
-        "`.lib <file> <section>` references only"
-    )
 
 
 def _read_closure_file(path: str, *, where: str) -> bytes:
@@ -697,8 +660,9 @@ def _classify_include_target(
         raise SimError(
             f"{where}: absolute {directive} target {target!r} cannot be "
             "staged without modifying the deck -- reference the file by a "
-            "path relative to the deck, or move it under the PDK root so "
-            "the executing host resolves it"
+            "path relative to the deck, or, for a file in the runner's PDK, "
+            "write it as `$PDK_ROOT/<relative path>` (the executing host "
+            "expands it; the deck bytes are shipped unchanged)"
         )
     resolved = os.path.normpath(
         os.path.join(os.path.dirname(os.path.abspath(origin_path)), expanded)
@@ -897,7 +861,11 @@ def run_deck_unit(
     diagnostics: list[dict[str, str]] = []
     started = time.monotonic()
     spawn = _spawn_engine(
-        [ngspice_binary, "-b", deck_name],
+        [
+            ngspice_binary,
+            "-b",
+            sim_deck_expand.prepare_run_deck(unit, unit_dir=unit_dir),
+        ],
         unit_dir=unit_dir,
         timeout_s=unit["timeout_s"],
         diagnostics=diagnostics,

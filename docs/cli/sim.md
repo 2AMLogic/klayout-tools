@@ -2408,9 +2408,19 @@ job id; see "Asynchronous submit and status"); they cannot be combined with
   listed in the unit's `host_resolved`; the executing host expands `$VAR`/`~`
   in them before running the engine). Staged files are followed
   recursively, bounded by the same 64-file / 32 MiB caps as corner
-  staging. A two-token `.lib` whose target names `$PDK_ROOT` literally is
-  refused (the runner does not expand it in a netlist body); write the
-  absolute path under the submitting host's `$PDK_ROOT` and klt rewrites it.
+  staging.
+
+  To name a file in the *runner's* PDK from a deck, write it as
+  `$PDK_ROOT/<relative path>` (or `${PDK_ROOT}/...`) in `.include`/`.inc`,
+  `.lib <file> <section>` and `pre_osdi <file>` — with only `models.pdk`
+  set. The runner expands the variable into a sidecar copy of the deck
+  (`.klt-expanded-<deck>`) that ngspice runs; the shipped deck and its
+  `deck_sha256` stay byte-for-byte as submitted. An absolute path under the
+  *submitting* host's `$PDK_ROOT` is not rewritten (the deck is never
+  modified) and is refused with a message naming this spelling.
+  `pre_osdi` targets are classified like include targets: `$VAR` →
+  `host_resolved`, absolute elsewhere → named error before launch, relative →
+  staged at its declared path (shipped, not scanned).
   `--dry-run` on an off-host backend stages the netlist the same way, so it
   reports these refusals before any run directory exists. A one-token
   `.lib <section>` … `.endl` *definition* names no
