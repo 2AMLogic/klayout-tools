@@ -5831,7 +5831,7 @@ def _attach_batch_shards(
     sharded run does. The map must belong to this request (digest and
     fingerprint); a shard whose job is gone is reported lost, never
     resubmitted."""
-    from . import sim_batch_async
+    from . import sim_batch_shards
     from .sim import SimError
 
     if os.path.basename(manifest_path) != BATCH_SHARDS_FILENAME:
@@ -5850,7 +5850,7 @@ def _attach_batch_shards(
             f"--attach: shard map {manifest_path} is unreadable ({exc})",
             code=BATCH_SHARD_MANIFEST_CODE,
         ) from exc
-    mismatch = sim_batch_async.shard_map_mismatch(document, request)
+    mismatch = sim_batch_shards.shard_map_mismatch(document, request)
     if mismatch is not None:
         raise SimError(
             f"--attach: shard map {manifest_path} was submitted from a "
