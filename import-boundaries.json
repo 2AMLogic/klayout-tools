@@ -168,6 +168,7 @@
       "modules": [
         "klayout_tools.cli.erc_cmd",
         "klayout_tools.erc",
+        "klayout_tools.erc_antenna_gf180mcu",
         "klayout_tools.erc_disclosure",
         "klayout_tools.erc_spec"
       ]

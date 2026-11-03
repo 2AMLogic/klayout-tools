@@ -47,6 +47,7 @@ import sys
 from typing import Any
 
 from . import env_provenance
+from . import erc_antenna_gf180mcu as _gf180
 from ._devices import (
     _conductor_role_layers,
     _cut_device_bodies,
@@ -931,23 +932,24 @@ _SG13G2_ANTENNA_SOURCE_URL = (
 )
 
 #: PDK name -> (role name -> (limit, source rule id)) lookup for `--pdk`.
-#: sky130 and ihp-sg13g2; gf180mcu/sg13cmos5l/asap7 antenna limits are
-#: candidate follow-ons, not silently dropped.
+#: sky130, ihp-sg13g2, gf180mcu; sg13cmos5l/asap7 are candidate follow-ons.
 _ANTENNA_LIMITS_BY_PDK: dict[str, dict[str, tuple[float, str]]] = {
     "sky130": _SKY130_ANTENNA_RATIO_MAX_EGAR,
     "ihp-sg13g2": _SG13G2_ANTENNA_RATIO_MAX_EGAR,
+    "gf180mcu": _gf180.ANTENNA_RATIO_MAX_EGAR,
 }
 
 _ANTENNA_SOURCE_URL_BY_PDK: dict[str, str] = {
     "sky130": _SKY130_ANTENNA_SOURCE_URL,
     "ihp-sg13g2": _SG13G2_ANTENNA_SOURCE_URL,
+    "gf180mcu": _gf180.ANTENNA_SOURCE_URL,
 }
 
-#: Tail of `levels[].antenna_ratio_source`, naming which limit of the cited
-#: source was used (always the no-diode one).
+#: Tail of `levels[].antenna_ratio_source`: the limit used (always no-diode).
 _ANTENNA_SOURCE_NOTE_BY_PDK: dict[str, str] = {
     "sky130": "'Max EA/A w/o diode' column",
     "ihp-sg13g2": "IHP-Open-PDK v0.3.0, w/o-diode limit",
+    "gf180mcu": _gf180.ANTENNA_SOURCE_NOTE,
 }
 
 
@@ -1017,8 +1019,7 @@ def _resolve_deck(deck: str | None) -> ExtractionDeck | None:
     needs no filesystem PDK install to read. Deliberately a *separate* flag
     from ``--pdk`` (which selects only the built-in antenna-ratio limit
     table, see :func:`_resolve_antenna_limits`) -- the two answer unrelated
-    questions and ``--pdk`` has no ``gf180mcu`` entry today, while the
-    extraction-deck registry does.
+    questions: ``--pdk gf180mcu`` and ``--deck gf180mcu`` are independent.
 
     Returns ``None`` when ``deck`` is ``None`` -- no auto-detection is
     attempted, and every device-related output (``gates[]``, every antenna
@@ -3327,12 +3328,12 @@ def run_erc(
     matching rule and precedence, and ``docs/cli/erc.md``'s "Deck-driven
     device-marker auto-detection" for the full picture. Deliberately
     independent of ``pdk``: ``pdk`` selects only the antenna-ratio limit
-    table, has no ``gf180mcu`` entry, and resolves nothing when a deck name
-    would be valid for extraction but not for the antenna table (or vice
-    versa). Omitted (the default) -> no auto-detection is attempted, and
-    every output this feature could touch (``gates[]``, every antenna
-    ratio, every finding, ``provenance.deck``, ``provenance.devices``) is
-    byte-identical to a run before this feature existed.
+    table and resolves nothing when a deck name would be valid for
+    extraction but not for the antenna table (or vice versa). Omitted (the
+    default) -> no auto-detection is attempted, and every output this
+    feature could touch (``gates[]``, every antenna ratio, every finding,
+    ``provenance.deck``, ``provenance.devices``) is byte-identical to a run
+    before this feature existed.
 
     ``findings_only`` (optional, default ``False``, issue #2219) asks for
     the ``erc_findings`` half of this report only, and **skips the per-gate
@@ -3752,17 +3753,16 @@ def run_erc(
     #
     # `status` above is a roll-up of *both* questions, and its coverage input
     # is antenna-only, so on a PDK with no antenna-ratio table (any PDK other
-    # than sky130 and ihp-sg13g2, or `--pdk` omitted entirely) it is
-    # `"not_checked"`/exit 4
-    # no matter what the connectivity rules found: a run whose connectivity
-    # rules all passed is then indistinguishable, by `status` and by exit
-    # code, from a run that checked nothing at all. That is the right answer
-    # *for the antenna question* -- so it is left exactly as it was -- but it
-    # leaves the connectivity verdict, the only thing `klt erc` can report on
-    # such a PDK, readable only by hand-rolling this same roll-up off
-    # `erc_finding_count`. Every caller that wants the structural supply read
-    # as a CI gate reimplemented it; this field is that roll-up, computed
-    # once, here.
+    # than sky130, ihp-sg13g2 and gf180mcu, or `--pdk` omitted entirely) it is
+    # `"not_checked"`/exit 4 no matter what the connectivity rules found: a
+    # run whose connectivity rules all passed is then indistinguishable, by
+    # `status` and by exit code, from a run that checked nothing at all. That
+    # is the right answer *for the antenna question* -- so it is left exactly
+    # as it was -- but it leaves the connectivity verdict, the only thing
+    # `klt erc` can report on such a PDK, readable only by hand-rolling this
+    # same roll-up off `erc_finding_count`. Every caller that wants the
+    # structural supply read as a CI gate reimplemented it; this field is
+    # that roll-up, computed once, here.
     #
     # Deliberately *not* a copy of `status` minus the coverage input: it is
     # graded on `erc_findings` alone, so an antenna violation on an unrelated

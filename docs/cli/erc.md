@@ -26,9 +26,9 @@ klt erc --check <report> [--rerun] [--format text|json]
   exactly one root to analyse, unlike `klt layers`, which defaults to
   summing across every top cell).
 - `--pdk` — PDK antenna-ratio limit table each non-gate `stackup` level's
-  `antenna_ratio` is compared against (currently: `sky130`, `ihp-sg13g2`). Optional — see
+  `antenna_ratio` is compared against (currently: `sky130`, `ihp-sg13g2`, `gf180mcu`). Optional — see
   "Antenna-ratio verdict" below for what happens when it's omitted. Omitted
-  or unsupported-for-antenna (e.g. `gf180mcu`) means `status: "not_checked"`
+  or unsupported-for-antenna (e.g. `sg13cmos5l`) means `status: "not_checked"`
   and exit 4 **by design**, not a tool failure: gate on `erc_status` instead
   (see "Two verdicts"). Not
   validated by argparse: an unrecognised name is a clean exit-1 error, like
@@ -2364,14 +2364,46 @@ with-diode limits) are not used because `klt erc` does not model protection
 diodes. A spec that names its layers differently (e.g. `met1`) leaves those
 levels `unchecked` and rolls up to `clean_partial`.
 
-An unrecognised `--pdk` name (anything other than `sky130` or `ihp-sg13g2`) is a clean
-exit-1 error, checked eagerly before the layout is even loaded — see "Exit
-codes" below.
+An unrecognised `--pdk` name (anything other than `sky130`, `ihp-sg13g2` or
+`gf180mcu`) is a clean exit-1 error, checked eagerly before the layout is even
+loaded — see "Exit codes" below.
+
+### gf180mcu antenna-ratio limits
+
+`--pdk gf180mcu` uses the metal antenna limits from
+[`libs.tech/klayout/tech/drc/rule_decks/antenna.rb`](https://github.com/google/gf180mcu-pdk/blob/f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7/libs.tech/klayout/tech/drc/rule_decks/antenna.rb)
+of `google/gf180mcu-pdk` at commit `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`
+(the same pin as the curated gf180mcu deck), *without* a protection diode.
+Every metal level has the same limit, so one table covers the 3LM/4LM/5LM/6LM
+stacks; a level is graded only when the spec names it. The `stackup` role names
+are the deck's layer names:
+
+| `stackup` role name | Limit | Source rule id |
+| -------------------- | ----: | --------------- |
+| `Metal1`              | 400   | `ANT.16_i_ANT.2` |
+| `Metal2`              | 400   | `ANT.16_i_ANT.3` |
+| `Metal3`              | 400   | `ANT.16_i_ANT.4` |
+| `Metal4`              | 400   | `ANT.16_i_ANT.5` |
+| `Metal5`              | 400   | `ANT.16_i_ANT.6` |
+| `MetalTop`            | 400   | `ANT.16_i_ANT.7` |
+
+**Approximation, not exact equivalence.** The deck's metal rules measure
+`perimeter(layer) × thickness / gate area` (0.54 µm; the deck's
+`metal_top_thickness` for the topmost metal). `klt erc` computes cumulative
+connected *area* / gate area, the same connectivity-area-only approximation the
+sky130 table carries, so a verdict here can differ from the deck's own check.
+
+**Not graded** (no `levels[]` verdict possible): `ANT.1` (Poly2 perimeter /
+gate, 200), `ANT.8` (Contact / gate, 10), the via ratios `ANT.16_*_ANT.9`
+… `ANT.13` (Via1…Via5 area / gate, 20) — the gate role is never graded and
+contact/via are `vias[]` roles — the MIM-referenced `ANT.16_iii_*` rules, and
+the with-diode credit (`klt erc` does not model protection diodes). A spec that
+names its layers differently (e.g. `met1`) leaves those levels `unchecked` and
+rolls up to `clean_partial`.
 
 ### Caller-supplied antenna limits (`antenna_limits`, issue #4090)
 
-A process with no built-in `--pdk` table (ASAP7, and gf180mcu / sg13cmos5l
-until #4003 adds a built-in gf180mcu table) can still be antenna-graded: the
+A process with no built-in `--pdk` table (ASAP7 and sg13cmos5l) can still be antenna-graded: the
 spec file takes an optional top-level `antenna_limits` array.
 
 ```json
@@ -2499,8 +2531,9 @@ issue #2179 each carries its own roll-up:
 | `erc_status` | The `erc_findings` rules alone: `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.supply_short`, `erc.expected_short_missing`, `erc.unlabelled_conductor`, `erc.floating_gate`, `erc.missing_tie` | No |
 
 The distinction is not academic. `--pdk` resolves against a limit table
-**this command carries for sky130 and ihp-sg13g2 only** (see "Sky130
-antenna-ratio limits" and "SG13G2 antenna-ratio limits" above); any other PDK
+**this command carries for sky130, ihp-sg13g2 and gf180mcu only** (see "Sky130
+antenna-ratio limits", "SG13G2 antenna-ratio limits" and "gf180mcu
+antenna-ratio limits" above); any other PDK
 name is an exit-1 error, so a design on another PDK is run
 with `--pdk` omitted. Every level then comes back `verdict: "unchecked"`,
 the antenna scope's checked work is known-zero, and the
@@ -3227,7 +3260,7 @@ authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
 "Exit codes" section.
 
 **The exit code answers the *antenna* question**, because `status` does. On
-a PDK with no antenna-ratio table — every PDK but sky130 and ihp-sg13g2 today, any run
+a PDK with no antenna-ratio table — every PDK but sky130, ihp-sg13g2 and gf180mcu today, any run
 that omits `--pdk`, and every `--findings-only` run — it is therefore `4`
 for every layout, however clean the design is. That is not a signal that the run failed or that nothing was
 checked: the connectivity rules ran, and their verdict is `erc_status` in

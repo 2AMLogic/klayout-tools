@@ -9462,13 +9462,13 @@ def test_sg13g2_unlisted_role_stays_unchecked_and_partial(tmp_path):
     assert report["status"] == "not_checked"
 
 
-def test_unknown_pdk_error_lists_both_supported_pdks(tmp_path):
+def test_unknown_pdk_error_lists_all_supported_pdks(tmp_path):
     gds = tmp_path / "basic.gds"
     spec = tmp_path / "basic.erc.json"
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    with pytest.raises(ErcError, match=r"supported: ihp-sg13g2, sky130"):
+    with pytest.raises(ErcError, match=r"supported: gf180mcu, ihp-sg13g2, sky130"):
         run_erc(str(gds), str(spec), pdk="nope")
 
 
