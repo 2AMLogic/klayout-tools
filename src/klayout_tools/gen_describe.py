@@ -338,34 +338,9 @@ def _pitch_hints_and_warnings(
     return hints, warnings
 
 
-def _validate_mos_array_width(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
-    if params["mos_cap"]:
-        # The width floor of a MOS capacitor is the deck's own COMP min-width
-        # rule for the selected oxide, resolved once the PDK is known (see
-        # `_device_layer_params`); the flat generator-side floor below applies
-        # to plain transistors only.
-        if params["w_um"] <= 0:
-            raise GenError("generator 'mos_array': params.w_um must be > 0")
-        if not params["add_guard_ring"]:
-            raise GenError(
-                "generator 'mos_array': params.mos_cap requires "
-                "params.add_guard_ring (the guard ring is the capacitor's "
-                "body tie)"
-            )
-        if params["gate_contact"]:
-            raise GenError(
-                "generator 'mos_array': params.mos_cap does not support "
-                "params.gate_contact"
-            )
-    elif params["w_um"] < UNIT_MIN_W_UM:
-        raise GenError(
-            f"generator 'mos_array': params.w_um must be >= {UNIT_MIN_W_UM} "
-            "(the smallest width that fits an enclosed contact with margin -- "
-            "a generator-side structural floor, not the target PDK's own "
-            "diffusion-width rule)"
-        )
+from .gen_layer_params_checks import (  # noqa: E402 -- re-exported name
+    validate_mos_array_width as _validate_mos_array_width,
+)
 
 
 def _mos_array_validate(params: dict[str, Any]) -> None:
@@ -714,6 +689,7 @@ def _mos_array_describe(
         tap_reach_um=_tap_reach_um(family),
         share_sd=params["share_sd"],
         mirror=params["mirror"],
+        dogbone_terminals=params["dogbone_terminals"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]

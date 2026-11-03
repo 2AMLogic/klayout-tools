@@ -252,6 +252,7 @@
         "klayout_tools.gen_describe",
         "klayout_tools.gen_diode",
         "klayout_tools.gen_layer_params",
+        "klayout_tools.gen_layer_params_checks",
         "klayout_tools.gen_layer_tables",
         "klayout_tools.gen_pcells",
         "klayout_tools.gen_pcells.asap7_finfet",
@@ -264,10 +265,12 @@
         "klayout_tools.gen_pcells.diode",
         "klayout_tools.gen_pcells.esd_device",
         "klayout_tools.gen_pcells.guard_ring",
+        "klayout_tools.gen_pcells._mos_array_shapes",
         "klayout_tools.gen_pcells.mos_array",
         "klayout_tools.gen_pcells.res_array",
         "klayout_tools.gen_pcells.resistor_strip",
         "klayout_tools.gen_pcells.well_island",
+        "klayout_tools.gen_snap",
         "klayout_tools.gen_spec"
       ]
     },
@@ -359,6 +362,7 @@
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_gate_level_convert",
+        "klayout_tools.lvs_known_limits",
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_mismatch_tolerance",
         "klayout_tools.lvs_netgen",
