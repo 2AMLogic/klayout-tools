@@ -206,6 +206,7 @@ from .gen import (
     _fixed_cut_side_um,
     _pdk_family,
 )
+from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
 # The rest of this module never calls these directly -- they are re-exported
@@ -381,38 +382,6 @@ def _via_fixed_size_um(variant: str, via_layer: tuple[int, int]) -> float:
 #: requests a `routing.width_um` narrower than a full contact-enclosure
 #: footprint (e.g. sky130's own `li1.width.1` minimum, 0.17um).
 _VIA_LANDING_SIZE_UM = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
-
-
-# Die/chip boundary layer (``prBoundary.boundary``) shared by sky130 and
-# gf180mcu; ``options.boundary`` (#3998) draws one rectangle here so density
-# decks have a reference extent.
-_BOUNDARY_LAYER: tuple[int, int] = (235, 4)
-
-
-def _parse_boundary(raw: Any) -> dict[str, float] | None:
-    """Validate ``options.boundary`` (#3998) -> ``{x0,y0,x1,y1}`` or None."""
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise GenComposeError("options.boundary must be a JSON object")
-    bbox = raw.get("bbox_um")
-    if not isinstance(bbox, dict):
-        raise GenComposeError(
-            "options.boundary.bbox_um is required: an object with x0/y0/x1/y1"
-        )
-    out: dict[str, float] = {}
-    for key in ("x0", "y0", "x1", "y1"):
-        value = bbox.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise GenComposeError(
-                f"options.boundary.bbox_um.{key} must be a number, got {value!r}"
-            )
-        out[key] = float(value)
-    if out["x1"] <= out["x0"] or out["y1"] <= out["y0"]:
-        raise GenComposeError(
-            f"options.boundary.bbox_um must have x1 > x0 and y1 > y0, got {bbox!r}"
-        )
-    return out
 
 
 class GenComposeError(Exception):
@@ -3206,7 +3175,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         raise GenComposeError("request.options must be a JSON object")
     cell_name = options.get("cell_name") or "gen_compose_0"
     output_path = options.get("output") or f"{cell_name}.gds"
-    boundary_bbox_um = _parse_boundary(options.get("boundary"))
+    boundary_bbox_um = parse_boundary(options.get("boundary"), GenComposeError)
 
     output_dir = os.path.dirname(os.path.abspath(output_path))
     if output_dir and not os.path.isdir(output_dir):
@@ -5147,28 +5116,7 @@ def _write_composed_gds(
                     )
                 top.shapes(layer_index).insert(widen_box)
 
-    if pin_placements:
-        for pin in pin_placements:
-            layer = pin["layer"]
-            pin_layer_index = layout.layer(layer[0], layer[1])
-            pin_point = kdb.Point(
-                int(round(pin["x_um"] / dbu)), int(round(pin["y_um"] / dbu))
-            )
-            top.shapes(pin_layer_index).insert(
-                kdb.Text(pin["net"], kdb.Trans(pin_point))
-            )
-
-    if boundary_bbox_um is not None:
-        # options.boundary (#3998): one caller-given rectangle on 235/4,
-        # independent of the placed content's extent.
-        top.shapes(layout.layer(*_BOUNDARY_LAYER)).insert(
-            kdb.Box(
-                int(round(boundary_bbox_um["x0"] / dbu)),
-                int(round(boundary_bbox_um["y0"] / dbu)),
-                int(round(boundary_bbox_um["x1"] / dbu)),
-                int(round(boundary_bbox_um["y1"] / dbu)),
-            )
-        )
+    draw_pins_and_boundary(top, layout, pin_placements, boundary_bbox_um)
 
     write_layout(layout, output_path, GenComposeError)
     return layout.dbu, dbu_rescale_warnings
