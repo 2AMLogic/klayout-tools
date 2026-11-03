@@ -5847,6 +5847,25 @@ def shard_points_for_job(
     return None
 
 
+def shard_scoped_points(
+    backend: str,
+    attach_job_id: str | None,
+    artifacts_dir: str | None,
+    corner_points: list[CornerPoint],
+) -> list[CornerPoint]:
+    """``corner_points`` narrowed to one shard's slice when ``--attach`` names a
+    shard job of a sharded submit (issue #4878); otherwise unchanged."""
+    if (
+        backend != "batch"
+        or attach_job_id is None
+        or attach_job_id.endswith(".json")
+        or artifacts_dir is None
+    ):
+        return corner_points
+    shard = shard_points_for_job(artifacts_dir, attach_job_id, corner_points)
+    return corner_points if shard is None else shard
+
+
 def _attach_batch_shards(
     *,
     manifest_path: str,

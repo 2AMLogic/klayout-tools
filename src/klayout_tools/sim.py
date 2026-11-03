@@ -174,7 +174,7 @@ from .sim_batch import (
     attach_engine_build_comparison,
     attach_staged_model_comparison,
     dry_run_runner_check,
-    shard_points_for_job,
+    shard_scoped_points,
 )
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE
@@ -3878,19 +3878,9 @@ def _run_sim_corners(
         if resume
         else corner_points
     )
-    if (
-        backend == "batch"
-        and attach_job_id is not None
-        and not attach_job_id.endswith(".json")
-        and artifacts_dir is not None
-    ):
-        # Issue #4878: a shard job of a sharded --submit-only returns only its
-        # own corners; compare against that shard's points, not the request's.
-        shard_points = shard_points_for_job(
-            artifacts_dir, attach_job_id, dispatch_points
-        )
-        if shard_points is not None:
-            dispatch_points = shard_points
+    dispatch_points = shard_scoped_points(
+        backend, attach_job_id, artifacts_dir, dispatch_points
+    )
     _refuse_override_on_host_default(
         netlist_overrides_report,
         backend=backend,
