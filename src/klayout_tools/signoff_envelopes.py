@@ -368,6 +368,8 @@ class _ModelRunRequired(_EnvelopeCommon):
 
 
 class _ModelRunEnvelope(_ModelRunRequired, total=False):
+    # Optional per-point rollup; any non-passing entry fails the run.
+    corners: Any
     metrics: dict[str, Any]
     provenance: dict[str, Any] | None
 

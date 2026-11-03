@@ -4183,8 +4183,7 @@ def test_every_recognized_kind_declares_a_typed_shape():
         # Issue #4189: T1 item 2's seam/tiling evidence.
         "seam-check",
         "lef-abstract",
-        # Issue #4015: T1 item 1's netlist-evidence half.
-        "synthesize",
+        "synthesize",  # Issue #4015: T1 item 1's netlist-evidence half.
         "generic",
         "model-run",
         "error",
