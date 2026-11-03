@@ -99,3 +99,20 @@ def job_failure_parts(
         if stderr_tail:
             details["remote_stderr_tail"] = stderr_tail
     return message, code, details
+
+
+def resumable(
+    environment: dict[str, Any] | None, manifest: Any
+) -> dict[str, Any] | None:
+    """``environment`` plus the additive "incomplete, resumable" signal
+    (issue #4856) when ``manifest`` (a shard manifest) still has shards that
+    were submitted but never launched; ``environment`` unchanged otherwise."""
+    count = manifest.unlaunched() if manifest is not None else 0
+    if not count:
+        return environment
+    return {
+        **(environment or {}),
+        "unlaunched_shards": count,
+        "resumable": True,
+        "shard_map": str(manifest.path),
+    }
