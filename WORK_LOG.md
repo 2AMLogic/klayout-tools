@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-03
 
+- **PR #4869**: feat(sim): report best-effort peak_rss_bytes per unit
+- **Issue #4867** (closed): klt sim: surface ngspice progress / simulated-time-reached when a batch unit is killed on timeout
 - **PR #4855**: feat: place sg13g2 SiGe HBT arrays from the PDK's own npn13G2* cells
 - **Issue #4850** (closed): gen: no SiGe HBT (npn13G2*) generator for sg13g2; bjt_array unsupported and PDK pcell lib unreachable
 - **PR #4864**: feat(sim): name missing request features on batch preflight-reject diagnostics
