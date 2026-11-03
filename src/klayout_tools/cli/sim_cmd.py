@@ -306,15 +306,12 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
+    limit = DEFAULT_MAX_IN_FLIGHT if args.max_in_flight is None else args.max_in_flight
     try:
         report = run_sim_set(
             args.batch_set,
             outdir=args.outdir,
-            max_in_flight=(
-                args.max_in_flight
-                if args.max_in_flight is not None
-                else DEFAULT_MAX_IN_FLIGHT
-            ),
+            max_in_flight=limit,
             capacity_retries=args.capacity_retries or 0,
             max_workers=args.max_workers,
             hosts=args.hosts,
