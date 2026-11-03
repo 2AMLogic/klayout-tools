@@ -7804,12 +7804,11 @@ def test_families_without_gate_pad_clearance_are_unchanged(family):
     )
 
 
-@pytest.mark.parametrize("generator_name", ("bjt_array", "esd_device", "well_island"))
+@pytest.mark.parametrize("generator_name", ("esd_device", "well_island"))
 def test_sg13g2_deferred_generators_rejected(generator_name, tmp_path, sg13g2_pdk_root):
-    """`bjt_array` (no bipolar device recognition in this deck's curated
-    extraction deck -- `EXTRACTION_DECK.bipolars` is empty), `esd_device`,
-    and `well_island` (neither attempted by this issue) are all explicitly
-    deferred rather than silently accepted with untested geometry."""
+    """`esd_device` and `well_island` (neither attempted by this issue) are
+    explicitly deferred rather than silently accepted with untested geometry.
+    (`bjt_array` is no longer deferred: issue #4850 -- see the HBT tests.)"""
     with pytest.raises(GenError, match="not yet supported by this generator"):
         generate(
             {
@@ -8634,6 +8633,7 @@ def test_list_generators_bjt_array_params_schema():
     generator = next(g for g in report["generators"] if g["name"] == "bjt_array")
     params = {p["name"]: p for p in generator["params"]}
     assert set(params) == {
+        "flavor",  # sg13g2 HBT cell selector (#4850)
         "emitter_um",
         "rows",
         "cols",

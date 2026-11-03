@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt gen bjt_array` runs on `sg13g2` as a SiGe HBT array** (issue #4850,
+  documented in [`docs/cli/gen.md`](docs/cli/gen.md)): `params.flavor`
+  (`npn13G2` default, `npn13G2l`, `npn13G2v`) instantiates the PDK's own cell
+  from `sg13g2_pr.gds` on a `rows` x `cols` grid; a missing GDS/cell is an
+  application error. Additive `flavor` param and report `hbt` object; ports
+  gain `Q<i>_C`. Extraction round-trip is not claimed (#4397).
 - **`klt lvs` folds Liberty/CDL pin-name case in a `gate-level-verilog`
   reference** (issue #4815, documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)):
   a library-cell scalar port with no exact pin match (`.RESETN` against CDL

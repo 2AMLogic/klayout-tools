@@ -589,7 +589,7 @@ def _cap_top_plate_requires(family: str) -> tuple[tuple[int, int], ...]:
 #: ``guard_ring``/``diff_pair`` avoid above into this module's own clear
 #: ``GenError``.
 _GENERATOR_FAMILY_DEFERRED: dict[str, tuple[str, ...]] = {
-    "bjt_array": ("sg13g2", "sg13cmos5l"),
+    "bjt_array": ("sg13cmos5l",),
     "esd_device": ("sg13g2", "sg13cmos5l"),
     "well_island": ("sg13g2", "sg13cmos5l"),
     "guard_ring": ("sg13cmos5l",),

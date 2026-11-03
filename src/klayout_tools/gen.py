@@ -63,17 +63,7 @@ from .gen_cap_vpp import (
     _cap_vpp_array_layer_params,
     _cap_vpp_array_validate,
 )
-
-# Issue #2347 moved every family's `validate`/`describe` pair (plus the
-# helpers used only by them, and `_well_island_layer_params`, which #1875 had
-# to leave behind because it calls `_well_island_isolation`) into
-# `gen_describe.py` -- the third and last slice of this module's per-family
-# split, after `gen_layer_params.py` (#1875) and the `gen_pcells/` package
-# (#1698/#1713). `_GENERATOR_SPECS` below wires them up from there; nothing in
-# `gen_describe.py` imports this module at load time, so the direction stays
-# one-way.
 from .gen_describe import (
-    _bjt_array_describe,
     _bjt_array_validate,
     _bond_pad_describe,
     _bond_pad_validate,
@@ -100,6 +90,16 @@ from .gen_describe import (
     _well_island_layer_params,
     _well_island_validate,
 )
+
+# Issue #2347 moved every family's `validate`/`describe` pair (plus the
+# helpers used only by them, and `_well_island_layer_params`, which #1875 had
+# to leave behind because it calls `_well_island_isolation`) into
+# `gen_describe.py` -- the third and last slice of this module's per-family
+# split, after `gen_layer_params.py` (#1875) and the `gen_pcells/` package
+# (#1698/#1713). `_GENERATOR_SPECS` below wires them up from there; nothing in
+# `gen_describe.py` imports this module at load time, so the direction stays
+# one-way.
+from .gen_hbt import bjt_array_describe, bjt_array_layer_params, produce_hbt_array
 from .gen_layer_params import (
     _CAP_GEOMETRY_MIN_KEYS as _CAP_GEOMETRY_MIN_KEYS,
 )
@@ -132,7 +132,6 @@ from .gen_layer_params import (
     GUARD_RING_DEFAULT_PADDING_UM,
     GUARD_RING_DEFAULT_WIDTH_UM,
     SD_PAD_GATE_GAP_MIN_UM,
-    _bjt_layer_params,
     _bond_pad_layer_params,
     _cap_array_layer_params,
     _diff_pair_layer_params,
@@ -3958,6 +3957,7 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
         "drc_hints": described["drc_hints"],
         "warnings": described["warnings"],
         **({"expected": described["expected"]} if "expected" in described else {}),
+        **({"hbt": described["hbt"]} if "hbt" in described else {}),
         # Issue #2035: the shared `provenance` block every other verb's
         # report already carries -- see this function's docstring. A `gen`
         # request involves no rule/model deck and no single input layout
@@ -4063,18 +4063,16 @@ def _produce(
     the *resolved* PDK family rather than a fixed default -- see
     :func:`_device_layer_params` and friends.
 
-    The output layout's dbu is resolved from ``pdk_info``'s own tech LEF via
-    :func:`~klayout_tools.pdk.resolve_pdk_dbu` (issue #1496) -- e.g. 0.0005
-    for gf180mcu's ``DATABASE MICRONS 2000`` -- so a ``klt gen`` output
-    agrees, by construction, with a ``klt place_and_route`` output resolved
-    against the same PDK (both derive their dbu from the same tech LEF, the
-    way `place_and_route`'s own DEF/GDS merge already does per issue #1032).
-    Falls back to ``spec.dbu`` (the generator's hardcoded default, historically
-    always 0.001) when the resolver returns ``None`` -- a PDK whose tech LEF
-    is missing or unparsable never fails a `klt gen` request that previously
-    succeeded, it just keeps today's hardcoded dbu.
+    The output dbu comes from ``pdk_info``'s tech LEF via
+    :func:`~klayout_tools.pdk.resolve_pdk_dbu` (issue #1496, e.g. 0.0005 for
+    gf180mcu), agreeing by construction with ``klt place_and_route`` (#1032);
+    it falls back to ``spec.dbu`` when the LEF is missing or unparsable.
     """
     import klayout.db as kdb
+
+    if spec.name == "bjt_array" and _pdk_family(pdk_info["variant"]) == "sg13g2":
+        dbu = resolve_pdk_dbu(pdk_info) or spec.dbu  # #4850: PDK-authored HBT
+        return produce_hbt_array(cell_name, resolved_params, pdk_info, dbu)
 
     lib = _pcell_library()
     decl = lib.layout().pcell_declaration(spec.name)
@@ -4308,8 +4306,8 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         ),
         dbu=0.001,
         validate=_bjt_array_validate,
-        describe=_bjt_array_describe,
-        layer_params=_bjt_layer_params,
+        describe=bjt_array_describe,
+        layer_params=bjt_array_layer_params,
     ),
     "bond_pad": _GeneratorSpec(
         name="bond_pad",
