@@ -8066,7 +8066,7 @@ def test_fleet_capacity_wait_budget_is_shared_across_shards(tmp_path, monkeypatc
         message = corner["diagnostics"][0]["message"]
         assert "batch_concurrency_cap" in message
         assert "capacity wait budget" in message
-    assert environment is None
+    assert environment["unlaunched_shards"] == 2  # issue #4856: resumable signal
     assert sum(clock.sleeps) == pytest.approx(100.0, abs=1.0)
 
 
