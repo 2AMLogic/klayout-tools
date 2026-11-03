@@ -5138,6 +5138,7 @@ def _open_shard_manifest(
     resume: bool,
     config: BatchConfig,
     request_sha256: str | None = None,
+    request_sections: dict[str, str] | None = None,
 ) -> _ShardManifest | None:
     """Open the run's shard map, recording where the jobs live (issue #3896);
     ``None`` when the request has no fingerprint to key it by."""
@@ -5154,6 +5155,11 @@ def _open_shard_manifest(
             "profile": getattr(config, "profile", None),
             # Only a sharded --submit-only records it (issue #4620).
             **({} if request_sha256 is None else {"request_sha256": request_sha256}),
+            **(
+                {}
+                if request_sections is None
+                else {"request_sections": request_sections}
+            ),
         },
     )
 
@@ -5735,6 +5741,8 @@ def _submit_batch_shards(
     and keep running."""
     # Issue #4686: a re-run reuses the shard map of the same request, so a
     # shard that already has a job id never gets a second one.
+    from . import sim_batch_async
+
     manifest = _open_shard_manifest(
         artifacts_dir,
         shard_fingerprint,
@@ -5742,6 +5750,7 @@ def _submit_batch_shards(
         resume=True,
         config=config,
         request_sha256=request_sha256,
+        request_sections=sim_batch_async.request_section_digests(request),
     )
     assert manifest is not None
     shards = _shard_corner_points(corner_points, hosts)
@@ -5812,6 +5821,32 @@ def _submit_batch_shards(
     return identities, manifest.path
 
 
+def shard_points_for_job(
+    artifacts_dir: str, job_id: str, corner_points: list[CornerPoint]
+) -> list[CornerPoint] | None:
+    """The slice of ``corner_points`` one shard job of a sharded submit ran,
+    read from the ``batch-shards.json`` in ``artifacts_dir`` (issue #4878);
+    ``None`` when no map there lists ``job_id`` (a plain single-job attach).
+
+    A bare ``--attach <shard job id>`` collects only that shard's corners, so
+    the caller must compare the worker's echo against this slice, not the
+    whole request."""
+    try:
+        with open(
+            os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME), encoding="utf-8"
+        ) as handle:
+            document = json.load(handle)
+        hosts = int(document["hosts"])
+        entry = next(e for e in document["shards"] if e.get("job_id") == job_id)
+        wanted = entry["units_sha256"]
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+        return None
+    for points in _shard_corner_points(corner_points, hosts):
+        if points and _units_digest(points) == wanted:
+            return points
+    return None
+
+
 def _attach_batch_shards(
     *,
     manifest_path: str,
@@ -5851,12 +5886,28 @@ def _attach_batch_shards(
             code=BATCH_SHARD_MANIFEST_CODE,
         ) from exc
     recorded = document.get("request_sha256")
-    if recorded is not None and recorded != sim_batch_async.request_sha256(request):
+    if recorded is not None and recorded not in (
+        sim_batch_async.request_sha256(request),
+        sim_batch_async.legacy_request_sha256(request),
+    ):
+        sections = document.get("request_sections")
+        differing = (
+            sim_batch_async.differing_request_fields(sections, request)
+            if isinstance(sections, dict)
+            else []
+        )
+        detail = (
+            f"differing request field(s): {', '.join(differing)}"
+            if differing
+            else "re-run with exactly the request file, overrides "
+            "(--max-units-per-job, --budget-s, --pdk-root) and environment "
+            "used at --submit-only"
+        )
         raise SimError(
             f"--attach: shard map {manifest_path} was submitted from a "
             f"different request (request_sha256: map {str(recorded)[:12]}, "
-            f"request {sim_batch_async.request_sha256(request)[:12]}); pass "
-            "the request the shards were submitted from",
+            f"request {sim_batch_async.request_sha256(request)[:12]}; "
+            f"{detail}); pass the request the shards were submitted from",
             code=BATCH_SHARD_MANIFEST_CODE,
         )
     try:

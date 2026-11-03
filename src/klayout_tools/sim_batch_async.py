@@ -102,11 +102,64 @@ _STATUS_INSTANCE_FIELDS = (
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
+#: ``request.batch`` fields that steer submission only (how long to wait for
+#: spot capacity, how many jobs to keep in flight) and never change what a
+#: shard computes. They are left out of :func:`request_sha256` so a sharded
+#: ``--submit-only --wait-for-capacity`` can be collected by an
+#: ``--attach <map>`` that (by design) cannot repeat that flag (issue #4878).
+_SUBMISSION_ONLY_BATCH_FIELDS = ("capacity_wait_s", "max_concurrent_jobs")
+
+
+def _canonical_sha256(document: Any) -> str:
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def legacy_request_sha256(request: dict[str, Any]) -> str:
+    """The digest of the whole request document, as maps written before
+    issue #4878 recorded it; ``--attach`` still accepts it."""
+    return _canonical_sha256(request)
+
+
 def request_sha256(request: dict[str, Any]) -> str:
     """Digest of the request document (canonical JSON), so a caller can tie a
-    later status read back to the request it submitted."""
-    canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    later status read back to the request it submitted. Submission-only
+    ``batch`` fields (:data:`_SUBMISSION_ONLY_BATCH_FIELDS`) are excluded."""
+    batch = request.get("batch")
+    if isinstance(batch, dict) and any(
+        k in batch for k in _SUBMISSION_ONLY_BATCH_FIELDS
+    ):
+        kept = {
+            k: v for k, v in batch.items() if k not in _SUBMISSION_ONLY_BATCH_FIELDS
+        }
+        request = {**request, "batch": kept}
+    return _canonical_sha256(request)
+
+
+def request_section_digests(request: dict[str, Any]) -> dict[str, str]:
+    """Short per-field digests (top-level keys; ``batch`` split per key) that
+    the shard map records so a digest mismatch can name what differs."""
+    sections: dict[str, str] = {}
+    for key, value in request.items():
+        if key == "batch" and isinstance(value, dict):
+            for sub, sub_value in value.items():
+                if sub not in _SUBMISSION_ONLY_BATCH_FIELDS:
+                    sections[f"batch.{sub}"] = _canonical_sha256(sub_value)[:12]
+        else:
+            sections[key] = _canonical_sha256(value)[:12]
+    return sections
+
+
+def differing_request_fields(
+    recorded: dict[str, str], request: dict[str, Any]
+) -> list[str]:
+    """Fields whose digest differs between a map's record and ``request``."""
+    current = request_section_digests(request)
+    return sorted(
+        key
+        for key in set(recorded) | set(current)
+        if recorded.get(key) != current.get(key)
+    )
 
 
 def submit_only(

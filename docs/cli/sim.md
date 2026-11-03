@@ -965,6 +965,33 @@ must be the one submitted (a `request_sha256` or fingerprint mismatch is
 shard whose job is gone is reported as lost, other shards are still reported,
 and nothing is resubmitted.
 
+**Worked example: a 135-unit grid** ([#4878](https://github.com/2AMLogic/klayout-tools/issues/4878)).
+A job is capped by the whole-job ceiling (`max_job_seconds`, default `3600`
+s), and a job's units run back to back at up to `options.timeout_s` each, so
+units per job = `floor((3600 - 120) / timeout_s)`. With `timeout_s: 600`
+that is 5 units per job, so 135 units need 27 shards, more than Spot capacity
+usually gives at once. This is the fleet's ceiling arithmetic, not a client
+limit: lower `options.timeout_s` to fit more units per job, or submit in waves.
+
+```bash
+klt sim grid.json --backend batch --submit-only --max-units-per-job 5 -o out --format json
+klt sim grid.json --backend batch --attach out/batch-shards.json --max-units-per-job 5 -o out --format json
+```
+
+Use the same request file, overrides (`--max-units-per-job`, `--budget-s`,
+`--pdk-root`) and environment at `--attach`; on a `request_sha256` mismatch
+the error names the differing request field(s).
+
+*Interrupted submit.* If `--submit-only` is killed (for example during a long
+`--wait-for-capacity`), the shards not yet reached stay `pending` in
+`batch-shards.json`. Re-run the **same** `--submit-only` command: it reuses the
+map and submits only the `pending` shards (launched shards are never
+resubmitted).
+
+*Attaching one shard.* `--attach <shard job_id>` with the same request and
+`-o` dir collects only that shard (found via the `batch-shards.json` there)
+and reports just its corners; use the shard-map attach for the merged report.
+
 A **deck-list request** (`decks`, [#3958](https://github.com/2AMLogic/klayout-tools/issues/3958))
 is one job with one job id, so it supports the same flow: `--submit-only`
 uploads and launches the single deck job and returns the payload above
@@ -1133,7 +1160,10 @@ made. Things worth knowing:
   `--job-status` and `--batch-set` (use `--capacity-retries`); it applies to
   deck-list requests too. On expiry the run fails with the existing `batch_no_capacity` /
   `batch_concurrency_cap` code. `--submit-only`'s reported `request_sha256`
-  covers the request with this override folded in.
+  covers the request with every override folded in **except** the
+  submission-only `batch.capacity_wait_s` and `batch.max_concurrent_jobs`
+  (they never change what a shard computes), so a shard map submitted with
+  `--wait-for-capacity` still attaches without repeating it.
 
 ### Submit receipt and client termination ([#3065](https://github.com/2AMLogic/klayout-tools/issues/3065))
 
