@@ -4,6 +4,12 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-03
 
+- **PR #4864**: feat(sim): name missing request features on batch preflight-reject diagnostics
+- **PR #4862**: feat(signoff): accept model-run evidence kind for T1 item 5
+- **PR #4857**: feat: report unlaunched shards as a resumable signal in sim batch environment
+- **Issue #4863** (closed): Follow-on from PR #4860: runner version and offending key in batch job-failed diagnostic
+- **Issue #4859** (closed): klt signoff item 5: no way to cite a non-SPICE model result (analytical / linear model run) as evidence for a spec row
+- **Issue #4856** (closed): klt sim batch: sharded run leaves shards never launched (lost_shard, exit 4) until a manual --resume; oversize single job is submitted despite warning
 - **PR #4860**: feat: gate measurements[].stress on batch runner version
 - **PR #4854**: feat(gen): add mos_array dogbone_terminals for sub-0.42um widths
 - **PR #4852**: feat: add asap7_tap substrate/well tap and ring generator
