@@ -8514,3 +8514,18 @@ include left to the executing host). It is computed client-side, so `local`,
 `remote` and `batch` report the same value for one request. `klt sim` stays
 stateless: to guard a comparison, copy the earlier report's stamp into the new
 request's `expect_netlist_identity`.
+
+## Peak memory and timeout progress (issue #4867)
+
+Each unit report gains an optional, additive `peak_rss_bytes` (engine peak
+resident set size). It is best effort, read from the harness's
+`RUSAGE_CHILDREN` high-water mark, so it appears only when this unit raised
+that mark; it is omitted (never `null`) when it cannot be attributed, e.g. a
+unit beside a larger sibling, or a platform without `resource`.
+
+**Simulated-time-reached on timeout is not available.** Measured on
+ngspice 46 in `-b` mode: no periodic progress output is emitted to the log or
+stdout during `tran`; `bg_run` is not built in; and `stop when` / `resume`
+segmentation prints nothing reliably in batch mode while also altering the
+solver's breakpoints. A timeout diagnostic therefore still carries no
+`time_reached_s`, and no `options.progress_interval_s` exists.

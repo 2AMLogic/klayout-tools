@@ -15864,3 +15864,37 @@ def test_pinned_run_writes_num_threads_into_spiceinit(tmp_path, monkeypatch):
     corner_dir = os.path.dirname(corner["artifacts"]["log"])
     text = Path(corner_dir, ".spiceinit").read_text()
     assert text == "set num_threads=1\n"
+
+
+# --- issue #4867: best-effort per-unit peak RSS -----------------------------
+
+
+def test_peak_rss_since_reports_only_when_high_water_mark_rose(monkeypatch):
+    seq = iter([2048, 2048, 4096])
+    monkeypatch.setattr(sim, "_children_max_rss_bytes", lambda: next(seq))
+    assert sim._peak_rss_since(1024) == 2048  # rose: attributable
+    assert sim._peak_rss_since(2048) is None  # equal: not attributable
+    assert sim._peak_rss_since(None) is None  # no baseline
+    monkeypatch.setattr(sim, "_children_max_rss_bytes", lambda: None)
+    assert sim._peak_rss_since(0) is None  # resource unavailable
+
+
+def test_children_max_rss_bytes_is_positive_int_on_posix():
+    value = sim._children_max_rss_bytes()
+    assert value is None or (isinstance(value, int) and value >= 0)
+
+
+def test_unit_report_omits_peak_rss_when_unattributable(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    monkeypatch.setattr(sim, "_children_max_rss_bytes", lambda: 1000)
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [],
+        },
+    )
+    report = sim.run_sim(str(request))
+    assert all("peak_rss_bytes" not in c for c in report["corners"])

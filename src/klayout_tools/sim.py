@@ -9892,6 +9892,7 @@ def _run_corner(
     engine_exit_code: int | None = None
     engine_killed_by_signal: str | None = None
     launched = False
+    rss_before = _children_max_rss_bytes()
     try:
         completed = subprocess.run(
             command,
@@ -9918,6 +9919,7 @@ def _run_corner(
             }
         )
     runtime_s = round(time.monotonic() - started, 3)
+    peak_rss_bytes = _peak_rss_since(rss_before)
 
     log_text = _read_log_file(log_path)
 
@@ -10233,6 +10235,9 @@ def _run_corner(
         **_options_report_field(point),
         "status": status,
         "runtime_s": runtime_s,
+        # Additive (issue #4867): best-effort engine peak RSS; absent when
+        # it could not be attributed to this unit.
+        **({"peak_rss_bytes": peak_rss_bytes} if peak_rss_bytes else {}),
         # Additive (issue #2848): the engine process's raw outcome. Both are
         # null when the harness itself ended the run (timeout) or the engine
         # never launched.
@@ -11715,6 +11720,33 @@ def _supply_alter_lines(point: CornerPoint) -> list[str]:
         for key, value in sorted(point.supply_v.items())
         if key not in point.supply_waveforms
     ]
+
+
+def _children_max_rss_bytes() -> int | None:
+    """High-water RSS of all waited-for child processes, in bytes (issue
+    #4867), or ``None`` where :mod:`resource` is unavailable."""
+    try:
+        import resource
+
+        peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    except (ImportError, OSError, ValueError):
+        return None
+    # ru_maxrss is KiB on Linux, bytes on macOS.
+    return int(peak) if sys.platform == "darwin" else int(peak) * 1024
+
+
+def _peak_rss_since(before: int | None) -> int | None:
+    """This unit's engine peak RSS, best effort (issue #4867).
+
+    ``RUSAGE_CHILDREN`` only exposes a process-wide *maximum*, so a value is
+    attributable to this unit only when it raised that high-water mark; a
+    unit that peaked below an earlier one (or ran beside a larger sibling)
+    reports ``None`` and the field is omitted rather than guessed.
+    """
+    after = _children_max_rss_bytes()
+    if before is None or after is None or after <= before:
+        return None
+    return after
 
 
 def _corner_deck_control_lines(
