@@ -32,7 +32,6 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#3094**: decks/sg13cmos5l: poly resistors assume coincident GatPoly/PolyRes, same as sg13g2 before #2679
 - **#3440**: gf180mcu MIM option A: live verification against PDK pcell and runset (follow-up to #2920 / PR #3358)
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin
-- **#4002**: Make gf180mcu's native sign-off deck runnable from klt drc --engine klayout (assemble rule_decks + run_drc.py)
 - **#4161**: klt sim batch: all jobs exit 87 within seconds on the current fleet image; no runner stderr surfaced
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s)
@@ -40,7 +39,7 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#4739**: main CI red: file-size baseline out of sync with source (lvs.py, sim.py, lvs_mismatch.py, netlist_normalize.py, test_lvs.py, test_sim.py)
 - **#4763**: Live-verify gf180mcu tran run with models.param_file (follow-up to #4759)
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1
-- **#4844**: Live-verify gen-compose options.boundary (235/4) against gf180mcu_density.lydrc
+- **#4872**: klt synthesize: netlist embeds absolute source path in internal net names (non-reproducible across directories)
 
 ## In Progress
 
@@ -50,14 +49,7 @@ Issues currently being built (`loom:building`).
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
-- **#4819**: klt lvs: ASAP7 library cell OAI21x1 does not compare clean against its CDL (drawn-stack topology)
-- **#4841**: ASAP7: substrate/well taps and guard rings for asap7_finfet
-- **#4848**: signoff --attest 9: per-testbench cold start, rows without a bench, progress output
-- **#4850**: gen: no SiGe HBT (npn13G2*) generator for sg13g2; bjt_array unsupported and PDK pcell lib unreachable
-- **#4851**: gen: mos_array w_um floor (0.42) still refuses narrow sg13g2 thick-oxide devices
-- **#4856**: klt sim batch: sharded run leaves shards never launched (lost_shard, exit 4) until a manual --resume; oversize single job is submitted despite warning
-- **#4858**: klt sim --backend batch: measurements[].stress fails every corner on a runner image older than the client, and the request-feature preflight does not catch it
-- **#4859**: klt signoff item 5: no way to cite a non-SPICE model result (analytical / linear model run) as evidence for a spec row
+- **#4844**: Live-verify gen-compose options.boundary (235/4) against gf180mcu_density.lydrc
 
 ## PRs Awaiting Review
 
@@ -67,11 +59,7 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 - **#4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
 - **#4772**: fix: honor --dry-run and --wait-for-capacity under klt sim --batch-set
-- **#4849**: feat: per-bench cold start, unbenched_rows and stderr progress for signoff --attest 9
-- **#4852**: feat: add asap7_tap substrate/well tap and ring generator
-- **#4854**: feat(gen): add mos_array dogbone_terminals for sub-0.42um widths
-- **#4855**: feat: place sg13g2 SiGe HBT arrays from the PDK's own npn13G2* cells
-- **#4857**: feat: report unlaunched shards as a resumable signal in sim batch environment
+- **#4871**: docs(drc): record gf180mcu_density deck behavior against options.boundary
 
 ## Approved (Awaiting Merge)
 
@@ -112,15 +100,9 @@ Issues carrying `loom:curated`.
 - **#4763**: Live-verify gf180mcu tran run with models.param_file (follow-up to #4759) *(curated)*
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set *(curated)*
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1 *(curated)*
-- **#4841**: ASAP7: substrate/well taps and guard rings for asap7_finfet *(curated)*
 - **#4844**: Live-verify gen-compose options.boundary (235/4) against gf180mcu_density.lydrc *(curated)*
 - **#4845**: ring-check --pdk sg13g2: cross-check re-implemented Seal.* rules against the real Ruby deck *(curated)*
-- **#4848**: signoff --attest 9: per-testbench cold start, rows without a bench, progress output *(curated)*
-- **#4850**: gen: no SiGe HBT (npn13G2*) generator for sg13g2; bjt_array unsupported and PDK pcell lib unreachable *(curated)*
-- **#4851**: gen: mos_array w_um floor (0.42) still refuses narrow sg13g2 thick-oxide devices *(curated)*
-- **#4856**: klt sim batch: sharded run leaves shards never launched (lost_shard, exit 4) until a manual --resume; oversize single job is submitted despite warning *(curated)*
-- **#4858**: klt sim --backend batch: measurements[].stress fails every corner on a runner image older than the client, and the request-feature preflight does not catch it *(curated)*
-- **#4859**: klt signoff item 5: no way to cite a non-SPICE model result (analytical / linear model run) as evidence for a spec row *(curated)*
+- **#4872**: klt synthesize: netlist embeds absolute source path in internal net names (non-reproducible across directories) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -145,11 +127,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 1 |
 | Very important | 1 |
 | Important | 2 |
-| Ready (`loom:issue`) | 15 |
-| In Progress (`loom:building`) | 12 |
-| PRs awaiting review | 9 |
+| Ready (`loom:issue`) | 14 |
+| In Progress (`loom:building`) | 5 |
+| PRs awaiting review | 5 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 38 |
+| Curated | 32 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
