@@ -14,7 +14,8 @@
   ],
   "properties": {
     "schema_version": { "const": 1 },
-    "status": { "enum": ["pass", "fail", "error"] },
+    "status": { "enum": ["pass", "fail", "error", "valid"] },
+    "dry_run": { "const": true },
     "request_count": { "type": "integer", "minimum": 1 },
     "max_in_flight": { "type": "integer", "minimum": 1 },
     "submitted": { "type": "integer", "minimum": 0 },
@@ -33,6 +34,7 @@
           "job_id": { "type": ["string", "null"] },
           "job_ids": { "type": "array", "items": { "type": "string" } },
           "report": { "type": ["string", "null"] },
+          "plan": { "type": ["object", "null"] },
           "error": {
             "type": ["object", "null"],
             "required": ["message", "code"],
