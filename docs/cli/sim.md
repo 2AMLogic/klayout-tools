@@ -1183,7 +1183,7 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   directory runs fresh. A non-sharded or deck-list request resumes through its
   own checkpoint (the set always runs on `batch`, which supports `--resume`
   for both). A request whose resume is refused -- a shard map written for a
-  different request or hosts count (`resume_fingerprint_mismatch`), or an
+  different request (`resume_fingerprint_mismatch`; the shard count may differ, since a resume splits only the remaining units, so `--resume` is repeatable), or an
   unreadable one -- becomes an ordinary `error` entry, as it does for a single
   request, and its siblings still run. A shard
   still `interrupted` is re-polled first, so resuming it can wait up to another
