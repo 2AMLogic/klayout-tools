@@ -74,6 +74,53 @@ def validate_tap_params(
     return problems
 
 
+def _active_boxes(ring: bool, act: Box, bar_h: int) -> list[Box]:
+    """ACTIVE rectangles: one solid bar, or the four bars of a ring."""
+    x0, y0, x1, y1 = act
+    if not ring:
+        return [act]
+    side_w = SD_W - 2 * ACT_INSET
+    return [
+        (x0, y0, x1, y0 + bar_h),
+        (x0, y1 - bar_h, x1, y1),
+        (x0, y0, x0 + side_w, y1),
+        (x1 - side_w, y0, x1, y1),
+    ]
+
+
+def _emit_column(
+    boxes: dict[str, list[Box]],
+    j: int,
+    act_y: tuple[int, int],
+    bar_h: int,
+    ring: bool,
+    full_height: bool,
+    lo_rail: tuple[int, int],
+    hi_rail: tuple[int, int],
+) -> None:
+    """SDT/LISD/V0/M1 geometry of tap column ``j``."""
+    act_y0, act_y1 = act_y
+    x = _col_x(j)
+    vx0 = x + V0_INSET
+    vx1 = vx0 + V0_SIZE
+    if ring and not full_height:
+        spans = [(act_y0, act_y0 + bar_h), (act_y1 - bar_h, act_y1)]
+    else:
+        spans = [(act_y0, act_y1)]
+    for y0, y1 in spans:
+        boxes["sdt"].append((x, y0, x + SD_W, y1))
+        boxes["lisd"].append((x, y0, x + SD_W, y1))
+    # Bottom contact: V0 + M1 stub down to the lower rail.
+    boxes["v0"].append((vx0, act_y0, vx1, act_y0 + V0_SIZE))
+    boxes["m1"].append((vx0, lo_rail[0], vx1, act_y0 + V0_SIZE))
+    if ring:
+        boxes["v0"].append((vx0, act_y1 - V0_SIZE, vx1, act_y1))
+        boxes["m1"].append((vx0, act_y1 - V0_SIZE, vx1, hi_rail[1]))
+        if full_height:
+            # Strap tying the two rails together through this column.
+            boxes["m1"].append((vx0, lo_rail[0], vx1, hi_rail[1]))
+
+
 def tap_layout(
     device: str,
     nfin: int,
@@ -101,14 +148,7 @@ def tap_layout(
     )
 
     boxes: dict[str, list[Box]] = {k: [] for k in ASAP7_LAYERS}
-    if not ring:
-        boxes["active"].append((act_x0, act_y0, act_x1, act_y1))
-    else:
-        side_w = SD_W - 2 * ACT_INSET
-        boxes["active"].append((act_x0, act_y0, act_x1, act_y0 + bar_h))
-        boxes["active"].append((act_x0, act_y1 - bar_h, act_x1, act_y1))
-        boxes["active"].append((act_x0, act_y0, act_x0 + side_w, act_y1))
-        boxes["active"].append((act_x1 - side_w, act_y0, act_x1, act_y1))
+    boxes["active"].extend(_active_boxes(ring, (act_x0, act_y0, act_x1, act_y1), bar_h))
 
     for m in range(1, (act_y1 - act_y0) // FIN_PITCH + 1):
         y = FIN_OFFSET + FIN_PITCH * m
@@ -122,29 +162,9 @@ def tap_layout(
     port_boxes: dict[str, list[Box]] = {"B": []}
     edge_cols = {0, ncol - 1}
     for j in range(ncol):
-        x = _col_x(j)
-        vx0 = x + V0_INSET
-        vx1 = vx0 + V0_SIZE
-        full_height = ring and j in edge_cols
-        if full_height:
-            boxes["sdt"].append((x, act_y0, x + SD_W, act_y1))
-            boxes["lisd"].append((x, act_y0, x + SD_W, act_y1))
-        elif ring:
-            for y0, y1 in ((act_y0, act_y0 + bar_h), (act_y1 - bar_h, act_y1)):
-                boxes["sdt"].append((x, y0, x + SD_W, y1))
-                boxes["lisd"].append((x, y0, x + SD_W, y1))
-        else:
-            boxes["sdt"].append((x, act_y0, x + SD_W, act_y1))
-            boxes["lisd"].append((x, act_y0, x + SD_W, act_y1))
-        # Bottom contact: V0 + M1 stub down to the lower rail.
-        boxes["v0"].append((vx0, act_y0, vx1, act_y0 + V0_SIZE))
-        boxes["m1"].append((vx0, lo_rail[0], vx1, act_y0 + V0_SIZE))
-        if ring:
-            boxes["v0"].append((vx0, act_y1 - V0_SIZE, vx1, act_y1))
-            boxes["m1"].append((vx0, act_y1 - V0_SIZE, vx1, hi_rail[1]))
-            if full_height:
-                # Strap tying the two rails together through this column.
-                boxes["m1"].append((vx0, lo_rail[0], vx1, hi_rail[1]))
+        _emit_column(
+            boxes, j, (act_y0, act_y1), bar_h, ring, j in edge_cols, lo_rail, hi_rail
+        )
     cols = [_col_x(j) + V0_INSET for j in range(ncol)]
     if ncol >= 2:
         lo = (cols[0], lo_rail[0], cols[-1] + V0_SIZE, lo_rail[1])
