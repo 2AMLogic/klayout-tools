@@ -2,6 +2,16 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-11-03
+
+- **PR #4832**: feat(erc): add gf180mcu antenna-ratio limit table for --pdk gf180mcu
+- **PR #4836**: feat: add --pdk seal-ring rule check to ring-check
+- **PR #4834**: feat: add klt fill verb for PDK density fill insertion
+- **PR #4835**: feat: disclose gf180mcu bond-pad guideline ids as unmodeled rules
+- **PR #4843**: docs: define item 10 hygiene inventory scope and attestation provenance
+- **PR #4833**: feat: resolve gf180mcu native DRC main script in klt drc
+- **Issue #4839** (closed): signoff --attest: Loom-managed files (.gitignore) in hygiene inventories drift on every resync
+
 ### 2026-11-02
 
 - **PR #4796**: feat: let signoff item 6 not_applicable cite a markdown spec table

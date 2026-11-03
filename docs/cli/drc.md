@@ -1713,7 +1713,7 @@ floorplan-*windowed* tiler but a boundary-scoped **whole-region** ratio: a
 `DrcRule` that names a boundary layer, sums the checked layer (optionally
 unioned with a fill layer) inside it, and compares the single fraction
 against `density_min`/`density_max`. That is deferred because it would be
-inert here today: **nothing this repo produces or ships draws 235/4.**
+inert here today: **nothing this repo ships draws 235/4** (a composed layout can opt in via `klt gen-compose`'s `options.boundary`, #3998; see [`gen-compose.md`](gen-compose.md)).
 Verified across `examples/`, `blocks/`, and `tests/corpus/` — the sky130
 standard cells carry 236/0 (`OUTLINE`) and 81/4 (`areaid.standardc`), the
 generator and routing outputs carry neither, and no `klt` verb emits a

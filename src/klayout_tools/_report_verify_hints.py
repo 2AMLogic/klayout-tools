@@ -12,6 +12,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from ._provenance import sha256_file
 from ._report_verify import hash_check
 
 
@@ -51,12 +52,49 @@ def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[st
     """``detail`` for a ``stale_evidence`` verdict: names the failed
     comparison (field / expected / actual, the entry shape ``--check`` emits)
     so the author can tell which input to regenerate or re-pin (issue #4795).
+
+    Issue #4837 adds, additively, ``compared_against`` (what ``actual`` was
+    computed over) and ``hint`` (which hash ``content_hash`` must be), plus
+    ``pin_is_envelope_file_hash`` when the pin is the cited envelope file's own
+    sha256 -- the usual mistake.
     """
-    return {
+    expected = spec.get("content_hash")
+    detail: dict[str, Any] = {
         "content_hash_pin": "stale",
         "hash_check": hash_check(
-            "provenance.input.content_hash",
-            spec.get("content_hash"),
-            resolution["content_hash"],
+            "provenance.input.content_hash", expected, resolution["content_hash"]
         ),
     }
+    envelope = resolution.get("envelope")
+    provenance = envelope.get("provenance") if isinstance(envelope, Mapping) else None
+    block = provenance.get("input") if isinstance(provenance, Mapping) else None
+    block = block if isinstance(block, Mapping) else {}
+    members = block.get("paths")
+    if isinstance(members, list) and members:
+        names = []
+        for member in members:
+            path = member.get("path") if isinstance(member, Mapping) else None
+            path = path.get("path") if isinstance(path, Mapping) else path
+            if isinstance(path, str):
+                names.append(path)
+        detail["compared_against"] = names
+        what = "the input-set digest over the files in compared_against"
+    elif isinstance(block.get("path"), str):
+        detail["compared_against"] = block["path"]
+        what = f"the sha256 of the input artifact {block['path']}"
+    else:
+        return detail
+    hint = (
+        f"content_hash must be {what} (provenance.input.content_hash), "
+        "not the hash of the evidence envelope file"
+    )
+    evidence_file = resolution.get("file")
+    own = sha256_file(evidence_file) if isinstance(evidence_file, str) else None
+    if own is not None and expected == f"sha256:{own}":
+        hint = (
+            "the pinned content_hash is the sha256 of the evidence envelope "
+            f"file {evidence_file} itself; " + hint
+        )
+        detail["pin_is_envelope_file_hash"] = True
+    detail["hint"] = hint
+    return detail
