@@ -804,6 +804,18 @@ launched. The rate is observed launches per minute since the first launch; until
 two launches are seen it reads `unknown`. stdout and the JSON report are
 unchanged ([#4349](https://github.com/2AMLogic/klayout-tools/issues/4349)).
 
+**Unlaunched shards are a resumable signal.** When a sharded run ends with one
+or more shards submitted but never launched (typically a capacity or
+concurrency-cap refusal with `batch.capacity_wait_s` at its default `0`),
+`environment.remote` carries three additive fields, absent when every shard
+launched: `unlaunched_shards` (count), `resumable: true`, and `shard_map` (the
+`batch-shards.json` path). The affected corners still report `lost_shard` and
+the exit code stays 4; the fields only let an unattended caller tell
+"incomplete, rerun with `--resume` and the same outdir" from a real failure
+([#4856](https://github.com/2AMLogic/klayout-tools/issues/4856)). Unattended
+callers should set `batch.capacity_wait_s` to wait out refusals before falling
+back to `--resume`.
+
 **Retry contract, up front.** A launch refused for lack of Spot capacity is
 *not* retried unless you opt in: `batch.capacity_wait_s` defaults to `0` (one
 attempt), and the refusal then fails the request with

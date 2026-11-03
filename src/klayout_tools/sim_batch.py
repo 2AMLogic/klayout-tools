@@ -5185,6 +5185,21 @@ def _warn_unlaunched(manifest: _ShardManifest | None, hosts: int) -> None:
     )
 
 
+def _unlaunched_environment(manifest: _ShardManifest | None) -> dict[str, Any]:
+    """Additive machine-readable "incomplete, resumable" signal for
+    ``environment.remote`` (issue #4856): empty when every shard launched."""
+    if manifest is None:
+        return {}
+    count = manifest.unlaunched()
+    if not count:
+        return {}
+    return {
+        "unlaunched_shards": count,
+        "resumable": True,
+        "shard_map": str(manifest.path),
+    }
+
+
 class _CapacityWatch:
     """Fleet-wide view of shards waiting out a capacity refusal (issue #4018).
 
@@ -5687,6 +5702,9 @@ def _run_batch_fleet(
                 **environment,
                 "max_concurrent_jobs": config.max_concurrent_jobs,
             }
+        resumable = _unlaunched_environment(manifest)
+        if resumable:
+            environment = {**(environment or {}), **resumable}
         return corners, engine_version, environment
     finally:
         if in_main:
