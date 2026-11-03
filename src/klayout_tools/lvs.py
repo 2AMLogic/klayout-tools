@@ -181,6 +181,7 @@ from .lvs_finfet import (
     apply_finfet_bulk_hierarchy,
     bulk_disclosures,
     finfet_bulk_replay_options,
+    known_limitation_disclosures,
     prepare_finfet_comparison,
     prepare_finfet_request,
     reference_reader,
@@ -2795,6 +2796,14 @@ def run_lvs(
         # not apply.
         status = STATUS_INCONCLUSIVE
     status = _force_mismatch_on(status, unresolved_subckt_call_findings)
+    # Issue #4819: in-band disclosure of a pinned ASAP7 library limitation;
+    # a warning, so it never moves `status`.
+    known_limits = known_limitation_disclosures(
+        finfet_layout, status, reference_spec.get("top"), layout_spec.get("top")
+    )
+    if known_limits:
+        mismatches.extend(known_limits)
+        mismatches.sort(key=_sort_key)
 
     category_counts: dict[str, int] = {}
     # Issue #1132: `category_counts` alone collapses `error`/`warning`

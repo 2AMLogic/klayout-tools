@@ -1500,6 +1500,47 @@ def test_corpus_folded_stack_cells_are_reported_as_mismatches_not_normalised(cel
     assert report["status"] == "mismatch" and _errors(report)
 
 
+def test_known_unsupported_list_matches_corpus_pins():
+    from klayout_tools.lvs_finfet import KNOWN_UNSUPPORTED_ASAP7_CELLS
+
+    assert (
+        set(KNOWN_UNSUPPORTED_ASAP7_CELLS) == _FOLDED_STACK_CELLS | _SERIES_ORDER_CELLS
+    )
+    assert len(KNOWN_UNSUPPORTED_ASAP7_CELLS) == 17
+
+
+def test_known_limitation_disclosure_only_for_mismatching_pinned_cell():
+    from klayout_tools.lvs_finfet import known_limitation_disclosures
+
+    cell = "OAI21x1_ASAP7_75t_R"
+    (entry,) = known_limitation_disclosures(True, "mismatch", cell)
+    assert entry["category"] == "topology.known_limitation"
+    assert entry["severity"] == "warning"
+    assert cell in entry["description"]
+    assert entry["details"] == {"cell": cell, "limitation": "folded-stack"}
+    assert known_limitation_disclosures(True, "match", cell) == []
+    assert known_limitation_disclosures(False, "mismatch", cell) == []
+    assert known_limitation_disclosures(True, "mismatch", "INVx1_ASAP7_75t_R") == []
+
+
+@_needs_corpus
+@pytest.mark.parametrize("cell", ["OAI21x1_ASAP7_75t_R", "SDFLx1_ASAP7_75t_R"])
+def test_corpus_unsupported_cell_carries_known_limitation_warning(cell):
+    report = _corpus_lvs(cell)
+    assert report["status"] == "mismatch" and _errors(report)
+    assert report["category_counts"]["topology.known_limitation"] == 1
+    (entry,) = [
+        m for m in report["mismatches"] if m["category"] == "topology.known_limitation"
+    ]
+    assert entry["details"]["cell"] == cell
+
+
+@_needs_corpus
+def test_corpus_supported_cell_has_no_known_limitation_warning():
+    report = _corpus_lvs("INVx1_ASAP7_75t_R")
+    assert "topology.known_limitation" not in report["category_counts"]
+
+
 _SWEEP_SCRIPT = """
 import json, re, sys
 from klayout_tools import build_identity
