@@ -1722,6 +1722,16 @@ on every layout in the corpus. The precondition for revisiting is a
 chip-level assembly step that emits a real `prBoundary` — at which point the
 rule ids, bounds, and fill layers above are the transcription source.
 
+**Measured (issue #4844, sky130A from ciel, KLayout 0.30.12).** With
+`options.boundary` set, `klt drc --engine klayout --deck-file
+.../gf180mcu_density.lydrc` runs headless and its denominator is exactly the
+drawn 235/4 rectangle: a gf180 `comp` 22/0 rect covering 89.6% of the boundary
+yields one `comp.density` violation reported on the boundary rect, while the
+same content without a boundary is a vacuous pass (`chip_boundary.area` = 0).
+The deck keys on gf180 `comp` 22/0, so it passes vacuously on pure sky130
+content even with a boundary, and `klt drc` reports `coverage_unknown` (exit 4)
+for it when clean because it declares no rule categories.
+
 `li1.enclosing.licon1.1` (issue #551) is that one exception, and the only
 rule in either deck whose threshold is deliberately *not* its source value.
 It closes the same asymmetry as gf180mcu's `metal1.enclosing.contact.1`
