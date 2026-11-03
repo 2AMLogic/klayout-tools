@@ -661,7 +661,9 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "one invocation (issue #2869) instead of the single positional "
             "request: at most --max-in-flight run at once, the rest queue, "
             "and one aggregate JSON envelope reports every request. Always "
-            "backend `batch`; never falls back to local ngspice. See "
+            "backend `batch`; never falls back to local ngspice. "
+            "--max-units-per-job, --max-concurrent-jobs and "
+            "--wait-for-capacity apply to every member request. See "
             "docs/cli/sim.md 'Submitting a set of requests'."
         ),
     )
@@ -710,7 +712,8 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "batch_concurrency_cap), re-launching the same job with jittered "
             "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
             "means one attempt. Also applies with --submit-only (issue "
-            "#3564). See docs/cli/sim.md."
+            "#3564). With --batch-set, applied to every member request "
+            "(alongside --capacity-retries). See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
