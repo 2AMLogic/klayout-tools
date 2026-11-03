@@ -206,6 +206,7 @@ from .gen import (
     _fixed_cut_side_um,
     _pdk_family,
 )
+from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
 # The rest of this module never calls these directly -- they are re-exported
@@ -3174,6 +3175,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         raise GenComposeError("request.options must be a JSON object")
     cell_name = options.get("cell_name") or "gen_compose_0"
     output_path = options.get("output") or f"{cell_name}.gds"
+    boundary_bbox_um = parse_boundary(options.get("boundary"), GenComposeError)
 
     output_dir = os.path.dirname(os.path.abspath(output_path))
     if output_dir and not os.path.isdir(output_dir):
@@ -4471,6 +4473,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         array_placement=array_placement_gds,
         via_drop_size_um=via_drop_size_um,
         landing_pad_size_um=landing_pad_size_um,
+        boundary_bbox_um=boundary_bbox_um,
     )
     warnings.extend(dbu_rescale_warnings)
 
@@ -4720,6 +4723,7 @@ def _write_composed_gds(
     via_drop_size_um: dict[tuple[int, int], float] | None = None,
     landing_pad_size_um: dict[tuple[tuple[int, int], tuple[int, int]], float]
     | None = None,
+    boundary_bbox_um: dict[str, float] | None = None,
 ) -> tuple[float, list[str]]:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
     every block's own top cell as a translated sub-cell instance, plus any
@@ -5112,16 +5116,7 @@ def _write_composed_gds(
                     )
                 top.shapes(layer_index).insert(widen_box)
 
-    if pin_placements:
-        for pin in pin_placements:
-            layer = pin["layer"]
-            pin_layer_index = layout.layer(layer[0], layer[1])
-            pin_point = kdb.Point(
-                int(round(pin["x_um"] / dbu)), int(round(pin["y_um"] / dbu))
-            )
-            top.shapes(pin_layer_index).insert(
-                kdb.Text(pin["net"], kdb.Trans(pin_point))
-            )
+    draw_pins_and_boundary(top, layout, pin_placements, boundary_bbox_um)
 
     write_layout(layout, output_path, GenComposeError)
     return layout.dbu, dbu_rescale_warnings

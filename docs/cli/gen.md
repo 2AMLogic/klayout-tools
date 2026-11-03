@@ -2051,6 +2051,43 @@ schematic, label the two ports' `li1` (positions are in `ports[]`), run
 `klt extract`, and compare with a `D` element of the matching class under
 `klt lvs`.
 
+### `asap7_finfet` (ASAP7 FinFET nFET/pFET, issue #2762)
+
+A multi-fin, multi-finger FinFET on the ASAP7 grids. **ASAP7 only** — it needs
+a resolved `asap7` PDK tree (`klt pdk find`); any other family raises a clear
+`GenError`. Width is quantized by fin count, not drawn in µm.
+
+- Output database unit is `0.00025` µm; every coordinate is an integer dbu, so
+  gates (20 nm wide, 54 nm pitch), fins (7 nm, 27 nm pitch), the active
+  height (`nfin` × 27 nm) and S/D columns sit on the grids by construction.
+- One dummy gate at each end, `nf` live gates, `nf + 1` S/D columns (even =
+  source, odd = drain) with SDT/LISD/V0/M1, strapped on M1 so the fingers
+  extract as one parallel device; one LIG/V0/M1 gate contact. GCut bands end
+  the gates, as in the pinned ASAP7 standard cells.
+- `device="pfet"` adds `Pselect` and the well; `vt="lvt"`/`"slvt"` add the
+  matching VT marker (extracts as `*_lvt`/`*_slvt`).
+- **`nfin` is fins per gate finger.** `klt extract` reports `nfin` as the
+  total over parallel fingers, so the response's `expected` block gives
+  `nfin_total = nfin * nf` to compare against.
+- The output is a single flat cell (the FinFET extractor reads the top cell).
+- Ports `S`, `D`, `G` on M1 (19/0). `device_count` is `1`.
+- Verified DRC-clean under `asap7.drc` and extracting the requested
+  `nfin * nf` / `nf` for a bounded sweep (`tests/test_gen_asap7.py`).
+- **Not generated yet:** substrate/well taps and guard rings (tracked as a
+  follow-up), SRAM/thick-oxide flavours, routing between devices.
+
+| `params` field | Type   | Default  | Description |
+| -------------- | ------ | -------- | ----------- |
+| `device`       | string | `"nfet"` | `"nfet"` or `"pfet"`. |
+| `nfin`         | int    | `2`      | Fins per gate finger, `1..16`. |
+| `nf`           | int    | `1`      | Gate fingers, `1..16`. |
+| `vt`           | string | `"rvt"`  | `"rvt"`, `"lvt"` or `"slvt"`. |
+
+```
+klt gen asap7_finfet --pdk-root <lambdapdk>/asap7 \
+  --params '{"device":"nfet","nfin":3,"nf":2}' -o nfet.gds --format json
+```
+
 ## Output database unit (dbu)
 
 **Every generator writes its GDS at the resolved PDK's own database unit,

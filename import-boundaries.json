@@ -245,6 +245,7 @@
       "modules": [
         "klayout_tools.cli.gen_cmd",
         "klayout_tools.gen",
+        "klayout_tools.gen_asap7",
         "klayout_tools.gen_cap_vpp",
         "klayout_tools.gen_cap_stack",
         "klayout_tools.gen_describe",
@@ -252,6 +253,7 @@
         "klayout_tools.gen_layer_params",
         "klayout_tools.gen_layer_tables",
         "klayout_tools.gen_pcells",
+        "klayout_tools.gen_pcells.asap7_finfet",
         "klayout_tools.gen_pcells.bjt_array",
         "klayout_tools.gen_pcells.bond_pad",
         "klayout_tools.gen_pcells.cap_array",
@@ -263,7 +265,8 @@
         "klayout_tools.gen_pcells.mos_array",
         "klayout_tools.gen_pcells.res_array",
         "klayout_tools.gen_pcells.resistor_strip",
-        "klayout_tools.gen_pcells.well_island"
+        "klayout_tools.gen_pcells.well_island",
+        "klayout_tools.gen_spec"
       ]
     },
     "gen_compose": {
@@ -272,6 +275,7 @@
       "modules": [
         "klayout_tools.cli.gen_compose_cmd",
         "klayout_tools.gen_compose",
+        "klayout_tools.gen_compose_boundary",
         "klayout_tools.gen_compose_port_access",
         "klayout_tools.gen_compose_port_request",
         "klayout_tools.gen_compose_routing"
