@@ -1664,6 +1664,39 @@ member is named in `detail.artifact_binding.members`) without running
 > evidence `content_hash` to the new `provenance.input.content_hash`; the old
 > inventory-only hash now grades `stale_evidence`.
 
+#### Item 10: what belongs in a hygiene inventory, and who re-attests (issue #4839)
+
+Every `hygiene` path is hashed as raw bytes (`sha256-raw-bytes`) and bound
+into the envelope, so any byte change to a listed file turns the committed
+envelope stale (`stale_evidence`, or a `--check` diff).
+
+**List only repo-owned evidence:** the README, the spec table, the LICENSE,
+and a CI workflow whose content the repo owner wrote. **Do not list paths
+that a Loom or Repo-Skills resync rewrites**: `.gitignore`, anything under
+`.loom/` or `.claude/`, and `CLAUDE.md` (its managed marker blocks are
+rewritten on every resync). Those files are tooling, not hygiene evidence,
+and listing one makes `signoff` go red after each resync with no design
+change. The rule is about resync-managed *content*: a repo-owned workflow
+that a resync does not touch may still be listed even if Loom also installs
+other workflows. `--attest` does not hash "the file minus managed blocks";
+the fix is to list fewer files.
+
+**Migration for existing item 10 inventories:** remove resync-managed paths
+from `hygiene`, then re-attest once and commit the new envelope
+(`klt signoff --attest 10 --inventory <inv> -o <envelope>`). That re-attest
+is the owner's action (next paragraph).
+
+**Provenance is the PR record.** The envelope deliberately carries no actor
+or timestamp field (`provenance` records only `klt_version`,
+`klayout_version`, `pdk` and `deck`): a self-reported name is unverifiable,
+and a timestamp would break the byte-deterministic `--check` re-diff. Who
+attested and when is the git/PR record of the commit that changed
+`manifests/envelopes/item*.attest.json`. Re-attesting is a sign-off action
+for the repo owner. An agent must not regenerate an envelope to clear a red
+`signoff` or CI check, and an envelope diff inside an unrelated PR is a
+review red flag. If a stale envelope is blocking CI, escalate it to the
+owner instead.
+
 #### Item 2: attest a committed layout stream (`--input`, issue #4188)
 
 Item 2 (Layout) needs no inventory — the committed stream is the artifact
