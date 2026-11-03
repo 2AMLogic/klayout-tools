@@ -64,6 +64,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from . import signoff_attest_item9 as item9
 from ._provenance import sha256_file
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
@@ -149,7 +150,7 @@ _ITEM_KEYS: dict[int, frozenset[str]] = {
     8: frozenset(
         {"report", "spec_rows", "citations", "envelope_checks", "corners", "metrics"}
     ),
-    9: frozenset({"testbenches", "cold_start", "pins"}),
+    9: item9.ITEM9_KEYS,
     10: frozenset({"hygiene", "checks"}),
 }
 
@@ -402,6 +403,11 @@ def _validated_inventory(
     normalised form the checks run against. Raises :class:`AttestationError`
     for anything malformed."""
     _validate_header(inventory, item, source)
+    bench_specs: dict[str, Any] = {}
+    if item == 9:
+        inventory, bench_specs = item9.split_testbenches(
+            inventory, root, _normalize_repo_path, _command_spec
+        )
     seen: dict[str, str] = {}
     normalized: dict[str, Any] = {}
     for field, _role in _PATH_LISTS[item]:
@@ -413,15 +419,7 @@ def _validated_inventory(
     elif item == CHARACTERIZATION_ITEM:
         normalized.update(_validated_characterization(inventory, root))
     elif item == 9:
-        if "cold_start" not in inventory:
-            raise AttestationError(
-                "item 9 inventory must declare 'cold_start' -- the invocation "
-                "that reproduces the claimed measurements from a clean checkout"
-            )
-        normalized["cold_start"] = _command_spec(
-            inventory["cold_start"], "cold_start", root
-        )
-        normalized["pins"] = inventory.get("pins")
+        item9.validate_into(normalized, inventory, bench_specs, root, _command_spec)
     else:
         normalized["checks"] = _validated_command_checks(inventory, root, 10)
     return normalized
@@ -1048,7 +1046,7 @@ def _run_checks(
     elif item == CHARACTERIZATION_ITEM:
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
-        checks.append(command(normalized["cold_start"], "cold_start"))
+        checks.extend(item9.item9_checks(normalized, command))
         checks.extend(_pin_checks(normalized["pins"]))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
