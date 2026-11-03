@@ -4,6 +4,16 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-03
 
+- **PR #4860**: feat: gate measurements[].stress on batch runner version
+- **PR #4854**: feat(gen): add mos_array dogbone_terminals for sub-0.42um widths
+- **PR #4852**: feat: add asap7_tap substrate/well tap and ring generator
+- **PR #4849**: feat: per-bench cold start, unbenched_rows and stderr progress for signoff --attest 9
+- **PR #4847**: feat(lvs): disclose known ASAP7 library limitation on mismatched cells
+- **Issue #4858** (closed): klt sim --backend batch: measurements[].stress fails every corner on a runner image older than the client, and the request-feature preflight does not catch it
+- **Issue #4851** (closed): gen: mos_array w_um floor (0.42) still refuses narrow sg13g2 thick-oxide devices
+- **Issue #4848** (closed): signoff --attest 9: per-testbench cold start, rows without a bench, progress output
+- **Issue #4841** (closed): ASAP7: substrate/well taps and guard rings for asap7_finfet
+- **Issue #4819** (closed): klt lvs: ASAP7 library cell OAI21x1 does not compare clean against its CDL (drawn-stack topology)
 - **PR #4842**: feat(gen): add ASAP7 grid-aware asap7_finfet nFET/pFET generator
 - **PR #4838**: feat: explain stale_evidence pins with compared_against and hint
 - **PR #4831**: feat: add options.boundary to gen-compose for a 235/4 die boundary
