@@ -396,6 +396,7 @@
         "klayout_tools.decks.extraction",
         "klayout_tools.decks.finfet",
         "klayout_tools.decks.gf180mcu",
+        "klayout_tools.decks.gf180mcu_bond_pad",
         "klayout_tools.decks.parasitics",
         "klayout_tools.decks.rules",
         "klayout_tools.decks.sg13cmos5l",
