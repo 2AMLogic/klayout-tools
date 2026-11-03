@@ -78,3 +78,10 @@ def _build_asap7_tap_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     )
 
     return {"asap7_tap": _Asap7TapPCell}
+
+
+def _build_asap7_pcells() -> dict[str, type[kdb.PCellDeclarationHelper]]:
+    """Build every ASAP7 PCell (finfet + tap) for `gen.py`'s single hook."""
+    from .asap7_finfet import _build_asap7_finfet_pcell
+
+    return {**_build_asap7_finfet_pcell(), **_build_asap7_tap_pcell()}

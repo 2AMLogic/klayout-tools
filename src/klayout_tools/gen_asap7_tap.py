@@ -23,6 +23,7 @@ from typing import Any
 from .gen_asap7 import (
     ACTIVE_Y0,
     ASAP7_DBU_UM,
+    ASAP7_FINFET_SPEC,
     ASAP7_LAYERS,
     FIN_OFFSET,
     FIN_PITCH,
@@ -39,6 +40,7 @@ from .gen_asap7 import (
 from .gen_spec import _GeneratorSpec
 
 __all__ = [
+    "ASAP7_SPECS",
     "ASAP7_TAP_SPEC",
     "TAP_DEVICES",
     "all_boxes",
@@ -292,3 +294,6 @@ ASAP7_TAP_SPEC = _GeneratorSpec(
     layer_params=asap7_tap_layer_params,
     flatten_output=True,
 )
+
+#: Every `klt gen` spec in the ASAP7 family, registered together in `gen.py`.
+ASAP7_SPECS = {"asap7_finfet": ASAP7_FINFET_SPEC, "asap7_tap": ASAP7_TAP_SPEC}

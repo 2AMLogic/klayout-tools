@@ -696,8 +696,7 @@ _SG13G2_DUMMY_LAYER = (99, 50)
 def test_list_generators_includes_all_four_phase2_families():
     """`klt gen --list` must show all four analog primitive families the
     issue scopes, alongside `resistor_strip`, `bjt_array`, `bond_pad` (#568),
-    `esd_device` (#569), `well_island` (#1421) and `asap7_finfet` (#2762)
-    (acceptance criterion #1)."""
+    `esd_device` (#569), `well_island` (#1421), `asap7_finfet` (#2762), `asap7_tap`."""
     report = list_generators()
     names = {g["name"] for g in report["generators"]}
     assert names == {
