@@ -39,7 +39,6 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#4739**: main CI red: file-size baseline out of sync with source (lvs.py, sim.py, lvs_mismatch.py, netlist_normalize.py, test_lvs.py, test_sim.py)
 - **#4763**: Live-verify gf180mcu tran run with models.param_file (follow-up to #4759)
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1
-- **#4872**: klt synthesize: netlist embeds absolute source path in internal net names (non-reproducible across directories)
 
 ## In Progress
 
@@ -49,7 +48,7 @@ Issues currently being built (`loom:building`).
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
-- **#4844**: Live-verify gen-compose options.boundary (235/4) against gf180mcu_density.lydrc
+- **#4878**: klt sim: sharded batch jobs cannot be collected into one report
 
 ## PRs Awaiting Review
 
@@ -59,7 +58,7 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 - **#4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
 - **#4772**: fix: honor --dry-run and --wait-for-capacity under klt sim --batch-set
-- **#4871**: docs(drc): record gf180mcu_density deck behavior against options.boundary
+- **#4879**: fix: let sharded --attach collect maps submitted with --wait-for-capacity
 
 ## Approved (Awaiting Merge)
 
@@ -100,9 +99,8 @@ Issues carrying `loom:curated`.
 - **#4763**: Live-verify gf180mcu tran run with models.param_file (follow-up to #4759) *(curated)*
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set *(curated)*
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1 *(curated)*
-- **#4844**: Live-verify gen-compose options.boundary (235/4) against gf180mcu_density.lydrc *(curated)*
 - **#4845**: ring-check --pdk sg13g2: cross-check re-implemented Seal.* rules against the real Ruby deck *(curated)*
-- **#4872**: klt synthesize: netlist embeds absolute source path in internal net names (non-reproducible across directories) *(curated)*
+- **#4878**: klt sim: sharded batch jobs cannot be collected into one report *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -127,11 +125,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 1 |
 | Very important | 1 |
 | Important | 2 |
-| Ready (`loom:issue`) | 14 |
+| Ready (`loom:issue`) | 13 |
 | In Progress (`loom:building`) | 5 |
 | PRs awaiting review | 5 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 32 |
+| Curated | 31 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
