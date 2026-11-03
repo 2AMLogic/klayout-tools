@@ -569,10 +569,10 @@ naming the cell (`details`: `{"cell", "limitation": "folded-stack" |
 "series-order"}`), so an agent gets the known-limit signal in-band. It never
 changes `status`: the cell stays `mismatch`, and the real `device.unmatched` /
 `net.unmatched` errors are still reported. The list is
-`KNOWN_UNSUPPORTED_ASAP7_CELLS` in `klayout_tools/lvs_finfet.py`, pinned to the
+`KNOWN_UNSUPPORTED_ASAP7_CELLS` in `klayout_tools/lvs_known_limits.py`, pinned to the
 corpus by the tests.
 
-Corpus tests live in `tests/test_asap7_finfet.py`; they skip with an
+Corpus tests live in `tests/test_asap7_finfet.py` (unit tests in `tests/test_lvs_known_limits.py`); they skip with an
 explicit reason when the pinned PDK is not fetched and write only to temp
 paths.
 

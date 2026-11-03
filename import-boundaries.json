@@ -357,6 +357,7 @@
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_gate_level_convert",
+        "klayout_tools.lvs_known_limits",
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_mismatch_tolerance",
         "klayout_tools.lvs_netgen",
