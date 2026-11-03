@@ -2075,6 +2075,25 @@ def _device_layer_params(
                 f"a MOS capacitor on '{family}' (deck rule '{floor[1]}', the "
                 "minimum COMP width for the selected oxide)"
             )
+    if params.get("dogbone_terminals") and not params.get("mos_cap"):
+        from .gen import GenError
+
+        # Issue #4851: below the generator-side floor the PDK's own active
+        # min width is the limit.
+        active_floor = _deck_min_width_um(family, _PDK_ROLE_LAYERS[family]["active"])
+        if active_floor is None:
+            raise GenError(
+                f"generator 'mos_array': params.dogbone_terminals is not "
+                f"supported on PDK family '{family}' (its deck declares no "
+                "active min-width rule)"
+            )
+        if params["w_um"] < active_floor[1]:
+            raise GenError(
+                f"generator 'mos_array': params.w_um must be >= "
+                f"{active_floor[1]} with params.dogbone_terminals on "
+                f"'{family}' (deck rule '{active_floor[0]}', the minimum "
+                "active width)"
+            )
     layer_params = {
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),

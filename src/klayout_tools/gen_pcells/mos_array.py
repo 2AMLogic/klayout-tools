@@ -586,6 +586,17 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "dogbone_terminals",
+                getattr(self, "TypeBoolean"),  # noqa: B009 -- see type baseline
+                "Allow w_um below the generator's enclosed-contact floor "
+                "(0.42um) down to the PDK's own active min width: each "
+                "source/drain terminal gets a locally widened active/contact "
+                "head while the channel keeps w_um (issue #4851). Not "
+                "supported with finger_topology='parallel' and fingers > 1. "
+                "False (default) = byte-for-byte unchanged",
+                default=False,
+            )
+            self.param(
                 "mirror",
                 getattr(self, "TypeBoolean"),  # noqa: B009 -- see type baseline
                 "Mirror every odd column about its vertical axis so facing "
@@ -670,6 +681,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # `getattr` keeps the type baseline from growing per param.
                 share_sd=getattr(self, "share_sd"),  # noqa: B009
                 mirror=getattr(self, "mirror"),  # noqa: B009
+                dogbone_terminals=getattr(self, "dogbone_terminals"),  # noqa: B009
             )
             unit_boxes = info["unit"]["boxes_um"]
             _insert_unit_shapes(

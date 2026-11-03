@@ -560,6 +560,9 @@ _GRID_DBU_UM = 0.001
 #: gf180mcu ``comp.enclosing.contact.1``/``poly2.enclosing.contact.1``:
 #: 0.07um each).
 ENCLOSURE_MARGIN_UM = 0.1
+#: Gap (um) between a ``dogbone_terminals`` S/D head and the neighbouring gate
+#: stripe (issue #4851); clears sg13g2's 0.07um GatPoly-to-Activ spacing.
+DOGBONE_GATE_GAP_UM = 0.1
 
 #: Minimum spacing (um) kept between same-layer shapes belonging to
 #: different unit instances (adjacent array cells, ring segments) --
@@ -806,6 +809,7 @@ def _mos_unit_layout(
     sd_implant_margin_um: float = 0.0,
     mos_cap: bool = False,
     top_endcap_um: float = 0.0,
+    dogbone_terminals: bool = False,
 ) -> dict[str, Any]:
     """One MOS-like unit device: a diffusion strip crossed by ``fingers``
     poly gates, with a contact + local-metal pad in each source/drain
@@ -917,7 +921,19 @@ def _mos_unit_layout(
     strap's centre -- as its single S/D terminal. ``gate_contact`` is not
     supported (the strap would sit on the gate's local-metal pad). Left at
     ``False`` the drawn geometry is byte-for-byte unchanged.
+
+    ``dogbone_terminals`` (issue #4851) lets a plain transistor be narrower
+    than the enclosed-contact floor: every S/D segment grows a diffusion head
+    (active, contact, local-metal pad) up to ``contact_region_um`` tall while
+    the channel keeps ``w_um``; the gate landing pad is lifted clear of the
+    head. Series geometry only (``finger_topology='parallel'`` with
+    ``fingers > 1`` raises). ``False`` is a strict no-op.
     """
+    if dogbone_terminals and finger_topology == "parallel" and fingers > 1:
+        raise GenError(
+            "generator 'mos_array': params.dogbone_terminals does not support "
+            "params.finger_topology='parallel' with params.fingers > 1"
+        )
     if finger_topology == "parallel" and fingers > 1 and not mos_cap:
         return _mos_unit_strapped_layout(
             w_um,
@@ -930,6 +946,10 @@ def _mos_unit_layout(
         )
 
     contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+    if dogbone_terminals and w_um < contact_region_um:
+        # The head's extra active sits beside the gate stem; keep them apart
+        # so poly never abuts unrelated active (issue #4851).
+        contact_gate_offset_um = max(contact_gate_offset_um, DOGBONE_GATE_GAP_UM)
     seg_positions, poly_positions, total_len_um = _mos_finger_positions(
         l_um, fingers, contact_gate_offset_um
     )
@@ -938,7 +958,12 @@ def _mos_unit_layout(
     # budget). Each S/D segment then grows a diffusion landing bump above the
     # channel -- S/D only, so the channel width stays `w_um` -- and the gate
     # landing pad is lifted clear of it.
-    bump_um = max(contact_region_um - w_um, 0.0) if mos_cap else 0.0
+    # `dogbone_terminals` (issue #4851) reuses the same bump for a plain
+    # transistor narrower than the enclosed-contact floor: each S/D segment
+    # widens locally (a "dog-bone" head) while the channel keeps `w_um`.
+    bump_um = (
+        max(contact_region_um - w_um, 0.0) if (mos_cap or dogbone_terminals) else 0.0
+    )
     seg_h_um = w_um + bump_um
     if bump_um > 0.0:
         gate_pad_clearance_um = max(
@@ -1472,6 +1497,7 @@ def _mos_array_layout(
     pitch_y_um: float = 0.0,
     top_endcap_um: float = 0.0,
     share_sd: bool = False,
+    dogbone_terminals: bool = False,
     mirror: bool = False,
     tap_reach_um: float = 0.0,
 ) -> dict[str, Any]:
@@ -1596,6 +1622,7 @@ def _mos_array_layout(
         sd_implant_margin_um,
         mos_cap,
         top_endcap_um=top_endcap_um,
+        dogbone_terminals=dogbone_terminals,
     )
     min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     # Issue #3551: dummy columns keep the isolated-unit pitch under `share_sd`.

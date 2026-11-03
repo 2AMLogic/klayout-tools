@@ -895,6 +895,18 @@ it is of the ring, and still reports `comp.tap_distance.*`. With
 `add_guard_ring: true` the ring is the tap and no pads are drawn. sky130 and
 the other families draw no pads and are byte-for-byte unchanged.
 
+**Below `UNIT_MIN_W_UM`: `dogbone_terminals` (issue #4851).** Set
+`"dogbone_terminals": true` to let `w_um` drop below `0.42` µm down to the
+resolved PDK's own active min width (sg13g2 `activ.width.1`: 0.15 µm; smaller
+still raises a `GenError` naming that rule). Each source/drain segment grows a
+local active/contact/metal head `0.42` µm tall while the channel keeps `w_um`,
+and the gate is offset from the head so poly never abuts unrelated active.
+Works with `gate_contact`, `rows`/`cols`, `dummy`, `nfet`/`pfet` and series
+multi-finger units; `finger_topology: "parallel"` with `fingers > 1` raises, and
+`w_um >= 0.42` or `mos_cap` makes it a no-op. Default `false` is byte-for-byte
+unchanged. `diff_pair` keeps its floor. The hand-drawn recipe below remains
+for other cases.
+
 **Below `UNIT_MIN_W_UM`: dog-bone terminals drawn by hand (issue #1574).**
 `w_um` below `0.42` µm is rejected outright, with no override — that floor is
 about the *contact*, not the target PDK's own diffusion-width minimum (sky130

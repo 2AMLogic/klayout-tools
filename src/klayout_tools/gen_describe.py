@@ -359,6 +359,18 @@ def _validate_mos_array_width(params: dict[str, Any]) -> None:
                 "generator 'mos_array': params.mos_cap does not support "
                 "params.gate_contact"
             )
+    elif params["dogbone_terminals"]:
+        # Opt-in (issue #4851): the floor drops to the PDK's own active
+        # min width, which needs the resolved family (see
+        # `_device_layer_params`); here only positivity is checkable.
+        if params["w_um"] <= 0:
+            raise GenError("generator 'mos_array': params.w_um must be > 0")
+        if params["finger_topology"] == "parallel" and params["fingers"] > 1:
+            raise GenError(
+                "generator 'mos_array': params.dogbone_terminals does not "
+                "support params.finger_topology='parallel' with "
+                "params.fingers > 1"
+            )
     elif params["w_um"] < UNIT_MIN_W_UM:
         raise GenError(
             f"generator 'mos_array': params.w_um must be >= {UNIT_MIN_W_UM} "
@@ -714,6 +726,7 @@ def _mos_array_describe(
         tap_reach_um=_tap_reach_um(family),
         share_sd=params["share_sd"],
         mirror=params["mirror"],
+        dogbone_terminals=params["dogbone_terminals"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
