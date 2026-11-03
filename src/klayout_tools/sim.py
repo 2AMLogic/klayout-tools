@@ -174,10 +174,9 @@ from .sim_batch import (
     attach_engine_build_comparison,
     attach_staged_model_comparison,
     dry_run_runner_check,
-    shard_scoped_points,
 )
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
-from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE
+from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE, shard_scoped_points
 from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_decks import run_deck_request
 
@@ -3787,7 +3786,7 @@ def _run_sim_corners(
     budget_s = resolved.budget_s
     capture_only = resolved.capture_only
     convergence_retry = resolved.convergence_retry
-    corner_points = resolved.corner_points
+    corner_points = shard_scoped_points(resolved, attach_job_id)
     corner_section_libs = resolved.corner_section_libs
     deadline = resolved.deadline
     dispatch_netlist_path = resolved.dispatch_netlist_path
@@ -3877,9 +3876,6 @@ def _run_sim_corners(
         [point for point in corner_points if point.corner_id not in pre_completed]
         if resume
         else corner_points
-    )
-    dispatch_points = shard_scoped_points(
-        backend, attach_job_id, artifacts_dir, dispatch_points
     )
     _refuse_override_on_host_default(
         netlist_overrides_report,
