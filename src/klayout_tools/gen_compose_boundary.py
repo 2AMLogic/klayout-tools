@@ -52,9 +52,9 @@ def draw_pins_and_boundary(
     dbu = layout.dbu
     for pin in pin_placements or []:
         layer = pin["layer"]
-        point = kdb.Point(int(round(pin["x_um"] / dbu)), int(round(pin["y_um"] / dbu)))
+        x, y = int(round(pin["x_um"] / dbu)), int(round(pin["y_um"] / dbu))
         top.shapes(layout.layer(layer[0], layer[1])).insert(
-            kdb.Text(pin["net"], kdb.Trans(point))
+            kdb.Text(pin["net"], kdb.Trans(x, y))
         )
     if bbox_um is not None:
         top.shapes(layout.layer(*BOUNDARY_LAYER)).insert(
