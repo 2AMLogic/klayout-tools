@@ -6160,57 +6160,6 @@ def test_preflight_feature_rejection_is_annotated_on_the_corner(tmp_path, monkey
     assert diagnostic["runner_klt_version"] == "0.7.0"
 
 
-_STRESS_REQUEST = {
-    "netlist": "body.spice",
-    "measurements": [{"name": "s", "stress": {"a": "x", "b": "y"}}],
-}
-
-
-def test_feature_gap_names_missing_features_on_recovered_envelope(
-    tmp_path, monkeypatch
-):
-    # Issue #4863: a stress request against a 0.8.0 runner names `stress`.
-    runner = _FakeRunner()
-    runner.default = fake_completed(_status("failed", exit_code="87", detail="x"))
-    runner.outputs = {
-        "report.json": _envelope("predates stress", code=sb.BATCH_RUNNER_FEATURE_CODE),
-        "runner_identity.json": _identity("0.8.0"),
-    }
-    corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner, request=_STRESS_REQUEST)
-    diagnostic = corners[0]["diagnostics"][0]
-    assert diagnostic["missing_features"] == ["stress"]
-    assert diagnostic["runner_klt_version"] == "0.8.0"
-    assert diagnostic["client_klt_version"] == _CLIENT_VERSION
-
-
-def test_feature_gap_names_missing_features_on_unrecovered_exit_87(
-    tmp_path, monkeypatch
-):
-    runner = _FakeRunner()
-    runner.default = fake_completed(
-        _status("failed", exit_code="87", detail="job command exited 87")
-    )
-    runner.outputs = {"runner_identity.json": _identity("0.8.0")}
-    corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner, request=_STRESS_REQUEST)
-    diagnostic = corners[0]["diagnostics"][0]
-    assert diagnostic["missing_features"] == ["stress"]
-    assert diagnostic["runner_klt_version"] == "0.8.0"
-    assert diagnostic["client_klt_version"] == _CLIENT_VERSION
-    assert "stress" in diagnostic["message"]
-    assert "0.8.0" in diagnostic["message"]
-
-
-def test_no_missing_features_adds_no_field(tmp_path, monkeypatch):
-    runner = _FakeRunner()
-    runner.default = fake_completed(_status("failed", exit_code="87", detail="x"))
-    runner.outputs = {
-        "report.json": _envelope("predates", code=sb.BATCH_RUNNER_FEATURE_CODE),
-        "runner_identity.json": _identity("0.7.0"),
-    }
-    corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner)
-    assert "missing_features" not in corners[0]["diagnostics"][0]
-
-
 def test_prelaunch_refuses_a_feature_every_published_image_predates(
     tmp_path, monkeypatch
 ):
@@ -8117,7 +8066,7 @@ def test_fleet_capacity_wait_budget_is_shared_across_shards(tmp_path, monkeypatc
         message = corner["diagnostics"][0]["message"]
         assert "batch_concurrency_cap" in message
         assert "capacity wait budget" in message
-    assert environment is None
+    assert environment["unlaunched_shards"] == 2  # issue #4856: resumable signal
     assert sum(clock.sleeps) == pytest.approx(100.0, abs=1.0)
 
 

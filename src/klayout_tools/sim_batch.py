@@ -125,6 +125,7 @@ from .remote_launcher import (
     _signal_handlers_restore,
     published_runner_identities,
 )
+from .sim_batch_features import annotate_gap, gap_note
 from .sim_remote import (
     _build_remote_request,
     _points_to_push,
@@ -4145,24 +4146,6 @@ def _recover_failed_job_corners(
     return corners, identity
 
 
-def _identity_missing_features(identity: dict[str, Any]) -> list[str]:
-    """The request-feature keys the runner predates (``[]`` when none, or
-    when the runner version is unknown and ``missing`` is ``null``)."""
-    report = identity.get("runner_request_features")
-    missing = report.get("missing") if isinstance(report, dict) else None
-    return list(missing) if missing else []
-
-
-def _annotate_feature_gap(
-    diagnostic: dict[str, Any], identity: dict[str, Any], missing: list[str]
-) -> None:
-    """Issue #4863: name the offending request feature(s) and both klt
-    versions on a per-corner diagnostic (additive fields only)."""
-    diagnostic["missing_features"] = list(missing)
-    diagnostic["runner_klt_version"] = identity.get("runner_klt_version")
-    diagnostic["client_klt_version"] = identity.get("client_klt_version")
-
-
 def _annotate_preflight_rejection(
     corners: list[dict[str, Any]],
     runner_error: dict[str, Any] | None,
@@ -4178,14 +4161,10 @@ def _annotate_preflight_rejection(
         BATCH_RUNNER_FEATURE_CODE,
     ):
         return
-    missing = _identity_missing_features(identity)
     for corner in corners:
         for diagnostic in corner.get("diagnostics") or []:
             if diagnostic.get("runner_code") == runner_error["code"]:
-                diagnostic["runner_klt_version"] = identity["runner_klt_version"]
-                diagnostic["client_klt_version"] = identity["client_klt_version"]
-                if missing:
-                    diagnostic["missing_features"] = list(missing)
+                annotate_gap(diagnostic, identity, versions=True)
 
 
 def _annotate_unrecovered_preflight_reject(
@@ -4219,24 +4198,15 @@ def _annotate_unrecovered_preflight_reject(
             f"client is {identity.get('client_klt_version')} -- update the "
             "runner image or use a compatible client"
         )
-    missing = _identity_missing_features(identity)
-    if missing:
-        note += (
-            f"; the runner (klt {identity.get('runner_klt_version')}) predates "
-            f"the request feature(s) {', '.join(missing)} -- update the "
-            "runner image"
-        )
+    note += gap_note(identity)
     for corner in corners:
         for diagnostic in corner.get("diagnostics") or []:
             if diagnostic.get("code") != "batch_job_failed":
                 continue
             diagnostic["message"] = f"{diagnostic['message']} [{note}]"
-            if missing:
-                _annotate_feature_gap(diagnostic, identity, missing)
+            annotate_gap(diagnostic, identity, versions=mismatch)
             if mismatch:
                 diagnostic["runner_code"] = BATCH_RUNNER_MISMATCH_CODE
-                diagnostic["runner_klt_version"] = identity["runner_klt_version"]
-                diagnostic["client_klt_version"] = identity["client_klt_version"]
 
 
 def _annotate_unrecovered_failure(
@@ -5717,7 +5687,7 @@ def _run_batch_fleet(
                 **environment,
                 "max_concurrent_jobs": config.max_concurrent_jobs,
             }
-        return corners, engine_version, environment
+        return corners, engine_version, _batch_common.resumable(environment, manifest)
     finally:
         if in_main:
             _signal_handlers_restore(prev_handlers)
