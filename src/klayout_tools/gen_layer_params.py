@@ -2056,44 +2056,10 @@ def _device_layer_params(
     # must clear the deck's own COMP min-width rule for the selected oxide,
     # else the request fails here rather than drawing an unmarked or
     # sub-rule capacitor.
-    mos_cap_mark = None
-    if params.get("mos_cap"):
-        from .gen import GenError
+    from .gen_layer_params_checks import check_dogbone_width, resolve_mos_cap_mark
 
-        pair = _PDK_MOS_CAP_MARK_LAYERS.get(family)
-        if pair is None:
-            raise GenError(
-                f"generator 'mos_array': params.mos_cap is not supported on "
-                f"PDK family '{family}' (no MOS-capacitor marker layer is "
-                "declared for it)"
-            )
-        mos_cap_mark = kdb.LayerInfo(*pair)
-        floor = _mos_cap_min_width_um(family, voltage_flavor_mark)
-        if floor is not None and params["w_um"] < floor[0]:
-            raise GenError(
-                f"generator 'mos_array': params.w_um must be >= {floor[0]} for "
-                f"a MOS capacitor on '{family}' (deck rule '{floor[1]}', the "
-                "minimum COMP width for the selected oxide)"
-            )
-    if params.get("dogbone_terminals") and not params.get("mos_cap"):
-        from .gen import GenError
-
-        # Issue #4851: below the generator-side floor the PDK's own active
-        # min width is the limit.
-        active_floor = _deck_min_width_um(family, _PDK_ROLE_LAYERS[family]["active"])
-        if active_floor is None:
-            raise GenError(
-                f"generator 'mos_array': params.dogbone_terminals is not "
-                f"supported on PDK family '{family}' (its deck declares no "
-                "active min-width rule)"
-            )
-        if params["w_um"] < active_floor[1]:
-            raise GenError(
-                f"generator 'mos_array': params.w_um must be >= "
-                f"{active_floor[1]} with params.dogbone_terminals on "
-                f"'{family}' (deck rule '{active_floor[0]}', the minimum "
-                "active width)"
-            )
+    mos_cap_mark = resolve_mos_cap_mark(family, params, voltage_flavor_mark)
+    check_dogbone_width(family, params)
     layer_params = {
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
