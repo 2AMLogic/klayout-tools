@@ -895,6 +895,18 @@ it is of the ring, and still reports `comp.tap_distance.*`. With
 `add_guard_ring: true` the ring is the tap and no pads are drawn. sky130 and
 the other families draw no pads and are byte-for-byte unchanged.
 
+**Below `UNIT_MIN_W_UM`: `dogbone_terminals` (issue #4851).** Set
+`"dogbone_terminals": true` to let `w_um` drop below `0.42` µm down to the
+resolved PDK's own active min width (sg13g2 `activ.width.1`: 0.15 µm; smaller
+still raises a `GenError` naming that rule). Each source/drain segment grows a
+local active/contact/metal head `0.42` µm tall while the channel keeps `w_um`,
+and the gate is offset from the head so poly never abuts unrelated active.
+Works with `gate_contact`, `rows`/`cols`, `dummy`, `nfet`/`pfet` and series
+multi-finger units; `finger_topology: "parallel"` with `fingers > 1` raises, and
+`w_um >= 0.42` or `mos_cap` makes it a no-op. Default `false` is byte-for-byte
+unchanged. `diff_pair` keeps its floor. The hand-drawn recipe below remains
+for other cases.
+
 **Below `UNIT_MIN_W_UM`: dog-bone terminals drawn by hand (issue #1574).**
 `w_um` below `0.42` µm is rejected outright, with no override — that floor is
 about the *contact*, not the target PDK's own diffusion-width minimum (sky130
@@ -2090,8 +2102,8 @@ a resolved `asap7` PDK tree (`klt pdk find`); any other family raises a clear
 - Ports `S`, `D`, `G` on M1 (19/0). `device_count` is `1`.
 - Verified DRC-clean under `asap7.drc` and extracting the requested
   `nfin * nf` / `nf` for a bounded sweep (`tests/test_gen_asap7.py`).
-- **Not generated yet:** substrate/well taps and guard rings (tracked as a
-  follow-up), SRAM/thick-oxide flavours, routing between devices.
+- **Not generated here:** SRAM/thick-oxide flavours, routing between devices.
+  Substrate/well taps are the separate [`asap7_tap`](#asap7_tap-asap7-substratewell-tap-issue-4841) generator.
 
 | `params` field | Type   | Default  | Description |
 | -------------- | ------ | -------- | ----------- |
@@ -2103,6 +2115,43 @@ a resolved `asap7` PDK tree (`klt pdk find`); any other family raises a clear
 ```
 klt gen asap7_finfet --pdk-root <lambdapdk>/asap7 \
   --params '{"device":"nfet","nfin":3,"nf":2}' -o nfet.gds --format json
+```
+
+### `asap7_tap` (ASAP7 substrate/well tap, issue #4841)
+
+A gate-free ACTIVE tap that ties a body to its supply, on the same ASAP7 fin
+(27 nm) and S/D column (54 nm) grids as `asap7_finfet`. **ASAP7 only**, same
+PDK gate and `0.00025` µm output dbu.
+
+- `device="ptap"`: p+ tap (`Pselect`) in the p-substrate, no WELL; ties an
+  nFET body. `device="ntap"`: n+ tap (`Nselect`) inside a WELL; ties a pFET
+  body.
+- ACTIVE is `nfin` fins tall and spans `ncol` S/D columns; each column has
+  SDT/LISD/V0/M1, joined by an M1 rail. Body port `B` on M1 (19/0).
+- `ring=true` draws a rectangular ACTIVE ring: `nfin`-fin top/bottom bars,
+  one-column left/right bars, `inner_nfin` fins of hole between the bars, with
+  M1 straps tying both rails. A ring needs `ncol >= 2`.
+- `nfin` starts at `2`: a one-column tap is 16 nm wide, so ACTIVE.A.1A
+  (864 nm²) needs two fins.
+- **Extraction caveat:** `klt extract` recognises no device for a tap and does
+  not model substrate/WELL connectivity (`_NET_MODEL` in
+  `decks/asap7_rules.py`), so the body tie is not visible to extraction. The
+  tests assert the tap layers on the drawn geometry instead. The `expected`
+  block names the tap type and the body it ties.
+- Verified DRC-clean under `asap7.drc` for single taps (n and p, 2/3/5 fins,
+  1/2/3 columns) and rings (`tests/test_gen_asap7_taps.py`).
+
+| `params` field | Type   | Default  | Description |
+| -------------- | ------ | -------- | ----------- |
+| `device`       | string | `"ptap"` | `"ptap"` or `"ntap"`. |
+| `nfin`         | int    | `2`      | Tap (bar) height in fins, `2..16`. |
+| `ncol`         | int    | `1`      | S/D contact columns, `1..16`. |
+| `ring`         | bool   | `false`  | Draw a tap ring. |
+| `inner_nfin`   | int    | `2`      | Ring hole height in fins, `1..16`. |
+
+```
+klt gen asap7_tap --pdk-root <lambdapdk>/asap7 \
+  --params '{"device":"ntap","nfin":2,"ncol":3,"ring":true}' -o tap.gds --format json
 ```
 
 ## Output database unit (dbu)

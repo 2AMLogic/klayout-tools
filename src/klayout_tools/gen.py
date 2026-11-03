@@ -57,7 +57,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._layout import write_layout
 from ._provenance import build_provenance
-from .gen_asap7 import ASAP7_FINFET_SPEC
+from .gen_asap7_tap import ASAP7_SPECS
 from .gen_cap_vpp import (
     _cap_vpp_array_describe,
     _cap_vpp_array_layer_params,
@@ -314,7 +314,7 @@ from .gen_layer_params import (
     mfg_grid_um as mfg_grid_um,
 )
 from .gen_pcells import (
-    _build_asap7_finfet_pcell,
+    _build_asap7_pcells,
     _build_bjt_array_pcell,
     _build_bond_pad_pcell,
     _build_cap_array_pcell,
@@ -551,7 +551,12 @@ CONTACT_SIZE_UM = 0.22
 #: deliberately not re-derived per-request from the resolved dbu -- doing so
 #: would move geometry (a finer snap grid moves a contact's centre) on the
 #: very PDKs this constant was validated against.
-_GRID_DBU_UM = 0.001
+from .gen_snap import (  # noqa: E402,F401 -- re-exported
+    _GRID_DBU_UM,
+    _snap_offset_um,
+    _snap_rect_box_um,
+    _snap_square_box_um,
+)
 
 #: Margin (um) an active/poly/tap region must keep around a contact it
 #: encloses -- exceeds both curated decks' enclosure rules (sky130
@@ -559,6 +564,9 @@ _GRID_DBU_UM = 0.001
 #: gf180mcu ``comp.enclosing.contact.1``/``poly2.enclosing.contact.1``:
 #: 0.07um each).
 ENCLOSURE_MARGIN_UM = 0.1
+#: Gap (um) between a ``dogbone_terminals`` S/D head and the neighbouring gate
+#: stripe (issue #4851); clears sg13g2's 0.07um GatPoly-to-Activ spacing.
+DOGBONE_GATE_GAP_UM = 0.1
 
 #: Minimum spacing (um) kept between same-layer shapes belonging to
 #: different unit instances (adjacent array cells, ring segments) --
@@ -793,6 +801,27 @@ def _top_endcap_neck(
     return [(px0, w_um, px1, w_um + top_endcap_um)]
 
 
+def _check_dogbone_topology(
+    dogbone_terminals: bool, finger_topology: str, fingers: int
+) -> None:
+    """Reject ``dogbone_terminals`` with the strapped parallel topology."""
+    if dogbone_terminals and finger_topology == "parallel" and fingers > 1:
+        raise GenError(
+            "generator 'mos_array': params.dogbone_terminals does not support "
+            "params.finger_topology='parallel' with params.fingers > 1"
+        )
+
+
+def _dogbone_gate_offset(
+    dogbone_terminals: bool, w_um: float, contact_region_um: float, offset_um: float
+) -> float:
+    """Contact-to-gate offset, widened so a dog-bone head clears the gate stem
+    (poly never abuts unrelated active, issue #4851)."""
+    if dogbone_terminals and w_um < contact_region_um:
+        return max(offset_um, DOGBONE_GATE_GAP_UM)
+    return offset_um
+
+
 def _mos_unit_layout(
     w_um: float,
     l_um: float,
@@ -805,6 +834,7 @@ def _mos_unit_layout(
     sd_implant_margin_um: float = 0.0,
     mos_cap: bool = False,
     top_endcap_um: float = 0.0,
+    dogbone_terminals: bool = False,
 ) -> dict[str, Any]:
     """One MOS-like unit device: a diffusion strip crossed by ``fingers``
     poly gates, with a contact + local-metal pad in each source/drain
@@ -916,7 +946,15 @@ def _mos_unit_layout(
     strap's centre -- as its single S/D terminal. ``gate_contact`` is not
     supported (the strap would sit on the gate's local-metal pad). Left at
     ``False`` the drawn geometry is byte-for-byte unchanged.
+
+    ``dogbone_terminals`` (issue #4851) lets a plain transistor be narrower
+    than the enclosed-contact floor: every S/D segment grows a diffusion head
+    (active, contact, local-metal pad) up to ``contact_region_um`` tall while
+    the channel keeps ``w_um``; the gate landing pad is lifted clear of the
+    head. Series geometry only (``finger_topology='parallel'`` with
+    ``fingers > 1`` raises). ``False`` is a strict no-op.
     """
+    _check_dogbone_topology(dogbone_terminals, finger_topology, fingers)
     if finger_topology == "parallel" and fingers > 1 and not mos_cap:
         return _mos_unit_strapped_layout(
             w_um,
@@ -929,6 +967,9 @@ def _mos_unit_layout(
         )
 
     contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+    contact_gate_offset_um = _dogbone_gate_offset(
+        dogbone_terminals, w_um, contact_region_um, contact_gate_offset_um
+    )
     seg_positions, poly_positions, total_len_um = _mos_finger_positions(
         l_um, fingers, contact_gate_offset_um
     )
@@ -937,7 +978,12 @@ def _mos_unit_layout(
     # budget). Each S/D segment then grows a diffusion landing bump above the
     # channel -- S/D only, so the channel width stays `w_um` -- and the gate
     # landing pad is lifted clear of it.
-    bump_um = max(contact_region_um - w_um, 0.0) if mos_cap else 0.0
+    # `dogbone_terminals` (issue #4851) reuses the same bump for a plain
+    # transistor narrower than the enclosed-contact floor: each S/D segment
+    # widens locally (a "dog-bone" head) while the channel keeps `w_um`.
+    bump_um = (
+        max(contact_region_um - w_um, 0.0) if (mos_cap or dogbone_terminals) else 0.0
+    )
     seg_h_um = w_um + bump_um
     if bump_um > 0.0:
         gate_pad_clearance_um = max(
@@ -1471,6 +1517,7 @@ def _mos_array_layout(
     pitch_y_um: float = 0.0,
     top_endcap_um: float = 0.0,
     share_sd: bool = False,
+    dogbone_terminals: bool = False,
     mirror: bool = False,
     tap_reach_um: float = 0.0,
 ) -> dict[str, Any]:
@@ -1595,6 +1642,7 @@ def _mos_array_layout(
         sd_implant_margin_um,
         mos_cap,
         top_endcap_um=top_endcap_um,
+        dogbone_terminals=dogbone_terminals,
     )
     min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     # Issue #3551: dummy columns keep the isolated-unit pitch under `share_sd`.
@@ -2459,82 +2507,6 @@ def _boxes_overlap(
         min(a[2], b[2]) - max(a[0], b[0]) > eps
         and min(a[3], b[3]) - max(a[1], b[1]) > eps
     )
-
-
-def _snap_rect_box_um(
-    cx_um: float, cy_um: float, half_w_um: float, half_h_um: float, dbu_um: float
-) -> tuple[float, float, float, float]:
-    """Rectangular sibling of :func:`_snap_square_box_um` (issue #2449): a
-    ``2 * half_w_um`` x ``2 * half_h_um`` box whose centre and half-extents are
-    snapped to integer dbu *before* the edges are derived, so both drawn
-    dimensions are exact (e.g. a 0.19um x 2.0um precision-poly licon)."""
-    cx_dbu = round(cx_um / dbu_um)
-    cy_dbu = round(cy_um / dbu_um)
-    hw_dbu = round(half_w_um / dbu_um)
-    hh_dbu = round(half_h_um / dbu_um)
-    return (
-        (cx_dbu - hw_dbu) * dbu_um,
-        (cy_dbu - hh_dbu) * dbu_um,
-        (cx_dbu + hw_dbu) * dbu_um,
-        (cy_dbu + hh_dbu) * dbu_um,
-    )
-
-
-def _snap_square_box_um(
-    cx_um: float, cy_um: float, half_um: float, dbu_um: float
-) -> tuple[float, float, float, float]:
-    """A ``2 * half_um``-wide square centred on ``(cx_um, cy_um)``, snapped
-    to the ``dbu_um`` manufacturing grid *before* the box edges are derived,
-    so the returned box's width and height are exactly ``2 * round(half_um /
-    dbu_um) * dbu_um`` regardless of where the un-snapped centre falls
-    relative to the grid.
-
-    This matters because :func:`_insert_boxes`/``_insert_ring``'s ``_to_box``
-    round each of a box's *four edges* to the dbu grid independently
-    (``int(round(x0 / dbu))`` ... ``int(round(x1 / dbu))``). Building the box
-    from an un-snapped float centre first (``cx - half``, ``cx + half``) lets
-    ordinary floating-point noise put one edge just below a half-dbu grid
-    boundary and the other just above it -- Python's banker's-rounding
-    ``round()`` can then round those two edges in *different* directions,
-    silently drawing a box 1 dbu narrower/shorter than intended. That is
-    exactly the ``contact.width.1`` failure mode diagnosed in issue #685:
-    ``CONTACT_SIZE_UM`` carries zero DRC margin above gf180mcu's ``CO.1``
-    threshold, so a single dbu of asymmetric rounding is enough to trip it.
-    Snapping the centre (and the half-width, which is already grid-exact for
-    every current caller) to integer dbu counts *first* makes both edges
-    derive from the same rounded integer, so they can never drift apart.
-    """
-    cx_dbu = round(cx_um / dbu_um)
-    cy_dbu = round(cy_um / dbu_um)
-    half_dbu = round(half_um / dbu_um)
-    return (
-        (cx_dbu - half_dbu) * dbu_um,
-        (cy_dbu - half_dbu) * dbu_um,
-        (cx_dbu + half_dbu) * dbu_um,
-        (cy_dbu + half_dbu) * dbu_um,
-    )
-
-
-def _snap_offset_um(
-    ox_um: float, oy_um: float, dbu_um: float = _GRID_DBU_UM
-) -> tuple[float, float]:
-    """A placement offset ``(ox_um, oy_um)`` snapped to the ``dbu_um``
-    manufacturing grid, so boxes already grid-exact in their own local frame
-    stay grid-exact after the offset is applied.
-
-    This is the placement-offset counterpart of :func:`_snap_square_box_um`
-    (issue #2442): :func:`_insert_boxes`/``_insert_ring`` round each of a
-    box's four edges *independently* after adding the offset
-    (``int(round((x0 + ox_um) / dbu))`` ...). An un-snapped offset derived
-    from an arbitrary float param (e.g. ``ring_padding_um``, whose only
-    documented constraint is ``>= 0``) can land one edge of an exactly
-    ``CONTACT_SIZE_UM``-square contact just below a half-dbu rounding
-    boundary and the opposite edge just above it, silently drawing a
-    221x220dbu contact that trips gf180mcu's ``contact.width.1`` max-size
-    bound. Snapping the offset to integer dbu *first* makes every shifted
-    edge derive from the same grid as the un-shifted box, so per-edge
-    rounding can never drift an edge pair apart."""
-    return (round(ox_um / dbu_um) * dbu_um, round(oy_um / dbu_um) * dbu_um)
 
 
 def _ring_layout(
@@ -4176,7 +4148,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     pcell_classes.update(_build_bond_pad_pcell())
     pcell_classes.update(_build_esd_device_pcell())
     pcell_classes.update(_build_diode_pcell())
-    pcell_classes.update(_build_asap7_finfet_pcell())
+    pcell_classes.update(_build_asap7_pcells())
     return pcell_classes
 
 
@@ -4381,5 +4353,5 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         describe=_diode_describe,
         layer_params=_diode_layer_params,
     ),
-    "asap7_finfet": ASAP7_FINFET_SPEC,
+    **ASAP7_SPECS,
 }

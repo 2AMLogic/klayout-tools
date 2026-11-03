@@ -213,7 +213,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1234
+      "lines": 1207
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -369,7 +369,7 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4385
+      "lines": 4357
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
@@ -385,11 +385,11 @@
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
-      "lines": 3230
+      "lines": 3206
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
-      "lines": 2895
+      "lines": 2880
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
@@ -405,7 +405,7 @@
     },
     {
       "path": "src/klayout_tools/gen_pcells/mos_array.py",
-      "lines": 904
+      "lines": 843
     },
     {
       "path": "src/klayout_tools/kb.py",
@@ -601,7 +601,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1243
+      "lines": 1241
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
