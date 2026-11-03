@@ -38,6 +38,7 @@ unchanged by this split.
 
 from __future__ import annotations
 
+from .asap7_finfet import _build_asap7_finfet_pcell
 from .bjt_array import _build_bjt_array_pcell
 from .bond_pad import _build_bond_pad_pcell
 from .cap_array import _build_cap_array_pcell
@@ -52,6 +53,7 @@ from .resistor_strip import _build_resistor_strip_pcell
 from .well_island import _build_well_island_pcell
 
 __all__ = [
+    "_build_asap7_finfet_pcell",
     "_build_bjt_array_pcell",
     "_build_bond_pad_pcell",
     "_build_cap_array_pcell",
