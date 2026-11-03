@@ -181,7 +181,6 @@ from .lvs_finfet import (
     apply_finfet_bulk_hierarchy,
     bulk_disclosures,
     finfet_bulk_replay_options,
-    known_limitation_disclosures,
     prepare_finfet_comparison,
     prepare_finfet_request,
     reference_reader,
@@ -213,6 +212,7 @@ from .lvs_gate_level_convert import (  # noqa: F401
     _convert_gate_level_reference,
     _gate_level_port_case_fold_warnings,
 )
+from .lvs_known_limits import note_known_limit
 from .lvs_mismatch import (
     _annotate_case_collision_merges,
     _apply_tolerance_snaps,
@@ -2763,10 +2763,8 @@ def run_lvs(
     # Issue #4200: explain a net.merged that is really a case-fold name collision.
     _annotate_case_collision_merges(mismatches, layout_circuit, "file" in layout_spec)
     # Issue #2952: an unresolved reference subcircuit call is a pre-compare
-    # determination (see `_unresolved_reference_subckt_calls`); unlike the
-    # diagnostic-only errors above it *does* move `status` -- below, after
-    # the combine downgrade, so it can never be hidden behind
-    # `"inconclusive"` either.
+    # finding that moves `status` below (after the combine downgrade), so it
+    # is never hidden behind `"inconclusive"`.
     mismatches.extend(unresolved_subckt_call_findings)
     mismatches.sort(key=_sort_key)
 
@@ -2796,14 +2794,7 @@ def run_lvs(
         # not apply.
         status = STATUS_INCONCLUSIVE
     status = _force_mismatch_on(status, unresolved_subckt_call_findings)
-    # Issue #4819: in-band disclosure of a pinned ASAP7 library limitation;
-    # a warning, so it never moves `status`.
-    known_limits = known_limitation_disclosures(
-        finfet_layout, status, reference_spec.get("top"), layout_spec.get("top")
-    )
-    if known_limits:
-        mismatches.extend(known_limits)
-        mismatches.sort(key=_sort_key)
+    note_known_limit(mismatches, finfet_layout, status, reference_spec, layout_spec)
 
     category_counts: dict[str, int] = {}
     # Issue #1132: `category_counts` alone collapses `error`/`warning`
