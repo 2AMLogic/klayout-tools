@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-03
 
+- **PR #4879**: fix: let sharded --attach collect maps submitted with --wait-for-capacity
+- **Issue #4878** (closed): klt sim: sharded batch jobs cannot be collected into one report
 - **PR #4877**: docs: mark signoff item-9 unbenched_rows and per-bench cold_start as unreleased
 - **Issue #4875** (closed): signoff --attest 9: release 0.8.0 rejects unbenched_rows although docs/cli/signoff.md documents it
 - **PR #4874**: fix(synthesize): normalize source directories out of written netlist
