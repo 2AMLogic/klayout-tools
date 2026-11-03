@@ -4,6 +4,19 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-02
 
+- **PR #4796**: feat: let signoff item 6 not_applicable cite a markdown spec table
+- **PR #4823**: fix: make sharded batch --resume repeatable across shard-count changes
+- **PR #4822**: feat(erc): disclosed floating_gate_allowed carve-out for erc.floating_gate
+- **PR #4792**: chore(loom): resync installed Loom to v0.19.1254
+- **PR #4789**: chore(deps): bump astral-sh/setup-uv from 10.2.0 to 10.3.0 in the github-actions group across 1 directory
+- **Issue #4793** (closed): klt signoff: item 6 not_applicable cannot cite a markdown spec table; keyword scan refuses negated mentions
+- **Issue #4828** (closed): klt erc: no way to declare intentional dummy gates for erc.floating_gate
+- **Issue #4826** (closed): klt place-and-route: PDKs outside open_pdks layout (e.g. asap7) cannot be targeted, so request.power is unreachable
+- **Issue #4825** (closed): klt lvs: reference.form gate-level-verilog refused for FinFET extraction decks (no power_connectivity verdict)
+- **Issue #4821** (closed): Friction: klt sim --batch --resume is not repeatable; second resume refused after the shard map is rewritten for the remainder
+- **Issue #4820** (closed): klt erc: erc.floating_gate on ASAP7 gates wired through LIG/LISD only; no way to model or declare
+- **Issue #2812** (closed): ASAP7 FEOL/MOL gap tracker: mechanism-specific rule increments
+- **Issue #2760** (closed): ASAP7 DRC deck for KLayout
 - **PR #4816**: feat: bind gate-level Verilog library pins case-insensitively when unambiguous
 - **PR #4818**: fix: drop positional 0 from runset-bound MIM reference cards
 - **PR #4801**: fix(lvs): retry once with neutral names for repeated-label pin families
