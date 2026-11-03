@@ -5687,7 +5687,7 @@ def _run_batch_fleet(
                 **environment,
                 "max_concurrent_jobs": config.max_concurrent_jobs,
             }
-        return corners, engine_version, environment
+        return corners, engine_version, _batch_common.resumable(environment, manifest)
     finally:
         if in_main:
             _signal_handlers_restore(prev_handlers)
