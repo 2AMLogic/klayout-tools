@@ -53,12 +53,11 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Callable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._layout import write_layout
 from ._provenance import build_provenance
+from .gen_asap7 import ASAP7_FINFET_SPEC
 from .gen_cap_vpp import (
     _cap_vpp_array_describe,
     _cap_vpp_array_layer_params,
@@ -316,6 +315,7 @@ from .gen_layer_params import (
     mfg_grid_um as mfg_grid_um,
 )
 from .gen_pcells import (
+    _build_asap7_finfet_pcell,
     _build_bjt_array_pcell,
     _build_bond_pad_pcell,
     _build_cap_array_pcell,
@@ -329,6 +329,7 @@ from .gen_pcells import (
     _build_resistor_strip_pcell,
     _build_well_island_pcell,
 )
+from .gen_spec import _GeneratorSpec
 from .pdk import PdkNotFoundError, find_pdk, resolve_pdk_dbu
 
 if TYPE_CHECKING:
@@ -4117,6 +4118,10 @@ def _produce(
     # The variant keeps KLayout's generator-named default (e.g. ``mos_array``),
     # so two streams read into one Layout would merge their children (#4251).
     layout.rename_cell(pcell_var, f"{cell_name}__core")
+    if spec.flatten_output:
+        # The FinFET extractor recognises devices only from shapes in (or
+        # flattened into) the extracted top cell, so ship one flat cell.
+        top.flatten(-1, True)
     return layout, top
 
 
@@ -4173,35 +4178,13 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     pcell_classes.update(_build_bond_pad_pcell())
     pcell_classes.update(_build_esd_device_pcell())
     pcell_classes.update(_build_diode_pcell())
+    pcell_classes.update(_build_asap7_finfet_pcell())
     return pcell_classes
 
 
 # --------------------------------------------------------------------------- #
 # Reference generator registry
 # --------------------------------------------------------------------------- #
-
-
-@dataclass(frozen=True)
-class _GeneratorSpec:
-    """Generator-specific knowledge the generic harness (:func:`_produce`)
-    doesn't have: sanity-check bounds, how to describe the produced
-    geometry as the response envelope's ``device_count``/``ports``/
-    ``drc_hints`` fields, and how to resolve its hidden layer params against
-    a resolved PDK (see :func:`_device_layer_params` and friends).
-    """
-
-    name: str
-    summary: str
-    #: Fallback output database unit (um) -- used only when the resolved
-    #: PDK's own tech LEF declares no ``DATABASE MICRONS`` value (or ships
-    #: no readable tech LEF at all), since :func:`_produce` prefers
-    #: :func:`~klayout_tools.pdk.resolve_pdk_dbu`'s PDK-derived answer
-    #: (issue #1496). Every registered generator declares ``0.001``, the dbu
-    #: `klt gen` unconditionally wrote at before that change.
-    dbu: float
-    validate: Callable[[dict[str, Any]], None]
-    describe: Callable[[dict[str, Any], float, dict[str, Any]], dict[str, Any]]
-    layer_params: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 
 
 #: Maps ``PCellParameterDeclaration`` type constants to the JSON type names
@@ -4400,4 +4383,5 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         describe=_diode_describe,
         layer_params=_diode_layer_params,
     ),
+    "asap7_finfet": ASAP7_FINFET_SPEC,
 }
