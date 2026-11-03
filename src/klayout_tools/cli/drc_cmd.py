@@ -72,6 +72,7 @@ from ..drc import (
 from ..drc_crosscheck import crosscheck_exit_code, run_drc_crosscheck
 from ..env_provenance import render_path_field
 from . import _request_document as reqdoc
+from ._drc_native import attach_native_deck, resolve_native_deck
 from .output import (
     emit_error,
     emit_success,
@@ -412,10 +413,8 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
             )
     if not args.deck:
         raise DrcError("argument --deck is required for --engine both")
-    deck_file = args.deck_file
-    if deck_file is None:
-        deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
-    return run_drc_crosscheck(
+    deck_file, deck_vars, min_version, native = resolve_native_deck(args)
+    result = run_drc_crosscheck(
         args.file,
         args.deck,
         deck_file,
@@ -424,16 +423,17 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
         pdk_root=args.pdk_root,
         native_kwargs={
             "timeout_s": args.timeout_s,
-            "deck_vars": _parse_deck_vars(args.deck_var),
+            "deck_vars": deck_vars,
             "allow_deck_errors": args.allow_deck_errors,
             "allow_missing_host_tools": args.allow_missing_host_tools,
             "expected_rule_categories": args.expect_rule_categories,
-            "min_klayout_version": args.min_klayout_version,
+            "min_klayout_version": min_version,
             "expected_rule_category_names": _expected_rule_category_names(args),
             "negative_control": args.negative_control,
             "negative_control_categories": _negative_control_categories(args),
         },
     )
+    return attach_native_deck(result, native)
 
 
 def _run_klayout_engine(args: argparse.Namespace) -> dict:
@@ -458,33 +458,32 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
             "runset does not share the curated rule registry (see "
             "docs/cli/drc.md, 'Rule listing and selection')"
         )
-    deck_file = args.deck_file
-    if deck_file is None:
-        deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
+    deck_file, deck_vars, min_version, native = resolve_native_deck(args)
     if deck_file is None:
         raise DrcError(
             "no PDK-native klayout DRC deck script found for this PDK "
             "variant -- pass --deck-file to point at one directly (see "
             "docs/cli/drc.md, 'Engine' -> 'klayout')"
         )
-    return run_drc_klayout_engine(
+    result = run_drc_klayout_engine(
         args.file,
         deck_file,
         top=args.top,
         timeout_s=args.timeout_s,
-        deck_vars=_parse_deck_vars(args.deck_var),
+        deck_vars=deck_vars,
         pdk_variant=args.pdk,
         pdk_root=args.pdk_root,
         deck_name=args.deck or None,
         allow_deck_errors=args.allow_deck_errors,
         allow_missing_host_tools=args.allow_missing_host_tools,
         expected_rule_categories=args.expect_rule_categories,
-        min_klayout_version=args.min_klayout_version,
+        min_klayout_version=min_version,
         expected_rule_category_names=_expected_rule_category_names(args),
         negative_control=args.negative_control,
         negative_control_categories=_negative_control_categories(args),
         max_violations=args.max_violations,
     )
+    return attach_native_deck(result, native)
 
 
 def _run(args: argparse.Namespace) -> dict:
