@@ -4179,7 +4179,12 @@ def _run_sim_corners(
             measurements_spec=measurements_spec,
         )
 
-    _require_params_echo(dispatch_points, corners_new, backend=backend)
+    _require_params_echo(
+        dispatch_points,
+        corners_new,
+        backend=backend,
+        remote_environment=remote_environment,
+    )
     _require_nodeset_echo(dispatch_points, corners_new, backend=backend)
     _require_nodeset_echo(
         dispatch_points,
@@ -4189,7 +4194,12 @@ def _run_sim_corners(
         attr="initial_conditions",
         code=IC_UNSUPPORTED_WORKER_CODE,
     )
-    _require_options_echo(dispatch_points, corners_new, backend=backend)
+    _require_options_echo(
+        dispatch_points,
+        corners_new,
+        backend=backend,
+        remote_environment=remote_environment,
+    )
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
 
     if resume:
@@ -5618,7 +5628,7 @@ def _expand_param_axis(
             for i, value in enumerate(values)
         ]
     if len({len(values) for values in columns.values()}) != 1:
-        raise SimError("corners.params arrays must all be the same length")
+        raise SimError(_zipped_length_message("corners.params", columns))
     supply_names = {str(key).lower() for key in (corners_spec.get("supply_v") or {})}
     clash = sorted(set(columns) & supply_names)
     if clash:
@@ -5703,7 +5713,7 @@ def _expand_options_axis(
             for i, value in enumerate(values)
         ]
     if len({len(values) for values in columns.values()}) != 1:
-        raise SimError("corners.options arrays must all be the same length")
+        raise SimError(_zipped_length_message("corners.options", columns))
     count = len(next(iter(columns.values())))
     rows = [
         dict(sorted((name, values[i]) for name, values in columns.items()))
@@ -6021,7 +6031,7 @@ def _expand_corners(
     if supply_spec:
         lengths = {len(values) for values in supply_spec.values()}
         if len(lengths) != 1:
-            raise SimError("corners.supply_v arrays must all be the same length")
+            raise SimError(_zipped_length_message("corners.supply_v", supply_spec))
         (count,) = lengths
         supply_points = [
             {key: values[i] for key, values in supply_spec.items()}
@@ -9406,6 +9416,42 @@ def _classify_engine_diagnostics(
     return _classify_diagnostics(log_text, netlist_path)
 
 
+def _zipped_length_message(field: str, axes: dict[str, Any]) -> str:
+    """Error text for a ``corners.<field>`` axis-length mismatch: the arrays
+    are zipped by index (row i takes element i of every array), not crossed,
+    so they must be equally long (issue #4885)."""
+    lengths = ", ".join(f"{name}={len(values)}" for name, values in axes.items())
+    return (
+        f"{field} arrays must all be the same length -- they are zipped by "
+        f"index (row i uses element i of every array), not crossed; lengths "
+        f"found: {lengths}. To sweep a cross product, expand the pairs by "
+        "hand. See docs/cli/sim.md"
+    )
+
+
+def _echo_identity_suffix(remote_environment: dict[str, Any] | None) -> str:
+    identity = _echo_identity(remote_environment)
+    return f" [{identity}]" if identity else ""
+
+
+def _echo_identity(remote_environment: dict[str, Any] | None) -> str:
+    """``job <id>[, shard <n>]`` for the batch job(s) behind a result, so a
+    stale worker image can be told from a result paired with the wrong
+    request/shard (issue #4885). Empty when nothing is known."""
+    if not remote_environment:
+        return ""
+    entries = remote_environment.get("fleet")
+    if not isinstance(entries, list) or not entries:
+        entries = [remote_environment]
+    parts = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not entry.get("job_id"):
+            continue
+        shard = f", shard {index}" if len(entries) > 1 else ""
+        parts.append(f"job {entry['job_id']}{shard}")
+    return "; ".join(parts)
+
+
 PARAMS_UNSUPPORTED_WORKER_CODE = "params_unsupported_worker"
 
 
@@ -9414,6 +9460,7 @@ def _require_params_echo(
     corners: list[dict[str, Any]],
     *,
     backend: str = "remote",
+    remote_environment: dict[str, Any] | None = None,
 ) -> None:
     """Fail the request when an off-host worker did not honor a parameter
     axis (issue #3035).
@@ -9448,10 +9495,13 @@ def _require_params_echo(
     if problem is not None:
         raise SimError(
             "the remote/batch worker did not honor corners.params -- "
-            f"{problem}. A worker built before the parameter axis (issue "
-            "#3035) ignores it and would simulate the netlist default for "
-            "every row; update the runner image to this klt release, or "
-            "use a local backend. No result was reported",
+            f"{problem}{_echo_identity_suffix(remote_environment)}. Either the "
+            "worker was built before the parameter axis (issue #3035) and "
+            "ignores it -- it would simulate the netlist default for every "
+            "row; update the runner image to this klt release, or use a "
+            "local backend -- or the result was paired with the wrong "
+            "request/shard (compare the job id with the one submitted). "
+            "No result was reported",
             code=PARAMS_UNSUPPORTED_WORKER_CODE,
         )
 
@@ -9464,6 +9514,7 @@ def _require_options_echo(
     corners: list[dict[str, Any]],
     *,
     backend: str = "remote",
+    remote_environment: dict[str, Any] | None = None,
 ) -> None:
     """Fail the request when an off-host worker did not honor a
     ``corners.options`` axis (issue #3125) -- the counterpart of
@@ -9493,10 +9544,13 @@ def _require_options_echo(
     if problem is not None:
         raise SimError(
             "the remote/batch worker did not honor corners.options -- "
-            f"{problem}. A worker built before the options axis (issue "
-            "#3125) ignores it and would simulate the default solver "
-            "tolerances for every rung; update the runner image to this klt "
-            "release, or use a local backend. No result was reported",
+            f"{problem}{_echo_identity_suffix(remote_environment)}. Either the "
+            "worker was built before the options axis (issue #3125) and "
+            "ignores it -- it would simulate the default solver tolerances "
+            "for every rung; update the runner image to this klt release, or "
+            "use a local backend -- or the result was paired with the wrong "
+            "request/shard (compare the job id with the one submitted). "
+            "No result was reported",
             code=OPTIONS_UNSUPPORTED_WORKER_CODE,
         )
 

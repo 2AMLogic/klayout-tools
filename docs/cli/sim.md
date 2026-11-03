@@ -2039,7 +2039,10 @@ the packaged `data/` copy. See
   existed passes it and ignores that field. For `corners.params` `klt sim`
   does not rely on the version: it requires every returned corner to echo
   the dispatched `corner_id` and `params`, and fails the request with
-  `params_unsupported_worker` otherwise (see "Corner axes"). `corners.params`
+  `params_unsupported_worker` otherwise (see "Corner axes"); the message names
+  both candidate causes (an old runner image, or a result paired with the wrong
+  request/shard) and carries the batch job id (and shard index when sharded)
+  so the two can be told apart. `corners.params`
   is also a **mandatory** runner feature (first in `0.8.0`, #4235): a runner
   that predates it, or whose version is unreadable, is refused with
   `batch_runner_feature_unsupported` even under `runner_version_check: warn`.
