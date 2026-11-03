@@ -4,6 +4,16 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-03
 
+- **PR #4842**: feat(gen): add ASAP7 grid-aware asap7_finfet nFET/pFET generator
+- **PR #4838**: feat: explain stale_evidence pins with compared_against and hint
+- **PR #4831**: feat: add options.boundary to gen-compose for a 235/4 die boundary
+- **Issue #4837** (closed): signoff --manifest: stale_evidence for an attested item gives no hint that content_hash must be the inventory hash
+- **Issue #4003** (closed): erc: add a gf180mcu antenna-ratio limit table (--pdk gf180mcu), mirroring the sg13g2 table from #3784
+- **Issue #4001** (closed): gf180mcu deck: disclose the DRM §9.2 bond-pad guidelines (PAD.1, PAD.2, PAD.5–20) as not evaluated
+- **Issue #4000** (closed): Seal-ring / scribe conformance check against the PDK's seal-ring rules (ring-check only checks continuity)
+- **Issue #3999** (closed): Add a metal/poly/diffusion fill insertion verb driven by the PDK's density window
+- **Issue #3998** (closed): Emit a real prBoundary (235/4) from a chip-level assembly step, the precondition the operator set for boundary-scoped density (#1991)
+- **Issue #2762** (closed): Fin- and gate-grid-aware ASAP7 layout helpers (PCells)
 - **PR #4832**: feat(erc): add gf180mcu antenna-ratio limit table for --pdk gf180mcu
 - **PR #4836**: feat: add --pdk seal-ring rule check to ring-check
 - **PR #4834**: feat: add klt fill verb for PDK density fill insertion
