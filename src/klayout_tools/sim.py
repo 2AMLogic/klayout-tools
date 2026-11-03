@@ -136,6 +136,7 @@ from . import (
 #: `sim_remote._run_remote` for exactly this reason).
 from . import remote_fleet as remote_fleet
 from . import remote_transport as remote_transport
+from . import sim_peak_rss as sim_peak_rss
 from . import sim_staging as sim_staging
 from ._jsonnum import is_number
 from ._paths import (
@@ -162,9 +163,8 @@ from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 
 #: ``batch`` backend entry points (issue #2080) -- the `klt sim` consumer of
-#: 2am's EDA batch fleet. Same relationship to this module as
-#: ``sim_remote``'s: `run_sim` dispatches into them and re-exports their
-#: helpers (self-aliased) so ``klayout_tools.sim.<name>`` resolves them too.
+#: 2am's EDA batch fleet. Like ``sim_remote``'s: `run_sim` dispatches into them
+#: and re-exports their helpers (self-aliased) as ``klayout_tools.sim.<name>``.
 from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
 from .sim_batch import (
     _remove_shard_manifest,
@@ -186,11 +186,9 @@ from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
 
-#: The remaining names below are not called directly from this module's own
-#: code -- they are re-exported (self-aliased so linters recognise the
-#: re-export as intentional) so ``klayout_tools.sim.<name>`` keeps working
-#: for every external caller/test that reached them before this split
-#: (issue #1764).
+#: The remaining names below are not called directly from this module -- they
+#: are re-exported (self-aliased so linters recognise the re-export as
+#: intentional) so ``klayout_tools.sim.<name>`` keeps working (issue #1764).
 from .sim_remote import ShardRunner as ShardRunner
 from .sim_remote import _build_remote_job_description as _build_remote_job_description
 from .sim_remote import _build_remote_request as _build_remote_request
@@ -9882,7 +9880,7 @@ def _run_corner(
 
     diagnostics: list[dict[str, str]] = list(include_diagnostics)
     diagnostics.extend(_par_call_cap_preflight(deck_path, is_xyce))
-    started = time.monotonic()
+    started = sim_peak_rss.RunWatch()
     timed_out = False
     engine_aborted = False
     analysis_never_started = False
@@ -9917,7 +9915,7 @@ def _run_corner(
                 "message": f"could not launch {engine_name}: {exc}",
             }
         )
-    runtime_s = round(time.monotonic() - started, 3)
+    runtime_s = round(started.elapsed(), 3)
 
     log_text = _read_log_file(log_path)
 
@@ -10233,6 +10231,7 @@ def _run_corner(
         **_options_report_field(point),
         "status": status,
         "runtime_s": runtime_s,
+        **started.report_field(),  # issue #4867: best-effort, may be absent
         # Additive (issue #2848): the engine process's raw outcome. Both are
         # null when the harness itself ended the run (timeout) or the engine
         # never launched.
