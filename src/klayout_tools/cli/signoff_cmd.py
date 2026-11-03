@@ -134,7 +134,6 @@ from ..signoff_attest import (
     attach_output_tails,
     build_attestation,
     check_attestation,
-    failed_output_tail,
     write_attestation,
 )
 from ..signoff_attest_input import input_line
@@ -142,6 +141,8 @@ from ..signoff_attest_stream import (
     build_stream_attestation,
     check_stream_attestation,
 )
+from ..signoff_attest_text import attestation_check_line as _attestation_check_line
+from ..signoff_attest_text import check_label
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
     GeneratorExecution,
@@ -420,34 +421,6 @@ def _run_attest(
     return EXIT_PASS if result["status"] == "pass" else EXIT_FAIL
 
 
-def _attestation_check_line(check: dict) -> str:
-    marker = "PASS" if check["passed"] else "FAIL"
-    if check.get("skipped"):
-        marker = "SKIP"
-    if check["check"] == "present":
-        what = f"{check['role']} {check['path']} present"
-    elif check["check"] == "stream_readable":
-        what = f"layout stream readable ({check['content_hash']})"
-    elif check["check"] == "top_cell_non_empty":
-        what = f"non-empty top cell(s): {', '.join(check['top_cells']) or 'none'}"
-    elif check["check"] == "dbu_on_grid":
-        what = f"dbu on grid ({check['dbu']})"
-    elif check["check"] == "command":
-        label = check.get("target") or check.get("name") or check["role"]
-        status = check.get("error") or f"exit {check['exit_status']}"
-        what = f"{check['role']} {label}: {' '.join(check['argv'])} ({status})"
-    else:
-        what = (
-            f"pin {check['role']}: {check['value'] if check['passed'] else 'missing'}"
-        )
-    line = f"[{marker}] {what}"
-    if check["check"] == "command" and not check["passed"]:
-        tail = failed_output_tail(check)
-        if tail:
-            line += "\n" + "\n".join(f"    | {row}" for row in tail.splitlines())
-    return line
-
-
 def _print_attestation_text(result: dict) -> None:
     print(f"attest: T1 item {result['t1_item']}  status: {result['status']}")
     attestation = result["attestation"]
@@ -465,7 +438,7 @@ def _print_attestation_check_text(result: dict) -> None:
     for check in failed:
         print(_attestation_check_line(check))
     for check in result.get("skipped_checks", []):
-        label = check.get("target") or check.get("name") or check["role"]
+        label = check_label(check)
         outcome = "pass" if check["passed"] else "fail"
         print(
             f"[SKIP] {check['role']} {label}: {' '.join(check['argv'])} "
