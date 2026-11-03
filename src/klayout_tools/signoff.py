@@ -88,6 +88,7 @@ from .metrics import get_metric, is_registered
 # `signoff.<name>` keeps resolving exactly as it did before the split; the
 # `X as X` form marks the ones with no call site left in this module as
 # deliberate re-exports rather than dead imports.
+from .signoff_details import _DETAIL_BUILDERS
 from .signoff_envelopes import (
     _ENVELOPE_SHAPES,
     _SCALAR_CHECKS,
@@ -153,7 +154,6 @@ from .signoff_na import (
 from .signoff_power_delivery import (
     _build_power_delivery_item,
     _read_power_port_policy,
-    _strap_layers,
 )
 from .signoff_runset import (
     PINNED_RUNSETS,
@@ -329,8 +329,8 @@ _ITEM_ALLOWED_KINDS: dict[int, dict[str, set[str]]] = {
     # explicitly as items 3/4/7 do, so they get the same treatment -- see
     # this module's "Kind-restricting items 5, 6 and 8" docstring section.
     5: {
-        "analog": {"sim"},
-        "digital": {"sta", "functional-verification", "sim"},
+        "analog": {"sim", "model-run"},
+        "digital": {"sta", "functional-verification", "sim", "model-run"},
     },
     6: {"analog": {"yield"}, "digital": {"yield"}},
     7: {
@@ -502,6 +502,8 @@ _ITEMS_ACCEPTING_SEAM_CHECK_EVIDENCE: frozenset[int] = frozenset({2})
 #: ``None``.
 _OPT_IN_KIND_ITEMS: dict[str, frozenset[int]] = {
     "generic": _ITEMS_ACCEPTING_GENERIC_EVIDENCE,
+    # Issue #4859: a committed analytical/linear-model run record; item 5 only.
+    "model-run": frozenset({5}),
     "power": _ITEMS_ACCEPTING_POWER_EVIDENCE,
     "erc": _ITEMS_ACCEPTING_ERC_EVIDENCE,
     "place-and-route": _ITEMS_ACCEPTING_PLACE_AND_ROUTE_EVIDENCE,
@@ -1556,6 +1558,7 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
     "functional-verification": "pass_partial",
     "place-and-route": "ok_partial",
     "generic": "pass_partial",
+    "model-run": "pass_partial",
     "power": "pass_partial",
 }
 
@@ -1646,6 +1649,7 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                             | "power" | "sta" | "functional-verification"
                             | "erc" | "place-and-route" | "socket-check"
                             | "seam-check" | "lef-abstract" | "synthesize" | "generic"
+                            | "model-run"
                             | "error",
                     "status": <str> | None,
                     "passed": <bool>,
@@ -2116,8 +2120,11 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     # characterization record. See this module's "Generic evidence
     # ingestion" docstring section and docs/cli/signoff.md for this shape's
     # full contract and which --manifest items may cite it.
-    elif envelope.get("kind") == "generic":
-        kind = "generic"
+    # "model-run" (issue #4859): a committed analytical/linear-model run
+    # record, recognised only by its explicit self-declaration like
+    # "generic". Item 5 only; see docs/cli/signoff.md "Model-run evidence".
+    elif envelope.get("kind") in ("generic", "model-run"):
+        kind = envelope["kind"]
 
     # `klt seam-check` (issue #4189; docs/cli/seam-check.md): carries a
     # `violations` list like `klt drc`, so it must be recognised *before* the
@@ -2694,6 +2701,13 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
     :func:`~klayout_tools.coverage.coverage_refusal_reason`.
     """
     refusal = coverage_refusal_reason(envelope)
+    if kind == "model-run" and refusal is None:
+        # Issue #4859: no `coverage` block to count, so read the rollup
+        # itself -- a model-run with no limits-bearing measurement applied
+        # no bound to anything.
+        raw = envelope.get("measurements")
+        limited = any(isinstance(m, dict) and m.get("limits") for m in (raw or []))
+        return None if limited else _REASON_NO_LIMITS_CHECKED
     if kind == "sim" and refusal is None:
         # Issue #3769: sim coverage counts an unlimited measurement as a
         # checked observation, so `nothing_checked` stays false for an
@@ -2772,6 +2786,7 @@ _PASSING_STATUS_BY_KIND: dict[str, str] = {
     "socket-check": "pass",
     "seam-check": "pass",
     "generic": "pass",
+    "model-run": "pass",
 }
 
 
@@ -2785,6 +2800,22 @@ def _synthesize_structural_clean(envelope: Mapping[str, Any]) -> bool:
     return all(
         type(structural.get(key)) is int and structural[key] == 0
         for key in ("unexpected_latches", "comb_loops", "multi_driven")
+    )
+
+
+def _status_token_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
+    """One-passing-token kinds (``_PASSING_STATUS_BY_KIND``).
+
+    Issue #4859: a ``model-run``'s caller-asserted status is not enough --
+    any per-point entry that does not itself pass fails the run."""
+    if envelope.get("status") != _PASSING_STATUS_BY_KIND[kind]:
+        return False
+    if kind != "model-run":
+        return True
+    points = envelope.get("corners")
+    return not any(
+        not isinstance(c, dict) or c.get("status") != "pass"
+        for c in (points if isinstance(points, list) else [])
     )
 
 
@@ -2956,7 +2987,7 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
         )
     elif kind in _PASSING_STATUS_BY_KIND:
         # sim/pex/place-and-route/socket-check/generic: one passing token.
-        passed = envelope.get("status") == _PASSING_STATUS_BY_KIND[kind]
+        passed = _status_token_passed(kind, envelope)
     elif kind == "yield":
         passed = envelope.get("status") in ("pass", "reported")
     elif kind == "extract":
@@ -3706,132 +3737,6 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "measurements_with_limits": counts[1],
         }
     return detail
-
-
-def _erc_detail(envelope: dict[str, Any]) -> dict[str, Any]:
-    """:func:`_detail`'s ``"erc"`` branch (issue #2025), split out so adding
-    a kind does not push :func:`_detail`'s own dispatch chain up by the size
-    of the branch as well as by the branch itself."""
-    rule_counts: dict[str, int] = {}
-    for finding in envelope.get("erc_findings") or []:
-        rule = finding.get("rule") if isinstance(finding, dict) else None
-        if isinstance(rule, str):
-            rule_counts[rule] = rule_counts.get(rule, 0) + 1
-    return {
-        "file": envelope.get("file"),
-        "spec": envelope.get("spec"),
-        "gate_role": envelope.get("gate_role"),
-        "gate_count": envelope.get("gate_count"),
-        "erc_finding_count": envelope.get("erc_finding_count"),
-        # The connectivity half's own roll-up (issue #2179), beside the
-        # antenna-driven `status` this check's `checks[].status` already
-        # reports. Surfaced rather than merely consulted because it is what
-        # makes an otherwise contradictory-looking entry legible: a check
-        # with `status: "not_checked"` and `passed: true` is a run on a PDK
-        # with no antenna-ratio table whose connectivity rules all passed
-        # (:func:`_erc_passed`), and this field is the evidence for that.
-        # `None` for a pre-#2179 envelope, which states no such verdict.
-        "erc_status": envelope.get("erc_status"),
-        # Per-rule breakdown, so "which of the five ERC rules fired" is
-        # readable without re-opening the envelope -- the same reason `klt
-        # drc`'s own `rule_counts` exists. Item 11 grades only three of these
-        # rules (see :func:`_erc_supply_findings`), so a reader needs to see
-        # which ones actually fired.
-        "erc_rule_counts": dict(sorted(rule_counts.items())),
-    }
-
-
-def _place_and_route_detail(envelope: dict[str, Any]) -> dict[str, Any]:
-    """:func:`_detail`'s ``"place-and-route"`` branch (issue #2025), split
-    out for the same reason as :func:`_erc_detail`."""
-    power = envelope.get("power") or {}
-    straps = power.get("straps")
-    return {
-        "hdl_toplevel": envelope.get("hdl_toplevel"),
-        "stage_reached": envelope.get("stage_reached"),
-        "gds_path": envelope.get("gds_path"),
-        "verilog_path": envelope.get("verilog_path"),
-        # The `power` block is the only part of this response this module
-        # reasons about -- T1 item 11's digital branch (issue #2025).
-        # Surfaced verbatim so a "no PDN" verdict is readable beside the
-        # artifact that caused it.
-        "power_pdn": power.get("pdn"),
-        "power_global_connect": power.get("global_connect"),
-        "power_net": power.get("power_net"),
-        "ground_net": power.get("ground_net"),
-        "tapcell_master": power.get("tapcell_master"),
-        "strap_layers": _strap_layers(envelope),
-        "strap_count": len(straps) if isinstance(straps, list) else None,
-    }
-
-
-# --------------------------------------------------------------------------- #
-# Provenance consistency (issue #251's provenance block; #309 AC #2)
-# --------------------------------------------------------------------------- #
-
-
-def _socket_check_detail(envelope: dict[str, Any]) -> dict[str, Any]:
-    """:func:`_detail`'s ``"socket-check"`` excerpt (issue #2839)."""
-    return {
-        "socket": envelope.get("socket"),
-        "socket_name": envelope.get("socket_name"),
-        "failed_checks": [
-            check.get("name")
-            for check in envelope.get("checks") or []
-            if isinstance(check, dict) and check.get("status") == "fail"
-        ],
-    }
-
-
-def _seam_check_detail(envelope: dict[str, Any]) -> dict[str, Any]:
-    """:func:`_detail`'s ``"seam-check"`` excerpt (issue #4189)."""
-    violations = [v for v in envelope.get("violations") or [] if isinstance(v, dict)]
-    return {
-        "tiling": envelope.get("tiling"),
-        "layer": envelope.get("layer"),
-        "violation_count": len(violations),
-        "violation_kinds": sorted({str(v.get("kind")) for v in violations}),
-    }
-
-
-def _synthesize_detail(envelope: dict[str, Any]) -> dict[str, Any]:
-    """:func:`_detail`'s ``"synthesize"`` excerpt (issue #4015)."""
-    structural = envelope.get("structural") or {}
-    return {
-        "netlist_path": envelope.get("netlist_path"),
-        "netlist_sha256": envelope.get("netlist_sha256"),
-        "structural": {
-            key: structural.get(key)
-            for key in (
-                "unexpected_latches",
-                "comb_loops",
-                "multi_driven",
-                "has_critical",
-            )
-        },
-    }
-
-
-def _lef_abstract_detail(envelope: dict[str, Any]) -> dict[str, Any]:
-    """:func:`_detail`'s ``"lef-abstract"`` excerpt (issue #2839)."""
-    return {
-        "macro_name": envelope.get("macro_name"),
-        "output": envelope.get("output"),
-        "self_check_status": (envelope.get("self_check") or {}).get("status"),
-        "power_pins_status": (envelope.get("power_pins") or {}).get("status"),
-    }
-
-
-#: :func:`_detail`'s per-kind excerpt builders for the kinds that have one
-#: of their own (issue #2839 moved ``erc``/``place-and-route`` here).
-_DETAIL_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
-    "erc": _erc_detail,
-    "place-and-route": _place_and_route_detail,
-    "socket-check": _socket_check_detail,
-    "seam-check": _seam_check_detail,
-    "lef-abstract": _lef_abstract_detail,
-    "synthesize": _synthesize_detail,
-}
 
 
 def _provenance_consistency(checks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -5420,8 +5325,9 @@ def _input_artifact_candidates(
         # hashed, so falling through to another on a failed resolution would
         # verify the wrong artifact.
         return _resolve_input_artifact_value(value, spec, evidence_dir, repo_root)
-    if kind == "generic":
-        # Issue #2403: a `generic` envelope names its own fields by
+    if kind in ("generic", "model-run"):
+        # Issue #2403 (and #4859 for `model-run`, whose model record is
+        # likewise author-named): a `generic` envelope names its own fields by
         # definition (`_INPUT_ARTIFACT_FIELDS` above has no entry for it),
         # so the only field this module ever reads for it is this one
         # explicit, opt-in name -- never `source` (documented as purely
@@ -6731,6 +6637,11 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
+    if resolution["kind"] == "model-run":
+        # Issue #4859: disclosure only -- `method` is echoed, never graded,
+        # and klt did not execute the model.
+        citation["method"] = resolution["envelope"].get("method")
+        citation["executed_by_klt"] = False
     # Issue #2875: per-role verification of a `pex` envelope's schematic-side
     # inputs (request, body, DUT, reference netlist). Present only when the
     # cited envelope records those digests; legacy envelopes omit it.
@@ -7326,7 +7237,10 @@ def _grade_timing_margin(
     does not apply or the timing margin is satisfied."""
     if required_kind_pair is None or not graded:
         return None
-    if {g[2]["kind"] for _, _, g in graded if g[2] is not None} != {"sim"}:
+    kinds = {g[2]["kind"] for _, _, g in graded if g[2] is not None}
+    # Issue #4859: a `model-run` is sim-like here -- it alone neither
+    # satisfies the STA+functional pair nor escapes the timing-margin rule.
+    if not kinds or not kinds <= {"sim", "model-run"}:
         return None
     missing_margin = _missing_timing_margin(
         spec_rows,

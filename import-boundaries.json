@@ -579,6 +579,7 @@
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
+        "klayout_tools.signoff_details",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_foundry_cell",
         "klayout_tools.signoff_generator_batch",
