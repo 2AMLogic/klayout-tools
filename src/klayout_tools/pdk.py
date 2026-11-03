@@ -943,20 +943,16 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
     same "prefer the specific name" precedence :func:`netgen_setup_file`
     uses) and falls back to a bare ``<variant>.drc``.
 
-    Not every PDK's native deck fits that single-file shape: gf180mcu (also
-    verified against a real fetched install) ships its native deck instead as
-    ~60 topic fragments under ``drc/rule_decks/*.drc`` plus a Python
-    assembly/CLI wrapper (``drc/run_drc.py``) that concatenates the right
-    subset at run time -- a distinct, PDK-specific invocation contract (its
-    own ``--variant``/``--table``/``--run_dir`` flags) this function
-    deliberately does not attempt to drive generically, the same "avoid
-    hand-assembling rule-table fragments ourselves" boundary
-    ``docs/cli/drc.md``'s "Engine" section draws for the curated-deck engine.
-    For a variant shaped like that, this function returns ``None`` rather
-    than guessing or reimplementing that assembly -- a caller who has already
-    produced a merged single-file deck (e.g. by running the PDK's own
-    ``run_drc.py --macro_gen`` ahead of time) can still reach it via `klt
-    drc`'s ``--deck-file`` override, which bypasses this resolver entirely.
+    Not every PDK's native deck fits that single-file, variant-named shape:
+    gf180mcu ships a single main script named for the *family*
+    (``tech/drc/gf180mcu.drc``) that selects the metal stack from a ``variant``
+    ``-rd`` global, not a variant-named file. That shape is resolved by
+    :func:`.pdk_native_drc.native_drc_main_script` (issue #4002), not by this
+    function, which keeps its "``None`` means no variant-named deck" contract. An older
+    gf180mcu layout (topic fragments under ``drc/rule_decks/*.drc`` plus a
+    ``drc/run_drc.py`` wrapper) is not driven by either; reach it with `klt
+    drc`'s ``--deck-file`` override after running the PDK's own ``run_drc.py
+    --macro_gen``.
 
     A single-PDK flat install (:func:`_probe_flat_variant`, e.g. IHP-Open-
     PDK's SG13G2/SG13CMOS5L) nests its ``drc/`` one directory deeper, at

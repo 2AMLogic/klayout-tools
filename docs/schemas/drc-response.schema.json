@@ -62,6 +62,19 @@
         "tile": {"$ref": "#/$defs/tile"},
         "engine_deck_errors": {"$ref": "#/$defs/engine_deck_errors"},
         "coverage_assertion": {"$ref": "#/$defs/coverage_assertion"},
+        "native_deck": {
+          "type": "object",
+          "description": "`--engine klayout`/`both` without `--deck-file`, when the PDK's family main script (gf180mcu `tech/drc/gf180mcu.drc`) was resolved (issue #4002). Absent otherwise.",
+          "required": ["kind", "variant", "deck_file", "deck_vars_defaulted", "min_klayout_version", "min_klayout_version_defaulted"],
+          "properties": {
+            "kind": {"const": "pdk_main_script"},
+            "variant": {"type": "string"},
+            "deck_file": {"type": "string"},
+            "deck_vars_defaulted": {"type": "object", "additionalProperties": {"type": "string"}, "description": "`-rd` globals klt supplied because the caller did not (e.g. `variant`)."},
+            "min_klayout_version": {"type": "string"},
+            "min_klayout_version_defaulted": {"type": "boolean"}
+          }
+        },
         "provenance": {"$ref": "#/$defs/provenance"}
       },
       "if": {"required": ["engine"], "properties": {"engine": {"const": "klayout"}}},
