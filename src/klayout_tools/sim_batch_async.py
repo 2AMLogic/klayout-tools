@@ -22,8 +22,6 @@ batch transport, so tests never touch ``aws``.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import re
 from datetime import datetime, timezone
@@ -48,6 +46,11 @@ from .sim_batch import (
     launch_job,
     new_job_id,
     submit_job,
+)
+from .sim_batch_shards import (  # noqa: F401
+    request_sha256,
+    shard_map_request_fields,
+    shard_scoped_points,
 )
 
 #: Schema version of the two payloads this module builds. They are new
@@ -100,13 +103,6 @@ _STATUS_INSTANCE_FIELDS = (
 #: ``new_job_id``'s alphabet -- what ``batch-fleet-provision.sh launch``
 #: accepts, and therefore the only ids that can name a job.
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-
-
-def request_sha256(request: dict[str, Any]) -> str:
-    """Digest of the request document (canonical JSON), so a caller can tie a
-    later status read back to the request it submitted."""
-    canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def submit_only(
@@ -228,7 +224,7 @@ def _submit_sharded(
             artifacts_dir=artifacts_dir,
             hosts=hosts,
             shard_fingerprint=shard_fingerprint,
-            request_sha256=digest,
+            request_identity=shard_map_request_fields(request),
             request_dir=request_dir,
             runner=runner,
         )

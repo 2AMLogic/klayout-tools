@@ -5137,7 +5137,7 @@ def _open_shard_manifest(
     *,
     resume: bool,
     config: BatchConfig,
-    request_sha256: str | None = None,
+    request_identity: dict[str, Any] | None = None,
 ) -> _ShardManifest | None:
     """Open the run's shard map, recording where the jobs live (issue #3896);
     ``None`` when the request has no fingerprint to key it by."""
@@ -5153,7 +5153,7 @@ def _open_shard_manifest(
             "region": getattr(config, "region", None),
             "profile": getattr(config, "profile", None),
             # Only a sharded --submit-only records it (issue #4620).
-            **({} if request_sha256 is None else {"request_sha256": request_sha256}),
+            **(request_identity or {}),
         },
     )
 
@@ -5722,7 +5722,7 @@ def _submit_batch_shards(
     artifacts_dir: str,
     hosts: int,
     shard_fingerprint: str,
-    request_sha256: str,
+    request_identity: dict[str, Any],
     request_dir: str | None = None,
     runner: remote_transport.CommandRunner | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
@@ -5741,7 +5741,7 @@ def _submit_batch_shards(
         hosts,
         resume=True,
         config=config,
-        request_sha256=request_sha256,
+        request_identity=request_identity,
     )
     assert manifest is not None
     shards = _shard_corner_points(corner_points, hosts)
@@ -5831,7 +5831,7 @@ def _attach_batch_shards(
     sharded run does. The map must belong to this request (digest and
     fingerprint); a shard whose job is gone is reported lost, never
     resubmitted."""
-    from . import sim_batch_async
+    from . import sim_batch_shards
     from .sim import SimError
 
     if os.path.basename(manifest_path) != BATCH_SHARDS_FILENAME:
@@ -5850,13 +5850,12 @@ def _attach_batch_shards(
             f"--attach: shard map {manifest_path} is unreadable ({exc})",
             code=BATCH_SHARD_MANIFEST_CODE,
         ) from exc
-    recorded = document.get("request_sha256")
-    if recorded is not None and recorded != sim_batch_async.request_sha256(request):
+    mismatch = sim_batch_shards.shard_map_mismatch(document, request)
+    if mismatch is not None:
         raise SimError(
             f"--attach: shard map {manifest_path} was submitted from a "
-            f"different request (request_sha256: map {str(recorded)[:12]}, "
-            f"request {sim_batch_async.request_sha256(request)[:12]}); pass "
-            "the request the shards were submitted from",
+            f"different request ({mismatch}); pass the request the shards "
+            "were submitted from",
             code=BATCH_SHARD_MANIFEST_CODE,
         )
     try:
