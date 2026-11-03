@@ -46,7 +46,7 @@ def split_testbenches(
     container is left for the generic path-list validator to refuse."""
     entries = inventory.get("testbenches")
     if not isinstance(entries, list):
-        return inventory, {}
+        return dict(inventory), {}
     paths: list[Any] = []
     specs: dict[str, dict[str, Any]] = {}
     for index, entry in enumerate(entries):
