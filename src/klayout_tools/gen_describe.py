@@ -2711,6 +2711,10 @@ def _bjt_array_describe(
     )
 
     family = _pdk_family(pdk_info["variant"])
+    if family == "sg13g2":
+        from .gen_hbt import describe_hbt_array
+
+        return describe_hbt_array(params, dbu, pdk_info)
     info = _bjt_array_layout(
         params["emitter_um"],
         params["rows"],

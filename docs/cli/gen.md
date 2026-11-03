@@ -135,7 +135,7 @@ dimension is now independently checkable — see the note itself.)
 | `diff_pair` | yes | yes | yes | no |
 | `esd_device` | yes | yes | no | no |
 | `bond_pad` | yes | yes | no | no |
-| `bjt_array` | yes | yes | no | no |
+| `bjt_array` | yes | yes | yes (HBT, PDK cell) | no |
 | `diode` | yes | no | no | no |
 
 **gf180mcu — `mos_array`'s unit-device geometry was margined against the
@@ -308,9 +308,9 @@ two-term construct.
 **sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
 (#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired
 up against this family's curated deck (`klayout_tools.decks.sg13g2`) today;
-`bjt_array`/`esd_device`/`bond_pad`/`well_island` are not:
-
-- `bjt_array` has no recognised device class in this deck's
+`esd_device`/`bond_pad`/`well_island` are not (`bjt_array` is, as a SiGe
+HBT placed from the PDK's own cell — issue #4850, see its section below). For
+the record, the old reason `bjt_array` was deferred: no recognised device class in this deck's
   `EXTRACTION_DECK` at all (it declares `nfet`/`pfet`/three drawn poly
   resistors/two junction diodes/two MiM capacitors only — see that module's
   own "Device-class coverage" note — no bipolars). `cap_array` was
@@ -1791,6 +1791,23 @@ dummy-device suppression (see "Dummy devices: the `dummy` marker layer" in
 reporting it as a spurious unmatched device under `klt lvs`. These are the
 only two families `bjt_array` runs on at all (see "PDK-family support"
 above), so it always draws the marker where it is supported.
+
+**sg13g2 — SiGe HBT (issue #4850).** On `sg13g2` the generator does not draw
+from base layers. `params.flavor` selects `npn13G2` (default), `npn13G2l` or
+`npn13G2v`, and the PDK's own cell of that name (`npn13G2`/`npn13G2L`/
+`npn13G2V`) is read from `libs.ref/sg13g2_pr/gds/sg13g2_pr.gds` of the
+resolved install and instantiated on a `rows` × `cols` grid (bbox pitch plus
+a 2 µm gap). No PyCell shim is needed and no PDK data is vendored. Only
+`flavor`, `rows`, `cols` apply; `emitter_um`, `topology`, `dummy`, `ratio`
+and the collector ring are ignored (noted in `drc_hints.notes`). `flavor` on
+any other family is an error. A missing/unreadable GDS or absent cell is an
+application error (exit 1), never an empty cell. Ports are `Q<i>_E`/`_B`/`_C`
+from the cell's pin labels. The report gains an additive `hbt` object
+`{"flavor", "cell", "source_gds", "count"}`. Extraction/LVS recognition of
+`npn13G2` is not claimed here (tracked by #4397). Against IHP-Open-PDK
+v0.3.0, `klt drc --deck sg13g2` is clean for `npn13G2` and `npn13G2v`;
+`npn13G2L` shows one `via1.width.1` violation per unit, identical to the bare
+PDK cell.
 
 Ports are named `Q<i>_E` (emitter) and `Q<i>_B` (base) per unit device, plus
 `COLL_N`/`COLL_S`/`COLL_E`/`COLL_W` on the collector ring when

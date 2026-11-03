@@ -3986,6 +3986,7 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
         "drc_hints": described["drc_hints"],
         "warnings": described["warnings"],
         **({"expected": described["expected"]} if "expected" in described else {}),
+        **({"hbt": described["hbt"]} if "hbt" in described else {}),
         # Issue #2035: the shared `provenance` block every other verb's
         # report already carries -- see this function's docstring. A `gen`
         # request involves no rule/model deck and no single input layout
@@ -4103,6 +4104,16 @@ def _produce(
     succeeded, it just keeps today's hardcoded dbu.
     """
     import klayout.db as kdb
+
+    if spec.name == "bjt_array" and _pdk_family(pdk_info["variant"]) == "sg13g2":
+        # Issue #4850: sg13g2 HBTs are PDK-authored cells, not drawn here.
+        from .gen_hbt import produce_hbt_array
+
+        hbt_layout = kdb.Layout()
+        hbt_layout.dbu = resolve_pdk_dbu(pdk_info) or spec.dbu
+        hbt_top = hbt_layout.create_cell(cell_name)
+        produce_hbt_array(hbt_layout, hbt_top, resolved_params, pdk_info)
+        return hbt_layout, hbt_top
 
     lib = _pcell_library()
     decl = lib.layout().pcell_declaration(spec.name)

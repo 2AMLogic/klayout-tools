@@ -589,7 +589,7 @@ def _cap_top_plate_requires(family: str) -> tuple[tuple[int, int], ...]:
 #: ``guard_ring``/``diff_pair`` avoid above into this module's own clear
 #: ``GenError``.
 _GENERATOR_FAMILY_DEFERRED: dict[str, tuple[str, ...]] = {
-    "bjt_array": ("sg13g2", "sg13cmos5l"),
+    "bjt_array": ("sg13cmos5l",),
     "esd_device": ("sg13g2", "sg13cmos5l"),
     "well_island": ("sg13g2", "sg13cmos5l"),
     "guard_ring": ("sg13cmos5l",),
@@ -2664,6 +2664,17 @@ def _bjt_layer_params(
 
     family = _pdk_family(pdk_info["variant"])
     _reject_deferred_family("bjt_array", family)
+    if family == "sg13g2":
+        # Reached only by a direct caller: `gen._produce` routes sg13g2 to the
+        # PDK-cell HBT path (`gen_hbt`), which needs no layer params.
+        raise AssertionError("sg13g2 bjt_array is drawn by gen_hbt")
+    if params.get("flavor"):
+        from .gen import GenError
+
+        raise GenError(
+            "generator 'bjt_array': params.flavor is only supported on PDK "
+            f"family 'sg13g2' (resolved family: '{family}')"
+        )
     well = _role_layer_info(family, "well")
     mark = _role_layer_info(family, "bjt_mark")
     dummy = _role_layer_info(family, "dummy")
