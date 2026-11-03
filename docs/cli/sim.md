@@ -1831,7 +1831,11 @@ established. `runner_compatibility` itself stays a major.minor gate.
 - **On the runner**: after the version gate passes, the preflight exits `87`
   with the same code before `klt sim` runs; each unit gets a `batch_job_failed`
   diagnostic with `runner_code: "batch_runner_feature_unsupported"` plus
-  `runner_klt_version` / `client_klt_version`.
+  `runner_klt_version` / `client_klt_version`. When the runner's identity
+  shows the request uses features it predates, each such diagnostic also carries
+  `missing_features[]` (e.g. `["stress"]`), and an unrecovered exit `87` gets
+  `missing_features` plus both versions even when `runner_compatibility` is
+  `match`.
 - **`environment.remote.runner_request_features`** (only when the request uses
   a registry feature) holds `required`, `missing` (`null` when the runner
   version is unknown) and `status` (`supported` / `unsupported` / `unknown`).

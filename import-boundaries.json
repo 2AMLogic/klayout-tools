@@ -604,6 +604,7 @@
         "klayout_tools.sim",
         "klayout_tools.sim_batch",
         "klayout_tools.sim_batch_async",
+        "klayout_tools.sim_batch_features",
         "klayout_tools.sim_commands",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_crossings",

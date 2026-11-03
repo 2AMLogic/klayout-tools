@@ -125,6 +125,7 @@ from .remote_launcher import (
     _signal_handlers_restore,
     published_runner_identities,
 )
+from .sim_batch_features import annotate_gap, gap_note
 from .sim_remote import (
     _build_remote_request,
     _points_to_push,
@@ -4163,8 +4164,7 @@ def _annotate_preflight_rejection(
     for corner in corners:
         for diagnostic in corner.get("diagnostics") or []:
             if diagnostic.get("runner_code") == runner_error["code"]:
-                diagnostic["runner_klt_version"] = identity["runner_klt_version"]
-                diagnostic["client_klt_version"] = identity["client_klt_version"]
+                annotate_gap(diagnostic, identity, versions=True)
 
 
 def _annotate_unrecovered_preflight_reject(
@@ -4198,15 +4198,15 @@ def _annotate_unrecovered_preflight_reject(
             f"client is {identity.get('client_klt_version')} -- update the "
             "runner image or use a compatible client"
         )
+    note += gap_note(identity)
     for corner in corners:
         for diagnostic in corner.get("diagnostics") or []:
             if diagnostic.get("code") != "batch_job_failed":
                 continue
             diagnostic["message"] = f"{diagnostic['message']} [{note}]"
+            annotate_gap(diagnostic, identity, versions=mismatch)
             if mismatch:
                 diagnostic["runner_code"] = BATCH_RUNNER_MISMATCH_CODE
-                diagnostic["runner_klt_version"] = identity["runner_klt_version"]
-                diagnostic["client_klt_version"] = identity["client_klt_version"]
 
 
 def _annotate_unrecovered_failure(
