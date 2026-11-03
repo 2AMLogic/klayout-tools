@@ -714,6 +714,7 @@ def test_list_generators_includes_all_four_phase2_families():
         "cap_vpp_array",
         "well_island",
         "asap7_finfet",
+        "asap7_tap",
     }
 
 

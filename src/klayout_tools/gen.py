@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any
 from ._layout import write_layout
 from ._provenance import build_provenance
 from .gen_asap7 import ASAP7_FINFET_SPEC
+from .gen_asap7_tap import ASAP7_TAP_SPEC
 from .gen_cap_vpp import (
     _cap_vpp_array_describe,
     _cap_vpp_array_layer_params,
@@ -316,6 +317,7 @@ from .gen_layer_params import (
 )
 from .gen_pcells import (
     _build_asap7_finfet_pcell,
+    _build_asap7_tap_pcell,
     _build_bjt_array_pcell,
     _build_bond_pad_pcell,
     _build_cap_array_pcell,
@@ -4179,6 +4181,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     pcell_classes.update(_build_esd_device_pcell())
     pcell_classes.update(_build_diode_pcell())
     pcell_classes.update(_build_asap7_finfet_pcell())
+    pcell_classes.update(_build_asap7_tap_pcell())
     return pcell_classes
 
 
@@ -4384,4 +4387,5 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         layer_params=_diode_layer_params,
     ),
     "asap7_finfet": ASAP7_FINFET_SPEC,
+    "asap7_tap": ASAP7_TAP_SPEC,
 }
