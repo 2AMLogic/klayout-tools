@@ -4415,14 +4415,14 @@ class _ShardManifest:
                 "that may already have finished)",
                 code=BATCH_SHARD_MANIFEST_CODE,
             ) from exc
-        if stored_fingerprint != fingerprint or stored_hosts != hosts:
+        # Issue #4821: ``hosts`` is not identity; resume re-splits remaining units.
+        if stored_fingerprint != fingerprint:
             difference = _manifest_difference(
-                stored_fingerprint, fingerprint, stored_hosts, hosts
+                stored_fingerprint, fingerprint, stored_hosts, stored_hosts
             )
             raise SimError(
                 f"--resume: shard map {path} was written for a different "
-                f"request ({difference}); "
-                "delete it or drop --resume",
+                f"request ({difference}); delete it or drop --resume",
                 code=BATCH_SHARD_MANIFEST_CODE,
             )
         manifest.prior = shards
