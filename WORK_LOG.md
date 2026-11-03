@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-03
 
+- **PR #4877**: docs: mark signoff item-9 unbenched_rows and per-bench cold_start as unreleased
+- **Issue #4875** (closed): signoff --attest 9: release 0.8.0 rejects unbenched_rows although docs/cli/signoff.md documents it
 - **PR #4874**: fix(synthesize): normalize source directories out of written netlist
 - **Issue #4872** (closed): klt synthesize: netlist embeds absolute source path in internal net names (non-reproducible across directories)
 - **PR #4871**: docs(drc): record gf180mcu_density deck behavior against options.boundary
