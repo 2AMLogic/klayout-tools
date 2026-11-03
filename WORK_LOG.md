@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-03
 
+- **PR #4855**: feat: place sg13g2 SiGe HBT arrays from the PDK's own npn13G2* cells
+- **Issue #4850** (closed): gen: no SiGe HBT (npn13G2*) generator for sg13g2; bjt_array unsupported and PDK pcell lib unreachable
 - **PR #4864**: feat(sim): name missing request features on batch preflight-reject diagnostics
 - **PR #4862**: feat(signoff): accept model-run evidence kind for T1 item 5
 - **PR #4857**: feat: report unlaunched shards as a resumable signal in sim batch environment
