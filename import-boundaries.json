@@ -495,7 +495,9 @@
       "description": "`klt ring_check` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.ring_check_cmd",
-        "klayout_tools.ring_check"
+        "klayout_tools.ring_check",
+        "klayout_tools.seal_ring_check",
+        "klayout_tools.seal_ring_rules"
       ]
     },
     "seam_check": {

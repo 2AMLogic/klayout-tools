@@ -4112,3 +4112,10 @@ is checked first with the same `--deck`, `--top`, `--rules` and `--pdk*`
 options, and the block has the same shape. `--waivers` is **not** applied to
 the fixture run, so a waiver cannot hide the control's violations. Without
 the flag the report carries no `negative_control` block.
+
+## Seal-ring coverage
+
+`klt drc` decks carry **no seal-ring or scribe rules** (the `seal` mentions
+above are carve-outs only). Seal-ring conformance is checked by
+`klt ring-check --pdk` (sg13g2 only; sky130 and gf180mcu report
+`not_checked`): see [`ring-check.md`](ring-check.md#pdk-seal-ring-mode----pdk-sg13g2sky130gf180mcu).

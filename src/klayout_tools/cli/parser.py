@@ -7345,30 +7345,32 @@ def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
         help="assert a layer set forms a single closed annulus (guard/tap ring)",
         description=(
             "Assert that a caller-specified layer set forms a single closed "
-            "annulus -- a guard ring, tap ring, or seam moat -- and report "
-            "the break location when it does not. Purely geometric: the "
-            "shapes on the given layers are merged and the result must be "
-            "exactly one polygon with exactly one hole. A plain connectivity "
-            "check is insufficient (a ring is redundant by construction, so a "
-            "single break still leaves one connected group) -- this asserts "
-            "the annulus, not just connectedness, catching a gap cut into one "
-            "segment that every width/spacing/enclosure rule passes. No "
-            "extraction or netlist needed. Runs fully headless via KLayout's "
-            "native batch database API -- no GUI, no Qt. See "
-            "docs/cli/ring-check.md."
+            "annulus (guard ring, tap ring, seam moat) and report the break "
+            "location when it does not: the shapes are merged and must form "
+            "exactly one polygon with one hole. Catches a gap that connectivity "
+            "and width/spacing rules pass. No extraction needed; headless. "
+            "See docs/cli/ring-check.md."
         ),
     )
     ring_check_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
     ring_check_parser.add_argument(
-        "--layers",
-        required=True,
+        "--pdk",
+        default=None,
         help=(
-            "ring layer set as a path to a JSON file, or an inline JSON array "
-            "of [layer, datatype] pairs (e.g. '[[33, 0], [66, 44]]'); the "
-            "shapes on these layers are merged and their union must form the "
-            "annulus. Not validated by argparse -- an empty/malformed value "
-            "exits 1 with a clean error, per docs/cli/ring-check.md's "
-            "exit-code contract, rather than argparse's usage-error exit 2."
+            "check against a PDK's seal-ring rules (sg13g2, sky130, gf180mcu); "
+            "exclusive with --layers; no published rules -> 'not_checked' "
+            "(exit 4). Unknown PDK exits 1. See docs/cli/ring-check.md."
+        ),
+    )
+    ring_check_parser.add_argument(
+        "--layers",
+        default=None,
+        help=(
+            "ring layer set: a JSON file path, or an inline JSON array of "
+            "[layer, datatype] pairs (e.g. '[[33, 0], [66, 44]]'); their "
+            "union must form the annulus. Required unless --pdk is given. "
+            "Not validated by argparse -- an empty/malformed value exits 1 "
+            "(docs/cli/ring-check.md), not usage-error exit 2."
         ),
     )
     ring_check_parser.add_argument(
@@ -7394,12 +7396,10 @@ def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         default=False,
         help=(
-            "ignore polygons enclosed within the ring's own hole when "
-            "asserting the annulus -- use this when the ring encloses "
-            "geometry on the same layer set (e.g. a guard/tap ring around a "
-            "device), which otherwise merges to a second, disjoint polygon "
-            "and trips a spurious 'fragmented' violation. A genuine break in "
-            "the ring's own perimeter still fails with this flag set. "
+            "ignore polygons enclosed in the ring's own hole (e.g. a guard "
+            "ring around a device), which otherwise trip a spurious "
+            "'fragmented' violation; a real break in the perimeter still "
+            "fails. "
             "Off by default (backward compatible)."
         ),
     )
