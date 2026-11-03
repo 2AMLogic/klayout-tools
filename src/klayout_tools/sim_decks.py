@@ -76,8 +76,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -91,6 +89,7 @@ from . import (
     remote_transport,
     sim_batch,
     sim_batch_async,
+    sim_deck_expand,
     sim_remote,
     sim_staging,
 )
@@ -583,7 +582,7 @@ def _scan_deck_closure(
             )
         text = raw.decode("utf-8", errors="replace")
         for index, line in enumerate(text.splitlines(), start=1):
-            directive_target = _closure_directive_target(
+            directive_target = sim_deck_expand.closure_directive_target(
                 line, where=f"{where} line {index}"
             )
             if directive_target is None:
@@ -621,53 +620,6 @@ def _scan_deck_closure(
             if directive != "`pre_osdi`":  # a binary library holds no directives
                 queue.append((resolved, rel_dest))
     return includes, host_resolved
-
-
-#: A ``pre_osdi <file>`` control command (issue #4881), classified like an
-#: include target. The staged file is a binary shared library, so it is
-#: shipped but never scanned for further directives.
-_PRE_OSDI_RE = re.compile(r"^\s*pre_osdi\s+(?P<target>\S.*?)\s*$", re.IGNORECASE)
-
-
-def _closure_directive_target(line: str, *, where: str) -> tuple[str, str] | None:
-    """The file a deck line references, as ``(directive, target)``, or
-    ``None`` for a line that names no file.
-
-    ``.include``/``.inc`` always name one. ``.lib`` is two-faced (the same
-    split ``sim_staging._Stager._parse_lib`` makes, #2668): one token is a
-    section *definition* (``.lib tt`` ... ``.endl``) and names no file; two
-    tokens are a file-bearing ``.lib <file> <section>`` reference -- the
-    model-reference form PDK corner selection uses -- whose file must be
-    staged, left to the executing host, or rejected exactly like an include
-    target. Any other ``.lib`` shape is rejected by name rather than
-    guessed at, so it cannot slip past the pre-launch check."""
-    from .sim import SimError
-
-    match = sim_staging._INCLUDE_RE.match(line)
-    if match is not None:
-        return "`.include`", sim_staging._unquote(match.group("target"))
-    osdi_match = _PRE_OSDI_RE.match(line)
-    if osdi_match is not None:
-        return "`pre_osdi`", sim_staging._unquote(osdi_match.group("target"))
-    lib_match = sim_staging._LIB_RE.match(line)
-    if lib_match is None:
-        return None
-    try:
-        tokens = shlex.split(lib_match.group("rest"))
-    except ValueError as exc:
-        tokens = []
-        problem = str(exc)
-    else:
-        problem = f"{len(tokens)} argument(s)"
-    if len(tokens) == 1:
-        return None
-    if len(tokens) == 2:
-        return "`.lib`", tokens[0]
-    raise SimError(
-        f"{where}: unsupported `.lib` directive form ({problem}) -- deck-list "
-        "requests understand `.lib <section>` definitions and "
-        "`.lib <file> <section>` references only"
-    )
 
 
 def _read_closure_file(path: str, *, where: str) -> bytes:
@@ -874,81 +826,6 @@ def _copy_unit_files(unit: dict[str, Any], *, unit_dir: str, staging_root: str) 
         shutil.copyfile(source, dest)
 
 
-_EXPANDED_DECK_PREFIX = ".klt-expanded-"
-
-
-def _expand_directive_line(line: str) -> str:
-    """Expand ``$VAR``/``~`` in one ``.include``/``.inc``/``.lib <file>
-    <section>``/``pre_osdi`` target on the executing host (issue #4881).
-    ngspice expands none of them. A line with nothing to expand, or whose
-    variable is unset (the engine then reports it), is returned as is."""
-    ending = line[len(line.rstrip("\r\n")) :]
-    body = line[: len(line) - len(ending)]
-    try:
-        found = _closure_directive_target(body, where="")
-    except Exception:  # noqa: BLE001 -- malformed shapes are classified pre-launch
-        return line
-    if found is None:
-        return line
-    target = found[1]
-    if "$" not in target and not target.startswith("~"):
-        return line
-    expanded = os.path.expanduser(os.path.expandvars(target))
-    if "$" in expanded or not expanded.strip():
-        return line
-    index = body.find(target)
-    if index < 0:
-        return line
-    if any(ch.isspace() for ch in expanded):
-        expanded = f'"{expanded}"'
-        # the original may already be quoted: swallow its quotes
-        if body[index - 1 : index] in "\"'" and body[index - 1 : index]:
-            index -= 1
-            target = body[index] + target + body[index]
-    return body[:index] + expanded + body[index + len(target) :] + ending
-
-
-def _expand_text(text: str) -> str:
-    if "$" not in text and "~" not in text:
-        return text
-    return "".join(_expand_directive_line(ln) for ln in text.splitlines(keepends=True))
-
-
-def _prepare_run_deck(unit: dict[str, Any], *, unit_dir: str) -> str:
-    """The deck name ngspice is launched with. When the deck (or a staged
-    include) names a runner-resident file through ``$VAR``/``~``, the
-    executing host expands it here: staged includes in place (the resume
-    key hashes the staging root, not these bytes) and the deck itself into
-    a sidecar copy, so the shipped deck -- and its recorded ``deck_sha256``
-    -- stay byte-for-byte as submitted."""
-    for ref in unit["includes"]:
-        path = os.path.join(unit_dir, ref["name"])
-        if not ref["name"].lower().endswith(".osdi"):
-            _rewrite_if_expanded(path, path)
-    deck_name = unit["deck"]["name"]
-    deck_path = os.path.join(unit_dir, deck_name)
-    head, tail = os.path.split(deck_name)
-    run_name = os.path.join(head, _EXPANDED_DECK_PREFIX + tail)
-    if _rewrite_if_expanded(deck_path, os.path.join(unit_dir, run_name)):
-        return run_name
-    return deck_name
-
-
-def _rewrite_if_expanded(source: str, dest: str) -> bool:
-    try:
-        with open(source, "rb") as handle:
-            raw = handle.read()
-        text = raw.decode("utf-8")
-    except (OSError, UnicodeDecodeError):
-        return False
-    expanded = _expand_text(text)
-    if expanded == text:
-        return False
-    with open(dest, "wb") as handle:
-        handle.write(expanded.encode("utf-8"))
-    return True
-
-
 def run_deck_unit(
     unit: dict[str, Any],
     *,
@@ -984,7 +861,11 @@ def run_deck_unit(
     diagnostics: list[dict[str, str]] = []
     started = time.monotonic()
     spawn = _spawn_engine(
-        [ngspice_binary, "-b", _prepare_run_deck(unit, unit_dir=unit_dir)],
+        [
+            ngspice_binary,
+            "-b",
+            sim_deck_expand.prepare_run_deck(unit, unit_dir=unit_dir),
+        ],
         unit_dir=unit_dir,
         timeout_s=unit["timeout_s"],
         diagnostics=diagnostics,
