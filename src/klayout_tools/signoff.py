@@ -2120,14 +2120,11 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     # characterization record. See this module's "Generic evidence
     # ingestion" docstring section and docs/cli/signoff.md for this shape's
     # full contract and which --manifest items may cite it.
-    elif envelope.get("kind") == "generic":
-        kind = "generic"
-
     # "model-run" (issue #4859): a committed analytical/linear-model run
     # record, recognised only by its explicit self-declaration like
     # "generic". Item 5 only; see docs/cli/signoff.md "Model-run evidence".
-    elif envelope.get("kind") == "model-run":
-        kind = "model-run"
+    elif envelope.get("kind") in ("generic", "model-run"):
+        kind = envelope["kind"]
 
     # `klt seam-check` (issue #4189; docs/cli/seam-check.md): carries a
     # `violations` list like `klt drc`, so it must be recognised *before* the
@@ -2806,6 +2803,22 @@ def _synthesize_structural_clean(envelope: Mapping[str, Any]) -> bool:
     )
 
 
+def _status_token_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
+    """One-passing-token kinds (``_PASSING_STATUS_BY_KIND``).
+
+    Issue #4859: a ``model-run``'s caller-asserted status is not enough --
+    any per-point entry that does not itself pass fails the run."""
+    if envelope.get("status") != _PASSING_STATUS_BY_KIND[kind]:
+        return False
+    if kind != "model-run":
+        return True
+    points = envelope.get("corners")
+    return not any(
+        not isinstance(c, dict) or c.get("status") != "pass"
+        for c in (points if isinstance(points, list) else [])
+    )
+
+
 def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     """Whether this one check counts as passing.
 
@@ -2974,15 +2987,7 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
         )
     elif kind in _PASSING_STATUS_BY_KIND:
         # sim/pex/place-and-route/socket-check/generic: one passing token.
-        passed = envelope.get("status") == _PASSING_STATUS_BY_KIND[kind]
-        if passed and kind == "model-run":
-            # Issue #4859: caller-asserted status is not enough -- any
-            # per-point entry that does not itself pass fails the run.
-            points = envelope.get("corners")
-            passed = not any(
-                not isinstance(c, dict) or c.get("status") != "pass"
-                for c in (points if isinstance(points, list) else [])
-            )
+        passed = _status_token_passed(kind, envelope)
     elif kind == "yield":
         passed = envelope.get("status") in ("pass", "reported")
     elif kind == "extract":
@@ -3713,12 +3718,6 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "summary": envelope.get("summary"),
             "source": envelope.get("source"),
         }
-    elif kind == "model-run":
-        detail = {
-            "method": envelope.get("method"),
-            "measurement_count": len(envelope.get("measurements") or []),
-            "executed_by_klt": False,
-        }
     else:
         # kind == "error"
         error = envelope.get("error") or {}
@@ -3854,6 +3853,15 @@ def _lef_abstract_detail(envelope: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _model_run_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``"model-run"`` excerpt (issue #4859)."""
+    return {
+        "method": envelope.get("method"),
+        "measurement_count": len(envelope.get("measurements") or []),
+        "executed_by_klt": False,
+    }
+
+
 #: :func:`_detail`'s per-kind excerpt builders for the kinds that have one
 #: of their own (issue #2839 moved ``erc``/``place-and-route`` here).
 _DETAIL_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
@@ -3862,6 +3870,7 @@ _DETAIL_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "socket-check": _socket_check_detail,
     "seam-check": _seam_check_detail,
     "lef-abstract": _lef_abstract_detail,
+    "model-run": _model_run_detail,
     "synthesize": _synthesize_detail,
 }
 
