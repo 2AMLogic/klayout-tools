@@ -230,6 +230,14 @@
         "klayout_tools.functional_verification_sdf_rename"
       ]
     },
+    "fill": {
+      "kind": "verb",
+      "description": "`klt fill` implementation: core module plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.fill_cmd",
+        "klayout_tools.fill"
+      ]
+    },
     "gen": {
       "kind": "verb",
       "description": "`klt gen` implementation: core modules plus CLI adapter.",
@@ -786,6 +794,11 @@
       "consumer": "array_check",
       "exporter": "cli-infra",
       "reason": "CLI adapter uses the shared output envelope and --layers parser, as every verb does."
+    },
+    {
+      "consumer": "fill",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --layers/--region parsers, as every verb does."
     },
     {
       "consumer": "keepout_check",

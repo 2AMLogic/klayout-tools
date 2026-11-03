@@ -42,6 +42,7 @@ from . import (
     eval_cmd,
     evidence_cmd,
     extract_cmd,
+    fill_cmd,
     formal_cmd,
     functional_verification_cmd,
     gen_cmd,
@@ -289,13 +290,12 @@ def create_parser() -> argparse.ArgumentParser:
     _add_seam_check_parser(subparsers)
     _add_corner_matrix_parser(subparsers)
     _add_keepout_check_parser(subparsers)
+    fill_cmd.add_parser(subparsers, _add_format_arg)
     _add_array_check_parser(subparsers)
     _add_tap_distance_parser(subparsers)
 
     _add_layout_metrics_parser(subparsers)
-
     _add_render_parser(subparsers)
-
     _add_pdk_parser(subparsers)
     _add_deck_parser(subparsers)
     _add_env_provenance_parser(subparsers)
