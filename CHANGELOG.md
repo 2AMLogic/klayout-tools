@@ -20,6 +20,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   `RESETn`) binds to the single pin differing only by letter case, disclosed
   as the additive `reference.gate_level_pin_case_folded` warning category
   (never changes `status`). Ambiguous case-twin pin lists are still refused.
+- **`klt signoff` item 6 `not_applicable` accepts a markdown spec and a
+  reviewed assertion** (issue #4793, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)): the `spec` reference takes
+  optional `"format": "markdown-table"` + `"id_column"` (ratification from a
+  `Status:` line, row ids from the first pipe table; granted output echoes
+  `format`/`id_column`), and a statement row may set
+  `reviewed_not_statistical: true` to waive the string-pattern scan (never
+  the key scan) for that row, echoed in the output. Additive; JSON-form
+  manifests grade unchanged.
 - **`klt lvs` accepts escaped module names in a `gate-level-verilog`
   reference** (issue #4810, documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)):
   a Yosys `\$paramod\child\W=s32'd64` module declaration no longer fails
