@@ -2581,8 +2581,8 @@ Two mechanisms close that gap, both driven by the same content hash:
    drift from it:
 
    ```json
-   "opt_in_evidence_kinds": {"generic": [1, 2, 8, 9, 10], "power": [], "erc": [11], "place-and-route": [11], "socket-check": [11], "lef-abstract": [11], "synthesize": [1]},
-   "opt_in_kinds_by_item": {"1": ["generic", "synthesize"], "2": ["generic"], "8": ["generic"], "9": ["generic"], "10": ["generic"], "11": ["erc", "place-and-route", "socket-check", "lef-abstract"]}
+   "opt_in_evidence_kinds": {"generic": [1, 2, 8, 9, 10], "power": [], "erc": [11], "place-and-route": [11], "socket-check": [11], "lef-abstract": [11], "synthesize": [1], "model-run": [5]},
+   "opt_in_kinds_by_item": {"1": ["generic", "synthesize"], "2": ["generic"], "8": ["generic"], "5": ["model-run"], "9": ["generic"], "10": ["generic"], "11": ["erc", "place-and-route", "socket-check", "lef-abstract"]}
    ```
 
    `opt_in_evidence_kinds` maps kind to the item ids it may satisfy; an
@@ -3240,6 +3240,56 @@ every other irrelevant kind still counted would have been arbitrary. Issue
 #2718 later gave them an artifact-anchored `generic` form, and issue #2844
 added a producer for items 1, 9 and 10 (`--attest`) and restricted those
 three to it. Item 2 still accepts any passing native kind.
+
+### Model-run evidence (item 5, opt-in, file-only)
+
+A spec row defined by an analytical or linear-model run (not a SPICE
+testbench) has no `klt sim` envelope to cite. Issue #4859 adds the envelope
+`"kind": "model-run"`, recognised — like `generic` — only by that explicit
+self-declaration, and accepted by **T1 item 5 only** (analog and digital);
+every other item grades it `wrong_kind`. It reuses `klt sim`'s
+`measurements[]` rollup so the multi-citation and derived-coverage rules
+("Derived coverage (issue #3778)") apply unchanged.
+
+```json
+{
+  "schema_version": 1,
+  "kind": "model-run",
+  "status": "pass",
+  "method": "linear small-signal model of the OTA, ideal supplies",
+  "measurements": [
+    {"name": "dc_gain_db", "spec_row": "gain", "status": "pass",
+     "limits": {"min": 60.0}}
+  ],
+  "corners": [
+    {"corner_id": "tt/1.8V/27C", "status": "pass",
+     "measurements": [{"name": "dc_gain_db", "status": "pass"}]}
+  ],
+  "provenance": {"input": {"path": "model/ota.md", "content_hash": "sha256:..."}}
+}
+```
+
+- `kind`, `status` (`"pass"` is the passing token), `method` and
+  `measurements[]` are required. `method` is a disclosure echoed on the
+  citation (`citation.method`); it is never graded.
+- A row is covered only by a passing, `limits`-bearing measurement tagged
+  `spec_row: <row>`, and the citation passes only if `status` is `pass` and
+  every `corners[]` point entry (the per-point list, optional) passes.
+  Otherwise `partial_coverage` with `detail.uncovered_rows`, or
+  `check_failed`. Derived rows report `row_coverage.row_sources: "derived"`.
+- An envelope with no `limits`-bearing measurement is refused
+  `no_limits_checked`.
+- `provenance.input` (`path` + `content_hash`) names the committed model
+  record; it is re-hashed like `generic`'s (`citation.input_verified`), and
+  a manifest-pinned `content_hash` that no longer matches renders
+  `stale_evidence`.
+- `klt` never executes the model: the citation carries
+  `executed_by_klt: false`.
+- **Digital partitions:** a `model-run` is treated like `sim` — it does not
+  satisfy the STA + functional-verification pair, and on its own it needs
+  the same `timing_margin` row as a `sim`-only citation
+  (`timing_margin_missing`).
+- A row declared with a `gap` keeps the existing gap/coverage precedence.
 
 ### Generic evidence (opt-in, non-`klt`-native)
 
