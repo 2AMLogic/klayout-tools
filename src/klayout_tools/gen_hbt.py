@@ -16,6 +16,9 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
+from .gen_describe import _bjt_array_describe
+from .gen_layer_params import _bjt_layer_params, _pdk_family
+
 if TYPE_CHECKING:
     import klayout.db as kdb
 
@@ -159,27 +162,55 @@ def hbt_pitch_um(src: kdb.Layout, cell: kdb.Cell) -> tuple[float, float]:
 
 
 def produce_hbt_array(
-    layout: kdb.Layout,
-    top: kdb.Cell,
+    cell_name: str,
     params: dict[str, Any],
     pdk_info: dict[str, Any],
-) -> dict[str, Any]:
-    """Copy the PDK HBT cell into ``layout`` and place a ``rows`` x ``cols``
-    grid of it in ``top``. Returns the :func:`load_hbt` info dict."""
+    dbu: float,
+) -> tuple[kdb.Layout, kdb.Cell]:
+    """Copy the PDK HBT cell into a new layout and place a ``rows`` x
+    ``cols`` grid of it in a top cell named ``cell_name``."""
     import klayout.db as kdb
 
+    layout = kdb.Layout()
+    layout.dbu = dbu
+    top = layout.create_cell(cell_name)
     src, cell, info = load_hbt(pdk_info, params.get("flavor", ""))
     unit = layout.create_cell(info["cell"])
     unit.copy_tree(cell)
     box = unit.bbox()
     px, py = hbt_pitch_um(src, cell)
-    dbu = layout.dbu
     for r in range(params["rows"]):
         for c in range(params["cols"]):
             dx = round(c * px / dbu) - box.left
             dy = round(r * py / dbu) - box.bottom
             top.insert(kdb.CellInstArray(unit.cell_index(), kdb.Trans(dx, dy)))
-    return info
+    return layout, top
+
+
+def bjt_array_describe(
+    params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
+) -> dict[str, Any]:
+    """``bjt_array`` describe hook: HBT path on sg13g2, else base-layer."""
+    if _pdk_family(pdk_info["variant"]) == "sg13g2":
+        return describe_hbt_array(params, dbu, pdk_info)
+    return _bjt_array_describe(params, dbu, pdk_info)
+
+
+def bjt_array_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
+    """``bjt_array`` layer-params hook. sg13g2 draws no base layers (the PDK
+    cell is placed instead); ``flavor`` is rejected on every other family."""
+    from .gen import GenError
+
+    if _pdk_family(pdk_info["variant"]) == "sg13g2":
+        return {}
+    if params.get("flavor"):
+        raise GenError(
+            "generator 'bjt_array': params.flavor is only supported on PDK "
+            f"family 'sg13g2' (resolved family: '{_pdk_family(pdk_info['variant'])}')"
+        )
+    return _bjt_layer_params(pdk_info, params)
 
 
 def describe_hbt_array(

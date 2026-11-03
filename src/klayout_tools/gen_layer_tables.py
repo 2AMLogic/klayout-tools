@@ -599,9 +599,7 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     # `res_array`/`guard_ring` (#1448), `mos_array`/`diff_pair` (#1450), and
     # `cap_array` (#1455, once issue #1454 populated
     # `EXTRACTION_DECK.capacitors` for `cap_cmim`/`rfcmim`) are wired up to
-    # *run* on this family; `bjt_array` runs too (#4850) but via the PDK's own
-    # HBT cells (`gen_hbt`), not this table; `esd_device`/`bond_pad`/
-    # `well_island`
+    # *run* on this family; `bjt_array`/`esd_device`/`bond_pad`/`well_island`
     # are still explicitly rejected (`_GENERATOR_FAMILY_DEFERRED`, and
     # `_bond_pad_layer_params`'s missing-role guard) rather than silently
     # producing untested output:
@@ -618,9 +616,8 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     #   likely follow for free, but it also composes a ring/marker stack this
     #   issue did not verify on this family, so it stays deferred rather than
     #   shipped untested.
-    # - `bjt_array`'s base-layer drawing has no recognised device class in this
-    #   deck's `EXTRACTION_DECK` (`.bipolars` is empty; #4850 places the PDK's
-    #   HBT cell instead), and `bond_pad`/
+    # - `bjt_array` still has no recognised device class in this deck's
+    #   `EXTRACTION_DECK` at all (`.bipolars` is empty), and `bond_pad`/
     #   `well_island` were not attempted by #1448 (no citable curated
     #   passivation-opening layer for the former; no verification effort
     #   spent on the latter's well-tie-implant story for the latter).

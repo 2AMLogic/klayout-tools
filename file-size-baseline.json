@@ -369,7 +369,7 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4387
+      "lines": 4385
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
