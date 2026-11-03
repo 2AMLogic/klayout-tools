@@ -10,7 +10,8 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools.cli import main
-from klayout_tools.ring_check import RingCheckError, run_seal_ring_check
+from klayout_tools.ring_check import RingCheckError
+from klayout_tools.seal_ring_check import run_seal_ring_check
 from klayout_tools.seal_ring_rules import PDK_SEAL_RULES
 
 _DBU = 0.001

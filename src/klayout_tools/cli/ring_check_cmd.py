@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import argparse
 
-from ..ring_check import RingCheckError, run_ring_check, run_seal_ring_check
+from ..ring_check import RingCheckError, run_ring_check
+from ..seal_ring_check import run_seal_ring_check
 from ._parsing import load_json_path_or_inline, load_region, parse_layer_pairs
 from .output import emit_error, emit_success, render_table
 
