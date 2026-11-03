@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --attest 9` accepts per-bench `cold_start`, `unbenched_rows`
+  and prints stderr progress** (PR #4849, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)): a `testbenches` entry may be a
+  `{"path", "cold_start"}` object whose command runs on its own and yields a
+  `command` check naming the bench; `unbenched_rows` (`{"row", "issue"}`
+  entries) records bench-less rows as passing `unbenched_row` checks. On
+  `main` only: `klayout-tools==0.8.0` refuses `unbenched_rows` as an unknown
+  item-9 inventory field.
 - **`klt gen bjt_array` runs on `sg13g2` as a SiGe HBT array** (issue #4850,
   documented in [`docs/cli/gen.md`](docs/cli/gen.md)): `params.flavor`
   (`npn13G2` default, `npn13G2l`, `npn13G2v`) instantiates the PDK's own cell
