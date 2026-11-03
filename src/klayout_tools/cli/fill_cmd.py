@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 
 from ..fill import FillError, run_fill
 from ._parsing import load_json_path_or_inline, load_region, parse_layer_pairs
@@ -77,10 +78,10 @@ def _print_text(report: dict) -> None:
     print(f"top_cell: {report['top_cell']}")
     print(f"window_um: {report['window_um']}")
     print(f"spacing_um: {report['spacing_um']}")
-    rows = [
+    rows: list[tuple[str, ...]] = [
         (
-            e["layer"],
-            e["fill_layer"],
+            str(e["layer"]),
+            str(e["fill_layer"]),
             str(e["fill_shape_count"]),
             f"{e['density_before']['mean']:.4f}",
             f"{e['density_after']['mean']:.4f}",
@@ -93,3 +94,75 @@ def _print_text(report: dict) -> None:
         rows,
         left_aligned={0, 1, 5},
     )
+
+
+def add_parser(
+    subparsers: argparse._SubParsersAction,
+    add_format_arg: Callable[[argparse.ArgumentParser], None],
+) -> None:
+    """Register the ``fill`` verb: density fill on a PDK's fill layers."""
+    p = subparsers.add_parser(
+        "fill",
+        help="insert density fill shapes on a PDK's fill layers",
+        description=(
+            "Add fill squares on the PDK fill layer that maps to each named "
+            "drawing layer, inside a prBoundary or --extent, keeping --spacing "
+            "from drawn shapes and out of --exclude boxes. Writes a new layout "
+            "(-o); the input is never modified. NOT a sign-off density check: "
+            "sign-off is the PDK's own density deck. See docs/cli/fill.md."
+        ),
+    )
+    p.add_argument("file", help="path to a GDSII or OASIS layout file")
+    p.add_argument("--pdk", required=True, choices=("sky130", "gf180mcu"))
+    p.add_argument(
+        "--layers",
+        required=True,
+        help="drawing layers to fill: JSON file or inline [[layer, datatype], ...]",
+    )
+    p.add_argument(
+        "--boundary",
+        default=None,
+        choices=("prBoundary",),
+        help="fill inside the drawn prBoundary (235/4) of the top cell",
+    )
+    p.add_argument(
+        "--extent",
+        default=None,
+        help="explicit fill extent 'x0,y0,x1,y1' (or JSON array) in micrometres",
+    )
+    p.add_argument(
+        "--exclude",
+        default=None,
+        help="exclusion boxes: JSON file or inline [[x0,y0,x1,y1], ...] (um)",
+    )
+    p.add_argument(
+        "--spacing",
+        type=float,
+        default=None,
+        help="fill-to-drawing spacing in um (required; no cited PDK default)",
+    )
+    p.add_argument(
+        "--target-density",
+        type=float,
+        default=None,
+        help="stop filling each window at this density (0-1); default fill all",
+    )
+    p.add_argument(
+        "--window", type=float, default=100.0, help="density window in um (default 100)"
+    )
+    p.add_argument(
+        "--fill-size",
+        type=float,
+        default=1.0,
+        help="fill square edge in um (default 1)",
+    )
+    p.add_argument(
+        "--fill-gap",
+        type=float,
+        default=None,
+        help="gap between fill squares in um (default: --spacing)",
+    )
+    p.add_argument("--top", default=None, help="top cell when the stream has several")
+    p.add_argument("-o", "--output", required=True, help="output layout path")
+    add_format_arg(p)
+    p.set_defaults(func=run)

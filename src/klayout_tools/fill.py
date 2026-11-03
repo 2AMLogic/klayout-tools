@@ -230,41 +230,15 @@ def _select(
     return chosen
 
 
-def run_fill(
-    layout_path: str,
+def _validate_params(
     pdk: str,
     layers: list[tuple[int, int]],
-    output_path: str,
-    boundary: str | None = None,
-    extent_um: tuple[float, float, float, float] | None = None,
-    exclude_um: list[tuple[float, float, float, float]] | None = None,
-    spacing_um: float | None = None,
-    target_density: float | None = None,
-    window_um: float = DEFAULT_WINDOW_UM,
-    fill_size_um: float = DEFAULT_FILL_SIZE_UM,
-    fill_gap_um: float | None = None,
-    top: str | None = None,
-) -> dict[str, Any]:
-    """Insert fill and write the result to ``output_path`` (the input file is
-    never modified). Returns a dict::
-
-        {
-            "schema_version": 1, "file": ..., "output": ..., "pdk": ...,
-            "top_cell": ..., "dbu_um": ..., "window_um": ...,
-            "spacing_um": ..., "fill_size_um": ..., "fill_gap_um": ...,
-            "target_density": float | None,
-            "status": "filled",
-            "layers": [
-                {"layer": "l/d", "fill_layer": "l/d", "fill_shape_count": n,
-                 "density_before": {"min","max","mean"},
-                 "density_after": {"min","max","mean"},
-                 "target_reached": bool | None},
-            ],
-        }
-
-    ``spacing_um`` is required: no PDK fill-to-drawing spacing is encoded in
-    this repo with a citable source.
-    """
+    spacing_um: float | None,
+    window_um: float,
+    fill_size_um: float,
+    fill_gap_um: float | None,
+    target_density: float | None,
+) -> tuple[dict[tuple[int, int], tuple[int, int]], float, float, float, float]:
     table = FILL_LAYERS.get(pdk)
     if table is None:
         raise FillError(
@@ -300,6 +274,101 @@ def run_fill(
             raise FillError(
                 f"--target-density must be in (0, 1], got {target_density!r}"
             )
+    return table, spacing, window, size, gap
+
+
+def _fill_layer(
+    kdb: Any,
+    layout: Any,
+    top_cell: Any,
+    lay: tuple[int, int],
+    table: dict[tuple[int, int], tuple[int, int]],
+    bounds: Any,
+    blocked: Any,
+    windows: list[Any],
+    dims_dbu: tuple[int, int, int],
+    target_density: float | None,
+) -> tuple[dict[str, Any], tuple[int, int], list[Any]]:
+    """Compute fill for one drawing layer; return (report, fill_layer, boxes)."""
+    size_dbu, pitch_dbu, spacing_dbu = dims_dbu
+    fill_lay = table[lay]
+    drawn = _layer_region(kdb, layout, top_cell, lay) + _layer_region(
+        kdb, layout, top_cell, fill_lay
+    )
+    drawn.merge()
+    free = bounds - blocked
+    if spacing_dbu > 0:
+        free = free - drawn.sized(spacing_dbu)
+    else:
+        free = free - drawn
+    free.merge()
+
+    cands = _candidates(kdb, free, size_dbu, pitch_dbu)
+    chosen = _select(kdb, cands, drawn, bounds, windows, target_density)
+    added = kdb.Region()
+    for box in chosen:
+        added.insert(box)
+    after = drawn + added
+    after.merge()
+    reached: bool | None = None
+    if target_density is not None:
+        reached = (
+            all(
+                d + 1e-9 >= target_density
+                for d in _per_window(kdb, bounds, after, windows)
+            )
+            if windows
+            else False
+        )
+    report = {
+        "layer": f"{lay[0]}/{lay[1]}",
+        "fill_layer": f"{fill_lay[0]}/{fill_lay[1]}",
+        "fill_shape_count": len(chosen),
+        "density_before": _density_stats(kdb, bounds, drawn, windows),
+        "density_after": _density_stats(kdb, bounds, after, windows),
+        "target_reached": reached,
+    }
+    return report, fill_lay, chosen
+
+
+def run_fill(
+    layout_path: str,
+    pdk: str,
+    layers: list[tuple[int, int]],
+    output_path: str,
+    boundary: str | None = None,
+    extent_um: tuple[float, float, float, float] | None = None,
+    exclude_um: list[tuple[float, float, float, float]] | None = None,
+    spacing_um: float | None = None,
+    target_density: float | None = None,
+    window_um: float = DEFAULT_WINDOW_UM,
+    fill_size_um: float = DEFAULT_FILL_SIZE_UM,
+    fill_gap_um: float | None = None,
+    top: str | None = None,
+) -> dict[str, Any]:
+    """Insert fill and write the result to ``output_path`` (the input file is
+    never modified). Returns a dict::
+
+        {
+            "schema_version": 1, "file": ..., "output": ..., "pdk": ...,
+            "top_cell": ..., "dbu_um": ..., "window_um": ...,
+            "spacing_um": ..., "fill_size_um": ..., "fill_gap_um": ...,
+            "target_density": float | None,
+            "status": "filled",
+            "layers": [
+                {"layer": "l/d", "fill_layer": "l/d", "fill_shape_count": n,
+                 "density_before": {"min","max","mean"},
+                 "density_after": {"min","max","mean"},
+                 "target_reached": bool | None},
+            ],
+        }
+
+    ``spacing_um`` is required: no PDK fill-to-drawing spacing is encoded in
+    this repo with a citable source.
+    """
+    table, spacing, window, size, gap = _validate_params(
+        pdk, layers, spacing_um, window_um, fill_size_um, fill_gap_um, target_density
+    )
 
     layout = load_layout(layout_path, FillError)
     import klayout.db as kdb
@@ -327,47 +396,19 @@ def run_fill(
     reports: list[dict[str, Any]] = []
     new_shapes: list[tuple[tuple[int, int], list[Any]]] = []
     for lay in layers:
-        lay = (int(lay[0]), int(lay[1]))
-        fill_lay = table[lay]
-        drawn = _layer_region(kdb, layout, top_cell, lay) + _layer_region(
-            kdb, layout, top_cell, fill_lay
+        report, fill_lay, chosen = _fill_layer(
+            kdb,
+            layout,
+            top_cell,
+            (int(lay[0]), int(lay[1])),
+            table,
+            bounds,
+            blocked,
+            windows,
+            (size_dbu, pitch_dbu, spacing_dbu),
+            target_density,
         )
-        drawn.merge()
-        free = bounds - blocked
-        if spacing_dbu > 0:
-            free = free - drawn.sized(spacing_dbu)
-        else:
-            free = free - drawn
-        free.merge()
-
-        cands = _candidates(kdb, free, size_dbu, pitch_dbu)
-        chosen = _select(kdb, cands, drawn, bounds, windows, target_density)
-        added = kdb.Region()
-        for box in chosen:
-            added.insert(box)
-        after = drawn + added
-        after.merge()
-        stats_after = _density_stats(kdb, bounds, after, windows)
-        reached: bool | None = None
-        if target_density is not None:
-            reached = (
-                all(
-                    d + 1e-9 >= target_density
-                    for d in _per_window(kdb, bounds, after, windows)
-                )
-                if windows
-                else False
-            )
-        reports.append(
-            {
-                "layer": f"{lay[0]}/{lay[1]}",
-                "fill_layer": f"{fill_lay[0]}/{fill_lay[1]}",
-                "fill_shape_count": len(chosen),
-                "density_before": _density_stats(kdb, bounds, drawn, windows),
-                "density_after": stats_after,
-                "target_reached": reached,
-            }
-        )
+        reports.append(report)
         new_shapes.append((fill_lay, chosen))
 
     for fill_lay, chosen in new_shapes:

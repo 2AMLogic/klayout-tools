@@ -4,8 +4,8 @@
     "version": "0.8.0",
     "date": "2026-10-24"
   },
-  "verb_count": 66,
-  "mcp_tool_count": 91,
+  "verb_count": 67,
+  "mcp_tool_count": 92,
   "decks": [
     "asap7",
     "gf180mcu",
@@ -401,6 +401,17 @@
           "name": "mcp",
           "summary": "serve the klt verbs to MCP-capable agent frameworks",
           "doc": "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/mcp.md"
+        }
+      ]
+    },
+    {
+      "id": "more",
+      "title": "More",
+      "verbs": [
+        {
+          "name": "fill",
+          "summary": "insert density fill shapes on a PDK's fill layers",
+          "doc": "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/fill.md"
         }
       ]
     }
