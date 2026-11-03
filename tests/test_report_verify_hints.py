@@ -44,3 +44,8 @@ def test_stale_pin_names_the_failed_comparison():
         "actual": "sha256:layoutA",
         "match": False,
     }
+
+
+def test_stale_pin_without_input_provenance_is_unchanged():
+    detail = stale_pin({"content_hash": "sha256:a"}, {"content_hash": "sha256:b"})
+    assert set(detail) == {"content_hash_pin", "hash_check"}
