@@ -695,8 +695,7 @@ def _runner_gate_release(version: str) -> str | None:
 #: ``twoport_noise`` (``analysis.noise``, #3339), and ``snm``
 #: (``measurements[].snm``, #3895), and ``search`` (``measurements[].search``,
 #: #4121). ``eye`` (``measurements[].eye``, #4292) landed after ``v0.8.0``, so
-#: its first release segment is ``0.8.1``, as is ``stress``
-#: (``measurements[].stress``, #4592/#4858).
+#: its first release segment is ``0.8.1``, as is ``stress`` (#4592/#4858).
 def _declared(finder: Callable[[list[Any]], Any]) -> Callable[[dict[str, Any]], bool]:
     """Detector: the request declares at least one measurement ``finder`` finds."""
     return lambda request: bool(finder(request.get("measurements") or []))
@@ -739,21 +738,18 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: Registry features a runner must be *known* to support (issue #2924): a
 #: runner that predates one, or whose version cannot be read, is refused
 #: whatever ``runner_version_check`` says, because the alternative is a worker
-#: that accepts the request and omits the metric. Every other registry
-#: feature keeps the warn-and-run behaviour of #3249. ``stimulus`` is
-#: mandatory for the same reason: an older runner would ignore the key and
-#: simulate with the digital control lines undriven, exiting 0 with
-#: plausible-looking numbers (#2977). ``dual_injection`` is mandatory because
-#: an older runner would ignore ``analysis.passes`` and run a single AC pass,
-#: or drop the ``tian`` metrics (#3161). ``complex_vectors`` is mandatory
-#: because an older runner would ignore the option and return no sidecar
-#: (#3337). ``twoport`` is mandatory because an older runner would reject the
-#: unknown analysis kind or, worse, run it as a plain AC with no S-parameters
-#: (#3338). ``twoport_noise`` is mandatory because an older runner would reject
-#: ``analysis.noise`` as an unknown key or omit ``nf_db`` and the stability
-#: factors (#3339). ``corners.params`` is mandatory because an older runner has
-#: no parser for the axis and ignores it, running one corner per process x
-#: temperature with ``status: pass`` (#4235).
+#: that accepts the request and omits the metric. Every other feature keeps the
+#: warn-and-run behaviour of #3249. ``stimulus`` is mandatory because an older
+#: runner would simulate with undriven control lines, exiting 0 (#2977).
+#: ``dual_injection`` is mandatory because an older runner would ignore
+#: ``analysis.passes`` and run a single AC pass or drop ``tian`` (#3161).
+#: ``complex_vectors`` is mandatory because an older runner would return no
+#: sidecar (#3337). ``twoport`` is mandatory because an older runner would
+#: reject the unknown analysis kind or run a plain AC (#3338).
+#: ``twoport_noise`` is mandatory because an older runner would reject
+#: ``analysis.noise`` or omit ``nf_db`` (#3339). ``corners.params`` is
+#: mandatory because an older runner ignores the axis, running one corner per
+#: process x temperature with ``status: pass`` (#4235).
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "transfer",
