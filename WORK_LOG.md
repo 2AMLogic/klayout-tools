@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-03
 
+- **PR #4874**: fix(synthesize): normalize source directories out of written netlist
+- **Issue #4872** (closed): klt synthesize: netlist embeds absolute source path in internal net names (non-reproducible across directories)
+- **PR #4871**: docs(drc): record gf180mcu_density deck behavior against options.boundary
+- **Issue #4844** (closed): Live-verify gen-compose options.boundary (235/4) against gf180mcu_density.lydrc
 - **PR #4869**: feat(sim): report best-effort peak_rss_bytes per unit
 - **Issue #4867** (closed): klt sim: surface ngspice progress / simulated-time-reached when a batch unit is killed on timeout
 - **PR #4855**: feat: place sg13g2 SiGe HBT arrays from the PDK's own npn13G2* cells
