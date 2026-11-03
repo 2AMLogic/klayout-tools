@@ -296,6 +296,7 @@ from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_
 # Issue #2745: same one-directional split as `synthesize_arithmetic.py` --
 # `synthesize_memory.py` imports this module's helpers at call time only.
 from .synthesize_memory import collect_memory_evidence
+from .synthesize_netlist_normalize import rewrite_netlist
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1392,10 +1393,9 @@ def run_synthesize(
     # so a netlist with no `signed` declaration at all (the common case) is
     # never touched -- not even its mtime.
     netlist_text = _read_produced_netlist(netlist_path)
-    stripped_netlist_text = _strip_signed_qualifiers(netlist_text)
-    if stripped_netlist_text != netlist_text:
-        with open(netlist_path, "w", encoding="utf-8") as handle:
-            handle.write(stripped_netlist_text)
+    rewrite_netlist(  # issue #4872: also drops host source dirs
+        netlist_path, netlist_text, _strip_signed_qualifiers(netlist_text), elab_sources
+    )
 
     module_stats = _read_stats(stats_path, hdl_toplevel)
     timing = _read_produced_abc_timing(abc_log_path, delay_target_ps)

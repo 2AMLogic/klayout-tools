@@ -710,7 +710,8 @@
         "klayout_tools.synthesize",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
-        "klayout_tools.synthesize_memory"
+        "klayout_tools.synthesize_memory",
+        "klayout_tools.synthesize_netlist_normalize"
       ]
     },
     "techmap": {

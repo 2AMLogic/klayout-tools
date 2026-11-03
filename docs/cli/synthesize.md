@@ -557,6 +557,18 @@ downstream reader — is never touched. The netlist file is only rewritten
 when something actually changed, so the common case (no `signed` at all)
 leaves it untouched, mtime included.
 
+### Source-path normalization (issue #4872)
+
+The written netlist depends only on the inputs, not on the directory the
+request ran in. Yosys names some internal nets after the path it read the
+source from (`\f$func$/abs/dir/f.v:3$2.x`, typical of sv2v output with
+functions and casts); after `write_verilog`, `run_synthesize` drops each
+source's directory prefix, leaving `\f$func$f.v:3$2.x`. This runs before
+`netlist_sha256` is computed, so two runs of the same request from different
+directories produce byte-identical `*_synth.v` and equal `netlist_sha256`, and
+no host path leaks into a committed netlist. A netlist containing no such
+path is never rewritten. No JSON field changes.
+
 ## PDK / liberty resolution
 
 `request.pdk.cell_library`/`corner` are resolved to a liberty file via the
