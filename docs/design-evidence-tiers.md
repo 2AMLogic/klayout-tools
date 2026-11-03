@@ -313,6 +313,9 @@ written to every block.
      declaring the full row set; the item is met only when every cited
      envelope passes and every declared row is covered, and rows no
      envelope can express are declared gaps that keep it unmet.
+     A row defined by an analytical/linear-model run may instead cite a
+     committed `model-run` envelope (same per-row, limits-bearing
+     coverage rule; `klt` does not execute the model).
    - *Digital* — multi-corner static timing analysis (setup and hold
      across the PVT corner set) plus a bit-exact functional test suite,
      with per-corner and per-test pass/fail recorded. For the full-custom

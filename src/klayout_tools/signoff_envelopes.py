@@ -356,6 +356,22 @@ class _GenericEnvelope(_GenericRequired, total=False):
     provenance: dict[str, Any] | None
 
 
+class _ModelRunRequired(_EnvelopeCommon):
+    # Issue #4859: a committed analytical/linear-model run record (docs/cli/
+    # signoff.md "Model-run evidence"). `kind` is the explicit
+    # self-declaration `_classify` recognises it by; `measurements` reuses
+    # the `klt sim` rollup shape so row-coverage derivation applies as-is.
+    kind: str
+    status: str
+    method: str
+    measurements: list[Any]
+
+
+class _ModelRunEnvelope(_ModelRunRequired, total=False):
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
 class _ErrorRequired(_EnvelopeCommon):
     error: dict[str, Any]
 
@@ -386,6 +402,7 @@ _EvidenceEnvelope = (
     | _LefAbstractEnvelope
     | _SynthesizeEnvelope
     | _GenericEnvelope
+    | _ModelRunEnvelope
     | _ErrorEnvelope
 )
 
@@ -412,6 +429,7 @@ _ENVELOPE_SHAPES: dict[str, Any] = {
     "lef-abstract": _LefAbstractEnvelope,
     "synthesize": _SynthesizeEnvelope,
     "generic": _GenericEnvelope,
+    "model-run": _ModelRunEnvelope,
     "error": _ErrorEnvelope,
 }
 

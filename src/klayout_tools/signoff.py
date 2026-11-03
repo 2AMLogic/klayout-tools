@@ -329,8 +329,8 @@ _ITEM_ALLOWED_KINDS: dict[int, dict[str, set[str]]] = {
     # explicitly as items 3/4/7 do, so they get the same treatment -- see
     # this module's "Kind-restricting items 5, 6 and 8" docstring section.
     5: {
-        "analog": {"sim"},
-        "digital": {"sta", "functional-verification", "sim"},
+        "analog": {"sim", "model-run"},
+        "digital": {"sta", "functional-verification", "sim", "model-run"},
     },
     6: {"analog": {"yield"}, "digital": {"yield"}},
     7: {
@@ -502,6 +502,8 @@ _ITEMS_ACCEPTING_SEAM_CHECK_EVIDENCE: frozenset[int] = frozenset({2})
 #: ``None``.
 _OPT_IN_KIND_ITEMS: dict[str, frozenset[int]] = {
     "generic": _ITEMS_ACCEPTING_GENERIC_EVIDENCE,
+    # Issue #4859: a committed analytical/linear-model run record; item 5 only.
+    "model-run": frozenset({5}),
     "power": _ITEMS_ACCEPTING_POWER_EVIDENCE,
     "erc": _ITEMS_ACCEPTING_ERC_EVIDENCE,
     "place-and-route": _ITEMS_ACCEPTING_PLACE_AND_ROUTE_EVIDENCE,
@@ -1556,6 +1558,7 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
     "functional-verification": "pass_partial",
     "place-and-route": "ok_partial",
     "generic": "pass_partial",
+    "model-run": "pass_partial",
     "power": "pass_partial",
 }
 
@@ -1646,6 +1649,7 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                             | "power" | "sta" | "functional-verification"
                             | "erc" | "place-and-route" | "socket-check"
                             | "seam-check" | "lef-abstract" | "synthesize" | "generic"
+                            | "model-run"
                             | "error",
                     "status": <str> | None,
                     "passed": <bool>,
@@ -2118,6 +2122,12 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     # full contract and which --manifest items may cite it.
     elif envelope.get("kind") == "generic":
         kind = "generic"
+
+    # "model-run" (issue #4859): a committed analytical/linear-model run
+    # record, recognised only by its explicit self-declaration like
+    # "generic". Item 5 only; see docs/cli/signoff.md "Model-run evidence".
+    elif envelope.get("kind") == "model-run":
+        kind = "model-run"
 
     # `klt seam-check` (issue #4189; docs/cli/seam-check.md): carries a
     # `violations` list like `klt drc`, so it must be recognised *before* the
@@ -2694,6 +2704,13 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
     :func:`~klayout_tools.coverage.coverage_refusal_reason`.
     """
     refusal = coverage_refusal_reason(envelope)
+    if kind == "model-run" and refusal is None:
+        # Issue #4859: no `coverage` block to count, so read the rollup
+        # itself -- a model-run with no limits-bearing measurement applied
+        # no bound to anything.
+        raw = envelope.get("measurements")
+        limited = any(isinstance(m, dict) and m.get("limits") for m in (raw or []))
+        return None if limited else _REASON_NO_LIMITS_CHECKED
     if kind == "sim" and refusal is None:
         # Issue #3769: sim coverage counts an unlimited measurement as a
         # checked observation, so `nothing_checked` stays false for an
@@ -2772,6 +2789,7 @@ _PASSING_STATUS_BY_KIND: dict[str, str] = {
     "socket-check": "pass",
     "seam-check": "pass",
     "generic": "pass",
+    "model-run": "pass",
 }
 
 
@@ -2957,6 +2975,14 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     elif kind in _PASSING_STATUS_BY_KIND:
         # sim/pex/place-and-route/socket-check/generic: one passing token.
         passed = envelope.get("status") == _PASSING_STATUS_BY_KIND[kind]
+        if passed and kind == "model-run":
+            # Issue #4859: caller-asserted status is not enough -- any
+            # per-point entry that does not itself pass fails the run.
+            points = envelope.get("corners")
+            passed = not any(
+                not isinstance(c, dict) or c.get("status") != "pass"
+                for c in (points if isinstance(points, list) else [])
+            )
     elif kind == "yield":
         passed = envelope.get("status") in ("pass", "reported")
     elif kind == "extract":
@@ -3686,6 +3712,12 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
         detail = {
             "summary": envelope.get("summary"),
             "source": envelope.get("source"),
+        }
+    elif kind == "model-run":
+        detail = {
+            "method": envelope.get("method"),
+            "measurement_count": len(envelope.get("measurements") or []),
+            "executed_by_klt": False,
         }
     else:
         # kind == "error"
@@ -5420,8 +5452,9 @@ def _input_artifact_candidates(
         # hashed, so falling through to another on a failed resolution would
         # verify the wrong artifact.
         return _resolve_input_artifact_value(value, spec, evidence_dir, repo_root)
-    if kind == "generic":
-        # Issue #2403: a `generic` envelope names its own fields by
+    if kind in ("generic", "model-run"):
+        # Issue #2403 (and #4859 for `model-run`, whose model record is
+        # likewise author-named): a `generic` envelope names its own fields by
         # definition (`_INPUT_ARTIFACT_FIELDS` above has no entry for it),
         # so the only field this module ever reads for it is this one
         # explicit, opt-in name -- never `source` (documented as purely
@@ -6731,6 +6764,11 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
+    if resolution["kind"] == "model-run":
+        # Issue #4859: disclosure only -- `method` is echoed, never graded,
+        # and klt did not execute the model.
+        citation["method"] = resolution["envelope"].get("method")
+        citation["executed_by_klt"] = False
     # Issue #2875: per-role verification of a `pex` envelope's schematic-side
     # inputs (request, body, DUT, reference netlist). Present only when the
     # cited envelope records those digests; legacy envelopes omit it.
@@ -7326,7 +7364,10 @@ def _grade_timing_margin(
     does not apply or the timing margin is satisfied."""
     if required_kind_pair is None or not graded:
         return None
-    if {g[2]["kind"] for _, _, g in graded if g[2] is not None} != {"sim"}:
+    kinds = {g[2]["kind"] for _, _, g in graded if g[2] is not None}
+    # Issue #4859: a `model-run` is sim-like here -- it alone neither
+    # satisfies the STA+functional pair nor escapes the timing-margin rule.
+    if not kinds or not kinds <= {"sim", "model-run"}:
         return None
     missing_margin = _missing_timing_margin(
         spec_rows,

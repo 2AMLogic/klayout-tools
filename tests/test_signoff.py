@@ -4186,6 +4186,7 @@ def test_every_recognized_kind_declares_a_typed_shape():
         # Issue #4015: T1 item 1's netlist-evidence half.
         "synthesize",
         "generic",
+        "model-run",
         "error",
     }
 
