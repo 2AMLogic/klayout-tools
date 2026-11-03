@@ -113,6 +113,7 @@ from . import (
     sim_snm_meas,
     sim_staging,
     sim_step_resolution,
+    sim_stress,
     sim_transfer_meas,
     sim_twoport,
 )
@@ -694,7 +695,8 @@ def _runner_gate_release(version: str) -> str | None:
 #: ``twoport_noise`` (``analysis.noise``, #3339), and ``snm``
 #: (``measurements[].snm``, #3895), and ``search`` (``measurements[].search``,
 #: #4121). ``eye`` (``measurements[].eye``, #4292) landed after ``v0.8.0``, so
-#: its first release segment is ``0.8.1``.
+#: its first release segment is ``0.8.1``, as is ``stress``
+#: (``measurements[].stress``, #4592/#4858).
 def _declared(finder: Callable[[list[Any]], Any]) -> Callable[[dict[str, Any]], bool]:
     """Detector: the request declares at least one measurement ``finder`` finds."""
     return lambda request: bool(finder(request.get("measurements") or []))
@@ -708,6 +710,7 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "eye": ((0, 8, 1), _declared(sim_eye.eye_measurements)),
     "step_resolution": ((0, 8, 1), _step_res_declared),
     "settled": ((0, 8, 1), _declared(sim_settled.settled_measurements)),
+    "stress": ((0, 8, 1), _declared(sim_stress.stress_measurements)),
     "search": ((0, 7, 1), _declared(sim_search.search_measurements)),
     "stimulus": (
         (0, 7, 1),
@@ -759,6 +762,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "eye",
         "step_resolution",
         "settled",
+        "stress",
         "stimulus",
         "dual_injection",
         "complex_vectors",
