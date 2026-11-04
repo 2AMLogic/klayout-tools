@@ -179,6 +179,7 @@ from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE, shard_scoped_points
 from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_decks import run_deck_request
+from .sim_echo_messages import echo_unsupported_message, zipped_length_message
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
 from .sim_errors import SimError as SimError
@@ -4179,7 +4180,9 @@ def _run_sim_corners(
             measurements_spec=measurements_spec,
         )
 
-    _require_params_echo(dispatch_points, corners_new, backend=backend)
+    _require_params_echo(
+        dispatch_points, corners_new, backend=backend, env=remote_environment
+    )
     _require_nodeset_echo(dispatch_points, corners_new, backend=backend)
     _require_nodeset_echo(
         dispatch_points,
@@ -4189,7 +4192,9 @@ def _run_sim_corners(
         attr="initial_conditions",
         code=IC_UNSUPPORTED_WORKER_CODE,
     )
-    _require_options_echo(dispatch_points, corners_new, backend=backend)
+    _require_options_echo(
+        dispatch_points, corners_new, backend=backend, env=remote_environment
+    )
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
 
     if resume:
@@ -5618,7 +5623,7 @@ def _expand_param_axis(
             for i, value in enumerate(values)
         ]
     if len({len(values) for values in columns.values()}) != 1:
-        raise SimError("corners.params arrays must all be the same length")
+        raise SimError(zipped_length_message("corners.params", columns))
     supply_names = {str(key).lower() for key in (corners_spec.get("supply_v") or {})}
     clash = sorted(set(columns) & supply_names)
     if clash:
@@ -5703,7 +5708,7 @@ def _expand_options_axis(
             for i, value in enumerate(values)
         ]
     if len({len(values) for values in columns.values()}) != 1:
-        raise SimError("corners.options arrays must all be the same length")
+        raise SimError(zipped_length_message("corners.options", columns))
     count = len(next(iter(columns.values())))
     rows = [
         dict(sorted((name, values[i]) for name, values in columns.items()))
@@ -6021,7 +6026,7 @@ def _expand_corners(
     if supply_spec:
         lengths = {len(values) for values in supply_spec.values()}
         if len(lengths) != 1:
-            raise SimError("corners.supply_v arrays must all be the same length")
+            raise SimError(zipped_length_message("corners.supply_v", supply_spec))
         (count,) = lengths
         supply_points = [
             {key: values[i] for key, values in supply_spec.items()}
@@ -9414,6 +9419,7 @@ def _require_params_echo(
     corners: list[dict[str, Any]],
     *,
     backend: str = "remote",
+    env: dict[str, Any] | None = None,
 ) -> None:
     """Fail the request when an off-host worker did not honor a parameter
     axis (issue #3035).
@@ -9447,11 +9453,7 @@ def _require_params_echo(
                 break
     if problem is not None:
         raise SimError(
-            "the remote/batch worker did not honor corners.params -- "
-            f"{problem}. A worker built before the parameter axis (issue "
-            "#3035) ignores it and would simulate the netlist default for "
-            "every row; update the runner image to this klt release, or "
-            "use a local backend. No result was reported",
+            echo_unsupported_message("params", problem, env),
             code=PARAMS_UNSUPPORTED_WORKER_CODE,
         )
 
@@ -9464,6 +9466,7 @@ def _require_options_echo(
     corners: list[dict[str, Any]],
     *,
     backend: str = "remote",
+    env: dict[str, Any] | None = None,
 ) -> None:
     """Fail the request when an off-host worker did not honor a
     ``corners.options`` axis (issue #3125) -- the counterpart of
@@ -9492,11 +9495,7 @@ def _require_options_echo(
                 break
     if problem is not None:
         raise SimError(
-            "the remote/batch worker did not honor corners.options -- "
-            f"{problem}. A worker built before the options axis (issue "
-            "#3125) ignores it and would simulate the default solver "
-            "tolerances for every rung; update the runner image to this klt "
-            "release, or use a local backend. No result was reported",
+            echo_unsupported_message("options", problem, env),
             code=OPTIONS_UNSUPPORTED_WORKER_CODE,
         )
 

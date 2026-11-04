@@ -2045,7 +2045,10 @@ the packaged `data/` copy. See
   existed passes it and ignores that field. For `corners.params` `klt sim`
   does not rely on the version: it requires every returned corner to echo
   the dispatched `corner_id` and `params`, and fails the request with
-  `params_unsupported_worker` otherwise (see "Corner axes"). `corners.params`
+  `params_unsupported_worker` otherwise (see "Corner axes"); the message names
+  both candidate causes (an old runner image, or a result paired with the wrong
+  request/shard) and carries the batch job id (and shard index when sharded)
+  so the two can be told apart. `corners.params`
   is also a **mandatory** runner feature (first in `0.8.0`, #4235): a runner
   that predates it, or whose version is unreadable, is refused with
   `batch_runner_feature_unsupported` even under `runner_version_check: warn`.
@@ -3858,6 +3861,15 @@ shows `vector <name> is not available or has zero length`). This applies to
 ordinary file-scope `.meas` cards; `analysis_steps[]` control-scope `meas`
 has different semantics (see that section). Making `.meas` scalars visible to
 `expr` is a separate contract change.
+
+**Backends behave the same.** The deck is generated identically for
+`--backend local` and `--backend batch`, so an `expr` over a `.meas` result
+errors on both with the diagnostic above; `expr` -> `expr` chaining resolves on
+both. A request that grades `PASS` locally but `ERROR` on every batch point
+therefore is not explained by this rule — attach its request JSON to
+[#4902](https://github.com/2AMLogic/klayout-tools/issues/4902). (Measured
+locally on ngspice 46: `a`,`b` as `.meas` + `r = a/b` -> `r` errors; `a`,`b`,`r`
+all `expr` -> `r` passes. No batch run was made from the dispatch host.)
 
 ```json
 "measurements": [
@@ -7395,7 +7407,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `missing_include`  | ngspice's own `Error: Could not find include file ...` — a `.include`/`.inc` target that did not resolve. Everything downstream of it (missing devices, then `.meas` cards finding no vector) reads like a broken circuit, so it gets its own code rather than surfacing only as measurement failures ([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)). For an off-host backend this is now unreachable by construction — the include closure is staged, or the submit is refused (see "Off-host backends stage the netlist's `.include` closure" above). |
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w`, or `w * nf` when fingered, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
-| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). |
+| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
 | `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
 | `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |

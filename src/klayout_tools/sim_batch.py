@@ -126,6 +126,7 @@ from .remote_launcher import (
     published_runner_identities,
 )
 from .sim_batch_features import annotate_gap, gap_note
+from .sim_batch_hints import hint_existing_fatal, with_runner_expr_hint
 from .sim_remote import (
     _build_remote_request,
     _points_to_push,
@@ -3892,7 +3893,7 @@ def _fatal_log_diagnostic(log_text: str) -> dict[str, Any] | None:
     for diagnostic in _classify_diagnostics(log_text):
         if diagnostic.get("code") in _NGSPICE_FATAL_CODES:
             _mark_analysis_not_started([diagnostic], log_text)
-            return diagnostic
+            return with_runner_expr_hint(diagnostic)
     return None
 
 
@@ -3906,8 +3907,6 @@ def _surface_log_fatal(corners: list[dict[str, Any]], collected: str) -> None:
     ``artifacts.log`` (``<$EDA_OUTPUT_DIR>/artifacts/<rel>``); with exactly one
     log in the tree it applies to every such corner. A no-op when no log was
     collected."""
-    from .sim import _NGSPICE_FATAL_CODES
-
     logs = _find_engine_logs(collected)
     if not logs:
         return
@@ -3916,7 +3915,7 @@ def _surface_log_fatal(corners: list[dict[str, Any]], collected: str) -> None:
         if corner.get("status") != "error":
             continue
         diagnostics = corner.setdefault("diagnostics", [])
-        if any(d.get("code") in _NGSPICE_FATAL_CODES for d in diagnostics):
+        if hint_existing_fatal(diagnostics):
             continue
         log_path = None
         remote = (corner.get("artifacts") or {}).get("log")

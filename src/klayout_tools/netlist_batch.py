@@ -449,7 +449,7 @@ def build_job_spec(
         [
             'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
             'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
-            "w=$(mktemp -d)",
+            'w=$(mktemp -d) && export HOME="${HOME:-$(mktemp -d)}"',
             f'tar -xzf "$EDA_INPUT_DIR/{BATCH_TREE_FILENAME}" -C "$w"',
             'cd "$w"',
             'printf \'%s\\n%s\\n\' "$w" "$(pwd -P)" >'
