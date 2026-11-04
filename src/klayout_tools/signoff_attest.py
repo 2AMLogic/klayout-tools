@@ -874,8 +874,8 @@ def _pin_checks(pins: Any) -> list[dict[str, Any]]:
     """Item 9's reproducibility pins: the PDK name + revision (or the explicit
     ``{"none": true, "reason": "..."}`` no-PDK form -- an absent ``pdk`` never
     means "no PDK"), and at least one tool version. A missing or empty pin is
-    a failed check, not a malformed inventory -- the inventory is well-formed, it just does not
-    yet say how to reproduce the run."""
+    a failed check, not a malformed inventory -- the inventory is well-formed,
+    it just does not yet say how to reproduce the run."""
     pins = pins if isinstance(pins, Mapping) else {}
     pdk = pins.get("pdk")
     pdk_value = None
