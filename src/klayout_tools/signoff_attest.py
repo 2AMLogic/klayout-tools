@@ -871,17 +871,34 @@ def _skipped_check(
 
 
 def _pin_checks(pins: Any) -> list[dict[str, Any]]:
-    """Item 9's reproducibility pins: the PDK name + revision, and at least
-    one tool version. A missing or empty pin is a failed check, not a
-    malformed inventory -- the inventory is well-formed, it just does not
+    """Item 9's reproducibility pins: the PDK name + revision (or the explicit
+    ``{"none": true, "reason": "..."}`` no-PDK form -- an absent ``pdk`` never
+    means "no PDK"), and at least one tool version. A missing or empty pin is
+    a failed check, not a malformed inventory -- the inventory is well-formed, it just does not
     yet say how to reproduce the run."""
     pins = pins if isinstance(pins, Mapping) else {}
     pdk = pins.get("pdk")
     pdk_value = None
     if isinstance(pdk, Mapping):
-        name, revision = pdk.get("name"), pdk.get("revision")
-        if isinstance(name, str) and name and isinstance(revision, str) and revision:
-            pdk_value = {"name": name, "revision": revision}
+        if pdk.get("none") is True:
+            # Explicit no-PDK form: only ``none`` and a non-empty ``reason``;
+            # mixing in ``name``/``revision`` is contradictory and fails.
+            reason = pdk.get("reason")
+            if (
+                isinstance(reason, str)
+                and reason.strip()
+                and set(pdk) == {"none", "reason"}
+            ):
+                pdk_value = {"none": True, "reason": reason}
+        else:
+            name, revision = pdk.get("name"), pdk.get("revision")
+            if (
+                isinstance(name, str)
+                and name
+                and isinstance(revision, str)
+                and revision
+            ):
+                pdk_value = {"name": name, "revision": revision}
     tools = pins.get("tools")
     tools_value = None
     if (
