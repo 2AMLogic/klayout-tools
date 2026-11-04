@@ -5647,10 +5647,7 @@ def _grade_evidence(
             None,
             {
                 "content_hash_pin": _PIN_UNVERIFIABLE,
-                "content_hash_pin_note": (
-                    f"{check_kind} envelopes carry no "
-                    "provenance.input.content_hash; the pin cannot be compared"
-                ),
+                "content_hash_pin_note": _unverifiable_pin_note(check_kind, resolution),
             },
         )
     if pin_state == _PIN_STALE:
@@ -5757,9 +5754,34 @@ def _kind_gated_failure_detail(
     return detail
 
 
+#: Issue #4893: ``citation.content_hash_basis`` when the live hash is the
+#: grader's own re-hash of the cited evidence file (``functional-verification``).
+_CONTENT_HASH_BASIS_EVIDENCE_FILE = "evidence_file"
+
 _PIN_VERIFIED = "verified"
 _PIN_STALE = "stale"
 _PIN_UNVERIFIABLE = "unverifiable"
+
+
+def _unverifiable_pin_note(check_kind: str, resolution: Mapping[str, Any]) -> str:
+    """Why a pinned ``content_hash`` cannot be compared (issues #3747, #4893)."""
+    if check_kind == "functional-verification":
+        if resolution.get("command") is not None:
+            return (
+                "functional-verification envelopes carry no "
+                "provenance.input.content_hash, and a command-backed citation's "
+                "stdout is not a stable file the grader can re-hash; cite the "
+                "envelope as a file to pin its bytes"
+            )
+        return (
+            "functional-verification envelopes carry no "
+            "provenance.input.content_hash, and the cited evidence file could "
+            "not be re-hashed; the pin cannot be compared"
+        )
+    return (
+        f"{check_kind} envelopes carry no "
+        "provenance.input.content_hash; the pin cannot be compared"
+    )
 
 
 def _content_hash_pin_state(
@@ -6596,6 +6618,23 @@ def _resolve_evidence(
             check_kind, envelope, spec, actual_hash, file_label, repo_root
         )
 
+    # Issue #4893: a `functional-verification` envelope records no input hash,
+    # so a file-backed citation that the manifest pins is re-hashed here and
+    # the pin binds the evidence file's own bytes. Hashed only when pinned, so
+    # an unpinned entry's output is unchanged.
+    content_hash_basis: str | None = None
+    if (
+        actual_hash is None
+        and check_kind == "functional-verification"
+        and file_label is not None
+        and spec.get("content_hash") is not None
+    ):
+        evidence_digest = sha256_file(file_label)
+        if evidence_digest is not None:
+            actual_hash = f"sha256:{evidence_digest}"
+            content_hash_basis = _CONTENT_HASH_BASIS_EVIDENCE_FILE
+            input_verified = True
+
     pex_inputs, input_members, input_verified = _fold_kind_inputs(
         check_kind, envelope, spec, file_label, actual_hash, input_verified, repo_root
     )
@@ -6610,6 +6649,7 @@ def _resolve_evidence(
             "exit_status": exit_status,
             "content_hash": actual_hash,
             "content_hash_unresolved": content_hash_unresolved,
+            "content_hash_basis": content_hash_basis,
             "input_verified": input_verified,
             "pex_inputs": pex_inputs,
             "input_members": input_members,
@@ -6637,6 +6677,10 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
+    if resolution.get("content_hash_basis") is not None:
+        # Issue #4893: `content_hash` is a re-hash of the cited evidence file
+        # itself, not a design input.
+        citation["content_hash_basis"] = resolution["content_hash_basis"]
     if resolution["kind"] == "model-run":
         # Issue #4859: disclosure only -- `method` is echoed, never graded,
         # and klt did not execute the model.
