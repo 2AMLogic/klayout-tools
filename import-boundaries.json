@@ -607,6 +607,7 @@
         "klayout_tools.sim_batch_async",
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_features",
+        "klayout_tools.sim_batch_hints",
         "klayout_tools.sim_commands",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_crossings",
