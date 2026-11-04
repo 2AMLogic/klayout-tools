@@ -980,6 +980,7 @@ def _stage_script_lines(
     max_fanout: float | None,
     input_delay_ns: float | None,
     output_delay_ns: float | None,
+    power_activity: dict[str, float] | None = None,
     cell_library: str,
     seed: int,
     output_dir: str,
@@ -997,6 +998,7 @@ def _stage_script_lines(
         _ROUTING_LAYER_RANGE,
         _ROW_RAIL_STRAP,
     )
+    from .post_route_sta import _power_activity_lines
 
     global_placement_call = _global_placement_call(
         placement_density, _GLOBAL_PLACEMENT_DENSITY, seed
@@ -1319,6 +1321,9 @@ def _stage_script_lines(
             lines += [f"filler_placement {{{filler_masters}}}", "global_connect"]
         lines += ["estimate_parasitics -global_routing"]
 
+    # Issue #4914: global switching activity for `report_power_metric`
+    # (empty, so byte-identical, when `constraints.power_activity` is omitted).
+    lines += _power_activity_lines(power_activity)
     lines += _metrics_report_lines(
         include_fmax=True,
         include_power=True,

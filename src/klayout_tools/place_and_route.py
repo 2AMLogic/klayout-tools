@@ -380,6 +380,11 @@ from .place_and_route_sta import _post_route_spef_metrics as _post_route_spef_me
 from .place_and_route_sta import _run_corner_sweep as _run_corner_sweep
 from .place_and_route_sta import _spef_sta_script_lines as _spef_sta_script_lines
 from .place_and_route_sta import def_pin_names as def_pin_names
+from .post_route_sta import (
+    PostRouteStaError,
+    _power_basis_block,
+    _validate_power_activity,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1837,6 +1842,11 @@ def _run_single_corner(
         input_delay_ns,
         output_delay_ns,
     ) = _validate_constraints(request.get("constraints"))
+    # Issue #4914: same validation/semantics as `klt sta`'s (issue #3744).
+    try:
+        power_activity = _validate_power_activity(request.get("constraints") or {})
+    except PostRouteStaError as exc:
+        raise PlaceAndRouteError(str(exc)) from exc
     seed = _validate_seed(request["seed"])
     target_stage = _validate_target_stage(request.get("target_stage", "route"))
     route_critical_nets_percentage = _validate_route_critical_nets_percentage(
@@ -1954,6 +1964,7 @@ def _run_single_corner(
             max_fanout=max_fanout,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            power_activity=power_activity,
             cell_library=cell_library,
             seed=seed,
             output_dir=output_dir,
@@ -2457,6 +2468,9 @@ def _run_single_corner(
         "seed": seed,
         # Additive field (issue #4716): the resolved global-placement /
         # global-route knobs actually applied (defaults included).
+        # Additive field (issue #4914): what `estimated_power_mw` was
+        # computed under, as in `klt sta`.
+        "power_basis": _power_basis_block(power_activity, False),
         "applied": {
             "placement_density": placement_density,
             "route_congestion_iterations": route_congestion_iterations,
@@ -3196,6 +3210,11 @@ def _extract_stage_metrics(
             entry.get("worst_hold_slack_ns"),
         )
     )
+    # Issue #4914: `timing__fmax` derives from the same unconstrained design
+    # and is not backed by any timed path then; null it (keeping the key's
+    # `number | null` type) so it cannot be read as an achievable clock.
+    if entry["timing_status"] == "unconstrained" and "fmax_mhz" in entry:
+        entry["fmax_mhz"] = None
 
     return entry
 
