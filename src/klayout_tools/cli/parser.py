@@ -510,7 +510,9 @@ def _add_characterize_parser(subparsers: argparse._SubParsersAction) -> None:
             "klt sim execution backend for the characterization sweep "
             "(default: local). The grid is a single corner, so `local` is "
             "normally correct -- this exists for a caller who needs the run "
-            "off-host."
+            "off-host. For batch/remote with options.osdi_preload, name the "
+            ".osdi as $PDK_ROOT/<rel> (or under models.pdk_root); see "
+            "docs/cli/characterize.md."
         ),
     )
     characterize_parser.add_argument(
