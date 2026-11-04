@@ -710,7 +710,7 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "batch_concurrency_cap), re-launching the same job with jittered "
             "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
             "means one attempt. Also applies with --submit-only (issue "
-            "#3564). See docs/cli/sim.md."
+            "#3564). With --batch-set, applies to each member. See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(

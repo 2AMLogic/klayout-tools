@@ -288,7 +288,6 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),
             ("--job-status", getattr(args, "job_status", None)),
-            ("--wait-for-capacity", getattr(args, "wait_for_capacity", None)),
             ("--pdk-root", getattr(args, "pdk_root", None)),
         )
         if value is not None and value is not False and value != ""
@@ -307,15 +306,12 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
+    limit = DEFAULT_MAX_IN_FLIGHT if args.max_in_flight is None else args.max_in_flight
     try:
         report = run_sim_set(
             args.batch_set,
             outdir=args.outdir,
-            max_in_flight=(
-                args.max_in_flight
-                if args.max_in_flight is not None
-                else DEFAULT_MAX_IN_FLIGHT
-            ),
+            max_in_flight=limit,
             capacity_retries=args.capacity_retries or 0,
             max_workers=args.max_workers,
             hosts=args.hosts,
@@ -323,6 +319,9 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             resume=args.resume,
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
+            max_units_per_job=args.max_units_per_job,
+            max_concurrent_jobs=args.max_concurrent_jobs,
+            capacity_wait_s=getattr(args, "wait_for_capacity", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)

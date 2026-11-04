@@ -5418,7 +5418,6 @@ def test_cli_batch_set_accepts_resume_and_forwards_it(tmp_path, monkeypatch, cap
         ["--op-lint"],
         ["--submit-only"],
         ["--job-status", "job-1"],
-        ["--wait-for-capacity", "5"],
     ],
 )
 def test_cli_batch_set_still_refuses_other_single_request_flags(tmp_path, flags):

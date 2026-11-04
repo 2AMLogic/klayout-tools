@@ -394,29 +394,6 @@ def test_cli_wait_for_capacity_with_job_status_is_a_usage_error(
     assert runner.calls == []
 
 
-def test_cli_wait_for_capacity_with_batch_set_is_a_usage_error(
-    tmp_path, monkeypatch, capsys
-):
-    runner = _FakeRunner()
-    path = _setup(tmp_path, monkeypatch, runner)
-
-    code = main(
-        [
-            "sim",
-            "--batch-set",
-            str(path),
-            "--wait-for-capacity",
-            "0",
-            "--format",
-            "json",
-        ]
-    )
-
-    assert code == 2
-    assert "--wait-for-capacity" in _stderr_json(capsys)["error"]["message"]
-    assert runner.calls == []
-
-
 def test_cli_wait_for_capacity_flows_to_submit_only(tmp_path, monkeypatch, capsys):
     runner = _FakeRunner()
     path = _setup(tmp_path, monkeypatch, runner)

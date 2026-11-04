@@ -1157,8 +1157,8 @@ made. Things worth knowing:
   if the request asks for a wait). It applies to the blocking path and to
   `--submit-only`; an invalid value is refused before any S3 write, like the
   request field. It requires the `batch` backend and is refused with `--attach`,
-  `--job-status` and `--batch-set` (use `--capacity-retries`); it applies to
-  deck-list requests too. On expiry the run fails with the existing `batch_no_capacity` /
+  `--job-status`; with `--batch-set` it is applied to every member request and
+  coexists with `--capacity-retries`. It applies to deck-list requests too. On expiry the run fails with the existing `batch_no_capacity` /
   `batch_concurrency_cap` code. `--submit-only`'s reported `request_sha256`
   covers the request with every override folded in **except** the
   submission-only `batch.capacity_wait_s` and `batch.max_concurrent_jobs`
@@ -1206,6 +1206,12 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   re-submits such a request up to `N` more times with doubling backoff
   (5s, 10s, ...). Only those two codes are retried -- never another failure,
   and never on local ngspice.
+- **Per-member sharding and capacity wait.** `--max-units-per-job`,
+  `--max-concurrent-jobs` and `--wait-for-capacity` are forwarded to every
+  member request and behave exactly as on a single `klt sim <request>`: each
+  member is sharded independently, and an option left unset keeps that
+  request's own `batch.max_units_per_job` / `batch.max_concurrent_jobs` /
+  `batch.capacity_wait_s`.
 - **Incremental manifest.** `<outdir>/set-manifest.json` (without `-o`: the
   `.klt/sim/` directory next to the first request) is written when the set
   starts and atomically rewritten on every transition. It lists, per request,
