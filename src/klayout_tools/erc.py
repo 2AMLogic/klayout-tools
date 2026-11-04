@@ -824,11 +824,9 @@ def _connectivity_coverage(
                 checked_by_well_assertion.append(identity)
     # (issue #2541) One named entry per disclosed undeclared class, before
     # the bare "zero ties declared" entry below, so a *partial* declaration
-    # reaches the disclosure's reason token too. Both are emitted when a
-    # spec declares no `ties` at all and still names classes: the bare entry
-    # is the pre-#2541 "nothing was declared" fact, byte-identical to what
-    # such a run always reported, and the named ones say which classes the
-    # disclosure is about.
+    # reaches the disclosure's reason token too. Both are emitted when a spec
+    # declares no `ties` yet names classes: the bare entry is the byte-identical
+    # pre-#2541 fact, the named ones say what the disclosure is about.
     for undeclared_class in _disclosed_undeclared_classes(ties_disclosure):
         inapplicable.append(
             {
@@ -849,13 +847,8 @@ def _connectivity_coverage(
         **build_check_coverage(
             checked=checked, skipped=skipped, inapplicable=inapplicable
         ),
-        # (issue #4915) Additive, always present: true iff at least one
-        # `erc.missing_tie:*` identity was really evaluated. A gate counting
-        # `erc.missing_tie` findings must read false as "the check did not
-        # run", not as a pass.
-        "missing_tie_checked": any(
-            i.startswith("erc.missing_tie:") for i in checked
-        ),
+        # (issue #4915) true iff an `erc.missing_tie:*` identity really ran.
+        "missing_tie_checked": any(i.startswith("erc.missing_tie:") for i in checked),
         "checked_by_assertion": sorted(checked_by_assertion),
         "checked_by_well_assertion": sorted(checked_by_well_assertion),
         "layers_in_stream_without_declaration": list(undeclared_stream_layers or []),
