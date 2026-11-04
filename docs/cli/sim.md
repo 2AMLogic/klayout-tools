@@ -3859,6 +3859,15 @@ ordinary file-scope `.meas` cards; `analysis_steps[]` control-scope `meas`
 has different semantics (see that section). Making `.meas` scalars visible to
 `expr` is a separate contract change.
 
+**Backends behave the same.** The deck is generated identically for
+`--backend local` and `--backend batch`, so an `expr` over a `.meas` result
+errors on both with the diagnostic above; `expr` -> `expr` chaining resolves on
+both. A request that grades `PASS` locally but `ERROR` on every batch point
+therefore is not explained by this rule — attach its request JSON to
+[#4902](https://github.com/2AMLogic/klayout-tools/issues/4902). (Measured
+locally on ngspice 46: `a`,`b` as `.meas` + `r = a/b` -> `r` errors; `a`,`b`,`r`
+all `expr` -> `r` passes. No batch run was made from the dispatch host.)
+
 ```json
 "measurements": [
   { "name": "ta", "spice": ".meas tran ta when v(o)=0.8 rise=3" },
