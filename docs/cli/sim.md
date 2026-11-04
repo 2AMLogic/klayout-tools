@@ -4346,6 +4346,26 @@ member:
   "measurement"` diagnostic naming the signal — like any measurement that
   produced no value. One unresolvable signal does not affect the others.
 
+### Reductions (`crossings.reduce`)
+
+Add `"reduce": ["period", "cycle_to_cycle", "tie"]` (any subset; unknown names
+are refused by name) to a `crossings` object and the entry gains
+`crossings.reductions`, computed over the returned (interpolated) `times`. The
+member is absent when `reduce` is not requested; `value` stays the crossing
+count. With `k` = 1 for `edge` `rise`/`fall` and 2 for `either` (a full cycle
+spans two edges), and `t` the returned `times` (so a `truncated` series is
+reduced over the returned part only):
+
+| Name | Definition | Fields |
+|------|------------|--------|
+| `period` | `t[i+k] - t[i]` | `n`, `mean`, `std` (**population** std, divisor `n`), `min`, `max` |
+| `cycle_to_cycle` | `period[i+1] - period[i]` | `n`, `rms`, `peak` (largest absolute value) |
+| `tie` | `t[i] - (a + b*i)`, `(a, b)` the least-squares line over all returned crossings | `n`, `rms`, `peak_to_peak`, `fit_period` (`k*b`) |
+
+A reduction without enough crossings (`period` needs `k+1`, `cycle_to_cycle`
+`k+2`, `tie` 3) is `{"omitted": "<reason>"}`, never zeros. For `either`, a
+duty cycle away from 50 % appears as TIE. All values are seconds.
+
 ### How times are computed
 
 Each crossing is **linearly interpolated** between the two samples that
