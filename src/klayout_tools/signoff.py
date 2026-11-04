@@ -6475,6 +6475,34 @@ def _fold_kind_inputs(
     return pex_inputs, input_members, input_verified
 
 
+def _rehash_evidence_file(
+    check_kind: str,
+    spec: Mapping[str, Any],
+    file_label: str | None,
+    actual_hash: str | None,
+    input_verified: bool | None,
+) -> tuple[str | None, str | None, bool | None]:
+    """Issue #4893: a ``functional-verification`` envelope records no input
+    hash, so a file-backed citation that the manifest pins is re-hashed and the
+    pin binds the evidence file's own bytes. Hashed only when pinned, so an
+    unpinned entry's output is unchanged. Returns ``(actual_hash, basis,
+    input_verified)``."""
+    if (
+        actual_hash is None
+        and check_kind == "functional-verification"
+        and file_label is not None
+        and spec.get("content_hash") is not None
+    ):
+        evidence_digest = sha256_file(file_label)
+        if evidence_digest is not None:
+            return (
+                f"sha256:{evidence_digest}",
+                _CONTENT_HASH_BASIS_EVIDENCE_FILE,
+                True,
+            )
+    return actual_hash, None, input_verified
+
+
 def _resolve_evidence(
     spec: dict[str, Any],
     repo_root: str | Path | None = None,
@@ -6618,22 +6646,9 @@ def _resolve_evidence(
             check_kind, envelope, spec, actual_hash, file_label, repo_root
         )
 
-    # Issue #4893: a `functional-verification` envelope records no input hash,
-    # so a file-backed citation that the manifest pins is re-hashed here and
-    # the pin binds the evidence file's own bytes. Hashed only when pinned, so
-    # an unpinned entry's output is unchanged.
-    content_hash_basis: str | None = None
-    if (
-        actual_hash is None
-        and check_kind == "functional-verification"
-        and file_label is not None
-        and spec.get("content_hash") is not None
-    ):
-        evidence_digest = sha256_file(file_label)
-        if evidence_digest is not None:
-            actual_hash = f"sha256:{evidence_digest}"
-            content_hash_basis = _CONTENT_HASH_BASIS_EVIDENCE_FILE
-            input_verified = True
+    actual_hash, content_hash_basis, input_verified = _rehash_evidence_file(
+        check_kind, spec, file_label, actual_hash, input_verified
+    )
 
     pex_inputs, input_members, input_verified = _fold_kind_inputs(
         check_kind, envelope, spec, file_label, actual_hash, input_verified, repo_root
