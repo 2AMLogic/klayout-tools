@@ -4,6 +4,12 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-04
 
+- **PR #4903**: docs(sim): expr over .meas errors identically on local and batch
+- **PR #4897**: fix: default HOME to a scratch dir in netlist batch job
+- **Issue #4894** (closed): klt netlist --backend batch: xschem aborts on the runner because HOME is unset
+- **PR #4901**: feat: add crossings.reduce period/cycle-to-cycle/TIE reductions to klt sim
+- **PR #4896**: test: cover real PCell two-gate shared-drain LDMOS extraction
+- **Issue #4892** (closed): gen/extract: PDK PCell library not loaded in release; drain-extended device read as plain nfet
 - **PR #4890**: fix: apply sharding and capacity-wait options to each --batch-set member
 - **Issue #4889** (closed): klt sim --batch-set: no sharding and no capacity wait for large requests
 - **PR #4888**: chore(loom): resync installed Loom to v0.19.1259
