@@ -1656,6 +1656,34 @@ def _reject_wired_port_less_pins(
             )
 
 
+def _validate_clock_constraints(
+    constraints: dict[str, Any],
+) -> tuple[str | None, float | None]:
+    """The ``clock_port`` / ``clock_period_ns`` pair of ``request.constraints``.
+
+    `clock_period_ns` alone is a *virtual clock* (issue #4913): no port, for
+    purely combinational blocks. `clock_port` alone is an error -- a port
+    needs a period. Both omitted -> ``(None, None)``.
+    """
+    clock_port = constraints.get("clock_port")
+    clock_period_ns = constraints.get("clock_period_ns")
+    if clock_port is None and clock_period_ns is None:
+        return None, None
+    if clock_port is not None and not (isinstance(clock_port, str) and clock_port):
+        raise PlaceAndRouteError(
+            "request.constraints.clock_port must be a non-empty string"
+        )
+    if not (
+        isinstance(clock_period_ns, (int, float))
+        and not isinstance(clock_period_ns, bool)
+        and clock_period_ns > 0
+    ):
+        raise PlaceAndRouteError(
+            "request.constraints.clock_period_ns must be a positive number"
+        )
+    return clock_port, float(clock_period_ns)
+
+
 def _validate_constraints(
     constraints: Any,
 ) -> tuple[
@@ -1692,31 +1720,7 @@ def _validate_constraints(
     if not isinstance(constraints, dict):
         raise PlaceAndRouteError("request.constraints must be a JSON object")
 
-    clock_port = constraints.get("clock_port")
-    clock_period_ns = constraints.get("clock_period_ns")
-    if clock_port is not None or clock_period_ns is not None:
-        # `clock_period_ns` alone is a *virtual clock* (issue #4913): no
-        # port, for purely combinational blocks. `clock_port` alone is an
-        # error -- a port needs a period.
-        if clock_port is not None and not (isinstance(clock_port, str) and clock_port):
-            raise PlaceAndRouteError(
-                "request.constraints.clock_port must be a non-empty string"
-            )
-        if clock_port is not None and clock_period_ns is None:
-            raise PlaceAndRouteError(
-                "request.constraints.clock_period_ns must be a positive number"
-            )
-        if not (
-            isinstance(clock_period_ns, (int, float))
-            and not isinstance(clock_period_ns, bool)
-            and clock_period_ns > 0
-        ):
-            raise PlaceAndRouteError(
-                "request.constraints.clock_period_ns must be a positive number"
-            )
-        clock_period_ns = float(clock_period_ns)
-    else:
-        clock_port, clock_period_ns = None, None
+    clock_port, clock_period_ns = _validate_clock_constraints(constraints)
 
     max_transition_ns = constraints.get("max_transition_ns")
     if max_transition_ns is not None:
