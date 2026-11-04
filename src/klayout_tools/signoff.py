@@ -126,6 +126,13 @@ from .signoff_envelopes import _StaEnvelope as _StaEnvelope
 from .signoff_envelopes import _StaRequired as _StaRequired
 from .signoff_envelopes import _YieldEnvelope as _YieldEnvelope
 from .signoff_envelopes import _YieldRequired as _YieldRequired
+from .signoff_evidence_pin import (
+    PIN_STALE,
+    PIN_UNVERIFIABLE,
+    content_hash_pin_state,
+    rehash_evidence_file,
+    unverifiable_pin_note,
+)
 from .signoff_generator_batch import (
     GeneratorExecution,
     match_approval,
@@ -5636,24 +5643,21 @@ def _grade_evidence(
     if binding_refusal is not None:
         return "unmet", binding_refusal, None, {}
 
-    pin_state = _content_hash_pin_state(
+    pin_state = content_hash_pin_state(
         spec.get("content_hash"), resolution["content_hash"]
     )
-    if pin_state == _PIN_UNVERIFIABLE:
+    if pin_state == PIN_UNVERIFIABLE:
         # Issue #3747: say why -- the pin itself is ungradable for this kind.
         return (
             "unmet",
             _REASON_UNVERIFIABLE_PROVENANCE,
             None,
             {
-                "content_hash_pin": _PIN_UNVERIFIABLE,
-                "content_hash_pin_note": (
-                    f"{check_kind} envelopes carry no "
-                    "provenance.input.content_hash; the pin cannot be compared"
-                ),
+                "content_hash_pin": PIN_UNVERIFIABLE,
+                "content_hash_pin_note": unverifiable_pin_note(check_kind, resolution),
             },
         )
-    if pin_state == _PIN_STALE:
+    if pin_state == PIN_STALE:
         return "unmet", _REASON_STALE_EVIDENCE, None, hints.stale_pin(spec, resolution)
 
     citation = {**_citation(resolution), **citation_extra}
@@ -5749,34 +5753,12 @@ def _kind_gated_failure_detail(
     ):
         return {}
     detail: dict[str, Any] = {"yield_campaign": campaign}
-    pin_state = _content_hash_pin_state(
+    pin_state = content_hash_pin_state(
         spec.get("content_hash"), resolution["content_hash"]
     )
     if pin_state is not None:
         detail["content_hash_pin"] = pin_state
     return detail
-
-
-_PIN_VERIFIED = "verified"
-_PIN_STALE = "stale"
-_PIN_UNVERIFIABLE = "unverifiable"
-
-
-def _content_hash_pin_state(
-    expected_hash: str | None, live_hash: str | None
-) -> str | None:
-    """Compare a manifest-pinned ``content_hash`` to the resolved live one.
-
-    ``None`` when the entry pins nothing; otherwise ``"verified"`` (equal),
-    ``"unverifiable"`` (no live hash to compare) or ``"stale"`` (differs).
-    Shared by the staleness gate and the issue #3063 disclosure on the
-    ``yield`` refusals so the two cannot drift.
-    """
-    if expected_hash is None:
-        return None
-    if live_hash is None:
-        return _PIN_UNVERIFIABLE
-    return _PIN_VERIFIED if live_hash == expected_hash else _PIN_STALE
 
 
 def _bind_anchored_citation(
@@ -6596,6 +6578,10 @@ def _resolve_evidence(
             check_kind, envelope, spec, actual_hash, file_label, repo_root
         )
 
+    actual_hash, content_hash_basis, input_verified = rehash_evidence_file(
+        check_kind, spec, file_label, actual_hash, input_verified
+    )
+
     pex_inputs, input_members, input_verified = _fold_kind_inputs(
         check_kind, envelope, spec, file_label, actual_hash, input_verified, repo_root
     )
@@ -6610,6 +6596,7 @@ def _resolve_evidence(
             "exit_status": exit_status,
             "content_hash": actual_hash,
             "content_hash_unresolved": content_hash_unresolved,
+            "content_hash_basis": content_hash_basis,
             "input_verified": input_verified,
             "pex_inputs": pex_inputs,
             "input_members": input_members,
@@ -6637,6 +6624,10 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
+    if resolution.get("content_hash_basis") is not None:
+        # Issue #4893: `content_hash` is a re-hash of the cited evidence file
+        # itself, not a design input.
+        citation["content_hash_basis"] = resolution["content_hash_basis"]
     if resolution["kind"] == "model-run":
         # Issue #4859: disclosure only -- `method` is echoed, never graded,
         # and klt did not execute the model.

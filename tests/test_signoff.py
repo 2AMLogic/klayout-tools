@@ -7168,34 +7168,6 @@ def test_unpinned_unprovenanced_evidence_carries_no_pin_detail(tmp_path):
     assert "content_hash_pin" not in (item_5.get("detail") or {})
 
 
-def test_unprovenanced_functional_verification_cannot_satisfy_pinned_content_hash(
-    tmp_path,
-):
-    """`klt functional-verification` carries no shared `provenance` block at
-    all (by design -- its verdict depends on no PDK and no rule deck), so a
-    manifest that pins `content_hash` on one always renders
-    "unmet"/"unverifiable_provenance" (issue #2182) -- distinct from
-    "stale_evidence", which requires a genuinely mismatched, non-null hash."""
-    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
-
-    result = build_tier_report(
-        _manifest(
-            kind="digital",
-            evidence={"5": {"file": fv_path, "content_hash": "sha256:expected"}},
-        )
-    )
-
-    item_5 = next(item for item in result["items"] if item["id"] == 5)
-    assert item_5["status"] == "unmet"
-    assert item_5["reason"] == "unverifiable_provenance"
-    assert item_5["citation"] is None
-    # Issue #3747: the pin itself is disclosed as the cause.
-    assert item_5["detail"]["content_hash_pin"] == "unverifiable"
-    note = item_5["detail"]["content_hash_pin_note"]
-    assert "functional-verification" in note
-    assert "provenance.input.content_hash" in note
-
-
 # --------------------------------------------------------------------------- #
 # "power" evidence never satisfies any tier-report item (issue #1321)
 # --------------------------------------------------------------------------- #
