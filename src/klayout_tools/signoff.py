@@ -126,6 +126,13 @@ from .signoff_envelopes import _StaEnvelope as _StaEnvelope
 from .signoff_envelopes import _StaRequired as _StaRequired
 from .signoff_envelopes import _YieldEnvelope as _YieldEnvelope
 from .signoff_envelopes import _YieldRequired as _YieldRequired
+from .signoff_evidence_pin import (
+    PIN_STALE,
+    PIN_UNVERIFIABLE,
+    content_hash_pin_state,
+    rehash_evidence_file,
+    unverifiable_pin_note,
+)
 from .signoff_generator_batch import (
     GeneratorExecution,
     match_approval,
@@ -5636,21 +5643,21 @@ def _grade_evidence(
     if binding_refusal is not None:
         return "unmet", binding_refusal, None, {}
 
-    pin_state = _content_hash_pin_state(
+    pin_state = content_hash_pin_state(
         spec.get("content_hash"), resolution["content_hash"]
     )
-    if pin_state == _PIN_UNVERIFIABLE:
+    if pin_state == PIN_UNVERIFIABLE:
         # Issue #3747: say why -- the pin itself is ungradable for this kind.
         return (
             "unmet",
             _REASON_UNVERIFIABLE_PROVENANCE,
             None,
             {
-                "content_hash_pin": _PIN_UNVERIFIABLE,
-                "content_hash_pin_note": _unverifiable_pin_note(check_kind, resolution),
+                "content_hash_pin": PIN_UNVERIFIABLE,
+                "content_hash_pin_note": unverifiable_pin_note(check_kind, resolution),
             },
         )
-    if pin_state == _PIN_STALE:
+    if pin_state == PIN_STALE:
         return "unmet", _REASON_STALE_EVIDENCE, None, hints.stale_pin(spec, resolution)
 
     citation = {**_citation(resolution), **citation_extra}
@@ -5746,59 +5753,12 @@ def _kind_gated_failure_detail(
     ):
         return {}
     detail: dict[str, Any] = {"yield_campaign": campaign}
-    pin_state = _content_hash_pin_state(
+    pin_state = content_hash_pin_state(
         spec.get("content_hash"), resolution["content_hash"]
     )
     if pin_state is not None:
         detail["content_hash_pin"] = pin_state
     return detail
-
-
-#: Issue #4893: ``citation.content_hash_basis`` when the live hash is the
-#: grader's own re-hash of the cited evidence file (``functional-verification``).
-_CONTENT_HASH_BASIS_EVIDENCE_FILE = "evidence_file"
-
-_PIN_VERIFIED = "verified"
-_PIN_STALE = "stale"
-_PIN_UNVERIFIABLE = "unverifiable"
-
-
-def _unverifiable_pin_note(check_kind: str, resolution: Mapping[str, Any]) -> str:
-    """Why a pinned ``content_hash`` cannot be compared (issues #3747, #4893)."""
-    if check_kind == "functional-verification":
-        if resolution.get("command") is not None:
-            return (
-                "functional-verification envelopes carry no "
-                "provenance.input.content_hash, and a command-backed citation's "
-                "stdout is not a stable file the grader can re-hash; cite the "
-                "envelope as a file to pin its bytes"
-            )
-        return (
-            "functional-verification envelopes carry no "
-            "provenance.input.content_hash, and the cited evidence file could "
-            "not be re-hashed; the pin cannot be compared"
-        )
-    return (
-        f"{check_kind} envelopes carry no "
-        "provenance.input.content_hash; the pin cannot be compared"
-    )
-
-
-def _content_hash_pin_state(
-    expected_hash: str | None, live_hash: str | None
-) -> str | None:
-    """Compare a manifest-pinned ``content_hash`` to the resolved live one.
-
-    ``None`` when the entry pins nothing; otherwise ``"verified"`` (equal),
-    ``"unverifiable"`` (no live hash to compare) or ``"stale"`` (differs).
-    Shared by the staleness gate and the issue #3063 disclosure on the
-    ``yield`` refusals so the two cannot drift.
-    """
-    if expected_hash is None:
-        return None
-    if live_hash is None:
-        return _PIN_UNVERIFIABLE
-    return _PIN_VERIFIED if live_hash == expected_hash else _PIN_STALE
 
 
 def _bind_anchored_citation(
@@ -6475,34 +6435,6 @@ def _fold_kind_inputs(
     return pex_inputs, input_members, input_verified
 
 
-def _rehash_evidence_file(
-    check_kind: str,
-    spec: Mapping[str, Any],
-    file_label: str | None,
-    actual_hash: str | None,
-    input_verified: bool | None,
-) -> tuple[str | None, str | None, bool | None]:
-    """Issue #4893: a ``functional-verification`` envelope records no input
-    hash, so a file-backed citation that the manifest pins is re-hashed and the
-    pin binds the evidence file's own bytes. Hashed only when pinned, so an
-    unpinned entry's output is unchanged. Returns ``(actual_hash, basis,
-    input_verified)``."""
-    if (
-        actual_hash is None
-        and check_kind == "functional-verification"
-        and file_label is not None
-        and spec.get("content_hash") is not None
-    ):
-        evidence_digest = sha256_file(file_label)
-        if evidence_digest is not None:
-            return (
-                f"sha256:{evidence_digest}",
-                _CONTENT_HASH_BASIS_EVIDENCE_FILE,
-                True,
-            )
-    return actual_hash, None, input_verified
-
-
 def _resolve_evidence(
     spec: dict[str, Any],
     repo_root: str | Path | None = None,
@@ -6646,7 +6578,7 @@ def _resolve_evidence(
             check_kind, envelope, spec, actual_hash, file_label, repo_root
         )
 
-    actual_hash, content_hash_basis, input_verified = _rehash_evidence_file(
+    actual_hash, content_hash_basis, input_verified = rehash_evidence_file(
         check_kind, spec, file_label, actual_hash, input_verified
     )
 

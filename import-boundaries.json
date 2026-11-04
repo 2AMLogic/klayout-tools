@@ -582,6 +582,7 @@
         "klayout_tools.signoff_attest_text",
         "klayout_tools.signoff_details",
         "klayout_tools.signoff_envelopes",
+        "klayout_tools.signoff_evidence_pin",
         "klayout_tools.signoff_foundry_cell",
         "klayout_tools.signoff_generator_batch",
         "klayout_tools.signoff_na",
