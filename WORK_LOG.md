@@ -4,6 +4,13 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-04
 
+- **PR #4907**: test: pin that --batch-set requests keep their own corners
+- **PR #4898**: feat(signoff): re-hash file-backed functional-verification evidence to grade content_hash pins
+- **Issue #4893** (closed): signoff: content_hash pin on a functional-verification envelope stays ungradable; no way to have the grader re-hash the cited file
+- **PR #4895**: feat(sim): hint runner-image gap on off-host expr() ngspice_fatal
+- **PR #4886**: fix: explain zipped axis lengths and name job/shard in worker echo errors
+- **Issue #4885** (closed): klt sim batch: zipped params error text, whole-job ceiling with --submit-only, stuck interrupted shards, shard/corner mix-up, no heartbeat
+- **Issue #56** (closed): Friction: no waveform post-processing primitive, so every jitter/timing measurement re-implements threshold-crossing extraction
 - **PR #4903**: docs(sim): expr over .meas errors identically on local and batch
 - **PR #4897**: fix: default HOME to a scratch dir in netlist batch job
 - **Issue #4894** (closed): klt netlist --backend batch: xschem aborts on the runner because HOME is unset
