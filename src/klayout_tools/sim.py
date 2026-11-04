@@ -1458,9 +1458,7 @@ def _check_local_osdi_abi(
             f"v{abi[0]}.{abi[1]}, which needs ngspice >= "
             f"{OSDI_V04_MIN_NGSPICE_MAJOR}, but the local ngspice is {found}; "
             "run the corner with --backend batch (the fleet image carries a "
-            "new enough ngspice; batch refuses host paths, so name the "
-            "`.osdi` as `$PDK_ROOT/<rel>` or under `models.pdk_root`) or "
-            "build/use an ngspice >= "
+            "new enough ngspice) or build/use an ngspice >= "
             f"{OSDI_V04_MIN_NGSPICE_MAJOR}",
             code="osdi_abi_mismatch",
         )
