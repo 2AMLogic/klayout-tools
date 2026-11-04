@@ -47,6 +47,9 @@ def _write_script(script_path: str, lines: list[str]) -> None:
 _UNIT_PIN_LINE = "set_cmd_units -time ns -capacitance pF"
 
 
+VIRTUAL_CLOCK_NAME = "klt_virtual_clk"
+
+
 def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[str]:
     """``create_clock`` (OpenROAD's minimal SDC-equivalent input, contract
     spike section 5's ``constraints`` field) -- must run only **after** the
@@ -57,7 +60,13 @@ def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[
     :func:`_stage_script_lines`'s call sites, never before ``link_design``).
     """
     if clock_port is None:
-        return []
+        if clock_period_ns is None:
+            return []
+        # Virtual clock (issue #4913): a period but no port.
+        return [
+            _UNIT_PIN_LINE,
+            f"create_clock -name {VIRTUAL_CLOCK_NAME} -period {clock_period_ns}",
+        ]
     return [
         _UNIT_PIN_LINE,
         f"create_clock -name {clock_port} -period {clock_period_ns} "
@@ -114,6 +123,7 @@ def _io_delay_lines(
     clock_port: str | None,
     input_delay_ns: float | None,
     output_delay_ns: float | None,
+    clock_period_ns: float | None = None,
 ) -> list[str]:
     """``set_input_delay``/``set_output_delay`` -- issue #1865's
     ``request.constraints.input_delay_ns``/``.output_delay_ns``.
@@ -147,6 +157,21 @@ def _io_delay_lines(
     either delay is set (:func:`_validate_constraints` rejects that
     combination); the guard is defensive only.
     """
+    if clock_port is None and clock_period_ns is not None:
+        # Virtual clock (issue #4913): no port to exclude, so the input
+        # delay applies to every input.
+        lines = []
+        if input_delay_ns is not None:
+            lines.append(
+                f"set_input_delay {input_delay_ns} -clock {VIRTUAL_CLOCK_NAME} "
+                "[all_inputs]"
+            )
+        if output_delay_ns is not None:
+            lines.append(
+                f"set_output_delay {output_delay_ns} -clock {VIRTUAL_CLOCK_NAME} "
+                "[all_outputs]"
+            )
+        return lines
     if clock_port is None:
         return []
     lines: list[str] = []
@@ -1033,7 +1058,9 @@ def _stage_script_lines(
         lines += _design_rule_constraint_lines(
             max_transition_ns, max_capacitance_pf, max_fanout
         )
-        lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+        lines += _io_delay_lines(
+            clock_port, input_delay_ns, output_delay_ns, clock_period_ns
+        )
         lines += _floorplan_init_lines(floorplan)
         # `place_macro` fixes each declared hard-macro instance at its
         # caller-given location -- must run after the floorplan's own die/
@@ -1084,7 +1111,9 @@ def _stage_script_lines(
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
     )
-    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    lines += _io_delay_lines(
+        clock_port, input_delay_ns, output_delay_ns, clock_period_ns
+    )
 
     if stage == "place":
         assert io_spec is not None
@@ -1106,12 +1135,12 @@ def _stage_script_lines(
         # "route"}` with `clock_port is None` before this generator ever
         # runs -- see its own `stage_index >= STAGE_ORDER.index("place")`
         # check.
-        assert clock_port is not None
         buf_cell = (
             library["cts_buffer"]
             if library is not None and "cts_buffer" in library
             else _CTS_BUFFER_CELLS[cell_library]
         )
+        cts_clock = clock_port if clock_port is not None else VIRTUAL_CLOCK_NAME
         lines += [
             *_wire_rc_lines(io_spec, library),
             "estimate_parasitics -placement",
@@ -1141,7 +1170,7 @@ def _stage_script_lines(
             # rather than re-deriving what it already knows (see this
             # module's own docstring, "Macro-pin routability cross-check").
             f"set _klt_cts_seq_sinks [llength [all_registers -clock "
-            f"[get_clocks {{{clock_port}}}]]]",
+            f"[get_clocks {{{cts_clock}}}]]]",
             "if {$_klt_cts_seq_sinks > 0} {",
             # `-sink_clustering_enable -obstruction_aware` (P&R survey
             # section 3.4, issue #783): TritonCTS clusters nearby sinks
@@ -1170,7 +1199,7 @@ def _stage_script_lines(
             "estimate_parasitics -placement",
             "repair_timing -hold",
             "} else {",
-            f'puts "klt place-and-route: clock {clock_port} has no '
+            f'puts "klt place-and-route: clock {cts_clock} has no '
             "sequential (registered) fanout -- skipping "
             'clock_tree_synthesis (see issue #1506)"',
             "}",

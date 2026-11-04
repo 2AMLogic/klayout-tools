@@ -1695,11 +1695,22 @@ def _validate_constraints(
     clock_port = constraints.get("clock_port")
     clock_period_ns = constraints.get("clock_period_ns")
     if clock_port is not None or clock_period_ns is not None:
-        if not (isinstance(clock_port, str) and clock_port):
+        # `clock_period_ns` alone is a *virtual clock* (issue #4913): no
+        # port, for purely combinational blocks. `clock_port` alone is an
+        # error -- a port needs a period.
+        if clock_port is not None and not (isinstance(clock_port, str) and clock_port):
             raise PlaceAndRouteError(
                 "request.constraints.clock_port must be a non-empty string"
             )
-        if not (isinstance(clock_period_ns, (int, float)) and clock_period_ns > 0):
+        if clock_port is not None and clock_period_ns is None:
+            raise PlaceAndRouteError(
+                "request.constraints.clock_period_ns must be a positive number"
+            )
+        if not (
+            isinstance(clock_period_ns, (int, float))
+            and not isinstance(clock_period_ns, bool)
+            and clock_period_ns > 0
+        ):
             raise PlaceAndRouteError(
                 "request.constraints.clock_period_ns must be a positive number"
             )
@@ -1751,11 +1762,12 @@ def _validate_constraints(
     input_delay_ns = _validate_io_delay(constraints.get("input_delay_ns"), "input")
     output_delay_ns = _validate_io_delay(constraints.get("output_delay_ns"), "output")
     if (input_delay_ns is not None or output_delay_ns is not None) and (
-        clock_port is None
+        clock_period_ns is None
     ):
         raise PlaceAndRouteError(
             "request.constraints.input_delay_ns/output_delay_ns require "
-            "request.constraints.clock_port/clock_period_ns -- set_input_delay/"
+            "request.constraints.clock_period_ns (with or without clock_port) "
+            "-- set_input_delay/"
             "set_output_delay are defined relative to a named clock"
         )
 

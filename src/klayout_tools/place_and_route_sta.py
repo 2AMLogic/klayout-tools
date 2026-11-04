@@ -200,7 +200,9 @@ def _corner_sweep_script_lines(
     # docstring), so without re-emitting them here every swept corner would
     # report the unconstrained sentinel for a design whose only paths are
     # input-port -> register / register -> output-port.
-    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    lines += _io_delay_lines(
+        clock_port, input_delay_ns, output_delay_ns, clock_period_ns
+    )
     lines += [
         *_wire_rc_lines(io_spec, library),
         "estimate_parasitics -global_routing",
@@ -325,7 +327,9 @@ def _spef_sta_script_lines(
     # Issue #1865: re-emitted here for the same reason `_clock_lines` above
     # is -- this is a fresh OpenSTA session seeded from a `read_db`, which
     # carries no SDC state of its own.
-    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    lines += _io_delay_lines(
+        clock_port, input_delay_ns, output_delay_ns, clock_period_ns
+    )
     lines += [
         f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",

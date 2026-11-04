@@ -1634,6 +1634,7 @@ def _validate_stage_prerequisites(
     power: dict[str, Any] | None,
     library: dict[str, Any] | None = None,
     tech_lef: str | None = None,
+    clock_period_ns: float | None = None,
 ) -> None:
     """Fail with a clear request error when ``target_stage`` (or
     ``request.power``) needs inputs or per-library tables this request lacks
@@ -1645,10 +1646,15 @@ def _validate_stage_prerequisites(
     # real number. `_validate_constraints` already enforced clock_port and
     # clock_period_ns are given together; this additionally requires them
     # once a caller actually asks for a stage that needs them.
-    if stage_index >= STAGE_ORDER.index("place") and clock_port is None:
+    if (
+        stage_index >= STAGE_ORDER.index("place")
+        and clock_port is None
+        and clock_period_ns is None
+    ):
         raise PlaceAndRouteError(
             "request.constraints.clock_port/clock_period_ns are required to "
-            f"reach target_stage '{target_stage}'"
+            f"reach target_stage '{target_stage}' (clock_period_ns alone is "
+            "accepted as a virtual clock for purely combinational blocks)"
         )
     if stage_index >= STAGE_ORDER.index("place") and io_spec is None:
         raise PlaceAndRouteError(
@@ -1909,6 +1915,7 @@ def _run_single_corner(
         power=power,
         library=library,
         tech_lef=tech_lef,
+        clock_period_ns=clock_period_ns,
     )
 
     output_dir = _stage_root(request_dir, request)
