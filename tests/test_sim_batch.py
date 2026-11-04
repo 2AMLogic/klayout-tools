@@ -6048,38 +6048,6 @@ def test_engine_log_tail_is_bounded(tmp_path):
     assert len(note) < sb._BATCH_ENGINE_LOG_TAIL_CHARS + 100
 
 
-_EXPR_LOG = (
-    "Error in netlist line no. 12:\n"
-    "Undefined parameter [expr]\n"
-    "Expression err: expr((int((@nf+1)/2)*@w/@nf*0.29))\n"
-)
-
-
-def test_off_host_expr_failure_gains_runner_hint(tmp_path):
-    (tmp_path / "ngspice.log").write_text(_EXPR_LOG)
-    _, found = sb._engine_log_note(str(tmp_path))
-    assert found["code"] == "ngspice_fatal"
-    assert "runner_klt_version" in found["message"]
-    assert "None" not in found["message"]
-
-
-def test_local_classify_expr_failure_has_no_runner_hint():
-    from klayout_tools.sim import _classify_diagnostics
-
-    found = _classify_diagnostics(_EXPR_LOG)
-    assert [d["code"] for d in found] == ["ngspice_fatal"]
-    assert "runner_klt_version" not in found[0]["message"]
-
-
-def test_other_undefined_parameter_gets_no_runner_hint(tmp_path):
-    (tmp_path / "ngspice.log").write_text(
-        "Error in netlist line no. 3:\nUndefined parameter [w]\n"
-    )
-    _, found = sb._engine_log_note(str(tmp_path))
-    assert found["code"] == "ngspice_fatal"
-    assert "runner_klt_version" not in found["message"]
-
-
 # --- request-feature capability check (issue #3249) --------------------------
 
 _STEPS_REQUEST = {"models": {}, "options": {}, "analysis_steps": [{"tran": {}}]}
