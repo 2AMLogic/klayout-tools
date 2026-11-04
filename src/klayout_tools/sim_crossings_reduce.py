@@ -25,8 +25,26 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .sim_errors import SimError
+
 #: The ``crossings.reduce`` names, in report order.
 REDUCTIONS = ("period", "cycle_to_cycle", "tie")
+
+
+def validate_reduce(name: Any, reduce: Any) -> None:
+    if reduce is None:
+        return
+    if not isinstance(reduce, list) or not all(isinstance(r, str) for r in reduce):
+        raise SimError(
+            f"measurement '{name}': crossings.reduce must be a list of "
+            f"names drawn from {list(REDUCTIONS)} (got {reduce!r})"
+        )
+    unknown = sorted(set(reduce) - set(REDUCTIONS))
+    if unknown:
+        raise SimError(
+            f"measurement '{name}': unknown crossings.reduce name(s) "
+            f"{unknown}; allowed: {list(REDUCTIONS)}"
+        )
 
 
 def _periods(times: list[float], step: int) -> list[float]:

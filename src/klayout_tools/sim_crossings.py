@@ -52,7 +52,7 @@ from typing import Any
 
 from . import sim_supply_relative
 from ._jsonnum import is_number
-from .sim_crossings_reduce import REDUCTIONS, reduce_crossings
+from .sim_crossings_reduce import reduce_crossings, validate_reduce
 from .sim_errors import SimError
 
 #: The ``crossings.edge`` values: a rising crossing, a falling one, or both.
@@ -113,29 +113,13 @@ def validate_crossings_spec(name: Any, body: Any) -> None:
             f"{list(CROSSING_EDGES)} (got {edge!r})"
         )
     _validate_max(name, body.get("max"))
-    _validate_reduce(name, body.get("reduce"))
+    validate_reduce(name, body.get("reduce"))
     start = _window_bound(name, body, "from")
     stop = _window_bound(name, body, "to")
     if start is not None and stop is not None and stop < start:
         raise SimError(
             f"measurement '{name}': crossings.to ({stop!r} s) is before "
             f"crossings.from ({start!r} s)"
-        )
-
-
-def _validate_reduce(name: Any, reduce: Any) -> None:
-    if reduce is None:
-        return
-    if not isinstance(reduce, list) or not all(isinstance(r, str) for r in reduce):
-        raise SimError(
-            f"measurement '{name}': crossings.reduce must be a list of "
-            f"names drawn from {list(REDUCTIONS)} (got {reduce!r})"
-        )
-    unknown = sorted(set(reduce) - set(REDUCTIONS))
-    if unknown:
-        raise SimError(
-            f"measurement '{name}': unknown crossings.reduce name(s) "
-            f"{unknown}; allowed: {list(REDUCTIONS)}"
         )
 
 
