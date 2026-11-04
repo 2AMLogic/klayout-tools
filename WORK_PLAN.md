@@ -7,7 +7,7 @@ Current work from GitHub labels. Long-term direction lives in [ROADMAP.md](ROADM
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#4783**: chore(deps): bump pyo3 from 0.29.3 to 0.30.1 in /native/mom
+_None._
 
 ## Very Important
 
@@ -48,7 +48,11 @@ Issues currently being built (`loom:building`).
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
-- **#4878**: klt sim: sharded batch jobs cannot be collected into one report
+- **#4885**: klt sim batch: zipped params error text, whole-job ceiling with --submit-only, stuck interrupted shards, shard/corner mix-up, no heartbeat
+- **#4891**: batch fleet runner's ngspice cannot evaluate sky130A model-library expr() parameters (runner image gap), engine_version still null
+- **#4892**: gen/extract: PDK PCell library not loaded in release; drain-extended device read as plain nfet
+- **#4893**: signoff: content_hash pin on a functional-verification envelope stays ungradable; no way to have the grader re-hash the cited file
+- **#4894**: klt netlist --backend batch: xschem aborts on the runner because HOME is unset
 
 ## PRs Awaiting Review
 
@@ -58,13 +62,16 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 - **#4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
 - **#4772**: fix: honor --dry-run and --wait-for-capacity under klt sim --batch-set
-- **#4879**: fix: let sharded --attach collect maps submitted with --wait-for-capacity
+- **#4895**: feat(sim): hint runner-image gap on off-host expr() ngspice_fatal
+- **#4896**: test: cover real PCell two-gate shared-drain LDMOS extraction
+- **#4897**: fix: default HOME to a scratch dir in netlist batch job
+- **#4898**: feat(signoff): re-hash file-backed functional-verification evidence to grade content_hash pins
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#4783**: chore(deps): bump pyo3 from 0.29.3 to 0.30.1 in /native/mom
+- **#4886**: fix: explain zipped axis lengths and name job/shard in worker echo errors
 
 ## Proposed
 
@@ -100,7 +107,11 @@ Issues carrying `loom:curated`.
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set *(curated)*
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1 *(curated)*
 - **#4845**: ring-check --pdk sg13g2: cross-check re-implemented Seal.* rules against the real Ruby deck *(curated)*
-- **#4878**: klt sim: sharded batch jobs cannot be collected into one report *(curated)*
+- **#4885**: klt sim batch: zipped params error text, whole-job ceiling with --submit-only, stuck interrupted shards, shard/corner mix-up, no heartbeat *(curated)*
+- **#4891**: batch fleet runner's ngspice cannot evaluate sky130A model-library expr() parameters (runner image gap), engine_version still null *(curated)*
+- **#4892**: gen/extract: PDK PCell library not loaded in release; drain-extended device read as plain nfet *(curated)*
+- **#4893**: signoff: content_hash pin on a functional-verification envelope stays ungradable; no way to have the grader re-hash the cited file *(curated)*
+- **#4894**: klt netlist --backend batch: xschem aborts on the runner because HOME is unset *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -122,14 +133,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 1 |
+| Operator merge-risk holds | 0 |
 | Very important | 1 |
 | Important | 2 |
 | Ready (`loom:issue`) | 13 |
-| In Progress (`loom:building`) | 5 |
-| PRs awaiting review | 5 |
+| In Progress (`loom:building`) | 9 |
+| PRs awaiting review | 8 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 31 |
+| Curated | 35 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->

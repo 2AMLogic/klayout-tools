@@ -2,6 +2,12 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-11-04
+
+- **PR #4890**: fix: apply sharding and capacity-wait options to each --batch-set member
+- **Issue #4889** (closed): klt sim --batch-set: no sharding and no capacity wait for large requests
+- **PR #4888**: chore(loom): resync installed Loom to v0.19.1259
+
 ### 2026-11-03
 
 - **PR #4783**: chore(deps): bump pyo3 from 0.29.3 to 0.30.1 in /native/mom
