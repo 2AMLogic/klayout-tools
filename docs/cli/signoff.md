@@ -1990,7 +1990,6 @@ form instead of a placeholder name:
 }
 ```
 
-
 A multi-bench block can give each bench its own cold start and declare a spec
 row that has no bench yet (a plain-string `testbenches` list with one
 top-level `cold_start` stays valid and produces the same envelope as before):

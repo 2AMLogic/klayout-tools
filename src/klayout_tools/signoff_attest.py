@@ -877,28 +877,7 @@ def _pin_checks(pins: Any) -> list[dict[str, Any]]:
     a failed check, not a malformed inventory -- the inventory is well-formed,
     it just does not yet say how to reproduce the run."""
     pins = pins if isinstance(pins, Mapping) else {}
-    pdk = pins.get("pdk")
-    pdk_value = None
-    if isinstance(pdk, Mapping):
-        if pdk.get("none") is True:
-            # Explicit no-PDK form: only ``none`` and a non-empty ``reason``;
-            # mixing in ``name``/``revision`` is contradictory and fails.
-            reason = pdk.get("reason")
-            if (
-                isinstance(reason, str)
-                and reason.strip()
-                and set(pdk) == {"none", "reason"}
-            ):
-                pdk_value = {"none": True, "reason": reason}
-        else:
-            name, revision = pdk.get("name"), pdk.get("revision")
-            if (
-                isinstance(name, str)
-                and name
-                and isinstance(revision, str)
-                and revision
-            ):
-                pdk_value = {"name": name, "revision": revision}
+    pdk_value = item9.pdk_pin(pins.get("pdk"))
     tools = pins.get("tools")
     tools_value = None
     if (
