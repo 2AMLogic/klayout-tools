@@ -4,6 +4,9 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-03
 
+- **PR #4783**: chore(deps): bump pyo3 from 0.29.3 to 0.30.1 in /native/mom
+- **PR #4882**: feat(sim): classify pre_osdi in decks and expand $PDK_ROOT on the runner
+- **Issue #4881** (closed): klt sim decks (batch): no way to reference runner-resident PDK model files from a pre-composed deck without guessing the runner's PDK root
 - **PR #4879**: fix: let sharded --attach collect maps submitted with --wait-for-capacity
 - **Issue #4878** (closed): klt sim: sharded batch jobs cannot be collected into one report
 - **PR #4877**: docs: mark signoff item-9 unbenched_rows and per-bench cold_start as unreleased
