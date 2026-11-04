@@ -9939,3 +9939,38 @@ def test_unlabelled_allow_device_connected_rejects_bad_declarations(
         ErcError, match=rf"nets\[0\]\.unlabelled_allow_device_connected.*{match}"
     ):
         run_erc(str(gds), str(spec))
+
+
+# --- issue #4915: erc_coverage.missing_tie_checked -------------------------
+
+
+def test_missing_tie_checked_false_without_ties():
+    from klayout_tools.erc import _connectivity_coverage
+
+    cov = _connectivity_coverage([], [], [])
+    assert cov["missing_tie_checked"] is False
+    disclosed = _connectivity_coverage(
+        [], [], [], ties_disclosure={"kind": "unexpressible"}
+    )
+    assert disclosed["missing_tie_checked"] is False
+
+
+def test_missing_tie_checked_false_when_every_tie_degenerate():
+    from klayout_tools.erc import _connectivity_coverage
+
+    cov = _connectivity_coverage(
+        [], [], [{"name": "t1"}], degenerate_ties={"t1": "degenerate_tap_declaration"}
+    )
+    assert cov["missing_tie_checked"] is False
+
+
+def test_missing_tie_checked_true_when_a_tie_is_checked():
+    from klayout_tools.erc import _connectivity_coverage
+
+    cov = _connectivity_coverage(
+        [],
+        [],
+        [{"name": "t1"}, {"name": "t2"}],
+        degenerate_ties={"t1": "degenerate_tap_declaration"},
+    )
+    assert cov["missing_tie_checked"] is True

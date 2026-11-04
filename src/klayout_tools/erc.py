@@ -849,6 +849,13 @@ def _connectivity_coverage(
         **build_check_coverage(
             checked=checked, skipped=skipped, inapplicable=inapplicable
         ),
+        # (issue #4915) Additive, always present: true iff at least one
+        # `erc.missing_tie:*` identity was really evaluated. A gate counting
+        # `erc.missing_tie` findings must read false as "the check did not
+        # run", not as a pass.
+        "missing_tie_checked": any(
+            i.startswith("erc.missing_tie:") for i in checked
+        ),
         "checked_by_assertion": sorted(checked_by_assertion),
         "checked_by_well_assertion": sorted(checked_by_well_assertion),
         "layers_in_stream_without_declaration": list(undeclared_stream_layers or []),
