@@ -3878,6 +3878,34 @@ def _read_log_head(path: str) -> str:
         return ""
 
 
+#: ngspice log signatures of a model-library ``expr()`` parameter the engine
+#: cannot evaluate (issue #4891); off-host only, where the engine is the
+#: runner image's, not the caller's.
+_EXPR_UNSUPPORTED_RE = re.compile(
+    r"Undefined parameter \[expr\]|Expression err: expr\(", re.IGNORECASE
+)
+_RUNNER_EXPR_HINT = (
+    " The same library may load on a newer local ngspice; compare"
+    " environment.remote.runner_klt_version / environment.engine_version and"
+    " update the runner image (an infra change, not a client change)."
+)
+
+
+def _with_runner_expr_hint(diagnostic: dict[str, Any]) -> dict[str, Any]:
+    """Append the runner-gap sentence to an ``ngspice_fatal`` diagnostic whose
+    message shows an unevaluated ``expr()`` parameter. Idempotent; any other
+    diagnostic is returned unchanged."""
+    message = diagnostic.get("message")
+    if (
+        diagnostic.get("code") == "ngspice_fatal"
+        and isinstance(message, str)
+        and _EXPR_UNSUPPORTED_RE.search(message)
+        and _RUNNER_EXPR_HINT not in message
+    ):
+        diagnostic["message"] = message + _RUNNER_EXPR_HINT
+    return diagnostic
+
+
 def _fatal_log_diagnostic(log_text: str) -> dict[str, Any] | None:
     """The ngspice deck-abort diagnostic (``missing_include``, ``netlist``,
     ``model_bin_range`` or ``ngspice_fatal``) the local classifier would emit
@@ -3892,7 +3920,7 @@ def _fatal_log_diagnostic(log_text: str) -> dict[str, Any] | None:
     for diagnostic in _classify_diagnostics(log_text):
         if diagnostic.get("code") in _NGSPICE_FATAL_CODES:
             _mark_analysis_not_started([diagnostic], log_text)
-            return diagnostic
+            return _with_runner_expr_hint(diagnostic)
     return None
 
 
@@ -3917,6 +3945,8 @@ def _surface_log_fatal(corners: list[dict[str, Any]], collected: str) -> None:
             continue
         diagnostics = corner.setdefault("diagnostics", [])
         if any(d.get("code") in _NGSPICE_FATAL_CODES for d in diagnostics):
+            for existing in diagnostics:
+                _with_runner_expr_hint(existing)
             continue
         log_path = None
         remote = (corner.get("artifacts") or {}).get("log")
