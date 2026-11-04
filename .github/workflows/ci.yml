@@ -1059,6 +1059,20 @@ jobs:
       - name: Verify ngspice runs headlessly
         run: ngspice -v
 
+      - name: Cache gallery-cell SPICE netlists
+        # Issue #4908 (recurrence of #4726): raw.githubusercontent.com outages
+        # longer than the fetch script's retry budget failed unrelated PRs.
+        # Restoring the already-verified directory lets the script's
+        # `.fetched-manifest-version` marker short-circuit skip the network.
+        # The key hashes the script, which holds the pinned SHAs, checksums
+        # and MANIFEST_VERSION, so any pin/manifest edit forces a refetch and
+        # re-verification. The fetch step below is unchanged and still fails
+        # closed on a checksum mismatch.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: pdks/cell-netlists
+          key: cell-netlists-${{ runner.os }}-${{ hashFiles('scripts/fetch-cell-netlists.sh') }}
+
       - name: Fetch real gallery-cell SPICE netlists
         # Pinned, checksum-verified per-file fetch (see the script's header
         # comment) -- small (~9 MB), unlike fetch-pdks.sh's lambdapdk. Backs
