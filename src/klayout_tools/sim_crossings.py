@@ -26,9 +26,9 @@ vector, ``time``, comes along automatically). So:
 
 Crossing times are **linearly interpolated** between the two samples that
 bracket the level -- nearest-sample extraction would report the simulator's
-timestep as jitter (issue #56's argument, absorbed here). Reductions over the
-series (period, cycle-to-cycle, TIE) are deliberately out of scope; they
-belong to #56 and can consume the ``times`` array directly.
+timestep as jitter (issue #56's argument, absorbed here). Optional reductions
+over the series (``crossings.reduce``: period, cycle-to-cycle, TIE) live in
+:mod:`klayout_tools.sim_crossings_reduce` (issue #56).
 
 Response shape (additive, no ``schema_version`` bump)
 -----------------------------------------------------
@@ -52,6 +52,7 @@ from typing import Any
 
 from . import sim_supply_relative
 from ._jsonnum import is_number
+from .sim_crossings_reduce import REDUCTIONS, reduce_crossings
 from .sim_errors import SimError
 
 #: The ``crossings.edge`` values: a rising crossing, a falling one, or both.
@@ -64,7 +65,7 @@ MAX_CROSSINGS_CAP = 100_000
 
 #: Keys a ``crossings`` object may carry. Anything else is refused by name
 #: (a typo'd ``form``/``tmax`` must not silently widen the window).
-_ALLOWED_KEYS = frozenset({"signal", "level", "edge", "from", "to", "max"})
+_ALLOWED_KEYS = frozenset({"signal", "level", "edge", "from", "to", "max", "reduce"})
 
 #: Prefix of the ngspice vector each crossings measurement is bound to in the
 #: generated deck -- never a caller-visible name.
@@ -112,12 +113,29 @@ def validate_crossings_spec(name: Any, body: Any) -> None:
             f"{list(CROSSING_EDGES)} (got {edge!r})"
         )
     _validate_max(name, body.get("max"))
+    _validate_reduce(name, body.get("reduce"))
     start = _window_bound(name, body, "from")
     stop = _window_bound(name, body, "to")
     if start is not None and stop is not None and stop < start:
         raise SimError(
             f"measurement '{name}': crossings.to ({stop!r} s) is before "
             f"crossings.from ({start!r} s)"
+        )
+
+
+def _validate_reduce(name: Any, reduce: Any) -> None:
+    if reduce is None:
+        return
+    if not isinstance(reduce, list) or not all(isinstance(r, str) for r in reduce):
+        raise SimError(
+            f"measurement '{name}': crossings.reduce must be a list of "
+            f"names drawn from {list(REDUCTIONS)} (got {reduce!r})"
+        )
+    unknown = sorted(set(reduce) - set(REDUCTIONS))
+    if unknown:
+        raise SimError(
+            f"measurement '{name}': unknown crossings.reduce name(s) "
+            f"{unknown}; allowed: {list(REDUCTIONS)}"
         )
 
 
@@ -303,6 +321,8 @@ class CrossingsOutcome:
     error: str | None = None
     #: The threshold in volts, set only when ``level`` was supply-relative.
     resolved_level: float | None = None
+    #: ``crossings.reduce`` results, set only when requested.
+    reductions: dict[str, Any] | None = None
 
     def report(self) -> dict[str, Any]:
         """The response's ``crossings`` object for this measurement."""
@@ -313,6 +333,8 @@ class CrossingsOutcome:
         }
         if self.resolved_level is not None:
             out["level"] = self.resolved_level
+        if self.reductions is not None:
+            out["reductions"] = self.reductions
         return out
 
 
@@ -478,4 +500,8 @@ def _extract_one(
         max_count=body.get("max") or DEFAULT_MAX_CROSSINGS,
     )
     outcome.resolved_level = resolved_level
+    if body.get("reduce"):
+        outcome.reductions = reduce_crossings(
+            outcome.times, body.get("edge", "rise"), body["reduce"]
+        )
     return outcome
