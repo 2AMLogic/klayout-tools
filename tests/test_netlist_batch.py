@@ -352,6 +352,10 @@ def test_job_json_shape(repo, fake, no_local_xschem, tmp_path):
         '--backend local --format json > "$EDA_OUTPUT_DIR/report.json"'
     ) in cmd
     assert f'tar -xzf "$EDA_INPUT_DIR/{nb.BATCH_TREE_FILENAME}"' in cmd
+    # HOME is defaulted before xschem runs (the runner may leave it unset).
+    home = 'export HOME="${HOME:-$(mktemp -d)}"'
+    assert home in cmd
+    assert cmd.index(home) < cmd.index("klt netlist ")
     # No host-absolute path ever reaches the runner.
     assert str(tmp_path) not in cmd
     assert str(repo) not in cmd

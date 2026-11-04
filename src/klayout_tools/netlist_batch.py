@@ -450,6 +450,10 @@ def build_job_spec(
             'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
             'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
             "w=$(mktemp -d)",
+            # The runner may run jobs with HOME unset; xschem's Tcl init reads
+            # env(HOME) directly and dies. Use a scratch dir outside the tree
+            # so no .xschem template lands in the shipped schematic tree.
+            'export HOME="${HOME:-$(mktemp -d)}"',
             f'tar -xzf "$EDA_INPUT_DIR/{BATCH_TREE_FILENAME}" -C "$w"',
             'cd "$w"',
             'printf \'%s\\n%s\\n\' "$w" "$(pwd -P)" >'
