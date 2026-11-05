@@ -633,6 +633,7 @@
         "klayout_tools.sim_echo_messages",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_errors",
+        "klayout_tools.sim_exit_reason",
         "klayout_tools.sim_eye",
         "klayout_tools.sim_forms",
         "klayout_tools.sim_injected",
