@@ -962,14 +962,6 @@ def test_cli_devices_unknown_class_error_envelope(capsys):
 # --------------------------------------------------------------------------- #
 
 
-def _pending_release_tag(repo_root) -> str:
-    import re
-
-    text = (repo_root / "pyproject.toml").read_text()
-    match = re.search(r'^base-version\s*=\s*"([^"]+)"', text, re.MULTILINE)
-    return f"v{match.group(1)}" if match else ""
-
-
 def test_checked_in_history_table_covers_every_release():
     """Sanity check on the real, generated table -- not the synthetic
     fixture above. Every deck must have an entry for every release from the
@@ -981,6 +973,8 @@ def test_checked_in_history_table_covers_every_release():
     note), but once present it must never disappear from a later release."""
     import subprocess
     from pathlib import Path
+
+    from _pending_release_tag import with_pending_tag
 
     repo_root = Path(__file__).resolve().parent.parent
     real_path = repo_root / "src" / "klayout_tools" / "decks" / "_history.json"
@@ -1012,11 +1006,9 @@ def test_checked_in_history_table_covers_every_release():
         "the table -- rerun scripts/generate_deck_history.py"
     )
 
-    # The table is a well-formed, up-to-date reflection of *tagged* history
-    # -- it need not (and for an unreleased dev checkout, generally won't)
-    # include the current working tree's hash, only what git tag --list
-    # reports. Confirm the tag set matches reality so the fixture doesn't
-    # silently drift from a real `git tag` run.
+    # The table reflects *tagged* history (not the working tree's hash).
+    # Confirm the tag set matches reality so the fixture doesn't silently
+    # drift from a real `git tag` run.
     result = subprocess.run(
         ["git", "tag", "--sort=v:refname", "--list", "v*"],
         cwd=repo_root,
@@ -1024,13 +1016,7 @@ def test_checked_in_history_table_covers_every_release():
         capture_output=True,
         text=True,
     )
-    real_tags = [line for line in result.stdout.splitlines() if line.strip()]
-    # The automated release PR (issue #4920) records its own version via
-    # `generate_deck_history.py --as-release` before the tag exists, so exactly
-    # the pending `base-version` tag may be ahead of `git tag`.
-    pending = _pending_release_tag(repo_root)
-    if real_tags and tags == [*real_tags, pending] and pending not in real_tags:
-        real_tags = [*real_tags, pending]
+    real_tags = with_pending_tag(repo_root, tags, result.stdout)
     if real_tags:
         assert tags == real_tags, (
             "checked-in _history.json is stale relative to `git tag` -- "
