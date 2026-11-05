@@ -404,15 +404,18 @@
       "description": "`klt netlist` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.netlist_cmd",
+        "klayout_tools.cli.parser_netlist",
         "klayout_tools.netlist",
         "klayout_tools.netlist_block",
         "klayout_tools.netlist_batch",
+        "klayout_tools.netlist_batch_select",
         "klayout_tools.netlist_capacitor_recovery",
         "klayout_tools.netlist_digest",
         "klayout_tools.netlist_diagnostics",
         "klayout_tools.netlist_inputs",
         "klayout_tools.netlist_normalize",
-        "klayout_tools.netlist_normalize_scan"
+        "klayout_tools.netlist_normalize_scan",
+        "klayout_tools.netlist_pdk"
       ]
     },
     "pdk": {
