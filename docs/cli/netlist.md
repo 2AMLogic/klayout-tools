@@ -7,7 +7,7 @@ on the SPICE side: it produces the netlist `klt sim` simulates and (eventually)
 `klt lvs` compares a layout against.
 
 ```
-klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--backend local|batch] [--batch-root <dir>] [--batch-include <glob>]... [--batch-exclude <glob>]... [--format text|json]
+klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--symbol-path <dir>]... [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--backend local|batch] [--batch-root <dir>] [--batch-include <glob>]... [--batch-exclude <glob>]... [--format text|json]
 ```
 
 - `<schematic>` — path to the xschem schematic to netlist (`.sch`). Checked
@@ -31,6 +31,13 @@ klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rc
   With `--pdk`/`--pdk-root` (or `$PDK`/`$PDK_ROOT`), the PDK root the
   `xschemrc` declares is cross-checked against the resolved PDK — see
   [PDK-root consistency](#pdk-root-consistency).
+- `--symbol-path` — extra xschem symbol directory, repeatable. Exported to
+  xschem as `XSCHEM_USER_LIBRARY_PATH` (`DIR[:DIR…]`, absolute-resolved,
+  placed ahead of any value already in the environment), so a project's
+  sibling `.sym` files resolve without an exported variable or an `--rcfile`
+  edit. A missing or non-directory `DIR` is exit `1`. Under `--backend batch`
+  see [Batch backend](#batch-backend): each `DIR` must be under the batch
+  root. Recorded as `xschem.symbol_path`.
 - `--pdk`, `--pdk-root` — resolve a PDK the same way `klt sim` does, to
   cross-check against `--rcfile`'s declared PDK root. See
   [PDK-root consistency](#pdk-root-consistency).
@@ -385,6 +392,13 @@ dropped), in `error.remote_stderr_tail`, plus `error.remote_exit_code`,
 recovered. The tail is raw runner output and may contain paths from the
 runner; it is netlist-only (`klt sim` still never surfaces raw stderr).
 
+**`--symbol-path`.** Each `DIR` must exist, lie under the batch root and hold
+at least one tracked file in the selected set (exit `1` before any archive or
+S3 write otherwise). It is forwarded to the runner as a quoted root-relative
+`--symbol-path` argument; with the flag absent the job command is unchanged.
+The runner's `klt` must know `--symbol-path` (added with issue #4952); an older
+runner rejects the unknown flag, so use a runner image with a matching `klt`.
+
 **PDK-relative `--rcfile`.** An `xschemrc` that ships with the PDK is given in
 its PDK-relative form, quoted so the shell does not expand it:
 
@@ -568,6 +582,7 @@ resolves its own `$PDK_ROOT`.
 | `exit_status` | integer | xschem's own exit status. **Not the verdict** — non-zero on success. |
 | `exit_status_trusted` | boolean | Always `false`, stated in the payload so a consumer is not left to infer it. |
 | `timeout_s` | number | The bound that was in force (`--timeout-s`). |
+| `symbol_path` | array\<string\> | The `--symbol-path` directories (absolute for a local run, batch-root-relative under `--backend batch`); `[]` when the flag is unused. Additive. |
 | `duration_s` | number | Wall-clock seconds the xschem run took, rounded to milliseconds. |
 
 ### `netlist`
