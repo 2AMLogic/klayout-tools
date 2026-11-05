@@ -43,9 +43,9 @@ from .sim_batch import (
     job_uri,
     launch_job,
     new_job_id,
-    plan_batch_job,
     submit_job,
 )
+from .sim_batch_plan import plan_batch_job
 from .sim_batch_shards import (  # noqa: F401
     request_sha256,
     shard_map_request_fields,

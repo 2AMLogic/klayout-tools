@@ -37,8 +37,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .output_lock import OutputLockError
-from .sim import SimError, preflight_batch_request, run_sim
+from .sim import SimError, run_sim
 from .sim_batch import BATCH_CONCURRENCY_CAP_CODE, BATCH_NO_CAPACITY_CODE
+from .sim_batch_plan import preflight_batch_request
 
 SET_SCHEMA_VERSION = 1
 
@@ -249,8 +250,8 @@ def run_sim_set(
     **All-or-nothing preflight (issue #4972).** Before anything is submitted,
     every member is resolved (with ``run_kwargs`` overrides applied) and put
     through the submit path's own ceiling / split check
-    (:func:`~klayout_tools.sim.preflight_batch_request`). If any member fails,
-    a single :class:`SimError` names every failing member and nothing is
+    (:func:`~klayout_tools.sim_batch_plan.preflight_batch_request`). If any
+    member fails, a single :class:`SimError` names every failing member and nothing is
     submitted or written. ``preflight`` replaces the check; by default it runs
     only with the real ``run_sim`` (an injected ``run`` is a test double)."""
     if not request_paths:
