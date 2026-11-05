@@ -241,7 +241,6 @@ from .functional_verification_sdf import (
     _parse_toplevel_ports,
     _reject_sdf_escaped_divider_interconnects,
     _reject_sdf_mis_scoped_top_cell,
-    _reject_sdf_unresolvable_interconnect_instances,
     _reject_sdf_with_functional_models,
     _resolve_sdf_option,
     _scan_sdf_diagnostics,
@@ -250,6 +249,7 @@ from .functional_verification_sdf import (
     _write_sdf_annotate_shim,
     _write_sdf_dut_wrapper,
 )
+from .functional_verification_sdf_instance import _reject_sdf_unresolvable_scopes
 from .functional_verification_sdf_rename import (
     _apply_sdf_escaped_divider_rename,
     _sdf_renamed_report,
@@ -3566,7 +3566,7 @@ def run_functional_verification(
         )
         # Issue #3740: an INTERCONNECT endpoint naming an instance the
         # netlist does not have aborts vvp the same way -- caught here too.
-        _reject_sdf_unresolvable_interconnect_instances(
+        _reject_sdf_unresolvable_scopes(
             sdf["file"], sources, hdl_toplevel, sdf.get("scope")
         )
         if parameters:
