@@ -24,7 +24,8 @@ DIAGNOSTICS_TAIL_BYTES = 4096
 #: xschem prints its own netlister ERC findings (e.g. ``Error: undriven node:
 #: #net1``) on stdout/stderr during a normal batch run; measured on 3.4.7 --
 #: it has no ``-erc`` flag (``Unknown option``), so the signal is read here.
-#: Measured for a dangling wire; shorted pins are unverified (issue #4962).
+#: Measured on 3.4.7: a dangling wire (``undriven node``) and shorted pins
+#: (``Error: Net shorted: A - B``) are both caught (issue #4962).
 _ERC_LINE_RE = re.compile(r"^\s*Error:", re.MULTILINE)
 
 

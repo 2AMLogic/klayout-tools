@@ -5,6 +5,9 @@ Split from ``test_netlist.py``, which is at its file-size ceiling.
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 import pytest
 
 from klayout_tools.cli import main
@@ -112,3 +115,32 @@ def test_erc_rejected_with_batch_backend(tmp_path, capsys):
     )
     assert code == 1
     assert "--erc" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# real xschem: shorted pins (issue #4962)
+# --------------------------------------------------------------------------- #
+
+_SHORTED_PINS = Path(__file__).parent / "data" / "netlist" / "shorted_pins.sch"
+_XSCHEM_DEVICES_DIRS = (
+    "/usr/share/xschem/xschem_library",
+    "/usr/local/share/xschem/xschem_library",
+)
+
+
+@pytest.mark.skipif(shutil.which("xschem") is None, reason="xschem not on PATH")
+def test_erc_flags_shorted_pins_with_real_xschem(tmp_path):
+    library = next((d for d in _XSCHEM_DEVICES_DIRS if Path(d).is_dir()), None)
+    if library is None:
+        pytest.skip("xschem device library not found")
+    rcfile = tmp_path / "xschemrc"
+    rcfile.write_text(f"set XSCHEM_LIBRARY_PATH {library}\n")
+
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(
+            str(_SHORTED_PINS), str(tmp_path / "o.spice"), rcfile=str(rcfile), erc=True
+        )
+
+    assert excinfo.value.code == "erc_findings"
+    assert "Net shorted: A - B" in str(excinfo.value)
+    assert not (tmp_path / "o.spice").exists()
