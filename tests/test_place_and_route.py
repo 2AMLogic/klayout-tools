@@ -5651,9 +5651,14 @@ def test_io_delay_lines_helper_emits_only_given_fields():
         *_IO_INPUT_DELAY_LINES,
         _IO_OUTPUT_DELAY_LINE,
     ]
-    # Defensive: `_validate_constraints` never lets a delay through without
-    # a clock, but the helper stays total either way.
-    assert place_and_route._io_delay_lines(None, 0.2, 0.3) == []
+    # No `clock_port` (issue #4913): the delays bind to the virtual clock that
+    # `clock_period_ns` alone creates, on the full `[all_inputs]`/`[all_outputs]`
+    # sets; with neither delay there is still nothing to emit.
+    assert place_and_route._io_delay_lines(None, 0.2, 0.3) == [
+        "set_input_delay 0.2 -clock klt_virtual_clk [all_inputs]",
+        "set_output_delay 0.3 -clock klt_virtual_clk [all_outputs]",
+    ]
+    assert place_and_route._io_delay_lines(None, None, None) == []
 
 
 def test_io_delay_input_set_excludes_the_clock_port():
