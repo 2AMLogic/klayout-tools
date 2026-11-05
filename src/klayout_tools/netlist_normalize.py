@@ -1228,7 +1228,7 @@ def _convert_capacitor_card(
         "m",
         "to expand into that many parallel plain-element devices",
     )
-    exclude = _CAPACITOR_EXCLUDED_MULTIPLICITY_PARAMS
+    exclude: tuple[str, ...] = _CAPACITOR_EXCLUDED_MULTIPLICITY_PARAMS
     if capacitor_mf_is_m_alias(instance, subckt_name, params, multiplier):
         exclude += ("mf",)
     _reject_multiplicity(instance, subckt_name, params, exclude=exclude)

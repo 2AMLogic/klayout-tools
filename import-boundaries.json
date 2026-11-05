@@ -399,6 +399,7 @@
       "kind": "verb",
       "description": "`klt netlist` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools._capacitor_mf",
         "klayout_tools.cli.netlist_cmd",
         "klayout_tools.netlist",
         "klayout_tools.netlist_batch",
