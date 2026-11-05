@@ -962,6 +962,14 @@ def test_cli_devices_unknown_class_error_envelope(capsys):
 # --------------------------------------------------------------------------- #
 
 
+def _pending_release_tag(repo_root) -> str:
+    import re
+
+    text = (repo_root / "pyproject.toml").read_text()
+    match = re.search(r'^base-version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return f"v{match.group(1)}" if match else ""
+
+
 def test_checked_in_history_table_covers_every_release():
     """Sanity check on the real, generated table -- not the synthetic
     fixture above. Every deck must have an entry for every release from the
@@ -1017,6 +1025,12 @@ def test_checked_in_history_table_covers_every_release():
         text=True,
     )
     real_tags = [line for line in result.stdout.splitlines() if line.strip()]
+    # The automated release PR (issue #4920) records its own version via
+    # `generate_deck_history.py --as-release` before the tag exists, so exactly
+    # the pending `base-version` tag may be ahead of `git tag`.
+    pending = _pending_release_tag(repo_root)
+    if real_tags and tags == [*real_tags, pending] and pending not in real_tags:
+        real_tags = [*real_tags, pending]
     if real_tags:
         assert tags == real_tags, (
             "checked-in _history.json is stale relative to `git tag` -- "

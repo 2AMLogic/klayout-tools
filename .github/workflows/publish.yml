@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  # Dispatched by release.yml (issue #4920): a tag pushed with the default
+  # GITHUB_TOKEN does not fire the `push: tags` trigger above, but a
+  # `workflow_dispatch` made with that token does. Dispatch on the tag ref, so
+  # the run is still this workflow at top level (PyPI trusted publishing is
+  # registered against `publish.yml` + environment `pypi`).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,6 +20,15 @@ jobs:
     name: Build distribution
     runs-on: ubuntu-24.04
     steps:
+      # A dispatch from a branch would build a `.dev` version (issue #4920);
+      # only a tag ref may build, and so publish, a release.
+      - name: Require a release tag ref
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "::error::publish.yml must run on a v* tag ref, got $GITHUB_REF"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Full history + tags: `hatch_build.py` records the built commit's

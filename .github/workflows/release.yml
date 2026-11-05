@@ -1,0 +1,241 @@
+name: Release
+
+# Automated release (issue #4920); design in RELEASING.md "Automated release".
+#
+#   prepare  weekly cron / workflow_dispatch: when `main` is more than the
+#            RELEASING.md backstop ahead of the latest tag, open ONE
+#            `chore(release): bump version to X.Y.Z` PR (never a push to main).
+#   tag      push to main touching pyproject.toml: when HEAD is that release
+#            commit, tag it vX.Y.Z and dispatch publish.yml on the tag.
+#
+# Neither job auto-merges. Both run scripts/check_native_extras.py first and,
+# on failure, file/refresh a single tracking issue instead of a PR or tag.
+#
+# Token caveats (RELEASING.md): a PR or tag made with GITHUB_TOKEN does not
+# trigger other workflows' push/pull_request events. Tagging is solved by
+# dispatching publish.yml explicitly. For the release PR, set the optional
+# RELEASE_BOT_TOKEN secret (a token allowed to open PRs, e.g. a GitHub App
+# token) so required checks run on it; without it, push an empty commit to
+# the release branch to start CI.
+
+on:
+  schedule:
+    - cron: "17 15 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Override the version (default: next minor; a patch is a manual override)"
+        type: string
+        default: ""
+      force:
+        description: "Skip the commit-count gate"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Prepare and show the diff; open no PR"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Open the release PR when a release is due
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "latest"
+
+      - name: Release lag gate
+        id: lag
+        run: |
+          status=0
+          scripts/check-release-lag.sh --ref HEAD --annotate || status=$?
+          if [ "$status" -ge 2 ]; then
+            echo "::error::check-release-lag.sh exited $status"; exit 1
+          fi
+          due=false
+          if [ "$status" -eq 1 ] || [ "${{ inputs.force }}" = "true" ]; then due=true; fi
+          echo "due=$due" >> "$GITHUB_OUTPUT"
+
+      - name: Is a release PR already open?
+        id: existing
+        if: steps.lag.outputs.due == 'true'
+        run: |
+          open="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName \
+            --jq '[.[] | select(.headRefName | startswith("release/v"))] | length')"
+          echo "open=$open" >> "$GITHUB_OUTPUT"
+          [ "$open" = "0" ] || echo "A release PR is already open; nothing to do."
+
+      - name: Gate on native extras
+        id: native
+        if: steps.lag.outputs.due == 'true' && steps.existing.outputs.open == '0'
+        run: |
+          status=0
+          uv run --python 3.12 --no-project python scripts/check_native_extras.py \
+            > native.log 2>&1 || status=$?
+          cat native.log
+          echo "ok=$([ "$status" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Report blocked release (single tracking issue)
+        if: steps.native.outputs.ok == 'false'
+        run: |
+          title="Automated release blocked: klt-*-native pin not published"
+          body="$(printf 'The release workflow stopped before opening a release PR (no PR, no tag).\n\nRun: %s/%s/actions/runs/%s\n\n```\n%s\n```\n\nSee docs/releasing-native.md. Re-run the Release workflow once the pin is on PyPI; this issue is refreshed in place, not re-filed.' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(tail -n 40 native.log)")"
+          num="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
+            --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
+          if [ -n "$num" ]; then
+            gh issue edit "$num" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
+          exit 1
+
+      - name: Prepare the release commit
+        id: prep
+        if: steps.native.outputs.ok == 'true'
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          args=()
+          if [ -n "$INPUT_VERSION" ]; then args+=(--version "$INPUT_VERSION"); fi
+          info="$(python3 -I scripts/release_prep.py prepare "${args[@]}")"
+          version="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["version"])' "$info")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::error::tag v$version already exists"; exit 1
+          fi
+          uv lock
+          git switch -c "release/v$version"
+          git add -A
+          git commit -q -m "chore(release): bump version to $version"
+          # Both need the bump committed: the site data reads the new CHANGELOG
+          # heading, the deck history reads HEAD's pyproject as the release.
+          uv run python scripts/gen_site_cli_data.py
+          python3 scripts/generate_deck_history.py --as-release "v$version"
+          git add -A
+          git commit -q --amend --no-edit
+
+      - name: Dry run summary
+        if: steps.prep.outputs.version != '' && inputs.dry_run
+        run: |
+          {
+            echo "### Dry run: release v${{ steps.prep.outputs.version }}"
+            echo '```diff'
+            git diff --stat HEAD~1 HEAD
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open the release PR
+        if: steps.prep.outputs.version != '' && !inputs.dry_run
+        run: |
+          v="${{ steps.prep.outputs.version }}"
+          git push origin "release/v$v"
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "release/v$v" \
+            --title "chore(release): bump version to $v" \
+            --body "Automated release PR (RELEASING.md, Automated release). Merging it makes the tag job tag \`v$v\` and dispatch \`publish.yml\`. Not auto-merged."
+
+  tag:
+    name: Tag and publish a merged release commit
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "latest"
+
+      - name: Is this commit a release bump?
+        id: detect
+        run: |
+          subject="$(git log -1 --format=%s "$GITHUB_SHA")"
+          version="$(python3 -I scripts/release_prep.py detect --subject "$subject")"
+          if [ -z "$version" ]; then echo "Not a release commit."; echo "version=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          declared="$(grep -E '^base-version' pyproject.toml | head -1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')"
+          if [ "$declared" != "$version" ]; then
+            echo "::error::subject says $version but base-version is $declared; not tagging"; exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "v$version already exists; not tagging."; echo "version=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Gate on native extras
+        id: native
+        if: steps.detect.outputs.version != ''
+        run: |
+          status=0
+          uv run --python 3.12 --no-project python scripts/check_native_extras.py \
+            > native.log 2>&1 || status=$?
+          cat native.log
+          echo "ok=$([ "$status" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Report blocked tag (single tracking issue)
+        if: steps.native.outputs.ok == 'false'
+        run: |
+          title="Automated release blocked: klt-*-native pin not published"
+          body="$(printf 'The tag job refused to tag v%s (no tag, no publish).\n\nRun: %s/%s/actions/runs/%s\n\n```\n%s\n```\n\nPublish the pin (docs/releasing-native.md), then re-run this job.' \
+            "${{ steps.detect.outputs.version }}" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(tail -n 40 native.log)")"
+          num="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
+            --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
+          if [ -n "$num" ]; then gh issue edit "$num" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"; fi
+          exit 1
+
+      - name: Tag the bump commit and dispatch publish
+        if: steps.native.outputs.ok == 'true'
+        run: |
+          v="v${{ steps.detect.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$v" -m "Release ${v#v}" "$GITHUB_SHA"
+          git push origin "refs/tags/$v"
+          # GITHUB_TOKEN tag pushes do not trigger publish.yml's `push: tags`;
+          # workflow_dispatch on the tag ref does, and builds from the tag.
+          gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$v"
+
+      - name: Deck history must match the real tag
+        if: steps.native.outputs.ok == 'true'
+        run: |
+          python3 scripts/generate_deck_history.py
+          if ! git diff --quiet -- src/klayout_tools/decks/_history.json; then
+            title="Deck history stale after ${{ steps.detect.outputs.version }}"
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --body "Regenerating after tagging differs from the release PR's table (a deck changed between PR head and merge). Run \`python scripts/generate_deck_history.py\` and commit. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi

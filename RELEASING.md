@@ -4,7 +4,10 @@ This is the release process for `klayout-tools`: bump the version, tag it,
 push the tag, and `.github/workflows/publish.yml` builds and publishes to
 PyPI via trusted publishing.
 
-> **TL;DR** — Bump `base-version` in `pyproject.toml` + `uv lock` → merge to `main` → tag
+> **TL;DR** — Releases are automated (see "Automated release" below): a weekly
+> workflow opens a release PR when `main` is over the backstop; merging it tags
+> and publishes. The manual sequence further down is the documented fallback:
+> bump `base-version` in `pyproject.toml` + `uv lock` → merge to `main` → tag
 > `vX.Y.Z` on the merged commit → push the tag. Pushing the tag is what
 > triggers the publish workflow.
 
@@ -37,11 +40,10 @@ warranted."
    **You do not have to remember to run this.**
    [`scripts/check-release-lag.sh`](scripts/check-release-lag.sh) computes the
    same count (it *parses the 25 above out of this file*, so the two can never
-   drift apart), and `.github/workflows/release-lag.yml` runs it on every push
-   to `main`, weekly, and on demand — reporting an over-threshold count as a
-   job-summary entry plus a warning annotation. That check is advisory only:
-   it never tags, pushes, or triggers `publish.yml`. Run it locally the same
-   way CI does:
+   drift apart), and `.github/workflows/release.yml` runs it first on every
+   scheduled or dispatched run (see "Automated release"). The script itself is
+   advisory and never tags, pushes, or triggers `publish.yml`. Run it locally
+   the same way CI does:
 
    ```bash
    scripts/check-release-lag.sh            # exit 1 ⇒ a release is due
@@ -146,7 +148,58 @@ site to keep in sync.
 Nothing here needs a manual step during a release; it is computed and
 recorded automatically at build time.
 
-## The release sequence
+## Automated release
+
+`.github/workflows/release.yml` (issue #4920) cuts releases so they stop
+depending on someone remembering. Design decisions:
+
+- **Trigger: cadence, not every merge.** Weekly cron (Mondays 15:17 UTC) plus
+  `workflow_dispatch`. It acts only when `scripts/check-release-lag.sh` reports
+  lag over the backstop above (`force` skips that gate). A per-merge release
+  was rejected: too much PyPI noise.
+- **Version: always the next minor** (`vX.(Y+1).0`), which satisfies the
+  batch-runner rule above by construction. A patch is a manual override via the
+  dispatch `version` input.
+- **A release PR, never a push to `main`** (branch protection rejects direct
+  pushes). `scripts/release_prep.py` bumps `base-version`, inserts the
+  `## X.Y.Z (date)` CHANGELOG heading below `## Unreleased`, and resolves the
+  "first release after `vPREV`" notes in `docs/cli/signoff.md`; the workflow
+  then runs `uv lock`, `scripts/gen_site_cli_data.py` and
+  `scripts/generate_deck_history.py --as-release vX.Y.Z`. Only one release PR
+  (`release/v*` branch) is open at a time. It is never auto-merged.
+- **Tag on merge.** A `push` to `main` that touches `pyproject.toml` runs the
+  tag job. It tags the commit only if its subject is
+  `chore(release): bump version to X.Y.Z`, `base-version` equals `X.Y.Z` and
+  the tag does not exist yet. The tag is on that exact commit, and
+  `publish.yml` builds from the tag with `fetch-depth: 0`, so a `.dev` version
+  cannot be published; `publish.yml` also refuses any ref that is not a
+  `v*` tag.
+- **Token caveat, resolved.** Tags pushed with the default `GITHUB_TOKEN` do not
+  fire `publish.yml`'s `push: tags` trigger. The tag job therefore runs
+  `gh workflow run publish.yml --ref vX.Y.Z` (a `workflow_dispatch` made with
+  `GITHUB_TOKEN` is allowed). It runs as `publish.yml` at top level, so the
+  PyPI trusted publisher and the `pypi` environment's `v*` tag policy apply
+  unchanged. For the same reason a PR opened with `GITHUB_TOKEN` does not start
+  required checks: set the optional `RELEASE_BOT_TOKEN` secret (a token that may
+  open PRs) or push an empty commit to the release branch.
+- **Deck history (old step 5)** is regenerated *in the release PR* with
+  `--as-release`, so no push to `main` is needed;
+  `tests/test_deck_history.py` accepts exactly the pending `base-version` tag
+  ahead of `git tag`. The entry's `git_commit` is the PR head. After tagging the
+  job regenerates against the real tag and files an issue if the table differs.
+- **Gates fail loudly, once.** `scripts/check_native_extras.py` runs before the
+  PR is opened and again before tagging; if a `klt-*-native` pin is unpublished
+  the job files (or refreshes in place) a single "Automated release blocked"
+  issue and opens no PR or tag. `publish.yml` keeps its own copy of the gate.
+- **Re-run after a failed publish:** run `publish.yml` via "Run workflow" on the
+  existing `vX.Y.Z` tag; do not re-tag.
+- `release-lag.yml` was retired; its check is the first step of `release.yml`.
+
+One-time setup (human): enable "Allow GitHub Actions to create and approve pull
+requests" in repository settings and, optionally, add `RELEASE_BOT_TOKEN`. The
+workflow has not been exercised live; use a `dry_run` dispatch first.
+
+## The release sequence (manual fallback)
 
 Let `X.Y.Z` be the new version.
 
@@ -234,6 +287,8 @@ search for it. Hashes are stable only per package version; see
 - [ ] Every `klt-*-native` pin in `pyproject.toml`'s extras is on PyPI
       (`docs/releasing-native.md`); `publish.yml` enforces this with
       `scripts/check_native_extras.py`, which you can run first.
+- Automated path: review and merge the `chore(release)` PR; the tag job does
+  the tag and dispatches `publish.yml`. The items below are the manual fallback.
 - [ ] `base-version` bumped in `pyproject.toml`; `uv lock` re-run.
 - [ ] Bump commit merged to `main` via a PR.
 - [ ] Annotated tag `vX.Y.Z` created on the merged commit on `main`.

@@ -76,15 +76,26 @@ def _run(*args: str) -> str:
     ).stdout
 
 
+#: Pseudo-tags (``--as-release``): tag name -> the git ref that stands in for
+#: it. The automated release PR (issue #4920) regenerates the table *before*
+#: the tag exists, treating its own HEAD as the release.
+_PSEUDO_TAGS: dict[str, str] = {}
+
+
+def _ref(tag: str) -> str:
+    return _PSEUDO_TAGS.get(tag, tag)
+
+
 def _tags() -> list[str]:
     """Every ``v*`` tag, oldest first (matches ``docs/cli/deck.md``'s
-    documented ordering)."""
+    documented ordering), plus any ``--as-release`` pseudo-tag last."""
     out = _run("git", "tag", "--sort=v:refname", "--list", "v*")
-    return [line for line in out.splitlines() if line.strip()]
+    tags = [line for line in out.splitlines() if line.strip()]
+    return tags + [t for t in _PSEUDO_TAGS if t not in tags]
 
 
 def _deck_module_names_at(tag: str) -> list[str]:
-    out = _run("git", "ls-tree", "--name-only", f"{tag}:src/klayout_tools/decks")
+    out = _run("git", "ls-tree", "--name-only", f"{_ref(tag)}:src/klayout_tools/decks")
     names = []
     for line in out.splitlines():
         line = line.strip()
@@ -97,7 +108,7 @@ def _deck_module_names_at(tag: str) -> list[str]:
 def _drc_deck_names_at(tag: str) -> list[str]:
     """Names with a standalone ``<name>.drc`` KLayout DRC deck file at
     ``tag`` (issue #3826) -- a separate hashed artifact from the deck module."""
-    out = _run("git", "ls-tree", "--name-only", f"{tag}:src/klayout_tools/decks")
+    out = _run("git", "ls-tree", "--name-only", f"{_ref(tag)}:src/klayout_tools/decks")
     return sorted(
         line.strip()[: -len(".drc")]
         for line in out.splitlines()
@@ -107,7 +118,7 @@ def _drc_deck_names_at(tag: str) -> list[str]:
 
 def _blob_sha256(tag: str, deck_name: str, suffix: str = ".py") -> str:
     result = subprocess.run(
-        ["git", "show", f"{tag}:src/klayout_tools/decks/{deck_name}{suffix}"],
+        ["git", "show", f"{_ref(tag)}:src/klayout_tools/decks/{deck_name}{suffix}"],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
@@ -116,7 +127,7 @@ def _blob_sha256(tag: str, deck_name: str, suffix: str = ".py") -> str:
 
 
 def _package_version_at(tag: str) -> str:
-    text = _run("git", "show", f"{tag}:pyproject.toml")
+    text = _run("git", "show", f"{_ref(tag)}:pyproject.toml")
     match = _VERSION_RE.search(text)
     if not match:
         raise SystemExit(
@@ -127,7 +138,7 @@ def _package_version_at(tag: str) -> str:
 
 
 def _commit_sha(tag: str) -> str:
-    return _run("git", "rev-list", "-n", "1", tag).strip()
+    return _run("git", "rev-list", "-n", "1", _ref(tag)).strip()
 
 
 def build_entries() -> list[dict[str, Any]]:
@@ -161,7 +172,21 @@ def build_entries() -> list[dict[str, Any]]:
     return entries
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Regenerate decks/_history.json")
+    parser.add_argument(
+        "--as-release",
+        metavar="vX.Y.Z",
+        help="record HEAD as release vX.Y.Z before that tag exists (the release "
+        "PR; the next regeneration after tagging rewrites it from the real tag)",
+    )
+    args = parser.parse_args(argv)
+    if args.as_release:
+        if not re.fullmatch(r"v\d+\.\d+\.\d+", args.as_release):
+            parser.error("--as-release must look like vX.Y.Z")
+        _PSEUDO_TAGS[args.as_release] = "HEAD"
     tags = _tags()
     if not tags:
         print("no v* git tags found -- nothing to record", file=sys.stderr)
