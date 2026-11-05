@@ -14,6 +14,8 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+## 0.9.0 (2026-11-05)
+
 - **`klt signoff --attest 9` accepts an explicit no-PDK pin** (issue #4904,
   documented in [`docs/cli/signoff.md`](docs/cli/signoff.md)): `pins.pdk` may
   be `{"none": true, "reason": "<non-empty>"}` for a partition whose cold
