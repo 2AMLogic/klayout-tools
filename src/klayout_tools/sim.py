@@ -88,7 +88,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import IO, Any, NamedTuple
@@ -184,6 +184,13 @@ from .sim_echo_messages import echo_unsupported_message, zipped_length_message
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
 from .sim_errors import SimError as SimError
+from .sim_measurement_results import (
+    MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE as MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE,
+)
+from .sim_measurement_results import (
+    NOT_REACHED_DIAGNOSTIC_CODE as NOT_REACHED_DIAGNOSTIC_CODE,
+)
+from .sim_measurement_results import _corner_measurement_results
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
@@ -384,13 +391,6 @@ WAVEFORM_TOO_LARGE_CODE = "waveform_too_large"
 #: (issue #2493) -- the *other* reason a corner can grade
 #: :data:`_INCONCLUSIVE_STATUS`, and how a consumer tells the two apart.
 IMPLAUSIBLE_DIAGNOSTIC_CODE = "implausible_solution"
-
-#: The marker diagnostic :func:`_margin_measurement_result` attaches to a
-#: ``transfer`` margin measurement (issue #3088) whose limit was met but whose
-#: AC band cannot support a pass -- so the corner grades
-#: :data:`_INCONCLUSIVE_STATUS` and the message lists the
-#: ``MarginReport.ambiguity`` reasons.
-MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE = "margin_ambiguous"
 
 #: The codes above: emitted by the **grading** step rather than by a log
 #: classifier or an unrun-corner path, and therefore deliberately **not**
@@ -10379,187 +10379,6 @@ def _split_returncode(returncode: int) -> tuple[int | None, str | None]:
         return None, f"SIG{-returncode}"
 
 
-def _corner_measurement_results(
-    measurement_values: dict[str, float],
-    measurements_spec: list[dict[str, Any]],
-    *,
-    analysis: dict[str, Any],
-    log_text: str,
-    is_xyce: bool,
-    save_mode: str,
-    crossings: dict[int, sim_crossings.CrossingsOutcome] | None = None,
-    energy: dict[int, sim_energy.EnergyOutcome] | None = None,
-    stress: dict[int, sim_stress.StressOutcome] | None = None,
-    cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
-    transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
-    snms: dict[int, sim_snm_meas.SnmOutcome] | None = None,
-    eyes: dict[int, sim_eye.EyeOutcome] | None = None,
-    step_resolutions: (
-        dict[int, sim_step_resolution.StepResolutionOutcome] | None
-    ) = None,
-    settleds: dict[int, sim_settled.SettledOutcome] | None = None,
-    searches: dict[int, sim_search.SearchOutcome] | None = None,
-    tians: dict[int, sim_tian.TianOutcome] | None = None,
-    engine_diagnostics: list[dict[str, Any]] | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
-    """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
-    from its harvested log values.
-
-    ``crossings`` (issue #2868) maps a ``measurements_spec`` position to that
-    ``crossings`` entry's extracted series (see
-    :func:`klayout_tools.sim_crossings.extract_corner_crossings`); such an
-    entry is graded by :func:`_crossings_measurement_result` instead of being
-    looked up in the log. ``energy`` (issue #3033) does the same for ``energy``
-    entries, graded by :func:`_energy_measurement_result`.
-
-    An ``analysis_steps[]`` corner (issue #2482) is graded by
-    :func:`klayout_tools.sim_steps.grade_step_measurements`, which adds the
-    per-step outcome list and the step/derived failure propagation. Every
-    other corner takes the original single-analysis path below, unchanged:
-    one result per spec in declared order, a ``measurement`` diagnostic for
-    each one that produced no value, and ``extra_corner_fields`` empty.
-
-    ``engine_diagnostics`` (issue #3108) are the corner's diagnostics so far
-    (solver/timeout classification); a ``spice`` measurement declaring
-    ``on_unreached: "null"`` is graded :data:`NOT_REACHED_STATUS` instead of
-    ``error`` only when none of them is error-severity. Not applied to an
-    ``analysis_steps[]`` corner.
-    """
-    if sim_steps.is_steps_analysis(analysis):
-        return sim_steps.grade_step_measurements(
-            measurement_values,
-            measurements_spec,
-            analysis=analysis,
-            log_text=log_text,
-            save_mode=save_mode,
-        )
-    measurement_results: list[dict[str, Any]] = []
-    diagnostics: list[dict[str, Any]] = []
-    meas_errors = {} if is_xyce else _parse_meas_errors(log_text)
-    ac_too_few_points = (
-        not is_xyce
-        and analysis.get("kind") == "ac"
-        and _ac_sweep_too_few_points(log_text)
-    )
-    unreached_names = set() if is_xyce else _parse_meas_unreached_names(log_text)
-    attributed: set[str] = set()
-    # Forms whose value comes from a rawfile reduction rather than the log:
-    # (spec predicate, response-entry builder, position -> outcome map).
-    sidecar_forms: tuple[
-        tuple[
-            Callable[[dict[str, Any]], bool],
-            Callable[..., tuple[dict[str, Any], list[dict[str, Any]]]],
-            dict[int, Any] | None,
-        ],
-        ...,
-    ] = (
-        (sim_crossings.is_crossings, _crossings_measurement_result, crossings),
-        (sim_energy.is_energy, _energy_measurement_result, energy),
-        (sim_stress.is_stress, _stress_measurement_result, stress),
-        (sim_cycle_mean.is_cycle_mean, _cycle_mean_measurement_result, cycle_means),
-        (sim_transfer_meas.is_transfer, _transfer_measurement_result, transfers),
-        (sim_tian.is_tian, _tian_measurement_result, tians),
-        (sim_snm_meas.is_snm, _snm_measurement_result, snms),
-        (sim_eye.is_eye, _eye_measurement_result, eyes),
-        (
-            sim_step_resolution.is_step_resolution,
-            _step_resolution_measurement_result,
-            step_resolutions,
-        ),
-        (sim_settled.is_settled, _settled_measurement_result, settleds),
-        (sim_search.is_search, _search_measurement_result, searches),
-    )
-    for position, spec in enumerate(measurements_spec):
-        sidecar = next(
-            (
-                (render, outcomes)
-                for is_form, render, outcomes in sidecar_forms
-                if is_form(spec)
-            ),
-            None,
-        )
-        if sidecar is not None:
-            render, outcomes = sidecar
-            result, extra = render(
-                spec, (outcomes or {}).get(position), save_mode=save_mode
-            )
-            measurement_results.append(result)
-            diagnostics.extend(extra)
-            continue
-        name = spec["name"]
-        value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
-        unit = spec.get("unit")
-        if value is None and _is_unreached(
-            spec,
-            unreached_names=unreached_names,
-            diagnostics=engine_diagnostics or [],
-        ):
-            attributed.add(str(name).lower())
-            measurement_results.append(
-                {
-                    "name": name,
-                    "value": None,
-                    "unit": unit,
-                    "status": NOT_REACHED_STATUS,
-                    "margin": None,
-                }
-            )
-            diagnostics.append(
-                {
-                    "severity": "info",
-                    "code": NOT_REACHED_DIAGNOSTIC_CODE,
-                    "message": f"measurement '{name}' target not reached: the "
-                    "analysis completed but ngspice's .meas never satisfied "
-                    f"its condition ({spec['spice'].strip()})",
-                }
-            )
-            continue
-        if value is None:
-            result, diagnostic, was_attributed = _no_value_measurement(
-                spec,
-                meas_errors,
-                save_mode=save_mode,
-                too_few_points=ac_too_few_points,
-            )
-            measurement_results.append(result)
-            diagnostics.append(diagnostic)
-            if was_attributed:
-                attributed.add(str(name).lower())
-            continue
-        # `_grade_measurement_value` owns the plausibility-pre-check ->
-        # `limits` ordering (issue #2493) in one place, so there is no
-        # second grading path where the pre-check could be skipped.
-        m_status, margin, grading_diagnostics = _grade_measurement_value(spec, value)
-        measurement_results.append(
-            {
-                "name": name,
-                "value": value,
-                "unit": unit,
-                "status": m_status,
-                "margin": margin,
-            }
-        )
-        diagnostics.extend(grading_diagnostics)
-    # Corner-level fallback (issue #2826): engine `.meas` errors that could
-    # not be tied to a missing result by name are still surfaced, as a
-    # warning so grading is unchanged, but only when something is missing.
-    if diagnostics and any(d["code"] == "measurement" for d in diagnostics):
-        unattributed = [
-            f"{n}: {t}" for n, t in meas_errors.items() if n not in attributed
-        ]
-        if unattributed:
-            diagnostics.append(
-                {
-                    "severity": "warning",
-                    "code": "measurement",
-                    "message": "ngspice reported .meas errors not matched to a "
-                    "missing measurement: "
-                    + "; ".join(unattributed[:_MEAS_ERROR_MAX_ENTRIES]),
-                }
-            )
-    return measurement_results, diagnostics, {}
-
-
 #: The measurement ``status`` of an ``optional`` measurement that produced no
 #: value (issue #2925): data ("this figure does not exist at this point"),
 #: not a failure -- it never makes its corner ``error``/``fail``.
@@ -10759,68 +10578,6 @@ def _cycle_mean_measurement_result(
     return result, grading_diagnostics
 
 
-def _transfer_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_transfer_meas.TransferOutcome | None,
-    *,
-    save_mode: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``transfer`` measurement's response entry (issue #2923).
-
-    ``value`` is the metric, graded through :func:`_grade_measurement_value`
-    like any scalar; the request echo rides the additive ``transfer`` sibling.
-    A failure is ``status: "error"``, ``value: null`` (so it can never pass a
-    limit) with a ``code: "measurement"`` diagnostic whose message starts with
-    a ``[<reason>]`` token from
-    :data:`klayout_tools.sim_transfer_meas.ERROR_CODES`.
-
-    The all-crossing margin tokens (issue #3088) are graded by
-    :func:`_margin_measurement_result`."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is not None and outcome.margins is not None:
-        return _margin_measurement_result(spec, outcome)
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no transfer value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "transfer_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "transfer_vector_missing":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(
-        spec, outcome.value
-    )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "transfer": outcome.report(spec),
-    }
-    return result, grading_diagnostics
-
-
 def _snm_measurement_result(
     spec: dict[str, Any],
     outcome: sim_snm_meas.SnmOutcome | None,
@@ -10979,66 +10736,6 @@ _settled_measurement_result = functools.partial(
 )
 
 
-def _search_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_search.SearchOutcome | None,
-    *,
-    save_mode: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``search`` measurement's response entry (issue #4121).
-
-    ``value`` is the midpoint of the converged bracket, graded through
-    :func:`_grade_measurement_value` like any scalar; the additive ``search``
-    sibling carries ``{source, direction, iterations, lo, hi, converged}``. A
-    failure is ``status: "error"``, ``value: null`` (so it can never pass a
-    limit) with a ``code: "measurement"`` diagnostic whose message starts with
-    a ``[<reason>]`` token from
-    :data:`klayout_tools.sim_search.ERROR_CODES`."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no search value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "search_no_result"
-        )
-        if save_mode == "netlist" and reason == "search_probe_failed":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result: dict[str, Any] = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        if outcome is not None and outcome.iterations is not None:
-            result["search"] = outcome.report(spec)
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(
-        spec, outcome.value
-    )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "search": outcome.report(spec),
-    }
-    return result, grading_diagnostics
-
-
 def _tian_measurement_result(
     spec: dict[str, Any],
     outcome: sim_tian.TianOutcome | None,
@@ -11093,91 +10790,6 @@ def _tian_measurement_result(
         "tian": outcome.report(spec),
     }
     return result, grading_diagnostics
-
-
-def _margin_measurement_result(
-    spec: dict[str, Any], outcome: sim_transfer_meas.TransferOutcome
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """A ``transfer`` margin-metric entry (issue #3088).
-
-    ``value`` is graded through :func:`_grade_measurement_value` like any
-    scalar, then the AC band's verdict is applied: a limit that is *met* on a
-    band that cannot support a pass is :data:`_INCONCLUSIVE_STATUS` with a
-    :data:`MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE` warning -- never ``pass`` -- and a
-    violation is a sound ``fail`` only when ``grade_margins`` found it among
-    the crossings actually seen (a hidden crossing can only lower a minimum).
-    A metric with no crossing at all is vacuously ``pass`` on a clean band.
-    Without ``limits`` the entry is report-only and the band never downgrades
-    it; a valueless metric is then an ordinary ``transfer_metric_unavailable``
-    error."""
-    assert outcome.margins is not None
-    name = spec["name"]
-    metric = spec["transfer"]["metric"]
-    limits = spec.get("limits") or {}
-    has_limits = limits.get("min") is not None or limits.get("max") is not None
-    ambiguity = outcome.margins.ambiguity
-    diagnostics: list[dict[str, Any]] = []
-    status: str
-    margin: float | None = None
-    downgrade = False
-    if outcome.value is None:
-        if has_limits and sim_transfer_meas.is_vacuous(outcome, spec):
-            status = "pass"
-        elif has_limits and ambiguity:
-            status, downgrade = _INCONCLUSIVE_STATUS, True
-        else:
-            reason = sim_transfer_meas.unavailable_reason(outcome, metric)
-            return (
-                {
-                    "name": name,
-                    "value": None,
-                    "unit": spec.get("unit"),
-                    "status": "error",
-                    "margin": None,
-                    "transfer": outcome.report(spec),
-                },
-                [
-                    {
-                        "severity": "error",
-                        "code": "measurement",
-                        "message": (
-                            f"[transfer_metric_unavailable] measurement "
-                            f"'{name}': {metric} is unavailable ({reason})"
-                        ),
-                    }
-                ],
-            )
-    else:
-        status, margin, diagnostics = _grade_measurement_value(spec, outcome.value)
-        if (
-            has_limits
-            and ambiguity
-            and (status == "pass" or (status == "fail" and outcome.verdict != "fail"))
-        ):
-            status, margin, downgrade = _INCONCLUSIVE_STATUS, None, True
-    if downgrade:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE,
-                "message": (
-                    f"measurement {name!r}: {metric} cannot be graded -- the AC "
-                    f"band is ambiguous ({', '.join(ambiguity)}) -- graded "
-                    f"{_INCONCLUSIVE_STATUS} rather than pass/fail"
-                ),
-            }
-        )
-    return (
-        {
-            "name": name,
-            "value": outcome.value,
-            "unit": spec.get("unit"),
-            "status": status,
-            "margin": margin,
-            "transfer": outcome.report(spec),
-        },
-        diagnostics,
-    )
 
 
 def _energy_measurement_result(
@@ -11298,9 +10910,9 @@ def _parse_meas_errors(log_text: str) -> dict[str, str]:
     return errors
 
 
-#: The additive measurement status (and ``code``) for an unreached target.
+#: The additive measurement status for an unreached target (its diagnostic
+#: ``code``, ``NOT_REACHED_DIAGNOSTIC_CODE``, lives in ``sim_measurement_results``).
 NOT_REACHED_STATUS = "not_reached"
-NOT_REACHED_DIAGNOSTIC_CODE = "measurement_not_reached"
 
 
 #: ngspice-46's reason line for a ``.meas`` target the completed sweep never

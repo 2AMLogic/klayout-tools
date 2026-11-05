@@ -629,6 +629,7 @@
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
+        "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_noise",
         "klayout_tools.sim_param_file",
         "klayout_tools.sim_passes",
