@@ -52,7 +52,12 @@ def run(args: argparse.Namespace) -> int:
         backend = resolve_backend(getattr(args, "backend", None))
         allow_expr = bool(getattr(args, "allow_unevaluated_expr", False))
         ignore_comments = bool(getattr(args, "ignore_comments", False))
+        erc = bool(getattr(args, "erc", False))
         if backend == "batch":
+            if erc:
+                raise NetlistError(
+                    "--erc is not supported with --backend batch; use --backend local"
+                )
             if allow_expr:
                 raise NetlistError(
                     "--allow-unevaluated-expr is not supported with "
@@ -88,6 +93,7 @@ def run(args: argparse.Namespace) -> int:
                 block=args.block,
                 allow_unevaluated_expr=allow_expr,
                 ignore_comments=ignore_comments,
+                erc=erc,
             )
     except NetlistError as exc:
         return emit_error(

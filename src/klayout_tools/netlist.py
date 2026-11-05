@@ -711,6 +711,17 @@ UNEVALUATED_EXPR_CODE = "unevaluated_expr"
 #: ``error.code`` of the content gate (:func:`_check_no_unresolved_symbol`).
 UNRESOLVED_SYMBOL_CODE = "unresolved_symbol"
 
+#: ``error.code`` of the ``--erc`` gate (:func:`_check_erc`).
+ERC_FINDINGS_CODE = "erc_findings"
+
+#: Per-stream cap (bytes of tail kept) for the ``diagnostics`` payload block.
+DIAGNOSTICS_TAIL_BYTES = 4096
+
+#: xschem prints its own netlister ERC findings (e.g. ``Error: undriven node:
+#: #net1``) on stdout/stderr during a normal batch run; measured on 3.4.7 --
+#: it has no ``-erc`` flag (``Unknown option``), so the signal is read here.
+_ERC_LINE_RE = re.compile(r"^\s*Error:", re.MULTILINE)
+
 #: Oldest xschem reported (issue #3482; not verified against xschem's release
 #: notes) to evaluate a symbol's ``expr()`` attributes while netlisting.
 MIN_EXPR_XSCHEM_VERSION = "3.4.5"
@@ -831,6 +842,50 @@ def _check_no_unresolved_symbol(
             "Fix the symbol path or library.",
             code=UNRESOLVED_SYMBOL_CODE,
         )
+
+
+def _tail(text: str, limit: int = DIAGNOSTICS_TAIL_BYTES) -> dict[str, Any]:
+    raw = text.encode("utf-8", errors="replace")
+    if len(raw) <= limit:
+        return {"text": text, "truncated": False}
+    kept = raw[-limit:].decode("utf-8", errors="replace")
+    return {"text": kept, "truncated": True}
+
+
+def _diagnostics_block(stdout: str, stderr: str) -> dict[str, Any]:
+    out, err = _tail(stdout), _tail(stderr)
+    return {
+        "stdout": out["text"],
+        "stderr": err["text"],
+        "stdout_truncated": out["truncated"],
+        "stderr_truncated": err["truncated"],
+    }
+
+
+def _erc_findings(stdout: str, stderr: str) -> list[str]:
+    found: list[str] = []
+    for stream in (stdout, stderr):
+        for line in stream.splitlines():
+            if _ERC_LINE_RE.match(line):
+                found.append(line.strip())
+    return found
+
+
+def _check_erc(stdout: str, stderr: str) -> None:
+    """Fail when xschem reported ERC findings (``--erc``, issue #4953)."""
+    findings = _erc_findings(stdout, stderr)
+    if not findings:
+        return
+    shown = findings[:20]
+    more = len(findings) - len(shown)
+    raise NetlistError(
+        f"xschem reported {len(findings)} ERC finding(s): "
+        + "; ".join(shown)
+        + (f"; ... and {more} more" if more else "")
+        + ". Nothing was written.",
+        code=ERC_FINDINGS_CODE,
+        details={"findings": shown, "finding_count": len(findings)},
+    )
 
 
 def _write_output(output: str, data: bytes) -> None:
@@ -1094,6 +1149,7 @@ def run_netlist(
     block: bool = False,
     allow_unevaluated_expr: bool = False,
     ignore_comments: bool = False,
+    erc: bool = False,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -1114,6 +1170,10 @@ def run_netlist(
     ``ignore_comments=True`` (issue #4525; ``check=True`` only) makes the
     comparison ignore every comment line, for a committed netlist a project
     post-processes (header, rewritten ``sch_path``). Never affects a write.
+
+    ``erc=True`` (issue #4953) fails with ``error.code: "erc_findings"`` when
+    xschem's stdout/stderr contain ``Error:`` ERC lines. Every payload carries
+    the (tail-capped) xschem output under ``diagnostics`` either way.
 
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
@@ -1175,6 +1235,8 @@ def run_netlist(
             fresh_data, version, allow_unevaluated_expr
         )
         _check_no_unresolved_symbol(fresh_data, rcfile, xschem_env)
+        if erc:
+            _check_erc(stdout, stderr)
 
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -1195,6 +1257,7 @@ def run_netlist(
                 "timeout_s": timeout_s,
                 "duration_s": round(duration_s, 3),
             },
+            "diagnostics": _diagnostics_block(stdout, stderr),
         }
 
         if pdk_block is not None:

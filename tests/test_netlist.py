@@ -1843,3 +1843,99 @@ def test_cli_ignore_comments_exit_codes(tmp_path, argv_log, capsys, monkeypatch)
     capsys.readouterr()
     assert main([*argv, "--ignore-comments"]) == 0
     assert json.loads(capsys.readouterr().out)["drift"]["comments_differ"] is True
+
+
+# --------------------------------------------------------------------------- #
+# diagnostics + --erc (issue #4953)
+# --------------------------------------------------------------------------- #
+
+_STUB_ERC_OUTPUT = (
+    _STUB_PREAMBLE
+    + """
+echo "Error: undriven node: #net1"
+echo "some stderr note" >&2
+printf '%s\\n' "$NETLIST_BODY" > "$out_dir/$stem.spice"
+exit 10
+"""
+)
+
+
+def test_diagnostics_captured_without_erc_and_output_unchanged(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", "* stub\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_ERC_OUTPUT)
+    output = tmp_path / "b.spice"
+
+    payload = run_netlist(schematic, str(output), xschem_binary=binary)
+
+    assert payload["status"] == "generated"
+    assert output.exists()
+    assert "undriven node: #net1" in payload["diagnostics"]["stdout"]
+    assert "some stderr note" in payload["diagnostics"]["stderr"]
+    assert payload["diagnostics"]["stdout_truncated"] is False
+
+
+def test_diagnostics_are_tail_capped():
+    block = netlist_module._diagnostics_block("x" * 10000 + "END", "")
+    assert block["stdout_truncated"] is True
+    assert len(block["stdout"]) == netlist_module.DIAGNOSTICS_TAIL_BYTES
+    assert block["stdout"].endswith("END")
+    assert block["stderr"] == "" and block["stderr_truncated"] is False
+
+
+def test_erc_fails_on_findings_and_writes_nothing(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", "* stub\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_ERC_OUTPUT)
+    output = tmp_path / "b.spice"
+
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(schematic, str(output), xschem_binary=binary, erc=True)
+
+    assert excinfo.value.code == "erc_findings"
+    assert "undriven node: #net1" in str(excinfo.value)
+    assert excinfo.value.details["finding_count"] == 1
+    assert not output.exists()
+
+
+def test_erc_clean_run_passes(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", "* stub\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "b.spice"
+
+    payload = run_netlist(schematic, str(output), xschem_binary=binary, erc=True)
+
+    assert payload["status"] == "generated"
+    assert payload["diagnostics"]["stdout"] == ""
+
+
+def test_erc_with_check_mode_fails_on_findings(tmp_path, argv_log, monkeypatch):
+    monkeypatch.setenv("NETLIST_BODY", "* stub\n.end")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_ERC_OUTPUT)
+    output = tmp_path / "b.spice"
+    output.write_text("* stub\n.end\n")
+
+    with pytest.raises(NetlistError) as excinfo:
+        run_netlist(schematic, str(output), xschem_binary=binary, check=True, erc=True)
+    assert excinfo.value.code == "erc_findings"
+
+
+def test_erc_rejected_with_batch_backend(tmp_path, capsys):
+    schematic = _write_schematic(tmp_path)
+    code = main(
+        [
+            "netlist",
+            schematic,
+            "-o",
+            str(tmp_path / "o.spice"),
+            "--erc",
+            "--backend",
+            "batch",
+        ]
+    )
+    assert code == 1
+    assert "--erc" in capsys.readouterr().err

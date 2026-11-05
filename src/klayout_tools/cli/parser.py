@@ -7715,6 +7715,16 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     netlist_parser.add_argument(
+        "--erc",
+        action="store_true",
+        default=False,
+        help=(
+            "fail (error.code erc_findings) when xschem reports ERC findings "
+            "such as 'Error: undriven node' on its stdout/stderr. Local "
+            "backend only (issue #4953)"
+        ),
+    )
+    netlist_parser.add_argument(
         "--allow-unevaluated-expr",
         action="store_true",
         default=False,
