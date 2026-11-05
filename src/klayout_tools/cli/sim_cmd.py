@@ -145,6 +145,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
             command_approvals=getattr(args, "command_approvals", None),
             pdk_root=getattr(args, "pdk_root", None),
+            collect_partial=getattr(args, "collect_partial", False),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -284,6 +285,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
         for flag, value in (
             ("a positional request", args.request),
             ("--attach", getattr(args, "attach_job_id", None)),
+            ("--collect-partial", getattr(args, "collect_partial", False) or None),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),

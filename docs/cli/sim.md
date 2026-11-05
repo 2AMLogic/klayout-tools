@@ -54,6 +54,11 @@ this document (and the code) win.
   Waits for it, bounded by `batch.poll_timeout_s`, and reports it without
   uploading or launching anything. See "Waiting, job id, and re-attaching"
   below.
+- `--collect-partial` — with `--attach <batch-shards.json>`: read each shard's
+  `status.json` once instead of waiting. Finished shards merge as in a plain
+  attach; every other shard's units come back `lost_shard` and are listed in
+  `environment.remote.unfinished_shards[]`. Refused without `--attach <shard
+  map>`. See "Collecting a partial result" below.
 - `--fail-fast-probe` — before dispatching any real corner, run a short
   bounded `tran` calibration slice on the grid's first corner and abort the
   whole grid up front if the measured rate implies `options.timeout_s`
@@ -983,6 +988,38 @@ klt sim grid.json --backend batch --attach out/batch-shards.json --max-units-per
 Use the same request file, overrides (`--max-units-per-job`, `--budget-s`,
 `--pdk-root`) and environment at `--attach`; on a `request_sha256` mismatch
 the error names the differing request field(s).
+
+*Attaching from another host.* The shard map records the jobs prefix, region,
+profile and every shard's `job_id` (never the bucket), and `--attach` reads
+only that map plus the request, so no other local state is needed: copy
+`batch-shards.json` into an empty `-o` directory on the other host, use the
+same request file and overrides, and the same bucket environment, then run
+the `--attach` command above. A test attaches from a copied map in an
+otherwise empty directory.
+
+*Collecting a partial result.* When a long sharded run is still going (or
+Spot interruptions keep restarting shards), `--attach <map> --collect-partial`
+returns at once with what has finished:
+
+```bash
+klt sim grid.json --backend batch --attach out/batch-shards.json --collect-partial -o out --format json
+```
+
+Shards in a terminal state (`done`, `failed`, `timeout`) are collected as in
+a plain attach. Any other shard (`running`, `interrupted`, unreadable status,
+or one the map records as submitted but never launched, reported `unlaunched`)
+is not waited on and never launched: each of its units is `lost_shard`, and
+`environment.remote` carries `unfinished_shards[]` (`index`, `job_id`, last
+observed `state`), `resumable: true` and `shard_map`. The exit code is `4`
+(incomplete). With every shard `done` the report equals a plain `--attach`;
+with none done every unit is lost. The map is changed only by collected state,
+so a later plain `--attach` (or `--resume`) still finishes the remaining
+shards. Without `--attach <shard map>` the flag is refused
+(`error.code: "collect_partial_requires_attach"`).
+
+Interrupted-shard retry stays with 2am's `reconcile`; the client never
+re-launches an `interrupted` job. To lose less work per reclaim, use smaller
+shards (`--max-units-per-job`) and `--collect-partial` plus `--resume`.
 
 *Interrupted submit.* If `--submit-only` is killed (for example during a long
 `--wait-for-capacity`), the shards not yet reached stay `pending` in

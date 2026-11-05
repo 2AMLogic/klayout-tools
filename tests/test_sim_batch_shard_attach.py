@@ -4,14 +4,16 @@ tests (issue #4878); split from test_sim_batch_async.py to keep it small."""
 from __future__ import annotations
 
 import json
+import shutil
 
 import pytest
 
+from helpers.subprocess_fakes import fake_completed
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
 from klayout_tools import sim_batch_async as sba
 from klayout_tools import sim_batch_shards as sbs
-from test_sim_batch import _corner_points, _split_runner, _write_body
+from test_sim_batch import _corner_points, _split_runner, _status, _write_body
 from test_sim_batch_async import _attach_shards, _submit_shards
 
 
@@ -108,3 +110,148 @@ def test_submit_only_into_a_dir_holding_another_requests_map_is_refused(
     assert "--resume" not in message
     assert open(manifest_path, "rb").read() == before
     assert len(runner.calls) == calls  # no S3 write, no launch
+
+
+# --- `--collect-partial` (issue #5000) ---------------------------------------
+
+
+def _states(monkeypatch, states):
+    """Answer `status.json` reads per job id (``{job_id: state}``); every
+    other call goes to the fake fleet."""
+    inner = sb._run_subprocess
+
+    def _wrapped(argv, timeout_s):
+        joined = " ".join(argv)
+        if joined.endswith("status.json -"):
+            for job_id, state in states.items():
+                if job_id in joined:
+                    return fake_completed(_status(state))
+        return inner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _wrapped)
+    return states
+
+
+def _lost(corners):
+    return [
+        c
+        for c in corners
+        if any(d.get("code") == "lost_shard" for d in c.get("diagnostics") or [])
+    ]
+
+
+def test_collect_partial_merges_done_shards_and_lists_the_rest(tmp_path, monkeypatch):
+    runner, _ = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    request, payload = _submit_shards(tmp_path)
+    jobs = [s["job_id"] for s in payload["shards"]]
+    states = _states(monkeypatch, {jobs[1]: "running", jobs[2]: "interrupted"})
+    manifest_before = open(payload["manifest_path"]).read()
+    launches = len(runner.argvs_matching("launch"))
+
+    corners, _, environment = _attach_shards(
+        tmp_path, request, payload["manifest_path"], collect_partial=True
+    )
+
+    assert len(corners) == 10
+    assert len(_lost(corners)) == 6
+    assert all(c["status"] == "pass" for c in corners[:4])
+    unfinished = environment["unfinished_shards"]
+    assert [(u["index"], u["job_id"], u["state"]) for u in unfinished] == [
+        (1, jobs[1], "running"),
+        (2, jobs[2], "interrupted"),
+    ]
+    assert environment["resumable"] is True
+    assert environment["shard_map"] == payload["manifest_path"]
+    assert len(runner.argvs_matching("launch")) == launches
+    # Collected state only: the two unfinished entries are untouched.
+    after = json.loads(open(payload["manifest_path"]).read())
+    before = json.loads(manifest_before)
+    assert after["shards"][1] == before["shards"][1]
+    assert after["shards"][2] == before["shards"][2]
+
+    # A later plain attach finishes the remaining shards.
+    states.clear()
+    corners, _, environment = _attach_shards(
+        tmp_path, request, payload["manifest_path"]
+    )
+    assert _lost(corners) == []
+    assert "unfinished_shards" not in environment
+
+
+def test_collect_partial_with_all_shards_done_equals_plain_attach(
+    tmp_path, monkeypatch
+):
+    _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    request, payload = _submit_shards(tmp_path)
+
+    partial, _, partial_env = _attach_shards(
+        tmp_path, request, payload["manifest_path"], collect_partial=True
+    )
+    plain, _, _ = _attach_shards(tmp_path, request, payload["manifest_path"])
+
+    assert partial == plain
+    assert "unfinished_shards" not in partial_env
+
+
+def test_collect_partial_with_no_shard_done_reports_every_unit_lost(
+    tmp_path, monkeypatch
+):
+    _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    request, payload = _submit_shards(tmp_path)
+    _states(monkeypatch, {s["job_id"]: "running" for s in payload["shards"]})
+
+    corners, _, environment = _attach_shards(
+        tmp_path, request, payload["manifest_path"], collect_partial=True
+    )
+
+    assert len(_lost(corners)) == 10
+    assert len(environment["unfinished_shards"]) == 3
+
+
+def test_collect_partial_never_launches_an_unlaunched_shard(tmp_path, monkeypatch):
+    runner, _ = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    request, payload = _submit_shards(tmp_path)
+    document = json.loads(open(payload["manifest_path"]).read())
+    document["shards"][0]["state"] = "submitted"
+    open(payload["manifest_path"], "w").write(json.dumps(document))
+    launches = len(runner.argvs_matching("launch"))
+
+    _, _, environment = _attach_shards(
+        tmp_path, request, payload["manifest_path"], collect_partial=True
+    )
+
+    assert environment["unfinished_shards"][0]["state"] == "unlaunched"
+    assert len(runner.argvs_matching("launch")) == launches
+
+
+def test_collect_partial_attaches_from_a_copied_map_in_an_empty_dir(
+    tmp_path, monkeypatch
+):
+    """Cross-host attach: only the copied `batch-shards.json` is present."""
+    _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    request, payload = _submit_shards(tmp_path)
+    fresh = tmp_path / "other-host"
+    fresh.mkdir()
+    copied = fresh / sb.BATCH_SHARDS_FILENAME
+    shutil.copy(payload["manifest_path"], copied)
+
+    corners, _, environment = _attach_shards(
+        tmp_path, request, str(copied), artifacts_dir=str(fresh)
+    )
+
+    assert len(corners) == 10
+    assert _lost(corners) == []
+    assert len(environment["fleet"]) == 3
+
+
+def test_collect_partial_is_refused_without_a_shard_map():
+    with pytest.raises(sim.SimError) as err:
+        sim._apply_attach({}, None, "batch", 1, collect_partial=True)
+    assert err.value.code == "collect_partial_requires_attach"
+    with pytest.raises(sim.SimError):
+        sim._apply_attach({}, "klt-sim-job", "batch", 1, collect_partial=True)

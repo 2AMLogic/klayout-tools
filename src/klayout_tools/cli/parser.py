@@ -764,6 +764,20 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--collect-partial",
+        dest="collect_partial",
+        action="store_true",
+        default=False,
+        help=(
+            "with `--attach <batch-shards.json>`: read each shard's status "
+            "once instead of waiting; finished shards are merged, every "
+            "other shard's units are reported `lost_shard` and listed in "
+            "`environment.remote.unfinished_shards` (exit 4). Nothing is "
+            "re-launched; a later plain --attach finishes the rest. "
+            "Refused without --attach <shard map>. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--command-approvals",
         dest="command_approvals",
         metavar="FILE",

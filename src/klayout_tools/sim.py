@@ -2350,6 +2350,7 @@ def run_sim(
     capacity_wait_s: float | None = None,
     command_approvals: str | None = None,
     pdk_root: str | None = None,
+    collect_partial: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the request at ``request_path`` and return its report.
@@ -2612,6 +2613,13 @@ def run_sim(
         sim_commands.COMMANDS_FIELD in request or sim_decks.DECKS_FIELD in request
     ):
         raise SimError("--pdk-root only applies to corner requests (with `models`)")
+    if collect_partial and (
+        sim_commands.COMMANDS_FIELD in request or sim_decks.DECKS_FIELD in request
+    ):
+        raise SimError(
+            "--collect-partial only applies to corner requests (with `models`)",
+            code="collect_partial_requires_attach",
+        )
     if sim_commands.COMMANDS_FIELD in request:
         return _dispatch_command_request(
             request,
@@ -2673,6 +2681,7 @@ def run_sim(
         attach_job_id=attach_job_id,
         capacity_wait_s=capacity_wait_s,
         pdk_root=pdk_root,
+        collect_partial=collect_partial,
         _ownership=_ownership,
     )
 
@@ -3036,9 +3045,18 @@ def _apply_attach(
     backend: str,
     hosts: int,
     submit_only: bool = False,
+    collect_partial: bool = False,
 ) -> None:
     """Issue #2978: route ``--attach <job_id>`` to the batch backend. Only the
     single-job batch path has a job id to re-attach to."""
+    if collect_partial and (
+        attach_job_id is None or not attach_job_id.endswith(".json")
+    ):
+        raise SimError(
+            "--collect-partial requires --attach <batch-shards.json> (a shard "
+            "map); it reads each shard once instead of waiting",
+            code="collect_partial_requires_attach",
+        )
     if attach_job_id is None:
         return
     if backend != "batch" or hosts != 1:
@@ -3052,6 +3070,8 @@ def _apply_attach(
             "resumes an already-submitted job, submit-only launches a new one"
         )
     engine_kwargs["attach_job_id"] = attach_job_id
+    if collect_partial:
+        engine_kwargs["collect_partial"] = True
 
 
 @dataclass(frozen=True)
@@ -3762,6 +3782,7 @@ def _run_sim_corners(
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
     pdk_root: str | None = None,
+    collect_partial: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
@@ -4030,7 +4051,14 @@ def _run_sim_corners(
         if backend not in _OFFHOST_BACKENDS
         else {"request_dir": request_dir}
     )
-    _apply_attach(local_engine_kwargs, attach_job_id, backend, hosts, submit_only)
+    _apply_attach(
+        local_engine_kwargs,
+        attach_job_id,
+        backend,
+        hosts,
+        submit_only,
+        collect_partial,
+    )
     _check_capacity_wait_applies(capacity_wait_s, backend, attach_job_id)
 
     # Issue #2668: stage the complete job closure once, here, before any

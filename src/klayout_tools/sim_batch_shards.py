@@ -164,3 +164,52 @@ def mismatch_error(
     from .sim import SimError
 
     return SimError(message, code=sim_batch.BATCH_SHARD_MANIFEST_CODE)
+
+
+def gate_partial_shard(fleet: Any, index: int, prior: dict[str, Any]) -> None:
+    """``--attach <map> --collect-partial``: read one shard's ``status.json``
+    once, never waiting. Returns for a shard in a terminal state (collected
+    as in a plain attach); raises for any other, which
+    :func:`sim_remote._run_sharded` reports as a ``lost_shard`` per unit
+    with this reason. Nothing is launched: a shard the map records as
+    ``submitted`` (never launched) is reported as unlaunched.
+    """
+    job_id = str(prior["job_id"])
+    if prior.get("state") == "submitted":
+        status = None
+        state = "unlaunched"
+    else:
+        try:
+            status = sim_batch._read_status(
+                fleet.config, job_id, sim_batch._run_subprocess
+            )
+        except Exception:  # noqa: BLE001 - an unreadable status is "unknown"
+            status = None
+        raw = status.get("state") if status else None
+        state = str(raw) if raw else "unknown"
+    if state in sim_batch.BATCH_TERMINAL_STATES:
+        return
+    fleet.unfinished[index] = {"index": index, "job_id": job_id, "state": state}
+    raise sim_batch.BatchError(
+        f"shard still unfinished (--collect-partial): remote job {job_id} "
+        f"is {state}; re-run --attach (without --collect-partial) or "
+        "--resume to finish it",
+        code="batch_shard_unfinished",
+    )
+
+
+def with_unfinished(
+    environment: dict[str, Any] | None,
+    unfinished: dict[int, dict[str, Any]],
+    manifest: Any,
+) -> dict[str, Any] | None:
+    """``environment`` plus ``unfinished_shards[]`` (index order),
+    ``resumable`` and ``shard_map`` when ``--collect-partial`` left shards."""
+    if not unfinished:
+        return environment
+    return {
+        **(environment or {}),
+        "unfinished_shards": [unfinished[i] for i in sorted(unfinished)],
+        "resumable": True,
+        "shard_map": str(manifest.path),
+    }
