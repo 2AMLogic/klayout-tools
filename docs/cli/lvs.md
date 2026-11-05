@@ -6,7 +6,7 @@ Epic #153, following the layout-vs-schematic pattern
 [`klt extract`](extract.md) established for extraction.
 
 ```
-klt lvs <request> [--format text|json]
+klt lvs <request> [-o <report.json[.gz]>] [--format text|json]
 klt lvs --check <report.json> [--layout <path>] [--rerun] [--format text|json]
 ```
 
@@ -2181,6 +2181,15 @@ for tens of minutes with no output, which looks identical to a hang.
   KLayout's comparer is not known to expose them, so a slow match cannot be
   told apart from a mismatch beyond the deadline.
 
+## Output file (`-o`, issue #4984)
+
+`klt lvs <request> -o PATH` also writes the report envelope to `PATH`,
+byte-identical to `--format json` stdout (gzip-compressed when `PATH` ends
+`.gz`), written for match, mismatch and inconclusive runs alike; stdout and
+exit codes are unchanged. An unwritable `PATH` is the standard error envelope
+(exit `1`). Rejected with `--check`, which emits no run report. Mirrors
+`klt drc -o` (#4393).
+
 ## Request
 
 Accepted as a file path, `-` (stdin), or an inline JSON object string on the
@@ -2377,7 +2386,7 @@ devices and passes the stub calls through as ordinary subcircuit instances.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "engine": "klayout",
   "layout": { "path": "design.gds", "scope": "repo" },
   "reference": "ota_5t.schematic.spice",
@@ -2436,7 +2445,7 @@ section this engine buckets rather than fully structures:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "engine": "netgen",
   "status": "mismatch",
   "mismatch_count": 1,
@@ -2476,7 +2485,7 @@ section this engine buckets rather than fully structures:
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `schema_version` | integer | Version of this command's JSON shape (`2`; per-command, per [`docs/json-contract.md`](../json-contract.md)). |
+| `schema_version` | integer | Version of this command's JSON shape (`3`; per-command, per [`docs/json-contract.md`](../json-contract.md)). |
 | `engine` | string | Echo of the request's `engine` (or the default, `"klayout"`). |
 | `layout` | object | The layout side this run read and hashed, as the committable `{"path", "scope"}` envelope (issue #2659, `schema_version` 2): `scope: "repo"` with a repo-relative POSIX `path` when it lives inside the request's repo, `{"path": null, "scope": "external"}` when it does not. Built from the *resolved* `layout.file`/`layout.netlist` — the file `provenance.input.content_hash` actually hashes — and so, since `schema_version` 2, no longer the request's own verbatim echo: that echo was anchored to whatever directory the producing run used, which made a committed envelope's `input_verified` re-derivable only there. `klt signoff --manifest`'s gate resolves `scope: "repo"` against the repo root of the *evidence file's* own location, so a committed `klt lvs` envelope now re-verifies from any clone. Same shape `klt sim`'s `netlist` and `klt pex`'s `layout` carry (issue #1261); see [`docs/json-contract.md`](../json-contract.md)'s "Path fields: envelope vs. plain string". |
 | `label_layers` | object | Issue #2686. Present **only** when the request applied a non-empty `layout.label_layers` override (omitted otherwise, so every report from a request without it — and every report committed before the field existed — is unchanged): `{"<role>": [layer, datatype] \| null}`, sorted by role, `null` kept for a cleared role. Records which GDS purpose inline extraction read net/pin names from, which `provenance.deck` alone cannot say. `--check --rerun` replays it as `layout.label_layers`. |
@@ -2485,7 +2494,7 @@ section this engine buckets rather than fully structures:
 | `abstract_cells` | array\<string\> | Issue #2853. Present **only** when the request gave a non-empty `layout.abstract_cells`, and omitted otherwise, so every other report is unchanged. The cell-name globs, as given. `--check --rerun` replays it. |
 | `abstract_cell_lef` | array\<string\> | Issue #2853. Present **only** when the request gave a non-empty `layout.abstract_cell_lef`: the LEF paths, as given (unresolved). `--check --rerun` replays it. |
 | `abstracted_cells` | array\<object\> | Issue #2853. Present **only** alongside `abstract_cells`. Inline extraction's per-matched-cell-type report, the same entries `klt extract` emits under this name (`{"cell", "instance_count", "pin_count", "resolution_source", "lef_path"}`). `[]` when the globs matched no instantiated cell. |
-| `reference` | string | Echo of `reference.netlist`, exactly as provided — deliberately **not** retyped by issue #2659 (see `layout` above). The reference netlist is pinned by its own `environment.reference_sha256` digest rather than by `provenance.input`, which covers the layout side only, so it is not the field `input_verified` re-hashes. |
+| `reference` | object \| string | The resolved reference netlist as the same `{"path", "scope"}` envelope as `layout` (issue #4984, `schema_version` 3), built from the file `environment.reference_sha256` hashes — no longer the request's verbatim, request-relative echo, which only re-hashed from the directory it was relative to. `--check` resolves it from the report's own repo, independent of cwd. A report predating v3 (and a `klayout-runset` report) carries the bare request string and is still checked as before. |
 | `top` | string | The compared top circuit's name (the layout side's resolved top cell/circuit name). |
 | `reference_top` | string | The **reference** side's resolved top circuit name (issue #1205). Equal to `top` for the ordinary compare, but different by construction for an LVS negative control — a deliberately-broken `<cell>_shorted` layout compared against the *intact* `<cell>`'s reference netlist. Recording only one top made such a report unreconstructable by `--check --rerun` (it applied the single `top` to both sides and failed with "top cell/subcircuit not found in reference netlist"). |
 | `reference_conversion` | object | Issue #2673. Present **only** for `reference.form: "subckt-call"` or `"gate-level-verilog"` (omitted for every other form). `subckt-call`: `{"form": "subckt-call", "deck": <string\|null>, "device_map": <object\|null>}`; `gate-level-verilog` (issue #4353): `{"form": "gate-level-verilog", "library": <string\|null>, "pdk": <string\|null>, "pdk_root": <string\|null>, "pin_order_files": <array of resolved absolute paths\|null>}`. The request-side context the reference conversion depends on, echoed as given. It lets `--check --rerun` re-convert the reference (and, for `subckt-call`, rebuild its placeholder-value exclusions); a report without it replays the reference as plain-element SPICE, as before. |
@@ -4801,15 +4810,15 @@ construction and re-hashes to `null`, exactly as an absent field always did;
 `--rerun` reports it as the same clean "no `'layout'`/`'reference'` field to
 rerun" error.
 
-**Known limitation, reference side only**: `reference` is still echoed
-exactly as given in the original request document, which may have been
-relative to that request *file's own directory* — not necessarily the
-current working directory (see "Request" above). This re-hashes it relative
-to the current working directory of the `--check` invocation; if the
-original request used request-file-relative paths, invoke `--check` from
-that same directory, or commit reports whose `reference` is already an
-absolute path. A report predating #2659, whose `layout` is a bare string,
-has the same limitation on that field too.
+**`reference` resolves the same way (issue #4984).** Since `schema_version`
+3 it is also the `{path, scope}` envelope, so `--check` from any working
+directory re-hashes it. **Known limitation, older reports only**: a report
+predating #4984 (or a `klayout-runset` report) echoes `reference` exactly as
+given in the original request, possibly relative to that request *file's own
+directory*; it is re-hashed relative to the current working directory of the
+`--check` invocation, so invoke `--check` from that directory. A report
+predating #2659, whose `layout` is a bare string, has the same limitation on
+that field too.
 
 **`input_not_found` (issue #2595): hitting that limitation says so.** The
 anchoring above is deliberate and unchanged for the fields it still covers.

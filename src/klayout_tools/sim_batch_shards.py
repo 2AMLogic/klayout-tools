@@ -137,3 +137,30 @@ def shard_scoped_points(resolved: Any, attach_job_id: str | None) -> list[Any]:
         return points
     shard = shard_points_for_job(resolved.artifacts_dir, attach_job_id, points)
     return points if shard is None else shard
+
+
+def mismatch_error(
+    path: str, stored: dict[str, Any], fingerprint: str, submit_only: bool
+) -> Exception:
+    """Refusal for a shard map written for a different request. Issue #4979:
+    a ``--submit-only`` caller passed no ``--resume``, so name what they ran
+    and keep the first request's map (and its ``--attach`` path) intact."""
+    hosts = stored["hosts"]
+    difference = sim_batch._manifest_difference(
+        stored["fingerprint"], fingerprint, hosts, hosts
+    )
+    if submit_only:
+        message = (
+            f"--submit-only: shard map {path} belongs to a different request "
+            f"({difference}); use a distinct -o directory for this request, or "
+            "finish/attach the first one (deleting the map would lose its "
+            "--attach path)"
+        )
+    else:
+        message = (
+            f"--resume: shard map {path} was written for a different request "
+            f"({difference}); delete it or drop --resume"
+        )
+    from .sim import SimError
+
+    return SimError(message, code=sim_batch.BATCH_SHARD_MANIFEST_CODE)

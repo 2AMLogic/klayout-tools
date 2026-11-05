@@ -273,7 +273,7 @@
     },
     {
       "path": "src/klayout_tools/drc.py",
-      "lines": 3846
+      "lines": 3818
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
@@ -433,7 +433,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 7300
+      "lines": 7298
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -617,7 +617,7 @@
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 5979
+      "lines": 5978
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
@@ -1089,7 +1089,7 @@
     },
     {
       "path": "tests/test_sim_batch.py",
-      "lines": 8342
+      "lines": 8323
     },
     {
       "path": "tests/test_sim_batch_async.py",
