@@ -4,6 +4,21 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-05
 
+- **PR #4940**: refactor: move per-corner measurement-result assembly out of sim.py
+- **PR #4939**: docs: explain empty stdout and env failures in functional-verification
+- **PR #4937**: feat(signoff): repeatable --input for item 2 stream-set attestation
+- **PR #4933**: feat(functional-verification): add sha256 to artifact envelopes
+- **PR #4930**: build(eda-sim): bump pinned klayout_tools to 0.9.0
+- **PR #4925**: fix: include model-binding cause lines in ngspice 'Error on line N' diagnostics
+- **PR #4921**: feat(release): automate release PR, tag and publish dispatch
+- **PR #4910**: chore(loom): resync installed Loom to v0.19.1263
+- **Issue #4938** (closed): functional-verification: unusable-env failures leave empty stdout; hard to run with a user-site cocotb
+- **Issue #4936** (closed): Split sim.py: move per-corner measurement-result cluster (~1,150 lines) into a sibling module
+- **Issue #4935** (closed): signoff --attest 2: accept more than one layout stream (library of per-cell GDS)
+- **Issue #4931** (closed): functional-verification: failing envelope names no failed sub-check and records no log/results paths
+- **Issue #4929** (closed): Bump eda-sim klayout_tools pin to 0.9.0 (contains klt sim --command-approvals)
+- **Issue #4924** (closed): klt characterize: ngspice_fatal error hides the root cause (unknown model type) unless --keep-artifacts is set
+- **Issue #4920** (closed): Consider automating klayout-tools releases (version bump + tag), as Loom does
 - **PR #4928**: test: pin pnpMPA recognition on sg13cmos5l to the PDK runset engine
 - **PR #4926**: chore(decks): regenerate deck history table for v0.9.0
 - **PR #4922**: chore(release): bump version to 0.9.0
