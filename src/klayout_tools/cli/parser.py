@@ -7775,7 +7775,7 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_format_arg(netlist_parser)
-    netlist_parser.set_defaults(func=netlist_cmd.run)
+    netlist_cmd.register(netlist_parser)
 
 
 def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
