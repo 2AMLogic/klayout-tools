@@ -4,6 +4,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-05
 
+- **PR #5001**: feat(sim): add --collect-partial to sharded batch --attach
+- **PR #5004**: chore(release): bump version to 0.9.1
 - **PR #5007**: feat(functional-verification): add testbench.plusargs for verilog_top benches
 - **PR #5003**: fix(functional-verification): reject SDF CELL scoped to a missing instance before vvp aborts
 - **PR #4999**: refactor: consolidate sha256: digest wrappers onto _provenance helpers
@@ -16,6 +18,7 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **PR #4988**: fix(sim): honor explicit max_units_per_job above the serial ceiling bound
 - **PR #4985**: fix(sim): retry timestep_too_small aborts and report when retry was not applied
 - **PR #4980**: fix(sim): name --submit-only in shard-map mismatch refusal; document distinct -o dirs
+- **Issue #5000** (closed): klt sim batch: sharded Monte Carlo makes no progress under heavy spot interruption
 - **Issue #5008** (closed): klt sim batch: no simulated-time progress lines in ngspice.log, even for a completed run
 - **Issue #5006** (closed): functional-verification: Verilog-bench path cannot pass plusargs to the simulator
 - **Issue #4997** (closed): klt extract --spef: hierarchical net names do not correlate in klt sta read_spef (partial annotation)
