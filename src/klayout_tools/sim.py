@@ -181,6 +181,7 @@ from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE, shard_scoped_points
 from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_cause import _with_fatal_error_cause
+from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 from .sim_decks import run_deck_request
 from .sim_echo_messages import echo_unsupported_message, zipped_length_message
 
@@ -2012,23 +2013,6 @@ def _convergence_retry_environment(
 def _convergence_retry_deck_options(retry: dict[str, Any]) -> str:
     """The ``.options`` card a retried unit's deck carries."""
     return f".options reltol={retry['reltol']} method={retry['method']}"
-
-
-#: Error-severity diagnostic codes that can accompany a ``nonconvergence``
-#: failure without making it something other than one (the measurements and
-#: vectors a failed solve never produced). Any *other* error-severity code
-#: -- ``singular_matrix``, ``netlist``, ``timeout``, ``engine_killed``, ... --
-#: means a different failure class, which is never retried (issue #2973).
-_CONVERGENCE_CONSEQUENCE_CODES = frozenset(
-    {"nonconvergence", "measurement", "no_such_vector"}
-)
-
-
-def _is_retryable_convergence_failure(corner: dict[str, Any]) -> bool:
-    if corner["status"] != "error":
-        return False
-    codes = {d["code"] for d in corner["diagnostics"] if d["severity"] == "error"}
-    return "nonconvergence" in codes and codes <= _CONVERGENCE_CONSEQUENCE_CODES
 
 
 def _validate_ngspice_init(value: Any) -> tuple[str, ...]:
@@ -9602,7 +9586,10 @@ def _run_corner_with_retry(
     default) is exactly the single-attempt behaviour.
     """
     corner, version = _run_corner(**kwargs)
-    if convergence_retry is None or not _is_retryable_convergence_failure(corner):
+    if convergence_retry is None:
+        return corner, version
+    if not is_retryable_convergence_failure(corner):
+        note_not_retried(corner)
         return corner, version
     card = _convergence_retry_deck_options(convergence_retry)
     max_attempts = convergence_retry["max_attempts"]
@@ -9623,7 +9610,7 @@ def _run_corner_with_retry(
             }
         )
         corner, version = retried, retried_version or version
-        if recovered or not _is_retryable_convergence_failure(retried):
+        if recovered or not is_retryable_convergence_failure(retried):
             break
     corner["runtime_s"] = round(total_runtime, 3)
     return corner, version
