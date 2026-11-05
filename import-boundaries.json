@@ -573,6 +573,7 @@
         "klayout_tools._vendor.mutation_variants",
         "klayout_tools._version_scheme",
         "klayout_tools._verilog_params",
+        "klayout_tools._verilog_top",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
         "klayout_tools.design_evidence_tiers",

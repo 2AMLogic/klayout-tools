@@ -199,3 +199,54 @@ def test_integration_sdf_that_fails_to_annotate_still_raises(tmp_path):
     sdf.write_text(sdf.read_text().replace("INSTANCE u1", "INSTANCE nosuch"))
     with pytest.raises(FunctionalVerificationError, match="did not fully apply"):
         run_functional_verification(str(request))
+
+
+# -- testbench.plusargs (issue #5006) ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value,match",
+    [
+        ("+a=1", "array of strings"),
+        ([1], r"plusargs\[0\] must be a non-empty string"),
+        ([""], r"plusargs\[0\] must be a non-empty string"),
+        (["+ok", "bin=x"], r"plusargs\[1\] must start with '\+'"),
+    ],
+)
+def test_plusargs_validation(tmp_path, value, match):
+    request = _edit(_stage(tmp_path), **{"testbench.plusargs": value})
+    with pytest.raises(FunctionalVerificationError, match=match):
+        run_functional_verification(request)
+
+
+def test_plusargs_with_cocotb_module_is_unknown_field(tmp_path):
+    request_path = _stage(tmp_path)
+    doc = json.loads(request_path.read_text())
+    doc["testbench"] = {"module": "test_x", "plusargs": ["+a"]}
+    request_path.write_text(json.dumps(doc))
+    with pytest.raises(FunctionalVerificationError, match="plusargs"):
+        run_functional_verification(str(request_path))
+
+
+@needs_icarus
+def test_integration_plusargs_forwarded_and_echoed(tmp_path):
+    _stage(tmp_path)
+    _rewrite_bench(
+        tmp_path,
+        '    if (errors == 0) $display("PASS");',
+        '    if (errors == 0 && $test$plusargs("go") && '
+        '$value$plusargs("file=%s", f)) $display("PASS %0s", f);',
+    )
+    _rewrite_bench(
+        tmp_path, "integer errors = 0;", "integer errors = 0; reg [255:0] f;"
+    )
+    absent = run_functional_verification(str(tmp_path / "request-rtl.json"))
+    assert absent["status"] == "fail"
+    assert absent["environment"]["plusargs"] == []
+    request = _edit(
+        tmp_path / "request-rtl.json",
+        **{"testbench.plusargs": ["+go", "+file=a b=c"]},
+    )
+    report = run_functional_verification(request)
+    assert report["status"] == "pass"
+    assert report["environment"]["plusargs"] == ["+go", "+file=a b=c"]
