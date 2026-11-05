@@ -4,6 +4,32 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-05
 
+- **PR #5007**: feat(functional-verification): add testbench.plusargs for verilog_top benches
+- **PR #5003**: fix(functional-verification): reject SDF CELL scoped to a missing instance before vvp aborts
+- **PR #4999**: refactor: consolidate sha256: digest wrappers onto _provenance helpers
+- **PR #4998**: test(extract): pin DEF SPEF spelling for escaped-bracket hierarchical nets
+- **PR #4993**: fix(sim): reject non-object corners with SimError instead of AttributeError
+- **PR #4992**: feat(lvs): add -o/--output and record reference as {path, scope}
+- **PR #4991**: docs(sim): correct bin-range preflight timing in sim.md
+- **PR #4990**: fix(drc): make --check understand --engine both crosscheck reports
+- **PR #4989**: feat(sim): allow corners.supply_waveforms with corners.units
+- **PR #4988**: fix(sim): honor explicit max_units_per_job above the serial ceiling bound
+- **PR #4985**: fix(sim): retry timestep_too_small aborts and report when retry was not applied
+- **PR #4980**: fix(sim): name --submit-only in shard-map mismatch refusal; document distinct -o dirs
+- **Issue #5008** (closed): klt sim batch: no simulated-time progress lines in ngspice.log, even for a completed run
+- **Issue #5006** (closed): functional-verification: Verilog-bench path cannot pass plusargs to the simulator
+- **Issue #4997** (closed): klt extract --spef: hierarchical net names do not correlate in klt sta read_spef (partial annotation)
+- **Issue #4996** (closed): klt functional-verification cannot run plain-Verilog self-checking benches
+- **Issue #4995** (closed): Consolidate hand-rolled sha256: content-hash helpers onto _provenance (parallel drift)
+- **Issue #4987** (closed): docs(sim): bin-range preflight is attached after the run, docs say 'before ngspice runs'
+- **Issue #4986** (closed): klt drc --check cannot verify an --engine both (crosscheck) report
+- **Issue #4984** (closed): lvs: no -o/--output flag, and --check resolves a request-relative reference path against the cwd
+- **Issue #4983** (closed): klt sim batch: retry_on_convergence_error leaves timestep_too_small units as error with no trace that it was considered
+- **Issue #4982** (closed): klt sim batch: whole-job ceiling check uses a serial timeout bound; realistic jobs cannot be split
+- **Issue #4981** (closed): klt sim: corners.supply_waveforms unusable with an explicit corners.units list
+- **Issue #4979** (closed): klt sim: sharded batch submits from one request directory silently overwrite each other's `.klt/sim/batch-shards.json`
+- **Issue #4978** (closed): klt sim: a list-valued `corners` crashes with an AttributeError traceback instead of a SimError
+- **Issue #4739** (closed): main CI red: file-size baseline out of sync with source (lvs.py, sim.py, lvs_mismatch.py, netlist_normalize.py, test_lvs.py, test_sim.py)
 - **PR #4977**: fix(sim): key bin-range culprit on w as written and add preflight warning
 - **PR #4975**: feat(sim): record batch-set job ids at submit and verify request on --attach
 - **PR #4974**: feat(sim): per-corner analysis_overrides for tran windows
