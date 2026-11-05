@@ -2743,6 +2743,16 @@ mirrored layout. This is stricter than the PDK's own `gf180mcu.lvs`, whose
 KLayout MOS extractor orders S/D geometrically (`tests/test_lvs_native_extraction_cross_check_gf180mcu.py`
 compares the two on the unmirrored layout, where they agree on L, W and AS/AD/PS/PD).
 
+The PDK's own `nfet_10v0_asym` PCell (`klt gen --pdk-pcell
+gf180mcu_klayoutapi/nfet_10v0_asym`) extracts as this flavour (issue #4949). It
+draws two gate fingers whose drain is several separate `COMP` islands -- the
+drift-side stubs and the contacted centre stripe -- that only the `MVSD` marker
+spans. The marker therefore acts as the drain's conductor: drain-marked
+diffusion under one `MVSD` polygon is one drain net, so both fingers report the
+same `D` net (rather than the second finger's drain floating), with a distinct
+source net per source island. The result is two `nfet` devices (one per finger)
+sharing a drain, not a single merged device.
+
 `sg13g2` declares one such entry too (issue #1231), keyed on its
 `ThickGateOx` (44/0) marker: a transistor drawn inside it binds the real
 thick-oxide `sg13_hv_nmos`/`sg13_hv_pmos` models under `--pdk` instead of

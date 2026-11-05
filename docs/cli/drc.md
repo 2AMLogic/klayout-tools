@@ -3281,6 +3281,24 @@ with the input and deck; `--check --rerun` replays the waiver file the
 committed report recorded (`--waivers` itself cannot be combined with
 `--check`, like `--rules`).
 
+**Known false positives: the PDK's own `nfet_10v0_asym` PCell (issue #4949).**
+`klt gen --pdk-pcell gf180mcu_klayoutapi/nfet_10v0_asym` reports 17 markers under
+the curated gf180mcu deck, all with `source_cell: nfet_10v0_asym`: 16x
+`comp.enclosing.contact.1` and 1x `comp.width.mv.1` (the deck does not exempt
+`MVSD`-marked drains the way the official `DF.1a_MV` does, see above). The
+`comp.enclosing.contact.1` result for the PCell's narrow 0.22 um drain stripe is
+**not** cross-checked against the foundry runset (it cannot run on KLayout <
+0.30.9), so the deck is deliberately not loosened. To accept them explicitly:
+
+```json
+{"waivers": [
+  {"cell": "nfet_10v0_asym", "rule": "comp.enclosing.contact.1",
+   "justification": "PDK PCell drain stripe; unverified against native deck (#4949)"},
+  {"cell": "nfet_10v0_asym", "rule": "comp.width.mv.1",
+   "justification": "MVSD-marked LDMOS drain; official DF.1a_MV exempts it (#4949)"}
+]}
+```
+
 **Known limit — straddling markers.** A marker whose bbox spans two instances
 (a filler abutting a tap cell, say) carries the *container's* `source_cell`,
 so it is waived under that cell, which is why waivers are rule-scoped.
