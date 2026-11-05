@@ -70,6 +70,10 @@ def test_missing_unreleased_heading_is_an_error() -> None:
     [
         ("chore(release): bump version to 0.9.0", "0.9.0"),
         ("chore(release): bump version to 0.9.0 (#4999)", "0.9.0"),
+        ("Merge pull request #4922 from 2AMLogic/release/v0.9.0", "0.9.0"),
+        ("Merge pull request #4922 from release/v0.9.0", None),
+        ("Merge pull request #4922 from 2AMLogic/feature/issue-1", None),
+        ("Merge pull request #4922 from 2AMLogic/release/v0.9.0.dev1", None),
         ("fix: chore(release): bump version to 0.9.0", None),
         ("chore(release): bump version to 0.9.0.dev1", None),
         ("feat: something", None),

@@ -28,7 +28,9 @@ by construction. A patch is a manual override via ``--version``.
 
 ``detect`` reads a commit subject and prints the release version when it is a
 release-bump commit (``chore(release): bump version to X.Y.Z``, optionally
-with the ``(#NNN)`` suffix a squash merge appends) -- the tag job's gate for
+with the ``(#NNN)`` suffix a squash merge appends, or the merge-commit subject
+``Merge pull request #N from <owner>/release/vX.Y.Z`` this repo's merge style
+produces) -- the tag job's gate for
 "tag this commit". It prints nothing and exits 0 otherwise.
 
 Exit codes: 0 ok; 2 bad input (bad version, no ``## Unreleased`` heading, ...).
@@ -49,6 +51,9 @@ _VERSION = r"\d+\.\d+\.\d+"
 _BASE_VERSION_RE = re.compile(rf'^(base-version\s*=\s*")({_VERSION})(")', re.MULTILINE)
 _RELEASE_SUBJECT_RE = re.compile(
     rf"^chore\(release\): bump version to ({_VERSION})(?:\s|$)"
+)
+_MERGE_SUBJECT_RE = re.compile(
+    rf"^Merge pull request #\d+ from \S+?/release/v({_VERSION})(?:\s|$)"
 )
 _UNRELEASED_RE = re.compile(r"^## Unreleased[ \t]*$", re.MULTILINE)
 
@@ -100,7 +105,8 @@ def update_signoff_notes(text: str, previous: str, new: str) -> str:
 
 
 def release_version_from_subject(subject: str) -> str | None:
-    match = _RELEASE_SUBJECT_RE.match(subject.strip())
+    subject = subject.strip()
+    match = _RELEASE_SUBJECT_RE.match(subject) or _MERGE_SUBJECT_RE.match(subject)
     return match.group(1) if match else None
 
 

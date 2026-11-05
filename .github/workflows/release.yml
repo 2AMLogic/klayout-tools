@@ -96,8 +96,8 @@ jobs:
         run: |
           status=0
           uv run --python 3.12 --no-project python scripts/check_native_extras.py \
-            > native.log 2>&1 || status=$?
-          cat native.log
+            > "$RUNNER_TEMP/native.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/native.log"
           echo "ok=$([ "$status" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Report blocked release (single tracking issue)
@@ -105,7 +105,7 @@ jobs:
         run: |
           title="Automated release blocked: klt-*-native pin not published"
           body="$(printf 'The release workflow stopped before opening a release PR (no PR, no tag).\n\nRun: %s/%s/actions/runs/%s\n\n```\n%s\n```\n\nSee docs/releasing-native.md. Re-run the Release workflow once the pin is on PyPI; this issue is refreshed in place, not re-filed.' \
-            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(tail -n 40 native.log)")"
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(tail -n 40 "$RUNNER_TEMP/native.log")")"
           num="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
             --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
           if [ -n "$num" ]; then
@@ -202,8 +202,8 @@ jobs:
         run: |
           status=0
           uv run --python 3.12 --no-project python scripts/check_native_extras.py \
-            > native.log 2>&1 || status=$?
-          cat native.log
+            > "$RUNNER_TEMP/native.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/native.log"
           echo "ok=$([ "$status" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Report blocked tag (single tracking issue)
@@ -211,7 +211,7 @@ jobs:
         run: |
           title="Automated release blocked: klt-*-native pin not published"
           body="$(printf 'The tag job refused to tag v%s (no tag, no publish).\n\nRun: %s/%s/actions/runs/%s\n\n```\n%s\n```\n\nPublish the pin (docs/releasing-native.md), then re-run this job.' \
-            "${{ steps.detect.outputs.version }}" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(tail -n 40 native.log)")"
+            "${{ steps.detect.outputs.version }}" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(tail -n 40 "$RUNNER_TEMP/native.log")")"
           num="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
             --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
           if [ -n "$num" ]; then gh issue edit "$num" --repo "$GITHUB_REPOSITORY" --body "$body"
