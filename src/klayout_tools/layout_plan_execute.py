@@ -175,6 +175,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import tempfile
 from collections.abc import Callable
 from typing import Any
@@ -635,10 +636,16 @@ def _build_connectivity(
     device_groups: list[dict[str, Any]],
     digest: dict[str, Any],
     generated: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str], list[str], list[dict[str, str]]]:
     """Derive ``gen_compose``-shaped ``connectivity[]`` from the netlist
     digest's own device-to-net map (the module docstring's core job) --
-    returns ``(connectivity, unmapped_netlist_nets, warnings)``.
+    returns ``(connectivity, unmapped_netlist_nets, warnings, pins)``.
+
+    ``pins`` is the ``gen_compose`` ``pins[]`` list promoting each subckt
+    port net (``is_pin``) to a labelled top-level pin on its first resolved
+    device port (#4966), so the GDS carries a label per netlist port for
+    ``klt lvs``; a port net with no resolved device port gets a
+    ``warnings[]`` entry and no label.
 
     A net with two resolved pins becomes an ordinary two-pin
     ``connectivity[]`` entry; a net with three or more becomes a bundle
@@ -725,7 +732,43 @@ def _build_connectivity(
         net["name"] for net in digest["nets"] if not net_pins.get(net["name"])
     )
 
-    return connectivity, unmapped_netlist_nets, warnings
+    pins: list[dict[str, str]] = []
+    for net in digest["nets"]:
+        if not net.get("is_pin"):
+            continue
+        resolved = net_pins.get(net["name"])
+        if not resolved:
+            warnings.append(
+                f"netlist port '{net['name']}' has no mapped device port -- "
+                "no pin label is written for it"
+            )
+            continue
+        pins.append(
+            {
+                "net": net["name"],
+                "block": resolved[0]["block"],
+                "port": resolved[0]["port"],
+            }
+        )
+
+    return connectivity, unmapped_netlist_nets, warnings, pins
+
+
+_UNROUTED_NOTE_RE = re.compile(
+    r"^net '(?P<net>.*)' could not be routed: (?P<reason>.*)$"
+)
+
+
+def _unrouted_reasons(composed: dict[str, Any]) -> list[dict[str, str]]:
+    """``[{"net", "reason"}]`` parsed from ``compose()``'s
+    ``drc_hints.notes`` ``net '<n>' could not be routed: <reason>`` entries
+    (#4966), so a caller sees why a net is in ``unrouted_nets[]``."""
+    reasons: list[dict[str, str]] = []
+    for note in (composed.get("drc_hints") or {}).get("notes") or []:
+        match = _UNROUTED_NOTE_RE.match(note) if isinstance(note, str) else None
+        if match:
+            reasons.append({"net": match["net"], "reason": match["reason"]})
+    return reasons
 
 
 def _abutment_target_offset(
@@ -1137,7 +1180,7 @@ def execute_layout_plan(
         )
         warnings.extend(placement_warnings)
 
-        connectivity, unmapped_netlist_nets, connectivity_warnings = (
+        connectivity, unmapped_netlist_nets, connectivity_warnings, port_pins = (
             _build_connectivity(device_groups, digest, generated)
         )
         warnings.extend(connectivity_warnings)
@@ -1159,6 +1202,7 @@ def execute_layout_plan(
                 "origins_um": offsets_um,
             },
             "connectivity": connectivity,
+            "pins": port_pins,
             "options": {
                 "cell_name": options.get("cell_name") or "layout_plan_0",
                 "output": options.get("output"),
@@ -1195,6 +1239,7 @@ def execute_layout_plan(
             "nets": composed["nets"],
             "pins": composed["pins"],
             "unrouted_nets": composed["unrouted_nets"],
+            "unrouted_reasons": _unrouted_reasons(composed),
             "unmapped_netlist_nets": unmapped_netlist_nets,
             "drc_hints": composed["drc_hints"],
             "warnings": [*warnings, *composed["warnings"]],
