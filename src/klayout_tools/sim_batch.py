@@ -127,6 +127,8 @@ from .remote_launcher import (
 )
 from .sim_batch_features import annotate_gap, gap_note
 from .sim_batch_hints import hint_existing_fatal, with_runner_hints
+from .sim_exit_reason import exit_reason_env
+from .sim_exit_reason import status_exit_code as _status_exit_code
 from .sim_remote import (
     _build_remote_request,
     _points_to_push,
@@ -3836,15 +3838,6 @@ def _read_job_identity(
     }
 
 
-def _status_exit_code(status: dict[str, Any]) -> int | None:
-    """``status.json``'s ``exit_code`` as an int -- the harness writes it as
-    a string (and as ``""`` when the job never ran)."""
-    try:
-        return int(str(status.get("exit_code", "")).strip())
-    except (TypeError, ValueError):
-        return None
-
-
 #: Engine logs a collected ``outputs/`` tree may hold (``keep_artifacts`` runs
 #: copy each corner's log under ``artifacts/``). Only read to surface the
 #: engine's fatal error; never copied wholesale into the JSON.
@@ -4906,6 +4899,7 @@ def _poll_and_collect(
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}
+        environment.update(exit_reason_env(status, report))
         corners = report.get("corners") or []
         _surface_log_fatal(corners, collected)
         if keep_artifacts:

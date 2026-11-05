@@ -405,6 +405,7 @@
       "kind": "verb",
       "description": "`klt netlist` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools._capacitor_mf",
         "klayout_tools.cli.netlist_cmd",
         "klayout_tools.netlist",
         "klayout_tools.netlist_block",
@@ -634,6 +635,7 @@
         "klayout_tools.sim_echo_messages",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_errors",
+        "klayout_tools.sim_exit_reason",
         "klayout_tools.sim_eye",
         "klayout_tools.sim_forms",
         "klayout_tools.sim_injected",

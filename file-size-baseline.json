@@ -617,7 +617,7 @@
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 5987
+      "lines": 5981
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
@@ -941,7 +941,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26242
+      "lines": 26234
     },
     {
       "path": "tests/test_lvs_device_provenance.py",
