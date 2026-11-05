@@ -1039,6 +1039,13 @@ id survives the caller. Collecting a finished `--submit-only` job's report is
 
 ### Waiting, job id, and re-attaching ([#2978](https://github.com/2AMLogic/klayout-tools/issues/2978))
 
+Unsharded `--attach <job_id>` checks the supplied request against the
+`request_sha256` in `<artifacts_dir>/batch-receipt.json` when that receipt is
+for the same job id, and refuses a different request with
+`error.code: "resume_fingerprint_mismatch"` (the message names the receipt's
+hash). No receipt, or a receipt for another job id, proceeds unchanged
+([#4971](https://github.com/2AMLogic/klayout-tools/issues/4971)).
+
 The wait for a batch job is bounded by **`batch.poll_timeout_s`** (table
 above). Its default is the fully-serial worst case, so a many-unit request
 with a large `options.timeout_s` can wait hours; set `batch.poll_timeout_s`
@@ -1217,8 +1224,11 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   `.klt/sim/` directory next to the first request) is written when the set
   starts and atomically rewritten on every transition. It lists, per request,
   `index`, `request`, `dir`, `status` (`pending`/`running`/final), `attempts`,
-  and `job_id`/`job_ids` once the request finished, so a client interrupted
-  mid-set can re-associate the surviving directories. The aggregate envelope is
+  and `job_id`/`job_ids`, recorded the moment each batch job is submitted
+  (status `running`) rather than when the request finishes, so a client
+  interrupted mid-poll still leaves the request -> job id mapping on disk.
+  Member progress lines on stderr name the request:
+  `klt sim: batch job <id> (<request>): submitted`. The aggregate envelope is
   unchanged.
 - **Batch only, never local.** The backend is forced to `batch` (`--backend`
   other than `batch` is a usage error, exit `2`); a refused or failed request is
