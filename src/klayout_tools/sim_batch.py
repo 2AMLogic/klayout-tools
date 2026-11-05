@@ -4392,7 +4392,7 @@ class _ShardManifest:
                 data = json.load(handle)
             shards = {str(entry["index"]): dict(entry) for entry in data["shards"]}
             stored_fingerprint = data["fingerprint"]
-            stored_hosts = data["hosts"]
+            str(data["hosts"])
             if data.get("schema_version") != 1:
                 raise ValueError("unsupported schema_version")
             for entry in shards.values():
@@ -4409,9 +4409,7 @@ class _ShardManifest:
         if stored_fingerprint != fingerprint:
             from . import sim_batch_shards
 
-            raise sim_batch_shards.manifest_mismatch_error(
-                path, stored_fingerprint, fingerprint, stored_hosts, submit_only
-            )
+            raise sim_batch_shards.mismatch_error(path, data, fingerprint, submit_only)
         manifest.prior = shards
         return manifest
 
