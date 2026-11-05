@@ -31,6 +31,7 @@ from . import macros as macro_spec
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
+from .place_and_route_clock import validate_clock_constraints
 from .place_and_route_groups import reject_unknown_group_keys, validate_group_geometry
 from .place_and_route_layers import (
     _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK,
@@ -1692,20 +1693,9 @@ def _validate_constraints(
     if not isinstance(constraints, dict):
         raise PlaceAndRouteError("request.constraints must be a JSON object")
 
-    clock_port = constraints.get("clock_port")
-    clock_period_ns = constraints.get("clock_period_ns")
-    if clock_port is not None or clock_period_ns is not None:
-        if not (isinstance(clock_port, str) and clock_port):
-            raise PlaceAndRouteError(
-                "request.constraints.clock_port must be a non-empty string"
-            )
-        if not (isinstance(clock_period_ns, (int, float)) and clock_period_ns > 0):
-            raise PlaceAndRouteError(
-                "request.constraints.clock_period_ns must be a positive number"
-            )
-        clock_period_ns = float(clock_period_ns)
-    else:
-        clock_port, clock_period_ns = None, None
+    clock_port, clock_period_ns = validate_clock_constraints(
+        constraints, PlaceAndRouteError
+    )
 
     max_transition_ns = constraints.get("max_transition_ns")
     if max_transition_ns is not None:
@@ -1751,11 +1741,12 @@ def _validate_constraints(
     input_delay_ns = _validate_io_delay(constraints.get("input_delay_ns"), "input")
     output_delay_ns = _validate_io_delay(constraints.get("output_delay_ns"), "output")
     if (input_delay_ns is not None or output_delay_ns is not None) and (
-        clock_port is None
+        clock_period_ns is None
     ):
         raise PlaceAndRouteError(
             "request.constraints.input_delay_ns/output_delay_ns require "
-            "request.constraints.clock_port/clock_period_ns -- set_input_delay/"
+            "request.constraints.clock_period_ns (with or without clock_port) "
+            "-- set_input_delay/"
             "set_output_delay are defined relative to a named clock"
         )
 

@@ -5651,9 +5651,9 @@ def test_io_delay_lines_helper_emits_only_given_fields():
         *_IO_INPUT_DELAY_LINES,
         _IO_OUTPUT_DELAY_LINE,
     ]
-    # Defensive: `_validate_constraints` never lets a delay through without
-    # a clock, but the helper stays total either way.
-    assert place_and_route._io_delay_lines(None, 0.2, 0.3) == []
+    # No `clock_port` (#4913): delays bind to the virtual clock (exact Tcl is
+    # asserted in test_place_and_route_virtual_clock.py).
+    assert len(place_and_route._io_delay_lines(None, 0.2, 0.3)) == 2
 
 
 def test_io_delay_input_set_excludes_the_clock_port():
