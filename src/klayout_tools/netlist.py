@@ -64,7 +64,6 @@ scope-narrowing comment, 2026-10-01) are both now addressed, via #2680:
 from __future__ import annotations
 
 import difflib
-import hashlib
 import os
 import re
 import shutil
@@ -76,6 +75,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from . import pdk as pdk_module
+from ._provenance import content_hash_bytes
 from .netlist_block import apply_block_mode, space_separate_subckt_ports
 from .netlist_diagnostics import diagnostics_block
 from .netlist_inputs import (
@@ -165,10 +165,6 @@ class NetlistError(Exception):
         self.code = code
         self.job_id = job_id
         self.details = details
-
-
-def _sha256_file_hash(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 def _validate_schematic(schematic: str) -> None:
@@ -432,7 +428,7 @@ def _netlist_block(path: str | None, data: bytes) -> dict[str, Any]:
         "path": path,
         "bytes": len(data),
         "lines": data.count(b"\n"),
-        "content_hash": _sha256_file_hash(data),
+        "content_hash": content_hash_bytes(data),
     }
 
 
@@ -662,7 +658,7 @@ def _check_result(
         return STATUS_MATCH, {
             "committed_present": True,
             "committed_bytes": len(committed_raw),
-            "committed_content_hash": _sha256_file_hash(committed_raw),
+            "committed_content_hash": content_hash_bytes(committed_raw),
             "path_comments_differ": _normalize_layout(committed)
             != _normalize_layout(fresh_data),
             "layout_differs": committed_paths != fresh_paths,
@@ -680,7 +676,7 @@ def _check_result(
         return STATUS_MATCH, {
             "committed_present": True,
             "committed_bytes": len(committed_raw),
-            "committed_content_hash": _sha256_file_hash(committed_raw),
+            "committed_content_hash": content_hash_bytes(committed_raw),
             "path_comments_differ": False,
             "layout_differs": False,
             "comments_differ": True,
@@ -712,7 +708,7 @@ def _check_result(
     return STATUS_DRIFTED, {
         "committed_present": True,
         "committed_bytes": len(committed_raw),
-        "committed_content_hash": _sha256_file_hash(committed_raw),
+        "committed_content_hash": content_hash_bytes(committed_raw),
         "path_comments_differ": False,
         "layout_differs": False,
         "comments_differ": False,

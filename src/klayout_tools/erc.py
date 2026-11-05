@@ -61,7 +61,7 @@ from ._paths import (
     _load_spec_json,
     _reject_unknown_keys,
 )
-from ._provenance import _content_hash, build_provenance
+from ._provenance import build_provenance, content_hash
 from ._report_verify import (
     build_check_result,
     build_rerun_result,
@@ -3850,9 +3850,9 @@ def run_erc(
     # rather than via a second `build_provenance` parameter, following `klt
     # lvs`'s precedent (`environment.reference_sha256`, `lvs.py`) of keeping
     # a verb-specific second-input hash out of the shared helper's signature.
-    # `_content_hash` (not the bare `sha256_file`) so this reads identically
+    # `content_hash` (not the bare `sha256_file`) so this reads identically
     # to the `sha256:`-prefixed `provenance.input.content_hash` beside it.
-    provenance["spec"] = {"content_hash": _content_hash(spec_path)}
+    provenance["spec"] = {"content_hash": content_hash(spec_path)}
 
     # `provenance.devices` (issue #2183): what the `devices[]` carve-out
     # actually removed from the connectivity graph this verdict was computed
@@ -3981,7 +3981,7 @@ def _input_hash_check(
     """One :func:`~klayout_tools._report_verify.hash_check` entry for an input
     path the committed report echoes back (``file``/``spec``).
 
-    Hashes via :func:`~klayout_tools._provenance._content_hash` because the
+    Hashes via :func:`~klayout_tools._provenance.content_hash` because the
     recorded ``provenance.*.content_hash`` values are ``sha256:``-prefixed
     (``klt lvs``'s ``environment.*_sha256`` are bare, which is why its
     ``_input_hash_check`` cannot be reused). An echoed path naming no existing
@@ -3989,7 +3989,7 @@ def _input_hash_check(
     (issue #2595), so ``actual: null`` is not mistaken for a moved hash.
     """
     path = echoed if isinstance(echoed, str) and echoed else None
-    check = hash_check(field, expected, _content_hash(path))
+    check = hash_check(field, expected, content_hash(path))
     if path is None or os.path.isfile(path):
         return check
     found_relative_to_report: str | None = None
@@ -4053,7 +4053,7 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
             hash_check(
                 "provenance.deck.content_hash",
                 deck.get("content_hash"),
-                _content_hash(deck_source_path(deck["name"])),
+                content_hash(deck_source_path(deck["name"])),
             )
         )
     result = build_check_result(report_path=report_path, checks=checks)

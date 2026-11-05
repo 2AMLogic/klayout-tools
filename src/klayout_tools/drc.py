@@ -49,7 +49,7 @@ from ._layout import select_top_cells as _select_top_cells
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
-from ._provenance import _content_hash, build_provenance
+from ._provenance import build_provenance, content_hash
 from ._report_verify import (
     build_check_result,
     build_rerun_result,
@@ -2216,7 +2216,7 @@ def _assemble_report(
     if waivers_file is not None:
         report["provenance"]["waivers"] = {
             "file": waivers_file,
-            "content_hash": _content_hash(waivers_file),
+            "content_hash": content_hash(waivers_file),
         }
     return report
 

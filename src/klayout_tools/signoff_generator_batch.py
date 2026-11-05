@@ -381,10 +381,6 @@ def _fail(failure: str, message: str, evidence: dict[str, Any]) -> GeneratorOutc
 # --------------------------------------------------------------------------- #
 
 
-def _sha256_bytes(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
 def _select_tree(root: str, approval: GeneratorApproval) -> netlist_batch.BatchTree:
     """The git-tracked files the approval ships, capped in size; the approved
     script must be among them."""
@@ -447,12 +443,14 @@ def _package(
                 continue
             handle = archive.extractfile(member)
             data = handle.read() if handle is not None else b""
-            digest.update(f"{member.name}\0{_sha256_bytes(data)}\n".encode())
+            digest.update(
+                f"{member.name}\0{_provenance.content_hash_bytes(data)}\n".encode()
+            )
             if member.name == approval.script:
                 shipped_script = data
     if (
         shipped_script is None
-        or _sha256_bytes(shipped_script) != approval.script_sha256
+        or _provenance.content_hash_bytes(shipped_script) != approval.script_sha256
     ):
         raise netlist_batch.NetlistError(
             f"approved script {approval.script} does not hash to the approved "
@@ -664,7 +662,7 @@ def _compare(
             f"batch job {job_id} finished without collected generator output",
             evidence,
         )
-    output_hash = _sha256_bytes(data)
+    output_hash = _provenance.content_hash_bytes(data)
     try:
         with open(
             os.path.join(collected, OUTPUT_HASH_FILENAME), encoding="utf-8"

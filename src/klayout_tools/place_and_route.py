@@ -66,7 +66,7 @@ from ._paths import _tcl_net_list as _tcl_net_list
 # Same intent -- and same redundant `X as X` alias form -- as the
 # `place_and_route_sta` re-export block below.
 from ._power_activity import power_basis_block, validate_power_activity
-from ._provenance import INPUT_ROLE_NETLIST, _content_hash, build_provenance
+from ._provenance import INPUT_ROLE_NETLIST, build_provenance, content_hash
 from ._report_verify import (
     VOLATILE_FLOW_PATHS,
     build_check_result,
@@ -2688,7 +2688,7 @@ def _run_rebuild_corners(
     """
     request_dir = os.path.dirname(os.path.abspath(request_path))
     netlist_path = _resolve_netlist(request["netlist"], request_dir)
-    input_hash = _content_hash(netlist_path)
+    input_hash = content_hash(netlist_path)
     cell_library = request["pdk"].get("cell_library")
     if not isinstance(cell_library, str) or not cell_library:
         raise PlaceAndRouteError("request.pdk.cell_library is required")
@@ -2698,7 +2698,7 @@ def _run_rebuild_corners(
         liberty_path, _corner, _info = _resolve_liberty(
             cell_library, name, variant=pdk_variant, root=pdk_root
         )
-        deck_hashes[name] = _content_hash(liberty_path)
+        deck_hashes[name] = content_hash(liberty_path)
 
     stage_root = _stage_root(request_dir, request)
     corner_runs: list[dict[str, Any]] = []
@@ -3273,7 +3273,7 @@ def _place_and_route_provenance_hashes(
         variant=pdk_variant,
         root=pdk_root,
     )
-    return _content_hash(netlist_path), _content_hash(liberty_path)
+    return content_hash(netlist_path), content_hash(liberty_path)
 
 
 def check_place_and_route_report(

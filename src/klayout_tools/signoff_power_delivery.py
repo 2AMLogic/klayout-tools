@@ -34,7 +34,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-from ._provenance import sha256_file
+from ._provenance import content_hash
 from .signoff_runset import runset_disclosure, runset_refusal
 
 #: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Six
@@ -275,8 +275,7 @@ def _erc_supply_spec_hash_reason(
     )
     if not isinstance(recorded_hash, str) or not recorded_hash:
         return _REASON_UNVERIFIABLE_PROVENANCE
-    digest = sha256_file(resolved_path)
-    actual_hash = f"sha256:{digest}" if digest is not None else None
+    actual_hash = content_hash(resolved_path)
     if actual_hash is None:
         return _REASON_UNVERIFIABLE_PROVENANCE
     if actual_hash != recorded_hash:

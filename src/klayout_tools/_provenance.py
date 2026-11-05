@@ -308,7 +308,7 @@ def layout_geometry_digest(path: str | None) -> str | None:
     happened to emit). A consumer comparing raw-byte hashes therefore sees
     drift on every re-run and cannot tell a re-write from a real change --
     exactly the failure mode issue #2065 was filed against. The byte-level
-    contract of :func:`sha256_file`/:func:`_content_hash` is unchanged and
+    contract of :func:`sha256_file`/:func:`content_hash` is unchanged and
     still what ``drc``/``lvs``/``extract``/``sim`` record; this is a second,
     layout-aware digest for callers that need equality to mean "same
     geometry".
@@ -428,11 +428,31 @@ def _combined_content_hash(paths: list[str]) -> str | None:
     return f"sha256:{combined}"
 
 
-def _content_hash(path: str | None) -> str | None:
+def sha256_file_required(path: str) -> str:
+    """:func:`sha256_file` for a path that must exist: raises
+    ``FileNotFoundError`` instead of returning ``None``."""
+    digest = sha256_file(path)
+    if digest is None:
+        raise FileNotFoundError(path)
+    return digest
+
+
+def content_hash(path: str | None) -> str | None:
     """The envelope's ``sha256:``-prefixed deck-hash form of ``path``, or
     ``None`` when the file can't be hashed."""
     digest = sha256_file(path)
     return f"sha256:{digest}" if digest is not None else None
+
+
+def content_hash_required(path: str) -> str:
+    """:func:`content_hash` for a path that must exist: raises
+    ``FileNotFoundError`` instead of returning ``None``."""
+    return "sha256:" + sha256_file_required(path)
+
+
+def content_hash_bytes(data: bytes) -> str:
+    """The ``sha256:``-prefixed digest of in-memory ``data``."""
+    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 def _klt_version() -> str:
@@ -803,11 +823,11 @@ def _deck_block(
     """
     if name is None:
         return None
-    content_hash = _content_hash(path)
+    deck_hash = content_hash(path)
     block: dict[str, Any] = {
         "name": name,
-        "content_hash": content_hash,
-        "released": is_deck_hash_released(name, content_hash),
+        "content_hash": deck_hash,
+        "released": is_deck_hash_released(name, deck_hash),
     }
     if resolve_deck_options:
         options, explicit = _resolved_deck_options(name, deck_options)
@@ -857,7 +877,7 @@ def _input_block(path: str | None, role: str) -> dict[str, Any] | None:
     """
     if path is None:
         return None
-    return {"content_hash": _content_hash(path), "role": role}
+    return {"content_hash": content_hash(path), "role": role}
 
 
 class UnknownProvenanceDeckError(Exception):
