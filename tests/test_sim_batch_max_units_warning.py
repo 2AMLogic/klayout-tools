@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import klayout_tools.sim_batch as sb
+import klayout_tools.sim_batch_warn as sbw
 import klayout_tools.sim_set as ss
 from test_sim_batch import (
     _ceiling_request,
@@ -17,9 +18,9 @@ from test_sim_batch import (
 
 @pytest.fixture(autouse=True)
 def _reset_warned():
-    sb._SERIAL_BOUND_WARNED.clear()
+    sbw.SERIAL_BOUND_WARNED.clear()
     yield
-    sb._SERIAL_BOUND_WARNED.clear()
+    sbw.SERIAL_BOUND_WARNED.clear()
 
 
 def test_max_units_per_job_over_the_ceiling_limit_is_honored_with_warning(
