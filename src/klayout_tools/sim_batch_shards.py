@@ -213,3 +213,71 @@ def with_unfinished(
         "resumable": True,
         "shard_map": str(manifest.path),
     }
+
+
+def attach_batch_shards(
+    *,
+    manifest_path: str,
+    config: sim_batch.BatchConfig,
+    corner_points: list[sim_batch.CornerPoint],
+    netlist_path: str,
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    request: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    request_dir: str | None,
+    shard_fingerprint: str | None,
+    collect_partial: bool = False,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """``--attach <shard map>`` (issue #4620): wait for every shard a
+    sharded ``--submit-only`` recorded and merge them exactly as the blocking
+    sharded run does. The map must belong to this request (digest and
+    fingerprint); a shard whose job is gone is reported lost, never
+    resubmitted."""
+    from .sim import SimError
+
+    if os.path.basename(manifest_path) != sim_batch.BATCH_SHARDS_FILENAME:
+        raise SimError(
+            f"--attach {manifest_path}: expected a job id or a "
+            f"{sim_batch.BATCH_SHARDS_FILENAME} shard map",
+            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
+        )
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        hosts = int(document["hosts"])
+        fingerprint = str(document["fingerprint"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SimError(
+            f"--attach: shard map {manifest_path} is unreadable ({exc})",
+            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
+        ) from exc
+    mismatch = shard_map_mismatch(document, request)
+    if mismatch is not None:
+        raise SimError(
+            f"--attach: shard map {manifest_path} was submitted from a "
+            f"different request ({mismatch}); pass the request the shards "
+            "were submitted from",
+            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
+        )
+    try:
+        return sim_batch._run_batch_fleet(
+            corner_points=corner_points,
+            netlist_path=netlist_path,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            artifacts_dir=os.path.dirname(os.path.abspath(manifest_path)),
+            request=request,
+            hosts=hosts,
+            measurements_spec=measurements_spec,
+            request_dir=request_dir,
+            config=config,
+            shard_fingerprint=shard_fingerprint or fingerprint,
+            resume=True,
+            attach_only=True,
+            collect_partial=collect_partial,
+        )
+    except sim_batch.BatchError as exc:
+        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
