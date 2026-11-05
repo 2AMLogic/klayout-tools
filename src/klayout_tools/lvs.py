@@ -180,6 +180,7 @@ from .lvs_combine import (
 from .lvs_finfet import (
     apply_finfet_bulk_hierarchy,
     bulk_disclosures,
+    combine_layout_fingers,
     finfet_bulk_replay_options,
     prepare_finfet_comparison,
     prepare_finfet_request,
@@ -1506,6 +1507,11 @@ def run_lvs(
         layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
         if layout_flatten_warning is not None:
             flatten_warnings.append(layout_flatten_warning)
+        if finfet_layout:
+            # Issue #4954: the extractor merged fingers per circuit; flattening
+            # can place exactly-parallel fingers of different cells side by
+            # side, so re-run the same combiner on the flattened layout.
+            combine_layout_fingers(layout_netlist)
 
     reference_netlist_path = _require_path(
         reference_spec, "netlist", "reference", request_dir
@@ -2366,6 +2372,7 @@ def run_lvs(
             # finding attributed through `details.declared_constant_net`.
             constant_bindings=constant_bindings,
             excluded_parameters=excluded_parameters,
+            finfet=finfet_layout,
         )
         # Issue #4165: after a timeout nothing the (empty) logger produced
         # describes the design; report only the timeout.

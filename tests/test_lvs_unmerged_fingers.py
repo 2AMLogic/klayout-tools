@@ -85,3 +85,40 @@ def test_flavour_warning_absent_when_option_selects_reference_class(tmp_path):
         tmp_path, layout, ref, deck="gf180mcu", deck_options={"poly_res": "3k"}
     )
     assert _cats(report, "device.flavour_mismatch") == []
+
+
+def test_finfet_unmerged_fingers_never_suggest_combine_devices():
+    import klayout.db as kdb
+
+    from klayout_tools.lvs_mismatch import _group_unmerged_fingers
+
+    nl = kdb.Netlist()
+    cls = kdb.DeviceClassMOS3Transistor()
+    cls.name = "nfet"
+    nl.add(cls)
+    top = kdb.Circuit()
+    top.name = "top"
+    nl.add(top)
+    nets = {n: top.create_net(n) for n in "dgs"}
+    fingers = []
+    for i, w in enumerate((10.0, 10.0)):
+        dev = top.create_device(cls, f"M{i}")
+        dev.set_parameter("W", w)
+        dev.set_parameter("L", 0.5)
+        for t, n in (("S", "s"), ("G", "g"), ("D", "d")):
+            dev.connect_terminal(t, nets[n])
+        fingers.append(dev)
+    rdev = top.create_device(cls, "R")
+    rdev.set_parameter("W", 20.0)
+    rdev.set_parameter("L", 0.5)
+    for t, n in (("S", "s"), ("G", "g"), ("D", "d")):
+        rdev.connect_terminal(t, nets[n])
+    unmatched = [(f, None) for f in fingers] + [(None, rdev)]
+    for finfet in (False, True):
+        [entry] = _group_unmerged_fingers(unmatched, [], finfet).entries
+        if finfet:
+            assert "combine_devices" not in entry["description"]
+            assert entry["details"]["suggested_option"] is None
+        else:
+            assert "combine_devices" in entry["description"]
+            assert entry["details"]["suggested_option"] == "options.combine_devices"

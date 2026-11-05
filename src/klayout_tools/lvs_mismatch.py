@@ -1082,6 +1082,7 @@ def _device_terminal_key(device: Any) -> tuple[Any, ...] | None:
 def _group_unmerged_fingers(
     unmatched: Sequence[tuple[Any, Any]],
     param_pairs: Sequence[tuple[Any, Any]],
+    finfet: bool = False,
 ) -> _UnmergedFingers:
     """Issue #4729: diagnose parallel fingers left unmerged (no
     ``options.combine_devices``) against a reference holding one device of the
@@ -1153,15 +1154,29 @@ def _group_unmerged_fingers(
             if id(finger) in paired_reference:
                 consumed.add(id(paired_reference[id(finger)]))
         names = [_name_or_none(f) for f in fingers]
+        if finfet:
+            # Issue #4954: a FinFET deck refuses options.combine_devices (the
+            # extractor already merges fingers), so never suggest it.
+            remedy = (
+                "the extractor merges only exactly-parallel fingers (same "
+                "gate/bulk/source-drain nets and L); this group differs in a "
+                "net or length, so check the layout connectivity"
+            )
+            suggested = None
+        else:
+            remedy = (
+                "Set options.combine_devices: true to compare them as one "
+                "device (see docs/cli/lvs.md, 'device.unmerged_fingers')"
+            )
+            suggested = "options.combine_devices"
         entries.append(
             _mismatch(
                 CATEGORY_DEVICE_UNMERGED_FINGERS,
                 "error",
                 f"{len(fingers)} parallel layout fingers of class '{key[0]}' "
                 f"(same terminals, L={key[2]:g}) sum to W={total:g}, the width "
-                "of one reference device; the fingers were not merged. Set "
-                "options.combine_devices: true to compare them as one device "
-                "(see docs/cli/lvs.md, 'device.unmerged_fingers')",
+                "of one reference device; the fingers were not merged. "
+                f"{remedy[0].upper() + remedy[1:]}",
                 "both",
                 device={
                     "layout": names[0],
@@ -1174,7 +1189,7 @@ def _group_unmerged_fingers(
                     "summed_w_um": total,
                     "reference_w_um": _device_param(target, "W"),
                     "l_um": key[2],
-                    "suggested_option": "options.combine_devices",
+                    "suggested_option": suggested,
                 },
             )
         )
@@ -1190,6 +1205,7 @@ def _build_mismatches(
     anchored_pins: Sequence[tuple[str, str, str]] | None = None,
     constant_bindings: Sequence[tuple[str, str, str]] | None = None,
     excluded_parameters: ExcludedParameters | None = None,
+    finfet: bool = False,
 ) -> list[dict[str, Any]]:
     from .lvs import (
         CATEGORY_DEVICE_CLASS,
@@ -1259,6 +1275,7 @@ def _build_mismatches(
     unmerged = _group_unmerged_fingers(
         [(a, b) for a, b in logger.device_mismatches if a is None or b is None],
         list(logger.param_mismatches),
+        finfet,
     )
     mismatches.extend(unmerged.entries)
 

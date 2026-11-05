@@ -226,6 +226,12 @@ def combine_reference_fingers(netlist: kdb.Netlist) -> None:
     netlist.combine_devices()
 
 
+def combine_layout_fingers(netlist: kdb.Netlist) -> None:
+    """Re-merge exactly-parallel layout fingers after ``flatten_layout`` (the
+    extractor only merges within one circuit; issue #4954)."""
+    netlist.combine_devices()
+
+
 def configure_finfet_comparison(*netlists: kdb.Netlist) -> list[str]:
     """Compare ``NFIN`` exactly and ``L`` to :data:`L_TOLERANCE_UM` for every
     FinFET device class on every given netlist. Returns the configured class
