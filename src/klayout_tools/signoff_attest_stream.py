@@ -19,6 +19,7 @@ from .signoff import (
     _HASH_KIND_GEOMETRY,
     _REGENERATED_HASH_RE,
     SCHEMA_VERSION,
+    input_set_digest,
 )
 from .signoff_attest import (
     _ITEM_TITLES,
@@ -142,8 +143,103 @@ def _resolve_stream(stream_path: str) -> tuple[str, str]:
     return absolute, os.path.relpath(absolute, root).replace(os.sep, "/")
 
 
+def _resolve_streams(
+    stream_paths: Sequence[str],
+) -> list[tuple[str, str, str, str]]:
+    """``(given path, absolute, repo-relative, sha256:hash)`` per stream, in
+    the order given. Refuses a duplicate stream (same real file) and streams
+    spread over more than one git repository."""
+    resolved: list[tuple[str, str, str, str]] = []
+    seen: set[str] = set()
+    roots: set[str | None] = set()
+    for given in stream_paths:
+        absolute, rel = _resolve_stream(given)
+        if absolute in seen:
+            raise AttestationError(
+                f"duplicate --input: '{given}' names a stream already given"
+            )
+        seen.add(absolute)
+        roots.add(find_repo_root(os.path.dirname(absolute)))
+        digest = sha256_file(absolute)
+        if digest is None:
+            raise AttestationError(f"could not read stream '{given}'")
+        resolved.append((given, absolute, rel, f"sha256:{digest}"))
+    if len(roots) > 1:
+        raise AttestationError("all --input streams must be in the same git repository")
+    return resolved
+
+
+def _member_checks(
+    streams: list[tuple[str, str, str, str]], multi: bool
+) -> list[dict[str, Any]]:
+    """The built-in item-2 checks for every resolved stream. With more than
+    one stream each check also carries the member's repository-relative
+    ``path``."""
+    if not multi:
+        return _stream_checks(streams[0][1], streams[0][3])
+    checks: list[dict[str, Any]] = []
+    for _given, member_abs, member_rel, member_hash in streams:
+        for check in _stream_checks(member_abs, member_hash):
+            checks.append({**check, "path": member_rel})
+    return checks
+
+
+def _input_binding(
+    streams: list[tuple[str, str, str, str]], multi: bool, stream_hash: str
+) -> dict[str, Any]:
+    """``provenance.input``: one path + hash, or the sorted member list bound
+    by the set digest."""
+    if not multi:
+        return {
+            "path": {"path": streams[0][2], "scope": "repo"},
+            "content_hash": stream_hash,
+        }
+    return {
+        "paths": [
+            {"path": {"path": rel, "scope": "repo"}, "content_hash": h}
+            for _g, _a, rel, h in streams
+        ],
+        "content_hash": stream_hash,
+    }
+
+
+def _inventory_checks(
+    inventory_path: str,
+    absolute: str,
+    committed_checks: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run the item-2 inventory's declared checks; return them with the
+    ``attestation.inventory`` block."""
+    inventory, inventory_hash = _read_inventory(inventory_path)
+    inv_absolute = os.path.realpath(os.path.abspath(inventory_path))
+    root = find_repo_root(os.path.dirname(absolute))
+    inv_root = find_repo_root(os.path.dirname(inv_absolute))
+    if root is None or inv_root != root:
+        raise AttestationError(
+            f"inventory '{inventory_path}' must be in the same git "
+            "repository as the stream"
+        )
+    _validate_header(inventory, STREAM_ATTESTABLE_ITEM, inventory_path)
+    specs = _validated_command_checks(inventory, root, STREAM_ATTESTABLE_ITEM)
+
+    def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
+        if committed_checks is not None and spec.get("local_only"):
+            return _skipped_check(spec, role, committed_checks, **identity)
+        return _command_check(root, spec, role, **identity)
+
+    block = {
+        "path": {
+            "path": os.path.relpath(inv_absolute, root).replace(os.sep, "/"),
+            "scope": "repo",
+        },
+        "content_hash": inventory_hash,
+        "schema_version": inventory["schema_version"],
+    }
+    return _audit_command_checks(specs, command), block
+
+
 def build_stream_attestation(
-    stream_path: str,
+    stream_path: str | Sequence[str],
     *,
     generator: str | None = None,
     regenerated_hash: str | None = None,
@@ -169,42 +265,28 @@ def build_stream_attestation(
     (``local_only`` commands skip). Without an inventory the envelope is
     unchanged."""
     _validate_regeneration_claim(generator, regenerated_hash, hash_kind)
-    absolute, stream_rel = _resolve_stream(stream_path)
-    raw_digest = sha256_file(absolute)
-    if raw_digest is None:
-        raise AttestationError(f"could not read stream '{stream_path}'")
-    stream_hash = f"sha256:{raw_digest}"
-    checks = _stream_checks(absolute, stream_hash)
+    stream_paths = [stream_path] if isinstance(stream_path, str) else list(stream_path)
+    if not stream_paths:
+        raise AttestationError("at least one --input stream is required")
+    multi = len(stream_paths) > 1
+    if multi and generator is not None:
+        raise AttestationError(
+            "--generator/--regenerated-hash describe one regenerated stream "
+            "and cannot be combined with more than one --input"
+        )
+    streams = _resolve_streams(stream_paths)
+    absolute, stream_rel, stream_hash = streams[0][1], streams[0][2], streams[0][3]
+    if multi:
+        streams.sort(key=lambda item: item[2].encode("utf-8"))
+        stream_hash = input_set_digest((rel, h) for _g, _a, rel, h in streams)
+        absolute, stream_rel = streams[0][1], streams[0][2]
+    checks = _member_checks(streams, multi)
     inventory_block: dict[str, Any] | None = None
     if inventory_path is not None:
-        inventory, inventory_hash = _read_inventory(inventory_path)
-        inv_absolute = os.path.realpath(os.path.abspath(inventory_path))
-        root = find_repo_root(os.path.dirname(absolute))
-        inv_root = find_repo_root(os.path.dirname(inv_absolute))
-        if root is None or inv_root != root:
-            raise AttestationError(
-                f"inventory '{inventory_path}' must be in the same git "
-                "repository as the stream"
-            )
-        _validate_header(inventory, STREAM_ATTESTABLE_ITEM, inventory_path)
-        specs = _validated_command_checks(inventory, root, STREAM_ATTESTABLE_ITEM)
-
-        def command(
-            spec: Mapping[str, Any], role: str, **identity: Any
-        ) -> dict[str, Any]:
-            if committed_checks is not None and spec.get("local_only"):
-                return _skipped_check(spec, role, committed_checks, **identity)
-            return _command_check(root, spec, role, **identity)
-
-        checks.extend(_audit_command_checks(specs, command))
-        inventory_block = {
-            "path": {
-                "path": os.path.relpath(inv_absolute, root).replace(os.sep, "/"),
-                "scope": "repo",
-            },
-            "content_hash": inventory_hash,
-            "schema_version": inventory["schema_version"],
-        }
+        extra, inventory_block = _inventory_checks(
+            inventory_path, absolute, committed_checks
+        )
+        checks.extend(extra)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
     provenance: dict[str, Any] = {
@@ -212,10 +294,7 @@ def build_stream_attestation(
         "klayout_version": klayout_version(),
         "pdk": None,
         "deck": None,
-        "input": {
-            "path": {"path": stream_rel, "scope": "repo"},
-            "content_hash": stream_hash,
-        },
+        "input": _input_binding(streams, multi, stream_hash),
     }
     if generator is not None:
         regeneration: dict[str, Any] = {
@@ -251,7 +330,7 @@ def build_stream_attestation(
 
 
 def check_stream_attestation(
-    stream_path: str,
+    stream_path: str | Sequence[str],
     committed_path: str,
     *,
     generator: str | None = None,

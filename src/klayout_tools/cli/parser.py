@@ -4297,11 +4297,11 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         "--input",
         dest="attest_input",
         metavar="STREAM",
+        action="append",
         help=(
-            "with --attest 2: path to the committed GDS/OASIS layout stream "
-            "inside a git repository; the envelope pins its raw-byte sha256 "
-            "and the producing KLayout version (issue #4188). Refused with "
-            "items 1, 8, 9 and 10, which take --inventory."
+            "with --attest 2: committed GDS/OASIS stream in a git repo (issue "
+            "#4188); repeat for a per-cell library, bound as a set (issue #4935). "
+            "Refused with items 1, 8, 9 and 10, which take --inventory."
         ),
     )
     signoff_parser.add_argument(
