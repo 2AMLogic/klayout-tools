@@ -19,6 +19,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   weekly `chore(release)` PR when `main` is over the commit backstop, tags the
   merged bump commit and dispatches `publish.yml`. `release-lag.yml` is
   retired; `generate_deck_history.py` gains `--as-release`.
+
+## 0.9.0 (2026-11-05)
+
 - **`klt signoff --attest 9` accepts an explicit no-PDK pin** (issue #4904,
   documented in [`docs/cli/signoff.md`](docs/cli/signoff.md)): `pins.pdk` may
   be `{"none": true, "reason": "<non-empty>"}` for a partition whose cold
