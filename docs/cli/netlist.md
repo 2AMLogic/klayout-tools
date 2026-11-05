@@ -183,9 +183,11 @@ xschem 3.4.7 has no `-erc` flag, but its netlister prints findings such as
 nothing is written. Without `--erc` behaviour and netlist bytes are unchanged.
 Local backend only: `--backend batch` rejects `--erc`.
 
-**Verified:** a dangling wire (undriven node) is caught. **Unverified:** shorted
-pins were not measured with real xschem, so `--erc` may not flag them; do not
-rely on it for that case (tracked in #4962).
+**Verified (xschem 3.4.7):** a dangling wire (undriven node) is caught, and so
+are shorted pins: two differently-named `ipin`s wired to one net make xschem
+print `Error: Net shorted: A - B`, so `--erc` exits `1` with
+`error.code: "erc_findings"` and `error.findings: ["Error: Net shorted: A - B"]`
+(fixture `tests/data/netlist/shorted_pins.sch`, #4962).
 
 ## Success is the output file, not the exit status
 
