@@ -128,9 +128,12 @@
       "description": "`klt drc` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli._drc_native",
+        "klayout_tools.cli._drc_parser_args",
         "klayout_tools.cli.drc_cmd",
+        "klayout_tools.cli.drc_text",
         "klayout_tools.drc",
         "klayout_tools.drc_crosscheck",
+        "klayout_tools.drc_klayout_app",
         "klayout_tools.drc_klayout_engine"
       ]
     },
