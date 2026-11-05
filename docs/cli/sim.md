@@ -7056,8 +7056,9 @@ every request and report unchanged. Object keys: `max_attempts` (integer >= 1),
 a bad value is refused with an application error before any unit runs.
 
 - **Trigger.** Only a unit whose first attempt is `status: "error"` *because of* a
-  `nonconvergence` diagnostic (plus the missing-measurement / missing-vector
-  errors that follow from it). `singular_matrix`, `netlist`, `timeout`,
+  `nonconvergence` diagnostic (plus the errors that follow from it: the
+  missing-measurement / missing-vector errors, `timestep_too_small` and
+  `analysis_aborted`). `singular_matrix`, `netlist`, `timeout`,
   `engine_killed` and every other error class are never retried, and a
   `nonconvergence` ngspice recovered from by itself (a `pass`) is not either.
 - **Same draw.** The retry re-runs the same unit, so `sample_index` and
@@ -7067,7 +7068,10 @@ a bad value is refused with an application error before any unit runs.
   diagnostic naming the card and whether the retry recovered; its `runtime_s` is
   the total across attempts. A recovered unit contributes to the Monte Carlo
   statistics and `coverage` like any other sample; one that still fails stays
-  `error`.
+  `error`. With the option set, an `error` unit that is *not* retried carries an
+  `info` `convergence_retry` diagnostic (`not retried: error classes <codes> are
+  not a nonconvergence failure`), so "not triggered" is distinguishable from
+  "ignored"; it never changes the unit's status.
 - **Echo.** The resolved policy is reported as
   `environment.retry_on_convergence_error` (only when set).
 - **Backends.** `local`/`local-parallel` apply it directly. `remote`/`batch`
@@ -7502,7 +7506,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `batch_job_interrupted` | The corner's result was never observed: the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than `batch.interrupted_grace_s`, so polling stopped before `poll_timeout_s`. Distinct from `batch_poll_timeout`; the job may still be recoverable on the fleet and the client does not re-launch it. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
-| `convergence_retry` | The record of an opt-in retry (`options.retry_on_convergence_error`, issue #2973): the unit's first attempt ended in a `nonconvergence` error, so it was re-run with tighter solver options. The message names the `.options` card used and whether the retry recovered. `severity: "warning"`; informational, it never changes the unit's status. See "Retrying a non-converged unit" below. |
+| `convergence_retry` | The record of an opt-in retry (`options.retry_on_convergence_error`, issue #2973): the unit's first attempt ended in a `nonconvergence` error, so it was re-run with tighter solver options. The message names the `.options` card used and whether the retry recovered. `severity: "warning"` for a retry; `severity: "info"` (`not retried: ...`) when the option was set but the unit's error class is not a nonconvergence failure. Informational, it never changes the unit's status. See "Retrying a non-converged unit" below. |
 | `inconclusive` | **Emitted, never selectable.** The marker this command attaches to a corner it graded `status: "inconclusive"` because `options.fail_on_diagnostic` named a code the corner emitted (issue #2492) — the message names those code(s), so the report says *why* a corner whose numbers look fine is not being reported as a pass. `severity: "warning"`. See "Grading a recovered diagnostic as inconclusive" below. |
 | `implausible_solution` | **Emitted, never selectable.** The marker for the *other* route to `status: "inconclusive"`: a measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. `severity: "warning"`, never `"error"`. |
 | `margin_ambiguous` | **Emitted, never selectable.** A third route to `status: "inconclusive"` (issue #3088): a `measurements[].transfer` margin metric met its limit but the AC band cannot support a pass (`ambiguity[]` in the entry's `transfer.margins`); see "Margins at every crossing". `severity: "warning"`, never `"error"`. |

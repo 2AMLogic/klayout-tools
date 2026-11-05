@@ -2014,11 +2014,19 @@ def _convergence_retry_deck_options(retry: dict[str, Any]) -> str:
 
 #: Error-severity diagnostic codes that can accompany a ``nonconvergence``
 #: failure without making it something other than one (the measurements and
-#: vectors a failed solve never produced). Any *other* error-severity code
+#: vectors a failed solve never produced, plus ``timestep_too_small`` and
+#: ``analysis_aborted``, which ngspice emits when the solver gives up --
+#: issue #4983). Any *other* error-severity code
 #: -- ``singular_matrix``, ``netlist``, ``timeout``, ``engine_killed``, ... --
 #: means a different failure class, which is never retried (issue #2973).
 _CONVERGENCE_CONSEQUENCE_CODES = frozenset(
-    {"nonconvergence", "measurement", "no_such_vector"}
+    {
+        "nonconvergence",
+        "measurement",
+        "no_such_vector",
+        "timestep_too_small",
+        "analysis_aborted",
+    }
 )
 
 
@@ -9610,7 +9618,24 @@ def _run_corner_with_retry(
     default) is exactly the single-attempt behaviour.
     """
     corner, version = _run_corner(**kwargs)
-    if convergence_retry is None or not _is_retryable_convergence_failure(corner):
+    if convergence_retry is None:
+        return corner, version
+    if not _is_retryable_convergence_failure(corner):
+        if corner["status"] == "error":
+            codes = sorted(
+                {d["code"] for d in corner["diagnostics"] if d["severity"] == "error"}
+            )
+            corner["diagnostics"].append(
+                {
+                    "severity": "info",
+                    "code": "convergence_retry",
+                    "message": (
+                        "not retried: error classes "
+                        f"{', '.join(codes) or 'none'} are not a "
+                        "nonconvergence failure"
+                    ),
+                }
+            )
         return corner, version
     card = _convergence_retry_deck_options(convergence_retry)
     max_attempts = convergence_retry["max_attempts"]
