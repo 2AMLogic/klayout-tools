@@ -93,6 +93,7 @@ def run(args: argparse.Namespace) -> int:
                 batch_exclude=getattr(args, "batch_exclude", None) or (),
                 xschem_binary=args.xschem_binary,
                 ignore_comments=ignore_comments,
+                symbol_path=getattr(args, "symbol_path", None) or (),
                 warn=_warn,
             )
         else:
@@ -108,6 +109,7 @@ def run(args: argparse.Namespace) -> int:
                 block=args.block,
                 allow_unevaluated_expr=allow_expr,
                 ignore_comments=ignore_comments,
+                symbol_path=getattr(args, "symbol_path", None) or (),
                 erc=erc,
             )
     except NetlistError as exc:
