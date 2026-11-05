@@ -172,6 +172,7 @@ class BatchTree:
     schematic: str
     rcfile_arg: str | None
     rcfile_pdk_relative: bool
+    symbol_paths: tuple[str, ...] = ()
 
 
 def _git(cwd: str, *args: str) -> bytes:
@@ -314,6 +315,7 @@ def package_tree(
     include: Sequence[str] = (),
     exclude: Sequence[str] = (),
     max_bytes: int | None = None,
+    symbol_path: Sequence[str] = (),
 ) -> BatchTree:
     """Select and validate the input tree, **without** building the archive.
 
@@ -357,6 +359,33 @@ def package_tree(
             _require_selected(rel_rcfile, selected, what="--rcfile")
             rcfile_arg = shlex.quote(rel_rcfile)
 
+    # Each --symbol-path DIR must be an existing directory under the root with
+    # at least one selected tracked file (issue #4952); validated before any
+    # archive or S3 write. Stored root-relative ('.' for the root itself).
+    symbol_rel: list[str] = []
+    for entry in symbol_path:
+        if not os.path.isdir(entry):
+            raise NetlistError(f"--symbol-path is not a directory: {entry}")
+        rel_dir = os.path.relpath(os.path.realpath(entry), root)
+        if (
+            rel_dir == os.pardir
+            or rel_dir.startswith(os.pardir + os.sep)
+            or os.path.isabs(rel_dir)
+        ):
+            raise NetlistError(
+                f"--symbol-path {entry} is outside the batch root {root}; only "
+                "files under the root are uploaded -- pass a wider --batch-root"
+            )
+        rel_dir = rel_dir.replace(os.sep, "/")
+        prefix = "" if rel_dir == "." else rel_dir + "/"
+        if not any(item.startswith(prefix) for item in selected):
+            raise NetlistError(
+                f"--symbol-path {entry} contains no git-tracked files in the "
+                "selected upload set (check --batch-include / --batch-exclude, "
+                "or `git add` the symbols); the runner would not have them"
+            )
+        symbol_rel.append(rel_dir)
+
     present: list[str] = []
     total = 0
     for rel in files:
@@ -388,6 +417,7 @@ def package_tree(
         schematic=rel_schematic,
         rcfile_arg=rcfile_arg,
         rcfile_pdk_relative=pdk_relative,
+        symbol_paths=tuple(symbol_rel),
     )
 
 
@@ -466,6 +496,8 @@ def build_job_spec(
         argv.append("--block")
     if tree.rcfile_arg is not None:
         argv += ["--rcfile", tree.rcfile_arg]
+    for rel_dir in tree.symbol_paths:
+        argv += ["--symbol-path", shlex.quote(rel_dir)]
     argv += ["--pdk", shlex.quote(pdk), "--timeout-s", repr(float(timeout_s))]
     argv += ["--backend local --format json"]
     command = (
@@ -785,6 +817,7 @@ def _payload(
     data: bytes,
     remote: dict[str, Any],
     ignore_comments: bool = False,
+    symbol_path: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The ``schema_version: 1`` payload a local run returns, from the
     runner's report, plus ``environment.remote``; writes ``output`` unless
@@ -794,7 +827,9 @@ def _payload(
         "schematic": schematic,
         "output": output,
         "mode": "check" if check else "generate",
-        "xschem": report["xschem"],
+        # ``symbol_path`` is the root-relative list the client forwarded
+        # (the runner's own absolute paths are meaningless here).
+        "xschem": {**report["xschem"], "symbol_path": list(symbol_path)},
     }
     for key in ("pdk", "block"):
         if isinstance(report.get(key), dict):
@@ -829,6 +864,7 @@ def run_netlist_batch(
     batch_exclude: Sequence[str] = (),
     xschem_binary: str = DEFAULT_XSCHEM_BINARY,
     ignore_comments: bool = False,
+    symbol_path: Sequence[str] = (),
     runner: remote_transport.CommandRunner | None = None,
     sleep: Callable[[float], None] = time.sleep,
     warn: Callable[[str], None] | None = None,
@@ -859,6 +895,7 @@ def run_netlist_batch(
         batch_root=batch_root,
         include=batch_include,
         exclude=batch_exclude,
+        symbol_path=symbol_path,
     )
     config = _resolve_config(variant, timeout_s)
     job_id = new_job_id()
@@ -901,6 +938,7 @@ def run_netlist_batch(
         data=data,
         remote=remote,
         ignore_comments=ignore_comments,
+        symbol_path=list(tree.symbol_paths),
     )
 
 

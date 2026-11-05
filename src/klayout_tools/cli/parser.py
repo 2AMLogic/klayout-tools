@@ -7681,6 +7681,20 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
             "and a mismatch is reported (issue #2680)"
         ),
     )
+    netlist_parser.add_argument(
+        "--symbol-path",
+        action="append",
+        default=None,
+        metavar="DIR",
+        help=(
+            "extra xschem symbol directory (repeatable), exported to xschem "
+            "as XSCHEM_USER_LIBRARY_PATH ahead of any value already in the "
+            "environment. DIR must exist. With --backend batch each DIR must "
+            "be under the batch root and hold git-tracked files, and is "
+            "forwarded root-relative; the batch runner needs a klt that "
+            "knows --symbol-path (issue #4952)"
+        ),
+    )
     _add_pdk_args(
         netlist_parser,
         pdk_help=(

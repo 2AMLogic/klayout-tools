@@ -72,6 +72,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from . import pdk as pdk_module
@@ -797,7 +798,7 @@ def _unevaluated_expr_warnings(
 
 def _pdk_env_note(rcfile: str | None, env: dict[str, str] | None) -> str:
     """Name what klt can observe about xschem's PDK setup, for error text."""
-    if env is not None:
+    if env is not None and "PDK_ROOT" in env and "PDK" in env:
         seen = f"PDK_ROOT={env['PDK_ROOT']} PDK={env['PDK']} (exported by klt)"
     else:
         root = os.environ.get("PDK_ROOT")
@@ -806,7 +807,9 @@ def _pdk_env_note(rcfile: str | None, env: dict[str, str] | None) -> str:
             f"PDK_ROOT={root or 'not set'} PDK={variant or 'not set'} "
             "(inherited, not set by klt)"
         )
-    return f"xschem ran with --rcfile {rcfile or 'none'} and {seen}. "
+    symbols = (env or {}).get("XSCHEM_USER_LIBRARY_PATH")
+    extra = f" XSCHEM_USER_LIBRARY_PATH={symbols} (--symbol-path)." if symbols else ""
+    return f"xschem ran with --rcfile {rcfile or 'none'} and {seen}.{extra} "
 
 
 def _check_no_unresolved_symbol(
@@ -1081,6 +1084,16 @@ def _pdk_consistency(
     }
 
 
+def _resolve_symbol_path(symbol_path: Sequence[str]) -> list[str]:
+    """Absolute-resolve each ``--symbol-path`` DIR, refusing a non-directory."""
+    resolved: list[str] = []
+    for entry in symbol_path:
+        if not os.path.isdir(entry):
+            raise NetlistError(f"--symbol-path is not a directory: {entry}")
+        resolved.append(os.path.realpath(entry))
+    return resolved
+
+
 def run_netlist(
     schematic: str,
     output: str,
@@ -1094,6 +1107,7 @@ def run_netlist(
     block: bool = False,
     allow_unevaluated_expr: bool = False,
     ignore_comments: bool = False,
+    symbol_path: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -1115,6 +1129,10 @@ def run_netlist(
     comparison ignore every comment line, for a committed netlist a project
     post-processes (header, rewritten ``sch_path``). Never affects a write.
 
+    ``symbol_path`` (issue #4952) is a list of extra symbol directories,
+    exported to xschem as ``XSCHEM_USER_LIBRARY_PATH`` (prepended to any
+    value already in the environment). Each must be an existing directory.
+
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
     missing/unlaunchable xschem, the timeout (after SIGTERM->SIGKILL
@@ -1127,6 +1145,7 @@ def run_netlist(
         raise NetlistError(f"--timeout-s must be positive (got {timeout_s})")
     if rcfile is not None and not os.path.isfile(rcfile):
         raise NetlistError(f"xschemrc file not found: {rcfile}")
+    resolved_symbol_path = _resolve_symbol_path(symbol_path)
     pdk_block = _pdk_consistency(rcfile, pdk, pdk_root)
 
     stem = os.path.splitext(os.path.basename(schematic))[0]
@@ -1151,6 +1170,15 @@ def run_netlist(
                 "PDK_ROOT": pdk_block["root"],
                 "PDK": pdk_block["variant"],
             }
+        if resolved_symbol_path:
+            # Explicit --symbol-path dirs go first, ahead of any value the
+            # caller already exported (issue #4952).
+            if xschem_env is None:
+                xschem_env = dict(os.environ)
+            existing = xschem_env.get("XSCHEM_USER_LIBRARY_PATH")
+            xschem_env["XSCHEM_USER_LIBRARY_PATH"] = os.pathsep.join(
+                [*resolved_symbol_path, *([existing] if existing else [])]
+            )
         exit_status, stdout, stderr, duration_s = _launch_xschem(
             argv, timeout_s, xschem_env
         )
@@ -1194,6 +1222,7 @@ def run_netlist(
                 "exit_status_trusted": False,
                 "timeout_s": timeout_s,
                 "duration_s": round(duration_s, 3),
+                "symbol_path": resolved_symbol_path,
             },
         }
 
