@@ -186,8 +186,8 @@ _DEVICE_LIKE_PARAMS = _CARRIED_PARAMS + ("r_length", "r_width", "c_length", "c_w
 #: :func:`_convert_capacitor_card` call :func:`_reject_multiplicity`), so a
 #: resistor/capacitor ``nf>1`` is still a hard error. A capacitor's instance
 #: multiplier ``m`` is the exception: it is excluded and expanded into ``m``
-#: parallel plain ``C`` cards (issue #4318), so only its ``nf``/``mult``/``mf``
-#: are still rejected.
+#: parallel plain ``C`` cards (issue #4318), so only its ``nf``/``mult`` are still
+#: rejected; ``mf`` equal to ``m`` is the same multiplier (issue #4951).
 _MULTIPLICITY_PARAMS = ("nf", "m", "mult", "mf")
 
 #: The multiplicity parameters :func:`_reject_multiplicity` never rejects for
@@ -1211,7 +1211,8 @@ def _convert_capacitor_card(
 
     An instance multiplier ``m`` (issue #4318, mirroring #3123 for MOS)
     expands into ``m`` parallel cards named ``<instance>_m0``, ...; ``A``/``P``
-    stay per copy. ``mf``/``nf``/``mult`` greater than 1 are still rejected.
+    stay per copy. ``mf`` equal to ``m`` is the same multiplier (issue #4951); other
+    ``mf``/``nf``/``mult`` greater than 1 are still rejected.
     """
     if len(nodes) != _CAPACITOR_TERMINALS:
         raise NormalizeError(
@@ -1226,12 +1227,10 @@ def _convert_capacitor_card(
         "m",
         "to expand into that many parallel plain-element devices",
     )
-    _reject_multiplicity(
-        instance,
-        subckt_name,
-        params,
-        exclude=_CAPACITOR_EXCLUDED_MULTIPLICITY_PARAMS,
-    )
+    exclude = _CAPACITOR_EXCLUDED_MULTIPLICITY_PARAMS
+    if _capacitor_mf_is_m_alias(instance, subckt_name, params, multiplier):
+        exclude = exclude + ("mf",)
+    _reject_multiplicity(instance, subckt_name, params, exclude=exclude)
 
     has_length_param = lookup.length_param in params
     has_width_param = lookup.width_param in params
@@ -1542,6 +1541,41 @@ def _require_both(
         f"device '{instance}' (subcircuit '{subckt_name}'): both "
         f"'{(lookup.length_param or '').upper()}' and "
         f"'{(lookup.width_param or '').upper()}' must be given together{hint}"
+    )
+
+
+def _capacitor_mf_is_m_alias(
+    instance: str,
+    subckt_name: str,
+    params: dict[str, str],
+    multiplier: int,
+) -> bool:
+    """Whether a capacitor's ``mf`` merely repeats its ``m`` (issue #4951).
+
+    Schematic exporters emit ``MF=N m=N`` for one device (``m`` is the
+    symbol's alias for ``mf``), so ``mf > 1`` equal to ``m`` is one
+    multiplier, expanded once via ``m``. ``mf > 1`` with ``m`` absent or
+    different is refused with a message naming the combination. Returns
+    ``False`` when there is nothing to exclude (``mf`` absent or <= 1, or
+    non-numeric -- left to :func:`_reject_multiplicity`).
+    """
+    if "mf" not in params:
+        return False
+    try:
+        mf = float(params["mf"])
+    except ValueError:
+        return False
+    if mf <= 1:
+        return False
+    if "m" in params and mf == multiplier:
+        return True
+    m_text = f"m={params['m']}" if "m" in params else "no m"
+    raise NormalizeError(
+        f"device '{instance}' (subcircuit '{subckt_name}'): capacitor "
+        f"mf={params['mf']} with {m_text} is ambiguous; mf and m are the "
+        "same multiplier, so drop one or make them equal (e.g. mf=2 m=2 "
+        "expands to 2 parallel devices), or flatten the device in the "
+        "schematic netlist"
     )
 
 
