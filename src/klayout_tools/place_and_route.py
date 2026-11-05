@@ -51,13 +51,6 @@ from ._openroad_engine import (
     _timing_status,
     container_runtime_hint,
 )
-
-# `_count_spef_nets_annotated`/`_tcl_net_list` are `_paths.py`-hosted helpers
-# that only the STA subsystem calls after the issue #1808 split; they are
-# imported here purely so `klayout_tools.place_and_route.<name>` keeps
-# resolving for callers that reach them by that path (the test suite does).
-# Same intent -- and same redundant `X as X` alias form -- as the
-# `place_and_route_sta` re-export block below.
 from ._paths import _count_spef_nets_annotated as _count_spef_nets_annotated
 from ._paths import (
     _load_request_json,
@@ -65,6 +58,14 @@ from ._paths import (
     validate_request_shape,
 )
 from ._paths import _tcl_net_list as _tcl_net_list
+
+# `_count_spef_nets_annotated`/`_tcl_net_list` are `_paths.py`-hosted helpers
+# that only the STA subsystem calls after the issue #1808 split; they are
+# imported here purely so `klayout_tools.place_and_route.<name>` keeps
+# resolving for callers that reach them by that path (the test suite does).
+# Same intent -- and same redundant `X as X` alias form -- as the
+# `place_and_route_sta` re-export block below.
+from ._power_activity import power_basis_block, validate_power_activity
 from ._provenance import INPUT_ROLE_NETLIST, _content_hash, build_provenance
 from ._report_verify import (
     VOLATILE_FLOW_PATHS,
@@ -98,6 +99,7 @@ from .place_and_route_gds_merge import (
     _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
+from .place_and_route_hints import null_unconstrained_fmax, outside_cwd_note
 from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
 from .place_and_route_layers import _signal_layer_range
 from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
@@ -1640,21 +1642,14 @@ def _validate_stage_prerequisites(
     ``request.power``) needs inputs or per-library tables this request lacks
     (extracted from :func:`_run_single_corner`, issue #3507, to keep its
     cyclomatic complexity from growing)."""
-    # Stages beyond "floorplan" need a clock -- P&R signoff (CTS, routing,
-    # timing-driven repair) has no meaning without one, and STA/`-metrics`
-    # would otherwise report an unconstrained-design sentinel instead of a
-    # real number. `_validate_constraints` already enforced clock_port and
-    # clock_period_ns are given together; this additionally requires them
-    # once a caller actually asks for a stage that needs them.
-    if (
-        stage_index >= STAGE_ORDER.index("place")
-        and clock_port is None
-        and clock_period_ns is None
-    ):
+    # Stages beyond "floorplan" need a clock (else STA reports the
+    # unconstrained sentinel); `clock_period_ns` alone is a virtual clock.
+    no_clock = not (clock_port or clock_period_ns)
+    if stage_index >= STAGE_ORDER.index("place") and no_clock:
         raise PlaceAndRouteError(
-            "request.constraints.clock_port/clock_period_ns are required to "
-            f"reach target_stage '{target_stage}' (clock_period_ns alone is "
-            "accepted as a virtual clock for purely combinational blocks)"
+            "request.constraints.clock_period_ns (optionally with clock_port) "
+            f"is required to reach target_stage '{target_stage}'; period "
+            "alone is accepted as a virtual clock"
         )
     if stage_index >= STAGE_ORDER.index("place") and io_spec is None:
         raise PlaceAndRouteError(
@@ -1843,6 +1838,10 @@ def _run_single_corner(
         input_delay_ns,
         output_delay_ns,
     ) = _validate_constraints(request.get("constraints"))
+    # Issue #4914: same validation/semantics as `klt sta`'s (issue #3744).
+    power_activity = validate_power_activity(
+        request.get("constraints") or {}, PlaceAndRouteError
+    )
     seed = _validate_seed(request["seed"])
     target_stage = _validate_target_stage(request.get("target_stage", "route"))
     route_critical_nets_percentage = _validate_route_critical_nets_percentage(
@@ -1961,6 +1960,7 @@ def _run_single_corner(
             max_fanout=max_fanout,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            power_activity=power_activity,
             cell_library=cell_library,
             seed=seed,
             output_dir=output_dir,
@@ -2462,6 +2462,9 @@ def _run_single_corner(
         "status": "ok",
         "stage_reached": target_stage,
         "seed": seed,
+        # Additive field (issue #4914): what `estimated_power_mw` was
+        # computed under, as in `klt sta`.
+        "power_basis": power_basis_block(power_activity, False),
         # Additive field (issue #4716): the resolved global-placement /
         # global-route knobs actually applied (defaults included).
         "applied": {
@@ -2840,21 +2843,6 @@ def _engine_error_message(
     return message
 
 
-def _outside_cwd_note(path: str) -> str:
-    """Issue #4191: the docker wrapper mounts only `$PWD`, `$PDK_ROOT` and
-    `$TMPDIR`, so a readable path outside the invocation directory is the
-    commonest trigger -- say the rule and the fix, not just the symptom."""
-    cwd = os.path.realpath(os.getcwd())
-    real = os.path.realpath(path)
-    if real == cwd or real.startswith(cwd.rstrip(os.sep) + os.sep):
-        return ""
-    return (
-        f"; '{path}' is outside the invocation directory '{cwd}', and the "
-        "container wrapper mounts only $PWD, $PDK_ROOT and $TMPDIR -- run "
-        "from a common ancestor of the request and its inputs"
-    )
-
-
 def _mount_namespace_hint(
     completed: _OpenRoadResult, pdk_info: dict[str, Any] | None
 ) -> str | None:
@@ -2919,7 +2907,7 @@ def _mount_namespace_hint(
             f"{os.environ.get('PDK_ROOT') or '(unset)'})"
         )
 
-    mount_note = _outside_cwd_note(path)
+    mount_note = outside_cwd_note(path)
 
     return (
         f"'openroad' could not read '{path}', but this process can read it"
@@ -3203,6 +3191,10 @@ def _extract_stage_metrics(
             entry.get("worst_hold_slack_ns"),
         )
     )
+    # Issue #4914: `timing__fmax` derives from the same unconstrained design
+    # and is not backed by any timed path then; null it (keeping the key's
+    # `number | null` type) so it cannot be read as an achievable clock.
+    null_unconstrained_fmax(entry)
 
     return entry
 

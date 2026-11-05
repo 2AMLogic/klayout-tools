@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --attest 9` accepts an explicit no-PDK pin** (issue #4904,
+  documented in [`docs/cli/signoff.md`](docs/cli/signoff.md)): `pins.pdk` may
+  be `{"none": true, "reason": "<non-empty>"}` for a partition whose cold
+  start consumes no PDK. An absent `pins.pdk` still fails the `pin`/`pdk`
+  check, as does `none` with an empty reason or mixed with `name`/`revision`.
+  The docs also state that `--attest` runs `cold_start` even when marked
+  `local_only`.
 - **`klt signoff --attest 9` accepts per-bench `cold_start`, `unbenched_rows`
   and prints stderr progress** (PR #4849, documented in
   [`docs/cli/signoff.md`](docs/cli/signoff.md)): a `testbenches` entry may be a

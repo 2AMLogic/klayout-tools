@@ -44,7 +44,10 @@ positional file args. Relative paths inside it (`cell.netlist`,
 - `--lib` — override the emitted Liberty path (default: the request's own
   `output.lib`, else `<outdir>/<library name>.lib`).
 - `--backend` — `klt sim` execution backend for the sweep. The grid is a
-  **single corner**, so the default `local` is normally correct.
+  **single corner**, so the default `local` is normally correct. For
+  `batch`/`remote` with `options.osdi_preload`, see
+  [OSDI (Verilog-A) model preload](#osdi-verilog-a-model-preload) for the
+  `$PDK_ROOT/<rel>` spelling.
 - `--keep-artifacts` — keep the per-corner ngspice log/deck under
   `<outdir>/sim/`.
 - `--cell` — characterize only the named cell out of a batch request's
@@ -466,8 +469,18 @@ generates for each corner. The generated testbench itself carries **no**
 `.control` block — it is a plain circuit body, per [`sim.md`](sim.md)'s "a
 circuit body, not a full deck" convention — and `klt sim`'s report records
 each preloaded library and its SHA-256 under `environment.osdi_preload`. The
-same `klt sim` rules apply: the option works on the `local`/`local-parallel`
-backends (the default here) and is refused by name for `remote`/`batch`.
+same `klt sim` rules apply: host-local paths work on the `local`/`local-parallel`
+backends (the default here) and are refused by name for `remote`/`batch`.
+
+For `--backend batch` (or `remote`), name the library the way `klt sim` does
+(issue #3819): a literal `$PDK_ROOT/<rel>.osdi`, or a path under
+`models.pdk_root`. Such an entry is image-baked on the runner, so
+`klt characterize` does not expand or existence-check it on the submitting
+host and forwards it **unexpanded** to the generated `klt sim` request.
+Host-local entries keep the resolve + existence check, and a mixed list keeps
+its declared order. On the `local` backend the same `$PDK_ROOT/...` entry is
+still existence-checked (`osdi_preload file not found` when `PDK_ROOT` is unset).
+This is also the fix for `osdi_abi_mismatch` on a host with ngspice < 44.
 
 ## Request
 

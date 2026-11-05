@@ -14,7 +14,9 @@ import os
 import re
 from typing import Any
 
+from . import place_and_route_clock as _vclk
 from ._openroad_engine import _timing_violation_report_lines
+from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
 from .place_and_route_pins import pin_constraint_lines
 from .place_and_route_reports import detailed_route_lines, routing_completeness_lines
 from .place_and_route_request import PlaceAndRouteError
@@ -47,9 +49,6 @@ def _write_script(script_path: str, lines: list[str]) -> None:
 _UNIT_PIN_LINE = "set_cmd_units -time ns -capacitance pF"
 
 
-VIRTUAL_CLOCK_NAME = "klt_virtual_clk"
-
-
 def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[str]:
     """``create_clock`` (OpenROAD's minimal SDC-equivalent input, contract
     spike section 5's ``constraints`` field) -- must run only **after** the
@@ -60,13 +59,7 @@ def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[
     :func:`_stage_script_lines`'s call sites, never before ``link_design``).
     """
     if clock_port is None:
-        if clock_period_ns is None:
-            return []
-        # Virtual clock (issue #4913): a period but no port.
-        return [
-            _UNIT_PIN_LINE,
-            f"create_clock -name {VIRTUAL_CLOCK_NAME} -period {clock_period_ns}",
-        ]
+        return _vclk.virtual_clock_lines(clock_period_ns, _UNIT_PIN_LINE)  # issue #4913
     return [
         _UNIT_PIN_LINE,
         f"create_clock -name {clock_port} -period {clock_period_ns} "
@@ -123,7 +116,6 @@ def _io_delay_lines(
     clock_port: str | None,
     input_delay_ns: float | None,
     output_delay_ns: float | None,
-    clock_period_ns: float | None = None,
 ) -> list[str]:
     """``set_input_delay``/``set_output_delay`` -- issue #1865's
     ``request.constraints.input_delay_ns``/``.output_delay_ns``.
@@ -155,25 +147,10 @@ def _io_delay_lines(
     given -- a request with neither field set produces Tcl byte-identical
     to before this function existed. ``clock_port`` is never ``None`` when
     either delay is set (:func:`_validate_constraints` rejects that
-    combination); the guard is defensive only.
+    combination); with no port, the delays use the virtual clock (#4913).
     """
-    if clock_port is None and clock_period_ns is not None:
-        # Virtual clock (issue #4913): no port to exclude, so the input
-        # delay applies to every input.
-        lines = []
-        if input_delay_ns is not None:
-            lines.append(
-                f"set_input_delay {input_delay_ns} -clock {VIRTUAL_CLOCK_NAME} "
-                "[all_inputs]"
-            )
-        if output_delay_ns is not None:
-            lines.append(
-                f"set_output_delay {output_delay_ns} -clock {VIRTUAL_CLOCK_NAME} "
-                "[all_outputs]"
-            )
-        return lines
     if clock_port is None:
-        return []
+        return _vclk.virtual_io_delay_lines(input_delay_ns, output_delay_ns)
     lines: list[str] = []
     if input_delay_ns is not None:
         lines += [
@@ -188,18 +165,6 @@ def _io_delay_lines(
             f"set_output_delay {output_delay_ns} -clock {clock_port} [all_outputs]"
         )
     return lines
-
-
-def _make_tracks_lines(floorplan: dict[str, Any]) -> list[str]:
-    tracks = floorplan.get("tracks")
-    if not tracks:
-        return ["make_tracks"]
-    return [
-        f"make_tracks {t['layer']} -x_offset {t['x_offset_um']} "
-        f"-x_pitch {t['x_pitch_um']} -y_offset {t['y_offset_um']} "
-        f"-y_pitch {t['y_pitch_um']}"
-        for t in tracks
-    ]
 
 
 def _floorplan_init_lines(floorplan: dict[str, Any]) -> list[str]:
@@ -1005,6 +970,7 @@ def _stage_script_lines(
     max_fanout: float | None,
     input_delay_ns: float | None,
     output_delay_ns: float | None,
+    power_activity: dict[str, float] | None = None,
     cell_library: str,
     seed: int,
     output_dir: str,
@@ -1016,6 +982,7 @@ def _stage_script_lines(
     library: dict[str, Any] | None = None,
     macro_liberty_paths: list[str] | None = None,
 ) -> list[str]:
+    from ._power_activity import power_activity_lines
     from .place_and_route import (
         _CTS_BUFFER_CELLS,
         _GLOBAL_PLACEMENT_DENSITY,
@@ -1058,9 +1025,7 @@ def _stage_script_lines(
         lines += _design_rule_constraint_lines(
             max_transition_ns, max_capacitance_pf, max_fanout
         )
-        lines += _io_delay_lines(
-            clock_port, input_delay_ns, output_delay_ns, clock_period_ns
-        )
+        lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
         lines += _floorplan_init_lines(floorplan)
         # `place_macro` fixes each declared hard-macro instance at its
         # caller-given location -- must run after the floorplan's own die/
@@ -1111,9 +1076,7 @@ def _stage_script_lines(
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
     )
-    lines += _io_delay_lines(
-        clock_port, input_delay_ns, output_delay_ns, clock_period_ns
-    )
+    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
 
     if stage == "place":
         assert io_spec is not None
@@ -1130,17 +1093,13 @@ def _stage_script_lines(
         ]
     elif stage == "cts":
         assert io_spec is not None
-        # Guaranteed non-None here: the request validator (`run_place_and_
-        # route`) already rejects `target_stage in {"place", "cts",
-        # "route"}` with `clock_port is None` before this generator ever
-        # runs -- see its own `stage_index >= STAGE_ORDER.index("place")`
-        # check.
+        # Request validation guarantees clock_port or clock_period_ns here.
         buf_cell = (
             library["cts_buffer"]
             if library is not None and "cts_buffer" in library
             else _CTS_BUFFER_CELLS[cell_library]
         )
-        cts_clock = clock_port if clock_port is not None else VIRTUAL_CLOCK_NAME
+        cts_clock = clock_port if clock_port is not None else _vclk.VIRTUAL_CLOCK_NAME
         lines += [
             *_wire_rc_lines(io_spec, library),
             "estimate_parasitics -placement",
@@ -1348,6 +1307,9 @@ def _stage_script_lines(
             lines += [f"filler_placement {{{filler_masters}}}", "global_connect"]
         lines += ["estimate_parasitics -global_routing"]
 
+    # Issue #4914: global switching activity for `report_power_metric`
+    # (empty, so byte-identical, when `constraints.power_activity` is omitted).
+    lines += power_activity_lines(power_activity)
     lines += _metrics_report_lines(
         include_fmax=True,
         include_power=True,

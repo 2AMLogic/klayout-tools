@@ -1805,7 +1805,7 @@ an inventory the author did not write.
 | **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start"}` objects (mixing is fine; the object form is on `main`, not in 0.8.0 — see [`CHANGELOG.md`](../../CHANGELOG.md) Unreleased) | yes, non-empty | each file exists (`present`, role `testbench`) |
 | | `cold_start`: command | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. When both forms are present, the top-level command runs as well. |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *On `main`, not in 0.8.0 — see [`CHANGELOG.md`](../../CHANGELOG.md) Unreleased; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
-| | `pins`: `{"pdk": {"name", "revision"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty (`pin`, role `pdk`); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
+| | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
 | **10** Repo hygiene | `hygiene`: list of paths | yes, non-empty | each file exists (`present`, role `hygiene`) |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
@@ -1979,6 +1979,17 @@ Item 9: testbenches, a cold-start invocation and reproducibility pins
 }
 ```
 
+A partition whose cold start consumes no PDK (for example a behavioral-RTL
+regression driven by an HDL simulator) pins `pdk` with the explicit no-PDK
+form instead of a placeholder name:
+
+```json
+"pins": {
+  "pdk": {"none": true, "reason": "behavioral RTL regression; no PDK consumed"},
+  "tools": {"iverilog": "12.0"}
+}
+```
+
 A multi-bench block can give each bench its own cold start and declare a spec
 row that has no bench yet (a plain-string `testbenches` list with one
 top-level `cold_start` stays valid and produces the same envelope as before):
@@ -2074,6 +2085,11 @@ failing outcome still gives `fresh_status: "fail"` (exit `3`). The skip is
 visible, never a pass; `skipped_checks` is `[]` when nothing was skipped.
 Run a plain `--attest --check` (no `local_only` commands) on a runner that
 has the toolchain to re-verify them.
+
+**`--attest` runs `local_only` commands.** `local_only` only affects
+`--check`; `--attest` executes `cold_start` even when it is marked
+`local_only`, so a long cold start runs for its full duration on the first
+attest.
 
 **`--attest` has no skip.** Minting always runs every `local_only` command,
 and there is no `--skip-local-only` flag or `status: "partial"` envelope. An

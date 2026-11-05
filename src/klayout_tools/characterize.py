@@ -81,6 +81,7 @@ from .characterize_instances import (
     _metered_rail_nodes,
     _rail_nodes,
 )
+from .characterize_osdi import resolve_osdi_preload
 from .characterize_sequential import (
     SequentialSpecError,
     clock_pwl_line,
@@ -198,7 +199,7 @@ def run_characterize(
     corner = _resolve_corner(request)
     grid = _resolve_grid(request)
     thresholds = _resolve_thresholds(request)
-    options = _resolve_options(request, grid, thresholds, request_dir)
+    options = _resolve_options(request, grid, thresholds, request_dir, backend=backend)
 
     # Resolve *every* cell before simulating *any*: a typo in the fifth
     # cell's pin list must not cost the first four cells' simulation time.
@@ -852,6 +853,7 @@ def _resolve_options(
     grid: dict[str, tuple[float, ...]],
     thresholds: liberty_writer.Thresholds,
     request_dir: str,
+    backend: str | None = None,
 ) -> dict[str, Any]:
     spec = request.get("options") or {}
     if not isinstance(spec, dict):
@@ -892,36 +894,8 @@ def _resolve_options(
         "timeout_s": timeout_s,
         "keep_artifacts": keep_artifacts,
         "ramps_ns": tuple(ramps),
-        "osdi_preload": _resolve_osdi_preload(spec, request_dir),
+        "osdi_preload": resolve_osdi_preload(request, spec, request_dir, backend),
     }
-
-
-def _resolve_osdi_preload(spec: dict[str, Any], request_dir: str) -> tuple[str, ...]:
-    """Resolve ``options.osdi_preload``: OSDI shared libraries the simulation
-    must ``pre_osdi`` before the circuit is parsed.
-
-    ngspice can only instantiate a Verilog-A compact model through an OSDI
-    shared library, and several open PDKs ship their core devices that way --
-    IHP's ``sg13g2`` MOSFETs are PSP103 Verilog-A, compiled to
-    ``libs.tech/ngspice/osdi/*.osdi`` by
-    ``scripts/fetch-sg13g2-sim-toolchain.sh`` (see ``pdks/README.md``).
-    Without the preload every device in the cell's netlist fails with
-    ``Unable to find definition of model ...`` and the whole grid errors, so
-    this is not an exotic option on those PDKs -- it is the difference
-    between a run and no run.
-
-    Delegates to ``klt sim``'s own ``options.osdi_preload`` resolver (issue
-    #2513) -- same shape, same resolution rule, same up-front existence
-    check -- and is called here, before any testbench is written, so a bad
-    path is named against *this* request rather than the generated one. The
-    resolved absolute paths are forwarded into the generated ``klt sim``
-    request's ``options.osdi_preload``; the testbench itself carries no
-    ``.control`` block.
-    """
-    try:
-        return sim._resolve_osdi_preload(spec, request_dir)
-    except sim.SimError as exc:
-        raise CharacterizeError(str(exc)) from exc
 
 
 def _resolve_arcs(

@@ -3020,6 +3020,17 @@ connectivity finding exists; read `erc_status`/`erc_coverage` for the
 connectivity verdict. A run with no gate and no declared `nets[]`/`ties[]`
 asked for nothing gradable and is exit 1, not a zero-coverage report.
 
+**Gating on ties (issue #4915).** `erc_coverage.missing_tie_checked` is an
+always-present boolean: `true` iff at least one `erc.missing_tie:*` identity is
+in `checked`. It is `false` when the spec declares no `ties[]` (with or without
+`ties_disclosure`) and when every declared tie was skipped as degenerate. A gate
+that counts `erc.missing_tie` findings must require `missing_tie_checked ==
+true` before reading zero findings as a pass; `erc_status: clean` alone does
+not imply the tie check ran. For a PDK whose library has no tap/endcap cells,
+declare `ties_disclosure` (`kind: "unexpressible"`) so the inapplicable reason
+is `ties_disclosed_unexpressible` rather than `no_ties_declared`. The field is
+additive and moves no verdict.
+
 A disclosure that names `undeclared_classes` (issue #2541) additionally
 records one `erc.missing_tie:["<class>"]` **inapplicable** entry per named
 class, carrying the same reason token, whether or not `ties` is empty —

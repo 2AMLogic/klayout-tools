@@ -180,3 +180,28 @@ def item9_checks(
     for path, spec in sorted(normalized["bench_cold_starts"].items()):
         checks.append(run(spec, "cold_start", testbench=path))
     return checks + unbenched_row_checks(normalized["unbenched_rows"])
+
+
+def pdk_pin(pdk: Any) -> dict[str, Any] | None:
+    """The validated PDK pin value, or ``None`` when it is absent/malformed.
+
+    Either ``{"name", "revision"}`` or the explicit no-PDK form
+    ``{"none": true, "reason": "<non-empty>"}`` (issue #4904). The no-PDK form
+    carries only ``none`` and ``reason``; mixing in ``name``/``revision`` is
+    contradictory and fails. An absent ``pdk`` never means "no PDK".
+    """
+    if not isinstance(pdk, Mapping):
+        return None
+    if pdk.get("none") is True:
+        reason = pdk.get("reason")
+        if (
+            isinstance(reason, str)
+            and reason.strip()
+            and set(pdk) == {"none", "reason"}
+        ):
+            return {"none": True, "reason": reason}
+        return None
+    name, revision = pdk.get("name"), pdk.get("revision")
+    if isinstance(name, str) and name and isinstance(revision, str) and revision:
+        return {"name": name, "revision": revision}
+    return None
