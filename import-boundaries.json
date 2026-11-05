@@ -614,6 +614,7 @@
         "klayout_tools.sim_batch_features",
         "klayout_tools.sim_batch_hints",
         "klayout_tools.sim_commands",
+        "klayout_tools.sim_cause",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_crossings_reduce",
