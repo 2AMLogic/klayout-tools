@@ -129,6 +129,7 @@ from .remote_launcher import (
 )
 from .sim_batch_features import annotate_gap, gap_note
 from .sim_batch_hints import hint_existing_fatal, with_runner_hints
+from .sim_batch_warn import warn_over_serial_bound_once
 from .sim_exit_reason import exit_reason_env
 from .sim_exit_reason import status_exit_code as _status_exit_code
 from .sim_remote import (
@@ -2483,15 +2484,7 @@ def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
     largest = math.ceil(units / hosts)
     if largest > per_job:
         # An explicit cap is the caller's call; the bound is serial (#4982).
-        print(
-            f"klt sim: warning: request.batch.max_units_per_job {requested} "
-            f"leaves jobs of {largest} units, over the {per_job}-unit "
-            f"serial upper bound for the fleet's "
-            f"{assessment['max_job_seconds']:g}s whole-job ceiling (not a "
-            "runtime estimate); a job still running at the ceiling is "
-            "killed and every unit is reported batch_job_timeout",
-            file=sys.stderr,
-        )
+        warn_over_serial_bound_once(requested, largest, per_job, assessment)
     return hosts
 
 

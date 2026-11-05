@@ -638,6 +638,7 @@
         "klayout_tools.sim_batch_plan",
         "klayout_tools.sim_batch_observer",
         "klayout_tools.sim_batch_receipt",
+        "klayout_tools.sim_batch_warn",
         "klayout_tools.sim_commands",
         "klayout_tools.sim_cause",
         "klayout_tools.sim_complex_vectors",

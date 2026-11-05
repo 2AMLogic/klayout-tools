@@ -98,6 +98,12 @@ def _job_ids(report: dict[str, Any]) -> list[str]:
     return [b["job_id"] for b in blocks if isinstance(b, dict) and b.get("job_id")]
 
 
+def _client_interrupted(report: dict[str, Any]) -> bool:
+    env = report.get("environment") or {}
+    remote = env.get("remote") or {}
+    return bool(env.get("interrupted") or remote.get("interrupted"))
+
+
 def shard_text_lines(entry: dict[str, Any]) -> list[str]:
     """Text-mode per-shard summary lines for one request entry."""
     return [
@@ -288,6 +294,8 @@ def _run_one(
         report=report_path,
         shards=tracker.summary(report),
     )
+    if _client_interrupted(report):
+        entry["interrupted"] = True
     if manifest:
         manifest.update(
             index, status=entry["status"], job_id=entry["job_id"], job_ids=job_ids
