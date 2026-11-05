@@ -367,6 +367,7 @@
         "klayout_tools.lvs",
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_finfet",
+        "klayout_tools.lvs_finfet_flatten",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_gate_level_convert",
         "klayout_tools.lvs_known_limits",
@@ -379,7 +380,8 @@
         "klayout_tools.lvs_runset_reference",
         "klayout_tools.lvs_short_nets",
         "klayout_tools.lvs_supply",
-        "klayout_tools.lvs_timeout"
+        "klayout_tools.lvs_timeout",
+        "klayout_tools.lvs_unmerged_fingers"
       ]
     },
     "mcp": {
