@@ -2,8 +2,24 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-11-05
+
+- **PR #4922**: chore(release): bump version to 0.9.0
+- **PR #4919**: fix: null P&R fmax_mhz when unconstrained, accept constraints.power_activity
+- **PR #4918**: feat: accept clock_period_ns alone as a virtual clock in place-and-route
+- **PR #4917**: feat(erc): add missing_tie_checked to erc_coverage
+- **PR #4916**: fix: let klt characterize forward runner-resolved OSDI entries on batch
+- **PR #4905**: feat: accept explicit no-PDK pin for signoff --attest 9
+- **Issue #4915** (closed): klt erc: tie checks cannot be expressed for a standard-cell library with no tap/endcap cells; supply read reports erc.missing_tie as inapplicable
+- **Issue #4914** (closed): klt place-and-route: fmax_mhz is emitted for an unconstrained design, and no energy-per-operation metric exists
+- **Issue #4913** (closed): klt place-and-route: purely combinational design cannot reach target_stage route without a dummy clock port
+- **Issue #4911** (closed): klt characterize: OSDI-model cells have no working path when local ngspice < 44 (batch rejects osdi_preload)
+- **Issue #4904** (closed): signoff --attest 9: PDK pin is mandatory, no form for a PDK-free cold start
+
 ### 2026-11-04
 
+- **PR #4909**: ci: cache gallery-cell netlists to avoid raw.githubusercontent.com flakes
+- **Issue #4908** (closed): test flake: Fetch real gallery-cell SPICE netlists fails on Tests (Python 3.10)
 - **PR #4907**: test: pin that --batch-set requests keep their own corners
 - **PR #4898**: feat(signoff): re-hash file-backed functional-verification evidence to grade content_hash pins
 - **Issue #4893** (closed): signoff: content_hash pin on a functional-verification envelope stays ungradable; no way to have the grader re-hash the cited file
