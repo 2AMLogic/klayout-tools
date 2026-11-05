@@ -137,6 +137,7 @@ from . import (
 from . import remote_fleet as remote_fleet
 from . import remote_transport as remote_transport
 from . import sim_analysis_overrides as _sao
+from . import sim_bin_range as sim_bin_range
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_staging as sim_staging
 from ._jsonnum import is_number
@@ -333,7 +334,6 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "missing_include",
         "netlist",
         "model_bin_range",
-        # Non-fatal pre-run counterpart of `model_bin_range` (issue #4976).
         "model_bin_range_preflight",
         "ngspice_fatal",
         "no_such_vector",
@@ -4597,19 +4597,16 @@ def _run_sim_corners(
         "measurements": measurements_rollup,
         "corners": corners,
     }
-    # Additive/optional (issue #2901): only present when a batch runner
-    # predates a request feature under `runner_version_check: "warn"`.
-    # Issue #4976: plus the non-fatal pre-run bin-range warning.
-    top_diagnostics = [
+    # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
+    if top_diags := [
         d
         for d in (
             request_feature_diagnostic,
             _width_ceiling_preflight_diagnostic(netlist_path),
         )
-        if d is not None
-    ]
-    if top_diagnostics:
-        report["diagnostics"] = top_diagnostics
+        if d
+    ]:
+        report["diagnostics"] = top_diags
     _attach_expr_runner_hint(report, measurements_spec, corners, backend=backend)
     _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
@@ -4957,11 +4954,8 @@ def _build_dry_run_report(
     }
     if published_runner is not None:
         report["published_runner"] = published_runner
-    dry_diagnostics = [
-        d for d in (feature_diagnostic, bin_range_diagnostic) if d is not None
-    ]
-    if dry_diagnostics:
-        report["diagnostics"] = dry_diagnostics
+    if dry_diags := [d for d in (feature_diagnostic, bin_range_diagnostic) if d]:
+        report["diagnostics"] = dry_diags
     return report
 
 
@@ -12455,11 +12449,10 @@ def _with_netlist_error_cause(message: str, log_text: str, start: int) -> str:
     return message
 
 
-#: Width, in micrometres, above which a single MOS instance's ``w`` as
-#: written (``nf`` is not multiplied in -- see issue #4976) is a plausible
-#: culprit for ngspice's "could not find a valid modelname" failure. The
-#: true per-instance bin
-#: range is a property of each PDK's own BSIM model cards and cannot be
+#: Width, in micrometres, above which a MOS instance's ``w`` as written
+#: (``nf`` not multiplied in, issue #4976) is a plausible culprit for
+#: ngspice's "could not find a valid modelname" failure. The true
+#: per-instance bin range is a property of each PDK's own BSIM model cards and cannot be
 #: derived from the netlist alone -- this is a conservative empirical floor
 #: from the gf180mcu `nfet_06v0` case (observed ceiling ~100-110 um,
 #: undocumented in the model file, see issue #1214), used only to pick a
@@ -12509,9 +12502,7 @@ def _find_width_ceiling_culprit(
 ) -> tuple[str, str, float, float] | None:
     """Scan ``netlist_text`` for the MOS instance most likely to have
     tripped a model card's undocumented per-instance width bin range: the
-    ``w`` as written (``nf`` is ignored: observed on ngspice 42/46 that
-    ``w=2u nf=64`` passes while ``w=128u nf=1`` and ``w=128u nf=64`` abort;
-    ngspice 47 is unverified, issue #4976) among
+    ``w`` as written (``nf`` ignored; ngspice 42/46, issue #4976) among
     instances that do not already use ``m=`` to parallel it -- ``m=``
     parallels whole instances *outside* the model-card width check, so an
     instance already using ``m=`` (with its own ``w=`` inside the bin
@@ -12574,58 +12565,14 @@ def _diagnose_modelname_error(netlist_path: str) -> str | None:
     culprit = _find_width_ceiling_culprit(netlist_text)
     if culprit is None:
         return None
-    return _width_ceiling_message(culprit)
-
-
-def _width_ceiling_message(culprit: tuple[str, str, float, float]) -> str:
-    """Shared ``w``-as-written wording for the post-hoc and preflight paths."""
-    inst_name, model_name, w_um, nf_count = culprit
-    cause = f"w={w_um:g}u"
-    if nf_count > 1:
-        cause += f" nf={nf_count:g}"
-    return (
-        f'ngspice reported "could not find a valid modelname" -- likely '
-        f"cause: instance '{inst_name}' ({model_name}) with {cause} exceeds "
-        f"the model card's per-instance width bin range (undocumented, "
-        f"~{_MODEL_WIDTH_CEILING_UM:g} um on gf180mcu, keyed on w as "
-        "written; nf= does not widen it); use m= to parallel multiple "
-        "smaller-width instances instead of a single large w= (see issues "
-        "#1214, #4976)"
-    )
+    return sim_bin_range.message(culprit, _MODEL_WIDTH_CEILING_UM)
 
 
 def _width_ceiling_preflight_diagnostic(netlist_path: str) -> dict[str, Any] | None:
-    """Non-fatal pre-run warning (issue #4976) naming a MOS instance whose
-    ``w`` as written is at/above the empirical bin-range ceiling. Never
-    raises and never rejects; ``None`` when unreadable or nothing is found.
-    """
-    if not netlist_path:
-        return None
-    try:
-        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
-            culprit = _find_width_ceiling_culprit(handle.read())
-    except OSError:
-        return None
-    if culprit is None:
-        return None
-    inst_name, model_name, w_um, nf_count = culprit
-    return {
-        "severity": "warning",
-        "code": "model_bin_range_preflight",
-        "message": (
-            f"preflight: instance '{inst_name}' ({model_name}) has w={w_um:g}u"
-            + (f" nf={nf_count:g}" if nf_count > 1 else "")
-            + f", at/above the ~{_MODEL_WIDTH_CEILING_UM:g} um per-instance "
-            "width bin range some PDKs enforce (keyed on w as written; nf= "
-            'does not widen it); ngspice may abort with "could not find a '
-            'valid modelname". Use m= to parallel smaller-width instances '
-            "(see issue #4976)"
-        ),
-        "instance": inst_name,
-        "model": model_name,
-        "w_um": w_um,
-        "nf": nf_count,
-    }
+    """Non-fatal pre-run bin-range warning (issue #4976), or ``None``."""
+    return sim_bin_range.preflight_for_path(
+        netlist_path, _find_width_ceiling_culprit, _MODEL_WIDTH_CEILING_UM
+    )
 
 
 #: ngspice's own terminal trailer when an analysis never actually completed

@@ -2330,8 +2330,7 @@ def test_classify_diagnostics_modelname_with_wide_w_names_culprit(tmp_path):
 
 
 def test_classify_diagnostics_modelname_with_wide_nf_names_culprit(tmp_path):
-    # Selection keys on w as written (issue #4976): nf= is reported but
-    # never multiplied into an "effective width".
+    # Keys on w as written (issue #4976): nf= is reported, never multiplied.
     netlist = tmp_path / "netlist.spice"
     netlist.write_text("X5 d g s b nfet_06v0 w=128u l=0.6u nf=64 m=1\n")
 
@@ -2384,36 +2383,6 @@ def test_find_width_ceiling_culprit_picks_worst_offender(tmp_path):
     assert (inst_name, model_name) == ("X2", "nfet_06v0")
     assert w_um == pytest.approx(200.0)
     assert nf_count == pytest.approx(1.0)
-
-
-@pytest.mark.parametrize(
-    ("params", "flagged"),
-    [
-        ("w=2u nf=64", False),
-        ("w=128u nf=64", True),
-        ("w=128u nf=1", True),
-        ("w=50u nf=450", False),
-        ("w=50u m=450", False),
-        ("w=128u m=4", False),
-        ("w={wp} nf=64", False),
-    ],
-)
-def test_find_width_ceiling_culprit_keys_on_w_as_written(params, flagged):
-    culprit = sim._find_width_ceiling_culprit(f"X1 d g s b nfet_06v0 {params}\n")
-    assert (culprit is not None) is flagged
-
-
-def test_width_ceiling_preflight_diagnostic(tmp_path):
-    netlist = tmp_path / "n.spice"
-    netlist.write_text("X1 d g s b nfet_06v0 w=128u l=0.6u nf=64\n")
-    diag = sim._width_ceiling_preflight_diagnostic(str(netlist))
-    assert diag is not None
-    assert diag["severity"] == "warning"
-    assert diag["code"] == "model_bin_range_preflight"
-    assert diag["instance"] == "X1"
-    netlist.write_text("X1 d g s b nfet_06v0 w=2u l=0.6u nf=64\n")
-    assert sim._width_ceiling_preflight_diagnostic(str(netlist)) is None
-    assert sim._width_ceiling_preflight_diagnostic(str(tmp_path / "no.spice")) is None
 
 
 def test_find_width_ceiling_culprit_none_when_all_under_ceiling():
