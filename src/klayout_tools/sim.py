@@ -12818,6 +12818,8 @@ def _with_netlist_error_cause(message: str, log_text: str, start: int) -> str:
     """
     if "fatal error in ngspice" in message.lower():
         return _with_fatal_error_cause(message, log_text)
+    if message.lower().startswith("error on line"):
+        return _with_fatal_error_cause(message, log_text)
     if not message.lower().startswith("error in netlist line no."):
         return message
     following = log_text[start:].splitlines()[1:2]
@@ -12832,6 +12834,11 @@ def _with_netlist_error_cause(message: str, log_text: str, start: int) -> str:
 _FATAL_CAUSE_LINE_RE = re.compile(
     r"can't find model|undefined parameter|^\s*(?:error|warning)\b", re.IGNORECASE
 )
+#: Model-binding failures (e.g. an OSDI preload that registers no module the
+#: ``.model`` cards use). These win a cause slot over generic ``warning`` lines.
+_FATAL_CAUSE_SPECIFIC_RE = re.compile(
+    r"unknown model type|unable to find definition of model", re.IGNORECASE
+)
 _FATAL_CAUSE_MAX_LINES = 2
 _FATAL_CAUSE_MAX_CHARS = 200
 
@@ -12844,17 +12851,23 @@ def _with_fatal_error_cause(message: str, log_text: str) -> str:
     ``_FATAL_CAUSE_MAX_CHARS`` chars each. A log with no cause line leaves the
     message unchanged.
     """
-    causes: list[str] = []
+    candidates: list[str] = []
+    own_line = message.strip()
     for line in log_text.splitlines():
         text = line.strip()
-        if not text or text in causes or "fatal error in ngspice" in text.lower():
+        if not text or text == own_line or text in candidates:
+            continue
+        if "fatal error in ngspice" in text.lower():
             continue
         if "simulation interrupted" in text.lower():
             continue
-        if _FATAL_CAUSE_LINE_RE.search(text):
-            causes.append(text[:_FATAL_CAUSE_MAX_CHARS])
-            if len(causes) == _FATAL_CAUSE_MAX_LINES:
-                break
+        if _FATAL_CAUSE_LINE_RE.search(text) or _FATAL_CAUSE_SPECIFIC_RE.search(text):
+            candidates.append(text[:_FATAL_CAUSE_MAX_CHARS])
+    # Stable partition: model-binding lines first, then log order.
+    causes = (
+        [c for c in candidates if _FATAL_CAUSE_SPECIFIC_RE.search(c)]
+        + [c for c in candidates if not _FATAL_CAUSE_SPECIFIC_RE.search(c)]
+    )[:_FATAL_CAUSE_MAX_LINES]
     if not causes:
         return message
     return f"{message} [cause: {' | '.join(causes)}]"
