@@ -32,6 +32,7 @@ Three tiers, mirroring `tests/test_synthesize.py`'s structure:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -41,6 +42,7 @@ import sys
 import time
 import types
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -1263,9 +1265,10 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         "cocotb_version": "2.0.1",
         # Committable `{path, scope}` envelope (#4279): tmp_path is outside
         # the invoking repo, so no absolute host path may appear here.
-        "results_xml": {"path": None, "scope": "external"},
-        "test_log": {"path": None, "scope": "external"},
-        "build_log": {"path": None, "scope": "external"},
+        # Each also carries `sha256` (#4931), asserted against the files below.
+        "results_xml": {"path": None, "scope": "external", "sha256": mock.ANY},
+        "test_log": {"path": None, "scope": "external", "sha256": mock.ANY},
+        "build_log": {"path": None, "scope": "external", "sha256": mock.ANY},
         # `_RESULTS_XML_WITH_FAILURE` carries the exact `random_seed` value
         # the spike captured live (section 4) -- this is the authoritative
         # echo, read back from `results.xml` itself.
@@ -1280,6 +1283,13 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         # `options.initial_state`.
         "initial_state": None,
     }
+    for key in ("results_xml", "test_log", "build_log"):
+        digest = report["environment"][key]["sha256"]
+        assert (
+            digest
+            == "sha256:"
+            + hashlib.sha256(Path(report.local_paths[key]).read_bytes()).hexdigest()
+        )
     results_xml = report.local_paths["results_xml"]
     assert os.path.isabs(results_xml)
     assert os.path.isfile(results_xml)
@@ -1476,7 +1486,11 @@ def test_cli_outdir_flag_is_threaded_through(tmp_path, monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     data = payload.get("data", payload)
     # JSON carries the envelope only; an outdir outside the repo is external.
-    assert data["environment"]["results_xml"] == {"path": None, "scope": "external"}
+    assert data["environment"]["results_xml"] == {
+        "path": None,
+        "scope": "external",
+        "sha256": mock.ANY,
+    }
     assert str(outdir) not in json.dumps(data)
 
 
@@ -1997,8 +2011,8 @@ def test_cli_pass_exits_zero_json(tmp_path, monkeypatch, capsys):
     assert out["skipped_count"] == 1
     env = out["environment"]
     # Default outdir is outside the invoking repo (tmp_path): envelope, no path.
-    assert env["test_log"] == {"path": None, "scope": "external"}
-    assert env["build_log"] == {"path": None, "scope": "external"}
+    assert env["test_log"] == {"path": None, "scope": "external", "sha256": mock.ANY}
+    assert env["build_log"] == {"path": None, "scope": "external", "sha256": mock.ANY}
 
 
 def test_cli_test_failure_exits_three(tmp_path, monkeypatch, capsys):
@@ -6568,9 +6582,21 @@ def test_stubbed_run_paths_are_repo_relative_inside_the_repo(tmp_path, monkeypat
     report = run_functional_verification(request_path, output_dir="out")
 
     env = report["environment"]
-    assert env["results_xml"] == {"path": "out/results_icarus.xml", "scope": "repo"}
-    assert env["test_log"] == {"path": "out/test_icarus.log", "scope": "repo"}
-    assert env["build_log"] == {"path": "out/build_icarus.log", "scope": "repo"}
+    assert env["results_xml"] == {
+        "path": "out/results_icarus.xml",
+        "scope": "repo",
+        "sha256": mock.ANY,
+    }
+    assert env["test_log"] == {
+        "path": "out/test_icarus.log",
+        "scope": "repo",
+        "sha256": mock.ANY,
+    }
+    assert env["build_log"] == {
+        "path": "out/build_icarus.log",
+        "scope": "repo",
+        "sha256": mock.ANY,
+    }
     assert str(tmp_path) not in json.dumps(report)
     assert os.path.isabs(report.local_paths["results_xml"])
 

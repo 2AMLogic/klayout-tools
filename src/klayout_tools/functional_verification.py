@@ -1027,6 +1027,16 @@ def _path_envelope(path: str | None) -> dict[str, Any]:
     return repo_relative_path(path, repo_root=root)
 
 
+def _hashed_path_envelope(path: str | None) -> dict[str, Any]:
+    """``_path_envelope`` plus ``sha256`` (issue #4931): the ``sha256:``-prefixed
+    digest of the file as it stands now, or ``None`` when it was not produced.
+    Call after the producing process has closed the file."""
+    envelope = _path_envelope(path)
+    digest = sha256_file(path)
+    envelope["sha256"] = None if digest is None else f"sha256:{digest}"
+    return envelope
+
+
 def _initial_state_run_specs(
     initial_state: dict[str, Any] | None,
     *,
@@ -1124,7 +1134,7 @@ def _collect_run_results(
                 {
                     "seed": spec["seed"],
                     "status": "fail" if counts[1] else "pass",
-                    "results_xml": _path_envelope(spec["results_xml"]),
+                    "results_xml": _hashed_path_envelope(spec["results_xml"]),
                 }
             )
         tests.extend(spec_tests)
@@ -3358,9 +3368,9 @@ def _run_verilog_top(
                 "engine_version": _engine_version(engine),
                 "tools": tools,
                 "cocotb_version": None,
-                "results_xml": _path_envelope(None),
-                "test_log": _path_envelope(test_log),
-                "build_log": _path_envelope(build_log),
+                "results_xml": _hashed_path_envelope(None),
+                "test_log": _hashed_path_envelope(test_log),
+                "build_log": _hashed_path_envelope(build_log),
                 "random_seed": None,
                 "source_defines": source_defines,
                 "initial_state": None,
@@ -3902,12 +3912,12 @@ def run_functional_verification(
                 "engine_version": _engine_version(engine),
                 "tools": tools,
                 "cocotb_version": _cocotb_version(),
-                "results_xml": _path_envelope(results_xml),
+                "results_xml": _hashed_path_envelope(results_xml),
                 # Additive (issue #3013): the simulator/cocotb console transcript
                 # and the build transcript the run wrote, named by path (never
                 # inlined) like `results_xml`.
-                "test_log": _path_envelope(test_log),
-                "build_log": _path_envelope(build_log),
+                "test_log": _hashed_path_envelope(test_log),
+                "build_log": _hashed_path_envelope(build_log),
                 "random_seed": _extract_random_seed_property(results_xml),
                 # Additive (issue #3290): `options.source_defines` keyed by the
                 # request.sources entry as resolved to an absolute path; `{}`
