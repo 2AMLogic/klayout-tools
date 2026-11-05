@@ -137,6 +137,7 @@ from . import (
 from . import remote_fleet as remote_fleet
 from . import remote_transport as remote_transport
 from . import sim_analysis_overrides as _sao
+from . import sim_bin_range as sim_bin_range
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_staging as sim_staging
 from ._jsonnum import is_number
@@ -333,6 +334,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "missing_include",
         "netlist",
         "model_bin_range",
+        "model_bin_range_preflight",
         "ngspice_fatal",
         "no_such_vector",
         # ngspice's 99-calls-per-file `par()` cap (issue #4084); a log
@@ -4076,6 +4078,7 @@ def _run_sim_corners(
         return _build_dry_run_report(
             request,
             feature_diagnostic=feature_diagnostic,
+            bin_range_diagnostic=_width_ceiling_preflight_diagnostic(netlist_path),
             published_runner=published_runner or None,
             engine=engine,
             backend=backend,
@@ -4594,10 +4597,16 @@ def _run_sim_corners(
         "measurements": measurements_rollup,
         "corners": corners,
     }
-    if request_feature_diagnostic is not None:
-        # Additive/optional (issue #2901): only present when a batch runner
-        # predates a request feature under `runner_version_check: "warn"`.
-        report["diagnostics"] = [request_feature_diagnostic]
+    # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
+    if top_diags := [
+        d
+        for d in (
+            request_feature_diagnostic,
+            _width_ceiling_preflight_diagnostic(netlist_path),
+        )
+        if d
+    ]:
+        report["diagnostics"] = top_diags
     _attach_expr_runner_hint(report, measurements_spec, corners, backend=backend)
     _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
@@ -4900,6 +4909,7 @@ def _build_dry_run_report(
     monte_carlo_info: dict[str, Any] | None,
     staged_model_environment: dict[str, list[dict[str, Any]]],
     feature_diagnostic: dict[str, Any] | None = None,
+    bin_range_diagnostic: dict[str, Any] | None = None,
     published_runner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``klt sim --dry-run`` response (issue #3064): the request as
@@ -4944,8 +4954,8 @@ def _build_dry_run_report(
     }
     if published_runner is not None:
         report["published_runner"] = published_runner
-    if feature_diagnostic is not None:
-        report["diagnostics"] = [feature_diagnostic]
+    if dry_diags := [d for d in (feature_diagnostic, bin_range_diagnostic) if d]:
+        report["diagnostics"] = dry_diags
     return report
 
 
@@ -12421,10 +12431,10 @@ def _with_netlist_error_cause(message: str, log_text: str, start: int) -> str:
     return message
 
 
-#: Width, in micrometres, above which a single MOS instance's total width
-#: (``w``, or ``w * nf`` when fingered) is a plausible culprit for ngspice's
-#: "could not find a valid modelname" failure. The true per-instance bin
-#: range is a property of each PDK's own BSIM model cards and cannot be
+#: Width, in micrometres, above which a MOS instance's ``w`` as written
+#: (``nf`` not multiplied in, issue #4976) is a plausible culprit for
+#: ngspice's "could not find a valid modelname" failure. The true
+#: per-instance bin range is a property of each PDK's own BSIM model cards and cannot be
 #: derived from the netlist alone -- this is a conservative empirical floor
 #: from the gf180mcu `nfet_06v0` case (observed ceiling ~100-110 um,
 #: undocumented in the model file, see issue #1214), used only to pick a
@@ -12474,7 +12484,7 @@ def _find_width_ceiling_culprit(
 ) -> tuple[str, str, float, float] | None:
     """Scan ``netlist_text`` for the MOS instance most likely to have
     tripped a model card's undocumented per-instance width bin range: the
-    largest total width (``w``, or ``w * nf`` when fingered) among
+    ``w`` as written (``nf`` ignored; ngspice 42/46, issue #4976) among
     instances that do not already use ``m=`` to parallel it -- ``m=``
     parallels whole instances *outside* the model-card width check, so an
     instance already using ``m=`` (with its own ``w=`` inside the bin
@@ -12486,7 +12496,7 @@ def _find_width_ceiling_culprit(
     heuristic cannot identify).
     """
     worst: tuple[str, str, float, float] | None = None
-    worst_effective_um = -1.0
+    worst_w_um = -1.0
     for line in netlist_text.splitlines():
         match = _MOS_INSTANCE_RE.match(line)
         if match is None:
@@ -12509,12 +12519,8 @@ def _find_width_ceiling_culprit(
         nf_count = _parse_plain_number(nf_raw) if nf_raw is not None else 1.0
         if nf_count is None:
             nf_count = 1.0
-        effective_um = w_um * nf_count
-        if (
-            effective_um >= _MODEL_WIDTH_CEILING_UM
-            and effective_um > worst_effective_um
-        ):
-            worst_effective_um = effective_um
+        if w_um >= _MODEL_WIDTH_CEILING_UM and w_um > worst_w_um:
+            worst_w_um = w_um
             worst = (inst_name, model_name, w_um, nf_count)
     return worst
 
@@ -12524,8 +12530,8 @@ def _diagnose_modelname_error(netlist_path: str) -> str | None:
     ``could not find a valid modelname`` failure by naming the netlist
     instance most likely responsible (see
     :func:`_find_width_ceiling_culprit`) -- e.g. gf180mcu's undocumented
-    ~100 um per-instance width bin range, which fails identically whether
-    exceeded via a raw large ``w=`` or via ``nf=`` (issue #1214).
+    ~100 um per-instance width bin range, keyed on ``w`` as written
+    (issues #1214, #4976).
 
     Returns ``None`` (never raises) when ``netlist_path`` is empty/unreadable
     or no culprit instance is found; the caller falls back to ngspice's raw
@@ -12541,19 +12547,13 @@ def _diagnose_modelname_error(netlist_path: str) -> str | None:
     culprit = _find_width_ceiling_culprit(netlist_text)
     if culprit is None:
         return None
-    inst_name, model_name, w_um, nf_count = culprit
-    if nf_count > 1:
-        effective_um = w_um * nf_count
-        cause = f"w={w_um:g}u nf={nf_count:g} ({effective_um:g} um effective width)"
-    else:
-        cause = f"w={w_um:g}u"
-    return (
-        f'ngspice reported "could not find a valid modelname" -- likely '
-        f"cause: instance '{inst_name}' ({model_name}) with {cause} exceeds "
-        f"the model card's per-instance width bin range (undocumented, "
-        f"~{_MODEL_WIDTH_CEILING_UM:g} um on gf180mcu); use m= to parallel "
-        "multiple smaller-width instances instead of a single large w= or "
-        "nf= (see issue #1214)"
+    return sim_bin_range.message(culprit, _MODEL_WIDTH_CEILING_UM)
+
+
+def _width_ceiling_preflight_diagnostic(netlist_path: str) -> dict[str, Any] | None:
+    """Non-fatal pre-run bin-range warning (issue #4976), or ``None``."""
+    return sim_bin_range.preflight_for_path(
+        netlist_path, _find_width_ceiling_culprit, _MODEL_WIDTH_CEILING_UM
     )
 
 
