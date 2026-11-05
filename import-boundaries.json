@@ -635,6 +635,7 @@
         "klayout_tools.sim_commands",
         "klayout_tools.sim_cause",
         "klayout_tools.sim_complex_vectors",
+        "klayout_tools.sim_convergence_retry",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_crossings_reduce",
         "klayout_tools.sim_cycle_mean",
