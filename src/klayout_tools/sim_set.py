@@ -41,9 +41,8 @@ from .sim import SimError, run_sim
 from .sim_batch import (
     BATCH_CONCURRENCY_CAP_CODE,
     BATCH_NO_CAPACITY_CODE,
-    JobObserver,
-    observe_batch_jobs,
 )
+from .sim_batch_observer import JobObserver, observe_batch_jobs
 
 SET_SCHEMA_VERSION = 1
 

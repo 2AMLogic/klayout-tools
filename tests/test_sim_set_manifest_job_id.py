@@ -7,6 +7,8 @@ import pytest
 
 from klayout_tools import sim_batch, sim_set
 from klayout_tools.sim import SimError
+from klayout_tools.sim_batch_observer import current_job_observer, report_progress
+from klayout_tools.sim_batch_receipt import check_attach_receipt, request_sha256
 from test_sim_batch import _write_set
 
 
@@ -16,10 +18,10 @@ def test_manifest_has_job_id_before_member_finishes(tmp_path, capsys):
     seen = {}
 
     def fake_run(path, **kwargs):
-        observer = sim_batch.current_job_observer()
+        observer = current_job_observer()
         assert observer is not None and observer.label == path
         observer.on_job("klt-sim-abc")
-        sim_batch._report_progress("klt-sim-abc", "submitted", observer)
+        report_progress("klt-sim-abc", "submitted", observer)
         with open(outdir / "set-manifest.json", encoding="utf-8") as handle:
             seen.update(json.load(handle)["requests"][0])
         raise RuntimeError("client killed")
@@ -44,28 +46,26 @@ def test_two_jobs_leave_job_ids_without_single_job_id(tmp_path):
 
 
 def test_single_request_progress_line_unchanged(capsys):
-    sim_batch._report_progress("klt-sim-x", "done")
+    report_progress("klt-sim-x", "done")
     assert capsys.readouterr().err == "klt sim: batch job klt-sim-x: done\n"
 
 
 def _receipt(tmp_path, job_id, request):
     (tmp_path / sim_batch.BATCH_RECEIPT_FILENAME).write_text(
-        json.dumps(
-            {"job_id": job_id, "request_sha256": sim_batch._request_sha256(request)}
-        )
+        json.dumps({"job_id": job_id, "request_sha256": request_sha256(request)})
     )
 
 
 def test_attach_refuses_mismatched_request(tmp_path):
     _receipt(tmp_path, "j1", {"netlist": "a"})
     with pytest.raises(SimError) as exc:
-        sim_batch._check_attach_receipt(str(tmp_path), "j1", {"netlist": "b"})
+        check_attach_receipt(str(tmp_path), "j1", {"netlist": "b"})
     assert exc.value.code == "resume_fingerprint_mismatch"
-    assert sim_batch._request_sha256({"netlist": "a"}) in str(exc.value)
+    assert request_sha256({"netlist": "a"}) in str(exc.value)
 
 
 def test_attach_proceeds_when_match_absent_or_other_job(tmp_path):
-    sim_batch._check_attach_receipt(str(tmp_path), "j1", {"netlist": "b"})  # absent
+    check_attach_receipt(str(tmp_path), "j1", {"netlist": "b"})  # absent
     _receipt(tmp_path, "j1", {"netlist": "a"})
-    sim_batch._check_attach_receipt(str(tmp_path), "j1", {"netlist": "a"})  # match
-    sim_batch._check_attach_receipt(str(tmp_path), "j2", {"netlist": "b"})  # other
+    check_attach_receipt(str(tmp_path), "j1", {"netlist": "a"})  # match
+    check_attach_receipt(str(tmp_path), "j2", {"netlist": "b"})  # other
