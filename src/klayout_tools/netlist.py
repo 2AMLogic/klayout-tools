@@ -871,8 +871,13 @@ def _erc_findings(stdout: str, stderr: str) -> list[str]:
     return found
 
 
-def _check_erc(stdout: str, stderr: str) -> None:
-    """Fail when xschem reported ERC findings (``--erc``, issue #4953)."""
+def _check_erc(stdout: str, stderr: str, enabled: bool = True) -> None:
+    """Fail when xschem reported ERC findings (``--erc``, issue #4953).
+
+    A no-op when ``enabled`` is false, so callers need no branch of their own.
+    """
+    if not enabled:
+        return
     findings = _erc_findings(stdout, stderr)
     if not findings:
         return
@@ -1235,8 +1240,7 @@ def run_netlist(
             fresh_data, version, allow_unevaluated_expr
         )
         _check_no_unresolved_symbol(fresh_data, rcfile, xschem_env)
-        if erc:
-            _check_erc(stdout, stderr)
+        _check_erc(stdout, stderr, enabled=erc)
 
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,

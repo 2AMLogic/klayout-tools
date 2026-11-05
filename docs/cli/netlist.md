@@ -183,6 +183,10 @@ xschem 3.4.7 has no `-erc` flag, but its netlister prints findings such as
 nothing is written. Without `--erc` behaviour and netlist bytes are unchanged.
 Local backend only: `--backend batch` rejects `--erc`.
 
+**Verified:** a dangling wire (undriven node) is caught. **Unverified:** shorted
+pins were not measured with real xschem, so `--erc` may not flag them; do not
+rely on it for that case (tracked in #4962).
+
 ## Success is the output file, not the exit status
 
 `xschem -n -s -q -x` returns a **non-zero** status after a *successful* batch
