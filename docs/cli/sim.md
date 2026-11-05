@@ -3653,6 +3653,51 @@ every backend (remote/batch workers re-read it from the request document).
 smaller `tmax` makes the rawfile larger; a larger `tstep` makes it smaller).
 There is no separate `analysis.tmax` field.
 
+**What bounds the internal step.** ngspice's `.tran` card is `tstep tstop
+tstart tmax`: `tstep` is the printing/suggested increment, and when `tmax` is
+omitted ngspice derives its default from `tstep` and `tstop`, so the solver's
+internal step (and therefore a self-timed oscillator's *measured period*)
+depends on the chosen window. Set `tmax` explicitly (e.g. `"1n 5u 0 1n"`)
+whenever a period or edge time is measured from a `crossings` or `.meas`.
+*Not yet verified against the real engine:* the exact default `tmax` formula
+and the reported 4.54e-7 s (100 ns step) vs 4.91e-7 s (2 ns step) period
+spread on one cell (#4970).
+
+### Per-corner analysis windows: `analysis_overrides` (issue #4970)
+
+One `analysis.args` cannot serve a grid whose time scales span orders of
+magnitude (e.g. a leakage-limited oscillator across process x supply x
+temperature). `analysis_overrides` replaces `analysis.args` for the corner
+points a rule matches:
+
+```json
+"analysis": {"kind": "tran", "args": "100n 50u 0 100n"},
+"analysis_overrides": [
+  {"match": {"temperature_c": 125}, "args": "1n 2u 0 1n"}
+]
+```
+
+- `match` takes the same keys and equality semantics as an `options.nodeset`
+  rule (`process`, `temperature_c`, `supply_v`, `params`; keys AND together;
+  `{}` matches every point). Rules resolve once after corner expansion and
+  `exclude`, before Monte Carlo cloning (samples inherit their base point's
+  window).
+- Two rules matching one point, a rule matching no retained point, an unknown
+  key, an empty/non-string `args`, or a `{...}` brace in `args` (ngspice) are
+  application errors (exit 1) naming `analysis_overrides[i]`, before any run.
+  A point no rule matches uses `analysis.args` unchanged.
+- Only `args` is replaced, never `kind`. Refused with `analysis_steps` and for
+  requests with no scalar `analysis` (deck-list / `commands[]`).
+- A corner whose window was overridden reports the additive field
+  `analysis_args` (the effective args); corners on the base window omit it.
+- Honored on every backend (the selected window travels with each point to
+  fleet/remote/batch workers); a worker that does not echo it fails with
+  `analysis_overrides_unsupported_worker`. A changed override invalidates a
+  `--resume` checkpoint.
+- Early-stop after N crossings is deliberately not offered: `stop when` is
+  unreliable in ngspice batch mode (see "Simulated-time-reached on timeout is
+  not available").
+
 **Diagnosing a still-missing measurement.** When a `.meas`/rawfile signal
 still comes back empty after this fix, ngspice's log gives the same `Error:
 no such vector as <name>.` line (classified as `code: "no_such_vector"`,

@@ -3438,6 +3438,11 @@ def _prepare_sim_request(
         options.get("initial_conditions"), label=_IC_LABEL
     )
     _require_plain_tran_for_ic(bool(ic_rules), analysis)
+    # Issue #4970: per-corner `analysis.args` windows, validated up front and
+    # resolved onto points after expansion (below), before dispatch.
+    analysis_override_rules = _validate_analysis_overrides(
+        request.get("analysis_overrides"), analysis, engine
+    )
 
     # Timeout budget preflight (issue #1686): a coarse, pre-grid sanity
     # check -- never blocks the sweep, only surfaces an advisory string. See
@@ -3520,6 +3525,12 @@ def _prepare_sim_request(
         ic_rules if explicit_points_wire is None else [],
         label=_IC_LABEL,
         attr="initial_conditions",
+    )
+    _apply_nodeset_rules(
+        corner_points,
+        analysis_override_rules if explicit_points_wire is None else [],
+        label=_AO_LABEL,
+        attr="analysis_args",
     )
     if explicit_points_wire is not None:
         # Internal-only escape hatch: never set by an external caller or the
@@ -4192,6 +4203,14 @@ def _run_sim_corners(
         label=_IC_LABEL,
         attr="initial_conditions",
         code=IC_UNSUPPORTED_WORKER_CODE,
+    )
+    _require_nodeset_echo(
+        dispatch_points,
+        corners_new,
+        backend=backend,
+        label=_AO_LABEL,
+        attr="analysis_args",
+        code=AO_UNSUPPORTED_WORKER_CODE,
     )
     _require_options_echo(
         dispatch_points, corners_new, backend=backend, env=remote_environment
@@ -4898,6 +4917,7 @@ def _build_dry_run_report(
         unit: dict[str, Any] = {"corner_id": point.corner_id}
         unit.update(_nodeset_report_field(point))
         unit.update(_ic_report_field(point))
+        unit.update(_ao_report_field(point))
         if point.sample_index is not None:
             unit["sample_index"] = point.sample_index
         if point.mc_seed is not None:
@@ -5287,6 +5307,10 @@ class CornerPoint:
     start state, rendered as ``.ic`` cards plus ``uic`` on the analysis.
     Like ``nodeset`` it never changes :attr:`corner_id`.
 
+    ``analysis_args`` (issue #4970) is the ``analysis_overrides`` args string
+    selected for this point (``None`` when no rule matched); it replaces
+    ``analysis.args`` for this point only and never changes :attr:`corner_id`.
+
     ``options`` (issue #3125) is the same for the ``corners.options`` axis: the
     normalized ``{solver option: number}`` row, ``{}`` when the request has
     no such axis (and then the IDs/slugs are untouched).
@@ -5330,6 +5354,7 @@ class CornerPoint:
         "params",
         "nodeset",
         "initial_conditions",
+        "analysis_args",
         "options",
         "sample_index",
         "mc_seed",
@@ -5350,6 +5375,7 @@ class CornerPoint:
         params: dict[str, int | float] | None = None,
         nodeset: dict[str, float] | None = None,
         initial_conditions: dict[str, float] | None = None,
+        analysis_args: str | None = None,
         options: dict[str, int | float] | None = None,
         sample_index: int | None = None,
         mc_seed: dict[str, Any] | None = None,
@@ -5362,6 +5388,9 @@ class CornerPoint:
         self.params: dict[str, int | float] = params or {}
         self.nodeset: dict[str, float] = nodeset or {}
         self.initial_conditions: dict[str, float] = initial_conditions or {}
+        # Issue #4970: the `analysis_overrides` window selected for this
+        # point, ``None`` when no rule matched (the request's own args apply).
+        self.analysis_args: str | None = analysis_args
         self.options: dict[str, int | float] = options or {}
         self.process_sections = process_sections
         self.process_section_libs = process_section_libs
@@ -5448,6 +5477,12 @@ def _params_report_field(point: CornerPoint) -> dict[str, Any]:
     """The additive ``params`` field of a corner report: present only for a
     point on a ``corners.params`` axis, so every other report is unchanged."""
     return {"params": dict(point.params)} if point.params else {}
+
+
+def _ao_report_field(point: CornerPoint) -> dict[str, Any]:
+    """The additive ``analysis_args`` field of a corner report (issue #4970):
+    present only for a point an ``analysis_overrides`` rule selected."""
+    return {"analysis_args": point.analysis_args} if point.analysis_args else {}
 
 
 def _ic_report_field(point: CornerPoint) -> dict[str, Any]:
@@ -5876,6 +5911,9 @@ def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
         if point.initial_conditions:
             # Issue #3881: likewise the selected map, never the rules.
             entry["initial_conditions"] = point.initial_conditions
+        if point.analysis_args:
+            # Issue #4970: likewise the selected window, never the rules.
+            entry["analysis_args"] = point.analysis_args
         if point.options:
             # Issue #3125: likewise additive, only for an options point.
             entry["options"] = point.options
@@ -5936,6 +5974,11 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
             if raw_ic is not None
             else {}
         )
+        raw_ao = entry.get("analysis_args")
+        if raw_ao is not None and (not isinstance(raw_ao, str) or not raw_ao.strip()):
+            raise SimError(
+                "request._explicit_points[].analysis_args must be a non-empty string"
+            )
         raw_options = entry.get("options")
         options = (
             _normalize_option_row(raw_options, "request._explicit_points[].options")
@@ -5952,6 +5995,7 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
                 params=params,
                 nodeset=nodeset,
                 initial_conditions=initial_conditions,
+                analysis_args=raw_ao,
                 options=options,
                 sample_index=entry.get("sample_index"),
                 mc_seed=entry.get("mc_seed"),
@@ -6667,7 +6711,8 @@ def _apply_nodeset_rules(
             )
         if hits:
             used[hits[0]] = True
-            setattr(point, attr, dict(rules[hits[0]]["values"]))
+            chosen = rules[hits[0]]["values"]
+            setattr(point, attr, dict(chosen) if isinstance(chosen, dict) else chosen)
     if not all(used):
         raise SimError(
             f"{label}[{used.index(False)}] matches no retained corner "
@@ -6753,7 +6798,7 @@ def _require_nodeset_echo(
     else:
         for point, corner in zip(points, corners, strict=True):
             expected = getattr(point, attr)
-            if (corner.get(attr) or {}) != expected:
+            if (corner.get(attr) or type(expected)()) != expected:
                 problem = (
                     f"corner {point.corner_id!r} came back with {attr} "
                     f"{corner.get(attr)!r}, expected {expected!r}"
@@ -6817,6 +6862,67 @@ def _ic_analysis_args(point: CornerPoint, args: str) -> str:
     if "uic" in str(args).lower().split():
         return args
     return f"{args} uic".strip()
+
+
+# --------------------------------------------------------------------------- #
+# Per-corner analysis windows: `analysis_overrides` (issue #4970)
+# --------------------------------------------------------------------------- #
+#
+# Same `match` selector and resolution as `options.nodeset`, but the selected
+# value is an `analysis.args` string that replaces the request's for that point.
+
+_AO_LABEL = "analysis_overrides"
+AO_UNSUPPORTED_WORKER_CODE = "analysis_overrides_unsupported_worker"
+
+
+def _validate_analysis_overrides(
+    value: Any, analysis: dict[str, Any], engine: str
+) -> list[dict[str, Any]]:
+    """Validate ``request.analysis_overrides`` into normalized rules
+    ``[{"match": {...}, "values": "<args>"}]``; ``[]`` when omitted/empty.
+    Overrides replace ``analysis.args`` only, never ``kind``."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise SimError(
+            f"{_AO_LABEL} must be an array of {{match, args}} rules "
+            f"(got {json.dumps(value, default=repr)})"
+        )
+    if not value:
+        return []
+    if sim_steps.is_steps_analysis(analysis):
+        raise SimError(
+            f"{_AO_LABEL} cannot be combined with analysis_steps: overrides "
+            "replace one `analysis.args` and a step sequence has several"
+        )
+    if not analysis or "args" not in analysis:
+        raise SimError(
+            f"{_AO_LABEL} requires a request with a scalar `analysis` "
+            "(deck-list / commands[] requests carry none)"
+        )
+    rules: list[dict[str, Any]] = []
+    for index, rule in enumerate(value):
+        where = f"{_AO_LABEL}[{index}]"
+        if not isinstance(rule, dict) or set(rule) != {"match", "args"}:
+            raise SimError(
+                f"{where} must be an object with exactly the keys match, args"
+            )
+        args = rule["args"]
+        if not isinstance(args, str) or not args.strip():
+            raise SimError(f"{where}.args must be a non-empty string")
+        _reject_param_braces({"args": args}, engine)
+        rules.append(
+            {
+                "match": _validate_nodeset_match(rule["match"], f"{where}.match"),
+                "values": args.strip(),
+            }
+        )
+    return rules
+
+
+def _effective_analysis_args(point: CornerPoint, analysis: dict[str, Any]) -> str:
+    """The ``analysis.args`` this point runs: its override, else the request's."""
+    return getattr(point, "analysis_args", None) or analysis["args"]
 
 
 # --------------------------------------------------------------------------- #
@@ -7634,6 +7740,7 @@ def _expand_monte_carlo(
                     variant=base.variant,
                     nodeset=base.nodeset,
                     initial_conditions=base.initial_conditions,
+                    analysis_args=base.analysis_args,
                     options=base.options,
                     sample_index=sample_index,
                     mc_seed=mc_seed,
@@ -7827,6 +7934,14 @@ def _checkpoint_fingerprint(
             point.corner_id: point.nodeset for point in corner_points if point.nodeset
         }
     _key_in_initial_conditions(payload, corner_points)
+    windows = {
+        point.corner_id: point.analysis_args
+        for point in corner_points
+        if point.analysis_args
+    }
+    if windows:
+        # Issue #4970: a changed per-corner window changes the result.
+        payload["analysis_overrides"] = windows
     if corner_section_libs:
         # Issue #2522: a corner's per-section libraries determine its device
         # models exactly as `models.lib` does, so editing one must invalidate
@@ -10228,6 +10343,7 @@ def _run_corner(
         **_params_report_field(point),
         **_nodeset_report_field(point),
         **_ic_report_field(point),
+        **_ao_report_field(point),
         **_options_report_field(point),
         "status": status,
         "runtime_s": runtime_s,
@@ -11499,7 +11615,10 @@ def _corner_deck_control_lines(
         or complex_vector_lines
     ):
         lines.append("set filetype=ascii")
-    lines.append(f"{analysis['kind']} {_ic_analysis_args(point, analysis['args'])}")
+    lines.append(
+        f"{analysis['kind']} "
+        f"{_ic_analysis_args(point, _effective_analysis_args(point, analysis))}"
+    )
     if raw_path is not None:
         lines.append(f"write {raw_path}")
     if analysis.get("linearize") is True:
@@ -11598,7 +11717,9 @@ def _write_xyce_deck(
     # probe against XyceNF 7.10.0 used while building this). Top-level dot
     # card, with the dot -- there is no `.control` block for a bare
     # `dc`/`tran`/`op` command to live in.
-    lines.append("." + f"{analysis['kind']} {analysis['args']}".strip())
+    lines.append(
+        "." + f"{analysis['kind']} {_effective_analysis_args(point, analysis)}".strip()
+    )
     for spec in measurements_spec:
         if spec.get("spice") is not None:
             lines.append(spec["spice"])
