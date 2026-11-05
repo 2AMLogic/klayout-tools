@@ -4373,6 +4373,7 @@ class _ShardManifest:
         *,
         resume: bool,
         location: dict[str, Any] | None = None,
+        submit_only: bool = False,
     ) -> _ShardManifest:
         """Open the manifest for this run. Without ``resume`` any existing
         file is ignored (and overwritten by the first write). With ``resume``
@@ -4409,6 +4410,17 @@ class _ShardManifest:
             difference = _manifest_difference(
                 stored_fingerprint, fingerprint, stored_hosts, stored_hosts
             )
+            if submit_only:
+                # Issue #4979: the caller passed no --resume; name what they
+                # ran and keep the first request's map (and its --attach
+                # path) intact.
+                raise SimError(
+                    f"--submit-only: shard map {path} belongs to a different "
+                    f"request ({difference}); use a distinct -o directory "
+                    "for this request, or finish/attach the first one "
+                    "(deleting the map would lose its --attach path)",
+                    code=BATCH_SHARD_MANIFEST_CODE,
+                )
             raise SimError(
                 f"--resume: shard map {path} was written for a different "
                 f"request ({difference}); delete it or drop --resume",
@@ -5127,6 +5139,7 @@ def _open_shard_manifest(
     resume: bool,
     config: BatchConfig,
     request_identity: dict[str, Any] | None = None,
+    submit_only: bool = False,
 ) -> _ShardManifest | None:
     """Open the run's shard map, recording where the jobs live (issue #3896);
     ``None`` when the request has no fingerprint to key it by."""
@@ -5137,6 +5150,7 @@ def _open_shard_manifest(
         shard_fingerprint,
         hosts,
         resume=resume,
+        submit_only=submit_only,
         location={
             "jobs_prefix": getattr(config, "jobs_prefix", None),
             "region": getattr(config, "region", None),
@@ -5733,6 +5747,7 @@ def _submit_batch_shards(
         resume=True,
         config=config,
         request_identity=request_identity,
+        submit_only=True,
     )
     assert manifest is not None
     shards = _shard_corner_points(corner_points, hosts)
