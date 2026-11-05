@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._provenance import _content_hash
+from ._provenance import content_hash
 from ._report_verify import get_path, hash_check, resolve_committed_path
 from .decks import deck_source_path
 
@@ -48,7 +48,7 @@ def _report_hash_checks(
         hash_check(
             f"{prefix}provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
-            _content_hash(
+            content_hash(
                 resolve_committed_path(
                     committed.get("file"),
                     report_path=report_path,
@@ -59,7 +59,7 @@ def _report_hash_checks(
         hash_check(
             f"{prefix}provenance.deck.content_hash",
             get_path(committed, ("provenance", "deck", "content_hash")),
-            _content_hash(_deck_path_for_report(committed)),
+            content_hash(_deck_path_for_report(committed)),
         ),
     ]
     # Issue #3483: a waived report also pins its waivers file.
@@ -69,7 +69,7 @@ def _report_hash_checks(
             hash_check(
                 f"{prefix}provenance.waivers.content_hash",
                 get_path(committed, ("provenance", "waivers", "content_hash")),
-                _content_hash(waivers_file),
+                content_hash(waivers_file),
             )
         )
     recorded_tree = get_path(committed, ("provenance", "deck", "tree", "content_hash"))

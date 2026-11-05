@@ -90,7 +90,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ._provenance import sha256_file
+from ._provenance import sha256_file, sha256_file_required
 from .sim_param_file import declared_model_refs, rewrite_model_refs
 
 #: A ``.include``/``.inc`` directive line -- ngspice's two spellings, target
@@ -607,7 +607,7 @@ def _stage_model_closure(
                 source_path=item.local_path,
                 sha256=_staged_sha256(staged),
                 rewritten=staged.content is not None,
-                source_sha256=_file_sha256(item.local_path),
+                source_sha256=sha256_file_required(item.local_path),
             )
         )
 
@@ -794,14 +794,7 @@ def _staged_sha256(staged: StagedFile) -> str:
     if staged.content is not None:
         return hashlib.sha256(staged.content.encode("utf-8")).hexdigest()
     assert staged.local_path is not None
-    return _file_sha256(staged.local_path)
-
-
-def _file_sha256(path: str) -> str:
-    digest = sha256_file(path)
-    if digest is None:
-        raise FileNotFoundError(path)
-    return digest
+    return sha256_file_required(staged.local_path)
 
 
 # --------------------------------------------------------------------------- #
