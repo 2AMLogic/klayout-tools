@@ -2608,6 +2608,60 @@ def _deck_path_for_report(committed: dict[str, Any]) -> str | None:
     return deck_source_path(deck)
 
 
+def _report_hash_checks(
+    committed: dict[str, Any],
+    *,
+    report_path: str,
+    input_path: str | None,
+    prefix: str,
+) -> list[dict[str, Any]]:
+    """The per-report hash checks behind :func:`check_drc_report`, for one
+    single-engine report (``prefix`` is prepended to each ``field``; empty for
+    a top-level report, ``reports.<engine>.`` for a crosscheck side)."""
+    checks = [
+        hash_check(
+            f"{prefix}provenance.input.content_hash",
+            get_path(committed, ("provenance", "input", "content_hash")),
+            _content_hash(
+                resolve_committed_path(
+                    committed.get("file"),
+                    report_path=report_path,
+                    override=input_path,
+                )
+            ),
+        ),
+        hash_check(
+            f"{prefix}provenance.deck.content_hash",
+            get_path(committed, ("provenance", "deck", "content_hash")),
+            _content_hash(_deck_path_for_report(committed)),
+        ),
+    ]
+    # Issue #3483: a waived report also pins its waivers file.
+    waivers_file = get_path(committed, ("provenance", "waivers", "file"))
+    if waivers_file is not None:
+        checks.append(
+            hash_check(
+                f"{prefix}provenance.waivers.content_hash",
+                get_path(committed, ("provenance", "waivers", "content_hash")),
+                _content_hash(waivers_file),
+            )
+        )
+    recorded_tree = get_path(committed, ("provenance", "deck", "tree", "content_hash"))
+    if recorded_tree is not None:
+        deck_path = _deck_path_for_report(committed)
+        from .drc_klayout_engine import _deck_tree_identity
+
+        current_tree = _deck_tree_identity(deck_path) if deck_path else None
+        checks.append(
+            hash_check(
+                f"{prefix}provenance.deck.tree.content_hash",
+                recorded_tree,
+                current_tree["content_hash"] if current_tree else None,
+            )
+        )
+    return checks
+
+
 def check_drc_report(
     report_path: str, *, input_path: str | None = None
 ) -> dict[str, Any]:
@@ -2635,46 +2689,33 @@ def check_drc_report(
     traceback.
     """
     committed = _load_committed_report(report_path, DrcError)
-    checks = [
-        hash_check(
-            "provenance.input.content_hash",
-            get_path(committed, ("provenance", "input", "content_hash")),
-            _content_hash(
-                resolve_committed_path(
-                    committed.get("file"),
-                    report_path=report_path,
-                    override=input_path,
+    if committed.get("mode") == "crosscheck":
+        # Issue #4986: an ``--engine both`` envelope nests each engine's own
+        # report under ``reports.<engine>``; check each with the same logic,
+        # naming fields with the engine prefix. A null native side (engine
+        # failed / unavailable) is skipped, never reported as drift.
+        reports = committed.get("reports")
+        reports = reports if isinstance(reports, dict) else {}
+        checks = []
+        for engine in ("curated", "native"):
+            sub = reports.get(engine)
+            if isinstance(sub, dict):
+                checks.extend(
+                    _report_hash_checks(
+                        sub,
+                        report_path=report_path,
+                        input_path=input_path,
+                        prefix=f"reports.{engine}.",
+                    )
                 )
-            ),
-        ),
-        hash_check(
-            "provenance.deck.content_hash",
-            get_path(committed, ("provenance", "deck", "content_hash")),
-            _content_hash(_deck_path_for_report(committed)),
-        ),
-    ]
-    # Issue #3483: a waived report also pins its waivers file.
-    waivers_file = get_path(committed, ("provenance", "waivers", "file"))
-    if waivers_file is not None:
-        checks.append(
-            hash_check(
-                "provenance.waivers.content_hash",
-                get_path(committed, ("provenance", "waivers", "content_hash")),
-                _content_hash(waivers_file),
+        if not checks:
+            raise DrcError(
+                f"crosscheck report has no embedded 'reports.curated' report "
+                f"to check: {report_path}"
             )
-        )
-    recorded_tree = get_path(committed, ("provenance", "deck", "tree", "content_hash"))
-    if recorded_tree is not None:
-        deck_path = _deck_path_for_report(committed)
-        from .drc_klayout_engine import _deck_tree_identity
-
-        current_tree = _deck_tree_identity(deck_path) if deck_path else None
-        checks.append(
-            hash_check(
-                "provenance.deck.tree.content_hash",
-                recorded_tree,
-                current_tree["content_hash"] if current_tree else None,
-            )
+    else:
+        checks = _report_hash_checks(
+            committed, report_path=report_path, input_path=input_path, prefix=""
         )
     return build_check_result(report_path=report_path, checks=checks)
 
@@ -2752,6 +2793,12 @@ def rerun_drc_report(
     raises (bad file, unknown deck, engine error) -- never a traceback.
     """
     committed = _load_committed_report(report_path, DrcError)
+    if committed.get("mode") == "crosscheck":
+        raise DrcError(
+            "--rerun supports single-engine reports only; "
+            f"{report_path} is an --engine both (crosscheck) report "
+            "(use --check without --rerun)"
+        )
     file_path = resolve_committed_path(
         committed.get("file"), report_path=report_path, override=input_path
     )
