@@ -4,6 +4,32 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-05
 
+- **PR #4977**: fix(sim): key bin-range culprit on w as written and add preflight warning
+- **PR #4975**: feat(sim): record batch-set job ids at submit and verify request on --attach
+- **PR #4974**: feat(sim): per-corner analysis_overrides for tran windows
+- **PR #4973**: feat(sim): all-or-nothing ceiling preflight for --batch-set
+- **PR #4968**: test: record xschem shorted-pin ERC result and add gated test
+- **PR #4965**: feat(sim): name the verdict exit in environment.remote.exit_reason for batch jobs
+- **PR #4961**: feat(netlist): capture xschem diagnostics and add --erc gate
+- **PR #4960**: fix(extract): join drain-marker COMP islands into one LDMOS drain net
+- **PR #4959**: feat(drc): add --klayout-binary override for the native KLayout engine
+- **PR #4958**: fix(lvs): treat capacitor mf equal to m as one multiplier
+- **PR #4957**: fix(lvs): re-merge FinFET fingers after flatten and drop invalid combine_devices hint
+- **PR #4956**: feat(netlist): add repeatable --symbol-path for project-local xschem symbols
+- **PR #4942**: fix: render citation, recorded_hash and metric checks in signoff attest text output
+- **Issue #4976** (closed): klt sim: no preflight for gf180mcu instances whose total W exceeds the bin ceiling; ngspice 42/46 and batch runner abort
+- **Issue #4972** (closed): klt sim --batch-set: --max-units-per-job not applied to members; invalid members refused after others are submitted
+- **Issue #4971** (closed): klt sim --batch-set: no per-member report or request->job mapping until the whole set ends; --attach does not check the request
+- **Issue #4970** (closed): klt sim: one analysis window per request cannot serve a grid whose time scales span orders of magnitude
+- **Issue #4964** (closed): klt sim: batch job reports failed (exit 4) when all corners pass on an op-only request
+- **Issue #4962** (closed): netlist --erc: verify shorted-pin detection with real xschem (follow-up to #4953)
+- **Issue #4954** (closed): lvs: device.unmerged_fingers suggests options.combine_devices, which FinFET decks refuse
+- **Issue #4953** (closed): klt netlist: floating and shorted nets export as status=generated; no ERC option or captured xschem diagnostics
+- **Issue #4952** (closed): klt netlist: no way to add a project symbol directory to the xschem library path (batch drops XSCHEM_USER_LIBRARY_PATH)
+- **Issue #4951** (closed): lvs: subckt-call capacitor card with mf equal to m is rejected after m expansion landed
+- **Issue #4950** (closed): drc --engine klayout: no way to supply a pinned standalone KLayout from a throwaway env
+- **Issue #4949** (closed): extract/drc: PDK-instantiated nfet_10v0_asym still extracts as split nfets with floating drain; PCell trips CO.4 and DF.1a_MV
+- **Issue #4941** (closed): signoff --attest 8: text output crashes with KeyError 'value' when a citation check fails
 - **PR #4955**: feat(sim): hint stage_model_inputs when batch runner image lacks the PDK variant
 - **PR #4946**: feat(netlist): record generation inputs and surface them in --check drift
 - **PR #4943**: chore(loom): resync installed Loom to v0.19.1264
