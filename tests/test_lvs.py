@@ -12491,7 +12491,7 @@ def test_normalize_capacitor_wrong_terminal_count_fails():
 
 
 def test_normalize_capacitor_multiplicity_gt_one_rejected():
-    with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
+    with pytest.raises(NormalizeError, match="mf=2 with no m"):
         normalize_reference_netlist(
             "XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u mf=2\n", deck="sky130"
         )
@@ -12522,14 +12522,6 @@ def test_normalize_capacitor_bad_m_rejected(bad):
     with pytest.raises(NormalizeError, match="'m'|m="):
         normalize_reference_netlist(
             f"XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u m={bad}\n",
-            deck="sky130",
-        )
-
-
-def test_normalize_capacitor_m_with_mf_still_rejected():
-    with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
-        normalize_reference_netlist(
-            "XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u m=2 mf=2\n",
             deck="sky130",
         )
 
