@@ -4,6 +4,13 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-05
 
+- **PR #4955**: feat(sim): hint stage_model_inputs when batch runner image lacks the PDK variant
+- **PR #4946**: feat(netlist): record generation inputs and surface them in --check drift
+- **PR #4943**: chore(loom): resync installed Loom to v0.19.1264
+- **Issue #4948** (closed): Batch runner image: no PDK install for variant gf180mcuC (batch_job_failed, exit 1)
+- **Issue #4947** (closed): Friction: batch runner image (eda-batch-runner v10) has no gf180mcuC PDK at /opt/pdk, so every klt sim batch corner fails
+- **Issue #4945** (closed): klt netlist: --check reports drift on unmodified schematics (pd/ps dropped, comment re-wrap)
+- **Issue #4161** (closed): klt sim batch: all jobs exit 87 within seconds on the current fleet image; no runner stderr surfaced
 - **PR #4940**: refactor: move per-corner measurement-result assembly out of sim.py
 - **PR #4939**: docs: explain empty stdout and env failures in functional-verification
 - **PR #4937**: feat(signoff): repeatable --input for item 2 stream-set attestation
