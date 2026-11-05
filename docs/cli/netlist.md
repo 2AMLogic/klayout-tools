@@ -260,6 +260,22 @@ When the files match only because of this, `drift.layout_differs` is `true`. Thi
 real `.subckt`, pass `--block`, which `--check` applies before comparing
 ([Block mode](#block-mode-an-includable-subckt)).
 
+**Generation inputs are recorded** (issue #4945). A written netlist starts with
+one comment line, `** klt-netlist-inputs: {"pdk_variant": ..., "rcfile": ...,
+"xschem_version": ...}`: the xschem version, the `--rcfile` *basename* (its
+directory is checkout-specific) and the PDK variant that produced it. xschem's
+own output carries no such record, so klt writes it. `--check` excludes that
+line from the comparison and from `drift.diff`, and compares it with the
+current inputs in `drift.inputs`; `drift.reason` then says whether the inputs
+changed (tool environment) or are unchanged (the schematic or a symbol it uses
+changed). A committed netlist written before this record existed has none:
+`drift.inputs.committed` is `null` and the reason says the two causes cannot be
+told apart until it is regenerated. Nothing is normalized on device cards:
+`pd=`/`ps=` or any other token difference is still drift. Being a `**` comment,
+the line is ignorable with `--ignore-comments`. Because the line is part of the
+written file, `netlist.content_hash` / `netlist.bytes` / `netlist.lines`
+include it, in `check` mode too (what a generation would write).
+
 **Post-processed committed netlists: `--ignore-comments`** (issue #4525).
 When a project lightly post-processes the export (an added header comment, a
 rewritten `** sch_path:` line), pass `--ignore-comments` with `--check`: every
@@ -584,6 +600,7 @@ resolves its own `$PDK_ROOT`.
 | `path_comments_differ` | boolean | `true` when the files differ only in the directories of xschem's `** sch_path:` / `** sym_path:` comments, which `--check` ignores (status is then `"match"`). Additive (issue #3010). |
 | `layout_differs` | boolean | `true` when the files match only after `--check` ignored `+` continuation layout, whitespace runs, or the port order of the `**.subckt` comment line (issue #3743). Additive (issue #3324). |
 | `subckt_port_order` | array\<object\> | One `{subckt, committed, regenerated}` entry per `.subckt` card whose port set is unchanged but whose port order differs, when that is the *only* drift (typically a different xschem build). Status stays `"drifted"` (port order is the positional contract of `subckt-call` and LVS), and `reason` names the local xschem version and warns to recheck positional callers. `[]` otherwise, including a missing file or any other drift. Additive (issue #4524). |
+| `inputs` | object | `{committed, fresh, changed}` (issue #4945). `fresh` is the current `{xschem_version, rcfile, pdk_variant}`; `committed` is the record parsed from the committed netlist's `** klt-netlist-inputs:` line, or `null` for a legacy netlist or a missing file; `changed` lists the keys whose values differ (`[]` = none, `null` = no committed record to compare). `reason` quotes the changes. Additive; no `schema_version` bump. |
 | `diff` | array\<string\> | Unified diff lines, committed → regenerated. `[]` on `"match"`. Capped at 200 lines. |
 | `diff_truncated` | boolean | Whether `diff` was cut off at the cap. |
 | `reason` | string \| null | Human-readable explanation of the verdict; `null` on `"match"`. |

@@ -49,3 +49,25 @@ def test_existing_fatal_diagnostic_is_hinted_once():
     assert "runner_klt_version" in corner["diagnostics"][0]["message"]
     assert hint_existing_fatal(corner["diagnostics"]) is True  # idempotent
     assert corner["diagnostics"][0]["message"].count("runner_klt_version") == 1
+
+
+_PDK_MSG = "no supported-layout PDK install providing variant 'gf180mcuC'"
+
+
+def test_missing_pdk_variant_gains_stage_model_inputs_hint_once():
+    from klayout_tools.sim_batch_hints import hint_existing_fatal
+
+    diags = [{"code": "runner_error", "message": _PDK_MSG, "severity": "error"}]
+    assert hint_existing_fatal(diags) is False
+    assert "options.stage_model_inputs" in diags[0]["message"]
+    assert diags[0]["code"] == "runner_error"
+    hint_existing_fatal(diags)
+    assert diags[0]["message"].count("options.stage_model_inputs") == 1
+
+
+def test_unrelated_fatal_gets_no_pdk_hint():
+    from klayout_tools.sim_batch_hints import hint_existing_fatal
+
+    diags = [{"code": "ngspice_fatal", "message": "Undefined parameter [w]"}]
+    assert hint_existing_fatal(diags) is True
+    assert "stage_model_inputs" not in diags[0]["message"]
