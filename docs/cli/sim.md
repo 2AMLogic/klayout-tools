@@ -988,6 +988,12 @@ the error names the differing request field(s).
 map and submits only the `pending` shards (launched shards are never
 resubmitted).
 
+*Sibling requests need distinct `-o` directories.* A directory holds one
+`batch-shards.json`, so each sharded request needs its own `-o` directory. A
+second, different `--submit-only` request into an occupied directory is
+refused (`resume_fingerprint_mismatch`, the first map is left untouched);
+give it a distinct `-o`, or finish or attach the first request first.
+
 *Attaching one shard.* `--attach <shard job_id>` with the same request and
 `-o` dir collects only that shard (found via the `batch-shards.json` there)
 and reports just its corners; use the shard-map attach for the merged report.

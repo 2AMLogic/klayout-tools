@@ -4373,6 +4373,7 @@ class _ShardManifest:
         *,
         resume: bool,
         location: dict[str, Any] | None = None,
+        submit_only: bool = False,
     ) -> _ShardManifest:
         """Open the manifest for this run. Without ``resume`` any existing
         file is ignored (and overwritten by the first write). With ``resume``
@@ -4391,7 +4392,7 @@ class _ShardManifest:
                 data = json.load(handle)
             shards = {str(entry["index"]): dict(entry) for entry in data["shards"]}
             stored_fingerprint = data["fingerprint"]
-            stored_hosts = data["hosts"]
+            str(data["hosts"])
             if data.get("schema_version") != 1:
                 raise ValueError("unsupported schema_version")
             for entry in shards.values():
@@ -4406,14 +4407,9 @@ class _ShardManifest:
             ) from exc
         # Issue #4821: ``hosts`` is not identity; resume re-splits remaining units.
         if stored_fingerprint != fingerprint:
-            difference = _manifest_difference(
-                stored_fingerprint, fingerprint, stored_hosts, stored_hosts
-            )
-            raise SimError(
-                f"--resume: shard map {path} was written for a different "
-                f"request ({difference}); delete it or drop --resume",
-                code=BATCH_SHARD_MANIFEST_CODE,
-            )
+            from . import sim_batch_shards
+
+            raise sim_batch_shards.mismatch_error(path, data, fingerprint, submit_only)
         manifest.prior = shards
         return manifest
 
@@ -5127,6 +5123,7 @@ def _open_shard_manifest(
     resume: bool,
     config: BatchConfig,
     request_identity: dict[str, Any] | None = None,
+    submit_only: bool = False,
 ) -> _ShardManifest | None:
     """Open the run's shard map, recording where the jobs live (issue #3896);
     ``None`` when the request has no fingerprint to key it by."""
@@ -5137,6 +5134,7 @@ def _open_shard_manifest(
         shard_fingerprint,
         hosts,
         resume=resume,
+        submit_only=submit_only,
         location={
             "jobs_prefix": getattr(config, "jobs_prefix", None),
             "region": getattr(config, "region", None),
@@ -5733,6 +5731,7 @@ def _submit_batch_shards(
         resume=True,
         config=config,
         request_identity=request_identity,
+        submit_only=True,
     )
     assert manifest is not None
     shards = _shard_corner_points(corner_points, hosts)
