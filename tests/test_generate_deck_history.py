@@ -237,3 +237,29 @@ def test_version_regex_reads_both_pyproject_version_styles():
     assert module._VERSION_RE.search(dynamic).group(1) == "0.8.0"
     real = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text("utf-8")
     assert module._VERSION_RE.search(real) is not None
+
+
+def test_as_release_entries_match_real_tag_modulo_git_commit(tmp_path, monkeypatch):
+    """The release PR records HEAD as a pseudo-tag; after tagging, the real-tag
+    entries must be identical except ``git_commit`` (null while pending, since
+    amend/squash change the sha), so the tag job's reconciliation can pass."""
+    repo = _make_repo(tmp_path)
+    decks_dir = repo / "src" / "klayout_tools" / "decks"
+    _write_pyproject(repo, "0.1.0")
+    (decks_dir / "sky130.py").write_text("DECK_A = 1\n")
+    _commit(repo, "v0.1.0")
+    _write_pyproject(repo, "0.2.0")
+    (decks_dir / "sky130.py").write_text("DECK_B = 2\n")
+    _commit(repo, None)
+    monkeypatch.setattr(gdh, "REPO_ROOT", repo)
+    monkeypatch.setitem(gdh._PSEUDO_TAGS, "v0.2.0", "HEAD")
+
+    pending = [e for e in gdh.build_entries() if e["git_tag"] == "v0.2.0"]
+    gdh._PSEUDO_TAGS.clear()
+    _git("tag", "v0.2.0", cwd=repo)
+    real = [e for e in gdh.build_entries() if e["git_tag"] == "v0.2.0"]
+
+    assert pending and all(e["git_commit"] is None for e in pending)
+    assert all(e["git_commit"] for e in real)
+    strip = lambda es: [{k: v for k, v in e.items() if k != "git_commit"} for e in es]  # noqa: E731
+    assert strip(pending) == strip(real)

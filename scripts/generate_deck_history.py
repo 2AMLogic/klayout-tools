@@ -137,7 +137,11 @@ def _package_version_at(tag: str) -> str:
     return match.group(1)
 
 
-def _commit_sha(tag: str) -> str:
+def _commit_sha(tag: str) -> str | None:
+    # A pseudo-tag's commit is unknowable pre-merge (amend/squash change the
+    # sha), so record null rather than a sha that never lands on any branch.
+    if tag in _PSEUDO_TAGS:
+        return None
     return _run("git", "rev-list", "-n", "1", _ref(tag)).strip()
 
 

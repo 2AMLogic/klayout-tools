@@ -185,8 +185,9 @@ depending on someone remembering. Design decisions:
 - **Deck history (old step 5)** is regenerated *in the release PR* with
   `--as-release`, so no push to `main` is needed;
   `tests/test_deck_history.py` accepts exactly the pending `base-version` tag
-  ahead of `git tag`. The entry's `git_commit` is the PR head. After tagging the
-  job regenerates against the real tag and files an issue if the table differs.
+  ahead of `git tag`. The pending entry's `git_commit` is `null` (the sha is unknowable before
+  merge). After tagging the job regenerates against the real tag and files an
+  issue if the table differs in anything other than `git_commit`.
 - **Gates fail loudly, once.** `scripts/check_native_extras.py` runs before the
   PR is opened and again before tagging; if a `klt-*-native` pin is unpublished
   the job files (or refreshes in place) a single "Automated release blocked"

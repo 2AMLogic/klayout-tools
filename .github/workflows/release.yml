@@ -233,8 +233,21 @@ jobs:
       - name: Deck history must match the real tag
         if: steps.native.outputs.ok == 'true'
         run: |
+          h=src/klayout_tools/decks/_history.json
+          git show "HEAD:$h" > "$RUNNER_TEMP/history.before.json"
           python3 scripts/generate_deck_history.py
-          if ! git diff --quiet -- src/klayout_tools/decks/_history.json; then
+          # git_commit is null for the pending tag in the release PR (its sha
+          # is unknowable pre-merge), so compare everything else.
+          if ! python3 - "$RUNNER_TEMP/history.before.json" "$h" <<'PY'
+          import json, sys
+          def load(p):
+              d = json.load(open(p))
+              for e in d["entries"]:
+                  e.pop("git_commit", None)
+              return d
+          sys.exit(0 if load(sys.argv[1]) == load(sys.argv[2]) else 1)
+          PY
+          then
             title="Deck history stale after ${{ steps.detect.outputs.version }}"
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
               --body "Regenerating after tagging differs from the release PR's table (a deck changed between PR head and merge). Run \`python scripts/generate_deck_history.py\` and commit. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
