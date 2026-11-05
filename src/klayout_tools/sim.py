@@ -5988,33 +5988,6 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
     return points
 
 
-def _parse_supply_waveforms(
-    corners_spec: dict[str, Any], supply_spec: dict[str, list[float]]
-) -> tuple[str, ...]:
-    """Validate ``corners.supply_waveforms`` (issue #2902): an array of
-    ``corners.supply_v`` keys whose PWL/PULSE source is scaled per corner."""
-    raw = corners_spec.get("supply_waveforms")
-    if raw is None:
-        return ()
-    if (
-        not isinstance(raw, list)
-        or not all(isinstance(n, str) and n.strip() for n in raw)
-        or len(set(raw)) != len(raw)
-    ):
-        raise SimError(
-            "corners.supply_waveforms must be an array of unique "
-            "corners.supply_v source names"
-        )
-    stray = [n for n in raw if n not in supply_spec]
-    if stray:
-        raise SimError(
-            f"corners.supply_waveforms names {stray!r}, which "
-            "corners.supply_v does not sweep: every entry must also be a "
-            "corners.supply_v key"
-        )
-    return tuple(raw)
-
-
 def _expand_corners(
     corners_spec: dict[str, Any], exclude_spec: list[dict[str, Any]]
 ) -> list[CornerPoint]:
@@ -6060,7 +6033,9 @@ def _expand_corners(
     else:
         supply_points = [{}]
 
-    supply_waveforms = _parse_supply_waveforms(corners_spec, supply_spec)
+    supply_waveforms = sim_supply_waveform.parse_supply_waveforms(
+        corners_spec, supply_spec, SimError
+    )
     temperatures: list[float] = corners_spec.get("temperature_c") or [27]
 
     variants = _parse_variants(corners_spec.get("variants"))
@@ -6192,10 +6167,17 @@ def _expand_corner_units(
     if not isinstance(units, list) or not units:
         raise SimError("corners.units must be a non-empty array of objects")
 
+    supply_waveforms = sim_supply_waveform.parse_supply_waveforms(
+        corners_spec, {}, SimError, units_mode=True
+    )
     points: list[CornerPoint] = []
     seen: dict[str, int] = {}
     for index, record in enumerate(units):
         point = _parse_corner_unit(record, f"corners.units[{index}]")
+        sim_supply_waveform.require_unit_keys(
+            supply_waveforms, point.supply_v, index, SimError
+        )
+        point.supply_waveforms = supply_waveforms
         corner_id = point.corner_id
         if corner_id in seen:
             raise SimError(

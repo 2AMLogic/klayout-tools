@@ -202,3 +202,55 @@ def scale_netlist(
     for first, last, card in sorted(edits, reverse=True):
         lines[first : last + 1] = [card]
     return "\n".join(lines), disclosure
+
+
+def parse_supply_waveforms(
+    corners_spec: dict[str, Any],
+    supply_spec: dict[str, list[float]],
+    error_cls: type[Exception],
+    *,
+    units_mode: bool = False,
+) -> tuple[str, ...]:
+    """Validate ``corners.supply_waveforms`` (issue #2902): an array of
+    ``corners.supply_v`` keys whose PWL/PULSE source is scaled per corner.
+
+    With ``units_mode`` (``corners.units``, issue #4981) only the shape is
+    checked here; each unit's ``supply_v`` is checked by
+    :func:`require_unit_keys`."""
+    raw = corners_spec.get("supply_waveforms")
+    if raw is None:
+        return ()
+    if (
+        not isinstance(raw, list)
+        or not all(isinstance(n, str) and n.strip() for n in raw)
+        or len(set(raw)) != len(raw)
+    ):
+        raise error_cls(
+            "corners.supply_waveforms must be an array of unique "
+            "corners.supply_v source names"
+        )
+    stray = [n for n in raw if n not in supply_spec]
+    if stray and not units_mode:
+        raise error_cls(
+            f"corners.supply_waveforms names {stray!r}, which "
+            "corners.supply_v does not sweep: every entry must also be a "
+            "corners.supply_v key"
+        )
+    return tuple(raw)
+
+
+def require_unit_keys(
+    names: tuple[str, ...],
+    unit_supply_v: dict[str, Any],
+    index: int,
+    error_cls: type[Exception],
+) -> None:
+    """``corners.units`` mode: every ``supply_waveforms`` entry must be a
+    ``supply_v`` key of unit ``index``."""
+    missing = [n for n in names if n not in unit_supply_v]
+    if missing:
+        raise error_cls(
+            f"corners.supply_waveforms names {missing!r}, which "
+            f"corners.units[{index}].supply_v does not set: with "
+            "corners.units every entry must be a supply_v key of every unit"
+        )
