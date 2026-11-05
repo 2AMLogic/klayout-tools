@@ -433,7 +433,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 7306
+      "lines": 7300
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -441,7 +441,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_finfet.py",
-      "lines": 546
+      "lines": 538
     },
     {
       "path": "src/klayout_tools/lvs_gate_level.py",
@@ -449,7 +449,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_mismatch.py",
-      "lines": 2568
+      "lines": 2423
     },
     {
       "path": "src/klayout_tools/lvs_netgen.py",

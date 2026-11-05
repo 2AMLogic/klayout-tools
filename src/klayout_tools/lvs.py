@@ -180,13 +180,13 @@ from .lvs_combine import (
 from .lvs_finfet import (
     apply_finfet_bulk_hierarchy,
     bulk_disclosures,
-    combine_layout_fingers,
     finfet_bulk_replay_options,
     prepare_finfet_comparison,
     prepare_finfet_request,
     reference_reader,
     sliced_reference_file,
 )
+from .lvs_finfet_flatten import flatten_layout_netlist
 from .lvs_gate_level import (
     _apply_gate_level_port_aliases,
     _boundary_supply_nets,  # noqa: F401
@@ -1504,12 +1504,7 @@ def run_lvs(
         layout_netlist, layout_spec, finfet_layout, finfet_bulk
     )
     if flatten_layout:
-        layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
-        if layout_flatten_warning is not None:
-            flatten_warnings.append(layout_flatten_warning)
-        # Issue #4954: re-merge exactly-parallel FinFET fingers the flatten
-        # brought together (no-op for a planar layout).
-        combine_layout_fingers(layout_netlist, finfet_layout)
+        flatten_layout_netlist(layout_netlist, finfet_layout, flatten_warnings)
 
     reference_netlist_path = _require_path(
         reference_spec, "netlist", "reference", request_dir
@@ -2370,7 +2365,6 @@ def run_lvs(
             # finding attributed through `details.declared_constant_net`.
             constant_bindings=constant_bindings,
             excluded_parameters=excluded_parameters,
-            finfet=finfet_layout,
         )
         # Issue #4165: after a timeout nothing the (empty) logger produced
         # describes the design; report only the timeout.
