@@ -3040,7 +3040,7 @@ _VERILOG_TOP_REJECTED_OPTIONS = (
 )
 
 
-def _verilog_top_fields(testbench: dict[str, Any]) -> dict[str, str | None]:
+def _verilog_top_fields(testbench: dict[str, Any]) -> dict[str, Any]:
     """Shape-check the ``verilog_top`` testbench fields."""
     if "module" in testbench:
         raise FunctionalVerificationError(
@@ -3048,7 +3048,9 @@ def _verilog_top_fields(testbench: dict[str, Any]) -> dict[str, str | None]:
             "'verilog_top' (Verilog bench), not both"
         )
     unknown = sorted(
-        set(testbench) - set(VERILOG_TOP_FIELDS) - {"search_path", "testcase"}
+        set(testbench)
+        - set(VERILOG_TOP_FIELDS)
+        - {"search_path", "testcase", "plusargs"}
     )
     if unknown:
         raise FunctionalVerificationError(
@@ -3061,7 +3063,7 @@ def _verilog_top_fields(testbench: dict[str, Any]) -> dict[str, str | None]:
                 f"request.testbench.{cocotb_only} applies to a cocotb "
                 "testbench and cannot be combined with verilog_top"
             )
-    resolved: dict[str, str | None] = {}
+    resolved: dict[str, Any] = {}
     for name in VERILOG_TOP_FIELDS:
         value = testbench.get(name)
         if value is None and name == "verilog_top":
@@ -3073,7 +3075,30 @@ def _verilog_top_fields(testbench: dict[str, Any]) -> dict[str, str | None]:
                 f"request.testbench.{name} must be a non-empty string when given"
             )
         resolved[name] = value
+    resolved["plusargs"] = _verilog_top_plusargs(testbench.get("plusargs"))
     return resolved
+
+
+def _verilog_top_plusargs(value: Any) -> list[str]:
+    """``testbench.plusargs`` (issue #5006): ``+name[=value]`` strings appended
+    verbatim to the ``vvp`` argv. Absent means ``[]``."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise FunctionalVerificationError(
+            "request.testbench.plusargs must be an array of strings"
+        )
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item:
+            raise FunctionalVerificationError(
+                f"request.testbench.plusargs[{index}] must be a non-empty string"
+            )
+        if not item.startswith("+"):
+            raise FunctionalVerificationError(
+                f"request.testbench.plusargs[{index}] must start with '+' "
+                f"(a vvp plusarg) -- got {item!r}"
+            )
+    return list(value)
 
 
 def _reject_verilog_top_options(engine: str, options: Any) -> None:
@@ -3108,13 +3133,13 @@ def _require_module_declared(top: str, sources: list[str]) -> None:
 
 def _resolve_verilog_top(
     testbench: Any, sources: list[str], engine: str, options: Any
-) -> dict[str, str | None] | None:
+) -> dict[str, Any] | None:
     """Validate the Verilog-bench form of ``request.testbench`` (issue #4083).
 
     Returns ``None`` when ``testbench.verilog_top`` is absent (the ordinary
     cocotb path), else ``{"verilog_top", "pass_marker", "fail_marker",
-    "dut_instance"}``. ``testbench.module`` and ``testbench.verilog_top`` are
-    mutually exclusive. The bench's verdict is derived without cocotb (see
+    "dut_instance", "plusargs"}``. ``testbench.module`` and
+    ``testbench.verilog_top`` are mutually exclusive. The bench's verdict is derived without cocotb (see
     :func:`_run_verilog_top`), so every option that needs cocotb is rejected
     here rather than silently ignored.
     """
@@ -3129,7 +3154,7 @@ def _resolve_verilog_top(
 
 
 def _resolve_testbench_target(
-    verilog_tb: dict[str, str | None] | None, testbench: Any, request_dir: str
+    verilog_tb: dict[str, Any] | None, testbench: Any, request_dir: str
 ) -> tuple[str, str, str | list[str] | None]:
     """``(module, module_dir, testcase)`` for either testbench form."""
     if verilog_tb is None:
@@ -3140,7 +3165,7 @@ def _resolve_testbench_target(
 
 
 def _sdf_annotate_scope(
-    verilog_tb: dict[str, str | None] | None, sdf_scope: str | None = None
+    verilog_tb: dict[str, Any] | None, sdf_scope: str | None = None
 ) -> str:
     """Hierarchical scope the generated ``$sdf_annotate`` shim targets;
     ``options.sdf.scope`` (issue #4521) descends further below the DUT."""
@@ -3153,7 +3178,7 @@ def _sdf_annotate_scope(
 
 
 def _sdf_extend_sources(
-    verilog_tb: dict[str, str | None] | None,
+    verilog_tb: dict[str, Any] | None,
     sources: list[str],
     *,
     wrapper_path: str,
@@ -3182,7 +3207,7 @@ def _sdf_extend_sources(
 
 
 def _check_verilog_top_sdf(
-    verilog_tb: dict[str, str | None] | None, sdf: Any, parameters: Any
+    verilog_tb: dict[str, Any] | None, sdf: Any, parameters: Any
 ) -> None:
     """``testbench.dut_instance`` is the SDF scope, so it is required with
     ``options.sdf`` and meaningless without it. ``request.parameters`` is
@@ -3252,7 +3277,7 @@ def _verilog_top_error(
 
 
 def _run_verilog_top(
-    verilog_tb: dict[str, str | None],
+    verilog_tb: dict[str, Any],
     *,
     engine: str,
     hdl_toplevel: str,
@@ -3284,6 +3309,7 @@ def _run_verilog_top(
     top = verilog_tb["verilog_top"]
     pass_marker = verilog_tb["pass_marker"]
     fail_marker = verilog_tb["fail_marker"]
+    plusargs: list[str] = verilog_tb["plusargs"]
     assert top is not None
 
     os.makedirs(build_dir, exist_ok=True)
@@ -3311,7 +3337,7 @@ def _run_verilog_top(
     try:
         with open(test_log, "w", encoding="utf-8") as handle:
             ran = subprocess.run(
-                ["vvp", vvp_path],
+                ["vvp", vvp_path, *plusargs],
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 cwd=build_dir,
@@ -3363,6 +3389,9 @@ def _run_verilog_top(
                 "build_log": _hashed_path_envelope(build_log),
                 "random_seed": None,
                 "source_defines": source_defines,
+                # Additive (issue #5006): `testbench.plusargs` as given; `[]`
+                # when absent. Echoed verbatim -- never put credentials in it.
+                "plusargs": plusargs,
                 "initial_state": None,
                 "sdf": (
                     None
