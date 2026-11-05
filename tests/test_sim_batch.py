@@ -6767,23 +6767,51 @@ def test_max_units_per_job_at_or_under_the_ceiling_limit_is_accepted(
     assert max(shard_sizes) <= cap
 
 
-def test_max_units_per_job_over_the_ceiling_limit_is_rejected_before_s3(
-    tmp_path, monkeypatch
+def test_max_units_per_job_over_the_ceiling_limit_is_honored_with_warning(
+    tmp_path, monkeypatch, capsys
 ):
-    runner = _FakeRunner()
-    with pytest.raises(sim.SimError) as excinfo:
-        _run_one_batch(
-            tmp_path,
-            monkeypatch,
-            runner,
-            units=63,
-            timeout_s=120.0,
-            max_units_per_job=40,  # 120 x 40 + 120 > 3600
-        )
+    """Issue #4982: the ceiling bound is a serial upper bound, so an explicit
+    cap whose shards exceed it is honored (and warned about), not refused."""
+    runner, shard_sizes = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
 
-    assert runner.calls == []
-    assert excinfo.value.code == sb.BATCH_MAX_UNITS_CODE
-    assert "at most 29" in str(excinfo.value)
+    sb._run_batch(
+        corner_points=_corner_points(63),
+        netlist_path=str(_write_body(tmp_path)),
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=_measurements_spec(),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        max_workers=None,
+        request=_ceiling_request(
+            tmp_path, max_units_per_job=40
+        ),  # 120 x 32 + 120 > 3600
+    )
+
+    assert sorted(shard_sizes) == [31, 32]
+    err = capsys.readouterr().err
+    assert "serial upper bound" in err
+    assert "max_units_per_job 40" in err
+
+
+def test_plan_job_split_250_units_cap_150_with_3000s_timeout(capsys):
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(
+        max_job_seconds=3600.0,
+        max_job_seconds_source="default",
+        job_ceiling_check="warn",
+        max_units_per_job=150,
+    )
+    assessment = sb._assess_job_ceiling(
+        unit_count=250, per_unit_timeout_s=3000.0, config=config
+    )
+    assert assessment["max_units_per_job"] == 1
+    assert sb._plan_job_split(assessment, config) == 2  # 2 shards of 125
+    assert "serial upper bound" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("bad", [0, -3, 2.5, "8", True])

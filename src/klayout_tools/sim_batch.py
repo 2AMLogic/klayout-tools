@@ -2463,8 +2463,8 @@ def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
     :class:`~klayout_tools.sim.SimError` before any S3 write when no split
     can keep every job inside the ceiling: code
     :data:`BATCH_JOB_CEILING_CODE` when even one unit exceeds it (lower
-    ``options.timeout_s``), :data:`BATCH_MAX_UNITS_CODE` when the requested
-    cap leaves a shard over it.
+    ``options.timeout_s``). An explicit cap whose shards exceed the (serial
+    upper-bound) ceiling is honored with a stderr warning (issue #4982).
     """
     from .sim import SimError
 
@@ -2482,15 +2482,23 @@ def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
     hosts = math.ceil(units / cap)
     largest = math.ceil(units / hosts)
     if largest > per_job:
-        raise SimError(
-            f"request.batch.max_units_per_job {requested} leaves a job of "
-            f"{largest} units, over the {per_job}-unit limit the fleet's "
-            f"{assessment['max_job_seconds']:g}s whole-job ceiling allows at "
-            f"options.timeout_s {assessment['per_unit_timeout_s']:g}s "
-            "(max_units_per_job = floor((max_job_seconds - 120) / "
-            f"options.timeout_s)); use at most {per_job}, or omit the cap and "
-            'set job_ceiling_check to "split"',
-            code=BATCH_MAX_UNITS_CODE,
+        # An explicit cap is the caller's call: the ceiling bound is a
+        # fully-serial upper bound, and the harness only kills a job that
+        # actually runs past the ceiling (issue #4982). Warn, don't refuse.
+        shard_bound = _default_batch_job_timeout_s(
+            largest, assessment["per_unit_timeout_s"]
+        )
+        print(
+            f"klt sim: warning: request.batch.max_units_per_job {requested} "
+            f"leaves jobs of {largest} units, whose bound "
+            f"{shard_bound:g}s (options.timeout_s "
+            f"{assessment['per_unit_timeout_s']:g}s x {largest} units + "
+            f"{_BATCH_JOB_OVERHEAD_S:g}s; a conservative fully-serial upper "
+            "bound, not a runtime estimate) exceeds the fleet's whole-job "
+            f"ceiling of {assessment['max_job_seconds']:g}s; a job still "
+            "running at the ceiling is killed and every unit is reported "
+            "batch_job_timeout",
+            file=sys.stderr,
         )
     return hosts
 

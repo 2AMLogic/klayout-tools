@@ -14,6 +14,7 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` honors an explicit `--max-units-per-job` over the ceiling bound** (issue #4982): the whole-job ceiling bound (`timeout_s x units + 120`) is a serial upper bound, so a cap whose shards exceed it is no longer rejected with `batch_max_units_per_job_invalid`; it is honored with a stderr warning. Non-positive caps, `enforce` combos and a single unit over the ceiling still fail as before.
 - **Automated releases** (issue #4920, design in
   [`RELEASING.md`](RELEASING.md) "Automated release"): `release.yml` opens a
   weekly `chore(release)` PR when `main` is over the commit backstop, tags the

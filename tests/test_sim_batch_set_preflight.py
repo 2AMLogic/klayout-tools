@@ -70,7 +70,6 @@ def test_bad_member_blocks_every_submission_and_all_failures_named(
 
 def test_cli_override_is_applied_to_each_member_at_preflight(tmp_path, monkeypatch):
     from klayout_tools import sim_set
-    from klayout_tools.sim import SimError
 
     _write_body(tmp_path)
     calls = []
@@ -81,19 +80,12 @@ def test_cli_override_is_applied_to_each_member_at_preflight(tmp_path, monkeypat
 
     _patch_set_run(monkeypatch, fake_run)
     # The member's own max_units_per_job=3 x 100s = 300s exceeds the 250s
-    # ceiling (per-job bound invalid); the CLI override of 1 unit/job fits.
+    # ceiling, but the serial bound is advisory (#4982): the cap is honored,
+    # so preflight accepts it; the CLI override of 1 unit/job also fits.
     path = _member(
         tmp_path, "big", timeout_s=100, max_job_seconds=250, check="warn",
         max_units_per_job=3,
     )  # fmt: skip
-    with pytest.raises(SimError, match="batch_max_units_per_job_invalid"):
-        sim_set.run_sim_set(
-            [path],
-            outdir=str(tmp_path / "o1"),
-            preflight=sim_set.preflight_batch_request,
-        )
-    assert calls == []
-
     report = sim_set.run_sim_set(
         [path],
         outdir=str(tmp_path / "o2"),
