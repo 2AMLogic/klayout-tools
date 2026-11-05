@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -586,11 +587,77 @@ def _subckt_port_order_drift(
     return entries
 
 
+#: Comment line :func:`run_netlist` prepends to a written netlist (issue #4945)
+#: recording the tool inputs that generated it, so ``--check`` can tell a
+#: tool-environment change from a schematic change. A ``**`` comment, so it is
+#: inert to SPICE and ignorable with ``--ignore-comments``.
+INPUTS_RECORD_PREFIX = b"** klt-netlist-inputs: "
+_INPUTS_RECORD_RE = re.compile(rb"^\*\* klt-netlist-inputs: (.*?)\r?\n", re.MULTILINE)
+
+
+def _generation_inputs(
+    version: str | None, rcfile: str | None, pdk_block: dict[str, Any] | None
+) -> dict[str, str | None]:
+    """The host-independent inputs that shape xschem's output: the xschem
+    version, the xschemrc *basename* (its directory is checkout-specific) and
+    the PDK variant."""
+    return {
+        "xschem_version": version,
+        "rcfile": os.path.basename(rcfile) if rcfile else None,
+        "pdk_variant": pdk_block["variant"] if pdk_block is not None else None,
+    }
+
+
+def _inputs_record_line(inputs: dict[str, str | None]) -> bytes:
+    return INPUTS_RECORD_PREFIX + json.dumps(inputs, sort_keys=True).encode() + b"\n"
+
+
+def _split_inputs_record(data: bytes) -> tuple[bytes, dict[str, Any] | None]:
+    """``data`` without its inputs-record line, plus the parsed record
+    (``None`` for a legacy netlist, or one whose record is unparseable)."""
+    match = _INPUTS_RECORD_RE.search(data)
+    if match is None:
+        return data, None
+    stripped = data[: match.start()] + data[match.end() :]
+    try:
+        record = json.loads(match.group(1))
+    except ValueError:
+        return stripped, None
+    return stripped, record if isinstance(record, dict) else None
+
+
+def _inputs_drift(
+    committed: dict[str, Any] | None, fresh: dict[str, str | None]
+) -> tuple[dict[str, Any], str]:
+    """The ``drift.inputs`` block and the sentence appended to ``reason``."""
+    if committed is None:
+        return (
+            {"committed": None, "fresh": fresh, "changed": None},
+            "the committed netlist records no generation inputs (written "
+            "before klt recorded them), so a tool-environment change cannot "
+            "be told from a schematic change -- re-run without --check to "
+            "write the record",
+        )
+    changed = sorted(k for k in fresh if committed.get(k) != fresh[k])
+    block = {"committed": committed, "fresh": fresh, "changed": changed}
+    if not changed:
+        return block, (
+            "the recorded generation inputs are unchanged, so the schematic "
+            "(or a symbol it uses) changed"
+        )
+    detail = ", ".join(f"{k}: {committed.get(k)} -> {fresh[k]}" for k in changed)
+    return block, (
+        f"the generation inputs changed since the committed netlist was "
+        f"written ({detail}), which may explain the drift"
+    )
+
+
 def _check_result(
     output: str,
     fresh_data: bytes,
     ignore_comments: bool = False,
     xschem_version: str | None = None,
+    inputs: dict[str, str | None] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """``check=True``'s verdict: does the committed netlist at ``output``
     still match what the schematics produce?
@@ -620,6 +687,11 @@ def _check_result(
     ``.subckt`` cards, ``subckt_port_order`` names them and ``reason`` says so
     (issue #4524); the status stays ``"drifted"``. ``xschem_version`` is the
     local xschem's version, quoted in that reason.
+
+    ``inputs`` (issue #4945) are the fresh generation inputs; the committed
+    side's record is the ``** klt-netlist-inputs:`` line :func:`run_netlist`
+    wrote, which is excluded from the comparison. ``drift.inputs`` compares
+    the two and ``reason`` says whether they changed.
     """
     if not os.path.isfile(output):
         return STATUS_DRIFTED, {
@@ -633,17 +705,20 @@ def _check_result(
             "diff": [],
             "diff_truncated": False,
             "reason": "no committed netlist at the output path",
+            "inputs": {"committed": None, "fresh": inputs, "changed": None},
         }
 
     with open(output, "rb") as handle:
-        committed = handle.read()
+        committed_raw = handle.read()
+    committed, record = _split_inputs_record(committed_raw)
+    inputs_block, inputs_reason = _inputs_drift(record, inputs or {})
     committed_paths = _normalize_path_comments(committed)
     fresh_paths = _normalize_path_comments(fresh_data)
     if _normalize_layout(committed_paths) == _normalize_layout(fresh_paths):
         return STATUS_MATCH, {
             "committed_present": True,
-            "committed_bytes": len(committed),
-            "committed_content_hash": _sha256_file_hash(committed),
+            "committed_bytes": len(committed_raw),
+            "committed_content_hash": _sha256_file_hash(committed_raw),
             "path_comments_differ": _normalize_layout(committed)
             != _normalize_layout(fresh_data),
             "layout_differs": committed_paths != fresh_paths,
@@ -652,6 +727,7 @@ def _check_result(
             "diff": [],
             "diff_truncated": False,
             "reason": None,
+            "inputs": inputs_block,
         }
 
     if ignore_comments and _normalize_layout(committed, True) == _normalize_layout(
@@ -659,8 +735,8 @@ def _check_result(
     ):
         return STATUS_MATCH, {
             "committed_present": True,
-            "committed_bytes": len(committed),
-            "committed_content_hash": _sha256_file_hash(committed),
+            "committed_bytes": len(committed_raw),
+            "committed_content_hash": _sha256_file_hash(committed_raw),
             "path_comments_differ": False,
             "layout_differs": False,
             "comments_differ": True,
@@ -668,6 +744,7 @@ def _check_result(
             "diff": [],
             "diff_truncated": False,
             "reason": None,
+            "inputs": inputs_block,
         }
 
     diff, truncated = _unified_diff(committed, fresh_data, output)
@@ -681,15 +758,17 @@ def _check_result(
             "positional subckt-call callers and LVS references before "
             "re-running without --check to refresh it"
         )
+        reason += f"; {inputs_reason}"
     else:
         reason = (
             "the committed netlist differs from the one the schematics "
             "produce now -- re-run without --check to refresh it"
         )
+        reason += f"; {inputs_reason}"
     return STATUS_DRIFTED, {
         "committed_present": True,
-        "committed_bytes": len(committed),
-        "committed_content_hash": _sha256_file_hash(committed),
+        "committed_bytes": len(committed_raw),
+        "committed_content_hash": _sha256_file_hash(committed_raw),
         "path_comments_differ": False,
         "layout_differs": False,
         "comments_differ": False,
@@ -697,6 +776,7 @@ def _check_result(
         "diff": diff,
         "diff_truncated": truncated,
         "reason": reason,
+        "inputs": inputs_block,
     }
 
 
@@ -1204,18 +1284,24 @@ def run_netlist(
         if warnings:
             payload["warnings"] = warnings
 
+        inputs = _generation_inputs(version, rcfile, pdk_block)
+        written_data = _inputs_record_line(inputs) + fresh_data
         if check:
             status, drift = _check_result(
-                output, fresh_data, ignore_comments, xschem_version=version
+                output,
+                fresh_data,
+                ignore_comments,
+                xschem_version=version,
+                inputs=inputs,
             )
             payload["status"] = status
-            payload["netlist"] = _netlist_block(None, fresh_data)
+            payload["netlist"] = _netlist_block(None, written_data)
             payload["drift"] = drift
             return payload
 
-        _write_output(output, fresh_data)
+        _write_output(output, written_data)
         payload["status"] = STATUS_GENERATED
-        payload["netlist"] = _netlist_block(output, fresh_data)
+        payload["netlist"] = _netlist_block(output, written_data)
         return payload
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
