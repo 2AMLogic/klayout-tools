@@ -213,6 +213,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
@@ -1019,22 +1020,11 @@ class _Report(dict):
 
 
 def _path_envelope(path: str | None) -> dict[str, Any]:
-    """``path`` as the committable ``{path, scope}`` shape, relative to the
-    repo the process was invoked from (never the absolute host path)."""
+    """``path`` as the committable ``{path, scope}`` shape (never absolute)."""
     root = find_repo_root()
     if path is not None and root is None:
         return {"path": None, "scope": "external"}
     return repo_relative_path(path, repo_root=root)
-
-
-def _hashed_path_envelope(path: str | None) -> dict[str, Any]:
-    """``_path_envelope`` plus ``sha256`` (issue #4931): the ``sha256:``-prefixed
-    digest of the file as it stands now, or ``None`` when it was not produced.
-    Call after the producing process has closed the file."""
-    envelope = _path_envelope(path)
-    digest = sha256_file(path)
-    envelope["sha256"] = None if digest is None else f"sha256:{digest}"
-    return envelope
 
 
 def _initial_state_run_specs(
