@@ -48,7 +48,7 @@ from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
 from ..sim import SimError, load_request, run_sim
 from ..sim_batch_async import read_job_status
-from ..sim_set import DEFAULT_MAX_IN_FLIGHT, run_sim_set
+from ..sim_set import DEFAULT_MAX_IN_FLIGHT, run_sim_set, shard_text_lines
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
@@ -343,12 +343,7 @@ def _print_set_text(report: dict) -> None:
         error = entry["error"]
         if error:
             line += f"  {error['code'] or 'error'}: {error['message']}"
-        print(line)
-        for shard in entry.get("shards") or ():
-            print(
-                f"    shard {shard['job_id']}: {shard['last_state']}  "
-                f"interrupted_observations={shard['interrupted_observations']}"
-            )
+        print("\n".join([line, *shard_text_lines(entry)]))
 
 
 def _run_op_lint(args: argparse.Namespace) -> int:

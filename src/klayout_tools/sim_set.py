@@ -98,6 +98,15 @@ def _job_ids(report: dict[str, Any]) -> list[str]:
     return [b["job_id"] for b in blocks if isinstance(b, dict) and b.get("job_id")]
 
 
+def shard_text_lines(entry: dict[str, Any]) -> list[str]:
+    """Text-mode per-shard summary lines for one request entry."""
+    return [
+        f"    shard {sh['job_id']}: {sh['last_state']}  "
+        f"interrupted_observations={sh['interrupted_observations']}"
+        for sh in entry.get("shards") or ()
+    ]
+
+
 def _entry_exit_code(status: str) -> int:
     """The exit code a single ``klt sim`` would have returned for ``status``."""
     if status in {"error", "not_checked", "inconclusive"}:
