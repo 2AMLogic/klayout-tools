@@ -51,7 +51,7 @@ scope-narrowing comment, 2026-10-01) are both now addressed, via #2680:
    the export: the first commented ``.subckt``/``.ends`` pair is uncommented
    and the trailing ``.end`` is dropped, so the result is directly
    ``.include``able without a duplicate ``.end`` terminating the including
-   deck early (:func:`_apply_block_mode`).
+   deck early (:func:`apply_block_mode`).
 5. **PDK-root disagreement between the schematic and simulation sides is
    silent** (edge #3). Addressed as a *consistency check*, not
    auto-generation: ``--pdk``/``--pdk-root`` resolve through
@@ -65,7 +65,6 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -76,6 +75,13 @@ import time
 from typing import Any
 
 from . import pdk as pdk_module
+from .netlist_block import apply_block_mode, space_separate_subckt_ports
+from .netlist_inputs import (
+    generation_inputs,
+    inputs_drift,
+    inputs_record_line,
+    split_inputs_record,
+)
 
 #: Payload schema version (``docs/json-contract.md``; versioned per command).
 SCHEMA_VERSION = 1
@@ -587,71 +593,6 @@ def _subckt_port_order_drift(
     return entries
 
 
-#: Comment line :func:`run_netlist` prepends to a written netlist (issue #4945)
-#: recording the tool inputs that generated it, so ``--check`` can tell a
-#: tool-environment change from a schematic change. A ``**`` comment, so it is
-#: inert to SPICE and ignorable with ``--ignore-comments``.
-INPUTS_RECORD_PREFIX = b"** klt-netlist-inputs: "
-_INPUTS_RECORD_RE = re.compile(rb"^\*\* klt-netlist-inputs: (.*?)\r?\n", re.MULTILINE)
-
-
-def _generation_inputs(
-    version: str | None, rcfile: str | None, pdk_block: dict[str, Any] | None
-) -> dict[str, str | None]:
-    """The host-independent inputs that shape xschem's output: the xschem
-    version, the xschemrc *basename* (its directory is checkout-specific) and
-    the PDK variant."""
-    return {
-        "xschem_version": version,
-        "rcfile": os.path.basename(rcfile) if rcfile else None,
-        "pdk_variant": pdk_block["variant"] if pdk_block is not None else None,
-    }
-
-
-def _inputs_record_line(inputs: dict[str, str | None]) -> bytes:
-    return INPUTS_RECORD_PREFIX + json.dumps(inputs, sort_keys=True).encode() + b"\n"
-
-
-def _split_inputs_record(data: bytes) -> tuple[bytes, dict[str, Any] | None]:
-    """``data`` without its inputs-record line, plus the parsed record
-    (``None`` for a legacy netlist, or one whose record is unparseable)."""
-    match = _INPUTS_RECORD_RE.search(data)
-    if match is None:
-        return data, None
-    stripped = data[: match.start()] + data[match.end() :]
-    try:
-        record = json.loads(match.group(1))
-    except ValueError:
-        return stripped, None
-    return stripped, record if isinstance(record, dict) else None
-
-
-def _inputs_drift(
-    committed: dict[str, Any] | None, fresh: dict[str, str | None]
-) -> tuple[dict[str, Any], str]:
-    """The ``drift.inputs`` block and the sentence appended to ``reason``."""
-    if committed is None:
-        return (
-            {"committed": None, "fresh": fresh, "changed": None},
-            "the committed netlist records no generation inputs (written "
-            "before klt recorded them), so a tool-environment change cannot "
-            "be told from a schematic change -- re-run without --check to "
-            "write the record",
-        )
-    changed = sorted(k for k in fresh if committed.get(k) != fresh[k])
-    block = {"committed": committed, "fresh": fresh, "changed": changed}
-    if not changed:
-        return block, (
-            "the recorded generation inputs are unchanged, so the schematic "
-            "(or a symbol it uses) changed"
-        )
-    detail = ", ".join(f"{k}: {committed.get(k)} -> {fresh[k]}" for k in changed)
-    return block, (
-        f"the generation inputs changed since the committed netlist was "
-        f"written ({detail}), which may explain the drift"
-    )
-
-
 def _check_result(
     output: str,
     fresh_data: bytes,
@@ -710,8 +651,8 @@ def _check_result(
 
     with open(output, "rb") as handle:
         committed_raw = handle.read()
-    committed, record = _split_inputs_record(committed_raw)
-    inputs_block, inputs_reason = _inputs_drift(record, inputs or {})
+    committed, record = split_inputs_record(committed_raw)
+    inputs_block, inputs_reason = inputs_drift(record, inputs or {})
     committed_paths = _normalize_path_comments(committed)
     fresh_paths = _normalize_path_comments(fresh_data)
     if _normalize_layout(committed_paths) == _normalize_layout(fresh_paths):
@@ -923,142 +864,6 @@ def _write_output(output: str, data: bytes) -> None:
         raise NetlistError(f"could not write netlist to {output}: {exc}") from exc
 
 
-#: xschem comments out the top sheet's own ``.subckt``/``.ends`` pair when it
-#: netlists it as a testbench (``**.subckt ...`` / ``**.ends``). Matches the
-#: first such line so it can be uncommented; the capture group is everything
-#: after the ``**`` (preserving the directive's own arguments verbatim).
-_BLOCK_SUBCKT_COMMENT_RE = re.compile(
-    r"^([ \t]*)\*\*([ \t]*\.subckt\b.*)$", re.IGNORECASE | re.MULTILINE
-)
-#: xschem wraps a long top-sheet header onto commented continuation lines
-#: (``*+ ...``); once the header is uncommented they must become real SPICE
-#: ``+`` continuations or the port list is silently truncated (issue #3899).
-_BLOCK_CONTINUATION_COMMENT_RE = re.compile(r"^([ \t]*)\*{1,2}\+(.*)$")
-_BLOCK_ENDS_COMMENT_RE = re.compile(
-    r"^([ \t]*)\*\*([ \t]*\.ends\b.*)$", re.IGNORECASE | re.MULTILINE
-)
-
-#: xschem always appends a trailing ``.end`` -- correct for a complete deck,
-#: wrong for an includable block (a second ``.end`` in the including
-#: testbench's own deck would terminate it early). Matches only when ``.end``
-#: is the last line of the file.
-_TRAILING_END_RE = re.compile(r"\n[ \t]*\.end[ \t]*\n?\Z", re.IGNORECASE)
-
-
-def _rejoin_header_continuations(text: str) -> str:
-    """Rewrite the commented ``*+``/``**+`` lines contiguous with the
-    just-uncommented ``.subckt`` header into real ``+`` continuations."""
-    lines = text.split("\n")
-    header = next(
-        (
-            i
-            for i, line in enumerate(lines)
-            if re.match(r"[ \t]*\.subckt\b", line, re.IGNORECASE)
-        ),
-        None,
-    )
-    if header is None:
-        return text
-    j = header + 1
-    while j < len(lines):
-        match = _BLOCK_CONTINUATION_COMMENT_RE.match(lines[j])
-        if not match:
-            break
-        lines[j] = f"{match.group(1)}+{match.group(2)}"
-        j += 1
-    return "\n".join(lines)
-
-
-_SUBCKT_HEADER_RE = re.compile(r"[ \t]*\.subckt\b", re.IGNORECASE)
-_PARAMS_RE = re.compile(r"\bparams:", re.IGNORECASE)
-
-
-def _space_separate_subckt_ports(data: bytes) -> bytes:
-    """Rewrite comma-joined bus ports in ``.subckt`` headers to spaces
-    (issue #4490).
-
-    xschem emits a bus port as ``a[1],a[0]``; ngspice mis-maps the ports of a
-    subcircuit with two or more such groups (trailing nodes silently left
-    unconnected). Only the port part of ``.subckt`` header lines and their
-    ``+`` continuations changes -- text from ``params:`` onward, comments and
-    device cards are left alone. A bus-free netlist is returned unchanged.
-    """
-    text = data.decode("utf-8", errors="replace")
-    lines = text.split("\n")
-    in_header = False
-    in_params = False
-    for i, line in enumerate(lines):
-        if _SUBCKT_HEADER_RE.match(line):
-            in_header, in_params = True, False
-        elif not (in_header and line.lstrip().startswith("+")):
-            in_header = False
-            continue
-        if in_params:
-            continue
-        match = _PARAMS_RE.search(line)
-        head, tail = (
-            (line[: match.start()], line[match.start() :]) if match else (line, "")
-        )
-        if match:
-            in_params = True
-        lines[i] = re.sub(r"[ \t]*,[ \t]*", " ", head) + tail
-    return "\n".join(lines).encode("utf-8")
-
-
-def _apply_block_mode(data: bytes) -> tuple[bytes, dict[str, Any]]:
-    """Post-process a testbench-shaped xschem export into an includable block
-    (issue #2680, edge 1).
-
-    xschem comments out the top sheet's own ``.subckt``/``.ends`` pair and
-    always appends a trailing ``.end`` -- correct when the top sheet is a
-    testbench, wrong when it is a reusable block meant to be ``.include``d
-    elsewhere. This uncomments the first commented ``.subckt``/``.ends`` pair
-    found and drops the trailing ``.end``, so the result can be ``.include``d
-    by a separate testbench deck without a duplicate ``.end`` terminating it
-    early.
-
-    Never raises: a schematic that was not shaped like a testbench export
-    (no commented header, no trailing ``.end``) is passed through unchanged,
-    with the gap reported in the returned info dict's ``warning`` rather than
-    failing the whole run -- the netlist itself is still valid output.
-    """
-    text = data.decode("utf-8", errors="replace")
-
-    text, n_subckt = _BLOCK_SUBCKT_COMMENT_RE.subn(r"\1\2", text, count=1)
-    if n_subckt:
-        text = _rejoin_header_continuations(text)
-    text, n_ends = _BLOCK_ENDS_COMMENT_RE.subn(r"\1\2", text, count=1)
-    text, n_end = _TRAILING_END_RE.subn("\n", text, count=1)
-
-    subckt_uncommented = n_subckt > 0
-    ends_uncommented = n_ends > 0
-    trailing_end_removed = n_end > 0
-
-    warning = None
-    missing = []
-    if not subckt_uncommented:
-        missing.append("no commented '**.subckt' header found to uncomment")
-    if not ends_uncommented:
-        missing.append("no commented '**.ends' found to uncomment")
-    if not trailing_end_removed:
-        missing.append("no trailing '.end' line found to remove")
-    if missing:
-        warning = (
-            "--block requested but " + "; ".join(missing) + " -- the export "
-            "may not have been shaped like a testbench netlist; it was "
-            "written as xschem produced it"
-        )
-
-    info = {
-        "requested": True,
-        "subckt_uncommented": subckt_uncommented,
-        "ends_uncommented": ends_uncommented,
-        "trailing_end_removed": trailing_end_removed,
-        "warning": warning,
-    }
-    return text.encode("utf-8"), info
-
-
 _RC_PDK_ROOT_RE = re.compile(
     r"^\s*set\s+(?:::)?(?:env\(PDK_ROOT\)|PDK_ROOT)\s+(\"[^\"]*\"|\{[^}]*\}|\S+)",
     re.MULTILINE,
@@ -1183,7 +988,7 @@ def run_netlist(
     a repo runs in CI over a committed netlist.
 
     ``block=True`` post-processes the export into an includable block (issue
-    #2680, edge 1): see :func:`_apply_block_mode`. The transform runs before
+    #2680, edge 1): see :func:`apply_block_mode`. The transform runs before
     ``check``'s comparison/diff and before the normal write, so both modes
     operate on the block-shaped netlist, not xschem's raw testbench export.
 
@@ -1247,8 +1052,8 @@ def run_netlist(
 
         block_info: dict[str, Any] | None = None
         if block:
-            fresh_data, block_info = _apply_block_mode(fresh_data)
-        fresh_data = _space_separate_subckt_ports(fresh_data)
+            fresh_data, block_info = apply_block_mode(fresh_data)
+        fresh_data = space_separate_subckt_ports(fresh_data)
 
         version = _probe_xschem_version(xschem_binary)
         warnings = _unevaluated_expr_warnings(
@@ -1284,8 +1089,8 @@ def run_netlist(
         if warnings:
             payload["warnings"] = warnings
 
-        inputs = _generation_inputs(version, rcfile, pdk_block)
-        written_data = _inputs_record_line(inputs) + fresh_data
+        inputs = generation_inputs(version, rcfile, pdk_block)
+        written_data = inputs_record_line(inputs) + fresh_data
         if check:
             status, drift = _check_result(
                 output,
