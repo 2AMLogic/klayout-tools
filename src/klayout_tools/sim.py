@@ -136,6 +136,7 @@ from . import (
 #: `sim_remote._run_remote` for exactly this reason).
 from . import remote_fleet as remote_fleet
 from . import remote_transport as remote_transport
+from . import sim_analysis_overrides as _sao
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_staging as sim_staging
 from ._jsonnum import is_number
@@ -181,6 +182,19 @@ from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_cause import _with_fatal_error_cause
 from .sim_decks import run_deck_request
 from .sim_echo_messages import echo_unsupported_message, zipped_length_message
+
+from .sim_analysis_overrides import (  # isort: skip
+    AO_LABEL as _AO_LABEL,  # noqa: F401
+    AO_UNSUPPORTED_WORKER_CODE as AO_UNSUPPORTED_WORKER_CODE,
+    IC_LABEL as _IC_LABEL,
+    IC_UNSUPPORTED_WORKER_CODE as IC_UNSUPPORTED_WORKER_CODE,
+    effective_analysis_args as _effective_analysis_args,
+    ic_analysis_args as _ic_analysis_args,  # noqa: F401
+    ic_cards as _ic_cards,
+    report_field as _ao_report_field,
+    require_plain_tran_for_ic as _require_plain_tran_for_ic,
+    validate_analysis_overrides as _validate_analysis_overrides,
+)
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
 from .sim_errors import SimError as SimError
@@ -3438,6 +3452,9 @@ def _prepare_sim_request(
         options.get("initial_conditions"), label=_IC_LABEL
     )
     _require_plain_tran_for_ic(bool(ic_rules), analysis)
+    analysis_override_rules = _validate_analysis_overrides(
+        request.get("analysis_overrides"), analysis, engine
+    )
 
     # Timeout budget preflight (issue #1686): a coarse, pre-grid sanity
     # check -- never blocks the sweep, only surfaces an advisory string. See
@@ -3521,6 +3538,7 @@ def _prepare_sim_request(
         label=_IC_LABEL,
         attr="initial_conditions",
     )
+    _sao.resolve(corner_points, [] if explicit_points_wire else analysis_override_rules)
     if explicit_points_wire is not None:
         # Internal-only escape hatch: never set by an external caller or the
         # CLI, only by this same module's own `_run_remote_fleet` when it
@@ -4193,6 +4211,7 @@ def _run_sim_corners(
         attr="initial_conditions",
         code=IC_UNSUPPORTED_WORKER_CODE,
     )
+    _sao.require_echo(dispatch_points, corners_new, backend)
     _require_options_echo(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
@@ -4898,6 +4917,7 @@ def _build_dry_run_report(
         unit: dict[str, Any] = {"corner_id": point.corner_id}
         unit.update(_nodeset_report_field(point))
         unit.update(_ic_report_field(point))
+        unit.update(_ao_report_field(point))
         if point.sample_index is not None:
             unit["sample_index"] = point.sample_index
         if point.mc_seed is not None:
@@ -5287,6 +5307,10 @@ class CornerPoint:
     start state, rendered as ``.ic`` cards plus ``uic`` on the analysis.
     Like ``nodeset`` it never changes :attr:`corner_id`.
 
+    ``analysis_args`` (issue #4970) is the ``analysis_overrides`` args string
+    selected for this point (``None`` when no rule matched); it replaces
+    ``analysis.args`` for this point only and never changes :attr:`corner_id`.
+
     ``options`` (issue #3125) is the same for the ``corners.options`` axis: the
     normalized ``{solver option: number}`` row, ``{}`` when the request has
     no such axis (and then the IDs/slugs are untouched).
@@ -5330,6 +5354,7 @@ class CornerPoint:
         "params",
         "nodeset",
         "initial_conditions",
+        "analysis_args",
         "options",
         "sample_index",
         "mc_seed",
@@ -5350,6 +5375,7 @@ class CornerPoint:
         params: dict[str, int | float] | None = None,
         nodeset: dict[str, float] | None = None,
         initial_conditions: dict[str, float] | None = None,
+        analysis_args: str | None = None,
         options: dict[str, int | float] | None = None,
         sample_index: int | None = None,
         mc_seed: dict[str, Any] | None = None,
@@ -5362,6 +5388,7 @@ class CornerPoint:
         self.params: dict[str, int | float] = params or {}
         self.nodeset: dict[str, float] = nodeset or {}
         self.initial_conditions: dict[str, float] = initial_conditions or {}
+        self.analysis_args: str | None = analysis_args
         self.options: dict[str, int | float] = options or {}
         self.process_sections = process_sections
         self.process_section_libs = process_section_libs
@@ -5876,6 +5903,8 @@ def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
         if point.initial_conditions:
             # Issue #3881: likewise the selected map, never the rules.
             entry["initial_conditions"] = point.initial_conditions
+        if point.analysis_args:
+            entry["analysis_args"] = point.analysis_args
         if point.options:
             # Issue #3125: likewise additive, only for an options point.
             entry["options"] = point.options
@@ -5952,6 +5981,7 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
                 params=params,
                 nodeset=nodeset,
                 initial_conditions=initial_conditions,
+                analysis_args=_sao.wire_args(entry),
                 options=options,
                 sample_index=entry.get("sample_index"),
                 mc_seed=entry.get("mc_seed"),
@@ -6667,7 +6697,8 @@ def _apply_nodeset_rules(
             )
         if hits:
             used[hits[0]] = True
-            setattr(point, attr, dict(rules[hits[0]]["values"]))
+            chosen = rules[hits[0]]["values"]
+            setattr(point, attr, dict(chosen) if isinstance(chosen, dict) else chosen)
     if not all(used):
         raise SimError(
             f"{label}[{used.index(False)}] matches no retained corner "
@@ -6753,7 +6784,7 @@ def _require_nodeset_echo(
     else:
         for point, corner in zip(points, corners, strict=True):
             expected = getattr(point, attr)
-            if (corner.get(attr) or {}) != expected:
+            if (corner.get(attr) or type(expected)()) != expected:
                 problem = (
                     f"corner {point.corner_id!r} came back with {attr} "
                     f"{corner.get(attr)!r}, expected {expected!r}"
@@ -6778,45 +6809,6 @@ def _require_nodeset_echo(
 # map is a transient *start state*: `.ic v(node)=volts` cards plus `uic` on
 # the `tran` command (a `.nodeset` is only a DC-solve guess and is dropped
 # once `uic` skips the operating point).
-
-_IC_LABEL = "options.initial_conditions"
-IC_UNSUPPORTED_WORKER_CODE = "initial_conditions_unsupported_worker"
-
-
-def _require_plain_tran_for_ic(declared: bool, analysis: dict[str, Any]) -> None:
-    """``uic`` is a ``tran`` flag, so a start state needs a plain transient
-    analysis; step/pass/two-port sequences and other kinds are refused up
-    front rather than silently run without it."""
-    if not declared:
-        return
-    if (
-        sim_steps.is_steps_analysis(analysis)
-        or str(analysis.get("kind", "")).lower() != "tran"
-    ):
-        raise SimError(
-            f"{_IC_LABEL} requires a single analysis of kind 'tran' "
-            "(`.ic` is applied with the `uic` flag of the transient command)"
-        )
-
-
-def _ic_cards(point: CornerPoint) -> list[str]:
-    """One file-scope ``.ic`` card per node of the point's start state."""
-    return [
-        f".ic v({node})={volts!r}"
-        for node, volts in sorted(
-            (getattr(point, "initial_conditions", None) or {}).items()
-        )
-    ]
-
-
-def _ic_analysis_args(point: CornerPoint, args: str) -> str:
-    """``args`` with ``uic`` appended for a point carrying a start state,
-    unless the request already spells it; untouched otherwise."""
-    if not getattr(point, "initial_conditions", None):
-        return args
-    if "uic" in str(args).lower().split():
-        return args
-    return f"{args} uic".strip()
 
 
 # --------------------------------------------------------------------------- #
@@ -7634,6 +7626,7 @@ def _expand_monte_carlo(
                     variant=base.variant,
                     nodeset=base.nodeset,
                     initial_conditions=base.initial_conditions,
+                    analysis_args=base.analysis_args,
                     options=base.options,
                     sample_index=sample_index,
                     mc_seed=mc_seed,
@@ -7827,6 +7820,8 @@ def _checkpoint_fingerprint(
             point.corner_id: point.nodeset for point in corner_points if point.nodeset
         }
     _key_in_initial_conditions(payload, corner_points)
+    if windows := _sao.windows_by_corner(corner_points):
+        payload["analysis_overrides"] = windows  # issue #4970
     if corner_section_libs:
         # Issue #2522: a corner's per-section libraries determine its device
         # models exactly as `models.lib` does, so editing one must invalidate
@@ -10228,6 +10223,7 @@ def _run_corner(
         **_params_report_field(point),
         **_nodeset_report_field(point),
         **_ic_report_field(point),
+        **_ao_report_field(point),
         **_options_report_field(point),
         "status": status,
         "runtime_s": runtime_s,
@@ -11499,7 +11495,7 @@ def _corner_deck_control_lines(
         or complex_vector_lines
     ):
         lines.append("set filetype=ascii")
-    lines.append(f"{analysis['kind']} {_ic_analysis_args(point, analysis['args'])}")
+    lines.append(f"{analysis['kind']} {_sao.deck_args(point, analysis)}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
     if analysis.get("linearize") is True:
@@ -11598,7 +11594,9 @@ def _write_xyce_deck(
     # probe against XyceNF 7.10.0 used while building this). Top-level dot
     # card, with the dot -- there is no `.control` block for a bare
     # `dc`/`tran`/`op` command to live in.
-    lines.append("." + f"{analysis['kind']} {analysis['args']}".strip())
+    lines.append(
+        "." + f"{analysis['kind']} {_effective_analysis_args(point, analysis)}".strip()
+    )
     for spec in measurements_spec:
         if spec.get("spice") is not None:
             lines.append(spec["spice"])

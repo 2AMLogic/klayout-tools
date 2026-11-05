@@ -622,6 +622,7 @@
         "klayout_tools.remote_launcher",
         "klayout_tools.remote_transport",
         "klayout_tools.sim",
+        "klayout_tools.sim_analysis_overrides",
         "klayout_tools.sim_batch",
         "klayout_tools.sim_batch_async",
         "klayout_tools.sim_batch_shards",
