@@ -207,4 +207,4 @@ def add_netlist_parser(
         ),
     )
     _add_format_arg(netlist_parser)
-    netlist_parser.set_defaults(func=netlist_cmd.run)
+    netlist_cmd.register(netlist_parser)

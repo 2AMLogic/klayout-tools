@@ -90,6 +90,7 @@ from . import (
 )
 from ._argv_flags import _REQUEST_ARGV_FLAG_EXCLUDE as _REQUEST_ARGV_FLAG_EXCLUDE
 from ._argv_flags import _record_request_argv_flags as _record_request_argv_flags
+from ._drc_parser_args import add_klayout_app_args
 from .color import add_color_args
 from .parser_netlist import add_netlist_parser
 
@@ -6768,22 +6769,7 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "field. See docs/cli/drc.md, 'Engine' -> 'klayout'."
         ),
     )
-    drc_parser.add_argument(
-        "--min-klayout-version",
-        dest="min_klayout_version",
-        metavar="VERSION",
-        default=None,
-        help=(
-            "minimum standalone KLayout application version (e.g. 0.30.12) "
-            "the native deck needs (--engine klayout only; ignored for "
-            "--engine curated). The `klayout` on PATH is probed with -v "
-            "before the deck runs; an older, missing or unparseable "
-            "version fails up front. Omitted: no check. Not bypassed by "
-            "--allow-deck-errors/--allow-missing-host-tools, and passing "
-            "does not prove the deck is compatible. "
-            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
-        ),
-    )
+    add_klayout_app_args(drc_parser)
     drc_parser.add_argument(
         "--negative-control",
         dest="negative_control",

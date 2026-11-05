@@ -193,7 +193,7 @@
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
-      "lines": 754
+      "lines": 581
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 7834
+      "lines": 7820
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -277,7 +277,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1828
+      "lines": 1735
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -313,7 +313,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 11837
+      "lines": 11791
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -481,7 +481,7 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1194
+      "lines": 1083
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
@@ -981,7 +981,7 @@
     },
     {
       "path": "tests/test_netlist.py",
-      "lines": 1845
+      "lines": 1779
     },
     {
       "path": "tests/test_netlist_batch.py",
