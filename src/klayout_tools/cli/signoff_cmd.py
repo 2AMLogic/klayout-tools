@@ -293,7 +293,7 @@ def _run_describe_grader(
 
 
 def _attest_flag_problem(
-    args: argparse.Namespace, inventory: str | None, stream: str | None
+    args: argparse.Namespace, inventory: str | None, stream: list[str] | None
 ) -> str | None:
     """The refusal message for an invalid ``--attest`` flag combination, else
     ``None``. Item 2 takes ``--input`` plus an optional ``--inventory`` of
@@ -303,6 +303,16 @@ def _attest_flag_problem(
             return (
                 "--attest 2 requires --input <stream> (the committed GDS/OASIS "
                 "layout stream; see docs/cli/signoff.md)"
+            )
+        if len(set(stream)) != len(stream):
+            return "duplicate --input: each stream may be given only once"
+        if len(stream) > 1 and (
+            getattr(args, "generator", None) is not None
+            or getattr(args, "regenerated_hash", None) is not None
+        ):
+            return (
+                "--generator/--regenerated-hash describe one regenerated "
+                "stream and cannot be combined with more than one --input"
             )
         return None
     if stream or any(
@@ -325,7 +335,7 @@ def _attest_flag_problem(
 def _compute_attestation(
     args: argparse.Namespace,
     inventory: str | None,
-    stream: str | None,
+    stream: list[str] | None,
     committed: str | None,
 ) -> dict:
     """Build (or, with ``committed``, re-check) the attestation. The flag

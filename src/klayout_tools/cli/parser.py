@@ -4297,10 +4297,14 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         "--input",
         dest="attest_input",
         metavar="STREAM",
+        action="append",
         help=(
             "with --attest 2: path to the committed GDS/OASIS layout stream "
             "inside a git repository; the envelope pins its raw-byte sha256 "
-            "and the producing KLayout version (issue #4188). Refused with "
+            "and the producing KLayout version (issue #4188). Repeat to "
+            "attest a library of per-cell streams: the envelope then binds "
+            "the whole set through provenance.input.paths (duplicates and "
+            "--generator/--regenerated-hash are refused with several). Refused with "
             "items 1, 8, 9 and 10, which take --inventory."
         ),
     )
