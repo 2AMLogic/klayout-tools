@@ -2482,22 +2482,14 @@ def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
     hosts = math.ceil(units / cap)
     largest = math.ceil(units / hosts)
     if largest > per_job:
-        # An explicit cap is the caller's call: the ceiling bound is a
-        # fully-serial upper bound, and the harness only kills a job that
-        # actually runs past the ceiling (issue #4982). Warn, don't refuse.
-        shard_bound = _default_batch_job_timeout_s(
-            largest, assessment["per_unit_timeout_s"]
-        )
+        # An explicit cap is the caller's call; the bound is serial (#4982).
         print(
             f"klt sim: warning: request.batch.max_units_per_job {requested} "
-            f"leaves jobs of {largest} units, whose bound "
-            f"{shard_bound:g}s (options.timeout_s "
-            f"{assessment['per_unit_timeout_s']:g}s x {largest} units + "
-            f"{_BATCH_JOB_OVERHEAD_S:g}s; a conservative fully-serial upper "
-            "bound, not a runtime estimate) exceeds the fleet's whole-job "
-            f"ceiling of {assessment['max_job_seconds']:g}s; a job still "
-            "running at the ceiling is killed and every unit is reported "
-            "batch_job_timeout",
+            f"leaves jobs of {largest} units, over the {per_job}-unit "
+            f"serial upper bound for the fleet's "
+            f"{assessment['max_job_seconds']:g}s whole-job ceiling (not a "
+            "runtime estimate); a job still running at the ceiling is "
+            "killed and every unit is reported batch_job_timeout",
             file=sys.stderr,
         )
     return hosts
