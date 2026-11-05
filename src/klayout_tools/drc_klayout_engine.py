@@ -23,6 +23,7 @@ from typing import Any
 
 from . import env_provenance
 from ._layout import load_layout, select_top_cells
+from ._paths import resolve_tool_binary
 from ._provenance import build_provenance, sha256_file
 from .coverage import (
     build_check_coverage,
@@ -785,6 +786,41 @@ def _missing_deck_host_commands(deck_file: str) -> dict[str, str]:
 
 _KLAYOUT_EXECUTABLE = "klayout"
 
+KLAYOUT_BINARY_ENV_VAR = "KLT_KLAYOUT_BINARY"
+"""Environment override for the standalone KLayout application (issue #4950),
+the same variable ``klt lvs --engine klayout-runset`` honors."""
+
+
+def _resolve_klayout_executable(
+    klayout_binary: str | None,
+) -> tuple[str, str | None]:
+    """Return ``(executable, override_path)`` for the standalone KLayout app.
+
+    Issue #4950: ``klayout_binary`` (CLI ``--klayout-binary``), then
+    ``$KLT_KLAYOUT_BINARY``, then ``klayout`` on PATH -- via the shared
+    :func:`resolve_tool_binary`, so a named-but-unrunnable override raises
+    :class:`DrcError` naming its source and never falls back to PATH.
+    ``override_path`` is the resolved absolute path when an override was in
+    force, else ``None`` (the executable is then the bare ``klayout``, so a
+    no-override run is unchanged).
+    """
+    if not klayout_binary and not os.environ.get(KLAYOUT_BINARY_ENV_VAR):
+        return _KLAYOUT_EXECUTABLE, None
+    resolved = resolve_tool_binary(
+        "klayout",
+        {"klayout_binary": klayout_binary},
+        option_key="klayout_binary",
+        option_label="--klayout-binary",
+        env_var=KLAYOUT_BINARY_ENV_VAR,
+        request_dir=os.getcwd(),
+        fallback_names=(_KLAYOUT_EXECUTABLE,),
+        error_cls=DrcError,
+        install_hint="Install the standalone KLayout application.",
+    )
+    assert resolved is not None
+    return resolved, resolved
+
+
 KLAYOUT_VERSION_PROBE_TIMEOUT_S = 15.0
 """Wall-clock budget for the ``klayout -v`` version probe (issue #2689)."""
 
@@ -1390,6 +1426,7 @@ def run_drc_klayout_engine(
     negative_control_categories: list[str] | None = None,
     deck_name: str | None = None,
     max_violations: int | None = None,
+    klayout_binary: str | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -1628,7 +1665,8 @@ def run_drc_klayout_engine(
 
     # Issue #2689: opt-in application-version floor, probed on the very
     # executable launched below, before any deck work.
-    _preflight_klayout_version(_KLAYOUT_EXECUTABLE, min_klayout_version)
+    klayout_exe, klayout_override = _resolve_klayout_executable(klayout_binary)
+    _preflight_klayout_version(klayout_exe, min_klayout_version)
 
     negative_control_result = None
     if negative_control is not None:
@@ -1643,6 +1681,7 @@ def run_drc_klayout_engine(
             pdk_root=pdk_root,
             allow_deck_errors=allow_deck_errors,
             allow_missing_host_tools=allow_missing_host_tools,
+            klayout_binary=klayout_binary,
         )
 
     # Validates `path` (missing/directory/unreadable) before the subprocess
@@ -1676,7 +1715,7 @@ def run_drc_klayout_engine(
             input_path = os.path.join(work_dir, "input-top.gds")
             top_cells[0].write(input_path)
         cmd = [
-            _KLAYOUT_EXECUTABLE,
+            klayout_exe,
             "-b",
             "-r",
             deck_file,
@@ -1762,6 +1801,13 @@ def run_drc_klayout_engine(
         ),
         "deck": deck_file,
         "engine": "klayout",
+        # Additive (issue #4950): present only when a binary override
+        # (--klayout-binary / $KLT_KLAYOUT_BINARY) was in force.
+        **(
+            {"environment": {"klayout_binary": klayout_override}}
+            if klayout_override is not None
+            else {}
+        ),
         # Additive, and present *only* when --allow-deck-errors actually
         # tolerated a failed deck run (issue #1941) -- an ordinary run's
         # payload is unchanged, and a tolerated one is self-describing

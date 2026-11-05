@@ -272,6 +272,7 @@ _REQUEST_FIELD_DESTS = {
     "expect_rule_categories": "expect_rule_categories",
     "expect_rule_categories_file": "expect_rule_categories_file",
     "min_klayout_version": "min_klayout_version",
+    "klayout_binary": "klayout_binary",
     "negative_control": "negative_control",
     "negative_control_categories": "negative_control_categories",
     "pdk": "pdk",
@@ -346,6 +347,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             # directory, like every other path field.
             "expect_rule_categories_file": _path("expect_rule_categories_file"),
             "min_klayout_version": _str("min_klayout_version"),
+            "klayout_binary": _path("klayout_binary"),
             # Issue #3076: resolved against the request document's own
             # directory, like every other path field.
             "negative_control": _path("negative_control"),
@@ -428,6 +430,7 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
             "allow_missing_host_tools": args.allow_missing_host_tools,
             "expected_rule_categories": args.expect_rule_categories,
             "min_klayout_version": min_version,
+            "klayout_binary": args.klayout_binary,
             "expected_rule_category_names": _expected_rule_category_names(args),
             "negative_control": args.negative_control,
             "negative_control_categories": _negative_control_categories(args),
@@ -478,6 +481,7 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
         allow_missing_host_tools=args.allow_missing_host_tools,
         expected_rule_categories=args.expect_rule_categories,
         min_klayout_version=min_version,
+        klayout_binary=args.klayout_binary,
         expected_rule_category_names=_expected_rule_category_names(args),
         negative_control=args.negative_control,
         negative_control_categories=_negative_control_categories(args),

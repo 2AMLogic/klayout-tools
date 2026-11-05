@@ -6786,6 +6786,20 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     drc_parser.add_argument(
+        "--klayout-binary",
+        dest="klayout_binary",
+        metavar="PATH",
+        default=None,
+        help=(
+            "standalone KLayout application to run the native deck with "
+            "(--engine klayout/both only). Precedence: this flag, then "
+            "$KLT_KLAYOUT_BINARY, then `klayout` on PATH. A named but "
+            "non-runnable binary is an error, never a PATH fallback. "
+            "Lets a throwaway pinned env supply a newer KLayout than the "
+            "distro one. See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
+    drc_parser.add_argument(
         "--negative-control",
         dest="negative_control",
         metavar="LAYOUT",
