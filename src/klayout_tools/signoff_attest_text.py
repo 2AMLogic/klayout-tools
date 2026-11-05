@@ -37,10 +37,26 @@ def attestation_check_line(check: dict) -> str:
         what = f"{check['role']} {label}: {' '.join(check['argv'])} ({status})"
     elif check["check"] == "unbenched_row":
         what = f"row {check['row']} has no testbench (issue #{check['issue']})"
-    else:
+    elif check["check"] == "citation":
+        cited = ", ".join(check["envelopes"]) or "no envelope cited"
+        what = f"spec row {check['row']}: {cited}"
+    elif check["check"] == "recorded_hash":
+        what = f"{check['role']} {check['target']} recorded hash"
+        if not check["passed"]:
+            paths = ", ".join(m["path"] for m in check.get("mismatches", []))
+            what += f" mismatch: {paths}"
+    elif check["check"] == "metric":
+        value = check.get("value")
+        what = (
+            f"{check['role']} {check['corner']} {check['metric']}: "
+            f"{'missing' if value is None else value}"
+        )
+    elif check["check"] == "pin":
         what = (
             f"pin {check['role']}: {check['value'] if check['passed'] else 'missing'}"
         )
+    else:
+        raise ValueError(f"unknown attestation check kind: {check['check']!r}")
     line = f"[{marker}] {what}"
     if check["check"] == "command" and not check["passed"]:
         tail = failed_output_tail(check)
