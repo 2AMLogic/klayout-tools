@@ -71,7 +71,6 @@ from .netlist import (
     _check_no_unresolved_symbol,
     _check_result,
     _netlist_block,
-    _sha256_file_hash,
     _validate_schematic,
     _write_output,
 )
@@ -638,7 +637,7 @@ def _read_collected_netlist(
             job_id=job_id,
         ) from exc
     expected = report["netlist"].get("content_hash")
-    if expected is not None and expected != _sha256_file_hash(data):
+    if expected is not None and expected != _provenance.content_hash_bytes(data):
         raise NetlistError(
             f"batch job {job_id}: the collected {BATCH_NETLIST_FILENAME} does "
             f"not match the content_hash the runner reported ({expected}) "

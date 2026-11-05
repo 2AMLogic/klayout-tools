@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import evidence_record as er
+from ._provenance import sha256_file_required
 
 #: Stable finding codes (the JSON contract).
 F_UNREADABLE = "record_unreadable"
@@ -207,7 +208,7 @@ def _check_sidecar(rel: str, path: str, record: Mapping[str, Any]) -> list[dict]
                 )
                 continue
             expected = entry.get(f"{key}_sha256")
-            if expected and er._sha256_file(target) != expected:
+            if expected and sha256_file_required(target) != expected:
                 out.append(
                     _finding(F_SIDECAR_HASH, rel, f"{key} {ref!r} SHA-256 differs")
                 )

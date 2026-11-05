@@ -132,8 +132,8 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
     INPUT_ROLE_LAYOUT,
     INPUT_ROLE_NETLIST,
-    _content_hash,
     build_provenance,
+    content_hash,
     explicit_deck_options,
     sha256_file,
     version_drift_advisories,
@@ -3272,7 +3272,7 @@ def check_lvs_report(
             hash_check(
                 "provenance.deck.content_hash",
                 deck.get("content_hash"),
-                _content_hash(deck_source_path(deck["name"])),
+                content_hash(deck_source_path(deck["name"])),
             )
         )
     runset_hash = get_path(committed, ("provenance", "runset", "content_hash"))
@@ -3283,7 +3283,7 @@ def check_lvs_report(
             hash_check(
                 "provenance.runset.content_hash",
                 runset_hash,
-                _content_hash(committed.get("deck_file")),
+                content_hash(committed.get("deck_file")),
             )
         )
     result = build_check_result(report_path=report_path, checks=checks)

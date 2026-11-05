@@ -18,7 +18,7 @@ import os
 import re
 from typing import Any
 
-from ._provenance import _combined_content_hash, _content_hash
+from ._provenance import _combined_content_hash, content_hash
 
 #: ``equiv_status``'s own exact success line (verified live against the
 #: pinned Yosys v0.67 this repo's own CI installs, `equiv_status.cc`'s
@@ -89,14 +89,14 @@ def stage_fingerprint(
             "top": gold["top"],
             "sources_sha256": _combined_content_hash(gold["sources"]),
             "liberty_sha256": (
-                _content_hash(gold["liberty"]) if gold.get("liberty") else None
+                content_hash(gold["liberty"]) if gold.get("liberty") else None
             ),
         },
         "gate": {
             "top": gate["top"],
             "sources_sha256": _combined_content_hash(gate["sources"]),
             "liberty_sha256": (
-                _content_hash(gate["liberty"]) if gate.get("liberty") else None
+                content_hash(gate["liberty"]) if gate.get("liberty") else None
             ),
         },
         "port_map": port_map,
