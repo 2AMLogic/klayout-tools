@@ -314,3 +314,52 @@ def test_host_specific_tail_text_does_not_change_the_envelope_bytes(
 
     assert rendered[0] == rendered[1]
     assert "host-" not in rendered[0]
+
+
+def test_text_line_names_failing_citation_row(tmp_path):
+    from klayout_tools.signoff_attest_text import attestation_check_line
+
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory(spec_rows=["gain", "bandwidth", "psrr"])
+
+    envelope = _attest(repo, inventory)
+
+    lines = [
+        attestation_check_line(c)
+        for c in envelope["attestation"]["checks"]
+        if c["check"] == "citation"
+    ]
+    assert "[FAIL] spec row psrr: no envelope cited" in lines
+    assert any(line.startswith("[PASS] spec row gain: ") for line in lines)
+
+
+def test_text_line_per_check_kind():
+    from klayout_tools.signoff_attest_text import attestation_check_line
+
+    assert (
+        attestation_check_line(
+            {
+                "check": "recorded_hash",
+                "role": "freshness",
+                "target": "a.gds",
+                "passed": False,
+                "mismatches": [{"path": "a.gds"}],
+            }
+        )
+        == "[FAIL] freshness a.gds recorded hash mismatch: a.gds"
+    )
+    assert (
+        attestation_check_line(
+            {
+                "check": "metric",
+                "role": "digital",
+                "corner": "tt",
+                "metric": "fmax",
+                "value": None,
+                "passed": False,
+            }
+        )
+        == "[FAIL] digital tt fmax: missing"
+    )
+    with pytest.raises(ValueError):
+        attestation_check_line({"check": "bogus", "passed": True})
