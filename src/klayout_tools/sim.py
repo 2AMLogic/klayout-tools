@@ -164,6 +164,7 @@ from .pdk import ambiguity_warning as pdk_ambiguity_warning
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
+from .sim_attach import apply_attach as _apply_attach
 
 #: ``batch`` backend entry points (issue #2080) -- the `klt sim` consumer of
 #: 2am's EDA batch fleet. Like ``sim_remote``'s: `run_sim` dispatches into them
@@ -2350,6 +2351,7 @@ def run_sim(
     capacity_wait_s: float | None = None,
     command_approvals: str | None = None,
     pdk_root: str | None = None,
+    collect_partial: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the request at ``request_path`` and return its report.
@@ -2612,6 +2614,13 @@ def run_sim(
         sim_commands.COMMANDS_FIELD in request or sim_decks.DECKS_FIELD in request
     ):
         raise SimError("--pdk-root only applies to corner requests (with `models`)")
+    if collect_partial and (
+        sim_commands.COMMANDS_FIELD in request or sim_decks.DECKS_FIELD in request
+    ):
+        raise SimError(
+            "--collect-partial only applies to corner requests (with `models`)",
+            code="collect_partial_requires_attach",
+        )
     if sim_commands.COMMANDS_FIELD in request:
         return _dispatch_command_request(
             request,
@@ -2673,6 +2682,7 @@ def run_sim(
         attach_job_id=attach_job_id,
         capacity_wait_s=capacity_wait_s,
         pdk_root=pdk_root,
+        collect_partial=collect_partial,
         _ownership=_ownership,
     )
 
@@ -3028,30 +3038,6 @@ def _check_capacity_wait_applies(
             "--wait-for-capacity cannot be combined with --attach: attach "
             "launches nothing, so there is no capacity to wait for"
         )
-
-
-def _apply_attach(
-    engine_kwargs: dict[str, Any],
-    attach_job_id: str | None,
-    backend: str,
-    hosts: int,
-    submit_only: bool = False,
-) -> None:
-    """Issue #2978: route ``--attach <job_id>`` to the batch backend. Only the
-    single-job batch path has a job id to re-attach to."""
-    if attach_job_id is None:
-        return
-    if backend != "batch" or hosts != 1:
-        raise SimError(
-            "--attach requires backend 'batch' with a single job "
-            "(hosts = 1); a sharded run has one job id per shard"
-        )
-    if submit_only:
-        raise SimError(
-            "--attach and --submit-only are mutually exclusive: attach "
-            "resumes an already-submitted job, submit-only launches a new one"
-        )
-    engine_kwargs["attach_job_id"] = attach_job_id
 
 
 @dataclass(frozen=True)
@@ -3762,6 +3748,7 @@ def _run_sim_corners(
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
     pdk_root: str | None = None,
+    collect_partial: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
@@ -4030,7 +4017,14 @@ def _run_sim_corners(
         if backend not in _OFFHOST_BACKENDS
         else {"request_dir": request_dir}
     )
-    _apply_attach(local_engine_kwargs, attach_job_id, backend, hosts, submit_only)
+    _apply_attach(
+        local_engine_kwargs,
+        attach_job_id,
+        backend,
+        hosts,
+        submit_only,
+        collect_partial,
+    )
     _check_capacity_wait_applies(capacity_wait_s, backend, attach_job_id)
 
     # Issue #2668: stage the complete job closure once, here, before any

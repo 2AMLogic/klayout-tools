@@ -617,6 +617,7 @@
       "description": "`klt sim` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.asap7_bsimcmg",
+        "klayout_tools.cli.parser_sim",
         "klayout_tools.cli.sim_cmd",
         "klayout_tools.cli.sim_merge_cmd",
         "klayout_tools.cli.sim_pdk_text",
@@ -627,6 +628,7 @@
         "klayout_tools.remote_transport",
         "klayout_tools.sim",
         "klayout_tools.sim_analysis_overrides",
+        "klayout_tools.sim_attach",
         "klayout_tools.sim_batch",
         "klayout_tools.sim_bin_range",
         "klayout_tools.sim_batch_async",

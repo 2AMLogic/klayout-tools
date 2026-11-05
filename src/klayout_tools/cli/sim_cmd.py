@@ -114,8 +114,7 @@ def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
 def run(args: argparse.Namespace) -> int:
     if getattr(args, "batch_set", None) is not None:
         return _run_batch_set(args)
-    misuse = _reject_single_request_misuse(args)
-    if misuse is not None:
+    if (misuse := _reject_single_request_misuse(args)) is not None:
         return misuse
     if getattr(args, "op_lint", False):
         return _run_op_lint(args)
@@ -145,14 +144,14 @@ def _run_sweep(args: argparse.Namespace) -> int:
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
             command_approvals=getattr(args, "command_approvals", None),
             pdk_root=getattr(args, "pdk_root", None),
+            collect_partial=getattr(args, "collect_partial", False),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
     except OutputLockError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
-    write_failure = _write_report_out(report, args)
-    if write_failure is not None:
+    if (write_failure := _write_report_out(report, args)) is not None:
         return write_failure
     if report.get("status") == "submitted" and getattr(args, "submit_only", False):
         # Issue #3073: submitted, not run -- there is no verdict to grade.
@@ -284,6 +283,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
         for flag, value in (
             ("a positional request", args.request),
             ("--attach", getattr(args, "attach_job_id", None)),
+            ("--collect-partial", getattr(args, "collect_partial", False) or None),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),

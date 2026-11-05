@@ -4954,6 +4954,7 @@ def _run_batch(
     probe_abort: dict[str, Any] | None = None,
     request_dir: str | None = None,
     attach_job_id: str | None = None,
+    collect_partial: bool = False,
     shard_fingerprint: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend: submit the whole corner matrix to 2am's EDA
@@ -5012,7 +5013,9 @@ def _run_batch(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
     if attach_job_id is not None and attach_job_id.endswith(".json"):
-        return _attach_batch_shards(
+        from . import sim_batch_shards
+
+        return sim_batch_shards.attach_batch_shards(
             manifest_path=attach_job_id,
             config=config,
             corner_points=corner_points,
@@ -5024,6 +5027,7 @@ def _run_batch(
             measurements_spec=measurements_spec,
             request_dir=request_dir,
             shard_fingerprint=shard_fingerprint,
+            collect_partial=collect_partial,
         )
     if attach_job_id is not None:
         sim_batch_receipt.check_attach_receipt(artifacts_dir, attach_job_id, request)
@@ -5371,8 +5375,11 @@ class _BatchFleetRun:
         measurements_spec: list[dict[str, Any]],
         request_dir: str | None,
         attach_only: bool = False,
+        collect_partial: bool = False,
     ) -> None:
         self.attach_only = attach_only
+        self.collect_partial = collect_partial
+        self.unfinished: dict[int, dict[str, Any]] = {}
         self.job_observer = sim_batch_observer.current_job_observer()
         self.config = config
         self.manifest = manifest
@@ -5516,6 +5523,10 @@ class _BatchFleetRun:
                     "(its units differ from the submitted ones)",
                     code=BATCH_SHARD_MANIFEST_CODE,
                 )
+            if self.collect_partial:
+                from . import sim_batch_shards
+
+                sim_batch_shards.gate_partial_shard(self, index, prior)
             attached = self._run_job(
                 shard_points,
                 str(prior["job_id"]),
@@ -5578,6 +5589,7 @@ def _run_batch_fleet(
     shard_fingerprint: str | None = None,
     resume: bool = False,
     attach_only: bool = False,
+    collect_partial: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend's ``hosts > 1`` dispatch: one **job** per shard.
 
@@ -5615,6 +5627,9 @@ def _run_batch_fleet(
     ``attach_only`` (issue #4620; ``--attach <shard map>``) only re-attaches:
     every shard must be in the manifest (a shard it cannot reach is reported
     lost, never submitted again), and nothing is staged or pre-recorded.
+    ``collect_partial`` (``--collect-partial``) reads each shard's status once
+    instead of waiting: terminal shards merge, the rest are lost units listed
+    in ``environment.remote.unfinished_shards``.
     """
     from .sim import SimError
 
@@ -5654,6 +5669,7 @@ def _run_batch_fleet(
         measurements_spec=measurements_spec,
         request_dir=request_dir,
         attach_only=attach_only,
+        collect_partial=collect_partial,
     )
 
     prev_handlers: dict[int, Any] = {}
@@ -5676,7 +5692,14 @@ def _run_batch_fleet(
                 **environment,
                 "max_concurrent_jobs": config.max_concurrent_jobs,
             }
-        return corners, engine_version, _batch_common.resumable(environment, manifest)
+        environment = _batch_common.resumable(environment, manifest)
+        if fleet.unfinished:
+            from . import sim_batch_shards
+
+            environment = sim_batch_shards.with_unfinished(
+                environment, fleet.unfinished, manifest
+            )
+        return corners, engine_version, environment
     finally:
         if in_main:
             _signal_handlers_restore(prev_handlers)
@@ -5800,73 +5823,6 @@ def _submit_batch_shards(
         )
         unit_start += len(points)
     return identities, manifest.path
-
-
-def _attach_batch_shards(
-    *,
-    manifest_path: str,
-    config: BatchConfig,
-    corner_points: list[CornerPoint],
-    netlist_path: str,
-    timeout_s: float,
-    keep_artifacts: bool,
-    want_waveforms: bool,
-    request: dict[str, Any],
-    measurements_spec: list[dict[str, Any]],
-    request_dir: str | None,
-    shard_fingerprint: str | None,
-) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-    """``--attach <shard map>`` (issue #4620): wait for every shard a
-    sharded ``--submit-only`` recorded and merge them exactly as the blocking
-    sharded run does. The map must belong to this request (digest and
-    fingerprint); a shard whose job is gone is reported lost, never
-    resubmitted."""
-    from . import sim_batch_shards
-    from .sim import SimError
-
-    if os.path.basename(manifest_path) != BATCH_SHARDS_FILENAME:
-        raise SimError(
-            f"--attach {manifest_path}: expected a job id or a "
-            f"{BATCH_SHARDS_FILENAME} shard map",
-            code=BATCH_SHARD_MANIFEST_CODE,
-        )
-    try:
-        with open(manifest_path, encoding="utf-8") as handle:
-            document = json.load(handle)
-        hosts = int(document["hosts"])
-        fingerprint = str(document["fingerprint"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise SimError(
-            f"--attach: shard map {manifest_path} is unreadable ({exc})",
-            code=BATCH_SHARD_MANIFEST_CODE,
-        ) from exc
-    mismatch = sim_batch_shards.shard_map_mismatch(document, request)
-    if mismatch is not None:
-        raise SimError(
-            f"--attach: shard map {manifest_path} was submitted from a "
-            f"different request ({mismatch}); pass the request the shards "
-            "were submitted from",
-            code=BATCH_SHARD_MANIFEST_CODE,
-        )
-    try:
-        return _run_batch_fleet(
-            corner_points=corner_points,
-            netlist_path=netlist_path,
-            timeout_s=timeout_s,
-            keep_artifacts=keep_artifacts,
-            want_waveforms=want_waveforms,
-            artifacts_dir=os.path.dirname(os.path.abspath(manifest_path)),
-            request=request,
-            hosts=hosts,
-            measurements_spec=measurements_spec,
-            request_dir=request_dir,
-            config=config,
-            shard_fingerprint=shard_fingerprint or fingerprint,
-            resume=True,
-            attach_only=True,
-        )
-    except BatchError as exc:
-        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
 
 
 def _mark_collected(
