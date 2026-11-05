@@ -917,7 +917,7 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   base/collector geometry the fixed-geometry cell name does not encode, and
   they are *secondary* parameters — once the primary `AE`/`NE` agree the
   devices pair and the comparer never reports them.
-- `nf`/`m`/`mult`/`mf` > 1 on a resistor call, or `nf`/`mult`/`mf` > 1 on a capacitor call (a multiplied device the
+- `nf`/`m`/`mult`/`mf` > 1 on a resistor call, or `nf`/`mult` > 1 on a capacitor call (a multiplied device the
   curated plain-element form cannot represent) is **rejected** with a specific error naming the device —
   never silently dropped or misinterpreted. Flatten it (one device per
   drawn gate) in the schematic netlist first. Two exceptions: bipolar's
@@ -925,7 +925,10 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   `DeviceClassBJT3Transistor` can represent multiple parallel emitters that
   way; MOS's own `nf` and `m` are *expanded*, not rejected (see above); and a
   capacitor's `m=N` (positive integer) becomes `N` parallel plain `C` cards named
-  `<instance>_m0` ..., each with the per-copy `A`/`P` (issue #4318).
+  `<instance>_m0` ..., each with the per-copy `A`/`P` (issue #4318). A capacitor `mf` > 1 equal to `m` (the
+  `MF=N m=N` schematic-exporter form) is the same multiplier, expanded once (not `mf*m`);
+  `mf` > 1 with `m` absent or different is **rejected** with an error naming the `mf`/`m`
+  combination and asking to drop one or make them equal (issue #4951).
   MOS `m=N` (positive integer) becomes `N` parallel plain `M` cards named
   `<instance>_m0` ... (`nf*m` cards named `<instance>_m0_f0` ... when
   combined with `nf`), total width `m*W`; pair with `options.combine_devices`
