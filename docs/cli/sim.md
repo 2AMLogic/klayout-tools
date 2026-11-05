@@ -58,7 +58,7 @@ this document (and the code) win.
   `status.json` once instead of waiting. Finished shards merge as in a plain
   attach; every other shard's units come back `lost_shard` and are listed in
   `environment.remote.unfinished_shards[]`. Refused without `--attach <shard
-  map>`. See "Collecting a partial result" below.
+  map>` (except with `--batch-set`, where it applies per member). See "Collecting a partial result" below.
 - `--fail-fast-probe` — before dispatching any real corner, run a short
   bounded `tran` calibration slice on the grid's first corner and abort the
   whole grid up front if the measured rate implies `options.timeout_s`
@@ -1300,6 +1300,22 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   other than `batch` is a usage error, exit `2`); a refused or failed request is
   reported, never re-run on local ngspice. `--plot` and `--op-lint` cannot be
   combined with it.
+- **Partial collection (`--collect-partial`,
+  [#5014](https://github.com/2AMLogic/klayout-tools/issues/5014)).** Allowed
+  with `--batch-set`. Each member whose directory (`<outdir>/<request-stem>/`)
+  holds a `batch-shards.json` is collected through the single-request
+  `--attach <map> --collect-partial` path: every shard is read once, nothing is
+  relaunched, finished shards are merged and the rest come back `lost_shard`
+  (listed in that member's `environment.remote.unfinished_shards[]`; no value is
+  fabricated). Such a member has a non-pass status, so the set exits non-zero
+  (the worst member code). Members with no shard map run as usual. Without the
+  flag nothing changes.
+- **Per-shard summary.** Each `requests[]` entry carries an additive `shards[]`:
+  `job_id`, `last_state` (last state this client observed, or the one a
+  `--collect-partial` read found) and `interrupted_observations` (how many times
+  this client saw the job enter `interrupted`; observed only -- fleet relaunches
+  are never inferred). Empty when this client observed no job. The text output
+  prints one `shard ...` line per row.
 - **Resuming a set (`--resume`).** `--resume` is forwarded to every request and
   each one resumes from its own directory, `<outdir>/<request-stem>/`. Re-run
   the same set with the same `-o`: a sharded request re-attaches to the shard

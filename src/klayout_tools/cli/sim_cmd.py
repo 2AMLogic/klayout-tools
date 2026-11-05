@@ -283,7 +283,6 @@ def _run_batch_set(args: argparse.Namespace) -> int:
         for flag, value in (
             ("a positional request", args.request),
             ("--attach", getattr(args, "attach_job_id", None)),
-            ("--collect-partial", getattr(args, "collect_partial", False) or None),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),
@@ -323,6 +322,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             max_concurrent_jobs=args.max_concurrent_jobs,
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
             dry_run=getattr(args, "dry_run", False),
+            collect_partial=bool(getattr(args, "collect_partial", False)),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)

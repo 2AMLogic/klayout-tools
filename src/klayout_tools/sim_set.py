@@ -41,6 +41,7 @@ from .sim import SimError, run_sim
 from .sim_batch import (
     BATCH_CONCURRENCY_CAP_CODE,
     BATCH_NO_CAPACITY_CODE,
+    BATCH_SHARDS_FILENAME,
 )
 from .sim_batch_observer import JobObserver, observe_batch_jobs
 from .sim_batch_plan import preflight_batch_request
@@ -95,6 +96,15 @@ def _job_ids(report: dict[str, Any]) -> list[str]:
     remote = (report.get("environment") or {}).get("remote") or {}
     blocks = remote.get("fleet") if isinstance(remote.get("fleet"), list) else [remote]
     return [b["job_id"] for b in blocks if isinstance(b, dict) and b.get("job_id")]
+
+
+def shard_text_lines(entry: dict[str, Any]) -> list[str]:
+    """Text-mode per-shard summary lines for one request entry."""
+    return [
+        f"    shard {sh['job_id']}: {sh['last_state']}  "
+        f"interrupted_observations={sh['interrupted_observations']}"
+        for sh in entry.get("shards") or ()
+    ]
 
 
 def _entry_exit_code(status: str) -> int:
@@ -170,6 +180,42 @@ def _record_job(manifest: _Manifest | None, index: int) -> Callable[[str], None]
     return _on_job
 
 
+class _ShardTracker:
+    """Issue #5014: what this client observed of each batch job (shard) of one
+    member -- last state and how many times it saw ``interrupted``. Observed
+    only; relaunches by the fleet's ``reconcile`` are never inferred."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._jobs: dict[str, dict[str, Any]] = {}
+
+    def on_state(self, job_id: str, state: str) -> None:
+        with self._lock:
+            job = self._jobs.setdefault(
+                job_id, {"last_state": state, "interrupted_observations": 0}
+            )
+            job["last_state"] = state
+            if state == "interrupted":
+                job["interrupted_observations"] += 1
+
+    def summary(self, report: dict[str, Any] | None) -> list[dict[str, Any]]:
+        """Per-shard rows (job id order of first sight); shards a
+        ``--collect-partial`` read left unfinished carry the state it read."""
+        with self._lock:
+            jobs = {k: dict(v) for k, v in self._jobs.items()}
+        remote = ((report or {}).get("environment") or {}).get("remote") or {}
+        for shard in remote.get("unfinished_shards") or ():
+            if isinstance(shard, dict) and shard.get("job_id"):
+                jobs.setdefault(
+                    str(shard["job_id"]),
+                    {
+                        "last_state": str(shard.get("state") or "unknown"),
+                        "interrupted_observations": 0,
+                    },
+                )
+        return [{"job_id": job_id, **row} for job_id, row in jobs.items()]
+
+
 def _run_one(
     index: int,
     path: str,
@@ -179,7 +225,15 @@ def _run_one(
     manifest: _Manifest | None = None,
     capacity_retries: int = 0,
     sleep: Callable[[float], None] = time.sleep,
+    collect_partial: bool = False,
 ) -> dict[str, Any]:
+    tracker = _ShardTracker()
+    shard_map = os.path.join(directory, BATCH_SHARDS_FILENAME)
+    attach_kwargs: dict[str, Any] = (
+        {"attach_job_id": shard_map, "collect_partial": True}
+        if collect_partial and os.path.isfile(shard_map)
+        else {}
+    )
     entry: dict[str, Any] = {
         "index": index,
         "request": path,
@@ -189,6 +243,7 @@ def _run_one(
         "job_ids": [],
         "report": None,
         "error": None,
+        "shards": [],
     }
     attempt = 0
     while True:
@@ -196,9 +251,14 @@ def _run_one(
         if manifest:
             manifest.update(index, status="running", attempts=attempt)
         try:
-            with observe_batch_jobs(JobObserver(path, _record_job(manifest, index))):
+            observer = JobObserver(path, _record_job(manifest, index), tracker.on_state)
+            with observe_batch_jobs(observer):
                 report = run(
-                    path, artifacts_dir=directory, backend="batch", **run_kwargs
+                    path,
+                    artifacts_dir=directory,
+                    backend="batch",
+                    **attach_kwargs,
+                    **run_kwargs,
                 )
             break
         except (SimError, OutputLockError) as exc:
@@ -209,6 +269,7 @@ def _run_one(
             entry["error"] = {"message": str(exc), "code": code}
         except Exception as exc:  # one request must never sink its siblings
             entry["error"] = {"message": f"{type(exc).__name__}: {exc}", "code": None}
+        entry["shards"] = tracker.summary(None)
         if manifest:
             manifest.update(index, status="error")
         return entry
@@ -225,6 +286,7 @@ def _run_one(
         job_id=job_ids[0] if len(job_ids) == 1 else None,
         job_ids=job_ids,
         report=report_path,
+        shards=tracker.summary(report),
     )
     if manifest:
         manifest.update(
@@ -271,7 +333,7 @@ def print_set_text(report: dict) -> None:
         error = entry["error"]
         if error:
             line += f"  {error['code'] or 'error'}: {error['message']}"
-        print(line)
+        print("\n".join([line, *shard_text_lines(entry)]))
 
 
 def run_sim_set(
@@ -284,6 +346,7 @@ def run_sim_set(
     sleep: Callable[[float], None] = time.sleep,
     preflight: Callable[..., Any] | None = None,
     dry_run: bool = False,
+    collect_partial: bool = False,
     **run_kwargs: Any,
 ) -> dict[str, Any]:
     """Run ``request_paths`` with at most ``max_in_flight`` in flight; return
@@ -291,6 +354,12 @@ def run_sim_set(
 
     ``capacity_retries`` (default 0: off) re-submits a request refused with a
     capacity code up to that many more times, with doubling backoff.
+
+    ``collect_partial`` (issue #5014): a member whose directory holds a
+    ``batch-shards.json`` is collected through the single-request
+    ``--attach <map> --collect-partial`` path (each shard read once, never
+    relaunched); unfinished units are reported missing, not fabricated.
+    Members without a shard map run as usual.
 
     ``resume=True`` in ``run_kwargs`` reaches every request's ``run`` call; each
     request resumes from its own directory, so a sharded request re-attaches to
@@ -363,6 +432,7 @@ def run_sim_set(
                 manifest,
                 capacity_retries,
                 sleep,
+                collect_partial,
             )
             for i, path in enumerate(request_paths)
         ]
