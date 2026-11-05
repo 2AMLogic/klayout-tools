@@ -180,6 +180,40 @@ the reviewer-side check.
 - **`iverilog`** or **`verilator`** (plus `verilator_coverage` for coverage
   runs) on `$PATH`, matching the requested engine.
 
+### Empty stdout on failure
+
+Under `--format json`, a run that cannot start (or fails) writes the error
+envelope to **stderr** and leaves **stdout empty** — the shared `klt` contract,
+see [`json-contract.md` § Error shape](../json-contract.md#error-shape). So
+`klt functional-verification ... --format json > report.json` leaves a 0-byte
+`report.json` on failure. Gate on the exit code (`0` pass, `1` error, `3`
+failed tests), never on file size or existence, and do not commit the redirect
+target after a nonzero exit. `--format text` behaves the same: message on
+stderr, nothing on stdout.
+
+### Unusable-environment symptoms
+
+A tool-installed `klt` without the `functional-verification` extra, run with
+`PYTHONPATH` pointing at another interpreter's site-packages, can fail in two
+ways:
+
+- **Shadowed dependencies** — a foreign `PYTHONPATH` entry hides klt's own
+  dependencies, e.g. `ModuleNotFoundError: rpds.rpds`. This breaks before the
+  verb's own error handling runs, so it may surface as a raw traceback rather
+  than a structured envelope.
+- **cocotb built for a different CPython** — loads, then the simulator
+  segfaults (`Simulation failed: -11`). klt's ABI pre-flight rejects the wheel
+  tags it recognizes with a structured error; a mismatch it does not catch
+  shows up as this exit `-11`.
+
+In either case, clear `PYTHONPATH` and run with the extra in an isolated
+environment instead of reinstalling the tool:
+
+```bash
+env -u PYTHONPATH uvx --from "klayout-tools[functional-verification]" \
+  klt functional-verification request.json --format json
+```
+
 ## Never trusting an exit code
 
 The spike observed the *same* deliberately-failing regression exit `2`, `1`,
