@@ -2330,16 +2330,17 @@ def test_classify_diagnostics_modelname_with_wide_w_names_culprit(tmp_path):
 
 
 def test_classify_diagnostics_modelname_with_wide_nf_names_culprit(tmp_path):
-    # nf= hits the identical bin-range check w= does (issue #1214) -- the
-    # diagnostic must report the *effective* width (w * nf), not just w.
+    # Selection keys on w as written (issue #4976): nf= is reported but
+    # never multiplied into an "effective width".
     netlist = tmp_path / "netlist.spice"
-    netlist.write_text("X5 d g s b nfet_06v0 w=50u l=0.6u nf=450 m=1\n")
+    netlist.write_text("X5 d g s b nfet_06v0 w=128u l=0.6u nf=64 m=1\n")
 
     (diag,) = sim._classify_diagnostics(_MODELNAME_LOG, str(netlist))
 
     assert diag["code"] == "model_bin_range"
-    assert "nf=450" in diag["message"]
-    assert "22500" in diag["message"]  # 50 um * 450 fingers
+    assert "nf=64" in diag["message"]
+    assert "w=128u" in diag["message"]
+    assert "effective" not in diag["message"]
 
 
 def test_classify_diagnostics_modelname_with_m_workaround_finds_no_culprit(tmp_path):
@@ -2385,6 +2386,36 @@ def test_find_width_ceiling_culprit_picks_worst_offender(tmp_path):
     assert nf_count == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize(
+    ("params", "flagged"),
+    [
+        ("w=2u nf=64", False),
+        ("w=128u nf=64", True),
+        ("w=128u nf=1", True),
+        ("w=50u nf=450", False),
+        ("w=50u m=450", False),
+        ("w=128u m=4", False),
+        ("w={wp} nf=64", False),
+    ],
+)
+def test_find_width_ceiling_culprit_keys_on_w_as_written(params, flagged):
+    culprit = sim._find_width_ceiling_culprit(f"X1 d g s b nfet_06v0 {params}\n")
+    assert (culprit is not None) is flagged
+
+
+def test_width_ceiling_preflight_diagnostic(tmp_path):
+    netlist = tmp_path / "n.spice"
+    netlist.write_text("X1 d g s b nfet_06v0 w=128u l=0.6u nf=64\n")
+    diag = sim._width_ceiling_preflight_diagnostic(str(netlist))
+    assert diag is not None
+    assert diag["severity"] == "warning"
+    assert diag["code"] == "model_bin_range_preflight"
+    assert diag["instance"] == "X1"
+    netlist.write_text("X1 d g s b nfet_06v0 w=2u l=0.6u nf=64\n")
+    assert sim._width_ceiling_preflight_diagnostic(str(netlist)) is None
+    assert sim._width_ceiling_preflight_diagnostic(str(tmp_path / "no.spice")) is None
+
+
 def test_find_width_ceiling_culprit_none_when_all_under_ceiling():
     netlist_text = "M1 d g s b nfet_06v0 w=5u l=0.6u nf=4\n"
     assert sim._find_width_ceiling_culprit(netlist_text) is None
@@ -2401,7 +2432,7 @@ def test_run_sim_stubbed_modelname_failure_reports_actionable_diagnostic(
     body.write_text(
         ".param vdd=1.0\n"
         "Vdd vdd 0 DC {vdd}\n"
-        "X5 vdd g out 0 nfet_06v0 w=50u l=0.6u nf=450 m=1\n"
+        "X5 vdd g out 0 nfet_06v0 w=128u l=0.6u nf=64 m=1\n"
     )
     request = _write_request(
         tmp_path,
@@ -2422,7 +2453,7 @@ def test_run_sim_stubbed_modelname_failure_reports_actionable_diagnostic(
     assert corner["status"] == "error"
     (diag,) = [d for d in corner["diagnostics"] if d["code"] == "model_bin_range"]
     assert "X5" in diag["message"]
-    assert "nf=450" in diag["message"]
+    assert "nf=64" in diag["message"]
     assert "m=" in diag["message"]
 
 
