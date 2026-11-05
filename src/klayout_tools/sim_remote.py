@@ -192,8 +192,7 @@ def _unrun_corner_report(
             "unit": spec.get("unit"),
             "status": "error",
             "margin": None,
-            # Issue #2482: the same additive `step`/`derived_from`
-            # provenance a ran corner's entry carries (empty otherwise).
+            # Issue #2482: additive `step`/`derived_from` provenance, as a ran corner.
             **sim_steps.measurement_provenance(spec),
         }
         for spec in measurements_spec
