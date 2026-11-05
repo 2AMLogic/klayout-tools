@@ -33,6 +33,7 @@
           "job_id": { "type": ["string", "null"] },
           "job_ids": { "type": "array", "items": { "type": "string" } },
           "report": { "type": ["string", "null"] },
+          "interrupted": { "type": "boolean" },
           "error": {
             "type": ["object", "null"],
             "required": ["message", "code"],

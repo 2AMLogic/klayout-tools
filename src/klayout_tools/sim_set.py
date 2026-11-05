@@ -97,6 +97,12 @@ def _job_ids(report: dict[str, Any]) -> list[str]:
     return [b["job_id"] for b in blocks if isinstance(b, dict) and b.get("job_id")]
 
 
+def _client_interrupted(report: dict[str, Any]) -> bool:
+    env = report.get("environment") or {}
+    remote = env.get("remote") or {}
+    return bool(env.get("interrupted") or remote.get("interrupted"))
+
+
 def _entry_exit_code(status: str) -> int:
     """The exit code a single ``klt sim`` would have returned for ``status``."""
     if status in {"error", "not_checked", "inconclusive"}:
@@ -226,6 +232,8 @@ def _run_one(
         job_ids=job_ids,
         report=report_path,
     )
+    if _client_interrupted(report):
+        entry["interrupted"] = True
     if manifest:
         manifest.update(
             index, status=entry["status"], job_id=entry["job_id"], job_ids=job_ids

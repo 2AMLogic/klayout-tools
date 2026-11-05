@@ -1302,6 +1302,17 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   still `interrupted` is re-polled first, so resuming it can wait up to another
   `batch.interrupted_grace_s` (default 1800 s) before its replacement is
   submitted. The aggregate envelope is unchanged.
+- **An interrupted (Spot-reclaimed) shard.** Polling is bounded: a shard that
+  stays `interrupted` is waited on for at most `batch.interrupted_grace_s`
+  (default 1800 s, settable only in the request's `batch` block), and while it
+  is polled it holds a `--max-in-flight` slot, so lowering the grace in the
+  request frees the slot sooner. The client never re-submits it itself.
+  To re-run only the units with no result, re-run the same set with the same
+  `-o` and `--resume` (or `--attach <batch-shards.json> --collect-partial`,
+  then `--resume`). A request the *client* stopped (Ctrl-C/SIGTERM) carries
+  `interrupted: true` in its `requests[]` entry (additive; present only when
+  true), distinguishing it from a shard that really failed; its unfinished
+  shards are `lost_shard` units.
 - **Per-request reports.** Each request writes its full single-request report
   to `report.json` in its own directory, `<outdir>/<request-stem>/` (without
   `-o`: `.klt/sim/<request-stem>/` next to the request file).
