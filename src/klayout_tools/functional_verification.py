@@ -3139,9 +3139,9 @@ def _resolve_verilog_top(
     Returns ``None`` when ``testbench.verilog_top`` is absent (the ordinary
     cocotb path), else ``{"verilog_top", "pass_marker", "fail_marker",
     "dut_instance", "plusargs"}``. ``testbench.module`` and
-    ``testbench.verilog_top`` are mutually exclusive. The bench's verdict is derived without cocotb (see
-    :func:`_run_verilog_top`), so every option that needs cocotb is rejected
-    here rather than silently ignored.
+    ``testbench.verilog_top`` are mutually exclusive. The bench's verdict is
+    derived without cocotb (see :func:`_run_verilog_top`), so every option
+    that needs cocotb is rejected here rather than silently ignored.
     """
     if not isinstance(testbench, dict) or "verilog_top" not in testbench:
         return None
