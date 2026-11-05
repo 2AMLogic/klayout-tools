@@ -60,9 +60,9 @@ from ._paths import load_request_arg as _shared_load_request_arg
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
-    _content_hash,
     _yosys_version,
     build_provenance,
+    content_hash,
     wasi_sandbox_hint_if_applicable,
 )
 from ._report_verify import (
@@ -1033,12 +1033,12 @@ def _equiv_input_hash(gold: dict[str, Any], gate: dict[str, Any]) -> str | None:
     documents: any divergence here would show up as permanent, unexplained
     drift on a report that never moved, so there is exactly one recipe and
     both call sites follow it). A single source across both sides hashes
-    through ``_content_hash`` (what ``build_provenance``'s ``input_path``
+    through ``content_hash`` (what ``build_provenance``'s ``input_path``
     records); multiple sources through the order-independent
     ``_combined_content_hash``."""
     all_sources = gold["sources"] + gate["sources"]
     if len(all_sources) == 1:
-        return _content_hash(all_sources[0])
+        return content_hash(all_sources[0])
     return _combined_content_hash(all_sources)
 
 

@@ -157,7 +157,7 @@ from ._paths import (
     _reject_unknown_keys,
     _validate_via_entries,
 )
-from ._provenance import INPUT_ROLE_LAYOUT, _content_hash, build_provenance
+from ._provenance import INPUT_ROLE_LAYOUT, build_provenance, content_hash
 from ._unionfind import UnionFind
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .ir_solver import solve_ir_drop, worst_deviation
@@ -2579,7 +2579,7 @@ def run_power(
     # Issue #3400: with `--deck`, the deck that defaulted the via
     # resistances is recorded; without it `deck` stays `null`.
     provenance = _power_provenance(file, deck)
-    provenance["spec"] = {"content_hash": _content_hash(spec_path)}
+    provenance["spec"] = {"content_hash": content_hash(spec_path)}
     provenance["top_cell"] = top_cell.name
 
     report: dict[str, Any] = {

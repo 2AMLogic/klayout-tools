@@ -555,6 +555,7 @@
         "klayout_tools._batch_common",
         "klayout_tools._check_result",
         "klayout_tools._devices",
+        "klayout_tools._digest",
         "klayout_tools._jsonnum",
         "klayout_tools._layout",
         "klayout_tools._native",
@@ -1604,12 +1605,6 @@
     },
     {
       "consumer": "klayout_tools.evidence_lint",
-      "exporter": "klayout_tools.evidence_record",
-      "symbol": "_sha256_file",
-      "reason": "Issue #4043: the lint must verify sidecar hashes with the exact hashing the evidence writer used; promote to a public name when evidence_record is next reworked."
-    },
-    {
-      "consumer": "klayout_tools.evidence_lint",
       "exporter": "klayout_tools.sim",
       "symbol": "_grade_corners",
       "reason": "Issue #4043: verdict re-derivation must match `klt sim` grading by construction; make it public or move it to a shared module when sim is next split."
@@ -1651,18 +1646,6 @@
       "reason": "Issue #3009: reuse ERC label-layer registration for the tap net filter rather than duplicating it."
     },
     {
-      "consumer": "klayout_tools.drc",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.drc_report_check",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md); split out of klayout_tools.drc."
-    },
-    {
       "consumer": "klayout_tools.env_provenance",
       "exporter": "klayout_tools._provenance",
       "symbol": "_klayout_version",
@@ -1683,12 +1666,6 @@
     {
       "consumer": "klayout_tools.equiv",
       "exporter": "klayout_tools._provenance",
-      "symbol": "_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.equiv",
-      "exporter": "klayout_tools._provenance",
       "symbol": "_yosys_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
@@ -1708,36 +1685,12 @@
       "consumer": "klayout_tools.equiv_stage",
       "exporter": "klayout_tools._provenance",
       "symbol": "_combined_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.equiv_stage",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.erc",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.extract",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
       "consumer": "klayout_tools.extract",
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.lvs",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
@@ -1795,12 +1748,6 @@
       "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
-      "consumer": "klayout_tools.place_and_route",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
       "consumer": "klayout_tools.post_route_sta",
       "exporter": "klayout_tools._provenance",
       "symbol": "_deck_block",
@@ -1831,12 +1778,6 @@
       "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
     },
     {
-      "consumer": "klayout_tools.power",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
       "consumer": "klayout_tools.sim_batch",
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
@@ -1858,12 +1799,6 @@
       "consumer": "klayout_tools.synthesize",
       "exporter": "klayout_tools._provenance",
       "symbol": "_combined_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.synthesize",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
@@ -1942,12 +1877,6 @@
       "consumer": "klayout_tools.place_and_route_batch",
       "exporter": "klayout_tools.sim",
       "symbol": "_yield_host_default_backend",
-      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.place_and_route_batch",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_content_hash",
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {

@@ -235,13 +235,6 @@ def resolve_approvals(approvals_path: str | None) -> tuple[CommandApproval, ...]
     return load_approvals(path)
 
 
-def _sha256_file(path: str) -> str:
-    digest = _provenance.sha256_file(path)
-    if digest is None:
-        raise FileNotFoundError(path)
-    return "sha256:" + digest
-
-
 def _match_step(
     approvals: Sequence[CommandApproval],
     argv: Sequence[str],
@@ -303,7 +296,13 @@ def _plan_inputs(
         if dest in seen:
             raise _error(f"{label} duplicates unit input name {dest!r}")
         seen.add(dest)
-        planned.append({"name": dest, "source": source, "sha256": _sha256_file(source)})
+        planned.append(
+            {
+                "name": dest,
+                "source": source,
+                "sha256": _provenance.content_hash_required(source),
+            }
+        )
     return planned
 
 
