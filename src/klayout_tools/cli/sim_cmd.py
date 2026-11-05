@@ -48,7 +48,7 @@ from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
 from ..sim import SimError, load_request, run_sim
 from ..sim_batch_async import read_job_status
-from ..sim_set import DEFAULT_MAX_IN_FLIGHT, run_sim_set
+from ..sim_set import DEFAULT_MAX_IN_FLIGHT, run_sim_set, shard_text_lines
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
@@ -283,7 +283,6 @@ def _run_batch_set(args: argparse.Namespace) -> int:
         for flag, value in (
             ("a positional request", args.request),
             ("--attach", getattr(args, "attach_job_id", None)),
-            ("--collect-partial", getattr(args, "collect_partial", False) or None),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),
@@ -322,6 +321,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             max_units_per_job=args.max_units_per_job,
             max_concurrent_jobs=args.max_concurrent_jobs,
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
+            collect_partial=bool(getattr(args, "collect_partial", False)),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -343,7 +343,7 @@ def _print_set_text(report: dict) -> None:
         error = entry["error"]
         if error:
             line += f"  {error['code'] or 'error'}: {error['message']}"
-        print(line)
+        print("\n".join([line, *shard_text_lines(entry)]))
 
 
 def _run_op_lint(args: argparse.Namespace) -> int:

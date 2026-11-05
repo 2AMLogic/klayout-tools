@@ -33,6 +33,18 @@
           "job_id": { "type": ["string", "null"] },
           "job_ids": { "type": "array", "items": { "type": "string" } },
           "report": { "type": ["string", "null"] },
+          "shards": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["job_id", "last_state", "interrupted_observations"],
+              "properties": {
+                "job_id": { "type": "string" },
+                "last_state": { "type": "string" },
+                "interrupted_observations": { "type": "integer", "minimum": 0 }
+              }
+            }
+          },
           "error": {
             "type": ["object", "null"],
             "required": ["message", "code"],
