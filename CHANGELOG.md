@@ -14,6 +14,8 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+## 0.9.1 (2026-11-05)
+
 - **`klt sim` `corners.supply_waveforms` with `corners.units`** (issue #4981):
   a PWL/PULSE supply source can now be rescaled per unit in an explicit
   `corners.units` request (each name must be a `supply_v` key of every unit).
