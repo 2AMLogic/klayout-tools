@@ -173,7 +173,7 @@
     },
     {
       "path": "src/klayout_tools/_provenance.py",
-      "lines": 1014
+      "lines": 1005
     },
     {
       "path": "src/klayout_tools/_report_verify.py",
@@ -481,11 +481,11 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1083
+      "lines": 1079
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
-      "lines": 904
+      "lines": 903
     },
     {
       "path": "src/klayout_tools/netlist_capacitor_recovery.py",
@@ -525,7 +525,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3957
+      "lines": 3948
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
@@ -605,11 +605,11 @@
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
-      "lines": 705
+      "lines": 703
     },
     {
       "path": "src/klayout_tools/signoff_power_delivery.py",
-      "lines": 2034
+      "lines": 2033
     },
     {
       "path": "src/klayout_tools/sim.py",
@@ -621,7 +621,7 @@
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
-      "lines": 925
+      "lines": 924
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
@@ -637,7 +637,7 @@
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
-      "lines": 1244
+      "lines": 1237
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
