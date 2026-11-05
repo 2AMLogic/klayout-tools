@@ -235,6 +235,7 @@
         "klayout_tools.functional_verification",
         "klayout_tools.functional_verification_initial_state",
         "klayout_tools.functional_verification_sdf",
+        "klayout_tools.functional_verification_sdf_instance",
         "klayout_tools.functional_verification_sdf_rename"
       ]
     },
