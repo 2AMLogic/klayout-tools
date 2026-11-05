@@ -2571,7 +2571,7 @@ def _assess_job_ceiling(
     return assessment
 
 
-def _enforce_job_ceiling(assessment: dict[str, Any]) -> None:
+def _enforce_job_ceiling(assessment: dict[str, Any], *, quiet: bool = False) -> None:
     """Act on :func:`_assess_job_ceiling`'s result before any S3 write:
     under ``"enforce"`` an exceeded ceiling is a
     :class:`~klayout_tools.sim.SimError` with code
@@ -2590,7 +2590,8 @@ def _enforce_job_ceiling(assessment: dict[str, Any]) -> None:
             'request.batch.job_ceiling_check to "warn" to submit anyway)',
             code=BATCH_JOB_CEILING_CODE,
         )
-    print(f"klt sim: warning: {warning}", file=sys.stderr)
+    if not quiet:
+        print(f"klt sim: warning: {warning}", file=sys.stderr)
 
 
 def _resolve_runner_version_check(batch_spec: dict[str, Any]) -> str:
@@ -4916,7 +4917,7 @@ def _poll_and_collect(
 
 
 def _apply_job_split(
-    job_ceiling: dict[str, Any], config: BatchConfig
+    job_ceiling: dict[str, Any], config: BatchConfig, *, quiet: bool = False
 ) -> tuple[dict[str, Any], int]:
     """Decide whether the request is split into several batch jobs (issues
     #3446, #4620): returns the assessment annotated with ``split`` /
@@ -4931,7 +4932,7 @@ def _apply_job_split(
             "split": effective_hosts > 1,
             "effective_hosts": effective_hosts,
         }
-        if effective_hosts > 1:
+        if effective_hosts > 1 and not quiet:
             print(
                 f"klt sim: notice: splitting {job_ceiling['unit_count']} units "
                 f"into {effective_hosts} batch jobs of at most "
@@ -4940,8 +4941,27 @@ def _apply_job_split(
                 file=sys.stderr,
             )
     else:
-        _enforce_job_ceiling(job_ceiling)
+        _enforce_job_ceiling(job_ceiling, quiet=quiet)
     return job_ceiling, effective_hosts
+
+
+def plan_batch_job(
+    config: BatchConfig,
+    *,
+    unit_count: int,
+    timeout_s: float,
+    quiet: bool = False,
+) -> tuple[dict[str, Any], int]:
+    """Assess one job against the fleet's whole-job ceiling and plan its split
+    (issues #2833, #3446): the single implementation the submit paths use and
+    ``--batch-set`` preflights with (issue #4972). Raises
+    :class:`~klayout_tools.sim.SimError` (``batch_job_ceiling_exceeded`` /
+    ``batch_max_units_per_job_invalid``); no S3 write. ``quiet`` suppresses the
+    stderr notices (a preflight must not announce twice)."""
+    job_ceiling = _assess_job_ceiling(
+        unit_count=unit_count, per_unit_timeout_s=timeout_s, config=config
+    )
+    return _apply_job_split(job_ceiling, config, quiet=quiet)
 
 
 def _run_batch(
@@ -5055,10 +5075,9 @@ def _run_batch(
     # Issue #2833: assess the one job against the fleet's whole-job ceiling
     # before `submit_job`'s first S3 write, so an "enforce" refusal can never
     # leave a partial contract or launch a billable job.
-    job_ceiling = _assess_job_ceiling(
-        unit_count=len(corner_points), per_unit_timeout_s=timeout_s, config=config
+    job_ceiling, effective_hosts = plan_batch_job(
+        config, unit_count=len(corner_points), timeout_s=timeout_s
     )
-    job_ceiling, effective_hosts = _apply_job_split(job_ceiling, config)
     if effective_hosts > 1:
         try:
             corners, engine_version, environment = _run_batch_fleet(

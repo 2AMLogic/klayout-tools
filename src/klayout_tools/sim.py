@@ -3116,6 +3116,45 @@ class _ResolvedSimRequest:
     waveform_max_bytes: Any
 
 
+def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, Any]:
+    """Side-effect-free ceiling / split check for one ``backend: batch`` request
+    (issue #4972): resolve it exactly as a real run would (CLI overrides
+    included), then run the same :func:`~klayout_tools.sim_batch.plan_batch_job`
+    the submit path runs, before any S3 write. Raises :class:`SimError` with the
+    submit path's own code; returns the job-ceiling assessment otherwise.
+    ``overrides`` are the :func:`run_sim` keyword options."""
+    from .sim_batch import _resolve_batch_config, plan_batch_job
+
+    resolved = _prepare_sim_request(
+        request_path,
+        artifacts_dir=overrides.get("artifacts_dir"),
+        backend="batch",
+        max_workers=overrides.get("max_workers"),
+        hosts=overrides.get("hosts"),
+        budget_s=overrides.get("budget_s"),
+        resume=overrides.get("resume"),
+        plot_dir=overrides.get("plot_dir"),
+        fail_fast_probe=overrides.get("fail_fast_probe"),
+        fail_on_diagnostic=overrides.get("fail_on_diagnostic"),
+        max_units_per_job=overrides.get("max_units_per_job"),
+        max_concurrent_jobs=overrides.get("max_concurrent_jobs"),
+        capacity_wait_s=overrides.get("capacity_wait_s"),
+        dry_run=True,
+        pdk_root=overrides.get("pdk_root"),
+    )
+    points = resolved.corner_points
+    config = _resolve_batch_config(
+        resolved.request,
+        corner_count=len(points),
+        timeout_s=resolved.timeout_s,
+        check_runner=False,
+    )
+    job_ceiling, _hosts = plan_batch_job(
+        config, unit_count=len(points), timeout_s=resolved.timeout_s, quiet=True
+    )
+    return job_ceiling
+
+
 def _prepare_sim_request(
     request_path: str,
     *,
