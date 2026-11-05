@@ -283,7 +283,6 @@ def _run_batch_set(args: argparse.Namespace) -> int:
         for flag, value in (
             ("a positional request", args.request),
             ("--attach", getattr(args, "attach_job_id", None)),
-            ("--collect-partial", getattr(args, "collect_partial", False) or None),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),
@@ -322,6 +321,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             max_units_per_job=args.max_units_per_job,
             max_concurrent_jobs=args.max_concurrent_jobs,
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
+            collect_partial=bool(getattr(args, "collect_partial", False)),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -344,6 +344,11 @@ def _print_set_text(report: dict) -> None:
         if error:
             line += f"  {error['code'] or 'error'}: {error['message']}"
         print(line)
+        for shard in entry.get("shards") or ():
+            print(
+                f"    shard {shard['job_id']}: {shard['last_state']}  "
+                f"interrupted_observations={shard['interrupted_observations']}"
+            )
 
 
 def _run_op_lint(args: argparse.Namespace) -> int:

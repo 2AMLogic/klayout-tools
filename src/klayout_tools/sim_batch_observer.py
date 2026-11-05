@@ -23,6 +23,9 @@ class JobObserver:
 
     label: str | None
     on_job: Callable[[str], None] | None = None
+    #: Called as ``on_state(job_id, state)`` on each observed state change
+    #: (issue #5014: lets ``--batch-set`` summarise per-shard history).
+    on_state: Callable[[str, str], None] | None = None
 
 
 _JOB_OBSERVER: contextvars.ContextVar[JobObserver | None] = contextvars.ContextVar(
@@ -64,4 +67,10 @@ def report_submitted(job_id: str) -> None:
 def state_hook(job_id: str) -> Callable[[str], None]:
     """``on_state`` callback for the poller (bound to this thread's observer)."""
     observer = current_job_observer()
-    return lambda state: report_progress(job_id, state, observer)
+
+    def _hook(state: str) -> None:
+        if observer is not None and observer.on_state is not None:
+            observer.on_state(job_id, state)
+        report_progress(job_id, state, observer)
+
+    return _hook
