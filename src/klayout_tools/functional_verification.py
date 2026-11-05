@@ -219,6 +219,7 @@ from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import sha256_file
 from ._vendor import mutation_variants as _mutation_variants
+from ._verilog_top import plusargs, require_module_declared
 from .env_provenance import find_repo_root, repo_relative_path
 from .functional_verification_initial_state import (
     INITIAL_STATE_MODULE,
@@ -3075,30 +3076,10 @@ def _verilog_top_fields(testbench: dict[str, Any]) -> dict[str, Any]:
                 f"request.testbench.{name} must be a non-empty string when given"
             )
         resolved[name] = value
-    resolved["plusargs"] = _verilog_top_plusargs(testbench.get("plusargs"))
+    resolved["plusargs"] = plusargs(
+        testbench.get("plusargs"), FunctionalVerificationError
+    )
     return resolved
-
-
-def _verilog_top_plusargs(value: Any) -> list[str]:
-    """``testbench.plusargs`` (issue #5006): ``+name[=value]`` strings appended
-    verbatim to the ``vvp`` argv. Absent means ``[]``."""
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise FunctionalVerificationError(
-            "request.testbench.plusargs must be an array of strings"
-        )
-    for index, item in enumerate(value):
-        if not isinstance(item, str) or not item:
-            raise FunctionalVerificationError(
-                f"request.testbench.plusargs[{index}] must be a non-empty string"
-            )
-        if not item.startswith("+"):
-            raise FunctionalVerificationError(
-                f"request.testbench.plusargs[{index}] must start with '+' "
-                f"(a vvp plusarg) -- got {item!r}"
-            )
-    return list(value)
 
 
 def _reject_verilog_top_options(engine: str, options: Any) -> None:
@@ -3115,20 +3096,6 @@ def _reject_verilog_top_options(engine: str, options: Any) -> None:
                 "-- not supported on the Verilog-bench path (it has no cocotb "
                 "run to apply it to)"
             )
-
-
-def _require_module_declared(top: str, sources: list[str]) -> None:
-    module_re = re.compile(rf"^\s*module\s+{re.escape(top)}\b", re.MULTILINE)
-    for source in sources:
-        try:
-            with open(source, encoding="utf-8", errors="replace") as handle:
-                if module_re.search(handle.read()):
-                    return
-        except OSError:
-            continue
-    raise FunctionalVerificationError(
-        f"testbench.verilog_top '{top}' is not a module declared in request.sources"
-    )
 
 
 def _resolve_verilog_top(
@@ -3149,7 +3116,7 @@ def _resolve_verilog_top(
     _reject_verilog_top_options(engine, options)
     top = resolved["verilog_top"]
     assert top is not None
-    _require_module_declared(top, sources)
+    require_module_declared(top, sources, FunctionalVerificationError)
     return resolved
 
 
@@ -3389,9 +3356,7 @@ def _run_verilog_top(
                 "build_log": _hashed_path_envelope(build_log),
                 "random_seed": None,
                 "source_defines": source_defines,
-                # Additive (issue #5006): `testbench.plusargs` as given; `[]`
-                # when absent. Echoed verbatim -- never put credentials in it.
-                "plusargs": plusargs,
+                "plusargs": plusargs,  # issue #5006; `[]` when absent
                 "initial_state": None,
                 "sdf": (
                     None
