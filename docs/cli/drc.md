@@ -7,7 +7,7 @@ report violations as structured data.
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--pdk <variant> [--pdk-root <path>]] [--negative-control <layout> [--negative-control-categories <A,B>]] [--format text|json]
 klt drc --deck sky130|gf180mcu|sg13g2|sg13cmos5l --list-rules [--format text|json]
 klt drc <file> --engine both --deck <name> [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--format text|json]
-klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
+klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--klayout-binary <path>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
 klt drc <file> --deck <name> --waivers <waivers.json> [--format text|json]
 klt drc <file> --deck <name> -o <report.json[.gz]> [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
@@ -90,6 +90,13 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   issue #2689; ignored for `--engine curated`). Omitted (the default), no
   version check runs. See "Engine" → `"klayout"` → "Declaring a minimum
   application version".
+- `--klayout-binary PATH` — run the native deck (and the
+  `--min-klayout-version` probe) with this standalone KLayout application
+  instead of `klayout` on `PATH` (`--engine klayout`/`both`, issue #4950).
+  Precedence: flag, then `$KLT_KLAYOUT_BINARY`, then `klayout` on `PATH`. A
+  named but non-runnable binary is an error naming its source, never a
+  silent fallback to `PATH`. See "Engine" → `"klayout"` → "Pinning the
+  KLayout application".
 - `--negative-control LAYOUT` — run the same deck first against a
   known-bad fixture and require findings (both engines; issues #3076,
   #4320). See "Engine" → `"klayout"` → "Negative control".
@@ -171,6 +178,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `allow_deck_errors` | boolean | `--allow-deck-errors` |
 | `allow_missing_host_tools` | boolean | `--allow-missing-host-tools` |
 | `min_klayout_version` | string | `--min-klayout-version` (dotted decimal, e.g. `"0.30.12"`) |
+| `klayout_binary` | string | `--klayout-binary` (a path, resolved relative to the request document's directory) |
 | `negative_control` | string | `--negative-control` (a path, resolved relative to the request document's directory) |
 | `negative_control_categories` | string | `--negative-control-categories` (comma-separated) |
 | `expect_rule_categories` | positive integer | `--expect-rule-categories` (booleans, floats, strings, `0` and negatives are rejected) |
@@ -581,6 +589,25 @@ A malformed minimum, or a missing, failing, timed-out or unparseable probe,
 is also an error once a minimum is declared. Neither `--allow-deck-errors`
 nor `--allow-missing-host-tools` bypasses it. Omitting the option preserves
 the previous behaviour exactly: no probe, no compatibility claim.
+
+### Pinning the KLayout application
+
+The application is resolved from `--klayout-binary PATH` (request field
+`klayout_binary`; Python `run_drc_klayout_engine(..., klayout_binary=...)`),
+then `$KLT_KLAYOUT_BINARY` (the variable `klt lvs --engine klayout-runset`
+also honors), then `klayout` on `PATH`. The same binary serves the
+`--min-klayout-version` probe and the deck run, so an old build still fails
+with `klayout_version_too_old` from its own `-v`. An explicitly named binary
+that is not runnable is an error naming the flag or variable; it never falls
+back to `PATH`. When an override is in force the report gains an additive
+`environment.klayout_binary` (the resolved absolute path); without one the
+report is unchanged. `klt` does not fetch KLayout — supply any build you
+trust. In a pinned throwaway environment:
+
+```
+KLT_KLAYOUT_BINARY=/opt/klayout-0.30.12/klayout \
+  uvx --from klayout-tools==X.Y.Z klt drc top.gds --engine klayout --pdk gf180mcu
+```
 
 Passing the preflight proves only the version. It does **not** prove an
 arbitrary deck is compatible with that application; klt ships no built-in
@@ -3280,6 +3307,24 @@ absent without `--waivers`, so a default report is unchanged and
 with the input and deck; `--check --rerun` replays the waiver file the
 committed report recorded (`--waivers` itself cannot be combined with
 `--check`, like `--rules`).
+
+**Known false positives: the PDK's own `nfet_10v0_asym` PCell (issue #4949).**
+`klt gen --pdk-pcell gf180mcu_klayoutapi/nfet_10v0_asym` reports 17 markers under
+the curated gf180mcu deck, all with `source_cell: nfet_10v0_asym`: 16x
+`comp.enclosing.contact.1` and 1x `comp.width.mv.1` (the deck does not exempt
+`MVSD`-marked drains the way the official `DF.1a_MV` does, see above). The
+`comp.enclosing.contact.1` result for the PCell's narrow 0.22 um drain stripe is
+**not** cross-checked against the foundry runset (it cannot run on KLayout <
+0.30.9), so the deck is deliberately not loosened. To accept them explicitly:
+
+```json
+{"waivers": [
+  {"cell": "nfet_10v0_asym", "rule": "comp.enclosing.contact.1",
+   "justification": "PDK PCell drain stripe; unverified against native deck (#4949)"},
+  {"cell": "nfet_10v0_asym", "rule": "comp.width.mv.1",
+   "justification": "MVSD-marked LDMOS drain; official DF.1a_MV exempts it (#4949)"}
+]}
+```
 
 **Known limit — straddling markers.** A marker whose bbox spans two instances
 (a filler abutting a tap cell, say) carries the *container's* `source_cell`,

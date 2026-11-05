@@ -128,9 +128,12 @@
       "description": "`klt drc` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli._drc_native",
+        "klayout_tools.cli._drc_parser_args",
         "klayout_tools.cli.drc_cmd",
+        "klayout_tools.cli.drc_text",
         "klayout_tools.drc",
         "klayout_tools.drc_crosscheck",
+        "klayout_tools.drc_klayout_app",
         "klayout_tools.drc_klayout_engine"
       ]
     },
@@ -202,6 +205,7 @@
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_netselect",
+        "klayout_tools.extract_orient",
         "klayout_tools.extract_passive_regions",
         "klayout_tools.extract_progress",
         "klayout_tools.extract_report",
@@ -401,9 +405,12 @@
       "modules": [
         "klayout_tools.cli.netlist_cmd",
         "klayout_tools.netlist",
+        "klayout_tools.netlist_block",
         "klayout_tools.netlist_batch",
         "klayout_tools.netlist_capacitor_recovery",
         "klayout_tools.netlist_digest",
+        "klayout_tools.netlist_diagnostics",
+        "klayout_tools.netlist_inputs",
         "klayout_tools.netlist_normalize",
         "klayout_tools.netlist_normalize_scan"
       ]

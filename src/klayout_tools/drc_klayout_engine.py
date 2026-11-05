@@ -32,12 +32,12 @@ from .coverage import (
 )
 from .drc import (
     CODE_KLAYOUT_UNAVAILABLE,
-    CODE_KLAYOUT_VERSION_TOO_OLD,
     CODE_MULTIPLE_TOP_CELLS,
     CODE_NEGATIVE_CONTROL_FAILED,
     SCHEMA_VERSION,
     DrcError,
 )
+from .drc_klayout_app import _preflight_klayout_version, _resolve_klayout_executable
 from .pdk import PdkNotFoundError, find_pdk_for_deck
 
 # --------------------------------------------------------------------------- #
@@ -783,109 +783,6 @@ def _missing_deck_host_commands(deck_file: str) -> dict[str, str]:
     }
 
 
-_KLAYOUT_EXECUTABLE = "klayout"
-
-KLAYOUT_VERSION_PROBE_TIMEOUT_S = 15.0
-"""Wall-clock budget for the ``klayout -v`` version probe (issue #2689)."""
-
-_REQUESTED_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*$")
-_REPORTED_VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
-
-
-def _parse_requested_klayout_version(value: str) -> tuple[int, ...]:
-    """Validate a caller-declared ``min_klayout_version`` (issue #2689): dotted
-    decimal components only (``0.30.12``). Raises :class:`DrcError` otherwise."""
-    text = value.strip() if isinstance(value, str) else value
-    if not isinstance(text, str) or not _REQUESTED_VERSION_RE.match(text):
-        raise DrcError(
-            f"invalid minimum KLayout version {value!r}: expected dotted "
-            "decimal components such as '0.30.12'"
-        )
-    return tuple(int(part) for part in text.split("."))
-
-
-def _klayout_version_at_least(
-    found: tuple[int, ...], required: tuple[int, ...]
-) -> bool:
-    """Numeric component-wise comparison (``0.30.12 > 0.30.9``); missing
-    trailing components count as zero."""
-    width = max(len(found), len(required))
-    pad = lambda v: v + (0,) * (width - len(v))  # noqa: E731
-    return pad(found) >= pad(required)
-
-
-def _preflight_klayout_version(executable: str, min_version: str | None) -> None:
-    """Refuse to run a deck on a standalone ``klayout`` application older than
-    the caller-declared minimum (issue #2689).
-
-    A no-op when ``min_version`` is ``None`` (existing behaviour: no
-    compatibility is claimed or checked). Otherwise probes the *same*
-    executable the deck will run with (``<executable> -v``, bounded by
-    :data:`KLAYOUT_VERSION_PROBE_TIMEOUT_S`) and raises :class:`DrcError` for
-    an invalid minimum, a missing/failed/timed-out/unparseable probe, or a
-    detected version below the minimum. Never bypassed by
-    ``allow_deck_errors`` or ``allow_missing_host_tools``. Passing proves only
-    the version, not that an arbitrary deck is compatible.
-    """
-    if min_version is None:
-        return
-    required = _parse_requested_klayout_version(min_version)
-    required_text = ".".join(str(c) for c in required)
-    try:
-        probe = subprocess.run(
-            [executable, "-v"],
-            capture_output=True,
-            text=True,
-            timeout=KLAYOUT_VERSION_PROBE_TIMEOUT_S,
-        )
-    except FileNotFoundError as exc:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"{executable!r} binary not found on PATH. Install KLayout "
-            f">= {required_text} (https://www.klayout.de/build.html) or omit "
-            f"the minimum version. ({exc})",
-            code=CODE_KLAYOUT_UNAVAILABLE,
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"'{executable} -v' did not complete within "
-            f"{KLAYOUT_VERSION_PROBE_TIMEOUT_S}s. Check the installation."
-        ) from exc
-    except OSError as exc:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"could not launch '{executable} -v' ({exc}). Check that the "
-            f"binary is executable and install KLayout >= {required_text}.",
-            code=CODE_KLAYOUT_UNAVAILABLE,
-        ) from exc
-    output = ((probe.stdout or "") + "\n" + (probe.stderr or "")).strip()
-    if probe.returncode != 0:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"'{executable} -v' exited with status {probe.returncode}. "
-            f"Reinstall or update KLayout. Output:\n{output}"
-        )
-    match = _REPORTED_VERSION_RE.search(output)
-    if match is None:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"could not parse a version from '{executable} -v' output. "
-            f"Check the installation. Output:\n{output}"
-        )
-    found = tuple(int(part) for part in match.group(0).split("."))
-    if not _klayout_version_at_least(found, required):
-        raise DrcError(
-            f"the standalone KLayout application on PATH is version "
-            f"{match.group(0)}, but this run requires >= {required_text}. "
-            f"Install or update the KLayout application to {required_text} "
-            "or newer (https://www.klayout.de/build.html); the pip `klayout` "
-            "package is a separate install and is not used by --engine "
-            "klayout. See docs/cli/drc.md, 'Engine' -> 'klayout'.",
-            code=CODE_KLAYOUT_VERSION_TOO_OLD,
-        )
-
-
 def _deck_tree_identity(deck_file: str) -> dict[str, Any] | None:
     """Additive identity for a deck that is a *tree* of files (issue #3076).
 
@@ -1390,6 +1287,7 @@ def run_drc_klayout_engine(
     negative_control_categories: list[str] | None = None,
     deck_name: str | None = None,
     max_violations: int | None = None,
+    klayout_binary: str | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -1628,7 +1526,8 @@ def run_drc_klayout_engine(
 
     # Issue #2689: opt-in application-version floor, probed on the very
     # executable launched below, before any deck work.
-    _preflight_klayout_version(_KLAYOUT_EXECUTABLE, min_klayout_version)
+    klayout_exe, klayout_override = _resolve_klayout_executable(klayout_binary)
+    _preflight_klayout_version(klayout_exe, min_klayout_version)
 
     negative_control_result = None
     if negative_control is not None:
@@ -1643,6 +1542,7 @@ def run_drc_klayout_engine(
             pdk_root=pdk_root,
             allow_deck_errors=allow_deck_errors,
             allow_missing_host_tools=allow_missing_host_tools,
+            klayout_binary=klayout_binary,
         )
 
     # Validates `path` (missing/directory/unreadable) before the subprocess
@@ -1676,7 +1576,7 @@ def run_drc_klayout_engine(
             input_path = os.path.join(work_dir, "input-top.gds")
             top_cells[0].write(input_path)
         cmd = [
-            _KLAYOUT_EXECUTABLE,
+            klayout_exe,
             "-b",
             "-r",
             deck_file,
@@ -1762,6 +1662,13 @@ def run_drc_klayout_engine(
         ),
         "deck": deck_file,
         "engine": "klayout",
+        # Additive (issue #4950): present only when a binary override
+        # (--klayout-binary / $KLT_KLAYOUT_BINARY) was in force.
+        **(
+            {"environment": {"klayout_binary": klayout_override}}
+            if klayout_override is not None
+            else {}
+        ),
         # Additive, and present *only* when --allow-deck-errors actually
         # tolerated a failed deck run (issue #1941) -- an ordinary run's
         # payload is unchanged, and a tolerated one is self-describing
