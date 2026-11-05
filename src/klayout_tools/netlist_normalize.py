@@ -140,6 +140,7 @@ from dataclasses import replace
 from typing import Any, NamedTuple
 
 from . import _spice_number as spice_number
+from ._capacitor_mf import capacitor_mf_is_m_alias
 from ._paths import fold_spice_continuations
 from .pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
@@ -1228,8 +1229,8 @@ def _convert_capacitor_card(
         "to expand into that many parallel plain-element devices",
     )
     exclude = _CAPACITOR_EXCLUDED_MULTIPLICITY_PARAMS
-    if _capacitor_mf_is_m_alias(instance, subckt_name, params, multiplier):
-        exclude = exclude + ("mf",)
+    if capacitor_mf_is_m_alias(instance, subckt_name, params, multiplier):
+        exclude += ("mf",)
     _reject_multiplicity(instance, subckt_name, params, exclude=exclude)
 
     has_length_param = lookup.length_param in params
@@ -1541,41 +1542,6 @@ def _require_both(
         f"device '{instance}' (subcircuit '{subckt_name}'): both "
         f"'{(lookup.length_param or '').upper()}' and "
         f"'{(lookup.width_param or '').upper()}' must be given together{hint}"
-    )
-
-
-def _capacitor_mf_is_m_alias(
-    instance: str,
-    subckt_name: str,
-    params: dict[str, str],
-    multiplier: int,
-) -> bool:
-    """Whether a capacitor's ``mf`` merely repeats its ``m`` (issue #4951).
-
-    Schematic exporters emit ``MF=N m=N`` for one device (``m`` is the
-    symbol's alias for ``mf``), so ``mf > 1`` equal to ``m`` is one
-    multiplier, expanded once via ``m``. ``mf > 1`` with ``m`` absent or
-    different is refused with a message naming the combination. Returns
-    ``False`` when there is nothing to exclude (``mf`` absent or <= 1, or
-    non-numeric -- left to :func:`_reject_multiplicity`).
-    """
-    if "mf" not in params:
-        return False
-    try:
-        mf = float(params["mf"])
-    except ValueError:
-        return False
-    if mf <= 1:
-        return False
-    if "m" in params and mf == multiplier:
-        return True
-    m_text = f"m={params['m']}" if "m" in params else "no m"
-    raise NormalizeError(
-        f"device '{instance}' (subcircuit '{subckt_name}'): capacitor "
-        f"mf={params['mf']} with {m_text} is ambiguous; mf and m are the "
-        "same multiplier, so drop one or make them equal (e.g. mf=2 m=2 "
-        "expands to 2 parallel devices), or flatten the device in the "
-        "schematic netlist"
     )
 
 
