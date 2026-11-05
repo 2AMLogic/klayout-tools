@@ -126,7 +126,7 @@ from .remote_launcher import (
     published_runner_identities,
 )
 from .sim_batch_features import annotate_gap, gap_note
-from .sim_batch_hints import hint_existing_fatal, with_runner_expr_hint
+from .sim_batch_hints import hint_existing_fatal, with_runner_hints
 from .sim_remote import (
     _build_remote_request,
     _points_to_push,
@@ -3893,7 +3893,7 @@ def _fatal_log_diagnostic(log_text: str) -> dict[str, Any] | None:
     for diagnostic in _classify_diagnostics(log_text):
         if diagnostic.get("code") in _NGSPICE_FATAL_CODES:
             _mark_analysis_not_started([diagnostic], log_text)
-            return with_runner_expr_hint(diagnostic)
+            return with_runner_hints(diagnostic)
     return None
 
 
