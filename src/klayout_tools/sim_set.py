@@ -265,6 +265,7 @@ def run_sim_set(
     capacity_retries: int = 0,
     sleep: Callable[[float], None] = time.sleep,
     preflight: Callable[..., Any] | None = None,
+    dry_run: bool = False,
     **run_kwargs: Any,
 ) -> dict[str, Any]:
     """Run ``request_paths`` with at most ``max_in_flight`` in flight; return
@@ -283,7 +284,12 @@ def run_sim_set(
     (:func:`~klayout_tools.sim_batch_plan.preflight_batch_request`). If any
     member fails, a single :class:`SimError` names every failing member and nothing is
     submitted or written. ``preflight`` replaces the check; by default it runs
-    only with the real ``run_sim`` (an injected ``run`` is a test double)."""
+    only with the real ``run_sim`` (an injected ``run`` is a test double).
+
+    ``dry_run`` (issue #5012) stops after that preflight: nothing is submitted,
+    no manifest or output directory is written, and the fleet is never
+    contacted. The envelope carries ``dry_run: true`` and one ``dry_run``
+    entry per member."""
     if not request_paths:
         raise SimError("--batch-set needs at least one request file")
     if isinstance(max_in_flight, bool) or max_in_flight < 1:
@@ -295,6 +301,31 @@ def run_sim_set(
         preflight = preflight_batch_request
     if preflight is not None:
         _preflight_set(request_paths, preflight, run_kwargs)
+
+    if dry_run:
+        return {
+            "schema_version": SET_SCHEMA_VERSION,
+            "status": "pass",
+            "dry_run": True,
+            "request_count": len(request_paths),
+            "max_in_flight": min(max_in_flight, len(request_paths)),
+            "submitted": 0,
+            "refused": 0,
+            "refused_codes": [],
+            "requests": [
+                {
+                    "index": i,
+                    "request": path,
+                    "status": "dry_run",
+                    "exit_code": 0,
+                    "job_id": None,
+                    "job_ids": [],
+                    "report": None,
+                    "error": None,
+                }
+                for i, path in enumerate(request_paths)
+            ],
+        }
 
     dirs = _request_dirs(request_paths, outdir)
     manifest_dir = outdir if outdir is not None else os.path.dirname(dirs[0])

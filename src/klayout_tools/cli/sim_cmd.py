@@ -322,6 +322,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             max_units_per_job=args.max_units_per_job,
             max_concurrent_jobs=args.max_concurrent_jobs,
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
+            dry_run=getattr(args, "dry_run", False),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -331,6 +332,8 @@ def _run_batch_set(args: argparse.Namespace) -> int:
 
 
 def _print_set_text(report: dict) -> None:
+    if report.get("dry_run"):
+        print("dry run: every member passed preflight; nothing was submitted")
     print(
         f"status: {report['status']}  requests: {report['request_count']}  "
         f"submitted: {report['submitted']}  refused: {report['refused']}  "

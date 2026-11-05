@@ -1268,6 +1268,12 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   command exits `1` with error code `batch_set_preflight_failed` naming every
   failing member (path and code). Capacity refusals (`--capacity-retries`) can
   still fail mid-set.
+- **`--dry-run`** ([#5012](https://github.com/2AMLogic/klayout-tools/issues/5012)).
+  `klt sim --batch-set ... --dry-run` runs only the all-or-nothing preflight
+  above and exits `0` with `dry_run: true`, `submitted: 0` and one
+  `status: "dry_run"` entry per member. It never contacts the fleet and writes
+  no `set-manifest.json` or output directory. A failing member exits `1` with
+  `batch_set_preflight_failed`, as without the flag.
 - **Per-member sharding and capacity wait.** `--max-units-per-job`,
   `--max-concurrent-jobs` and `--wait-for-capacity` are forwarded to every
   member request and behave exactly as on a single `klt sim <request>`: each
@@ -1284,6 +1290,12 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   Member progress lines on stderr name the request:
   `klt sim: batch job <id> (<request>): submitted`. The aggregate envelope is
   unchanged.
+- **After a killed client.** If the client is killed mid-wait (for example by
+  a caller timeout), the manifest keeps the last state it wrote: the request
+  stays `running`, and `job_id` is `null` for a request with more than one
+  shard job (the ids are in `job_ids`). The manifest is not rewritten on
+  resume-time inspection; `--resume` ignores the manifest status and
+  re-derives each request's state from its own `batch-shards.json`.
 - **Batch only, never local.** The backend is forced to `batch` (`--backend`
   other than `batch` is a usage error, exit `2`); a refused or failed request is
   reported, never re-run on local ngspice. `--plot` and `--op-lint` cannot be
