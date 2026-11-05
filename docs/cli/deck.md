@@ -677,6 +677,10 @@ git add src/klayout_tools/decks/_history.json
 git commit -m "chore(decks): regenerate deck history table for vX.Y.Z"
 ```
 
+`python scripts/generate_deck_history.py --as-release vX.Y.Z` records `HEAD`
+as the not-yet-tagged release `vX.Y.Z`; the automated release PR uses it so no
+follow-up push is needed (issue #4920).
+
 Idempotent — re-running it against unchanged tag history reproduces
 byte-identical output, so it is safe to run speculatively. A standalone
 `<name>.drc` deck file at a tag gets its own entry marked

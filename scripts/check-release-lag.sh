@@ -11,7 +11,7 @@
 #
 # This script makes the rule self-reporting. It is strictly READ-ONLY and
 # ADVISORY: it never tags, pushes, or triggers .github/workflows/publish.yml.
-# Cutting a release stays a human action (see RELEASING.md).
+# Cutting a release is .github/workflows/release.yml's job (see RELEASING.md).
 #
 # The threshold is *parsed from RELEASING.md* rather than hardcoded here, so
 # the two can never drift apart silently — editing the policy edits this
