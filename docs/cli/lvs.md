@@ -253,6 +253,23 @@ absolute paths. On a non-zero exit that yields no usable verdict,
 application and pip module versions (a mismatch is a common cause), then
 carries the full runset log.
 
+**`pnpMPA` on `sg13cmos5l` needs this engine (issue #4927).** The curated
+`sg13cmos5l` deck declares no bipolar class, so it extracts **zero** devices
+from the PDK's `pnpMPA` testcase. The PDK's own runset recognises the device
+(`rule_decks/bjt_extraction.lvs:78-79`, `CustomBJTExtractor.new('pnpMPA',
+true)`), so select it with `"engine": "klayout-runset"` and `deck_file`
+pointing at the install's `libs.tech/klayout/tech/lvs/sg13cmos5l.lvs`.
+Measured against the PDK's `testing/testcases/unit/bjt_devices/` testcase
+(`pnpMPA.gds` vs `pnpMPA.cdl`, top `pnpMPA_lvs`): `status: match`, 2 of 2
+devices matched (`pnpMPA` plus the testcase's `ptap1` tap resistor). The
+reference is the PDK's own CDL, which this engine reads as-is. The same
+CDL fed to the curated deck's reader fails to parse (resistor card without a
+value). Porting the Ruby `CustomBJTExtractor` into the curated deck is out of
+scope (see the sg13g2 HBT note in `decks/sg13g2.py`, issue #1232).
+Regression tests: `tests/test_lvs_runset_pnpmpa_cmos5l.py`
+(`test_real_runset_recognises_pnpmpa_on_sg13cmos5l`,
+`test_curated_sg13cmos5l_deck_extracts_no_pnpmpa`).
+
 **Unresolved `X` calls are reported, not dropped (issue #4519).** An `X`
 card in the reference naming a subcircuit that is neither defined in the
 reference file, nor converted into a device by the runset (its `DEVICE_LIST`
