@@ -37,6 +37,7 @@
         "klayout_tools.characterize_cards",
         "klayout_tools.characterize_constraints",
         "klayout_tools.characterize_instances",
+        "klayout_tools.characterize_osdi",
         "klayout_tools.characterize_sequential",
         "klayout_tools.cli.characterize_cmd",
         "klayout_tools.liberty_compare",
@@ -1539,6 +1540,12 @@
   ],
   "shared_private_permissions": [
     {
+      "consumer": "klayout_tools.characterize_osdi",
+      "exporter": "klayout_tools.sim",
+      "symbol": "_OFFHOST_BACKENDS",
+      "reason": "Issue #4911: characterize forwards runner-resolved OSDI entries only for the same off-host backends klt sim recognises; promote to a public name when sim is next split."
+    },
+    {
       "consumer": "klayout_tools.power_intent",
       "exporter": "klayout_tools.reset_coverage",
       "symbol": "_CAPTURE_PINS",
@@ -2094,7 +2101,7 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.characterize",
+        "consumer": "klayout_tools.characterize_osdi",
         "exporter": "klayout_tools.sim",
         "symbol": "_resolve_osdi_preload",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
