@@ -5046,13 +5046,13 @@ def _run_batch(
             )
         except BatchError as exc:
             raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
-    # Issue #2833: assess the one job against the fleet's whole-job ceiling
-    # before `submit_job`'s first S3 write, so an "enforce" refusal can never
-    # leave a partial contract or launch a billable job.
-    job_ceiling = _assess_job_ceiling(
-        unit_count=len(corner_points), per_unit_timeout_s=timeout_s, config=config
+    # Issue #2833: assess the job against the fleet's whole-job ceiling before
+    # `submit_job`'s first S3 write (an "enforce" refusal leaves no partial contract).
+    from .sim_batch_plan import plan_batch_job
+
+    job_ceiling, effective_hosts = plan_batch_job(
+        config, unit_count=len(corner_points), timeout_s=timeout_s
     )
-    job_ceiling, effective_hosts = _apply_job_split(job_ceiling, config)
     if effective_hosts > 1:
         try:
             corners, engine_version, environment = _run_batch_fleet(

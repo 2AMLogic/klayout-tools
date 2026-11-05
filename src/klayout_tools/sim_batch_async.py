@@ -34,8 +34,6 @@ from .sim_batch import (
     BATCH_WAITING_STATES,
     BatchConfig,
     BatchError,
-    _apply_job_split,
-    _assess_job_ceiling,
     _aws_argv,
     _prepare_batch_job_spec,
     _read_status,
@@ -47,6 +45,7 @@ from .sim_batch import (
     new_job_id,
     submit_job,
 )
+from .sim_batch_plan import plan_batch_job
 from .sim_batch_shards import (  # noqa: F401
     request_sha256,
     shard_map_request_fields,
@@ -142,10 +141,9 @@ def submit_only(
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
-    job_ceiling = _assess_job_ceiling(
-        unit_count=len(corner_points), per_unit_timeout_s=timeout_s, config=config
+    job_ceiling, hosts = plan_batch_job(
+        config, unit_count=len(corner_points), timeout_s=timeout_s
     )
-    job_ceiling, hosts = _apply_job_split(job_ceiling, config)
     if hosts > 1:
         return _submit_sharded(
             request=request,

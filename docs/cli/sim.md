@@ -1220,6 +1220,15 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   re-submits such a request up to `N` more times with doubling backoff
   (5s, 10s, ...). Only those two codes are retried -- never another failure,
   and never on local ngspice.
+- **All-or-nothing preflight** ([#4972](https://github.com/2AMLogic/klayout-tools/issues/4972)).
+  Before anything is submitted, every member is resolved (with
+  `--max-units-per-job` / `--max-concurrent-jobs` applied) and run through the
+  same whole-job ceiling / split check a real submit does
+  (`batch_job_ceiling_exceeded`, `batch_max_units_per_job_invalid`). If any
+  member fails, nothing is submitted, no `set-manifest.json` is written, and the
+  command exits `1` with error code `batch_set_preflight_failed` naming every
+  failing member (path and code). Capacity refusals (`--capacity-retries`) can
+  still fail mid-set.
 - **Per-member sharding and capacity wait.** `--max-units-per-job`,
   `--max-concurrent-jobs` and `--wait-for-capacity` are forwarded to every
   member request and behave exactly as on a single `klt sim <request>`: each
@@ -7470,7 +7479,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `nonconvergence`   | Iteration-limit / gmin-stepping / source-stepping / time-step-too-small text (Xyce's `Time step too small`; ngspice's own `Timestep too small` abort is `timestep_too_small` above). |
 | `missing_include`  | ngspice's own `Error: Could not find include file ...` — a `.include`/`.inc` target that did not resolve. Everything downstream of it (missing devices, then `.meas` cards finding no vector) reads like a broken circuit, so it gets its own code rather than surfacing only as measurement failures ([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)). For an off-host backend this is now unreachable by construction — the include closure is staged, or the submit is refused (see "Off-host backends stage the netlist's `.include` closure" above). |
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
-| `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w`, or `w * nf` when fingered, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
+| `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w` as written, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
 | `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
 | `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
@@ -7708,26 +7717,35 @@ Some PDKs' BSIM model cards enforce an undocumented per-instance width *bin
 range* — a device sized past it fails ngspice with a generic
 `Error: could not find a valid modelname`, which says nothing about width
 and reads like the device name is wrong or the model library never loaded.
-gf180mcu's `nfet_06v0`/`pfet_06v0` hit this at roughly 100–110 µm of total
-instance width, and the failure is identical whether the width comes from a
-single large `w=` or from fingering it via `nf=` — `nf=` parallels *inside*
-the same model-card instance the width check applies to, so it trips the
-same ceiling `w=` alone does. Only `m=` (the parallel-*instance* multiplier,
-applied outside that check, with each instance's own `w=` kept under the
-ceiling) reliably works around it (issue #1214).
+gf180mcu's `nfet_06v0`/`pfet_06v0` hit this at roughly 100–110 µm of
+instance `w`. Selection keys on `w` **as written**, not on `w * nf`
+(issue #4976): observed on ngspice 42/46, `w=2u nf=64` passes while
+`w=128u nf=1` and `w=128u nf=64` both abort. (An earlier observation,
+`w=50u nf=450` aborting, is consistent with neither reading and remains
+unexplained.) **ngspice 47 is unverified.** Only `m=` (the
+parallel-*instance* multiplier, applied outside that check, with each
+instance's own `w=` kept under the ceiling) reliably works around it
+(issue #1214).
+
+Before ngspice runs, `klt sim` (and `klt sim --dry-run`) scans the netlist the
+same way and, when an instance's `w` is at/above the ceiling, adds a
+**non-fatal** top-level `diagnostics[]` entry with `severity: "warning"`,
+`code: "model_bin_range_preflight"`, and `instance`, `model`, `w_um`, `nf`
+fields. It never rejects the run; a `w` given as an expression is skipped.
 
 When ngspice's log matches this failure, `klt sim` re-scans the corner's own
 netlist for MOS-shaped instances (`M`/`X` cards) and picks out the one with
-the largest total width (`w`, or `w * nf` when fingered) that does not
+the largest `w` as written (`nf` is not multiplied in) that does not
 already use `m=` — the most likely culprit — and reports it by name in the
 `model_bin_range` diagnostic's `message`, e.g.:
 
 ```
 ngspice reported "could not find a valid modelname" -- likely cause:
-instance 'X5' (nfet_06v0) with w=50u nf=450 (22500 um effective width)
-exceeds the model card's per-instance width bin range (undocumented,
-~100 um on gf180mcu); use m= to parallel multiple smaller-width instances
-instead of a single large w= or nf= (see issue #1214)
+instance 'X5' (nfet_06v0) with w=128u nf=64 exceeds the model card's
+per-instance width bin range (undocumented, ~100 um on gf180mcu, keyed on w
+as written; nf= does not widen it); use m= to parallel multiple
+smaller-width instances instead of a single large w= (see issues #1214,
+#4976)
 ```
 
 This is a heuristic over the netlist text, not a validated PDK limit: the
