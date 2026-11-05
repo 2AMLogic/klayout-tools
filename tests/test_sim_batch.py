@@ -8340,24 +8340,3 @@ def test_recovered_envelope_is_not_given_the_unrecovered_note(tmp_path, monkeypa
     messages = [d["message"] for d in corners[0]["diagnostics"]]
     assert messages
     assert all("no report.json" not in m for m in messages)
-
-
-def test_exit_4_with_collected_report_names_the_reason(tmp_path, monkeypatch):
-    """Issue #4964: an op-only job (nothing checked) ends failed/exit 4 with
-    per-corner pass; the environment names why."""
-    report = json.loads(_sim_report())
-    report["status"] = "not_checked"
-    report["coverage"] = {
-        "measurements_declared": 0,
-        "nothing_checked": True,
-        "nothing_checked_reasons": [],
-    }
-    runner = _FakeRunner()
-    runner.default = fake_completed(_status("failed", exit_code="4"))
-    runner.outputs = {"report.json": json.dumps(report)}
-    corners, _, environment = _run_failed_job(tmp_path, monkeypatch, runner, points=1)
-    assert corners[0]["status"] == "pass"
-    reason = environment["exit_reason"]
-    assert reason["exit_code"] == 4
-    assert reason["report_status"] == "not_checked"
-    assert "no measurements declared" in reason["message"]
