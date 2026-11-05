@@ -632,6 +632,35 @@ def _device_owned_port_names(ports: list[dict[str, Any]], suffix: str) -> list[s
     ]
 
 
+def _port_pins(
+    digest: dict[str, Any],
+    net_pins: dict[str, list[dict[str, str]]],
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Promote each subckt port net (``is_pin``) to a labelled top-level pin
+    on its first resolved device port (#4966); returns ``(pins, warnings)``.
+    A port net with no resolved device port gets a warning and no label."""
+    pins: list[dict[str, str]] = []
+    warnings: list[str] = []
+    for net in digest["nets"]:
+        if not net.get("is_pin"):
+            continue
+        resolved = net_pins.get(net["name"])
+        if not resolved:
+            warnings.append(
+                f"netlist port '{net['name']}' has no mapped device port -- "
+                "no pin label is written for it"
+            )
+            continue
+        pins.append(
+            {
+                "net": net["name"],
+                "block": resolved[0]["block"],
+                "port": resolved[0]["port"],
+            }
+        )
+    return pins, warnings
+
+
 def _build_connectivity(
     device_groups: list[dict[str, Any]],
     digest: dict[str, Any],
@@ -732,24 +761,8 @@ def _build_connectivity(
         net["name"] for net in digest["nets"] if not net_pins.get(net["name"])
     )
 
-    pins: list[dict[str, str]] = []
-    for net in digest["nets"]:
-        if not net.get("is_pin"):
-            continue
-        resolved = net_pins.get(net["name"])
-        if not resolved:
-            warnings.append(
-                f"netlist port '{net['name']}' has no mapped device port -- "
-                "no pin label is written for it"
-            )
-            continue
-        pins.append(
-            {
-                "net": net["name"],
-                "block": resolved[0]["block"],
-                "port": resolved[0]["port"],
-            }
-        )
+    pins, pin_warnings = _port_pins(digest, net_pins)
+    warnings.extend(pin_warnings)
 
     return connectivity, unmapped_netlist_nets, warnings, pins
 
