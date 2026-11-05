@@ -256,6 +256,24 @@ def _preflight_set(
         )
 
 
+def print_set_text(report: dict) -> None:
+    if report.get("dry_run"):
+        print("dry run: every member passed preflight; nothing was submitted")
+    print(
+        f"status: {report['status']}  requests: {report['request_count']}  "
+        f"submitted: {report['submitted']}  refused: {report['refused']}  "
+        f"max_in_flight: {report['max_in_flight']}"
+    )
+    for entry in report["requests"]:
+        line = f"  {entry['request']}  [{entry['status']}]"
+        if entry["job_ids"]:
+            line += f"  job={','.join(entry['job_ids'])}"
+        error = entry["error"]
+        if error:
+            line += f"  {error['code'] or 'error'}: {error['message']}"
+        print(line)
+
+
 def run_sim_set(
     request_paths: list[str],
     *,

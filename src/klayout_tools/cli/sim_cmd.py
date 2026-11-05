@@ -48,7 +48,7 @@ from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
 from ..sim import SimError, load_request, run_sim
 from ..sim_batch_async import read_job_status
-from ..sim_set import DEFAULT_MAX_IN_FLIGHT, run_sim_set
+from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
@@ -327,26 +327,8 @@ def _run_batch_set(args: argparse.Namespace) -> int:
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
-    emit_success(report, args.format, _print_set_text)
+    emit_success(report, args.format, print_set_text)
     return max((r["exit_code"] for r in report["requests"]), default=EXIT_PASS)
-
-
-def _print_set_text(report: dict) -> None:
-    if report.get("dry_run"):
-        print("dry run: every member passed preflight; nothing was submitted")
-    print(
-        f"status: {report['status']}  requests: {report['request_count']}  "
-        f"submitted: {report['submitted']}  refused: {report['refused']}  "
-        f"max_in_flight: {report['max_in_flight']}"
-    )
-    for entry in report["requests"]:
-        line = f"  {entry['request']}  [{entry['status']}]"
-        if entry["job_ids"]:
-            line += f"  job={','.join(entry['job_ids'])}"
-        error = entry["error"]
-        if error:
-            line += f"  {error['code'] or 'error'}: {error['message']}"
-        print(line)
 
 
 def _run_op_lint(args: argparse.Namespace) -> int:
