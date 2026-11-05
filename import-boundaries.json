@@ -628,6 +628,7 @@
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_features",
         "klayout_tools.sim_batch_hints",
+        "klayout_tools.sim_batch_plan",
         "klayout_tools.sim_batch_observer",
         "klayout_tools.sim_batch_receipt",
         "klayout_tools.sim_commands",

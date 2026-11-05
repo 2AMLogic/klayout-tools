@@ -1214,6 +1214,15 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   re-submits such a request up to `N` more times with doubling backoff
   (5s, 10s, ...). Only those two codes are retried -- never another failure,
   and never on local ngspice.
+- **All-or-nothing preflight** ([#4972](https://github.com/2AMLogic/klayout-tools/issues/4972)).
+  Before anything is submitted, every member is resolved (with
+  `--max-units-per-job` / `--max-concurrent-jobs` applied) and run through the
+  same whole-job ceiling / split check a real submit does
+  (`batch_job_ceiling_exceeded`, `batch_max_units_per_job_invalid`). If any
+  member fails, nothing is submitted, no `set-manifest.json` is written, and the
+  command exits `1` with error code `batch_set_preflight_failed` naming every
+  failing member (path and code). Capacity refusals (`--capacity-retries`) can
+  still fail mid-set.
 - **Per-member sharding and capacity wait.** `--max-units-per-job`,
   `--max-concurrent-jobs` and `--wait-for-capacity` are forwarded to every
   member request and behave exactly as on a single `klt sim <request>`: each

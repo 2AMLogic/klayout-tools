@@ -43,6 +43,7 @@ from .sim_batch import (
     BATCH_NO_CAPACITY_CODE,
 )
 from .sim_batch_observer import JobObserver, observe_batch_jobs
+from .sim_batch_plan import preflight_batch_request
 
 SET_SCHEMA_VERSION = 1
 
@@ -232,6 +233,29 @@ def _run_one(
     return entry
 
 
+#: Code of the all-or-nothing preflight refusal (issue #4972).
+SET_PREFLIGHT_CODE = "batch_set_preflight_failed"
+
+
+def _preflight_set(
+    paths: list[str], preflight: Callable[..., Any], run_kwargs: dict[str, Any]
+) -> None:
+    """Run ``preflight`` over every member; raise one error naming all failures."""
+    failures: list[str] = []
+    for path in paths:
+        try:
+            preflight(path, **run_kwargs)
+        except (SimError, OutputLockError) as exc:
+            code = getattr(exc, "code", None)
+            failures.append(f"{path}: {code + ': ' if code else ''}{exc}")
+    if failures:
+        raise SimError(
+            f"--batch-set refused before submitting anything: {len(failures)} of "
+            f"{len(paths)} request(s) failed validation:\n  " + "\n  ".join(failures),
+            code=SET_PREFLIGHT_CODE,
+        )
+
+
 def run_sim_set(
     request_paths: list[str],
     *,
@@ -240,6 +264,7 @@ def run_sim_set(
     run: Callable[..., dict[str, Any]] = run_sim,
     capacity_retries: int = 0,
     sleep: Callable[[float], None] = time.sleep,
+    preflight: Callable[..., Any] | None = None,
     **run_kwargs: Any,
 ) -> dict[str, Any]:
     """Run ``request_paths`` with at most ``max_in_flight`` in flight; return
@@ -250,13 +275,26 @@ def run_sim_set(
 
     ``resume=True`` in ``run_kwargs`` reaches every request's ``run`` call; each
     request resumes from its own directory, so a sharded request re-attaches to
-    the shard jobs recorded there (issue #4005)."""
+    the shard jobs recorded there (issue #4005).
+
+    **All-or-nothing preflight (issue #4972).** Before anything is submitted,
+    every member is resolved (with ``run_kwargs`` overrides applied) and put
+    through the submit path's own ceiling / split check
+    (:func:`~klayout_tools.sim_batch_plan.preflight_batch_request`). If any
+    member fails, a single :class:`SimError` names every failing member and nothing is
+    submitted or written. ``preflight`` replaces the check; by default it runs
+    only with the real ``run_sim`` (an injected ``run`` is a test double)."""
     if not request_paths:
         raise SimError("--batch-set needs at least one request file")
     if isinstance(max_in_flight, bool) or max_in_flight < 1:
         raise SimError(f"--max-in-flight must be >= 1 (got {max_in_flight!r})")
     if isinstance(capacity_retries, bool) or capacity_retries < 0:
         raise SimError(f"--capacity-retries must be >= 0 (got {capacity_retries!r})")
+
+    if preflight is None and run is run_sim:
+        preflight = preflight_batch_request
+    if preflight is not None:
+        _preflight_set(request_paths, preflight, run_kwargs)
 
     dirs = _request_dirs(request_paths, outdir)
     manifest_dir = outdir if outdir is not None else os.path.dirname(dirs[0])
