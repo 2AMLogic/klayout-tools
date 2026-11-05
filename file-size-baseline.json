@@ -1089,7 +1089,7 @@
     },
     {
       "path": "tests/test_sim_batch.py",
-      "lines": 8342
+      "lines": 8323
     },
     {
       "path": "tests/test_sim_batch_async.py",
