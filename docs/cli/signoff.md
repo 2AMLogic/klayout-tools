@@ -1731,6 +1731,26 @@ A cited item-2 envelope carries the same `artifact_binding.attestation`
 disclosure (`inventory_schema_version` is `null` unless a declared-checks
 inventory was given).
 
+##### Item 2 over several streams (repeat `--input`, issue #4935)
+
+A block whose layout evidence is a library of per-cell streams repeats
+`--input`:
+
+```bash
+klt signoff --attest 2 --input layout/a.gds --input layout/b.gds -o evidence/item2.json
+```
+
+With two or more streams the three checks run for each one (every check entry
+carries a `path`), and `provenance.input` binds the whole set through
+`paths` plus the combined `content_hash` — see
+[Binding a set of artifacts](#binding-a-set-of-artifacts-provenanceinputpaths).
+Members are sorted bytewise, so `--input` order does not matter; editing any
+one stream makes the manifest row `stale_evidence`, and `--check` reports
+drift. Any failing stream fails the envelope (exit `3`, nothing written). A
+duplicate `--input`, streams from different repositories, or
+`--generator`/`--regenerated-hash` with more than one `--input` are usage
+errors. A single `--input` produces the same envelope as before.
+
 ##### Item 2 declared checks (optional `--inventory`, issue #4767)
 
 The three built-in checks say nothing about *what is drawn*. To have the
@@ -1767,6 +1787,12 @@ hash and schema version are recorded under `attestation.inventory`. With
 carried, as for item 10. Without `--inventory` the envelope is unchanged.
 klt ships no built-in geometry engine for these checks — the declared command
 is the authority.
+
+Declared `argv` commands run with the tool virtualenv's `bin` directory
+removed from `PATH` when klt itself runs inside a venv (`uvx`, pipx), so a bare
+`python3` in an `argv` is the repository's interpreter, not klt's. Outside a
+venv the environment is unchanged. The same applies to item 10 commands.
+
 
 #### How manifest `file` paths resolve
 

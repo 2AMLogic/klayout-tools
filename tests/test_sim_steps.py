@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import sim, sim_remote, sim_steps
+from klayout_tools import sim, sim_measurement_results, sim_remote, sim_steps
 
 pytestmark = pytest.mark.usefixtures(
     "real_build_identity_git", "bare_name_ngspice_resolution"
@@ -915,7 +915,7 @@ def test_step_outcomes_from_markers():
 
 def _grade(request: dict, log_text: str, *, save_mode: str = "all"):
     analysis, specs = _resolve(request)
-    return sim._corner_measurement_results(
+    return sim_measurement_results._corner_measurement_results(
         sim._parse_measurements(log_text),
         specs,
         analysis=analysis,
