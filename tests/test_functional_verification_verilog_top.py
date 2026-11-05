@@ -138,7 +138,11 @@ def test_integration_pass_without_sdf(tmp_path):
     assert report["environment"]["cocotb_version"] is None
     assert report["environment"]["sdf"] is None
     assert Path(report.local_paths["test_log"]).is_file()
-    assert report["environment"]["results_xml"] == {"path": None, "scope": "absent"}
+    assert report["environment"]["results_xml"] == {
+        "path": None,
+        "scope": "absent",
+        "sha256": None,
+    }
 
 
 @needs_icarus

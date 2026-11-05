@@ -213,6 +213,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
@@ -1019,8 +1020,7 @@ class _Report(dict):
 
 
 def _path_envelope(path: str | None) -> dict[str, Any]:
-    """``path`` as the committable ``{path, scope}`` shape, relative to the
-    repo the process was invoked from (never the absolute host path)."""
+    """``path`` as the committable ``{path, scope}`` shape (never absolute)."""
     root = find_repo_root()
     if path is not None and root is None:
         return {"path": None, "scope": "external"}
@@ -1124,7 +1124,7 @@ def _collect_run_results(
                 {
                     "seed": spec["seed"],
                     "status": "fail" if counts[1] else "pass",
-                    "results_xml": _path_envelope(spec["results_xml"]),
+                    "results_xml": _hashed_path_envelope(spec["results_xml"]),
                 }
             )
         tests.extend(spec_tests)
@@ -3358,9 +3358,9 @@ def _run_verilog_top(
                 "engine_version": _engine_version(engine),
                 "tools": tools,
                 "cocotb_version": None,
-                "results_xml": _path_envelope(None),
-                "test_log": _path_envelope(test_log),
-                "build_log": _path_envelope(build_log),
+                "results_xml": _hashed_path_envelope(None),
+                "test_log": _hashed_path_envelope(test_log),
+                "build_log": _hashed_path_envelope(build_log),
                 "random_seed": None,
                 "source_defines": source_defines,
                 "initial_state": None,
@@ -3902,12 +3902,12 @@ def run_functional_verification(
                 "engine_version": _engine_version(engine),
                 "tools": tools,
                 "cocotb_version": _cocotb_version(),
-                "results_xml": _path_envelope(results_xml),
+                "results_xml": _hashed_path_envelope(results_xml),
                 # Additive (issue #3013): the simulator/cocotb console transcript
                 # and the build transcript the run wrote, named by path (never
                 # inlined) like `results_xml`.
-                "test_log": _path_envelope(test_log),
-                "build_log": _path_envelope(build_log),
+                "test_log": _hashed_path_envelope(test_log),
+                "build_log": _hashed_path_envelope(build_log),
                 "random_seed": _extract_random_seed_property(results_xml),
                 # Additive (issue #3290): `options.source_defines` keyed by the
                 # request.sources entry as resolved to an absolute path; `{}`

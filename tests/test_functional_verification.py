@@ -44,6 +44,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.artifact_envelope import env as _envelope
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import functional_verification as fv
@@ -1261,11 +1262,10 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         "engine_version": "13.0",
         "tools": [],
         "cocotb_version": "2.0.1",
-        # Committable `{path, scope}` envelope (#4279): tmp_path is outside
-        # the invoking repo, so no absolute host path may appear here.
-        "results_xml": {"path": None, "scope": "external"},
-        "test_log": {"path": None, "scope": "external"},
-        "build_log": {"path": None, "scope": "external"},
+        # Committable envelope (#4279): tmp_path is outside the repo, so no host path.
+        "results_xml": _envelope(None, "external"),
+        "test_log": _envelope(None, "external"),
+        "build_log": _envelope(None, "external"),
         # `_RESULTS_XML_WITH_FAILURE` carries the exact `random_seed` value
         # the spike captured live (section 4) -- this is the authoritative
         # echo, read back from `results.xml` itself.
@@ -1476,7 +1476,7 @@ def test_cli_outdir_flag_is_threaded_through(tmp_path, monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     data = payload.get("data", payload)
     # JSON carries the envelope only; an outdir outside the repo is external.
-    assert data["environment"]["results_xml"] == {"path": None, "scope": "external"}
+    assert data["environment"]["results_xml"] == _envelope(None, "external")
     assert str(outdir) not in json.dumps(data)
 
 
@@ -1997,8 +1997,8 @@ def test_cli_pass_exits_zero_json(tmp_path, monkeypatch, capsys):
     assert out["skipped_count"] == 1
     env = out["environment"]
     # Default outdir is outside the invoking repo (tmp_path): envelope, no path.
-    assert env["test_log"] == {"path": None, "scope": "external"}
-    assert env["build_log"] == {"path": None, "scope": "external"}
+    assert env["test_log"] == _envelope(None, "external")
+    assert env["build_log"] == _envelope(None, "external")
 
 
 def test_cli_test_failure_exits_three(tmp_path, monkeypatch, capsys):
@@ -6568,9 +6568,9 @@ def test_stubbed_run_paths_are_repo_relative_inside_the_repo(tmp_path, monkeypat
     report = run_functional_verification(request_path, output_dir="out")
 
     env = report["environment"]
-    assert env["results_xml"] == {"path": "out/results_icarus.xml", "scope": "repo"}
-    assert env["test_log"] == {"path": "out/test_icarus.log", "scope": "repo"}
-    assert env["build_log"] == {"path": "out/build_icarus.log", "scope": "repo"}
+    assert env["results_xml"] == _envelope("out/results_icarus.xml", "repo")
+    assert env["test_log"] == _envelope("out/test_icarus.log", "repo")
+    assert env["build_log"] == _envelope("out/build_icarus.log", "repo")
     assert str(tmp_path) not in json.dumps(report)
     assert os.path.isabs(report.local_paths["results_xml"])
 
