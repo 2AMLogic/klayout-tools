@@ -51,13 +51,6 @@ from ._openroad_engine import (
     _timing_status,
     container_runtime_hint,
 )
-
-# `_count_spef_nets_annotated`/`_tcl_net_list` are `_paths.py`-hosted helpers
-# that only the STA subsystem calls after the issue #1808 split; they are
-# imported here purely so `klayout_tools.place_and_route.<name>` keeps
-# resolving for callers that reach them by that path (the test suite does).
-# Same intent -- and same redundant `X as X` alias form -- as the
-# `place_and_route_sta` re-export block below.
 from ._paths import _count_spef_nets_annotated as _count_spef_nets_annotated
 from ._paths import (
     _load_request_json,
@@ -65,6 +58,14 @@ from ._paths import (
     validate_request_shape,
 )
 from ._paths import _tcl_net_list as _tcl_net_list
+
+# `_count_spef_nets_annotated`/`_tcl_net_list` are `_paths.py`-hosted helpers
+# that only the STA subsystem calls after the issue #1808 split; they are
+# imported here purely so `klayout_tools.place_and_route.<name>` keeps
+# resolving for callers that reach them by that path (the test suite does).
+# Same intent -- and same redundant `X as X` alias form -- as the
+# `place_and_route_sta` re-export block below.
+from ._power_activity import power_basis_block, validate_power_activity
 from ._provenance import INPUT_ROLE_NETLIST, _content_hash, build_provenance
 from ._report_verify import (
     VOLATILE_FLOW_PATHS,
@@ -98,6 +99,7 @@ from .place_and_route_gds_merge import (
     _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
+from .place_and_route_hints import null_unconstrained_fmax, outside_cwd_note
 from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
 from .place_and_route_layers import _signal_layer_range
 from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
@@ -380,11 +382,6 @@ from .place_and_route_sta import _post_route_spef_metrics as _post_route_spef_me
 from .place_and_route_sta import _run_corner_sweep as _run_corner_sweep
 from .place_and_route_sta import _spef_sta_script_lines as _spef_sta_script_lines
 from .place_and_route_sta import def_pin_names as def_pin_names
-from .post_route_sta import (
-    PostRouteStaError,
-    _power_basis_block,
-    _validate_power_activity,
-)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1843,10 +1840,9 @@ def _run_single_corner(
         output_delay_ns,
     ) = _validate_constraints(request.get("constraints"))
     # Issue #4914: same validation/semantics as `klt sta`'s (issue #3744).
-    try:
-        power_activity = _validate_power_activity(request.get("constraints") or {})
-    except PostRouteStaError as exc:
-        raise PlaceAndRouteError(str(exc)) from exc
+    power_activity = validate_power_activity(
+        request.get("constraints") or {}, PlaceAndRouteError
+    )
     seed = _validate_seed(request["seed"])
     target_stage = _validate_target_stage(request.get("target_stage", "route"))
     route_critical_nets_percentage = _validate_route_critical_nets_percentage(
@@ -2466,11 +2462,11 @@ def _run_single_corner(
         "status": "ok",
         "stage_reached": target_stage,
         "seed": seed,
-        # Additive field (issue #4716): the resolved global-placement /
-        # global-route knobs actually applied (defaults included).
         # Additive field (issue #4914): what `estimated_power_mw` was
         # computed under, as in `klt sta`.
-        "power_basis": _power_basis_block(power_activity, False),
+        "power_basis": power_basis_block(power_activity, False),
+        # Additive field (issue #4716): the resolved global-placement /
+        # global-route knobs actually applied (defaults included).
         "applied": {
             "placement_density": placement_density,
             "route_congestion_iterations": route_congestion_iterations,
@@ -2847,21 +2843,6 @@ def _engine_error_message(
     return message
 
 
-def _outside_cwd_note(path: str) -> str:
-    """Issue #4191: the docker wrapper mounts only `$PWD`, `$PDK_ROOT` and
-    `$TMPDIR`, so a readable path outside the invocation directory is the
-    commonest trigger -- say the rule and the fix, not just the symptom."""
-    cwd = os.path.realpath(os.getcwd())
-    real = os.path.realpath(path)
-    if real == cwd or real.startswith(cwd.rstrip(os.sep) + os.sep):
-        return ""
-    return (
-        f"; '{path}' is outside the invocation directory '{cwd}', and the "
-        "container wrapper mounts only $PWD, $PDK_ROOT and $TMPDIR -- run "
-        "from a common ancestor of the request and its inputs"
-    )
-
-
 def _mount_namespace_hint(
     completed: _OpenRoadResult, pdk_info: dict[str, Any] | None
 ) -> str | None:
@@ -2926,7 +2907,7 @@ def _mount_namespace_hint(
             f"{os.environ.get('PDK_ROOT') or '(unset)'})"
         )
 
-    mount_note = _outside_cwd_note(path)
+    mount_note = outside_cwd_note(path)
 
     return (
         f"'openroad' could not read '{path}', but this process can read it"
@@ -3213,8 +3194,7 @@ def _extract_stage_metrics(
     # Issue #4914: `timing__fmax` derives from the same unconstrained design
     # and is not backed by any timed path then; null it (keeping the key's
     # `number | null` type) so it cannot be read as an achievable clock.
-    if entry["timing_status"] == "unconstrained" and "fmax_mhz" in entry:
-        entry["fmax_mhz"] = None
+    null_unconstrained_fmax(entry)
 
     return entry
 

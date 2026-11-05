@@ -15,6 +15,7 @@ import re
 from typing import Any
 
 from ._openroad_engine import _timing_violation_report_lines
+from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
 from .place_and_route_pins import pin_constraint_lines
 from .place_and_route_reports import detailed_route_lines, routing_completeness_lines
 from .place_and_route_request import PlaceAndRouteError
@@ -163,18 +164,6 @@ def _io_delay_lines(
             f"set_output_delay {output_delay_ns} -clock {clock_port} [all_outputs]"
         )
     return lines
-
-
-def _make_tracks_lines(floorplan: dict[str, Any]) -> list[str]:
-    tracks = floorplan.get("tracks")
-    if not tracks:
-        return ["make_tracks"]
-    return [
-        f"make_tracks {t['layer']} -x_offset {t['x_offset_um']} "
-        f"-x_pitch {t['x_pitch_um']} -y_offset {t['y_offset_um']} "
-        f"-y_pitch {t['y_pitch_um']}"
-        for t in tracks
-    ]
 
 
 def _floorplan_init_lines(floorplan: dict[str, Any]) -> list[str]:
@@ -992,13 +981,13 @@ def _stage_script_lines(
     library: dict[str, Any] | None = None,
     macro_liberty_paths: list[str] | None = None,
 ) -> list[str]:
+    from ._power_activity import power_activity_lines
     from .place_and_route import (
         _CTS_BUFFER_CELLS,
         _GLOBAL_PLACEMENT_DENSITY,
         _ROUTING_LAYER_RANGE,
         _ROW_RAIL_STRAP,
     )
-    from .post_route_sta import _power_activity_lines
 
     global_placement_call = _global_placement_call(
         placement_density, _GLOBAL_PLACEMENT_DENSITY, seed
@@ -1323,7 +1312,7 @@ def _stage_script_lines(
 
     # Issue #4914: global switching activity for `report_power_metric`
     # (empty, so byte-identical, when `constraints.power_activity` is omitted).
-    lines += _power_activity_lines(power_activity)
+    lines += power_activity_lines(power_activity)
     lines += _metrics_report_lines(
         include_fmax=True,
         include_power=True,
