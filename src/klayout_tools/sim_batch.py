@@ -84,6 +84,8 @@ recorded-call-log discipline on the other side of the same seam.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import math
@@ -3101,9 +3103,42 @@ def _check_interrupted_grace(
     )
 
 
-def _report_progress(job_id: str, state: str) -> None:
-    """One per-job progress line on stderr (stdout carries the JSON report)."""
-    print(f"klt sim: batch job {job_id}: {state}", file=sys.stderr, flush=True)
+@dataclass(frozen=True)
+class JobObserver:
+    """Who to tell, and what to call the request, when a batch job id exists
+    (issue #4971). ``--batch-set`` installs one per member so the set manifest
+    records the id at submit time and progress lines name the request."""
+
+    label: str | None
+    on_job: Callable[[str], None] | None = None
+
+
+_JOB_OBSERVER: contextvars.ContextVar[JobObserver | None] = contextvars.ContextVar(
+    "klt_sim_batch_job_observer", default=None
+)
+
+
+@contextlib.contextmanager
+def observe_batch_jobs(observer: JobObserver) -> Any:
+    """Install ``observer`` for batch submissions made on this thread."""
+    token = _JOB_OBSERVER.set(observer)
+    try:
+        yield
+    finally:
+        _JOB_OBSERVER.reset(token)
+
+
+def current_job_observer() -> JobObserver | None:
+    return _JOB_OBSERVER.get()
+
+
+def _report_progress(
+    job_id: str, state: str, observer: JobObserver | None = None
+) -> None:
+    """One per-job progress line on stderr (stdout carries the JSON report).
+    In set mode the request is named: ``batch job <id> (<request>): state``."""
+    label = f" ({observer.label})" if observer is not None and observer.label else ""
+    print(f"klt sim: batch job {job_id}{label}: {state}", file=sys.stderr, flush=True)
 
 
 def _check_never_started(
@@ -4663,6 +4698,7 @@ def _run_batch_job(
     on_phase: Callable[[str], None] | None = None,
     launch_if_unlaunched: bool = False,
     launch_kwargs: dict[str, Any] | None = None,
+    job_observer: JobObserver | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """Submit, wait for, and collect **one** batch job's worth of corners --
     the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
@@ -4702,6 +4738,7 @@ def _run_batch_job(
     clock seam). A phase that was not reached is ``None``, never fabricated.
     """
     notify = on_phase if on_phase is not None else _ignore_phase
+    observer = job_observer if job_observer is not None else current_job_observer()
     if attach:
         if not job_exists(config, job_id, runner=runner):
             raise BatchError(
@@ -4738,6 +4775,7 @@ def _run_batch_job(
             timestamps=attach_timestamps,
             now=now,
             attach=True,
+            observer=observer,
         )
     spec = _prepare_batch_job_spec(
         request,
@@ -4758,7 +4796,9 @@ def _run_batch_job(
     }
     submit_job(config, job_id, spec, runner=runner)
     notify("submitted")
-    _report_progress(job_id, "submitted")
+    if observer is not None and observer.on_job is not None:
+        observer.on_job(job_id)
+    _report_progress(job_id, "submitted", observer)
     notify("launching")
     _launch_noting_refusal(config, job_id, runner, notify, launch_kwargs)
     timestamps["client_launched_at"] = now()
@@ -4783,9 +4823,7 @@ def _run_batch_job(
         "region": getattr(config, "region", None),
         "profile": getattr(config, "profile", None),
         "launched_at": datetime.now(timezone.utc).isoformat(),
-        "request_sha256": hashlib.sha256(
-            json.dumps(request, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest(),
+        "request_sha256": _request_sha256(request),
         "state": None,
     }
     _write_batch_receipt(receipt_path, receipt)
@@ -4803,6 +4841,7 @@ def _run_batch_job(
         now=now,
         receipt_path=receipt_path,
         receipt=receipt,
+        observer=observer,
     )
 
 
@@ -4822,6 +4861,7 @@ def _poll_and_collect(
     receipt_path: str | None = None,
     receipt: dict[str, Any] | None = None,
     attach: bool = False,
+    observer: JobObserver | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The wait-and-collect tail shared by a fresh submit and ``--attach``.
 
@@ -4839,7 +4879,7 @@ def _poll_and_collect(
             sleep=sleep,
             heartbeat=True,
             progress=False,
-            on_state=lambda state: _report_progress(job_id, state),
+            on_state=lambda state: _report_progress(job_id, state, observer),
             unstarted_grace_s=_ATTACH_UNSTARTED_GRACE_S if attach else None,
         )
     except BatchPollTimeout as exc:
@@ -4944,6 +4984,44 @@ def _apply_job_split(
     return job_ceiling, effective_hosts
 
 
+def _request_sha256(request: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(request, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _check_attach_receipt(
+    artifacts_dir: str, job_id: str, request: dict[str, Any]
+) -> None:
+    """Issue #4971: refuse ``--attach`` with a request other than the one the
+    job was submitted from, when the local submit receipt says so. No receipt,
+    an unreadable one, or one for a different job id -> proceed unchanged."""
+    from .sim import SimError
+
+    path = os.path.join(artifacts_dir, BATCH_RECEIPT_FILENAME)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            receipt = json.load(handle)
+    except (OSError, ValueError):
+        return
+    if not isinstance(receipt, dict) or receipt.get("job_id") != job_id:
+        return
+    recorded = receipt.get("request_sha256")
+    # Two writers: the synchronous submit hashes the whole request; the
+    # --submit-only receipt excludes submission-only batch fields.
+    from . import sim_batch_shards
+
+    accepted = {_request_sha256(request), sim_batch_shards.request_sha256(request)}
+    supplied = _request_sha256(request)
+    if isinstance(recorded, str) and recorded not in accepted:
+        raise SimError(
+            f"--attach {job_id}: the supplied request (sha256 {supplied}) is not "
+            f"the request this job was submitted from (receipt {path} records "
+            f"request_sha256 {recorded}); pass the original request file",
+            code=BATCH_SHARD_MANIFEST_CODE,
+        )
+
+
 def _run_batch(
     *,
     corner_points: list[CornerPoint],
@@ -5035,6 +5113,7 @@ def _run_batch(
             shard_fingerprint=shard_fingerprint,
         )
     if attach_job_id is not None:
+        _check_attach_receipt(artifacts_dir, attach_job_id, request)
         try:
             return _run_batch_job(
                 config=config,
@@ -5379,6 +5458,8 @@ class _BatchFleetRun:
         attach_only: bool = False,
     ) -> None:
         self.attach_only = attach_only
+        # Shard jobs run on pool threads; capture the member's observer here.
+        self.job_observer = current_job_observer()
         self.config = config
         self.manifest = manifest
         self.shard_indexes = shard_indexes
@@ -5475,6 +5556,7 @@ class _BatchFleetRun:
                 on_phase=self._phase_hook(index),
                 sleep=self.abortable_sleep,
                 launch_kwargs=self._launch_kwargs(shard_config, index),
+                job_observer=self.job_observer,
             )
         except BatchError as exc:
             if type(exc) is not BatchError:
