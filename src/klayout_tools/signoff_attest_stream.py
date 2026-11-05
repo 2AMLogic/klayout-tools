@@ -169,6 +169,75 @@ def _resolve_streams(
     return resolved
 
 
+def _member_checks(
+    streams: list[tuple[str, str, str, str]], multi: bool
+) -> list[dict[str, Any]]:
+    """The built-in item-2 checks for every resolved stream. With more than
+    one stream each check also carries the member's repository-relative
+    ``path``."""
+    if not multi:
+        return _stream_checks(streams[0][1], streams[0][3])
+    checks: list[dict[str, Any]] = []
+    for _given, member_abs, member_rel, member_hash in streams:
+        for check in _stream_checks(member_abs, member_hash):
+            checks.append({**check, "path": member_rel})
+    return checks
+
+
+def _input_binding(
+    streams: list[tuple[str, str, str, str]], multi: bool, stream_hash: str
+) -> dict[str, Any]:
+    """``provenance.input``: one path + hash, or the sorted member list bound
+    by the set digest."""
+    if not multi:
+        return {
+            "path": {"path": streams[0][2], "scope": "repo"},
+            "content_hash": stream_hash,
+        }
+    return {
+        "paths": [
+            {"path": {"path": rel, "scope": "repo"}, "content_hash": h}
+            for _g, _a, rel, h in streams
+        ],
+        "content_hash": stream_hash,
+    }
+
+
+def _inventory_checks(
+    inventory_path: str,
+    absolute: str,
+    committed_checks: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run the item-2 inventory's declared checks; return them with the
+    ``attestation.inventory`` block."""
+    inventory, inventory_hash = _read_inventory(inventory_path)
+    inv_absolute = os.path.realpath(os.path.abspath(inventory_path))
+    root = find_repo_root(os.path.dirname(absolute))
+    inv_root = find_repo_root(os.path.dirname(inv_absolute))
+    if root is None or inv_root != root:
+        raise AttestationError(
+            f"inventory '{inventory_path}' must be in the same git "
+            "repository as the stream"
+        )
+    _validate_header(inventory, STREAM_ATTESTABLE_ITEM, inventory_path)
+    specs = _validated_command_checks(inventory, root, STREAM_ATTESTABLE_ITEM)
+
+    def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
+        if committed_checks is not None and spec.get("local_only"):
+            return _skipped_check(spec, role, committed_checks, **identity)
+        return _command_check(root, spec, role, **identity)
+
+    block = {
+        "path": {
+            "path": os.path.relpath(inv_absolute, root).replace(os.sep, "/"),
+            "scope": "repo",
+        },
+        "content_hash": inventory_hash,
+        "schema_version": inventory["schema_version"],
+    }
+    return _audit_command_checks(specs, command), block
+
+
 def build_stream_attestation(
     stream_path: str | Sequence[str],
     *,
@@ -209,44 +278,15 @@ def build_stream_attestation(
     absolute, stream_rel, stream_hash = streams[0][1], streams[0][2], streams[0][3]
     if multi:
         streams.sort(key=lambda item: item[2].encode("utf-8"))
-        checks = []
-        for _given, member_abs, member_rel, member_hash in streams:
-            for check in _stream_checks(member_abs, member_hash):
-                checks.append({**check, "path": member_rel})
         stream_hash = input_set_digest((rel, h) for _g, _a, rel, h in streams)
         absolute, stream_rel = streams[0][1], streams[0][2]
-    else:
-        checks = _stream_checks(absolute, stream_hash)
+    checks = _member_checks(streams, multi)
     inventory_block: dict[str, Any] | None = None
     if inventory_path is not None:
-        inventory, inventory_hash = _read_inventory(inventory_path)
-        inv_absolute = os.path.realpath(os.path.abspath(inventory_path))
-        root = find_repo_root(os.path.dirname(absolute))
-        inv_root = find_repo_root(os.path.dirname(inv_absolute))
-        if root is None or inv_root != root:
-            raise AttestationError(
-                f"inventory '{inventory_path}' must be in the same git "
-                "repository as the stream"
-            )
-        _validate_header(inventory, STREAM_ATTESTABLE_ITEM, inventory_path)
-        specs = _validated_command_checks(inventory, root, STREAM_ATTESTABLE_ITEM)
-
-        def command(
-            spec: Mapping[str, Any], role: str, **identity: Any
-        ) -> dict[str, Any]:
-            if committed_checks is not None and spec.get("local_only"):
-                return _skipped_check(spec, role, committed_checks, **identity)
-            return _command_check(root, spec, role, **identity)
-
-        checks.extend(_audit_command_checks(specs, command))
-        inventory_block = {
-            "path": {
-                "path": os.path.relpath(inv_absolute, root).replace(os.sep, "/"),
-                "scope": "repo",
-            },
-            "content_hash": inventory_hash,
-            "schema_version": inventory["schema_version"],
-        }
+        extra, inventory_block = _inventory_checks(
+            inventory_path, absolute, committed_checks
+        )
+        checks.extend(extra)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
     provenance: dict[str, Any] = {
@@ -254,20 +294,7 @@ def build_stream_attestation(
         "klayout_version": klayout_version(),
         "pdk": None,
         "deck": None,
-        "input": (
-            {
-                "paths": [
-                    {"path": {"path": rel, "scope": "repo"}, "content_hash": h}
-                    for _g, _a, rel, h in streams
-                ],
-                "content_hash": stream_hash,
-            }
-            if multi
-            else {
-                "path": {"path": stream_rel, "scope": "repo"},
-                "content_hash": stream_hash,
-            }
-        ),
+        "input": _input_binding(streams, multi, stream_hash),
     }
     if generator is not None:
         regeneration: dict[str, Any] = {
