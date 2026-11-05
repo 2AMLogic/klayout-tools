@@ -1507,11 +1507,9 @@ def run_lvs(
         layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
         if layout_flatten_warning is not None:
             flatten_warnings.append(layout_flatten_warning)
-        if finfet_layout:
-            # Issue #4954: the extractor merged fingers per circuit; flattening
-            # can place exactly-parallel fingers of different cells side by
-            # side, so re-run the same combiner on the flattened layout.
-            combine_layout_fingers(layout_netlist)
+        # Issue #4954: re-merge exactly-parallel FinFET fingers the flatten
+        # brought together (no-op for a planar layout).
+        combine_layout_fingers(layout_netlist, finfet_layout)
 
     reference_netlist_path = _require_path(
         reference_spec, "netlist", "reference", request_dir

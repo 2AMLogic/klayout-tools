@@ -226,10 +226,12 @@ def combine_reference_fingers(netlist: kdb.Netlist) -> None:
     netlist.combine_devices()
 
 
-def combine_layout_fingers(netlist: kdb.Netlist) -> None:
+def combine_layout_fingers(netlist: kdb.Netlist, finfet: bool) -> None:
     """Re-merge exactly-parallel layout fingers after ``flatten_layout`` (the
-    extractor only merges within one circuit; issue #4954)."""
-    netlist.combine_devices()
+    extractor only merges within one circuit; issue #4954). No-op unless
+    ``finfet``."""
+    if finfet:
+        netlist.combine_devices()
 
 
 def configure_finfet_comparison(*netlists: kdb.Netlist) -> list[str]:
