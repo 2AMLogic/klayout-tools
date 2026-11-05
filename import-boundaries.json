@@ -555,6 +555,7 @@
         "klayout_tools._batch_common",
         "klayout_tools._check_result",
         "klayout_tools._devices",
+        "klayout_tools._digest",
         "klayout_tools._jsonnum",
         "klayout_tools._layout",
         "klayout_tools._native",
