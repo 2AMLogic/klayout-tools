@@ -3395,6 +3395,42 @@ def _batch_environment(
     }
 
 
+def _collected_exit_reason(
+    status: dict[str, Any], report: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Issue #4964: a job that ended ``failed`` with a ``klt sim`` verdict exit
+    (3/4) while its report was collected reads as the bare ``job command exited
+    4`` beside per-corner ``[pass]``. Name the reason from the collected report
+    (aggregate ``status`` and ``coverage``). ``None`` for exit 0 / no exit code.
+    Additive: lands in ``environment.remote.exit_reason``."""
+    exit_code = _status_exit_code(status)
+    if exit_code not in (3, 4):
+        return None
+    coverage = report.get("coverage")
+    coverage = coverage if isinstance(coverage, dict) else {}
+    reasons = list(coverage.get("nothing_checked_reasons") or [])
+    report_status = report.get("status")
+    declared = coverage.get("measurements_declared")
+    if exit_code == 4:
+        meaning = "klt sim exited 4 (errored / not_checked / inconclusive)"
+    else:
+        meaning = "klt sim exited 3 (a corner or measurement failed)"
+    if coverage.get("nothing_checked") or declared == 0:
+        detail = "no measurements declared; nothing was checked"
+    else:
+        detail = f"aggregate status {report_status!r}"
+    return {
+        "exit_code": exit_code,
+        "report_status": report_status,
+        "nothing_checked": coverage.get("nothing_checked"),
+        "nothing_checked_reasons": reasons,
+        "message": (
+            f"{meaning}: {detail}; the job state is failed because of this "
+            "verdict exit code, not a runner crash"
+        ),
+    }
+
+
 def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
     """A JSON-safe, bounded, control-character-free copy of a captured string
     (``None`` for anything that is not a string)."""
@@ -4906,6 +4942,9 @@ def _poll_and_collect(
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}
+        exit_reason = _collected_exit_reason(status, report)
+        if exit_reason is not None:
+            environment["exit_reason"] = exit_reason
         corners = report.get("corners") or []
         _surface_log_fatal(corners, collected)
         if keep_artifacts:
