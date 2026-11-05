@@ -6359,7 +6359,9 @@ a corner grid. A stock ngspice without the module still produces the
 - **`corners.supply_waveforms`** (`array<string>`, optional; issue #2902) —
   names of `corners.supply_v` keys whose top-level **`PWL(...)`/`PULSE(...)`**
   source is *rescaled* per corner instead of `alter`ed. Every entry must also
-  be a `corners.supply_v` key; no `alter` is emitted for it. The corner runs
+  be a `corners.supply_v` key (with `corners.units`, a `supply_v` key of
+  **every** unit, see [Explicit unit list](#explicit-unit-list-cornersunits));
+  no `alter` is emitted for it. The corner runs
   against a per-corner copy of the netlist (`netlist.supply_waveforms.cir`
   in the corner directory; relative `.include` targets are made absolute) in
   which the source's voltage levels are multiplied by `supply / peak`, where
@@ -6583,6 +6585,12 @@ executed exactly as given with no crossing
   key, an array-valued `supply_v`, or two records with the same `corner_id`
   (supply is formatted to 3 decimals, so 0.1004 V and 0.1001 V collide) is a
   `SimError`.
+- `corners.supply_waveforms` (#2902) may accompany `corners.units`
+  (issue #4981): the top-level array applies to every unit, and each name
+  must be a `supply_v` key of every unit, whose value is the supply the
+  PWL/PULSE source is rescaled to (no `alter` is emitted). A unit missing the
+  rail is a `SimError` naming the unit index. Per-unit waveform lists are not
+  supported.
 - Works on every backend, including `remote`/batch (the worker re-expands the
   same list).
 

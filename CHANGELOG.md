@@ -14,6 +14,11 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` `corners.supply_waveforms` with `corners.units`** (issue #4981):
+  a PWL/PULSE supply source can now be rescaled per unit in an explicit
+  `corners.units` request (each name must be a `supply_v` key of every unit).
+  Previously the option was silently ignored with `units`. Requests without
+  the option are unchanged.
 - **Automated releases** (issue #4920, design in
   [`RELEASING.md`](RELEASING.md) "Automated release"): `release.yml` opens a
   weekly `chore(release)` PR when `main` is over the commit backstop, tags the
