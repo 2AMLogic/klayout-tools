@@ -1,11 +1,14 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "engine": "klayout",
   "layout": {
     "path": "examples/signoff/layout.spice",
     "scope": "repo"
   },
-  "reference": "schematic.spice",
+  "reference": {
+    "path": "examples/signoff/schematic.spice",
+    "scope": "repo"
+  },
   "top": "CURRENT_MIRROR",
   "reference_top": "CURRENT_MIRROR",
   "parameter_tolerance": null,

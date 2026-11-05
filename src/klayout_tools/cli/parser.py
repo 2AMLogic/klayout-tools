@@ -3319,7 +3319,7 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_format_arg(lvs_parser)
-    lvs_parser.set_defaults(func=lvs_cmd.run)
+    lvs_cmd.configure(lvs_parser)  # -o/--output (issue #4984) + func=run
 
 
 def _add_equiv_parser(subparsers: argparse._SubParsersAction) -> None:

@@ -13,7 +13,7 @@
     "net_correspondence"
   ],
   "properties": {
-    "schema_version": {"type": "integer", "const": 2},
+    "schema_version": {"type": "integer", "const": 3},
     "engine": {"enum": ["klayout", "netgen"], "description": "Echo of the request's engine (default klayout)."},
     "layout": {"$ref": "#/$defs/path_value", "description": "Echo of layout.file or layout.netlist."},
     "label_layers": {
@@ -26,7 +26,7 @@
         ]
       }
     },
-    "reference": {"$ref": "#/$defs/path_value", "description": "Echo of reference.netlist."},
+    "reference": {"$ref": "#/$defs/path_value", "description": "Resolved reference.netlist as {path, scope} (repo-relative, issue #4984; schema_version 3). The klayout-runset engine, and reports predating v3, carry the verbatim request string."},
     "top": {"type": "string", "description": "Layout side's resolved top circuit name."},
     "reference_top": {"type": "string", "description": "Reference side's resolved top circuit name."},
     "reference_conversion": {

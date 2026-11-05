@@ -41,7 +41,13 @@ import sys
 
 from ..env_provenance import render_path_field
 from ..lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
-from .output import emit_error, emit_success, render_check_text, render_rerun_drift
+from .output import (
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+    write_json_file,
+)
 
 EXIT_MATCH = 0
 EXIT_MISMATCH = 3
@@ -62,6 +68,23 @@ _EXIT_BY_STATUS = {
     "mismatch": EXIT_MISMATCH,
     "inconclusive": EXIT_INCONCLUSIVE,
 }
+
+
+def configure(parser: argparse.ArgumentParser) -> None:
+    """Add ``-o/--output`` (issue #4984) and bind ``run`` as the handler."""
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        metavar="PATH",
+        help=(
+            "also write the JSON envelope to PATH (same as --format json "
+            "stdout; written atomically, '.gz' gzip-compressed; stdout is "
+            "unchanged). An unwritable PATH is a clean error (exit 1). "
+            "Rejected with --check"
+        ),
+    )
+    parser.set_defaults(func=run)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -100,11 +123,35 @@ def run(args: argparse.Namespace) -> int:
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
 
+    write_failure = _write_output(report, args)
+    if write_failure is not None:
+        return write_failure
+
     emit_success(report, args.format, _print_text)
 
     # Unknown/unexpected status can only mean a future additive value this
     # build predates -- never silently report it as a clean `0`.
     return _EXIT_BY_STATUS.get(report["status"], EXIT_MISMATCH)
+
+
+def _write_output(report: dict, args: argparse.Namespace) -> int | None:
+    """Write the ``-o/--output`` file copy; return an exit code only on failure.
+
+    Issue #4984, mirroring ``klt drc -o`` (#4393): an additive copy of the
+    envelope, written before emitting so it lands regardless of the verdict's
+    exit code and an unwritable path fails with the error envelope.
+    """
+    if not args.output:
+        return None
+    try:
+        write_json_file(report, args.output)
+    except OSError as exc:
+        return emit_error(
+            "lvs",
+            f"could not write report to '{args.output}': {exc}",
+            args.format,
+        )
+    return None
 
 
 def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
@@ -123,6 +170,13 @@ def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
 
 
 def _run_check(args: argparse.Namespace) -> int:
+    if args.output is not None:
+        return emit_error(
+            "lvs",
+            "-o/--output cannot be combined with --check: --check emits no "
+            "run report to write",
+            args.format,
+        )
     try:
         if args.rerun:
             result = rerun_lvs_report(args.check, layout_path=args.layout)
@@ -153,7 +207,11 @@ def _print_text(report: dict) -> None:
     # absolute path is never printed even in text mode. `reference` is still
     # the request's own verbatim echo (a plain string) and prints as-is.
     print(f"layout: {render_path_field(report['layout'])}")
-    print(f"reference: {report['reference']}")
+    # Issue #4984: an object since schema_version 3; a pre-v3 or runset
+    # report still carries the bare request string.
+    reference = report["reference"]
+    shown = reference if isinstance(reference, str) else render_path_field(reference)
+    print(f"reference: {shown}")
     print(f"top: {report['top']}")
     # Issue #1205: only printed when the two sides resolved to different top
     # circuits -- the ordinary compare's output is unchanged, but a negative

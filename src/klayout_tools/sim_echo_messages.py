@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .sim_errors import SimError
+
 
 def zipped_length_message(field: str, axes: dict[str, Any]) -> str:
     """Text for a ``corners.<field>`` axis-length mismatch: the arrays are
@@ -19,6 +21,15 @@ def zipped_length_message(field: str, axes: dict[str, Any]) -> str:
         f"found: {lengths}. To sweep a cross product, expand the pairs by "
         "hand. See docs/cli/sim.md"
     )
+
+
+def require_corners_object(corners_spec: Any) -> None:
+    """Raise ``SimError`` when ``corners`` is not an object (e.g. a JSON array)."""
+    if not isinstance(corners_spec, dict):
+        raise SimError(
+            f"corners must be an object (got {type(corners_spec).__name__}); "
+            "use corners.units for an explicit list of points. See docs/cli/sim.md"
+        )
 
 
 def echo_identity(remote_environment: dict[str, Any] | None) -> str:
