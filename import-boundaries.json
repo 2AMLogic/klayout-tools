@@ -134,7 +134,8 @@
         "klayout_tools.drc",
         "klayout_tools.drc_crosscheck",
         "klayout_tools.drc_klayout_app",
-        "klayout_tools.drc_klayout_engine"
+        "klayout_tools.drc_klayout_engine",
+        "klayout_tools.drc_report_check"
       ]
     },
     "economy": {
@@ -1653,6 +1654,12 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.drc_report_check",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md); split out of klayout_tools.drc."
     },
     {
       "consumer": "klayout_tools.env_provenance",

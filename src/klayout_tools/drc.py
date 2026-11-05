@@ -54,7 +54,6 @@ from ._report_verify import (
     build_check_result,
     build_rerun_result,
     get_path,
-    hash_check,
     resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
@@ -79,6 +78,7 @@ from .decks import (
     get_unmodeled_rules,
     get_unmodeled_voltage_markers,
 )
+from .drc_report_check import _report_hash_checks
 from .layers import layers_report
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk_for_deck
@@ -2587,27 +2587,6 @@ def drc_exit_code(report: dict[str, Any]) -> int:
     ).exit_code
 
 
-def _deck_path_for_report(committed: dict[str, Any]) -> str | None:
-    """The on-disk deck path a committed ``klt drc`` report's own ``deck``
-    field names, for re-hashing (issue #1106).
-
-    ``--engine curated`` reports store the deck *name* (``"sky130"``, ...)
-    under ``deck`` -- resolved to a source-module path via
-    :func:`deck_source_path`, exactly as :func:`run_drc` itself does when it
-    first builds ``provenance.deck.content_hash``. ``--engine klayout``
-    reports (``committed["engine"] == "klayout"``) instead store the deck
-    *script's own path* directly under ``deck`` (see
-    :func:`run_drc_klayout_engine`'s docstring -- there is no separate short
-    name for an arbitrary PDK-native script), so it is used as-is.
-    """
-    deck = committed.get("deck")
-    if deck is None:
-        return None
-    if committed.get("engine") == "klayout":
-        return deck
-    return deck_source_path(deck)
-
-
 def check_drc_report(
     report_path: str, *, input_path: str | None = None
 ) -> dict[str, Any]:
@@ -2635,46 +2614,33 @@ def check_drc_report(
     traceback.
     """
     committed = _load_committed_report(report_path, DrcError)
-    checks = [
-        hash_check(
-            "provenance.input.content_hash",
-            get_path(committed, ("provenance", "input", "content_hash")),
-            _content_hash(
-                resolve_committed_path(
-                    committed.get("file"),
-                    report_path=report_path,
-                    override=input_path,
+    if committed.get("mode") == "crosscheck":
+        # Issue #4986: an ``--engine both`` envelope nests each engine's own
+        # report under ``reports.<engine>``; check each with the same logic,
+        # naming fields with the engine prefix. A null native side (engine
+        # failed / unavailable) is skipped, never reported as drift.
+        reports = committed.get("reports")
+        reports = reports if isinstance(reports, dict) else {}
+        checks = []
+        for engine in ("curated", "native"):
+            sub = reports.get(engine)
+            if isinstance(sub, dict):
+                checks.extend(
+                    _report_hash_checks(
+                        sub,
+                        report_path=report_path,
+                        input_path=input_path,
+                        prefix=f"reports.{engine}.",
+                    )
                 )
-            ),
-        ),
-        hash_check(
-            "provenance.deck.content_hash",
-            get_path(committed, ("provenance", "deck", "content_hash")),
-            _content_hash(_deck_path_for_report(committed)),
-        ),
-    ]
-    # Issue #3483: a waived report also pins its waivers file.
-    waivers_file = get_path(committed, ("provenance", "waivers", "file"))
-    if waivers_file is not None:
-        checks.append(
-            hash_check(
-                "provenance.waivers.content_hash",
-                get_path(committed, ("provenance", "waivers", "content_hash")),
-                _content_hash(waivers_file),
+        if not checks:
+            raise DrcError(
+                f"crosscheck report has no embedded 'reports.curated' report "
+                f"to check: {report_path}"
             )
-        )
-    recorded_tree = get_path(committed, ("provenance", "deck", "tree", "content_hash"))
-    if recorded_tree is not None:
-        deck_path = _deck_path_for_report(committed)
-        from .drc_klayout_engine import _deck_tree_identity
-
-        current_tree = _deck_tree_identity(deck_path) if deck_path else None
-        checks.append(
-            hash_check(
-                "provenance.deck.tree.content_hash",
-                recorded_tree,
-                current_tree["content_hash"] if current_tree else None,
-            )
+    else:
+        checks = _report_hash_checks(
+            committed, report_path=report_path, input_path=input_path, prefix=""
         )
     return build_check_result(report_path=report_path, checks=checks)
 
@@ -2752,6 +2718,12 @@ def rerun_drc_report(
     raises (bad file, unknown deck, engine error) -- never a traceback.
     """
     committed = _load_committed_report(report_path, DrcError)
+    if committed.get("mode") == "crosscheck":
+        raise DrcError(
+            "--rerun supports single-engine reports only; "
+            f"{report_path} is an --engine both (crosscheck) report "
+            "(use --check without --rerun)"
+        )
     file_path = resolve_committed_path(
         committed.get("file"), report_path=report_path, override=input_path
     )

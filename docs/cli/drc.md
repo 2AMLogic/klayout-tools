@@ -4023,6 +4023,26 @@ a report originally scoped to one top cell via `--top` can legitimately
 drift under `--rerun` if the stream has others. Use cheap mode if that
 matters.
 
+### `--check` on an `--engine both` (crosscheck) report
+
+A committed `klt drc --engine both` envelope (`mode: "crosscheck"`) carries no
+top-level `provenance`; each engine's report is nested at `reports.curated` /
+`reports.native`. Cheap `--check` understands that shape (issue #4986): it
+runs the same hash checks over each embedded report, and `checks[].field`
+names carry the engine prefix, e.g. `reports.curated.provenance.input
+.content_hash`, `reports.native.provenance.deck.content_hash`, plus the
+`...deck.tree.content_hash` and `...waivers.content_hash` fields where the
+embedded report recorded them. The positional `<file>` override applies to
+both sides (and is needed when the embedded `file` is `scope: "external"`). When `reports.native` is `null` (`comparison.state:
+"engine_failed"`/`"native_unavailable"`), only the curated side is checked
+and the absent native side never counts as drift. Only input/deck provenance
+hashes are verified, not the `comparison` block. `checks[].field` is a
+free-form string, so the response `schema_version` is unchanged.
+
+`--rerun` supports single-engine reports only: `klt drc --check <crosscheck
+report> --rerun` fails with the standard error envelope (exit `1`) rather than
+diffing the wrong shape.
+
 ### Exit codes for `--check` / `--rerun`
 
 Both modes reuse the same 0/3 split a normal run uses: `0` when `status` is
