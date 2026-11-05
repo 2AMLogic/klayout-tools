@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 8005
+      "lines": 7820
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -481,11 +481,11 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1112
+      "lines": 1083
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
-      "lines": 920
+      "lines": 904
     },
     {
       "path": "src/klayout_tools/netlist_capacitor_recovery.py",

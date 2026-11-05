@@ -72,6 +72,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from . import pdk as pdk_module
@@ -83,6 +84,7 @@ from .netlist_inputs import (
     inputs_record_line,
     split_inputs_record,
 )
+from .netlist_pdk import _pdk_root_consistent, _rcfile_pdk_root, _with_symbol_path_env
 
 #: Payload schema version (``docs/json-contract.md``; versioned per command).
 SCHEMA_VERSION = 1
@@ -865,55 +867,6 @@ def _write_output(output: str, data: bytes) -> None:
         raise NetlistError(f"could not write netlist to {output}: {exc}") from exc
 
 
-_RC_PDK_ROOT_RE = re.compile(
-    r"^\s*set\s+(?:::)?(?:env\(PDK_ROOT\)|PDK_ROOT)\s+(\"[^\"]*\"|\{[^}]*\}|\S+)",
-    re.MULTILINE,
-)
-
-
-def _rcfile_pdk_root(rcfile: str) -> str | None:
-    """The PDK root a ``xschemrc`` statically declares, or ``None``.
-
-    Recognises ``set PDK_ROOT <path>`` and ``set env(PDK_ROOT) <path>`` (the
-    last such assignment wins). A value that is computed (contains ``$`` or
-    ``[``) cannot be evaluated without a Tcl interpreter and is reported as
-    undeclared rather than guessed at.
-    """
-    try:
-        with open(rcfile, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
-    except OSError:
-        return None
-    found = _RC_PDK_ROOT_RE.findall(text)
-    if not found:
-        return None
-    value = found[-1].strip()
-    if value[:1] in ('"', "{") and value[-1:] in ('"', "}"):
-        value = value[1:-1]
-    if not value or "$" in value or "[" in value:
-        return None
-    return os.path.realpath(os.path.expanduser(value))
-
-
-def _pdk_root_consistent(declared: str, root: str, variant: str) -> bool:
-    """True if a declared ``xschemrc`` PDK root agrees with the resolved PDK.
-
-    Consistent when ``declared`` equals the install ``root`` itself (the
-    ``$PDK_ROOT`` convention), or equals/sits under the resolved variant
-    directory ``root/variant`` (the ``$PDK_ROOT/sky130A`` convention).
-    Deliberately *not* consistent when ``declared`` merely sits above
-    ``root`` (too permissive to mean anything, e.g. ``$PDK_ROOT=/home/me``)
-    or names a different variant under the same install root (e.g. declares
-    ``sky130A`` while the resolved PDK is ``sky130B``).
-    """
-    declared = os.path.realpath(declared)
-    root = os.path.realpath(root)
-    if declared == root:
-        return True
-    variant_dir = os.path.realpath(os.path.join(root, variant))
-    return declared == variant_dir or declared.startswith(variant_dir + os.sep)
-
-
 def _pdk_consistency(
     rcfile: str | None, pdk: str | None, pdk_root: str | None
 ) -> dict[str, Any] | None:
@@ -967,6 +920,16 @@ def _pdk_consistency(
     }
 
 
+def _resolve_symbol_path(symbol_path: Sequence[str]) -> list[str]:
+    """Absolute-resolve each ``--symbol-path`` DIR, refusing a non-directory."""
+    resolved: list[str] = []
+    for entry in symbol_path:
+        if not os.path.isdir(entry):
+            raise NetlistError(f"--symbol-path is not a directory: {entry}")
+        resolved.append(os.path.realpath(entry))
+    return resolved
+
+
 def run_netlist(
     schematic: str,
     output: str,
@@ -981,6 +944,7 @@ def run_netlist(
     allow_unevaluated_expr: bool = False,
     ignore_comments: bool = False,
     erc: bool = False,
+    symbol_path: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -1002,6 +966,10 @@ def run_netlist(
     comparison ignore every comment line, for a committed netlist a project
     post-processes (header, rewritten ``sch_path``). Never affects a write.
 
+    ``symbol_path`` (issue #4952) is a list of extra symbol directories,
+    exported to xschem as ``XSCHEM_USER_LIBRARY_PATH`` (prepended to any
+    value already in the environment). Each must be an existing directory.
+
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
     missing/unlaunchable xschem, the timeout (after SIGTERM->SIGKILL
@@ -1014,6 +982,7 @@ def run_netlist(
         raise NetlistError(f"--timeout-s must be positive (got {timeout_s})")
     if rcfile is not None and not os.path.isfile(rcfile):
         raise NetlistError(f"xschemrc file not found: {rcfile}")
+    resolved_symbol_path = _resolve_symbol_path(symbol_path)
     pdk_block = _pdk_consistency(rcfile, pdk, pdk_root)
 
     stem = os.path.splitext(os.path.basename(schematic))[0]
@@ -1038,6 +1007,7 @@ def run_netlist(
                 "PDK_ROOT": pdk_block["root"],
                 "PDK": pdk_block["variant"],
             }
+        xschem_env = _with_symbol_path_env(xschem_env, resolved_symbol_path)
         exit_status, stdout, stderr, duration_s = _launch_xschem(
             argv, timeout_s, xschem_env
         )
@@ -1078,6 +1048,7 @@ def run_netlist(
                 "exit_status_trusted": False,
                 "timeout_s": timeout_s,
                 "duration_s": round(duration_s, 3),
+                "symbol_path": resolved_symbol_path,
             },
             "diagnostics": diagnostics_block(stdout, stderr, erc=erc),
         }
