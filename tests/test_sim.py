@@ -2330,16 +2330,16 @@ def test_classify_diagnostics_modelname_with_wide_w_names_culprit(tmp_path):
 
 
 def test_classify_diagnostics_modelname_with_wide_nf_names_culprit(tmp_path):
-    # nf= hits the identical bin-range check w= does (issue #1214) -- the
-    # diagnostic must report the *effective* width (w * nf), not just w.
+    # Keys on w as written (issue #4976): nf= is reported, never multiplied.
     netlist = tmp_path / "netlist.spice"
-    netlist.write_text("X5 d g s b nfet_06v0 w=50u l=0.6u nf=450 m=1\n")
+    netlist.write_text("X5 d g s b nfet_06v0 w=128u l=0.6u nf=64 m=1\n")
 
     (diag,) = sim._classify_diagnostics(_MODELNAME_LOG, str(netlist))
 
     assert diag["code"] == "model_bin_range"
-    assert "nf=450" in diag["message"]
-    assert "22500" in diag["message"]  # 50 um * 450 fingers
+    assert "nf=64" in diag["message"]
+    assert "w=128u" in diag["message"]
+    assert "effective" not in diag["message"]
 
 
 def test_classify_diagnostics_modelname_with_m_workaround_finds_no_culprit(tmp_path):
@@ -2401,7 +2401,7 @@ def test_run_sim_stubbed_modelname_failure_reports_actionable_diagnostic(
     body.write_text(
         ".param vdd=1.0\n"
         "Vdd vdd 0 DC {vdd}\n"
-        "X5 vdd g out 0 nfet_06v0 w=50u l=0.6u nf=450 m=1\n"
+        "X5 vdd g out 0 nfet_06v0 w=128u l=0.6u nf=64 m=1\n"
     )
     request = _write_request(
         tmp_path,
@@ -2422,7 +2422,7 @@ def test_run_sim_stubbed_modelname_failure_reports_actionable_diagnostic(
     assert corner["status"] == "error"
     (diag,) = [d for d in corner["diagnostics"] if d["code"] == "model_bin_range"]
     assert "X5" in diag["message"]
-    assert "nf=450" in diag["message"]
+    assert "nf=64" in diag["message"]
     assert "m=" in diag["message"]
 
 
