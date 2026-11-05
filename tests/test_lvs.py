@@ -702,7 +702,7 @@ def test_clean_self_compare_reports_match(tmp_path):
     )
     report = run_lvs(path)
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["engine"] == "klayout"
     assert report["status"] == "match"
     assert report["mismatch_count"] == 0
@@ -8343,6 +8343,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         deck_var=None,
         layout=None,
         progress=None,
+        output=None,
     )
     assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
     payload = json.loads(capsys.readouterr().out)
@@ -15918,7 +15919,7 @@ def test_check_lvs_report_detects_moved_layout_hash(tmp_path):
     assert by_field["environment.layout_sha256"]["match"] is False
 
 
-def _portable_pair(tmp_path: Path) -> tuple[Path, Path]:
+def _portable_pair(tmp_path: Path, legacy_reference: bool = False) -> tuple[Path, Path]:
     """Issue #2595's repro shape: a self-contained directory holding a
     request whose `layout`/`reference` are relative to the request *file's
     own* directory, its two netlists, and the report that run produced.
@@ -15935,7 +15936,10 @@ def _portable_pair(tmp_path: Path) -> tuple[Path, Path]:
         },
     )
     report_path = pair / "lvs.json"
-    _write_report(report_path, run_lvs(request_path))
+    report = run_lvs(request_path)
+    if legacy_reference:  # pre-#4984: request-relative bare string
+        report["reference"] = "ref.spice"
+    _write_report(report_path, report)
     return pair, report_path
 
 
@@ -15951,14 +15955,10 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
     just carries an additional `input_not_found` block naming the resolved
     path, plus the report-relative path that *does* exist when one does.
 
-    Issue #2659 removed the trap for `layout`, which is now the
-    `{path, scope}` envelope resolved against the repo root of the committed
-    report's own directory rather than the cwd -- so this test now also pins
-    the *asymmetry* between the two sides, which is the whole point of
-    leaving `reference` alone (it is pinned by
-    `environment.reference_sha256`, not by `provenance.input`).
+    Uses a pre-#4984 bare-string `reference`; `layout` (#2659) and v3
+    `reference` (#4984) are `{path, scope}` and have no such trap.
     """
-    pair, report_path = _portable_pair(tmp_path)
+    pair, report_path = _portable_pair(tmp_path, legacy_reference=True)
 
     monkeypatch.chdir(tmp_path)
     result = check_lvs_report(os.path.join("pair", "lvs.json"))
@@ -16425,7 +16425,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
     # earned no `schema_version` bump of its own (docs/json-contract.md,
     # "additive envelope"). The envelope is at `2` because issue #2659
     # separately retyped `layout`.
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["parameter_tolerance"] is None
 
 
@@ -16788,7 +16788,7 @@ def test_cli_lvs_check_text_names_unresolvable_input(tmp_path, capsys, monkeypat
     a committed pair from its parent directory still exits 3, but the text
     rendering says the input was not found (and where it really is) instead
     of the bare `actual: None` the report reads as a lost hash."""
-    pair, _report_path = _portable_pair(tmp_path)
+    pair, _report_path = _portable_pair(tmp_path, legacy_reference=True)
     monkeypatch.chdir(tmp_path)
     capsys.readouterr()
 
@@ -23084,9 +23084,9 @@ def test_run_lvs_layout_is_repo_relative_inside_a_repo(tmp_path):
 
     report = run_lvs(request_path)
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["layout"] == {"path": "blocks/layout.spice", "scope": "repo"}
-    assert report["reference"] == reference_path
+    assert report["reference"] == {"path": "ref.spice", "scope": "repo"}
 
 
 def test_run_lvs_layout_is_external_outside_any_repo(tmp_path_factory):
@@ -23231,9 +23231,9 @@ def test_check_lvs_report_reports_an_external_layout_as_unverifiable(
     by_field = {check["field"]: check for check in result["checks"]}
     assert by_field["environment.layout_sha256"]["actual"] is None
     assert by_field["environment.layout_sha256"]["match"] is False
-    # The reference side is unaffected -- still the verbatim echo, still
-    # re-hashed against the cwd, and here it resolves and matches.
-    assert by_field["environment.reference_sha256"]["match"] is True
+    # #4984: the reference is outside any repo too: unverifiable.
+    assert by_field["environment.reference_sha256"]["actual"] is None
+    assert by_field["environment.reference_sha256"]["match"] is False
     assert result["status"] == "drifted"
 
 
@@ -23284,6 +23284,7 @@ def test_check_lvs_report_still_resolves_a_pre_2659_bare_string_layout(
     )
     report["schema_version"] = 1
     report["layout"] = layout_path  # the pre-#2659 shape
+    report["reference"] = reference_path  # the pre-#4984 shape
     report_path = outside / "lvs.json"
     _write_report(report_path, report)
 
@@ -23337,7 +23338,7 @@ def test_lvs_text_output_renders_the_layout_envelope_not_a_dict_repr(
     outside_text = capsys.readouterr().out
 
     assert "layout: layout.spice\n" in inside
-    assert f"reference: {reference_path}\n" in inside
+    assert "reference: ref.spice\n" in inside
     assert "layout: <outside repo>\n" in outside_text
 
 
@@ -25870,18 +25871,17 @@ def _external_lvs_report(tmp_path_factory):
     layout_path = _write(outside / "layout.spice", _INVERTER_SPICE)
     reference_path = _write(outside / "ref.spice", _INVERTER_SPICE)
     report_path = outside / "lvs.json"
-    _write_report(
-        report_path,
-        run_lvs(
-            _write_request(
-                outside / "request.json",
-                {
-                    "layout": {"netlist": layout_path, "top": "inv"},
-                    "reference": {"netlist": reference_path, "top": "inv"},
-                },
-            )
-        ),
+    report = run_lvs(
+        _write_request(
+            outside / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+            },
+        )
     )
+    report["reference"] = reference_path  # pre-#4984 bare string (no override)
+    _write_report(report_path, report)
     return layout_path, report_path
 
 

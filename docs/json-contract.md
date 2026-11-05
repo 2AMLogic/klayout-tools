@@ -1397,7 +1397,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `characterize` | `cell.netlist`, `cells[].cell.netlist` | 1 | #2502 (`cells[]` #2503) |
 | `drc` | `file` (the hashed input layout; both engines) | 3 | #2659 |
 | `extract` | `file` (the hashed input layout; both response builders) | 4 | #2659 |
-| `lvs` | `layout` (the hashed layout side — **not** `reference`) | 2 | #2659 |
+| `lvs` | `layout` (the hashed layout side, `schema_version` 2, #2659); `reference` (the resolved reference netlist, `schema_version` 3, #4984; the `klayout-runset` engine keeps both as plain strings) | 3 | #2659, #4984 |
 | `erc` | `file` (the hashed input layout; `spec` stays a plain string) | 2 | #2703 |
 | `lef-abstract` | `file` (the hashed input layout; `socket` and `output` stay plain strings) | 2 | #2703 |
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
@@ -1412,7 +1412,6 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path` (plain strings by default; a request with `portable_paths: true` rewrites these and the other path fields to `{path, scope}` / `$PDK_ROOT/...` so the report is committable, issue #3820 — see `cli/place-and-route.md` → Response) | 1 |
 | `place-and-route` (nested `spef_sta` block) | `spef_path`, `sdf_path` | (parent's `SCHEMA_VERSION` = 1) |
 | `extract` | `netlist_path`, `spef_path`, `abstracted_cells[].lef_path` | 4 |
-| `lvs` | `reference` (pinned by `environment.reference_sha256`, not `provenance.input` — see issue #2659 above) | 2 |
 | `equiv` | `artifacts.{script_path,netlist_path,log_path}`, `artifacts.stage2_{script_path,log_path}` | 1 |
 | `gen` | `gds_path` | 1 |
 | `gen-compose` | `gds_path` (top-level and per-block) | 1 |
