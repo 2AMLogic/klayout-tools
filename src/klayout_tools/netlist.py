@@ -76,6 +76,7 @@ from typing import Any
 
 from . import pdk as pdk_module
 from .netlist_block import apply_block_mode, space_separate_subckt_ports
+from .netlist_diagnostics import diagnostics_block
 from .netlist_inputs import (
     generation_inputs,
     inputs_drift,
@@ -979,6 +980,7 @@ def run_netlist(
     block: bool = False,
     allow_unevaluated_expr: bool = False,
     ignore_comments: bool = False,
+    erc: bool = False,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -1072,14 +1074,12 @@ def run_netlist(
                 "argv": argv,
                 "forced_flags": list(FORCED_XSCHEM_FLAGS),
                 "exit_status": exit_status,
-                # Load-bearing, not decoration: xschem exits non-zero on a
-                # successful batch netlist (issue #55, edge #1), so a consumer
-                # reading this payload is told in the payload itself that the
-                # number above is a record, not a verdict.
+                # Not a verdict: xschem exits non-zero on a good netlist (#55).
                 "exit_status_trusted": False,
                 "timeout_s": timeout_s,
                 "duration_s": round(duration_s, 3),
             },
+            "diagnostics": diagnostics_block(stdout, stderr, erc=erc),
         }
 
         if pdk_block is not None:
