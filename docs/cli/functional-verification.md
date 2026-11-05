@@ -756,6 +756,20 @@ already surfaces. The check is skipped when the top module's instance list
 cannot be derived (ANSI header, RTL top) and does not inspect hierarchy
 below a top-level instance.
 
+**A `CELL` scoped to an instance the netlist does not have is rejected up
+front** (issue #5002). The same `vvp` abort (`NULL handle passed to
+vpi_scan.`, return code -6, at the start of the first test) occurs when a
+`CELL` that carries `INTERCONNECT` entries is spelled `(INSTANCE <name>)` and
+`<name>` is not an instance of the annotation scope — most often the design's
+own root cell written as `(INSTANCE top)` instead of an empty `(INSTANCE)`.
+Reproduced on a flat netlist with `(DIVIDER /)`, scalar and bus top-level
+ports and entirely resolvable endpoints: `(INSTANCE)` annotates and passes,
+`(INSTANCE top)` aborts. `klt` fails before launching `vvp` with a
+`FunctionalVerificationError` naming the SDF line and instance. Supported:
+the root cell as an empty `(INSTANCE)`, and sub-instance cells whose first
+path component is an instance of the scope's module. Same skip conditions as
+the endpoint check above.
+
 **A zero-delay `INTERCONNECT` onto an `assign`-aliased top-level port bit is
 dropped before annotation, and counted** (issue #2285). A P&R backend drives
 a constant output through a tie cell plus a Verilog `assign` alias rather
