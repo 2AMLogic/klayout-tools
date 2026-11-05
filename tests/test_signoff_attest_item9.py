@@ -246,3 +246,59 @@ def test_local_only_bench_is_skipped_under_check(tmp_path):
         ]
     )
     assert code == 0
+
+
+def _pdk_pin_check(envelope: dict) -> dict:
+    return next(
+        c
+        for c in envelope["attestation"]["checks"]
+        if c["check"] == "pin" and c["role"] == "pdk"
+    )
+
+
+def _with_pdk(tmp_path, pdk) -> dict:
+    repo = _repo(tmp_path)
+    pins = {"tools": {"iverilog": "12.0"}}
+    if pdk is not None:
+        pins["pdk"] = pdk
+    inventory = _inv(
+        repo,
+        pins=pins,
+        testbenches=["tb/a.spice"],
+        cold_start={"argv": _OK},
+    )
+    return build_attestation(9, inventory)
+
+
+def test_no_pdk_form_passes(tmp_path):
+    envelope = _with_pdk(tmp_path, {"none": True, "reason": "behavioral RTL only"})
+
+    check = _pdk_pin_check(envelope)
+    assert check["passed"] is True
+    assert check["value"] == {"none": True, "reason": "behavioral RTL only"}
+    assert envelope["status"] == "pass"
+
+
+def test_absent_pdk_still_fails(tmp_path):
+    envelope = _with_pdk(tmp_path, None)
+
+    assert _pdk_pin_check(envelope)["passed"] is False
+    assert envelope["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    "pdk",
+    [
+        {"none": True},
+        {"none": True, "reason": ""},
+        {"none": True, "reason": "  "},
+        {"none": True, "reason": 5},
+        {"none": True, "reason": "x", "name": "sky130A", "revision": "abc"},
+        {"none": "yes", "reason": "x"},
+    ],
+)
+def test_malformed_no_pdk_form_fails_without_crashing(tmp_path, pdk):
+    envelope = _with_pdk(tmp_path, pdk)
+
+    assert _pdk_pin_check(envelope)["passed"] is False
+    assert envelope["status"] == "fail"
