@@ -41,6 +41,21 @@ def _warn(message: str) -> None:
     print(f"klt netlist: warning: {message}", file=sys.stderr)
 
 
+def register(parser: argparse.ArgumentParser) -> None:
+    """Add the ``--erc`` flag (issue #4953) and bind :func:`run` to ``parser``."""
+    parser.add_argument(
+        "--erc",
+        action="store_true",
+        default=False,
+        help=(
+            "fail (error.code erc_findings) when xschem reports ERC findings "
+            "such as 'Error: undriven node' on its stdout/stderr. Local "
+            "backend only (issue #4953)"
+        ),
+    )
+    parser.set_defaults(func=run)
+
+
 def run(args: argparse.Namespace) -> int:
     if getattr(args, "ignore_comments", False) and not args.check:
         # argparse-style usage failure (stderr message, SystemExit(2)).
