@@ -453,6 +453,7 @@
       "modules": [
         "klayout_tools.cli.place_and_route_cmd",
         "klayout_tools.place_and_route",
+        "klayout_tools.place_and_route_clock",
         "klayout_tools.place_and_route_batch",
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_groups",

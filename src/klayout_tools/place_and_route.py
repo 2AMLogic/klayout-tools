@@ -1636,21 +1636,20 @@ def _validate_stage_prerequisites(
     power: dict[str, Any] | None,
     library: dict[str, Any] | None = None,
     tech_lef: str | None = None,
+    clock_period_ns: float | None = None,
 ) -> None:
     """Fail with a clear request error when ``target_stage`` (or
     ``request.power``) needs inputs or per-library tables this request lacks
     (extracted from :func:`_run_single_corner`, issue #3507, to keep its
     cyclomatic complexity from growing)."""
-    # Stages beyond "floorplan" need a clock -- P&R signoff (CTS, routing,
-    # timing-driven repair) has no meaning without one, and STA/`-metrics`
-    # would otherwise report an unconstrained-design sentinel instead of a
-    # real number. `_validate_constraints` already enforced clock_port and
-    # clock_period_ns are given together; this additionally requires them
-    # once a caller actually asks for a stage that needs them.
-    if stage_index >= STAGE_ORDER.index("place") and clock_port is None:
+    # Stages beyond "floorplan" need a clock (else STA reports the
+    # unconstrained sentinel); `clock_period_ns` alone is a virtual clock.
+    no_clock = not (clock_port or clock_period_ns)
+    if stage_index >= STAGE_ORDER.index("place") and no_clock:
         raise PlaceAndRouteError(
-            "request.constraints.clock_port/clock_period_ns are required to "
-            f"reach target_stage '{target_stage}'"
+            "request.constraints.clock_period_ns (optionally with clock_port) "
+            f"is required to reach target_stage '{target_stage}'; period "
+            "alone is accepted as a virtual clock"
         )
     if stage_index >= STAGE_ORDER.index("place") and io_spec is None:
         raise PlaceAndRouteError(
@@ -1915,6 +1914,7 @@ def _run_single_corner(
         power=power,
         library=library,
         tech_lef=tech_lef,
+        clock_period_ns=clock_period_ns,
     )
 
     output_dir = _stage_root(request_dir, request)
