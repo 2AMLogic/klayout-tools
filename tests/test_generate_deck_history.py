@@ -199,12 +199,12 @@ def test_main_writes_history_json_and_is_idempotent(
     monkeypatch.setattr(gdh, "REPO_ROOT", _tagged_repo)
     monkeypatch.setattr(gdh, "HISTORY_PATH", history_path)
 
-    assert gdh.main() == 0
+    assert gdh.main([]) == 0
     first = history_path.read_text()
     payload = json.loads(first)
     assert len(payload["entries"]) == 3
 
-    assert gdh.main() == 0
+    assert gdh.main([]) == 0
     assert history_path.read_text() == first  # byte-identical re-run
 
 
@@ -217,7 +217,7 @@ def test_main_no_tags_fails_loudly(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(gdh, "REPO_ROOT", repo)
     monkeypatch.setattr(gdh, "HISTORY_PATH", tmp_path / "_history.json")
 
-    exit_code = gdh.main()
+    exit_code = gdh.main([])
 
     assert exit_code == 1
     assert "no v* git tags" in capsys.readouterr().err
