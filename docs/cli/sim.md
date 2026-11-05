@@ -7725,9 +7725,12 @@ parallel-*instance* multiplier, applied outside that check, with each
 instance's own `w=` kept under the ceiling) reliably works around it
 (issue #1214).
 
-Before ngspice runs, `klt sim` (and `klt sim --dry-run`) scans the netlist the
-same way and, when an instance's `w` is at/above the ceiling, adds a
-**non-fatal** top-level `diagnostics[]` entry with `severity: "warning"`,
+`klt sim` scans the netlist text the same way (it never needs ngspice's log for
+this) and, when an instance's `w` is at/above the ceiling, adds a
+**non-fatal** top-level `diagnostics[]` entry. `klt sim --dry-run` computes it
+without running anything; on a normal run the report carries the same
+preflight warning, attached at report assembly (after the corners finish), so
+it is present even when every corner passed. The entry has `severity: "warning"`,
 `code: "model_bin_range_preflight"`, and `instance`, `model`, `w_um`, `nf`
 fields. It never rejects the run; a `w` given as an expression is skipped.
 
