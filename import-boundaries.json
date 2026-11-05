@@ -134,7 +134,8 @@
         "klayout_tools.drc",
         "klayout_tools.drc_crosscheck",
         "klayout_tools.drc_klayout_app",
-        "klayout_tools.drc_klayout_engine"
+        "klayout_tools.drc_klayout_engine",
+        "klayout_tools.drc_report_check"
       ]
     },
     "economy": {
