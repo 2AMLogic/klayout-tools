@@ -4,12 +4,19 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-05
 
+- **PR #4928**: test: pin pnpMPA recognition on sg13cmos5l to the PDK runset engine
+- **PR #4926**: chore(decks): regenerate deck history table for v0.9.0
 - **PR #4922**: chore(release): bump version to 0.9.0
 - **PR #4919**: fix: null P&R fmax_mhz when unconstrained, accept constraints.power_activity
 - **PR #4918**: feat: accept clock_period_ns alone as a virtual clock in place-and-route
 - **PR #4917**: feat(erc): add missing_tie_checked to erc_coverage
 - **PR #4916**: fix: let klt characterize forward runner-resolved OSDI entries on batch
 - **PR #4905**: feat: accept explicit no-PDK pin for signoff --attest 9
+- **Issue #4594** (closed): klt extract: no progress output and >60 min wall time on a ~25k-device flat extraction (--pdk, --pins)
+- **Issue #4927** (closed): sg13cmos5l LVS: no pnpMPA (vertical PNP) recognition in the curated deck
+- **Issue #4932** (closed): Friction: a dev-build (+g<sha>) pin has no resolvable install form without a local checkout
+- **Issue #3619** (closed): batch: confirm OMP_NUM_THREADS=1 per worker fixes transient oversubscription on the fleet
+- **Issue #4671** (closed): Friction: pinned release 0.8.0 still cannot run 'klt yield' — klt-yield-native not resolvable from the package index (recurrence of #2900, #2531, #2466)
 - **Issue #4915** (closed): klt erc: tie checks cannot be expressed for a standard-cell library with no tap/endcap cells; supply read reports erc.missing_tie as inapplicable
 - **Issue #4914** (closed): klt place-and-route: fmax_mhz is emitted for an unconstrained design, and no energy-per-operation metric exists
 - **Issue #4913** (closed): klt place-and-route: purely combinational design cannot reach target_stage route without a dummy clock port
