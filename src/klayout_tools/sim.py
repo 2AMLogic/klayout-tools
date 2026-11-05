@@ -102,6 +102,7 @@ from . import (
     sim_crossings,
     sim_cycle_mean,
     sim_decks,
+    sim_echo_messages,
     sim_energy,
     sim_eye,
     sim_injected,
@@ -6021,10 +6022,9 @@ def _expand_corners(
 
     Axis order (outer to inner, per the spike): process, then the supply
     sweep, then temperature, then ``params`` (#3035), then ``options``
-    (#3125). A missing axis collapses to a single default
-    point (``process=None``, ``supply_v={}``, ``temperature_c=27``) rather
-    than an error -- a request that only cares about one axis need not
-    populate the others.
+    (#3125). A missing axis collapses to a single default point
+    (``process=None``, ``supply_v={}``, ``temperature_c=27``) rather than an
+    error -- a request that only cares about one axis need not populate the others.
 
     Each ``corners.process[]`` entry is either a bare string (one ``.lib``
     section, unchanged) or a ``{"name": str, "sections": [...]}`` bundle
@@ -6036,9 +6036,9 @@ def _expand_corners(
     rails move as a set), matching the spike's documented semantics.
 
     ``corners.units`` (issue #2993) is the alternative, non-crossing form: an
-    explicit list of points executed exactly as given -- see
-    :func:`_expand_corner_units`.
+    explicit list of points executed exactly as given -- see `_expand_corner_units`.
     """
+    sim_echo_messages.require_corners_object(corners_spec)
     if "units" in corners_spec:
         return _expand_corner_units(corners_spec, exclude_spec)
     raw_processes: list[Any] = corners_spec.get("process") or [None]
