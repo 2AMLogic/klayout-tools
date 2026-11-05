@@ -147,7 +147,8 @@ def test_multi_stream_cli_refusals(tmp_path, capsys):
     base = ["signoff", "--attest", "2", "--format", "json"]
     assert main([*base, "--input", a, "--input", a]) == 1
     assert "duplicate" in capsys.readouterr().err
-    assert main([*base, "--input", a, "--input", b, "--generator", "x"]) == 1
+    claim = ["--generator", "x", "--regenerated-hash", "sha256:" + "0" * 64]
+    assert main([*base, "--input", a, "--input", b, *claim]) == 1
     assert "more than one --input" in capsys.readouterr().err
     assert main([*base, "--input", a, "--input", b]) == 0
     capsys.readouterr()

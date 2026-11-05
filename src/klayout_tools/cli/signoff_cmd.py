@@ -304,16 +304,6 @@ def _attest_flag_problem(
                 "--attest 2 requires --input <stream> (the committed GDS/OASIS "
                 "layout stream; see docs/cli/signoff.md)"
             )
-        if len(set(stream)) != len(stream):
-            return "duplicate --input: each stream may be given only once"
-        if len(stream) > 1 and (
-            getattr(args, "generator", None) is not None
-            or getattr(args, "regenerated_hash", None) is not None
-        ):
-            return (
-                "--generator/--regenerated-hash describe one regenerated "
-                "stream and cannot be combined with more than one --input"
-            )
         return None
     if stream or any(
         getattr(args, attr, None) is not None
