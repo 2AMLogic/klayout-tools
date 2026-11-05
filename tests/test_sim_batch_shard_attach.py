@@ -11,7 +11,7 @@ from klayout_tools import sim
 from klayout_tools import sim_batch as sb
 from klayout_tools import sim_batch_async as sba
 from klayout_tools import sim_batch_shards as sbs
-from test_sim_batch import _corner_points, _split_runner
+from test_sim_batch import _corner_points, _split_runner, _write_body
 from test_sim_batch_async import _attach_shards, _submit_shards
 
 
@@ -74,3 +74,37 @@ def test_shard_points_for_job_scopes_to_that_shards_points(tmp_path, monkeypatch
     ]
     assert [p.corner_id for p in scoped] == [p.corner_id for p in expected]
     assert sbs.shard_points_for_job(artifacts, "klt-sim-unknown", points) is None
+
+
+def test_submit_only_into_a_dir_holding_another_requests_map_is_refused(
+    tmp_path, monkeypatch
+):
+    """Issue #4979: a sibling sharded --submit-only into an occupied dir is
+    refused with submit-only wording; the first map and the fleet are left
+    untouched."""
+    runner, _ = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    request, payload = _submit_shards(tmp_path)
+    manifest_path = payload["manifest_path"]
+    before = open(manifest_path, "rb").read()
+    calls = len(runner.calls)
+
+    with pytest.raises(sim.SimError) as err:
+        sba.submit_only(
+            request=request,
+            corner_points=_corner_points(10),
+            netlist_path=str(_write_body(tmp_path)),
+            timeout_s=120.0,
+            keep_artifacts=False,
+            want_waveforms=False,
+            artifacts_dir=str(tmp_path / "artifacts"),
+            shard_fingerprint="fp-OTHER",
+        )
+
+    message = str(err.value)
+    assert err.value.code == sb.BATCH_SHARD_MANIFEST_CODE
+    assert message.startswith("--submit-only:")
+    assert "distinct -o directory" in message
+    assert "--resume" not in message
+    assert open(manifest_path, "rb").read() == before
+    assert len(runner.calls) == calls  # no S3 write, no launch

@@ -4407,24 +4407,10 @@ class _ShardManifest:
             ) from exc
         # Issue #4821: ``hosts`` is not identity; resume re-splits remaining units.
         if stored_fingerprint != fingerprint:
-            difference = _manifest_difference(
-                stored_fingerprint, fingerprint, stored_hosts, stored_hosts
-            )
-            if submit_only:
-                # Issue #4979: the caller passed no --resume; name what they
-                # ran and keep the first request's map (and its --attach
-                # path) intact.
-                raise SimError(
-                    f"--submit-only: shard map {path} belongs to a different "
-                    f"request ({difference}); use a distinct -o directory "
-                    "for this request, or finish/attach the first one "
-                    "(deleting the map would lose its --attach path)",
-                    code=BATCH_SHARD_MANIFEST_CODE,
-                )
-            raise SimError(
-                f"--resume: shard map {path} was written for a different "
-                f"request ({difference}); delete it or drop --resume",
-                code=BATCH_SHARD_MANIFEST_CODE,
+            from . import sim_batch_shards
+
+            raise sim_batch_shards.manifest_mismatch_error(
+                path, stored_fingerprint, fingerprint, stored_hosts, submit_only
             )
         manifest.prior = shards
         return manifest
