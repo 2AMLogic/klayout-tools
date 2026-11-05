@@ -186,6 +186,7 @@ from .lvs_finfet import (
     reference_reader,
     sliced_reference_file,
 )
+from .lvs_finfet_flatten import flatten_layout_netlist
 from .lvs_gate_level import (
     _apply_gate_level_port_aliases,
     _boundary_supply_nets,  # noqa: F401
@@ -1503,9 +1504,7 @@ def run_lvs(
         layout_netlist, layout_spec, finfet_layout, finfet_bulk
     )
     if flatten_layout:
-        layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
-        if layout_flatten_warning is not None:
-            flatten_warnings.append(layout_flatten_warning)
+        flatten_layout_netlist(layout_netlist, finfet_layout, flatten_warnings)
 
     reference_netlist_path = _require_path(
         reference_spec, "netlist", "reference", request_dir
