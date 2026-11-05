@@ -168,7 +168,24 @@ scanned — **including** `*` comment lines, since the marker lives in one — f
 number and text. It applies to `--check` too, which fails with this cause
 instead of reporting `drifted`, and nothing is written. Under `--backend batch`
 the same code is returned. This is on by default; there is no flag. xschem's
-ERC pass and its stdout/stderr are not consulted.
+ERC output is only consulted with `--erc` (below).
+
+## `diagnostics` and `--erc`
+
+Every local-backend payload carries `diagnostics`: `stdout` / `stderr` from
+xschem (each capped to the last 4096 bytes, with `stdout_truncated` /
+`stderr_truncated` flags). Additive; nothing else changes.
+
+xschem 3.4.7 has no `-erc` flag, but its netlister prints findings such as
+`Error: undriven node: #net1` during a normal run. `--erc` fails the run
+(exit `1`, `error.code: "erc_findings"`, `error.findings` /
+`error.finding_count`) when any `Error:` line appears on stdout/stderr, and
+nothing is written. Without `--erc` behaviour and netlist bytes are unchanged.
+Local backend only: `--backend batch` rejects `--erc`.
+
+**Verified:** a dangling wire (undriven node) is caught. **Unverified:** shorted
+pins were not measured with real xschem, so `--erc` may not flag them; do not
+rely on it for that case (tracked in #4962).
 
 ## Success is the output file, not the exit status
 

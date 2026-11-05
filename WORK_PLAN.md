@@ -13,7 +13,7 @@ _None._
 
 `loom:very-important` (one counts per workspace); every stage takes these first.
 
-- **#4161**: klt sim batch: all jobs exit 87 within seconds on the current fleet image; no runner stderr surfaced
+_None._
 
 ## Important
 
@@ -27,18 +27,20 @@ _None._
 Human-approved issues ready for implementation (`loom:issue`).
 
 - **#2340**: signoff: input_verified is always null for drc/extract envelopes that recorded an absolute host path
+- **#2727**: Friction: klt sim's batch/remote backends refuse ihp-sg13cmos5l, so no SG13CMOS5L corner grid can run on a batch-only host
 - **#2912**: Friction: sky130 native-Vt NMOS (nfet_05v0_nvt) cannot be drawn by klt gen or compared by klt lvs
 - **#3057**: klt sim --backend batch: -o FILE not written when --format json (report goes to stdout)
 - **#3094**: decks/sg13cmos5l: poly resistors assume coincident GatPoly/PolyRes, same as sg13g2 before #2679
 - **#3440**: gf180mcu MIM option A: live verification against PDK pcell and runset (follow-up to #2920 / PR #3358)
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin
-- **#4161**: klt sim batch: all jobs exit 87 within seconds on the current fleet image; no runner stderr surfaced
+- **#3516**: klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249)
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s)
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported
 - **#4739**: main CI red: file-size baseline out of sync with source (lvs.py, sim.py, lvs_mismatch.py, netlist_normalize.py, test_lvs.py, test_sim.py)
 - **#4763**: Live-verify gf180mcu tran run with models.param_file (follow-up to #4759)
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1
+- **#4891**: batch fleet runner's ngspice cannot evaluate sky130A model-library expr() parameters (runner image gap), engine_version still null
 
 ## In Progress
 
@@ -48,11 +50,13 @@ Issues currently being built (`loom:building`).
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
-- **#4885**: klt sim batch: zipped params error text, whole-job ceiling with --submit-only, stuck interrupted shards, shard/corner mix-up, no heartbeat
-- **#4891**: batch fleet runner's ngspice cannot evaluate sky130A model-library expr() parameters (runner image gap), engine_version still null
-- **#4892**: gen/extract: PDK PCell library not loaded in release; drain-extended device read as plain nfet
-- **#4893**: signoff: content_hash pin on a functional-verification envelope stays ungradable; no way to have the grader re-hash the cited file
-- **#4894**: klt netlist --backend batch: xschem aborts on the runner because HOME is unset
+- **#4941**: signoff --attest 8: text output crashes with KeyError 'value' when a citation check fails
+- **#4949**: extract/drc: PDK-instantiated nfet_10v0_asym still extracts as split nfets with floating drain; PCell trips CO.4 and DF.1a_MV
+- **#4950**: drc --engine klayout: no way to supply a pinned standalone KLayout from a throwaway env
+- **#4951**: lvs: subckt-call capacitor card with mf equal to m is rejected after m expansion landed
+- **#4952**: klt netlist: no way to add a project symbol directory to the xschem library path (batch drops XSCHEM_USER_LIBRARY_PATH)
+- **#4953**: klt netlist: floating and shorted nets export as status=generated; no ERC option or captured xschem diagnostics
+- **#4954**: lvs: device.unmerged_fingers suggests options.combine_devices, which FinFET decks refuse
 
 ## PRs Awaiting Review
 
@@ -62,16 +66,16 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 - **#4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
 - **#4772**: fix: honor --dry-run and --wait-for-capacity under klt sim --batch-set
-- **#4895**: feat(sim): hint runner-image gap on off-host expr() ngspice_fatal
-- **#4896**: test: cover real PCell two-gate shared-drain LDMOS extraction
-- **#4897**: fix: default HOME to a scratch dir in netlist batch job
-- **#4898**: feat(signoff): re-hash file-backed functional-verification evidence to grade content_hash pins
+- **#4956**: feat(netlist): add repeatable --symbol-path for project-local xschem symbols
+- **#4957**: fix(lvs): re-merge FinFET fingers after flatten and drop invalid combine_devices hint
+- **#4958**: fix(lvs): treat capacitor mf equal to m as one multiplier
+- **#4960**: fix(extract): join drain-marker COMP islands into one LDMOS drain net
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#4886**: fix: explain zipped axis lengths and name job/shard in worker echo errors
+- **#4942**: fix: render citation, recorded_hash and metric checks in signoff attest text output
 
 ## Proposed
 
@@ -89,9 +93,7 @@ Issues carrying `loom:curated`.
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin *(curated)*
 - **#3516**: klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249) *(curated)*
 - **#3522**: Verify OMP_NUM_THREADS pinning on the batch fleet (follow-up to #3502) *(curated)*
-- **#3619**: batch: confirm OMP_NUM_THREADS=1 per worker fixes transient oversubscription on the fleet *(curated)*
 - **#4075**: test flake: Install the klayout binary fails on ASAP7 DRC deck fixtures (PR #4074, recurrence of #4059) *(curated)*
-- **#4161**: klt sim batch: all jobs exit 87 within seconds on the current fleet image; no runner stderr surfaced *(curated)*
 - **#4277**: Live-verify klt synthesize sv_frontend=sv2v against a real sv2v (follow-up to #4228) *(curated)*
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267) *(curated)*
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck *(curated)*
@@ -107,11 +109,14 @@ Issues carrying `loom:curated`.
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set *(curated)*
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1 *(curated)*
 - **#4845**: ring-check --pdk sg13g2: cross-check re-implemented Seal.* rules against the real Ruby deck *(curated)*
-- **#4885**: klt sim batch: zipped params error text, whole-job ceiling with --submit-only, stuck interrupted shards, shard/corner mix-up, no heartbeat *(curated)*
-- **#4891**: batch fleet runner's ngspice cannot evaluate sky130A model-library expr() parameters (runner image gap), engine_version still null *(curated)*
-- **#4892**: gen/extract: PDK PCell library not loaded in release; drain-extended device read as plain nfet *(curated)*
-- **#4893**: signoff: content_hash pin on a functional-verification envelope stays ungradable; no way to have the grader re-hash the cited file *(curated)*
-- **#4894**: klt netlist --backend batch: xschem aborts on the runner because HOME is unset *(curated)*
+- **#4902**: klt sim batch backend: derived measurements referencing other measurements (m_<name>) produce no value *(curated)*
+- **#4941**: signoff --attest 8: text output crashes with KeyError 'value' when a citation check fails *(curated)*
+- **#4949**: extract/drc: PDK-instantiated nfet_10v0_asym still extracts as split nfets with floating drain; PCell trips CO.4 and DF.1a_MV *(curated)*
+- **#4950**: drc --engine klayout: no way to supply a pinned standalone KLayout from a throwaway env *(curated)*
+- **#4951**: lvs: subckt-call capacitor card with mf equal to m is rejected after m expansion landed *(curated)*
+- **#4952**: klt netlist: no way to add a project symbol directory to the xschem library path (batch drops XSCHEM_USER_LIBRARY_PATH) *(curated)*
+- **#4953**: klt netlist: floating and shorted nets export as status=generated; no ERC option or captured xschem diagnostics *(curated)*
+- **#4954**: lvs: device.unmerged_fingers suggests options.combine_devices, which FinFET decks refuse *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -124,6 +129,7 @@ Issues carrying `loom:curated`.
 - **#4126**: Simplify run_lvs: split the 2,047-line orchestrator in lvs.py into stage helpers *(hermit)*
 - **#4233**: Remove 8 passthrough _report_path wrappers over env_provenance.repo_relative_path *(hermit)*
 - **#4693**: Remove routing_pitch.py: library-only helper with no callers *(hermit)*
+- **#4900**: digital_fleet.py (944 lines) has no runtime caller: wire into klt or remove *(hermit)*
 
 ## Epics
 
@@ -134,13 +140,13 @@ Issues carrying `loom:curated`.
 | Bucket | Count |
 |------|-------|
 | Operator merge-risk holds | 0 |
-| Very important | 1 |
+| Very important | 0 |
 | Important | 2 |
-| Ready (`loom:issue`) | 13 |
-| In Progress (`loom:building`) | 9 |
+| Ready (`loom:issue`) | 15 |
+| In Progress (`loom:building`) | 11 |
 | PRs awaiting review | 8 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 35 |
-| Architect / Hermit proposals | 9 |
+| Curated | 36 |
+| Architect / Hermit proposals | 10 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
