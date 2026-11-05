@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 14364
+      "lines": 13976
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -1085,7 +1085,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15866
+      "lines": 15865
     },
     {
       "path": "tests/test_sim_batch.py",
