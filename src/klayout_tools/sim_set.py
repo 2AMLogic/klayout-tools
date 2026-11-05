@@ -38,7 +38,11 @@ from typing import Any
 
 from .output_lock import OutputLockError
 from .sim import SimError, run_sim
-from .sim_batch import BATCH_CONCURRENCY_CAP_CODE, BATCH_NO_CAPACITY_CODE
+from .sim_batch import (
+    BATCH_CONCURRENCY_CAP_CODE,
+    BATCH_NO_CAPACITY_CODE,
+)
+from .sim_batch_observer import JobObserver, observe_batch_jobs
 from .sim_batch_plan import preflight_batch_request
 
 SET_SCHEMA_VERSION = 1
@@ -127,6 +131,14 @@ class _Manifest:
             self._entries[index].update(fields)
             self._flush()
 
+    def append_job(self, index: int, job_id: str) -> list[str]:
+        with self._lock:
+            ids = self._entries[index]["job_ids"]
+            if job_id not in ids:
+                ids.append(job_id)
+            self._flush()
+            return list(ids)
+
     def _flush(self) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         tmp = f"{self.path}.tmp"
@@ -141,6 +153,21 @@ class _Manifest:
             )
             handle.write("\n")
         os.replace(tmp, self.path)
+
+
+def _record_job(manifest: _Manifest | None, index: int) -> Callable[[str], None]:
+    """Issue #4971: write each job id into the manifest the moment it exists,
+    so a client killed mid-poll leaves the request -> job id mapping on disk."""
+
+    def _on_job(job_id: str) -> None:
+        if manifest is None:
+            return
+        ids = manifest.append_job(index, job_id)
+        manifest.update(
+            index, status="running", job_id=ids[0] if len(ids) == 1 else None
+        )
+
+    return _on_job
 
 
 def _run_one(
@@ -169,7 +196,10 @@ def _run_one(
         if manifest:
             manifest.update(index, status="running", attempts=attempt)
         try:
-            report = run(path, artifacts_dir=directory, backend="batch", **run_kwargs)
+            with observe_batch_jobs(JobObserver(path, _record_job(manifest, index))):
+                report = run(
+                    path, artifacts_dir=directory, backend="batch", **run_kwargs
+                )
             break
         except (SimError, OutputLockError) as exc:
             code = getattr(exc, "code", None)

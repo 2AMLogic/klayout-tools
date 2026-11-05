@@ -107,6 +107,8 @@ from . import (
     _batch_common,
     _provenance,
     remote_transport,
+    sim_batch_observer,
+    sim_batch_receipt,
     sim_eye,
     sim_search,
     sim_settled,
@@ -3101,11 +3103,6 @@ def _check_interrupted_grace(
     )
 
 
-def _report_progress(job_id: str, state: str) -> None:
-    """One per-job progress line on stderr (stdout carries the JSON report)."""
-    print(f"klt sim: batch job {job_id}: {state}", file=sys.stderr, flush=True)
-
-
 def _check_never_started(
     config: BatchConfig, job_id: str, last_state: str | None, elapsed: float
 ) -> None:
@@ -4758,7 +4755,7 @@ def _run_batch_job(
     }
     submit_job(config, job_id, spec, runner=runner)
     notify("submitted")
-    _report_progress(job_id, "submitted")
+    sim_batch_observer.report_submitted(job_id)
     notify("launching")
     _launch_noting_refusal(config, job_id, runner, notify, launch_kwargs)
     timestamps["client_launched_at"] = now()
@@ -4783,9 +4780,7 @@ def _run_batch_job(
         "region": getattr(config, "region", None),
         "profile": getattr(config, "profile", None),
         "launched_at": datetime.now(timezone.utc).isoformat(),
-        "request_sha256": hashlib.sha256(
-            json.dumps(request, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest(),
+        "request_sha256": sim_batch_receipt.request_sha256(request),
         "state": None,
     }
     _write_batch_receipt(receipt_path, receipt)
@@ -4839,7 +4834,7 @@ def _poll_and_collect(
             sleep=sleep,
             heartbeat=True,
             progress=False,
-            on_state=lambda state: _report_progress(job_id, state),
+            on_state=sim_batch_observer.state_hook(job_id),
             unstarted_grace_s=_ATTACH_UNSTARTED_GRACE_S if attach else None,
         )
     except BatchPollTimeout as exc:
@@ -5035,6 +5030,7 @@ def _run_batch(
             shard_fingerprint=shard_fingerprint,
         )
     if attach_job_id is not None:
+        sim_batch_receipt.check_attach_receipt(artifacts_dir, attach_job_id, request)
         try:
             return _run_batch_job(
                 config=config,
@@ -5379,6 +5375,7 @@ class _BatchFleetRun:
         attach_only: bool = False,
     ) -> None:
         self.attach_only = attach_only
+        self.job_observer = sim_batch_observer.current_job_observer()
         self.config = config
         self.manifest = manifest
         self.shard_indexes = shard_indexes
@@ -5487,7 +5484,8 @@ class _BatchFleetRun:
     def run_shard_points(self, shard_points: list[CornerPoint]) -> _ShardResult:
         index = self.shard_indexes[_units_digest(shard_points)]
         try:
-            return self._run_one_shard(shard_points, index)
+            with sim_batch_observer.observe_batch_jobs(self.job_observer):
+                return self._run_one_shard(shard_points, index)
         except BatchError as exc:
             # The lost-shard diagnostic carries the refusal code.
             if exc.code in _RETRYABLE_LAUNCH_CODES:

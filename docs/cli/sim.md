@@ -1039,6 +1039,13 @@ id survives the caller. Collecting a finished `--submit-only` job's report is
 
 ### Waiting, job id, and re-attaching ([#2978](https://github.com/2AMLogic/klayout-tools/issues/2978))
 
+Unsharded `--attach <job_id>` checks the supplied request against the
+`request_sha256` in `<artifacts_dir>/batch-receipt.json` when that receipt is
+for the same job id, and refuses a different request with
+`error.code: "resume_fingerprint_mismatch"` (the message names the receipt's
+hash). No receipt, or a receipt for another job id, proceeds unchanged
+([#4971](https://github.com/2AMLogic/klayout-tools/issues/4971)).
+
 The wait for a batch job is bounded by **`batch.poll_timeout_s`** (table
 above). Its default is the fully-serial worst case, so a many-unit request
 with a large `options.timeout_s` can wait hours; set `batch.poll_timeout_s`
@@ -1226,8 +1233,11 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   `.klt/sim/` directory next to the first request) is written when the set
   starts and atomically rewritten on every transition. It lists, per request,
   `index`, `request`, `dir`, `status` (`pending`/`running`/final), `attempts`,
-  and `job_id`/`job_ids` once the request finished, so a client interrupted
-  mid-set can re-associate the surviving directories. The aggregate envelope is
+  and `job_id`/`job_ids`, recorded the moment each batch job is submitted
+  (status `running`) rather than when the request finishes, so a client
+  interrupted mid-poll still leaves the request -> job id mapping on disk.
+  Member progress lines on stderr name the request:
+  `klt sim: batch job <id> (<request>): submitted`. The aggregate envelope is
   unchanged.
 - **Batch only, never local.** The backend is forced to `batch` (`--backend`
   other than `batch` is a usage error, exit `2`); a refused or failed request is
@@ -3661,6 +3671,51 @@ every backend (remote/batch workers re-read it from the request document).
 `tstart` delays data recording and `tmax` caps the internal timestep (a
 smaller `tmax` makes the rawfile larger; a larger `tstep` makes it smaller).
 There is no separate `analysis.tmax` field.
+
+**What bounds the internal step.** ngspice's `.tran` card is `tstep tstop
+tstart tmax`: `tstep` is the printing/suggested increment, and when `tmax` is
+omitted ngspice derives its default from `tstep` and `tstop`, so the solver's
+internal step (and therefore a self-timed oscillator's *measured period*)
+depends on the chosen window. Set `tmax` explicitly (e.g. `"1n 5u 0 1n"`)
+whenever a period or edge time is measured from a `crossings` or `.meas`.
+*Not yet verified against the real engine:* the exact default `tmax` formula
+and the reported 4.54e-7 s (100 ns step) vs 4.91e-7 s (2 ns step) period
+spread on one cell (#4970).
+
+### Per-corner analysis windows: `analysis_overrides` (issue #4970)
+
+One `analysis.args` cannot serve a grid whose time scales span orders of
+magnitude (e.g. a leakage-limited oscillator across process x supply x
+temperature). `analysis_overrides` replaces `analysis.args` for the corner
+points a rule matches:
+
+```json
+"analysis": {"kind": "tran", "args": "100n 50u 0 100n"},
+"analysis_overrides": [
+  {"match": {"temperature_c": 125}, "args": "1n 2u 0 1n"}
+]
+```
+
+- `match` takes the same keys and equality semantics as an `options.nodeset`
+  rule (`process`, `temperature_c`, `supply_v`, `params`; keys AND together;
+  `{}` matches every point). Rules resolve once after corner expansion and
+  `exclude`, before Monte Carlo cloning (samples inherit their base point's
+  window).
+- Two rules matching one point, a rule matching no retained point, an unknown
+  key, an empty/non-string `args`, or a `{...}` brace in `args` (ngspice) are
+  application errors (exit 1) naming `analysis_overrides[i]`, before any run.
+  A point no rule matches uses `analysis.args` unchanged.
+- Only `args` is replaced, never `kind`. Refused with `analysis_steps` and for
+  requests with no scalar `analysis` (deck-list / `commands[]`).
+- A corner whose window was overridden reports the additive field
+  `analysis_args` (the effective args); corners on the base window omit it.
+- Honored on every backend (the selected window travels with each point to
+  fleet/remote/batch workers); a worker that does not echo it fails with
+  `analysis_overrides_unsupported_worker`. A changed override invalidates a
+  `--resume` checkpoint.
+- Early-stop after N crossings is deliberately not offered: `stop when` is
+  unreliable in ngspice batch mode (see "Simulated-time-reached on timeout is
+  not available").
 
 **Diagnosing a still-missing measurement.** When a `.meas`/rawfile signal
 still comes back empty after this fix, ngspice's log gives the same `Error:
