@@ -1,4 +1,4 @@
-"""`klt extract` DEF SPEF spelling for escaped-bracket hierarchical nets (issue #4997)."""
+"""`klt extract` DEF SPEF spelling for escaped-bracket nets (issue #4997)."""
 
 from __future__ import annotations
 
