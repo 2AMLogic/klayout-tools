@@ -2131,7 +2131,9 @@ on a mismatch; the caller decides.
 The text summary prints `pdk_stamp: <status> (<reason>)` (plus the `mismatch`
 warning) and `models_staged: <bool>` for batch runs; set
 `options.stage_model_inputs` to execute the submitter's model files
-(`models_staged: true`). A matching stamp does not prove model-closure equality
+(`models_staged: true`). It is also the workaround when a runner image lacks the requested PDK
+variant (`no supported-layout PDK install providing variant '...'`): the
+diagnostic then carries a hint naming it. A matching stamp does not prove model-closure equality
 (see #3071), and a matching major version (`engine_version`, the top-level
 simulator version) does not imply the same build: compare `version_banner`
 and `selected_path` for build identity (`engine_build_comparison` does this
