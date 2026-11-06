@@ -6968,9 +6968,9 @@ _DRC_ITEM_ID = 3
 #: #4562) -- and never ``spec_rows``.
 _POST_LAYOUT_ITEM_ID = 7
 
-#: Items whose list form is a plain per-cell report list (no ``spec_rows``).
+#: Per-cell report-list items (no ``spec_rows``); 2 = layout (#5044).
 _REPORT_LIST_ITEMS: frozenset[int] = frozenset(
-    {_DRC_ITEM_ID, _LVS_ITEM_ID, _POST_LAYOUT_ITEM_ID}
+    {2, _DRC_ITEM_ID, _LVS_ITEM_ID, _POST_LAYOUT_ITEM_ID}
 )
 
 #: Issue #3741: the RTL-flow evidence kinds of T1 item 5, digital -- the tier
