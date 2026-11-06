@@ -690,3 +690,66 @@ Bound a suspect schematic more tightly while debugging a hang:
 ```bash
 klt netlist design/block.sch -o /tmp/block.spice --timeout-s 10
 ```
+
+Netlist several entry points. `klt netlist` takes exactly one schematic and one
+`-o`, so a build script with several entry points loops over `<schematic>:<output>`
+pairs. The loop keeps going past a failure, remembers the worst exit code, and
+exits with it:
+
+```bash
+set -u
+rc=0
+for pair in \
+    design/amp.sch:design/netlist/amp.spice \
+    design/bias.sch:design/netlist/bias.spice; do
+  sch=${pair%%:*}
+  out=${pair##*:}
+  klt netlist "$sch" -o "$out" --rcfile design/xschemrc --format json \
+      > "${out%.spice}.report.json"
+  code=$?
+  [ "$code" -gt "$rc" ] && rc=$code
+done
+exit "$rc"
+```
+
+The `--check` variant is the same loop with `--check` added. Exit `3` (drifted)
+and `1` (failed to run) stay distinguishable, because the loop exits with the
+numerically highest code seen: **a failure (`1`) takes precedence over drift
+(`3`) only if you want it to**, and the snippet above does *not* — `3 > 1`, so
+a drifted entry masks a failed one. To make failure win, track the two
+separately:
+
+```bash
+set -u
+failed=0 drifted=0
+for pair in design/amp.sch:design/netlist/amp.spice \
+            design/bias.sch:design/netlist/bias.spice; do
+  klt netlist "${pair%%:*}" -o "${pair##*:}" --rcfile design/xschemrc \
+      --check --format json > "${pair##*:}.check.json"
+  case $? in
+    0) ;;
+    3) drifted=1 ;;
+    *) failed=1 ;;
+  esac
+done
+[ "$failed" -eq 1 ] && exit 1   # failed to run wins over drift
+[ "$drifted" -eq 1 ] && exit 3  # at least one committed netlist is stale
+exit 0
+```
+
+Notes on the loop:
+
+- Each invocation is independent: its own xschem run, its own `--timeout-s`,
+  and its own JSON report. With `--format json` each report is a separate
+  document on stdout, so redirect one file per entry (as above) rather than
+  concatenating them.
+- Under `--backend batch`, each call is a separate batch job.
+- The loop body is `klt netlist`, nothing else. Do not call raw `xschem` in the
+  loop on hosts that forbid it; `klt netlist` forces the headless flags and
+  kills a hung run.
+
+Verification status: the first loop was run against two entries whose
+schematics could not be netlisted (one missing, one with unresolved symbols, as
+no self-contained xschem fixture exists in CI); it visited both entries, wrote a
+report per entry, and exited `1`. The success path and the `--check` variant
+are **not run** here.
