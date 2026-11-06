@@ -4,6 +4,9 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-05
 
+- **PR #5016**: feat(sim): allow --collect-partial with --batch-set and add per-shard summary
+- **PR #5011**: fix: warn once on over-bound max_units_per_job and flag client-interrupted set entries
+- **Issue #5010** (closed): klt sim --batch-set: an interrupted (spot-reclaimed) shard is polled forever and is not re-submitted
 - **PR #5001**: feat(sim): add --collect-partial to sharded batch --attach
 - **PR #5004**: chore(release): bump version to 0.9.1
 - **PR #5007**: feat(functional-verification): add testbench.plusargs for verilog_top benches
