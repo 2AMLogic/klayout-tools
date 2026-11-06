@@ -669,6 +669,7 @@
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_noise",
+        "klayout_tools.sim_op_args",
         "klayout_tools.sim_param_file",
         "klayout_tools.sim_passes",
         "klayout_tools.sim_peak_rss",

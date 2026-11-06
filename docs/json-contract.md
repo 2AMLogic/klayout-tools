@@ -125,6 +125,10 @@ diagnostic led by a `[search_*]` token. Additive; no `schema_version` bump. See
 [`docs/cli/sim.md`](cli/sim.md)'s "Bisection / threshold search
 (`measurements[].search`)".
 
+`analysis.args` is optional for `analysis.kind: "op"` (and an `analysis_steps[]`
+`op` step; issue #5078) and defaults to `""`; every other kind still requires it.
+Additive; no `schema_version` bump.
+
 `analysis.kind: "twoport"` (issue #3338) is a new accepted value of the
 already-shipped `klt sim` `analysis.kind`, with its own `ports`/`freq` fields.
 Every request valid before is unchanged; the *response* gains only an optional

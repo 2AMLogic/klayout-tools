@@ -132,7 +132,7 @@ def test_scalar_analysis_resolves_to_the_requests_own_objects():
 
 def test_scalar_analysis_still_requires_kind_and_args():
     with pytest.raises(sim.SimError, match="requires 'kind' and 'args'"):
-        sim._resolve_analysis_and_measurements({"analysis": {"kind": "op"}})
+        sim._resolve_analysis_and_measurements({"analysis": {"kind": "dc"}})
 
 
 def test_scalar_run_report_gains_no_step_fields(tmp_path, monkeypatch):
@@ -311,7 +311,7 @@ _INVALID = [
     ),
     (
         "missing analysis args",
-        lambda r: r["analysis_steps"][0].update(analysis={"kind": "op"}),
+        lambda r: r["analysis_steps"][0].update(analysis={"kind": "dc"}),
         "requires 'kind' and 'args'",
     ),
     (

@@ -108,6 +108,7 @@ from . import (
     sim_injected,
     sim_mismatch_gate,
     sim_noise,
+    sim_op_args,
     sim_passes,
     sim_portable,
     sim_search,
@@ -1673,9 +1674,8 @@ def _resolve_analysis_and_measurements(
         _reject_linearize_in_steps(request)
         return sim_steps.resolve_analysis_steps(request)
     analysis = request.get("analysis") or {}
-    # Issue #3338: `kind: "twoport"` compiles to an `ac` analysis; resolved
-    # (every structural error raised) before the `kind`/`args` check.
-    analysis = sim_twoport.resolve_analysis(analysis)
+    # #3338: `twoport` compiles to `ac`; #5078: `op` defaults `args` to "".
+    analysis = sim_op_args.default_op_args(sim_twoport.resolve_analysis(analysis))
     if "kind" not in analysis or "args" not in analysis:
         raise SimError("request.analysis requires 'kind' and 'args'")
     reject_unsupported_analysis(analysis["kind"])
