@@ -14,6 +14,11 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **sky130 `npc` now encloses each poly-contact licon by 0.1 µm** (issue
+  #2934): `klt gen` generators with `gate_contact` grew `npc` 0.095 µm around
+  the licon, short of `licon.15` (0.1 µm, `sky130A.lydrc`). Geometry-only
+  change; no JSON field or deck change.
+
 - **sg13cmos5l poly resistors from PDK PCells** (issue #3094): `klt extract
   --deck sg13cmos5l` now recognises `rsil`/`rppd`/`rhigh` drawn the IHP PCell
   way (`PolyRes` body, two abutting `GatPoly` heads) by declaring
