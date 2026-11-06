@@ -51,13 +51,13 @@ chosen.
 from __future__ import annotations
 
 import functools
-import itertools
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .characterize_arcs import FunctionError, parse_function
+from .liberty_leakage import match_leakage_states
+from .liberty_units import Units, library_units
 
 #: Version of the ``comparison`` block's shape.
 SCHEMA_VERSION = 1
@@ -316,109 +316,6 @@ class CellData:
     notes: list[str]
 
 
-@dataclass(frozen=True)
-class Units:
-    """A library's declared units, as multipliers into the canonical units
-    the comparison works in: time -> ns, capacitance -> pF, energy -> pJ,
-    leakage power -> pW. ``declared`` echoes the raw declarations."""
-
-    time: float
-    capacitance: float
-    energy: float
-    leakage: float
-    declared: dict[str, str]
-
-
-_UNIT_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*([A-Za-z]+)\s*$")
-_SI_PREFIX = {"f": 1e-15, "p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3, "": 1.0}
-
-
-def _magnitude(
-    magnitude: str, suffix: str, base: str, canonical: float
-) -> float | None:
-    """``magnitude`` x ``suffix`` (e.g. ``1``, ``ps``) in ``canonical``
-    base-units of ``base`` (``s``/``F``/``V``/``W``), else ``None``."""
-    suffix = suffix.strip()
-    if not suffix.lower().endswith(base.lower()):
-        return None
-    prefix = suffix[: -len(base)].lower()
-    if prefix not in _SI_PREFIX:
-        return None
-    return float(magnitude) * _SI_PREFIX[prefix] / canonical
-
-
-def _simple_unit(
-    library: Group, attribute: str, base: str, canonical: float, path: str
-) -> tuple[float, str]:
-    text = library.attributes.get(attribute)
-    match = _UNIT_RE.match(text) if text is not None else None
-    value = (
-        _magnitude(match.group(1), match.group(2), base, canonical) if match else None
-    )
-    if text is None or value is None or value <= 0:
-        raise LibertyCompareError(
-            f"'{path}': "
-            + (
-                f"library has no {attribute} declaration"
-                if text is None
-                else f"unparseable {attribute} '{text}'"
-            )
-            + " -- cannot normalise table units"
-        )
-    return value, text.strip()
-
-
-def library_units(library: Group, path: str) -> Units:
-    """Read ``library``'s unit declarations (never defaulted: a missing or
-    unparseable one raises :class:`LibertyCompareError` naming ``path``)."""
-    time, time_text = _simple_unit(library, "time_unit", "s", 1e-9, path)
-    voltage, voltage_text = _simple_unit(library, "voltage_unit", "V", 1.0, path)
-    leakage, leakage_text = _simple_unit(
-        library, "leakage_power_unit", "W", 1e-12, path
-    )
-    args = library.complex_attributes.get("capacitive_load_unit")
-    cap = None
-    cap_text = ""
-    if args is not None:
-        cap_text = ", ".join(args)
-        parts = args if len(args) == 2 else " ".join(args).replace(",", " ").split()
-        if len(parts) == 2:
-            try:
-                cap = _magnitude(parts[0], parts[1], "F", 1e-12)
-            except ValueError:
-                cap = None
-        elif len(parts) == 1:
-            match = _UNIT_RE.match(parts[0])
-            cap = (
-                _magnitude(match.group(1), match.group(2), "F", 1e-12)
-                if match
-                else None
-            )
-    if args is None or cap is None or cap <= 0:
-        raise LibertyCompareError(
-            f"'{path}': "
-            + (
-                "library has no capacitive_load_unit declaration"
-                if args is None
-                else f"unparseable capacitive_load_unit ({cap_text})"
-            )
-            + " -- cannot normalise table units"
-        )
-    return Units(
-        time=time,
-        capacitance=cap,
-        # voltage_unit^2 x capacitive_load_unit, in pJ (1 V^2 x 1 pF = 1 pJ).
-        energy=voltage * voltage * cap,
-        leakage=leakage,
-        declared={
-            "time_unit": time_text,
-            "capacitive_load_unit": cap_text,
-            "voltage_unit": voltage_text,
-            "leakage_power_unit": leakage_text,
-        },
-    )
-
-
 def load_cells(
     path: str, names: list[str] | tuple[str, ...] | None = None
 ) -> dict[str, CellData]:
@@ -436,7 +333,12 @@ def _load(
     path: str, names: list[str] | tuple[str, ...] | None = None
 ) -> tuple[dict[str, CellData], Units]:
     library = parse_liberty(path)
-    units = library_units(library, path)
+    try:
+        units = library_units(library)
+    except ValueError as exc:
+        raise LibertyCompareError(
+            f"'{path}': {exc} -- cannot normalise table units"
+        ) from exc
     wanted = set(names) if names is not None else None
     cells = {
         cell.args[0]: _cell_data(cell, path, units)
@@ -824,59 +726,9 @@ def _compare_leakage(
     missing: list[str],
 ) -> dict[str, Any]:
     states = []
-    ref_conditions = []
-    names = frozenset(reference.inputs) | frozenset(reference.outputs)
-    for when, value in reference.leakage:
-        try:
-            expr = parse_function(when, allowed_pins=names) if when else None
-        except FunctionError:
-            expr = None
-            missing.append(
-                f'leakage_power when "{when}": reference condition unparseable'
-            )
-        ref_conditions.append((when, value, expr))
-    output_exprs = {}
-    for pin in reference.outputs:
-        function = reference.functions.get(pin)
-        if function is None:
-            continue
-        try:
-            output_exprs[pin] = parse_function(
-                function, allowed_pins=frozenset(reference.inputs)
-            )
-        except FunctionError:
-            continue
-
-    for when, value in ours.leakage:
-        try:
-            ours_expr = parse_function(when, allowed_pins=frozenset(ours.inputs))
-        except FunctionError:
-            missing.append(f'leakage_power when "{when}": our condition unparseable')
-            continue
-        matches: set[int] = set()
-        covered = 0
-        for bits in itertools.product((False, True), repeat=len(ours.inputs)):
-            assignment = dict(zip(ours.inputs, bits, strict=True))
-            if not ours_expr.evaluate(assignment):
-                continue
-            covered += 1
-            full = dict(assignment)
-            for pin, expr in output_exprs.items():
-                full[pin] = expr.evaluate(assignment)
-            for index, (_, _, expr) in enumerate(ref_conditions):
-                if expr is not None and _safe_eval(expr, full):
-                    matches.add(index)
-        if covered == 0 or len(matches) != 1:
-            missing.append(
-                f'leakage_power when "{when}": '
-                + (
-                    "no reference leakage_power group covers this state"
-                    if not matches
-                    else "matches more than one reference leakage_power group"
-                )
-            )
-            continue
-        ref_when, ref_value, _ = ref_conditions[matches.pop()]
+    for when, value, ref_when, ref_value in match_leakage_states(
+        ours, reference, missing
+    ):
         entry = _point(value, ref_value, tolerances["leakage_power"])
         accumulators["leakage_power"].add(
             {"when": when, **entry}, f"{ours.name} leakage_power {when}"
@@ -901,10 +753,3 @@ def _compare_leakage(
     if not ours.leakage and reference.leakage:
         missing.append("leakage_power: in the reference but not in ours")
     return {"states": states, "cell_leakage_power": total}
-
-
-def _safe_eval(expr: Any, state: dict[str, bool]) -> bool:
-    try:
-        return bool(expr.evaluate(state))
-    except KeyError:
-        return False
