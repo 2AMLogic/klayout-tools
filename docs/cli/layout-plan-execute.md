@@ -338,6 +338,7 @@ execution's terminal step *is* a composition:
   ],
   "pins": [],
   "unrouted_nets": [],
+  "unrouted_reasons": [],
   "unmapped_netlist_nets": [],
   "drc_hints": { "min_spacing_um": null, "matched_groups": [], "notes": [] },
   "warnings": []
@@ -351,8 +352,33 @@ execution's terminal step *is* a composition:
 | `device_groups[]` | array\<object\> | Replaces `gen-compose`'s `blocks[]` — per group: `id`, `generator`, `devices` (fully qualified, from Phase B), `resolved_params` (see "Parameter resolution"), `offset_um`, `bbox_um` (the latter two straight from `compose()`'s own `blocks[]`). |
 | `nets[]` | array\<object\> | Straight from `gen-compose.compose()` — `net`, `pins[]`, `routed`, `route_length_um`, `status` (`"routed"`/`"partial"`/`"unrouted"`, issue #1169), `legs[]` (a 2-pin net is the degenerate one-leg case of the same shape a bundle net uses). |
 | `unrouted_nets[]` | array\<string\> | Straight from `gen-compose.compose()` — every placed group, but this net's pins could not all be connected (includes both `status: "partial"` and `status: "unrouted"` nets, #1169 — see [`gen-compose.md`](gen-compose.md) for the distinction). |
+| `unrouted_reasons[]` | array\<object\> | Additive (#4966): one `{"net", "reason"}` per `unrouted_nets[]` entry, parsed from `compose()`'s `drc_hints.notes` `net '<n>' could not be routed: <reason>` lines, so a caller sees *why* a net failed. Always present, empty when nothing is unrouted. |
 | `unmapped_netlist_nets[]` | array\<string\> | **The one field with no `gen-compose` analogue.** Every digest net that resolved to *zero* `device_groups[]` ports — including a deliberately unrouted supply/bulk net (`VDD`/`VSS`-style, or a MOS bulk/BJT collector terminal, both deliberately unmapped — see "Connectivity derivation"). Always present, empty when every netlist net touching a declared group's devices resolved to at least one port. No `netlist.ignore_nets[]`-style opt-out exists — a caller judges an entry here benign or not; nothing is silently dropped. |
-| `warnings[]` | array\<string\> | Netlist-derived-vs-override parameter divergences, abutment-overrides-rows notices, connectivity-derivation degradations (an index past a suffix's candidate list), a resolved-generator-output-vs-declared-`device_class` mismatch (issue #1731 — see "Scope decisions" below), plus `gen-compose.compose()`'s own warnings (e.g. an `"explicit"`-placement clearance advisory). |
+| `warnings[]` | array\<string\> | A netlist port with no mapped device port (no pin label written, #4966), netlist-derived-vs-override parameter divergences, abutment-overrides-rows notices, connectivity-derivation degradations (an index past a suffix's candidate list), a resolved-generator-output-vs-declared-`device_class` mismatch (issue #1731 — see "Scope decisions" below), plus `gen-compose.compose()`'s own warnings (e.g. an `"explicit"`-placement clearance advisory). |
+
+## Pin labels and supported scope (mixed-device sky130 blocks)
+
+**Port labels (#4966).** Each netlist subckt port (a digest net with `is_pin`)
+is promoted through `compose()`'s `pins[]` to a top-level label on its first
+resolved device port, so the output GDS carries one label per port name for
+`klt lvs`. A port the router already wires (`connectivity[]`) is promoted
+without a duplicate label. A port that resolves to no device port (for
+example a bulk-only net, which is deliberately unmapped) gets a `warnings[]`
+entry and no label. The labels appear in the response's `pins[]`.
+
+**Scope.** Routing runs between the generated groups' ports exactly as in
+`gen-compose`; there is no "row of unlike devices" topology, and each
+single-device `mos_array`/`res_array`/`cap_array` group is one unit. For
+mixed-device sky130 blocks (thick-oxide `hvi` FETs, poly resistors, MIM caps)
+whether a net routes depends on the router reaching each port's layer, which
+is not guaranteed: treat an all-nets-unrouted result as a **placement-only
+floorplan** and read `unrouted_reasons[]` for the cause. If the reasons point
+at a router capability gap, file it as a separate router issue.
+
+**Class-qualified device references.** A device name is only unique within its
+class, so `device_groups[].devices[]` entries are class-qualified. The MIM
+capacitor class is `SKY130_FD_PR__MODEL__CAP_MIM` (easy to miss when writing
+`device_class`).
 
 ## Exit codes
 

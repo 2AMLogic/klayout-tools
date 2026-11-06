@@ -184,6 +184,7 @@ from ._jsonnum import is_number
 from ._paths import _resolve_relative
 from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
 from .gen_compose import GenComposeError, _translate_bbox, compose
+from .layout_plan_ports import device_owned_port_names, port_pins, unrouted_reasons
 from .netlist_digest import build_netlist_digest
 from .pdk import PdkNotFoundError
 
@@ -613,32 +614,20 @@ def _device_class_mismatch_warnings(
     return mismatch_warnings
 
 
-def _device_owned_port_names(ports: list[dict[str, Any]], suffix: str) -> list[str]:
-    """Every ``ports[]`` entry whose name ends with ``_<suffix>``, in the
-    order ``generate()`` reported them -- see the module docstring's scope
-    decision 3 for why this is generator-agnostic (no hardcoded name
-    prefix) and why it degrades gracefully (rather than mis-binding) for a
-    port-naming shape it does not expect (e.g. ``mos_array``'s
-    ``finger_topology: "series"`` mode).
-    """
-    marker = f"_{suffix}"
-    return [
-        port["name"]
-        for port in ports
-        if isinstance(port, dict)
-        and isinstance(port.get("name"), str)
-        and port["name"].endswith(marker)
-    ]
-
-
 def _build_connectivity(
     device_groups: list[dict[str, Any]],
     digest: dict[str, Any],
     generated: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str], list[str], list[dict[str, str]]]:
     """Derive ``gen_compose``-shaped ``connectivity[]`` from the netlist
     digest's own device-to-net map (the module docstring's core job) --
-    returns ``(connectivity, unmapped_netlist_nets, warnings)``.
+    returns ``(connectivity, unmapped_netlist_nets, warnings, pins)``.
+
+    ``pins`` is the ``gen_compose`` ``pins[]`` list promoting each subckt
+    port net (``is_pin``) to a labelled top-level pin on its first resolved
+    device port (#4966), so the GDS carries a label per netlist port for
+    ``klt lvs``; a port net with no resolved device port gets a
+    ``warnings[]`` entry and no label.
 
     A net with two resolved pins becomes an ordinary two-pin
     ``connectivity[]`` entry; a net with three or more becomes a bundle
@@ -654,7 +643,7 @@ def _build_connectivity(
     warnings: list[str] = []
 
     # Per group, per terminal suffix: the ordered candidate port names
-    # (see _device_owned_port_names). Built once per group up front.
+    # (see device_owned_port_names). Built once per group up front.
     candidates_by_group: dict[str, dict[str, list[str]]] = {}
     for group in device_groups:
         suffix_map = _TERMINAL_SUFFIXES.get(group["generator"])
@@ -669,7 +658,7 @@ def _build_connectivity(
             continue
         ports = generated[group["id"]].get("ports") or []
         candidates_by_group[group["id"]] = {
-            suffix: _device_owned_port_names(ports, suffix)
+            suffix: device_owned_port_names(ports, suffix)
             for suffix in set(suffix_map.values())
         }
 
@@ -725,7 +714,10 @@ def _build_connectivity(
         net["name"] for net in digest["nets"] if not net_pins.get(net["name"])
     )
 
-    return connectivity, unmapped_netlist_nets, warnings
+    pins, pin_warnings = port_pins(digest, net_pins)
+    warnings.extend(pin_warnings)
+
+    return connectivity, unmapped_netlist_nets, warnings, pins
 
 
 def _abutment_target_offset(
@@ -1137,7 +1129,7 @@ def execute_layout_plan(
         )
         warnings.extend(placement_warnings)
 
-        connectivity, unmapped_netlist_nets, connectivity_warnings = (
+        connectivity, unmapped_netlist_nets, connectivity_warnings, port_pins = (
             _build_connectivity(device_groups, digest, generated)
         )
         warnings.extend(connectivity_warnings)
@@ -1159,6 +1151,7 @@ def execute_layout_plan(
                 "origins_um": offsets_um,
             },
             "connectivity": connectivity,
+            "pins": port_pins,
             "options": {
                 "cell_name": options.get("cell_name") or "layout_plan_0",
                 "output": options.get("output"),
@@ -1195,6 +1188,7 @@ def execute_layout_plan(
             "nets": composed["nets"],
             "pins": composed["pins"],
             "unrouted_nets": composed["unrouted_nets"],
+            "unrouted_reasons": unrouted_reasons(composed),
             "unmapped_netlist_nets": unmapped_netlist_nets,
             "drc_hints": composed["drc_hints"],
             "warnings": [*warnings, *composed["warnings"]],
