@@ -8,6 +8,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-06
 
+- **PR #5029**: fix: drop stale unpublished-wheel claim from klt yield help
+- **PR #5026**: feat: name the recovery command in batch_job_interrupted message
+- **Issue #5028** (closed): klt yield --help still says the klt-yield-native wheel is unpublished
+- **Issue #5025** (closed): klt sim --attach/--resume wait loop never exits on a shard stuck in terminal 'interrupted' (spot reclaim)
 - **PR #5022**: feat: yield install hint names [yield] extra; report records native build
 - **PR #5023**: test(sim): cover all-shards-interrupted case for batch-set partial collect
 - **Issue #5018** (closed): klt yield: klt_yield_native not installable from a release or the installed tool (recurrence of #1061, #2466, #2531, #2900, #4671)
