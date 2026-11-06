@@ -72,3 +72,34 @@ def unrouted_reasons(composed: dict[str, Any]) -> list[dict[str, str]]:
         if match:
             reasons.append({"net": match["net"], "reason": match["reason"]})
     return reasons
+
+
+def bind_ring_nets(
+    device_groups: list[dict[str, Any]],
+    generated: dict[str, dict[str, Any]],
+    net_pins: dict[str, list[dict[str, str]]],
+    warnings: list[str],
+) -> None:
+    """Group-level tap/ring nets (#5095): a group declaring ``net`` binds its
+    ring to that digest net via its first generated port (the ring is one
+    closed conductor; routing all four TAP_* ports would only wire it to
+    itself)."""
+    for group in device_groups:
+        ring_net = group.get("net")
+        if ring_net is None:
+            continue
+        names = [
+            p["name"]
+            for p in generated[group["id"]].get("ports") or []
+            if isinstance(p, dict) and isinstance(p.get("name"), str)
+        ]
+        if not names:
+            warnings.append(
+                f"device_groups (id '{group['id']}'): generator "
+                f"'{group['generator']}' reported no ports, so net "
+                f"'{ring_net}' cannot be bound to the ring"
+            )
+            continue
+        pin = {"block": group["id"], "port": names[0]}
+        if pin not in net_pins.setdefault(ring_net, []):
+            net_pins[ring_net].append(pin)

@@ -174,6 +174,12 @@ from typing import Any
 from ._paths import _resolve_relative
 from .gen import _GENERATOR_SPECS
 from .gen_compose import _ORIENTATIONS
+from .layout_plan_fields import (
+    net_echo,
+    parse_group_net,
+    parse_options,
+    validate_group_nets,
+)
 from .netlist_digest import build_netlist_digest
 
 #: Contract identifier for the request envelope (spike section 2).
@@ -471,12 +477,6 @@ def _parse_device_groups_shape(raw: Any) -> list[dict[str, Any]]:
         if params is not None and not isinstance(params, dict):
             raise LayoutPlanUsageError(f"{entry_where}.params must be a JSON object")
 
-        net = raw_group.get("net")
-        if net is not None and (not isinstance(net, str) or not net):
-            raise LayoutPlanUsageError(
-                f"{entry_where}.net must be a non-empty string when given"
-            )
-
         groups.append(
             {
                 "id": group_id,
@@ -487,7 +487,7 @@ def _parse_device_groups_shape(raw: Any) -> list[dict[str, Any]]:
                 "dummy": dummy,
                 "params": params,
                 "orientation": orientation,
-                "net": net,
+                **parse_group_net(raw_group, entry_where),
             }
         )
 
@@ -545,7 +545,6 @@ def _validate_device_group_references(
     groups: list[dict[str, Any]],
     group_ids: set[str],
     classes_by_name: dict[str, set[str]],
-    digest_net_names: set[str] | None = None,
 ) -> None:
     """Reference (application-error) pass over an already shape-checked
     ``device_groups[]`` list -- see the module docstring's "Exit-code
@@ -562,20 +561,6 @@ def _validate_device_group_references(
                 f"{entry_where}.generator '{group['generator']}' is not a "
                 f"generator klt gen supports -- supported: {supported}"
             )
-
-        if group.get("net") is not None:
-            # Group-level tap/ring net (#5095): only a guard_ring group has a
-            # ring to tie, and the net must be a netlist digest net.
-            if group["generator"] != "guard_ring":
-                raise LayoutPlanError(
-                    f"{entry_where}.net is only supported on a 'guard_ring' "
-                    f"group, not generator '{group['generator']}'"
-                )
-            if digest_net_names is not None and group["net"] not in digest_net_names:
-                raise LayoutPlanError(
-                    f"{entry_where}.net '{group['net']}' does not resolve "
-                    "against the ingested netlist digest's nets"
-                )
 
         group["devices"] = [
             _resolve_device_reference(
@@ -737,26 +722,6 @@ def _parse_abutment(raw: Any, group_ids: set[str]) -> list[dict[str, Any]]:
     return abutment
 
 
-def _parse_options(raw: Any) -> dict[str, Any]:
-    if raw is None:
-        return {"cell_name": None, "output": None}
-    if not isinstance(raw, dict):
-        raise LayoutPlanUsageError("request.options must be a JSON object")
-
-    cell_name = raw.get("cell_name")
-    if cell_name is not None and (not isinstance(cell_name, str) or not cell_name):
-        raise LayoutPlanUsageError(
-            "request.options.cell_name must be a non-empty string when given"
-        )
-    output = raw.get("output")
-    if output is not None and (not isinstance(output, str) or not output):
-        raise LayoutPlanUsageError(
-            "request.options.output must be a non-empty string when given"
-        )
-
-    return {"cell_name": cell_name, "output": output}
-
-
 def validate_layout_plan(request: Any, digest: dict[str, Any]) -> dict[str, Any]:
     """Pure validation pass over a ``klt.layout_plan.request/1`` document --
     no generation, no file I/O beyond what the caller already did to build
@@ -810,18 +775,12 @@ def validate_layout_plan(request: Any, digest: dict[str, Any]) -> dict[str, Any]
     net_count = len(digest_nets) if isinstance(digest_nets, list) else 0
     circuit_name = digest.get("circuit") if isinstance(digest, dict) else None
 
-    digest_net_names = {
-        n["name"]
-        for n in (digest_nets if isinstance(digest_nets, list) else [])
-        if isinstance(n, dict) and isinstance(n.get("name"), str)
-    }
-    _validate_device_group_references(
-        raw_groups, group_ids, classes_by_name, digest_net_names
-    )
+    _validate_device_group_references(raw_groups, group_ids, classes_by_name)
+    validate_group_nets(raw_groups, digest_nets)
 
     rows = _parse_rows(request.get("rows"), group_ids)
     abutment = _parse_abutment(request.get("abutment"), group_ids)
-    options = _parse_options(request.get("options"))
+    options = parse_options(request.get("options"))
 
     referenced_devices = {
         (d["name"], d["device_class"]) for g in raw_groups for d in g["devices"]
@@ -856,9 +815,7 @@ def validate_layout_plan(request: Any, digest: dict[str, Any]) -> dict[str, Any]
                 "devices": g["devices"],
                 "encloses": g["encloses"],
                 "orientation": g["orientation"],
-                # Additive (#5095): echoed only when declared, so plans
-                # without a group-level net keep their exact output.
-                **({"net": g["net"]} if g.get("net") is not None else {}),
+                **net_echo(g),
             }
             for g in raw_groups
         ],

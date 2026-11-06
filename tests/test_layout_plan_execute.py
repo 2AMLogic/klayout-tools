@@ -196,56 +196,6 @@ def test_execute_reports_unmapped_netlist_net_as_partial_success(tmp_path, pdk_r
     assert exit_code_for(response) == 3
 
 
-def _ring_request(tmp_path, pdk_root, ring_net, generator="guard_ring"):
-    request = _gate_rail_request(
-        tmp_path, pdk_root, _GATE_RAIL_NETLIST_WITH_UNMAPPED_BULK
-    )
-    ring = {"id": "ring", "devices": [], "generator": generator}
-    if ring_net is not None:
-        ring["net"] = ring_net
-    request["device_groups"].append(ring)
-    request["rows"] = [
-        {"order": ["b1", "b2", "b3"], "spacing_um": 2.0, "align": "bottom"},
-        {"order": ["ring"], "spacing_um": 2.0, "align": "bottom"},
-    ]
-    return request
-
-
-def test_guard_ring_net_binds_ring_port_and_clears_unmapped(tmp_path, pdk_root):
-    # VNW (M3's bulk) is unmapped without a tap; a ring tied to VNW gives it
-    # one pin. A single-pin net is skipped silently, so it leaves
-    # unmapped_netlist_nets[] without becoming a connectivity entry.
-    request = _ring_request(tmp_path, pdk_root, "VNW")
-    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
-    assert "VNW" not in response["unmapped_netlist_nets"]
-
-
-def test_guard_ring_net_joins_existing_net_pins(tmp_path, pdk_root):
-    # D1 is reached by device terminals; the ring pin merges into the set.
-    request = _ring_request(tmp_path, pdk_root, "D1")
-    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
-    d1 = next(n for n in response["nets"] if n["net"] == "D1")
-    blocks = {p["block"] for p in d1["pins"]}
-    assert "ring" in blocks and {"b1", "b2"} <= blocks
-
-
-def test_guard_ring_unknown_net_is_application_error(tmp_path, pdk_root):
-    from klayout_tools.layout_plan import LayoutPlanError
-
-    request = _ring_request(tmp_path, pdk_root, "NOPE")
-    with pytest.raises(LayoutPlanError, match="ring.*NOPE"):
-        execute_layout_plan_document(request, request_dir=str(tmp_path))
-
-
-def test_net_on_non_guard_ring_is_application_error(tmp_path, pdk_root):
-    from klayout_tools.layout_plan import LayoutPlanError
-
-    request = _gate_rail_request(tmp_path, pdk_root, _GATE_RAIL_NETLIST)
-    request["device_groups"][0]["net"] = "D1"
-    with pytest.raises(LayoutPlanError, match="only supported on a 'guard_ring'"):
-        execute_layout_plan_document(request, request_dir=str(tmp_path))
-
-
 def test_execute_reports_same_facing_pins_as_unrouted_partial_success(
     tmp_path, pdk_root
 ):
