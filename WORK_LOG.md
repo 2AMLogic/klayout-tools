@@ -8,6 +8,33 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-06
 
+- **PR #5052**: refactor: drop 13 unused re-exports from place_and_route compat shim
+- **PR #5051**: docs(extract): state devices[] is the stable contract, deck card form is not
+- **PR #5049**: feat: add klt netlist --relative-paths for checkout-independent path comments
+- **PR #5048**: docs: add multi-entry netlist loop example to klt netlist page
+- **PR #5045**: feat(signoff): accept a list of native envelopes for T1 item 2
+- **PR #5043**: test: pin bundled vs identical-override tier doc equivalence
+- **PR #5042**: fix(gen): grow sky130 npc 0.1um around poly-contact licons
+- **PR #5040**: feat(sim): add --timeout-s override of options.timeout_s
+- **PR #5039**: fix(extract): select whole gf180mcu MIM plate by CAP_MK/MIM_L_MK instead of clipping
+- **PR #5038**: feat(sg13cmos5l): recognise PDK-PCell-shaped poly resistors
+- **PR #5037**: docs: mark digital_fleet as experimental library
+- **PR #5032**: feat(signoff): accept per-cell DRC report lists and report member coverage
+- **Issue #5050** (closed): extract: device-card form in the written netlist changed between minor versions with no machine-readable marker; deck parsers silently count zero
+- **Issue #5047** (closed): klt netlist: drive several schematic entry points in one call
+- **Issue #5046** (closed): klt netlist: absolute sch_path/sym_path comments make regenerated netlists differ across checkouts
+- **Issue #5044** (closed): signoff: no way to cite a set of per-cell native envelopes for T1 items 2-4
+- **Issue #5041** (closed): Fleet convention: stop vendoring design-evidence-tiers.md into chip repos; use the wheel's bundled copy
+- **Issue #5036** (closed): klt sim: no way to skip raw waveform staging; timeout_s default always trips batch ceiling warning
+- **Issue #5035** (closed): klt yield --help and tiers doc still say the klt-yield-native wheel is not on PyPI
+- **Issue #5033** (closed): Remove 13 dead re-exports from place_and_route.py compat shim
+- **Issue #5031** (closed): signoff --manifest: no way to cite per-cell DRC/LVS evidence for a multi-cell library
+- **Issue #4969** (closed): Remove congestion.py and native/congestion: research spike with no runtime caller
+- **Issue #4900** (closed): digital_fleet.py (944 lines) has no runtime caller: wire into klt or remove
+- **Issue #3440** (closed): gf180mcu MIM option A: live verification against PDK pcell and runset (follow-up to #2920 / PR #3358)
+- **Issue #3094** (closed): decks/sg13cmos5l: poly resistors assume coincident GatPoly/PolyRes, same as sg13g2 before #2679
+- **Issue #2934** (closed): gen (sky130): MOS/tap generators draw no nsdm/psdm implant or npc, and the curated sky130 DRC deck cannot see the omission
+
 - **PR #5029**: fix: drop stale unpublished-wheel claim from klt yield help
 - **PR #5026**: feat: name the recovery command in batch_job_interrupted message
 - **Issue #5028** (closed): klt yield --help still says the klt-yield-native wheel is unpublished
