@@ -152,6 +152,7 @@ from .signoff_na import (
     _na_reviewed_ids,
     _na_scan_statistical,
     _na_spec_format,
+    _na_statistical_detail,
 )
 
 # T1 item 11's ("Power delivery (structural)") grading subsystem lives in its
@@ -1266,12 +1267,6 @@ _REASON_NOT_APPLICABLE_SPEC_UNRATIFIED = "not_applicable_spec_unratified"
 #: statistical; ``detail.row`` names it. The statement file is the primary
 #: claim; this scan is a conservative backstop.
 _REASON_NOT_APPLICABLE_STATISTICAL_ROW = "not_applicable_statistical_row"
-_NA_TEXT_HIT_HINT = (
-    "a string value (the row id included) matches the statistical text "
-    "pattern (sigma, yield, cpk, ppk, monte-carlo, mismatch, matching, offset, "
-    "accuracy); rename it, or set 'reviewed_not_statistical': true on this "
-    "row's statement row to waive text hits (key hits are never waived)"
-)
 #: The statement does not account for exactly the spec's rows (a spec row
 #: with no statement row, a statement row naming no spec row, a row without
 #: a ``class``/``reason``, or a spec with no rows at all).
@@ -1428,14 +1423,7 @@ def _na_spec_refusal(
     for row in cast("list[dict[str, Any]]", spec_rows):
         hit = _na_scan_statistical(row, "", row["id"] not in reviewed)
         if hit is not None:
-            detail: dict[str, Any] = {
-                "row": row["id"],
-                "field": hit or "id",
-                "document": "spec",
-            }
-            if _na_scan_statistical(row, "", False) is None:
-                # Only a string-value (text-pattern) hit: the waiver applies.
-                detail["hint"] = _NA_TEXT_HIT_HINT
+            detail = _na_statistical_detail(row, hit)
             return _na_refusal(_REASON_NOT_APPLICABLE_STATISTICAL_ROW, detail)
     return None
 
