@@ -76,7 +76,6 @@ from typing import Any
 
 from . import pdk as pdk_module
 from ._provenance import content_hash_bytes
-from .netlist_block import apply_block_mode, space_separate_subckt_ports
 from .netlist_diagnostics import diagnostics_block
 from .netlist_inputs import (
     generation_inputs,
@@ -84,7 +83,7 @@ from .netlist_inputs import (
     inputs_record_line,
     split_inputs_record,
 )
-from .netlist_paths import _PATH_COMMENT_RE, relativize_schematic_paths
+from .netlist_paths import _PATH_COMMENT_RE, postprocess_netlist
 from .netlist_pdk import _pdk_root_consistent, _rcfile_pdk_root, _with_symbol_path_env
 
 #: Payload schema version (``docs/json-contract.md``; versioned per command).
@@ -917,20 +916,6 @@ def _resolve_symbol_path(symbol_path: Sequence[str]) -> list[str]:
     return resolved
 
 
-def _postprocess_netlist(
-    data: bytes, *, block: bool, relative_paths: bool, schematic: str
-) -> tuple[bytes, dict[str, Any] | None]:
-    """Apply the post-xschem netlist rewrites (block mode, port spacing,
-    ``--relative-paths``); returns ``(data, block_info)``."""
-    block_info: dict[str, Any] | None = None
-    if block:
-        data, block_info = apply_block_mode(data)
-    data = space_separate_subckt_ports(data)
-    if relative_paths:
-        data = relativize_schematic_paths(data, schematic)
-    return data, block_info
-
-
 def run_netlist(
     schematic: str,
     output: str,
@@ -1027,7 +1012,7 @@ def run_netlist(
         with open(produced, "rb") as handle:
             fresh_data = handle.read()
 
-        fresh_data, block_info = _postprocess_netlist(
+        fresh_data, block_info = postprocess_netlist(
             fresh_data, block=block, relative_paths=relative_paths, schematic=schematic
         )
 

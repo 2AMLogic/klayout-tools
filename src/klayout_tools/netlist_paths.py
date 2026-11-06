@@ -6,6 +6,8 @@ import re
 import subprocess
 from typing import Any
 
+from .netlist_block import apply_block_mode, space_separate_subckt_ports
+
 #: xschem writes the absolute path of every schematic and symbol it expands
 #: into a SPICE export as a comment line (``** sch_path: /abs/x.sch``,
 #: ``** sym_path: /abs/x.sym``). Those lines name the *checkout*, not the
@@ -85,3 +87,17 @@ def _rewrite_runner_paths(
         return match.group(0)
 
     return _PATH_COMMENT_RE.sub(_rewrite, data)
+
+
+def postprocess_netlist(
+    data: bytes, *, block: bool, relative_paths: bool, schematic: str
+) -> tuple[bytes, dict[str, Any] | None]:
+    """Apply the post-xschem netlist rewrites (block mode, port spacing,
+    ``--relative-paths``); returns ``(data, block_info)``."""
+    block_info: dict[str, Any] | None = None
+    if block:
+        data, block_info = apply_block_mode(data)
+    data = space_separate_subckt_ports(data)
+    if relative_paths:
+        data = relativize_schematic_paths(data, schematic)
+    return data, block_info
