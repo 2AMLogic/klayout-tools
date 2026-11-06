@@ -42,6 +42,7 @@ from __future__ import annotations
 import csv
 import gzip
 import hashlib
+import importlib.metadata
 import io
 import json
 import math
@@ -98,7 +99,19 @@ def _load_native() -> Any:
         "native/yield/",
         "uv sync --group yield",
         docs_link="docs/cli/yield.md#building-the-native-extension",
+        extra="yield",
     )
+
+
+def _native_provenance() -> dict[str, Any]:
+    """Which native build produced a report: module name plus the installed
+    ``klt-yield-native`` distribution version, ``None`` when no distribution
+    metadata exists (e.g. a ``maturin develop`` build)."""
+    try:
+        version: str | None = importlib.metadata.version("klt-yield-native")
+    except importlib.metadata.PackageNotFoundError:
+        version = None
+    return {"module": "klt_yield_native", "version": version}
 
 
 def _load_json(path: str, what: str) -> Any:
@@ -772,6 +785,7 @@ def run_yield(
             **source,
             "kind": kind,
             "sample_count": sum(len(m["samples"]) for m in request_measurements),
+            "native": _native_provenance(),
         },
     }
     payload.update(response)

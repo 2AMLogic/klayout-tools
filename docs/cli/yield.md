@@ -1244,7 +1244,7 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `schema_version` | integer | Version of this command's JSON shape (starts at `1`; per-command, per [`docs/json-contract.md`](../json-contract.md)). |
 | `samples` | string | Echo of the `<samples>` argument. |
 | `limits` | string \| null | Echo of `--limits`, or `null`. |
-| `source` | object | `kind` (`"sim-report"` or `"sample-set"`), `netlist` (string \| `null`), `monte_carlo` (echoed from a sim report, else `null`), `provenance` (the echoed [run provenance](#run-provenance-and-spec_row) block, else `null`), and `sample_count` (usable samples analysed across every reported measurement). |
+| `source` | object | `kind` (`"sim-report"` or `"sample-set"`), `netlist` (string \| `null`), `monte_carlo` (echoed from a sim report, else `null`), `provenance` (the echoed [run provenance](#run-provenance-and-spec_row) block, else `null`), `sample_count` (usable samples analysed across every reported measurement), and `native` (`{"module": "klt_yield_native", "version": <installed `klt-yield-native` distribution version, or `null` when no distribution metadata exists, e.g. a `maturin develop` build>}` -- which native build produced the report; additive, no `schema_version` bump). |
 | `confidence` | number | Effective two-sided confidence level. |
 | `target_ci_halfwidth` | number | Effective sample-size target. |
 | `min_samples` | integer | Effective per-measurement minimum. |
@@ -1313,31 +1313,26 @@ crate (standardized-regression/correlation numerics, still dependency-free).
 
 ## Building the native extension
 
-`klt yield` requires the `klt_yield_native` extension. **The supported route
-today is the from-source build below** (a full repo checkout and a Rust
-toolchain).
+`klt yield` requires the `klt_yield_native` extension. **Install it with the
+extra**: `pip install 'klayout-tools[yield]'`, `uv tool install
+'klayout-tools[yield]'`, or `uvx --from "klayout-tools[yield]" klt yield ...`.
 
-A prebuilt `klt-yield-native` wheel for Linux x86_64 and macOS arm64 is
-planned (issue #2531; release pipeline in
-[`docs/releasing-native.md`](../releasing-native.md)) but **has not been
-published to PyPI yet** (issue #2900). Until it is,
-`pip install 'klayout-tools[yield]'` / `uv tool install 'klayout-tools[yield]'`
-fails with "no matching distribution" for every released klayout-tools,
-0.6.0 and 0.7.0 included. The extra resolves **only for klayout-tools releases
-published after `klt-yield-native` is on PyPI**; `publish.yml` now refuses to
-release otherwise. Once such a release exists, no Rust toolchain is needed on
-those platforms. The extension is an **extra**, not a hard dependency, so
-every other `klt` verb stays installable with no Rust in sight.
+As of 2026-11-06 the prebuilt `klt-yield-native` 0.1.0 wheel (Linux x86_64 and
+macOS arm64; release pipeline in
+[`docs/releasing-native.md`](../releasing-native.md)) is on PyPI, and the extra
+resolves for klayout-tools 0.9.1 and later (issue #2900, #5018). No Rust
+toolchain is needed on those platforms. The extension is an **extra**, not a
+hard dependency, so every other `klt` verb stays installable with no Rust in
+sight.
 
 > **What the extra does and does not reach.** A bare `uv tool install
-> klayout-tools`/`pip install klayout-tools` and the git-pinned form (`uv
-> tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<ref>"`)
-> install only the pure-Python package; add `[yield]` to get the wheel once
-> one exists. The extra only resolves once `klt-yield-native` has been
-> published to PyPI: on a release that predates its first publication (every
-> release to date), `[yield]` fails with "no matching distribution", and other platforms (Linux aarch64, Windows, Intel
-> macOS) have no wheel yet. In those cases use the **full repo checkout**
-> build shown below. `klt yield`, `klt yield-campaign`, and
+> klayout-tools`/`pip install klayout-tools`, `uvx --from "klayout-tools==X"`
+> without `[yield]`, and the git-pinned form (`uv tool install "klayout-tools
+> @ git+https://github.com/2AMLogic/klayout-tools@<ref>"`) install only the
+> pure-Python package and fail with "the klt_yield_native extension is not
+> installed"; add `[yield]`. Other platforms (Linux aarch64, Windows, Intel
+> macOS) have no wheel: use the **full repo checkout** build shown below.
+> `klt yield`, `klt yield-campaign`, and
 > `klt yield-sensitivity` all share this requirement (same crate). `klt mom` and
 > `klt synthesize --restructure-timing` have the same from-source gap
 > for their own Rust extensions — see [`docs/cli/mom.md`](mom.md).
