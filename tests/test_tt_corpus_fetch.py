@@ -19,7 +19,7 @@ tt = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(tt)
 
 INDEX = json.loads(
-    (REPO_ROOT / "tests/fixtures/tt_corpus/tt06_index_recorded.json").read_text()
+    (REPO_ROOT / "tests/fixtures/tt_corpus/tt06_index_captured.json").read_text()
 )
 APACHE = "Apache License\nVersion 2.0, January 2004\n"
 MIT = "MIT License\n\nPermission is hereby granted, free of charge, to any person\n"
@@ -66,17 +66,65 @@ def _routes() -> dict[str, bytes]:
 
 def test_walk_filters_by_pdk_and_flags_unfetchable():
     recs = tt.walk_index(INDEX, shuttle="tt06", pdk="sky130A")
-    assert [r["macro"] for r in recs] == [
-        "tt_um_LFSR_shivam",
-        "tt_um_8bitALU",
-        "tt_um_nolicense",
-        "tt_um_nocommit",
-    ]
-    assert recs[-1]["unfetchable"] == "index entry has no pinned commit"
-    assert [
-        r["macro"] for r in tt.walk_index(INDEX, shuttle="tt06", pdk="gf180mcuD")
-    ] == ["tt_um_gf"]
+    assert len(recs) == 5  # real-shaped index has no pdk field: derived from id
+    assert {r["pdk"] for r in recs} == {"sky130A"}
+    assert [r["macro"] for r in recs][:2] == ["tt_um_LFSR_shivam", "tt_um_8bitALU"]
+    assert recs[3]["unfetchable"] == "index entry has no pinned commit"
+    assert tt.walk_index(INDEX, shuttle="tt06", pdk="gf180mcuD") == []
     assert len(tt.walk_index(INDEX, shuttle="tt06")) == 5
+
+
+def test_fixture_has_real_index_shape():
+    assert "pdk" not in INDEX
+    assert all("pdk" not in p for p in INDEX["projects"])
+    assert INDEX["id"] == "tt06"
+
+
+def test_shuttle_pdk_and_empty_filter_is_loud(tmp_path, capsys):
+    assert tt.shuttle_pdk("tt06") == "sky130A"
+    assert tt.shuttle_pdk("ttgf0p2") == "gf180mcuD"
+    assert tt.shuttle_pdk("ttsky25a") == "sky130A"
+    assert tt.shuttle_pdk("weird") is None
+    cache = tt.BlobCache(tmp_path, FakeTransport({}))
+    with pytest.raises(tt.PdkFilterError):
+        tt.run(INDEX, cache, shuttle="tt06", pdk="gf180mcuD")
+    idx = tmp_path / "i.json"
+    idx.write_text(json.dumps(INDEX))
+    rc = tt.main(
+        [
+            "--shuttle",
+            "tt06",
+            "--pdk",
+            "gf180mcuD",
+            "--index-file",
+            str(idx),
+            "--cache-dir",
+            str(tmp_path / "c"),
+        ],
+        transport=FakeTransport({}),
+    )
+    assert rc == 3 and "matched none" in capsys.readouterr().out
+
+
+def test_unsafe_macro_cannot_escape_cache(tmp_path):
+    cache = tt.BlobCache(tmp_path / "cache", FakeTransport(_routes()))
+    out = tt.run(INDEX, cache, shuttle="tt06", pdk="sky130A")
+    bad = [d for d in out["designs"] if d["macro"] == "../escape"][0]
+    assert bad["excluded"] and "unsafe macro" in bad["exclusion_reason"]
+    assert not (tmp_path / "escape.json").exists()
+    mdir = (tmp_path / "cache/manifests/tt06").resolve()
+    for f in mdir.iterdir():
+        assert f.resolve().parent == mdir
+
+
+def test_refresh_index_bypasses_url_map(tmp_path):
+    t = FakeTransport({"https://x/i.json": b"1"})
+    cache = tt.BlobCache(tmp_path, t)
+    cache.fetch("https://x/i.json")
+    cache.fetch("https://x/i.json")
+    assert len(t.calls) == 1
+    cache.fetch("https://x/i.json", refresh=True)
+    assert len(t.calls) == 2
 
 
 def test_manifest_fields_and_license_exclusion(tmp_path):
@@ -96,7 +144,7 @@ def test_manifest_fields_and_license_exclusion(tmp_path):
     assert by["tt_um_nolicense"]["excluded"] is True
     assert "license" in by["tt_um_nolicense"]["exclusion_reason"]
     assert by["tt_um_nocommit"]["excluded"] is True
-    assert (out["included"], out["excluded"]) == (2, 2)
+    assert (out["included"], out["excluded"]) == (2, 3)
     assert (tmp_path / "manifests/tt06/tt_um_LFSR_shivam.json").is_file()
 
 

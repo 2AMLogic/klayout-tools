@@ -438,7 +438,13 @@ PDK, and fetches each design's source archive (and GDS, when the index or a
 `--gds-url-template` names one) at its pinned commit into a content-addressed
 cache with a per-design provenance manifest (repo, commit, shuttle, PDK,
 license, fetch time). Designs with no readable license are marked `excluded`.
-A second run makes zero network requests. The seeds in
-`synth_e2e_validation/` and `place_and_route_tt_validation/` use the same
-repo/commit/license provenance fields; they are referenced, not migrated.
-Offline tests: `tests/test_tt_corpus_fetch.py` (recorded index fixture).
+A second run makes zero network requests (`--refresh-index` re-downloads the
+mutable shuttle index). The real index has no `pdk` field, so the PDK is
+derived from the shuttle id (`tt06` -> sky130A, `ttgf*` -> gf180mcuD); a
+`--pdk` that matches no project exits 3 instead of reporting an empty success.
+The seeds in `synth_e2e_validation/` and `place_and_route_tt_validation/`
+already draw their designs from the same `tt06.json` index; they are
+referenced, not migrated, and this tool does not rewrite their records.
+Offline tests: `tests/test_tt_corpus_fetch.py`, against
+`tests/fixtures/tt_corpus/tt06_index_captured.json` (a captured slice of the
+real index; hand-written cases are marked `"_synthetic": true`).

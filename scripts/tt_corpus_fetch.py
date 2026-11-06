@@ -15,9 +15,13 @@ Guardrails (Epic #520):
   between requests;
 * a design whose license cannot be read from its own repo is flagged
   ``excluded`` in its manifest and never silently included;
+* the index carries no ``pdk`` field (verified against the live tt06 and
+  ttgf0p2 indexes), so the PDK is derived from the shuttle id -- see
+  :func:`shuttle_pdk`; a ``--pdk`` filter that matches nothing is an error,
+  never a silent empty success;
 * all network access goes through one injected ``transport`` callable, so the
-  tests (``tests/test_tt_corpus_fetch.py``) run offline against a recorded
-  index fixture.
+  tests (``tests/test_tt_corpus_fetch.py``) run offline against a captured
+  slice of the real index.
 
 Cache layout (``--cache-dir``)::
 
@@ -28,7 +32,7 @@ Cache layout (``--cache-dir``)::
 Usage::
 
     scripts/tt_corpus_fetch.py --shuttle tt06 --pdk sky130A --cache-dir .cache/tt-corpus
-    scripts/tt_corpus_fetch.py --index-file recorded.json --shuttle tt06 --limit 4
+    scripts/tt_corpus_fetch.py --index-file captured.json --shuttle tt06 --limit 4
 
 Output is one JSON document on stdout (summary + per-design status).
 """
@@ -78,6 +82,10 @@ _LICENSE_MARKERS: tuple[tuple[str, str], ...] = (
 _LICENSE_FILE = re.compile(
     r"^(license|licence|copying|unlicense)([._-].*)?$", re.IGNORECASE
 )
+
+
+class PdkFilterError(ValueError):
+    """``--pdk`` filtered out every project (likely a schema/PDK mismatch)."""
 
 
 class FetchError(RuntimeError):
@@ -146,9 +154,13 @@ class BlobCache:
     def blob_path(self, digest: str) -> Path:
         return self.root / "blobs" / digest
 
-    def fetch(self, url: str) -> tuple[bytes, str, bool]:
-        """Return ``(data, sha256, from_cache)``; network only on a cache miss."""
-        digest = self._urls.get(url)
+    def fetch(self, url: str, *, refresh: bool = False) -> tuple[bytes, str, bool]:
+        """Return ``(data, sha256, from_cache)``; network only on a cache miss.
+
+        ``refresh=True`` skips the URL map lookup (for mutable URLs such as a
+        shuttle index) and re-points the map at the new digest.
+        """
+        digest = None if refresh else self._urls.get(url)
         if digest is not None and self.blob_path(digest).is_file():
             return self.blob_path(digest).read_bytes(), digest, True
         data = self._transport(url)
@@ -170,6 +182,32 @@ class BlobCache:
 # Index walking
 # --------------------------------------------------------------------------
 
+# The live index has no per-project or top-level ``pdk`` field; the PDK is a
+# property of the shuttle. Tiny Tapeout names shuttles by process family:
+# ``ttgf*`` = GlobalFoundries gf180mcuD, ``ttihp*`` = IHP sg13g2, and the
+# ``tt<NN>`` / ``ttsky*`` series = sky130A.
+_SHUTTLE_PDKS: tuple[tuple[str, str], ...] = (
+    (r"^ttgf", "gf180mcuD"),
+    (r"^ttihp", "ihp-sg13g2"),
+    (r"^ttsky", "sky130A"),
+    (r"^tt\d+", "sky130A"),
+)
+
+
+def shuttle_pdk(shuttle: str) -> str | None:
+    """PDK for a shuttle id by naming convention; ``None`` if unrecognised."""
+    for pattern, pdk in _SHUTTLE_PDKS:
+        if re.match(pattern, shuttle.lower()):
+            return pdk
+    return None
+
+
+def safe_macro(macro: str) -> str | None:
+    """``macro`` if usable as a single file name, else ``None``."""
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", macro) and ".." not in macro:
+        return macro
+    return None
+
 
 def _owner_repo(repo_url: str) -> tuple[str, str] | None:
     match = re.match(
@@ -183,15 +221,16 @@ def walk_index(
 ) -> list[dict[str, Any]]:
     """Normalise an index document into one record per project.
 
-    A project's PDK is its own ``pdk`` field, else the index's top-level
-    ``pdk``; ``pdk=None`` disables filtering. Projects with no pinned commit
+    A project's PDK is its own ``pdk`` field if present, else the index's
+    top-level ``pdk``, else the PDK implied by the shuttle id (the real index
+    has neither field); ``pdk=None`` disables filtering. Projects with no pinned commit
     or a non-GitHub repo are kept but marked ``unfetchable`` so the manifest
     says why they are absent, rather than dropping them silently.
     """
-    default_pdk = index.get("pdk")
+    default_pdk = index.get("pdk") or shuttle_pdk(index.get("id") or shuttle)
     out: list[dict[str, Any]] = []
     for project in index.get("projects", []):
-        project_pdk = project.get("pdk", default_pdk)
+        project_pdk = project.get("pdk") or default_pdk
         if pdk is not None and project_pdk != pdk:
             continue
         repo = project.get("repo", "")
@@ -337,14 +376,26 @@ def run(
     gds_url_template: str | None = None,
 ) -> dict[str, Any]:
     records = walk_index(index, shuttle=shuttle, pdk=pdk)
+    if pdk is not None and not records and index.get("projects"):
+        raise PdkFilterError(
+            f"--pdk {pdk!r} matched none of {len(index['projects'])} projects in "
+            f"shuttle {shuttle!r} (derived shuttle PDK: {shuttle_pdk(shuttle)!r})"
+        )
     if limit is not None:
         records = records[:limit]
     designs = []
     for record in records:
-        manifest = ingest_design(record, cache, gds_url_template=gds_url_template)
-        path = (
-            cache.root / "manifests" / shuttle / f"{record['macro'] or 'unnamed'}.json"
-        )
+        macro = safe_macro(record["macro"])
+        if macro is None:
+            # Remote data must never choose a path outside the cache.
+            manifest = ingest_design(
+                {**record, "unfetchable": f"unsafe macro name: {record['macro']!r}"},
+                cache,
+            )
+            macro = hashlib.sha256(record["macro"].encode()).hexdigest()[:16]
+        else:
+            manifest = ingest_design(record, cache, gds_url_template=gds_url_template)
+        path = cache.root / "manifests" / shuttle / f"{macro}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         designs.append(manifest)
@@ -370,6 +421,11 @@ def main(argv: list[str] | None = None, transport: Transport | None = None) -> i
     parser.add_argument(
         "--index-file", type=Path, help="read the index from a local file (no network)"
     )
+    parser.add_argument(
+        "--refresh-index",
+        action="store_true",
+        help="re-download the shuttle index even if cached (it is mutable)",
+    )
     parser.add_argument("--limit", type=int, help="process at most N projects")
     parser.add_argument(
         "--min-interval",
@@ -389,7 +445,9 @@ def main(argv: list[str] | None = None, transport: Transport | None = None) -> i
         if args.index_file:
             index = json.loads(args.index_file.read_text())
         else:
-            data, _, _ = cache.fetch(INDEX_URL.format(shuttle=args.shuttle))
+            data, _, _ = cache.fetch(
+                INDEX_URL.format(shuttle=args.shuttle), refresh=args.refresh_index
+            )
             index = json.loads(data)
     except (FetchError, OSError, ValueError) as exc:
         print(
@@ -398,14 +456,18 @@ def main(argv: list[str] | None = None, transport: Transport | None = None) -> i
             )
         )
         return 2
-    summary = run(
-        index,
-        cache,
-        shuttle=args.shuttle,
-        pdk=args.pdk,
-        limit=args.limit,
-        gds_url_template=args.gds_url_template,
-    )
+    try:
+        summary = run(
+            index,
+            cache,
+            shuttle=args.shuttle,
+            pdk=args.pdk,
+            limit=args.limit,
+            gds_url_template=args.gds_url_template,
+        )
+    except PdkFilterError as exc:
+        print(json.dumps({"schema_version": SCHEMA_VERSION, "error": str(exc)}))
+        return 3
     json.dump(summary, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0
