@@ -184,7 +184,14 @@ from ._jsonnum import is_number
 from ._paths import _resolve_relative
 from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
 from .gen_compose import GenComposeError, _translate_bbox, compose
-from .layout_plan_ports import device_owned_port_names, port_pins, unrouted_reasons
+from .layout_plan_ports import (
+    derive_gate_contact,
+    device_owned_port_names,
+    extract_raw_params_by_id,
+    gate_contact_warning,
+    port_pins,
+    unrouted_reasons,
+)
 from .netlist_digest import build_netlist_digest
 from .pdk import PdkNotFoundError
 
@@ -381,42 +388,17 @@ def _netlist_derived_size_params(
     return resolved
 
 
-def _extract_raw_params_by_id(request: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """``{device_groups[].id: device_groups[].params}`` read from the
-    **original** request, not the validated response.
-
-    :func:`klayout_tools.layout_plan.validate_layout_plan`'s own response
-    deliberately echoes only the fields it validates in detail (``id``,
-    ``generator``, ``topology``, ``devices``, ``encloses``) -- ``params`` is
-    checked for JSON-object shape only and not echoed back, so this module
-    reads it from ``request`` directly (already known well-typed, since it
-    passed Phase B's own validation) rather than trying to smuggle it
-    through the validated response.
-    """
-    raw_groups = request.get("device_groups")
-    if not isinstance(raw_groups, list):
-        return {}
-    result: dict[str, dict[str, Any]] = {}
-    for raw_group in raw_groups:
-        if not isinstance(raw_group, dict):
-            continue
-        group_id = raw_group.get("id")
-        params = raw_group.get("params")
-        if isinstance(group_id, str) and isinstance(params, dict):
-            result[group_id] = params
-    return result
-
-
 def _resolve_group_params(
     group: dict[str, Any],
     digest_devices_by_key: dict[tuple[str, str], dict[str, Any]],
     overrides: dict[str, Any],
+    digest: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Resolve one ``device_groups[]`` entry's ``klt gen`` ``params`` --
     netlist-derived sizing first (from every device the group declares, per
     the module docstring's scope decision 1), then ``overrides`` (the
     group's own ``params``, read from the original request -- see
-    :func:`_extract_raw_params_by_id`) layered on top, every divergence
+    :func:`extract_raw_params_by_id`) layered on top, every divergence
     between the two surfaced as a ``warnings[]`` entry (never silent, per
     the spike's own precedence rule).
     """
@@ -441,7 +423,12 @@ def _resolve_group_params(
                     f"resolved {derived[gen_param]}) -- using {derived[gen_param]}"
                 )
 
-    resolved = dict(derived)
+    resolved: dict[str, Any] = dict(derived)
+    # gate_contact (#5093): derived from gate-net fan-out; overrides win below.
+    if digest is not None and derive_gate_contact(group, digest, digest_devices_by_key):
+        resolved["gate_contact"] = True
+        if "gate_contact" not in overrides:
+            warnings.append(gate_contact_warning(group["id"]))
     # `device_groups[].topology` is a top-level plan field (Phase B's own
     # matching-pattern concept, already validated against the named
     # generator's own support table) but only `mos_array`/`bjt_array` accept
@@ -1068,7 +1055,7 @@ def execute_layout_plan(
     pdk_spec = validated["pdk"]
 
     warnings: list[str] = []
-    raw_params_by_id = _extract_raw_params_by_id(request)
+    raw_params_by_id = extract_raw_params_by_id(request)
 
     def _run(work_directory: str) -> dict[str, Any]:
         digest_devices_by_key = {
@@ -1079,7 +1066,10 @@ def execute_layout_plan(
         resolved_params_by_id: dict[str, dict[str, Any]] = {}
         for group in device_groups:
             params, param_warnings = _resolve_group_params(
-                group, digest_devices_by_key, raw_params_by_id.get(group["id"], {})
+                group,
+                digest_devices_by_key,
+                raw_params_by_id.get(group["id"], {}),
+                digest,
             )
             warnings.extend(param_warnings)
             resolved_params_by_id[group["id"]] = params

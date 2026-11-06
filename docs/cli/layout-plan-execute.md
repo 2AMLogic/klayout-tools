@@ -366,14 +366,31 @@ without a duplicate label. A port that resolves to no device port (for
 example a bulk-only net, which is deliberately unmapped) gets a `warnings[]`
 entry and no label. The labels appear in the response's `pins[]`.
 
+**`gate_contact` derivation (#5093).** For `mos_array`, `diff_pair` and
+`esd_device` groups, `execute` sets `params.gate_contact: true` when any
+declared device's gate terminal is on a net with two or more terminal
+connections or on a subckt port, because the router cannot reach a bare-poly
+gate. An explicit `device_groups[].params.gate_contact` (true or false) always
+wins. The derived choice shows in the group's `resolved_params` and as one
+`warnings[]` entry; plans with no such gate net resolve as before.
+
 **Scope.** Routing runs between the generated groups' ports exactly as in
 `gen-compose`; there is no "row of unlike devices" topology, and each
-single-device `mos_array`/`res_array`/`cap_array` group is one unit. For
-mixed-device sky130 blocks (thick-oxide `hvi` FETs, poly resistors, MIM caps)
-whether a net routes depends on the router reaching each port's layer, which
-is not guaranteed: treat an all-nets-unrouted result as a **placement-only
-floorplan** and read `unrouted_reasons[]` for the cause. If the reasons point
-at a router capability gap, file it as a separate router issue.
+single-device `mos_array`/`res_array`/`cap_array` group is one unit.
+
+*Largest block known to route end to end* (recorded 2026-11-06, base commit
+`3d2c74e`): the three-NFET shared-gate rail in
+`tests/test_layout_plan_execute.py` (`_GATE_RAIL_NETLIST`, three one-unit
+`mos_array` groups in one row, shared gate net `VBIAS`) routes every net with
+the derived `gate_contact`; with `gate_contact: false` forced, `VBIAS` stays
+unrouted ("bare-poly gate"). No mixed-device sky130 block (`hvi` FETs plus
+`res_array` and `cap_array`) is verified to route fully: the #5093 report
+still showed self-net backbone crossings, "crosses the block's interior on the
+side away from its own pin", and cross-layer detour conflicts, and MOS bulk
+has no well/substrate tap, so an LVS bulk compare would fail regardless.
+Treat an all-nets-unrouted result as a **placement-only floorplan**, read
+`unrouted_reasons[]` for the cause, and file a router issue for a capability
+gap.
 
 **Class-qualified device references.** A device name is only unique within its
 class, so `device_groups[].devices[]` entries are class-qualified. The MIM
