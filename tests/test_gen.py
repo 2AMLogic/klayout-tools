@@ -12089,8 +12089,7 @@ def test_sky130_ring_tap_implant_and_npc_geometry(
     """Phase B of issue #2934: the guard ring's tap is covered by the implant
     matching the well underneath it (nsdm for the pfet's n-tap well tie, psdm
     for the nfet's p-tap substrate tie) with ``n/psdm.5b``'s 0.125um margin,
-    and ``npc`` caps every poly-contact licon by ``licon.15``'s 0.1um, with
-    ``npc.2`` spacing met."""
+    and ``npc`` caps every poly-contact licon (licon.15) with ``npc.2`` met."""
     import klayout.db as kdb
 
     output = tmp_path / f"{generator}_sky130_phase_b_{flavor}.gds"
