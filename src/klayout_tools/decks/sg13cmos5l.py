@@ -1786,10 +1786,7 @@ EXTRACTION_DECK = ExtractionDeck(
             name="rsil",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
             marker=(128, 0),  # PolyRes.drawing -- the resistive body itself
-            # Issue #3094 (same as sg13g2, #2679): cmos5l's symlinked IHP
-            # PCells draw PolyRes as the whole body and GatPoly only as the
-            # two abutting heads, so `body & marker` would be empty.
-            topology="abutting_heads",
+            topology="abutting_heads",  # #3094 (as sg13g2 #2679): GatPoly = heads
             # `rsilG2_rspec` in cmos5l's own sg13cmos5l_tech.json (7.0;
             # `rsil_code.py` reads the `G2` key unconditionally, and the
             # non-G2 `rsil_rspec` carries the same 7.0 value, so this one
@@ -1816,8 +1813,7 @@ EXTRACTION_DECK = ExtractionDeck(
             # d2cc0355f26235c777dfcc6867b390fa1e78083f, same pin as the
             # rule-deck symlinks above), i.e. the same file sg13g2 uses:
             # `9.0e-6/w + 7.0*l/(w + 1.0e-8)` (SI, w/l in metres).
-            # `end_term_ohm_um` and
-            # `width_offset_um` are the end-term and line-width-delta
+            # `end_term_ohm_um`/`width_offset_um` are the end-term and line-width-delta
             # constants converted to ohm*um / um (`* 1e6`).
             end_term_ohm_um=9.0,
             width_offset_um=0.01,
@@ -1829,10 +1825,7 @@ EXTRACTION_DECK = ExtractionDeck(
             name="rppd",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
             marker=(128, 0),  # PolyRes.drawing -- the resistive body itself
-            # Issue #3094 (same as sg13g2, #2679): cmos5l's symlinked IHP
-            # PCells draw PolyRes as the whole body and GatPoly only as the
-            # two abutting heads, so `body & marker` would be empty.
-            topology="abutting_heads",
+            topology="abutting_heads",  # #3094 (as sg13g2 #2679): GatPoly = heads
             # `rppdG2_rspec` in cmos5l's own sg13cmos5l_tech.json (260.0,
             # vs the non-G2 `rppd_rspec`'s 250.0 for the older SG13
             # flavour) -- selected because cmos5l's own `techName`,
@@ -1858,8 +1851,7 @@ EXTRACTION_DECK = ExtractionDeck(
             # d2cc0355f26235c777dfcc6867b390fa1e78083f, same pin as the
             # rule-deck symlinks above), i.e. the same file sg13g2 uses:
             # `70.0e-6/w + 260.0*l/(w + 6.0e-9)` (SI, w/l in metres).
-            # `end_term_ohm_um` and
-            # `width_offset_um` are the end-term and line-width-delta
+            # `end_term_ohm_um`/`width_offset_um` are the end-term and line-width-delta
             # constants converted to ohm*um / um (`* 1e6`).
             end_term_ohm_um=70.0,
             width_offset_um=0.006,
@@ -1871,10 +1863,7 @@ EXTRACTION_DECK = ExtractionDeck(
             name="rhigh",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
             marker=(128, 0),  # PolyRes.drawing -- the resistive body itself
-            # Issue #3094 (same as sg13g2, #2679): cmos5l's symlinked IHP
-            # PCells draw PolyRes as the whole body and GatPoly only as the
-            # two abutting heads, so `body & marker` would be empty.
-            topology="abutting_heads",
+            topology="abutting_heads",  # #3094 (as sg13g2 #2679): GatPoly = heads
             # cmos5l's own sg13cmos5l_tech.json reproduces sg13g2's own
             # `rhigh` self-contradiction exactly: `rhigh_rspec` is 1300.0
             # while `rhighG2_rspec` is 1360.0, and the two PyCell readers
@@ -1921,8 +1910,7 @@ EXTRACTION_DECK = ExtractionDeck(
             # d2cc0355f26235c777dfcc6867b390fa1e78083f, same pin as the
             # rule-deck symlinks above), i.e. the same file sg13g2 uses:
             # `1.6e-4/w + 1360.0*l/(w - 0.04e-6)` (SI, w/l in metres).
-            # `end_term_ohm_um` and
-            # `width_offset_um` are the end-term and line-width-delta
+            # `end_term_ohm_um`/`width_offset_um` are the end-term and line-width-delta
             # constants converted to ohm*um / um (`* 1e6`).
             end_term_ohm_um=160.0,
             width_offset_um=-0.04,
