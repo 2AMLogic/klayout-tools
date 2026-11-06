@@ -295,7 +295,20 @@
       "required": ["exit_status", "error_lines"],
       "properties": {
         "exit_status": {"type": "integer"},
-        "error_lines": {"$ref": "#/$defs/strings"}
+        "error_lines": {"$ref": "#/$defs/strings"},
+        "decks_executed": {"$ref": "#/$defs/strings", "description": "Deck names klayout logged as started (`Executing deck <name>`), in order; the last one aborted. Absent when none were logged."},
+        "abort": {
+          "type": "object",
+          "description": "Structured abort cause parsed from klayout's output (issue #5091); each key present only when derivable.",
+          "properties": {
+            "deck": {"type": "string"},
+            "deck_file": {"type": "string"},
+            "message": {"type": "string"},
+            "symbol": {"type": "string"},
+            "location": {"type": "string"}
+          },
+          "additionalProperties": true
+        }
       },
       "additionalProperties": true
     },

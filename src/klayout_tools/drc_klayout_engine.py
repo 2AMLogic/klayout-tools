@@ -37,6 +37,7 @@ from .drc import (
     SCHEMA_VERSION,
     DrcError,
 )
+from .drc_klayout_abort import deck_abort_info, deck_aborted_error
 from .drc_klayout_app import _preflight_klayout_version, _resolve_klayout_executable
 from .pdk import PdkNotFoundError, find_pdk_for_deck
 
@@ -415,14 +416,7 @@ def _check_klayout_run(
         detail = _klayout_deck_error_detail(
             completed.stdout, completed.stderr, error_lines
         )
-        raise DrcError(
-            "klayout reported an error while running the deck script "
-            f"(exit status {completed.returncode}) -- the deck likely "
-            "aborted part-way through, so the report file it did write "
-            "covers only the rules that ran before the abort, and its "
-            "verdict cannot be trusted. Pass --allow-deck-errors to "
-            "accept a partial report anyway. klayout's own output:\n" + detail
-        )
+        raise deck_aborted_error(completed, error_lines, detail)
     return error_lines, deck_errored
 
 
@@ -1678,6 +1672,7 @@ def run_drc_klayout_engine(
                 "engine_deck_errors": {
                     "exit_status": completed.returncode,
                     "error_lines": error_lines,
+                    **deck_abort_info(completed.stdout, completed.stderr, error_lines),
                 }
             }
             if deck_errored
