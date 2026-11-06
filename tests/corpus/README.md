@@ -430,3 +430,15 @@ net (device counts, cell/instance counts, DRC violation counts, ...) — the
 right bar for a metric drifting slightly without the underlying geometry
 becoming byte-different — see [`tests/golden_metrics/README.md`](../golden_metrics/README.md)
 (issue #248).
+
+## Tiny Tapeout corpus fetch cache (Epic #520 Phase 1.A, #5081)
+
+`scripts/tt_corpus_fetch.py` walks a Tiny Tapeout shuttle index, filters by
+PDK, and fetches each design's source archive (and GDS, when the index or a
+`--gds-url-template` names one) at its pinned commit into a content-addressed
+cache with a per-design provenance manifest (repo, commit, shuttle, PDK,
+license, fetch time). Designs with no readable license are marked `excluded`.
+A second run makes zero network requests. The seeds in
+`synth_e2e_validation/` and `place_and_route_tt_validation/` use the same
+repo/commit/license provenance fields; they are referenced, not migrated.
+Offline tests: `tests/test_tt_corpus_fetch.py` (recorded index fixture).

@@ -1,0 +1,10 @@
+{
+  "pdk": "sky130A",
+  "projects": [
+    {"macro": "tt_um_LFSR_shivam", "title": "LFSR", "repo": "https://github.com/beaprog/tt06-LFSR", "commit": "6bffe5f606707446700dc5dc43db8fa4d6a74394"},
+    {"macro": "tt_um_8bitALU", "title": "8-bit ALU", "repo": "https://github.com/EdricOngKhaiJieh/8bitALU_verilog", "commit": "f9bcfd7d3cb6da2972d1678d9ec5e9402ae9eecb"},
+    {"macro": "tt_um_nolicense", "title": "No license", "repo": "https://github.com/example/nolicense", "commit": "1111111111111111111111111111111111111111"},
+    {"macro": "tt_um_gf", "title": "GF design", "pdk": "gf180mcuD", "repo": "https://github.com/example/gf", "commit": "2222222222222222222222222222222222222222"},
+    {"macro": "tt_um_nocommit", "title": "No commit", "repo": "https://github.com/example/nocommit"}
+  ]
+}
