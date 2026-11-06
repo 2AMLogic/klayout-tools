@@ -42,14 +42,13 @@ from __future__ import annotations
 import csv
 import gzip
 import hashlib
-import importlib.metadata
 import io
 import json
 import math
 import os
 from typing import Any
 
-from ._native import _load_native_extension
+from ._native import _load_native_extension, native_provenance
 from .yield_provenance import (
     _attach_spec_rows,
     _provenance_from,
@@ -101,17 +100,6 @@ def _load_native() -> Any:
         docs_link="docs/cli/yield.md#building-the-native-extension",
         extra="yield",
     )
-
-
-def _native_provenance() -> dict[str, Any]:
-    """Which native build produced a report: module name plus the installed
-    ``klt-yield-native`` distribution version, ``None`` when no distribution
-    metadata exists (e.g. a ``maturin develop`` build)."""
-    try:
-        version: str | None = importlib.metadata.version("klt-yield-native")
-    except importlib.metadata.PackageNotFoundError:
-        version = None
-    return {"module": "klt_yield_native", "version": version}
 
 
 def _load_json(path: str, what: str) -> Any:
@@ -785,14 +773,12 @@ def run_yield(
             **source,
             "kind": kind,
             "sample_count": sum(len(m["samples"]) for m in request_measurements),
-            "native": _native_provenance(),
+            "native": native_provenance("klt_yield_native", "klt-yield-native"),
         },
     }
     payload.update(response)
     _attach_spec_rows(payload, row_by_name)
-    # The native core owns the payload's shape version; this module's
-    # constant mirrors it (and is asserted against it below) so a crate-side
-    # bump that Python never noticed cannot ship silently.
+    # The native core owns the shape version; assert our mirror of it matches.
     if response.get("schema_version") != SCHEMA_VERSION:
         raise YieldError(
             "klt_yield_native reports schema_version "

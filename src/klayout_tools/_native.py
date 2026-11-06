@@ -18,11 +18,23 @@ from __future__ import annotations
 
 import functools
 import importlib
+import importlib.metadata
 import json
 import os
 import shutil
 import subprocess
 from typing import Any
+
+
+def native_provenance(module_name: str, dist_name: str) -> dict[str, Any]:
+    """Which native build produced a report: module name plus the installed
+    ``dist_name`` distribution version, ``None`` when no distribution
+    metadata exists (e.g. a ``maturin develop`` build)."""
+    try:
+        version: str | None = importlib.metadata.version(dist_name)
+    except importlib.metadata.PackageNotFoundError:
+        version = None
+    return {"module": module_name, "version": version}
 
 
 def _load_native_extension(

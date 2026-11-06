@@ -11,7 +11,7 @@ import importlib.metadata
 import pytest
 
 from klayout_tools import yield_analysis, yield_sensitivity
-from klayout_tools._native import _load_native_extension
+from klayout_tools._native import _load_native_extension, native_provenance
 
 
 def _no_import(name: str, *args, **kwargs):
@@ -51,7 +51,7 @@ def test_callers_without_extra_keep_original_message(monkeypatch):
 
 def test_native_provenance_version(monkeypatch):
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
-    assert yield_analysis._native_provenance() == {
+    assert native_provenance("klt_yield_native", "klt-yield-native") == {
         "module": "klt_yield_native",
         "version": "0.1.0",
     }
@@ -62,7 +62,7 @@ def test_native_provenance_null_without_metadata(monkeypatch):
         raise importlib.metadata.PackageNotFoundError(name)
 
     monkeypatch.setattr(importlib.metadata, "version", missing)
-    assert yield_analysis._native_provenance() == {
+    assert native_provenance("klt_yield_native", "klt-yield-native") == {
         "module": "klt_yield_native",
         "version": None,
     }
