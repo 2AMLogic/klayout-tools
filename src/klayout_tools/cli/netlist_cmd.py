@@ -68,10 +68,16 @@ def run(args: argparse.Namespace) -> int:
         allow_expr = bool(getattr(args, "allow_unevaluated_expr", False))
         ignore_comments = bool(getattr(args, "ignore_comments", False))
         erc = bool(getattr(args, "erc", False))
+        no_header = bool(getattr(args, "no_provenance_header", False))
         if backend == "batch":
             if erc:
                 raise NetlistError(
                     "--erc is not supported with --backend batch; use --backend local"
+                )
+            if no_header:
+                raise NetlistError(
+                    "--no-provenance-header is not supported with --backend "
+                    "batch; use --backend local"
                 )
             if allow_expr:
                 raise NetlistError(
@@ -113,6 +119,7 @@ def run(args: argparse.Namespace) -> int:
                 symbol_path=getattr(args, "symbol_path", None) or (),
                 erc=erc,
                 relative_paths=args.relative_paths,
+                provenance_header=not no_header,
             )
     except NetlistError as exc:
         return emit_error(

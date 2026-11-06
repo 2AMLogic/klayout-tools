@@ -932,6 +932,7 @@ def run_netlist(
     erc: bool = False,
     symbol_path: Sequence[str] = (),
     relative_paths: bool = False,
+    provenance_header: bool = True,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -1050,7 +1051,7 @@ def run_netlist(
             payload["warnings"] = warnings
 
         inputs = generation_inputs(version, rcfile, pdk_block)
-        written_data = inputs_record_line(inputs) + fresh_data
+        written_data = inputs_record_line(inputs, provenance_header) + fresh_data
         if check:
             status, drift = _check_result(
                 output,
@@ -1059,13 +1060,12 @@ def run_netlist(
                 xschem_version=version,
                 inputs=inputs,
             )
-            payload["status"] = status
-            payload["netlist"] = _netlist_block(None, written_data)
-            payload["drift"] = drift
+            nb = _netlist_block(None, written_data)
+            payload.update(status=status, netlist=nb, drift=drift)
             return payload
 
         _write_output(output, written_data)
-        payload["status"] = STATUS_GENERATED
+        payload.update(status=STATUS_GENERATED, provenance_header=provenance_header)
         payload["netlist"] = _netlist_block(output, written_data)
         return payload
     finally:
