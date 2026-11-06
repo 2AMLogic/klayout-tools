@@ -1969,9 +1969,8 @@ class CapacitorDevice:
     set, ``perim_cap_f_um``) was transcribed from -- the device-recognition
     analogue of :class:`DrcRule.provenance` (see :class:`RuleProvenance`'s
     own docstring). ``None`` (the default) means no structured provenance
-    has been backfilled for this entry yet -- the prose citation in the deck
-    module's own inline comment remains the only record, exactly as for
-    every entry before this field existed.
+    has been backfilled yet -- the deck module's inline prose citation
+    remains the only record, as for every entry before this field existed.
     """
 
     name: str
@@ -1979,13 +1978,7 @@ class CapacitorDevice:
     bottom_plate: tuple[int, int]
     area_cap_f_um2: float
     top_plate_requires: tuple[tuple[int, int], ...] = ()
-    #: When true, ``top_plate_requires`` is a whole-polygon selection
-    #: (``top_plate.interacting(marker)``) instead of a boolean AND that clips
-    #: the plate to the marker. gf180mcu's ``mimcap_derivations.lvs`` uses
-    #: ``interacting`` and the PDK's ``draw_cap_mim`` PCell draws ``MIM_L_MK``
-    #: as a thin strip along one plate edge, so an AND shrinks the plate to
-    #: that strip (issue #3440).
-    top_plate_requires_interacting: bool = False
+    top_plate_requires_interacting: bool = False  # interacting, not AND (#3440)
     top_plate_excludes: tuple[tuple[int, int], ...] = ()
     bottom_plate_requires: tuple[tuple[int, int], ...] = ()
     bottom_plate_excludes: tuple[tuple[int, int], ...] = ()

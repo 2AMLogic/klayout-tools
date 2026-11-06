@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._layout import region as _region
 from .decks import CapacitorDevice, ExtractionDeck, ResistorDevice
+from .extract_cap_top_plate import capacitor_top_region
 from .extract_spef import ExtractError
 
 if TYPE_CHECKING:
@@ -308,15 +309,7 @@ def _capacitor_plate_regions(
     drawn anywhere on this layout (the common case -- no PDK cap marker
     drawn at all).
     """
-    top_region = _region(layout, top_cell, capacitor.top_plate)
-    for layer in capacitor.top_plate_requires:
-        marker = _region(layout, top_cell, layer)
-        if capacitor.top_plate_requires_interacting:
-            top_region = top_region.interacting(marker)
-        else:
-            top_region = top_region & marker
-    for layer in capacitor.top_plate_excludes:
-        top_region = top_region - _region(layout, top_cell, layer)
+    top_region = capacitor_top_region(layout, top_cell, capacitor)
 
     bottom_conductor = _region(layout, top_cell, capacitor.bottom_plate)
     for layer in capacitor.bottom_plate_requires:
