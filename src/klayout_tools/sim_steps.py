@@ -89,6 +89,7 @@ import re
 from typing import Any
 
 from .sim_errors import SimError
+from .sim_op_args import default_op_args
 
 #: The internal ``analysis["kind"]`` a resolved step sequence carries. Never
 #: a request value: the request declares ``analysis_steps[]`` instead, and
@@ -362,20 +363,12 @@ def _resolve_arg_refs(
 
 
 def _resolve_step_analysis(analysis: Any, step: str) -> tuple[str, str]:
-    from .sim import _op_without_args
-
-    if _op_without_args(analysis):  # issue #5078: `op` takes no arguments
-        analysis = {**analysis, "args": ""}
-    if (
-        not isinstance(analysis, dict)
-        or "kind" not in analysis
-        or "args" not in analysis
-    ):
-        raise SimError(f"step {step!r}: analysis requires 'kind' and 'args'")
-    kind = analysis["kind"]
-    args = analysis["args"]
     from .sim import reject_unsupported_analysis
 
+    analysis = default_op_args(analysis)  # issue #5078
+    if not isinstance(analysis, dict) or not {"kind", "args"} <= analysis.keys():
+        raise SimError(f"step {step!r}: analysis requires 'kind' and 'args'")
+    kind, args = analysis["kind"], analysis["args"]
     reject_unsupported_analysis(kind)
     if not isinstance(kind, str) or kind.lower() not in STEP_ANALYSIS_KINDS:
         raise SimError(

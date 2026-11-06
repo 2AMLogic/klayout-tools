@@ -641,7 +641,7 @@
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
-      "lines": 1323
+      "lines": 1320
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
