@@ -48,8 +48,9 @@ from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
 from ..sim import SimError, load_request, run_sim
 from ..sim_batch_async import read_job_status
-from ..sim_set import DEFAULT_MAX_IN_FLIGHT, run_sim_set
+from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
+from .sim_job_text import _print_job_status_text as _print_job_status_text
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
 
@@ -114,8 +115,7 @@ def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
 def run(args: argparse.Namespace) -> int:
     if getattr(args, "batch_set", None) is not None:
         return _run_batch_set(args)
-    misuse = _reject_single_request_misuse(args)
-    if misuse is not None:
+    if (misuse := _reject_single_request_misuse(args)) is not None:
         return misuse
     if getattr(args, "op_lint", False):
         return _run_op_lint(args)
@@ -145,14 +145,15 @@ def _run_sweep(args: argparse.Namespace) -> int:
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
             command_approvals=getattr(args, "command_approvals", None),
             pdk_root=getattr(args, "pdk_root", None),
+            collect_partial=getattr(args, "collect_partial", False),
+            timeout_s=getattr(args, "timeout_s", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
     except OutputLockError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
-    write_failure = _write_report_out(report, args)
-    if write_failure is not None:
+    if (write_failure := _write_report_out(report, args)) is not None:
         return write_failure
     if report.get("status") == "submitted" and getattr(args, "submit_only", False):
         # Issue #3073: submitted, not run -- there is no verdict to grade.
@@ -258,18 +259,6 @@ def _print_submitted_text(report: dict) -> None:
     print(f"poll with: klt sim <request> --job-status {report['job_id']}")
 
 
-def _print_job_status_text(status: dict) -> None:
-    print(f"job: {status['job_id']}  state: {status['state']}")
-    for key in ("detail", "elapsed_seconds", "updated_at"):
-        if key in status:
-            print(f"{key}: {status[key]}")
-    instance = status.get("instance") or {}
-    if instance:
-        kind = instance.get("instance_type", "-")
-        where = instance.get("availability_zone", "-")
-        print(f"instance: {kind} ({instance.get('lifecycle', '-')}, {where})")
-
-
 def _run_batch_set(args: argparse.Namespace) -> int:
     """``klt sim --batch-set``: submit a set of requests (issue #2869).
 
@@ -289,6 +278,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--submit-only", getattr(args, "submit_only", False)),
             ("--job-status", getattr(args, "job_status", None)),
             ("--pdk-root", getattr(args, "pdk_root", None)),
+            ("--timeout-s", getattr(args, "timeout_s", None)),
         )
         if value is not None and value is not False and value != ""
     ]
@@ -322,28 +312,14 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             max_units_per_job=args.max_units_per_job,
             max_concurrent_jobs=args.max_concurrent_jobs,
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
+            dry_run=getattr(args, "dry_run", False),
+            collect_partial=bool(getattr(args, "collect_partial", False)),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
-    emit_success(report, args.format, _print_set_text)
+    emit_success(report, args.format, print_set_text)
     return max((r["exit_code"] for r in report["requests"]), default=EXIT_PASS)
-
-
-def _print_set_text(report: dict) -> None:
-    print(
-        f"status: {report['status']}  requests: {report['request_count']}  "
-        f"submitted: {report['submitted']}  refused: {report['refused']}  "
-        f"max_in_flight: {report['max_in_flight']}"
-    )
-    for entry in report["requests"]:
-        line = f"  {entry['request']}  [{entry['status']}]"
-        if entry["job_ids"]:
-            line += f"  job={','.join(entry['job_ids'])}"
-        error = entry["error"]
-        if error:
-            line += f"  {error['code'] or 'error'}: {error['message']}"
-        print(line)
 
 
 def _run_op_lint(args: argparse.Namespace) -> int:

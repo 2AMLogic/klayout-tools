@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._provenance import sha256_file
+from ._provenance import content_hash
 from .env_provenance import find_repo_root, repo_relative_path
 
 
@@ -18,6 +18,5 @@ def hashed_path_envelope(path: str | None) -> dict[str, Any]:
         envelope: dict[str, Any] = {"path": None, "scope": "external"}
     else:
         envelope = repo_relative_path(path, repo_root=root)
-    digest = sha256_file(path)
-    envelope["sha256"] = None if digest is None else f"sha256:{digest}"
+    envelope["sha256"] = content_hash(path)
     return envelope

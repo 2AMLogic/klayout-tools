@@ -137,3 +137,147 @@ def shard_scoped_points(resolved: Any, attach_job_id: str | None) -> list[Any]:
         return points
     shard = shard_points_for_job(resolved.artifacts_dir, attach_job_id, points)
     return points if shard is None else shard
+
+
+def mismatch_error(
+    path: str, stored: dict[str, Any], fingerprint: str, submit_only: bool
+) -> Exception:
+    """Refusal for a shard map written for a different request. Issue #4979:
+    a ``--submit-only`` caller passed no ``--resume``, so name what they ran
+    and keep the first request's map (and its ``--attach`` path) intact."""
+    hosts = stored["hosts"]
+    difference = sim_batch._manifest_difference(
+        stored["fingerprint"], fingerprint, hosts, hosts
+    )
+    if submit_only:
+        message = (
+            f"--submit-only: shard map {path} belongs to a different request "
+            f"({difference}); use a distinct -o directory for this request, or "
+            "finish/attach the first one (deleting the map would lose its "
+            "--attach path)"
+        )
+    else:
+        message = (
+            f"--resume: shard map {path} was written for a different request "
+            f"({difference}); delete it or drop --resume"
+        )
+    from .sim import SimError
+
+    return SimError(message, code=sim_batch.BATCH_SHARD_MANIFEST_CODE)
+
+
+def gate_partial_shard(fleet: Any, index: int, prior: dict[str, Any]) -> None:
+    """``--attach <map> --collect-partial``: read one shard's ``status.json``
+    once, never waiting. Returns for a shard in a terminal state (collected
+    as in a plain attach); raises for any other, which
+    :func:`sim_remote._run_sharded` reports as a ``lost_shard`` per unit
+    with this reason. Nothing is launched: a shard the map records as
+    ``submitted`` (never launched) is reported as unlaunched.
+    """
+    job_id = str(prior["job_id"])
+    if prior.get("state") == "submitted":
+        status = None
+        state = "unlaunched"
+    else:
+        try:
+            status = sim_batch._read_status(
+                fleet.config, job_id, sim_batch._run_subprocess
+            )
+        except Exception:  # noqa: BLE001 - an unreadable status is "unknown"
+            status = None
+        raw = status.get("state") if status else None
+        state = str(raw) if raw else "unknown"
+    if state in sim_batch.BATCH_TERMINAL_STATES:
+        return
+    fleet.unfinished[index] = {"index": index, "job_id": job_id, "state": state}
+    raise sim_batch.BatchError(
+        f"shard still unfinished (--collect-partial): remote job {job_id} "
+        f"is {state}; re-run --attach (without --collect-partial) or "
+        "--resume to finish it",
+        code="batch_shard_unfinished",
+    )
+
+
+def with_unfinished(
+    environment: dict[str, Any] | None,
+    unfinished: dict[int, dict[str, Any]],
+    manifest: Any,
+) -> dict[str, Any] | None:
+    """``environment`` plus ``unfinished_shards[]`` (index order),
+    ``resumable`` and ``shard_map`` when ``--collect-partial`` left shards."""
+    if not unfinished:
+        return environment
+    return {
+        **(environment or {}),
+        "unfinished_shards": [unfinished[i] for i in sorted(unfinished)],
+        "resumable": True,
+        "shard_map": str(manifest.path),
+    }
+
+
+def attach_batch_shards(
+    *,
+    manifest_path: str,
+    config: sim_batch.BatchConfig,
+    corner_points: list[sim_batch.CornerPoint],
+    netlist_path: str,
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    request: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    request_dir: str | None,
+    shard_fingerprint: str | None,
+    collect_partial: bool = False,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """``--attach <shard map>`` (issue #4620): wait for every shard a
+    sharded ``--submit-only`` recorded and merge them exactly as the blocking
+    sharded run does. The map must belong to this request (digest and
+    fingerprint); a shard whose job is gone is reported lost, never
+    resubmitted."""
+    from .sim import SimError
+
+    if os.path.basename(manifest_path) != sim_batch.BATCH_SHARDS_FILENAME:
+        raise SimError(
+            f"--attach {manifest_path}: expected a job id or a "
+            f"{sim_batch.BATCH_SHARDS_FILENAME} shard map",
+            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
+        )
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        hosts = int(document["hosts"])
+        fingerprint = str(document["fingerprint"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SimError(
+            f"--attach: shard map {manifest_path} is unreadable ({exc})",
+            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
+        ) from exc
+    mismatch = shard_map_mismatch(document, request)
+    if mismatch is not None:
+        raise SimError(
+            f"--attach: shard map {manifest_path} was submitted from a "
+            f"different request ({mismatch}); pass the request the shards "
+            "were submitted from",
+            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
+        )
+    try:
+        return sim_batch._run_batch_fleet(
+            corner_points=corner_points,
+            netlist_path=netlist_path,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            artifacts_dir=os.path.dirname(os.path.abspath(manifest_path)),
+            request=request,
+            hosts=hosts,
+            measurements_spec=measurements_spec,
+            request_dir=request_dir,
+            config=config,
+            shard_fingerprint=shard_fingerprint or fingerprint,
+            resume=True,
+            attach_only=True,
+            collect_partial=collect_partial,
+        )
+    except sim_batch.BatchError as exc:
+        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc

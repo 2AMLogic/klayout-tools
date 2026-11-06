@@ -220,7 +220,7 @@ from typing import Any
 
 from . import env_provenance, output_lock, pex_async
 from ._paths import _resolve_relative, fold_spice_continuations
-from ._provenance import sha256_file
+from ._provenance import content_hash, sha256_file
 from .coverage import (
     REASON_NO_DELTA_ROWS,
     build_check_coverage,
@@ -570,15 +570,6 @@ def _resistance_graph_echo(
             }
         )
     return {"r_cut_ohm": r_cut_ohm, "nets": nets}
-
-
-def _content_id(path: str | None) -> str | None:
-    """``sha256:<64 lowercase hex>`` of the exact bytes of ``path`` (issue
-    #2875), or ``None`` when it is not a readable file. The same digest
-    convention ``provenance.input.content_hash`` uses, so ``klt signoff``
-    re-hashes the cited file with the identical function."""
-    digest = sha256_file(path)
-    return None if digest is None else f"sha256:{digest}"
 
 
 def _strip_quotes(token: str) -> str:
@@ -2195,7 +2186,7 @@ def _resolve_reference_netlist_path(
     """The one ``reference_netlist`` for the run (issue #3739): ``""`` for
     ``--extract-only`` (no schematic side; every consumer of the path is
     skipped and ``env_provenance.repo_relative_path`` /
-    :func:`_content_id` read it as ``null``), the caller's own
+    :func:`content_hash` read it as ``null``), the caller's own
     ``--reference-netlist`` in ``--measure-command`` mode, else the DUT."""
     if extract_only:
         return ""
@@ -2676,7 +2667,7 @@ def _flatten_schematic_dut(
         "netlist": env_provenance.repo_relative_path(
             flat_path or None, repo_root=repo_root
         ),
-        "netlist_sha256": _content_id(flat_path),
+        "netlist_sha256": content_hash(flat_path),
         "subckts": result.roots,
         "inlined_instances": result.inlined_instances,
         "inlined_subckts": result.inlined_subckts,
@@ -2850,7 +2841,7 @@ def _device_only_result_fields(
         "device_only_netlist": env_provenance.repo_relative_path(
             device_only_netlist_path or None, repo_root=repo_root
         ),
-        "device_only_netlist_sha256": _content_id(device_only_netlist_path),
+        "device_only_netlist_sha256": content_hash(device_only_netlist_path),
         **(device_only_parity or {}),
     }
 
@@ -3368,9 +3359,9 @@ def run_pex(
             body_text = handle.read()
         input_identity.append(
             {
-                "request_sha256": _content_id(testbench_path),
+                "request_sha256": content_hash(testbench_path),
                 "netlist": schematic_body_path,
-                "netlist_sha256": _content_id(schematic_body_path),
+                "netlist_sha256": content_hash(schematic_body_path),
             }
         )
         _include_line, dut_path = _find_dut_include(
@@ -3382,7 +3373,7 @@ def run_pex(
         # if it were the DUT.
         _check_dut_declares_a_circuit(testbench_path, dut_path)
         dut_paths.append(dut_path)
-        input_identity[-1]["schematic_netlist_sha256"] = _content_id(dut_path)
+        input_identity[-1]["schematic_netlist_sha256"] = content_hash(dut_path)
 
     _require_single_dut(dut_paths)
     # Issue #4619: an `--attach` manifest must match this run's inputs.
@@ -3405,7 +3396,7 @@ def run_pex(
 
     # Issue #2875: hashed at the resolution point, before either side runs
     # (`None` for `--extract-only`, which has no reference netlist).
-    reference_netlist_sha256 = _content_id(reference_netlist_path)
+    reference_netlist_sha256 = content_hash(reference_netlist_path)
 
     # Issue #2889: `--flatten-schematic` -- the netlist the schematic leg
     # actually runs (and every diagnostic below compares) is a flattened

@@ -63,7 +63,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _batch_common, _provenance, output_lock, remote_transport, sim, sim_batch
-from ._provenance import _content_hash
+from ._provenance import content_hash
 from .netlist_batch import _remote_stderr_tail, _runner_error
 from .place_and_route import (
     SCHEMA_VERSION,
@@ -471,7 +471,7 @@ def _local_deck_hash(
         )
     except PlaceAndRouteError:
         return None
-    return _content_hash(path)
+    return content_hash(path)
 
 
 def _preflight(
@@ -480,7 +480,7 @@ def _preflight(
     """The request-level checks done before any upload: the netlist hash, the
     cell library, the packaged tree, the job timeout and the fleet config."""
     netlist_path = _resolve_netlist(request["netlist"], request_dir)
-    input_hash = _content_hash(netlist_path)
+    input_hash = content_hash(netlist_path)
     cell_library = request["pdk"].get("cell_library")
     if not isinstance(cell_library, str) or not cell_library:
         raise PlaceAndRouteError("request.pdk.cell_library is required")

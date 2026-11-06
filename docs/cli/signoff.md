@@ -2175,6 +2175,17 @@ checkout anywhere on disk. Only an override (1 or 2) changes `source_doc` in
 the report; the shipped doc always reports as
 `"docs/design-evidence-tiers.md"` regardless of install layout.
 
+**Fleet convention (issue #5041).** Chip repos should not vendor
+`design-evidence-tiers.md`: rely on the bundled copy and record the
+exact-pinned `klt` version as the source of the doc. Vendor a copy (and pass
+`--tiers-doc`) only to deliberately grade against a *different* doc. A
+byte-identical override and the bundled copy produce the same report in both
+`--manifest` and `--fleet` modes, differing only in `source_doc` (pinned by
+`test_cli_bundled_doc_and_identical_override_differ_only_in_source_doc`), so
+dropping a vendored copy does not change any verdict. Committed sign-off
+records are append-only and unaffected: a record graded with an override keeps
+its original `source_doc`.
+
 Both override forms expand a leading `~`, so a quoted
 `--tiers-doc '~/vendored-tiers.md'` (which the shell leaves unexpanded)
 resolves the same way `KLT_TIERS_DOC=~/vendored-tiers.md` does.
@@ -3155,6 +3166,21 @@ non-`lvs` member is `wrong_kind`, and a malformed member or empty list is
 item 4. The manifest is the record of which cells were cited; `klt signoff`
 does not check they cover the partition.
 
+Item 3 (DRC clean) accepts a list the same way (issue #5031): one `klt drc`
+report per cell of a multi-cell library, graded exactly like item 4's list
+(every member must pass; `detail.failed_citations` names failing members). For
+items 2, 3 and 4, a list-form entry also carries `members_total` (members cited)
+and `members_covered` (members that individually graded `met`); both are
+additive and absent for a single-entry citation, whose output is unchanged.
+The manifest author enumerates the cells; `klt signoff` does not check the
+list is the library's complete cell set.
+
+Item 2 (Layout) accepts a list of native envelopes the same way (issue #5044):
+one per independently laid-out cell. It grades `met` only if every member is a
+recognised, passing native envelope; a failing or unrecognised member makes it
+`unmet` and is named in `detail.failed_citations`, and a malformed member or
+empty list is `invalid_evidence`. A single-envelope item 2 entry is unchanged.
+
 Item 7 (post-layout verification) accepts a list the same way (issue #4562):
 one `klt pex` report per cell of a hierarchical design (objects or bare
 paths). It grades `met` only if every member is `pass`, of an accepted kind
@@ -3234,14 +3260,14 @@ additive and also parsed for item 5 rows, where it likewise blocks `met`.
 `schema_version`: no bump; `detail.unratified_rows` is a new optional field
 and `partial_coverage` is an existing reason.
 
-#### Item 6's evidence needs a from-source toolchain (issue #2466)
+#### Item 6's evidence needs the `[yield]` extra (issue #2466)
 
 Item 6 accepts only a `yield` envelope, and `klt yield` requires the
-`klt_yield_native` Rust extension. Today that means a full repo checkout
-with a Rust toolchain: the prebuilt `klt-yield-native` wheel behind
-`pip install 'klayout-tools[yield]'` is not yet on PyPI, so the extra does
-not resolve for any release to date (0.6.0 and 0.7.0 included) and will only
-resolve for releases published after the wheel is. A bare
+`klt_yield_native` Rust extension. Install it with
+`pip install 'klayout-tools[yield]'`: as of 2026-11-06 the prebuilt
+`klt-yield-native` 0.1.0 wheel (Linux x86_64, macOS arm64) is on PyPI and the
+extra resolves for klayout-tools 0.9.1 and later; other platforms need a repo
+checkout with a Rust toolchain. A bare
 `pip install klayout-tools` and the git-pinned (`@git+…`) form do not
 include it either (see
 [`yield.md`](yield.md)'s "What the extra does and does not reach"

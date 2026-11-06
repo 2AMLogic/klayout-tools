@@ -156,9 +156,9 @@ from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
-    _content_hash,
     _klt_version,
     build_provenance,
+    content_hash,
     explicit_deck_options,
     sha256_file,
 )
@@ -4552,7 +4552,7 @@ def check_extract_report(
     ``committed["provenance"]["deck"]["name"]``) and compares each against
     the ``sha256:``-prefixed digest already recorded in
     ``provenance.input.content_hash``/``provenance.deck.content_hash``
-    (:func:`klayout_tools._provenance._content_hash`) -- reusing
+    (:func:`klayout_tools._provenance.content_hash`) -- reusing
     :func:`klayout_tools._provenance.sha256_file`, never reimplementing
     hashing. Returns the shared ``--check`` payload built by
     :func:`klayout_tools._report_verify.build_check_result`: ``status:
@@ -4596,7 +4596,7 @@ def check_extract_report(
         hash_check(
             "provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
-            _content_hash(
+            content_hash(
                 resolve_committed_path(
                     committed.get("file"),
                     report_path=report_path,
@@ -4607,7 +4607,7 @@ def check_extract_report(
         hash_check(
             "provenance.deck.content_hash",
             get_path(committed, ("provenance", "deck", "content_hash")),
-            _content_hash(deck_source_path(deck_name) if deck_name else None),
+            content_hash(deck_source_path(deck_name) if deck_name else None),
         ),
     ]
     return build_check_result(report_path=report_path, checks=checks)

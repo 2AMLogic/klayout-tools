@@ -66,6 +66,7 @@ def _load_native() -> Any:
         "native/yield/",
         "uv sync --group yield",
         docs_link="docs/cli/yield-sensitivity.md#building-the-native-extension",
+        extra="yield",
     )
 
 

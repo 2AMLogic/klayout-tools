@@ -139,6 +139,10 @@ from .signoff_generator_batch import (
     run_approved_generator,
 )
 
+# Per-cell DRC/LVS member-coverage counts (issue #5031); kept out of this file
+# for its size-ratchet ceiling.
+from .signoff_multi_member import _entry_problem, with_member_coverage
+
 # The item-6 `not_applicable` form's pure helpers (statistical scan, markdown
 # spec parser; issue #4793) live in `signoff_na`, keeping this file under its
 # size-ratchet ceiling.
@@ -6913,6 +6917,8 @@ def _build_tier_item(
             met_envelopes=met_envelopes,
             required_kind_pair=required_kind_pair,
         )
+        # Issue #5031: per-cell DRC/LVS lists state how many members counted.
+        extra = with_member_coverage(item_id, report_list, raw_entry, extra)
     elif raw_entry is not None:
         spec = _normalize_evidence_entry(raw_entry)
         if spec is None:
@@ -6953,13 +6959,19 @@ _ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5, 6})
 #: kept out of :data:`_ITEMS_ACCEPTING_MULTI_CITATION`.
 _LVS_ITEM_ID = 4
 
+#: T1 item 3 (DRC): likewise accepts a list of ``klt drc`` reports -- one per
+#: cell of a multi-cell library (issue #5031).
+_DRC_ITEM_ID = 3
+
 #: T1 item 7 (post-layout verification): likewise accepts a list of
 #: ``klt pex`` reports -- one per cell of a hierarchical design (issue
 #: #4562) -- and never ``spec_rows``.
 _POST_LAYOUT_ITEM_ID = 7
 
-#: Items whose list form is a plain per-cell report list (no ``spec_rows``).
-_REPORT_LIST_ITEMS: frozenset[int] = frozenset({_LVS_ITEM_ID, _POST_LAYOUT_ITEM_ID})
+#: Per-cell report-list items (no ``spec_rows``); 2 = layout (#5044).
+_REPORT_LIST_ITEMS: frozenset[int] = frozenset(
+    {2, _DRC_ITEM_ID, _LVS_ITEM_ID, _POST_LAYOUT_ITEM_ID}
+)
 
 #: Issue #3741: the RTL-flow evidence kinds of T1 item 5, digital -- the tier
 #: doc's "multi-corner STA **plus** a bit-exact functional test suite". A
@@ -7331,22 +7343,6 @@ def _report_list_problem(item_id: int, raw: Any) -> dict[str, Any]:
     if item_id not in _REPORT_LIST_ITEMS:
         return {}
     return {"problem": _entry_problem(raw)}
-
-
-def _entry_problem(raw: Any) -> str:
-    """Human-readable cause for an evidence entry
-    :func:`_normalize_evidence_entry` rejects (issue #4562)."""
-    if not isinstance(raw, (str, dict)):
-        return "not a string or an object with 'file'/'command'"
-    if isinstance(raw, dict) and not isinstance(raw.get("file"), str):
-        command = raw.get("command")
-        if not (
-            isinstance(command, list)
-            and command
-            and all(isinstance(part, str) for part in command)
-        ):
-            return "object has neither a string 'file' nor a non-empty 'command' list"
-    return "invalid 'pointer' or option field"
 
 
 def _parse_multi_members(

@@ -85,3 +85,37 @@ def test_flavour_warning_absent_when_option_selects_reference_class(tmp_path):
         tmp_path, layout, ref, deck="gf180mcu", deck_options={"poly_res": "3k"}
     )
     assert _cats(report, "device.flavour_mismatch") == []
+
+
+def test_finfet_unmerged_fingers_never_suggest_combine_devices():
+    import klayout.db as kdb
+
+    from klayout_tools.lvs_unmerged_fingers import _group_unmerged_fingers
+
+    for finfet in (False, True):
+        nl = kdb.Netlist()
+        cls = kdb.DeviceClassMOS3Transistor()
+        cls.name = "nfet"
+        if finfet:
+            cls.add_parameter(kdb.DeviceParameterDefinition("NFIN", "fins", 0.0))
+        nl.add(cls)
+        top = kdb.Circuit()
+        top.name = "top"
+        nl.add(top)
+        nets = {n: top.create_net(n) for n in "dgs"}
+        devs = []
+        for name, w in (("M0", 10.0), ("M1", 10.0), ("R", 20.0)):
+            dev = top.create_device(cls, name)
+            dev.set_parameter("W", w)
+            dev.set_parameter("L", 0.5)
+            for t, n in (("S", "s"), ("G", "g"), ("D", "d")):
+                dev.connect_terminal(t, nets[n])
+            devs.append(dev)
+        unmatched = [(devs[0], None), (devs[1], None), (None, devs[2])]
+        [entry] = _group_unmerged_fingers(unmatched, []).entries
+        if finfet:
+            assert "combine_devices" not in entry["description"]
+            assert entry["details"]["suggested_option"] is None
+        else:
+            assert "combine_devices" in entry["description"]
+            assert entry["details"]["suggested_option"] == "options.combine_devices"

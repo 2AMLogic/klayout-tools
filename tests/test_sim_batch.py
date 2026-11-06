@@ -1215,7 +1215,7 @@ def test_poll_fails_fast_on_a_job_stuck_interrupted(tmp_path):
     assert excinfo.value.code == sb.BATCH_JOB_INTERRUPTED_CODE
     assert excinfo.value.last_state == "interrupted"
     assert excinfo.value.interrupted_s >= 100.0
-    assert "job-1" in str(excinfo.value)
+    assert "job-1" in str(excinfo.value) and "--resume" in str(excinfo.value)
     # Failed fast: nowhere near the 5400s poll budget.
     assert len(runner.argvs_matching("status.json")) < 20
 
@@ -3068,7 +3068,7 @@ def test_interrupted_grace_reports_distinct_unrun_corners(tmp_path, monkeypatch)
     for corner in corners:
         assert corner["status"] == "error"
         assert corner["diagnostics"][0]["code"] == "batch_job_interrupted"
-        assert "job-1" in corner["diagnostics"][0]["message"]
+        assert "job-1" in (m := corner["diagnostics"][0]["message"]) and "--resume" in m
     assert environment["job_id"] == "job-1"
     assert environment["state"] == "interrupted"
     assert environment["interrupted_s"] >= 0.0
@@ -6765,25 +6765,6 @@ def test_max_units_per_job_at_or_under_the_ceiling_limit_is_accepted(
     )
 
     assert max(shard_sizes) <= cap
-
-
-def test_max_units_per_job_over_the_ceiling_limit_is_rejected_before_s3(
-    tmp_path, monkeypatch
-):
-    runner = _FakeRunner()
-    with pytest.raises(sim.SimError) as excinfo:
-        _run_one_batch(
-            tmp_path,
-            monkeypatch,
-            runner,
-            units=63,
-            timeout_s=120.0,
-            max_units_per_job=40,  # 120 x 40 + 120 > 3600
-        )
-
-    assert runner.calls == []
-    assert excinfo.value.code == sb.BATCH_MAX_UNITS_CODE
-    assert "at most 29" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("bad", [0, -3, 2.5, "8", True])

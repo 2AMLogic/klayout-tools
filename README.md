@@ -78,18 +78,21 @@ uv tool install git+https://github.com/2AMLogic/klayout-tools
 > **`klt yield` (and its `yield-campaign`/`yield-sensitivity` siblings) need
 > the `yield` extra.** Both install commands above ship the pure-Python
 > package only — `klt yield`'s statistics run in a Rust extension
-> (`klt_yield_native`). **Today the supported route is a full repo checkout
-> plus a Rust toolchain**; see
+> (`klt_yield_native`). **Install with the extra**:
+> `pip install 'klayout-tools[yield]'` or
+> `uvx --from "klayout-tools[yield]" klt yield ...`. Platforms without a
+> prebuilt wheel need a repo checkout plus a Rust toolchain; see
 > [`docs/cli/yield.md#building-the-native-extension`](docs/cli/yield.md#building-the-native-extension).
 > `klt mom` and `klt synthesize --restructure-timing` have the same
 > from-source gap for their own Rust extensions; every other verb works
 > from the commands above alone.
 >
-> A prebuilt `klt-yield-native` wheel (Linux x86_64, macOS arm64) is planned
-> but **not yet on PyPI**, so `pip install 'klayout-tools[yield]'` does not
-> resolve for any release to date (0.6.0 and 0.7.0 included). It will only
-> resolve for klayout-tools releases published after the wheel is (issue
-> #2900, [`docs/releasing-native.md`](docs/releasing-native.md)).
+> As of 2026-11-06 the prebuilt `klt-yield-native` 0.1.0 wheel (Linux
+> x86_64, macOS arm64) is on PyPI, so `[yield]` resolves for klayout-tools
+> 0.9.1 and later. Linux aarch64, Windows and Intel macOS have no wheel and
+> build from source. Without the `[yield]` extra, `klt yield` fails with
+> "the klt_yield_native extension is not installed"
+> ([`docs/releasing-native.md`](docs/releasing-native.md)).
 
 ### Container image (`klt` + the analog sim toolchain)
 

@@ -236,9 +236,9 @@ from ._paths import _load_request_json, _reject_unknown_keys, validate_request_s
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
-    _content_hash,
     _yosys_version,
     build_provenance,
+    content_hash,
     sha256_file,
     wasi_sandbox_hint_if_applicable,
 )
@@ -4410,7 +4410,7 @@ def _synthesize_provenance_hashes(
 
     Deliberately mirrors :func:`run_synthesize`'s own hashing, step for step:
     the sources are resolved through the same :func:`_resolve_sources`, a
-    single source hashes through :func:`klayout_tools._provenance._content_hash`
+    single source hashes through :func:`klayout_tools._provenance.content_hash`
     (what :func:`build_provenance`'s ``input_path`` does) and multiple sources
     through :func:`klayout_tools._provenance._combined_content_hash` (what
     :func:`run_synthesize` substitutes for the multi-source case), and the
@@ -4435,7 +4435,7 @@ def _synthesize_provenance_hashes(
     if not isinstance(cell_library, str) or not cell_library:
         raise SynthesizeError("request.pdk.cell_library is required")
     if len(resolved_sources) == 1:
-        input_hash = _content_hash(resolved_sources[0])
+        input_hash = content_hash(resolved_sources[0])
     else:
         input_hash = _combined_content_hash(resolved_sources)
     if skip_deck:
@@ -4446,7 +4446,7 @@ def _synthesize_provenance_hashes(
         variant=pdk_variant,
         root=pdk_root,
     )
-    return input_hash, _content_hash(liberty_path)
+    return input_hash, content_hash(liberty_path)
 
 
 def _synthesize_request_parameters(request_path: str) -> dict[str, int | str]:

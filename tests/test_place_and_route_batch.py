@@ -163,7 +163,7 @@ def fake(tmp_path, monkeypatch) -> _FakeRunner:
         liberty, _c, _i = place_and_route._resolve_liberty(
             "sky130_fd_sc_hd", corner, variant=None, root=None
         )
-        deck_hash[corner] = _provenance._content_hash(liberty)
+        deck_hash[corner] = _provenance.content_hash(liberty)
     runner = _FakeRunner(keep, deck_hash)
     monkeypatch.setattr(sim_batch, "_run_subprocess", runner)
 

@@ -1919,7 +1919,8 @@ sg13g2's poly resistors `rsil`/`rppd`/`rhigh` are not
 drawn as a marked segment of a poly bar: IHP's own `SG13_dev` PCells draw
 `PolyRes` (128/0) as the **whole resistive body** and `GatPoly` (5/0) only
 as the two contact heads, which *abut* the body with zero overlap area
-(issue #2679). Their deck entries therefore declare
+(issue #2679; sg13cmos5l's identical, symlinked-PCell resistors follow
+suit, issue #3094). Their deck entries therefore declare
 `ResistorDevice.topology="abutting_heads"`: the recognised segment is the
 `PolyRes` region narrowed by each flavour's `requires`/`excludes` masks
 (upstream `res_derivations.lvs`'s `polyres_mk` core), kept only where it
@@ -2214,6 +2215,17 @@ klt extract cell.gds --deck gf180mcu --deck-option mim_option=A -o cell.spice --
 - Top-plate vias inside `FuseTop` connect the top plate to the strap metal
   only (the runset's `via2_n_cap`/`via2_cap` split); vias outside `FuseTop`
   remain ordinary routing.
+- Verified against the PDK pcell and runset (issue #3440, gf180mcuA @
+  `c6d73a35f524070e85faff4a6a9eef49553ebc2b`; `gf180mcuF` not installed on the
+  verifying host, so A only): the `draw_cap_mim.py` `MIM-A` cap (10x10 um,
+  `MIM_L_MK` a thin edge strip) extracts to one `cap_mim_2f0_m2m3_noshield`,
+  `area=100`/`perimeter=40`, two distinct plate nets -- the same device, nets
+  and `A=100P P=40U` as `gf180mcu.lvs` with `mim_option=A`. A `FuseTop` under
+  `efuse_mk` is excluded by both. `CAP_MK`/`MIM_L_MK` select the whole
+  `FuseTop` polygon (the runset's `.interacting`), they do not clip it. The
+  extracted `C` card uses the deck's nominal area+perimeter value (about
+  208 fF here) while the runset reports its nominal `2e-13`; that pre-existing
+  difference is untouched.
 - If a layout draws an option-A cap but the run uses `B` (or vice versa),
   nothing would claim the cap and its top-plate vias would short the plates, so
   a `warnings[]` entry names the `--deck-option mim_option=<X>` to re-run with.
@@ -7970,6 +7982,39 @@ may be added without breaking the contract, so consumers should ignore
 unknown fields. See [`docs/json-contract.md`](../json-contract.md) for the
 envelope shared across all `klt` commands (`schema_version`, error shape,
 exit codes).
+
+### `devices[]` is the device contract; the written deck's card form is not
+
+The stable device contract is `devices[]` in this JSON envelope: each device's
+class plus its `params` (e.g. `params.r_ohm`, `params.c_f`). The SPICE deck
+written by `-o out.spice` is a *simulation artifact*, and its **card form can
+change in any release, with or without `--pdk`** — the card prefix
+(`R` vs an `X` subcircuit call), a trailing model name, and how parameters are
+spelled (`r=` / `L=` / `W=`) are all outside the contract. No JSON field
+describes the card form, deliberately: it varies per device class and per
+`--pdk` binding, so one scalar could not.
+
+Consumers should read device class and value from `devices[]`. A consumer that
+matches cards in the written deck with a prefix regex will not error when the
+form changes; it silently matches nothing and reports zero devices. If you
+must parse the deck, expect to adapt per release and pin `klt --version` (or
+`provenance`) alongside it. Examples of card-form changes, each recorded in
+[`CHANGELOG.md`](../../CHANGELOG.md):
+
+- **Resistors, 0.7.0** (#1157): a bulk-bearing drawn resistor (e.g. sky130
+  `res_xhigh_po`) written without `--pdk` changed from a 3-net
+  `R$1 A B W 12000 res_xhigh_po` card to a subcircuit call
+  `X$1 A B W res_xhigh_po r=12000 L=6U W=1U`. Two-terminal classes keep the
+  `R` card.
+- **Capacitors, 0.5.0** (#1558): the `C` card stopped carrying the device
+  class's name as a trailing 4th token
+  (`C$1 a b 1.119e-13 cap_mim_1f0_m4m5_noshield` → `C$1 a b 1.119e-13`),
+  because ngspice reads that token as a `.model` reference.
+
+Card-form changes get a `CHANGELOG.md` line naming the device class and the
+old and new form. This is the same kind of non-contract as the anonymous-net
+numbering described in
+[Anonymous net numbering (`$N`)](#anonymous-net-numbering-n-is-not-a-stable-cross-platform-contract-issue-1063).
 
 ```json
 {

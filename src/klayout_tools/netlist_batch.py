@@ -48,7 +48,6 @@ unit, so that rule would make the setting a no-op.
 
 from __future__ import annotations
 
-import fnmatch
 import math
 import os
 import re
@@ -63,7 +62,6 @@ from typing import Any
 
 from . import _batch_common, _provenance, remote_transport, sim_batch
 from .netlist import (
-    _PATH_COMMENT_RE,
     DEFAULT_XSCHEM_BINARY,
     SCHEMA_VERSION,
     STATUS_GENERATED,
@@ -72,9 +70,13 @@ from .netlist import (
     _check_no_unresolved_symbol,
     _check_result,
     _netlist_block,
-    _sha256_file_hash,
     _validate_schematic,
     _write_output,
+)
+from .netlist_batch_select import _relative_symbol_dirs, _select_files
+from .netlist_paths import (
+    _rewrite_runner_paths,
+    relativize_schematic_paths,
 )
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +174,7 @@ class BatchTree:
     schematic: str
     rcfile_arg: str | None
     rcfile_pdk_relative: bool
+    symbol_paths: tuple[str, ...] = ()
 
 
 def _git(cwd: str, *args: str) -> bytes:
@@ -276,35 +279,6 @@ def _pdk_relative_rcfile(rcfile: str, pdk: str) -> str | None:
     return '"$PDK_ROOT"/' + shlex.quote(rest)
 
 
-_GLOB_CHARS = frozenset("*?[")
-
-
-def _matches_glob(rel: str, pattern: str) -> bool:
-    """``rel`` (a root-relative POSIX path) against one ``--batch-include`` /
-    ``--batch-exclude`` pattern. ``fnmatch`` semantics, so ``*`` also crosses
-    ``/``; a pattern with no glob character names a file or a directory and
-    matches that file or everything under that directory."""
-    while pattern.startswith("./"):
-        pattern = pattern[2:]
-    if not any(char in _GLOB_CHARS for char in pattern):
-        bare = pattern.rstrip("/")
-        return rel == bare or rel.startswith(bare + "/")
-    return fnmatch.fnmatchcase(rel, pattern)
-
-
-def _select_files(
-    files: list[str], include: Sequence[str], exclude: Sequence[str]
-) -> list[str]:
-    """``files`` kept by ``include`` (every file when empty) and not dropped
-    by ``exclude``."""
-    return [
-        rel
-        for rel in files
-        if (not include or any(_matches_glob(rel, pat) for pat in include))
-        and not any(_matches_glob(rel, pat) for pat in exclude)
-    ]
-
-
 def package_tree(
     schematic: str,
     *,
@@ -314,6 +288,7 @@ def package_tree(
     include: Sequence[str] = (),
     exclude: Sequence[str] = (),
     max_bytes: int | None = None,
+    symbol_path: Sequence[str] = (),
 ) -> BatchTree:
     """Select and validate the input tree, **without** building the archive.
 
@@ -357,6 +332,8 @@ def package_tree(
             _require_selected(rel_rcfile, selected, what="--rcfile")
             rcfile_arg = shlex.quote(rel_rcfile)
 
+    symbol_rel = _relative_symbol_dirs(symbol_path, root, selected)
+
     present: list[str] = []
     total = 0
     for rel in files:
@@ -388,6 +365,7 @@ def package_tree(
         schematic=rel_schematic,
         rcfile_arg=rcfile_arg,
         rcfile_pdk_relative=pdk_relative,
+        symbol_paths=tuple(symbol_rel),
     )
 
 
@@ -466,6 +444,8 @@ def build_job_spec(
         argv.append("--block")
     if tree.rcfile_arg is not None:
         argv += ["--rcfile", tree.rcfile_arg]
+    for rel_dir in tree.symbol_paths:
+        argv += ["--symbol-path", shlex.quote(rel_dir)]
     argv += ["--pdk", shlex.quote(pdk), "--timeout-s", repr(float(timeout_s))]
     argv += ["--backend local --format json"]
     command = (
@@ -591,28 +571,6 @@ def _job_failure(
 # --------------------------------------------------------------------------- #
 
 
-def _rewrite_runner_paths(
-    data: bytes, runner_roots: list[str], local_root: str
-) -> bytes:
-    """Rewrite xschem's ``** sch_path:`` / ``** sym_path:`` comments that
-    point into the runner's scratch tree so they point into ``local_root``
-    -- the paths a local export from this checkout would have written.
-    Paths outside the tree (the runner's PDK symbols) are left alone."""
-    if not runner_roots:
-        return data
-    targets = [root.encode("utf-8", errors="surrogateescape") for root in runner_roots]
-    local = local_root.rstrip("/").encode("utf-8", errors="surrogateescape")
-
-    def _rewrite(match: Any) -> bytes:
-        path = match.group(2)
-        for target in targets:
-            if path == target or path.startswith(target + b"/"):
-                return match.group(1) + local + path[len(target) :]
-        return match.group(0)
-
-    return _PATH_COMMENT_RE.sub(_rewrite, data)
-
-
 def _read_runner_report(collected: str, job_id: str) -> dict[str, Any]:
     try:
         report = sim_batch.read_collected_report(collected)
@@ -660,7 +618,7 @@ def _read_collected_netlist(
             job_id=job_id,
         ) from exc
     expected = report["netlist"].get("content_hash")
-    if expected is not None and expected != _sha256_file_hash(data):
+    if expected is not None and expected != _provenance.content_hash_bytes(data):
         raise NetlistError(
             f"batch job {job_id}: the collected {BATCH_NETLIST_FILENAME} does "
             f"not match the content_hash the runner reported ({expected}) "
@@ -785,6 +743,7 @@ def _payload(
     data: bytes,
     remote: dict[str, Any],
     ignore_comments: bool = False,
+    symbol_path: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The ``schema_version: 1`` payload a local run returns, from the
     runner's report, plus ``environment.remote``; writes ``output`` unless
@@ -794,7 +753,9 @@ def _payload(
         "schematic": schematic,
         "output": output,
         "mode": "check" if check else "generate",
-        "xschem": report["xschem"],
+        # ``symbol_path`` is the root-relative list the client forwarded
+        # (the runner's own absolute paths are meaningless here).
+        "xschem": {**report["xschem"], "symbol_path": list(symbol_path)},
     }
     for key in ("pdk", "block"):
         if isinstance(report.get(key), dict):
@@ -829,6 +790,8 @@ def run_netlist_batch(
     batch_exclude: Sequence[str] = (),
     xschem_binary: str = DEFAULT_XSCHEM_BINARY,
     ignore_comments: bool = False,
+    symbol_path: Sequence[str] = (),
+    relative_paths: bool = False,
     runner: remote_transport.CommandRunner | None = None,
     sleep: Callable[[float], None] = time.sleep,
     warn: Callable[[str], None] | None = None,
@@ -859,6 +822,7 @@ def run_netlist_batch(
         batch_root=batch_root,
         include=batch_include,
         exclude=batch_exclude,
+        symbol_path=symbol_path,
     )
     config = _resolve_config(variant, timeout_s)
     job_id = new_job_id()
@@ -882,6 +846,8 @@ def run_netlist_batch(
         data = _rewrite_runner_paths(
             data, _batch_common.read_runner_roots(collected), tree.root
         )
+        if relative_paths:
+            data = relativize_schematic_paths(data, schematic)
         # The runner's klt gates too; this keeps the guarantee client-side.
         _check_no_unevaluated_expr(data, report["xschem"].get("version"))
         _check_no_unresolved_symbol(data)
@@ -901,6 +867,7 @@ def run_netlist_batch(
         data=data,
         remote=remote,
         ignore_comments=ignore_comments,
+        symbol_path=list(tree.symbol_paths),
     )
 
 

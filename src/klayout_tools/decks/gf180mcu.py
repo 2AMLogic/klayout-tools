@@ -3539,10 +3539,8 @@ EXTRACTION_DECK = ExtractionDeck(
         CapacitorDevice(
             name="cap_mim_2f0_m4m5_noshield",  # official LVS deck's own device name
             top_plate=(75, 0),  # FuseTop
-            top_plate_requires=(
-                (117, 5),  # CAP_MK
-                (117, 10),  # MIM_L_MK
-            ),
+            top_plate_requires=((117, 5), (117, 10)),  # CAP_MK, MIM_L_MK
+            top_plate_requires_interacting=True,  # runset: .interacting (#3440)
             top_plate_excludes=(
                 (80, 5),  # efuse_mk
                 (125, 5),  # plfuse
@@ -3898,10 +3896,8 @@ _MIM_OPTION_A_CAPACITORS = (
     CapacitorDevice(
         name="cap_mim_2f0_m2m3_noshield",
         top_plate=(75, 0),  # FuseTop
-        top_plate_requires=(
-            (117, 5),  # CAP_MK
-            (117, 10),  # MIM_L_MK
-        ),
+        top_plate_requires=((117, 5), (117, 10)),  # CAP_MK, MIM_L_MK
+        top_plate_requires_interacting=True,  # runset: .interacting (#3440)
         top_plate_excludes=(
             (80, 5),  # efuse_mk
             (125, 5),  # plfuse

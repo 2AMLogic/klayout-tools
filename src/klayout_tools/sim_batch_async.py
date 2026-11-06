@@ -22,6 +22,7 @@ batch transport, so tests never touch ``aws``.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import datetime, timezone
@@ -34,8 +35,6 @@ from .sim_batch import (
     BATCH_WAITING_STATES,
     BatchConfig,
     BatchError,
-    _apply_job_split,
-    _assess_job_ceiling,
     _aws_argv,
     _prepare_batch_job_spec,
     _read_status,
@@ -47,6 +46,7 @@ from .sim_batch import (
     new_job_id,
     submit_job,
 )
+from .sim_batch_plan import plan_batch_job
 from .sim_batch_shards import (  # noqa: F401
     request_sha256,
     shard_map_request_fields,
@@ -142,10 +142,9 @@ def submit_only(
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
-    job_ceiling = _assess_job_ceiling(
-        unit_count=len(corner_points), per_unit_timeout_s=timeout_s, config=config
+    job_ceiling, hosts = plan_batch_job(
+        config, unit_count=len(corner_points), timeout_s=timeout_s
     )
-    job_ceiling, hosts = _apply_job_split(job_ceiling, config)
     if hosts > 1:
         return _submit_sharded(
             request=request,
@@ -346,6 +345,33 @@ def _stale_seconds(state: str, updated_at: Any, now: datetime | None) -> float |
     return round(age, 1) if age > STALE_AFTER_S else None
 
 
+def _failed_job_exit_reason(
+    config: BatchConfig,
+    job_id: str,
+    status: dict[str, Any],
+    run: remote_transport.CommandRunner,
+) -> dict[str, Any]:
+    """``{"exit_reason": ...}`` for a terminal ``failed`` job with a verdict
+    exit (3/4), from one bounded read of ``outputs/report.json``. Any read or
+    parse failure yields ``{}`` -- never turns a good status read into an
+    error (issue #5019)."""
+    from .sim_exit_reason import exit_reason_env, status_exit_code
+
+    if status_exit_code(status) not in (3, 4):
+        return {}
+    argv = _aws_argv(
+        config, "s3", "cp", f"{job_uri(config, job_id)}/outputs/report.json", "-"
+    )
+    try:
+        result = run(argv, 60.0)
+        if result.returncode != 0:
+            return {}
+        report = json.loads(result.stdout or "")
+    except Exception:  # noqa: BLE001 - best-effort enrichment
+        return {}
+    return exit_reason_env(status, report) if isinstance(report, dict) else {}
+
+
 def read_job_status(
     request: dict[str, Any],
     job_id: str,
@@ -408,6 +434,8 @@ def read_job_status(
     for key in _STATUS_PASSTHROUGH:
         if key in document:
             payload[key] = document[key]
+    if state == "failed":
+        payload.update(_failed_job_exit_reason(config, job_id, document, run))
     stale_seconds = _stale_seconds(state, document.get("updated_at"), now)
     if stale_seconds is not None:
         payload["stale"] = True

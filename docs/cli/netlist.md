@@ -7,7 +7,7 @@ on the SPICE side: it produces the netlist `klt sim` simulates and (eventually)
 `klt lvs` compares a layout against.
 
 ```
-klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--backend local|batch] [--batch-root <dir>] [--batch-include <glob>]... [--batch-exclude <glob>]... [--format text|json]
+klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--symbol-path <dir>]... [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--backend local|batch] [--batch-root <dir>] [--batch-include <glob>]... [--batch-exclude <glob>]... [--format text|json]
 ```
 
 - `<schematic>` — path to the xschem schematic to netlist (`.sch`). Checked
@@ -31,6 +31,13 @@ klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rc
   With `--pdk`/`--pdk-root` (or `$PDK`/`$PDK_ROOT`), the PDK root the
   `xschemrc` declares is cross-checked against the resolved PDK — see
   [PDK-root consistency](#pdk-root-consistency).
+- `--symbol-path` — extra xschem symbol directory, repeatable. Exported to
+  xschem as `XSCHEM_USER_LIBRARY_PATH` (`DIR[:DIR…]`, absolute-resolved,
+  placed ahead of any value already in the environment), so a project's
+  sibling `.sym` files resolve without an exported variable or an `--rcfile`
+  edit. A missing or non-directory `DIR` is exit `1`. Under `--backend batch`
+  see [Batch backend](#batch-backend): each `DIR` must be under the batch
+  root. Recorded as `xschem.symbol_path`.
 - `--pdk`, `--pdk-root` — resolve a PDK the same way `klt sim` does, to
   cross-check against `--rcfile`'s declared PDK root. See
   [PDK-root consistency](#pdk-root-consistency).
@@ -183,9 +190,11 @@ xschem 3.4.7 has no `-erc` flag, but its netlister prints findings such as
 nothing is written. Without `--erc` behaviour and netlist bytes are unchanged.
 Local backend only: `--backend batch` rejects `--erc`.
 
-**Verified:** a dangling wire (undriven node) is caught. **Unverified:** shorted
-pins were not measured with real xschem, so `--erc` may not flag them; do not
-rely on it for that case (tracked in #4962).
+**Verified (xschem 3.4.7):** a dangling wire (undriven node) is caught, and so
+are shorted pins: two differently-named `ipin`s wired to one net make xschem
+print `Error: Net shorted: A - B`, so `--erc` exits `1` with
+`error.code: "erc_findings"` and `error.findings: ["Error: Net shorted: A - B"]`
+(fixture `tests/data/netlist/shorted_pins.sch`, #4962).
 
 ## Success is the output file, not the exit status
 
@@ -241,8 +250,19 @@ committed from one checkout (a developer's home directory, a CI workspace, a
 worktree, the batch runner) still reports `"match"` from any other, while a
 change to any other line, or a subcircuit taken from a different file, still
 reports `"drifted"`. When the two files differ *only* in those comment
-directories, `drift.path_comments_differ` is `true`. Generation is unchanged:
-the written netlist carries xschem's paths as xschem wrote them.
+directories, `drift.path_comments_differ` is `true`. By default generation is
+unchanged: the written netlist carries xschem's paths as xschem wrote them.
+
+**`--relative-paths` (issue #5046)** makes the *written* netlist
+checkout-independent too. Each `** sch_path:` / `** sym_path:` comment is
+rewritten relative to the schematic's git toplevel (fallback: the schematic's
+parent directory); paths outside that root, such as PDK symbols, are reduced to
+their basename. Regenerating the same sources from two checkouts or worktrees
+is then byte-identical, so a one-device edit shows up as a one-device diff.
+It works with `--block` and `--backend batch` (applied after the runner's paths
+are mapped back to the local checkout), and `--check` reports `match` against a
+committed netlist written either way. `netlist.content_hash` / `netlist.bytes`
+describe the rewritten text; no JSON field is added or changed.
 
 **The comparison is also independent of `+` continuation layout** (issue
 #3324). Before comparing, each `+` continuation line is joined onto its
@@ -382,6 +402,13 @@ dropped), in `error.remote_stderr_tail`, plus `error.remote_exit_code`,
 `harness.log`). These fields are absent when the runner's own envelope was
 recovered. The tail is raw runner output and may contain paths from the
 runner; it is netlist-only (`klt sim` still never surfaces raw stderr).
+
+**`--symbol-path`.** Each `DIR` must exist, lie under the batch root and hold
+at least one tracked file in the selected set (exit `1` before any archive or
+S3 write otherwise). It is forwarded to the runner as a quoted root-relative
+`--symbol-path` argument; with the flag absent the job command is unchanged.
+The runner's `klt` must know `--symbol-path` (added with issue #4952); an older
+runner rejects the unknown flag, so use a runner image with a matching `klt`.
 
 **PDK-relative `--rcfile`.** An `xschemrc` that ships with the PDK is given in
 its PDK-relative form, quoted so the shell does not expand it:
@@ -566,6 +593,7 @@ resolves its own `$PDK_ROOT`.
 | `exit_status` | integer | xschem's own exit status. **Not the verdict** — non-zero on success. |
 | `exit_status_trusted` | boolean | Always `false`, stated in the payload so a consumer is not left to infer it. |
 | `timeout_s` | number | The bound that was in force (`--timeout-s`). |
+| `symbol_path` | array\<string\> | The `--symbol-path` directories (absolute for a local run, batch-root-relative under `--backend batch`); `[]` when the flag is unused. Additive. |
 | `duration_s` | number | Wall-clock seconds the xschem run took, rounded to milliseconds. |
 
 ### `netlist`
@@ -673,3 +701,66 @@ Bound a suspect schematic more tightly while debugging a hang:
 ```bash
 klt netlist design/block.sch -o /tmp/block.spice --timeout-s 10
 ```
+
+Netlist several entry points. `klt netlist` takes exactly one schematic and one
+`-o`, so a build script with several entry points loops over `<schematic>:<output>`
+pairs. The loop keeps going past a failure, remembers the worst exit code, and
+exits with it:
+
+```bash
+set -u
+rc=0
+for pair in \
+    design/amp.sch:design/netlist/amp.spice \
+    design/bias.sch:design/netlist/bias.spice; do
+  sch=${pair%%:*}
+  out=${pair##*:}
+  klt netlist "$sch" -o "$out" --rcfile design/xschemrc --format json \
+      > "${out%.spice}.report.json"
+  code=$?
+  [ "$code" -gt "$rc" ] && rc=$code
+done
+exit "$rc"
+```
+
+The `--check` variant is the same loop with `--check` added. Exit `3` (drifted)
+and `1` (failed to run) stay distinguishable, because the loop exits with the
+numerically highest code seen: **a failure (`1`) takes precedence over drift
+(`3`) only if you want it to**, and the snippet above does *not* — `3 > 1`, so
+a drifted entry masks a failed one. To make failure win, track the two
+separately:
+
+```bash
+set -u
+failed=0 drifted=0
+for pair in design/amp.sch:design/netlist/amp.spice \
+            design/bias.sch:design/netlist/bias.spice; do
+  klt netlist "${pair%%:*}" -o "${pair##*:}" --rcfile design/xschemrc \
+      --check --format json > "${pair##*:}.check.json"
+  case $? in
+    0) ;;
+    3) drifted=1 ;;
+    *) failed=1 ;;
+  esac
+done
+[ "$failed" -eq 1 ] && exit 1   # failed to run wins over drift
+[ "$drifted" -eq 1 ] && exit 3  # at least one committed netlist is stale
+exit 0
+```
+
+Notes on the loop:
+
+- Each invocation is independent: its own xschem run, its own `--timeout-s`,
+  and its own JSON report. With `--format json` each report is a separate
+  document on stdout, so redirect one file per entry (as above) rather than
+  concatenating them.
+- Under `--backend batch`, each call is a separate batch job.
+- The loop body is `klt netlist`, nothing else. Do not call raw `xschem` in the
+  loop on hosts that forbid it; `klt netlist` forces the headless flags and
+  kills a hung run.
+
+Verification status: the first loop was run against two entries whose
+schematics could not be netlisted (one missing, one with unresolved symbols, as
+no self-contained xschem fixture exists in CI); it visited both entries, wrote a
+report per entry, and exited `1`. The success path and the `--check` variant
+are **not run** here.

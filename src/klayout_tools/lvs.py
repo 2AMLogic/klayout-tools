@@ -132,8 +132,8 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
     INPUT_ROLE_LAYOUT,
     INPUT_ROLE_NETLIST,
-    _content_hash,
     build_provenance,
+    content_hash,
     explicit_deck_options,
     sha256_file,
     version_drift_advisories,
@@ -186,6 +186,7 @@ from .lvs_finfet import (
     reference_reader,
     sliced_reference_file,
 )
+from .lvs_finfet_flatten import flatten_layout_netlist
 from .lvs_gate_level import (
     _apply_gate_level_port_aliases,
     _boundary_supply_nets,  # noqa: F401
@@ -294,10 +295,11 @@ if TYPE_CHECKING:
 #: use (often that host's absolute path), so `klt signoff`'s
 #: `input_verified` freshness gate (issue #2196) could re-verify such a
 #: citation only there and reported drift from every other checkout.
-#: `reference` is deliberately *not* part of this bump and stays the verbatim
-#: echo: it is pinned by its own `environment.reference_sha256` digest and is
-#: not the artifact `provenance.input` hashes. See `env_provenance.repo_relative_path`.
-SCHEMA_VERSION = 2
+#: Bumped 2 -> 3 (issue #4984): top-level `reference` became the same
+#: `{path, scope}` shape, built from the resolved path `environment.
+#: reference_sha256` hashes, so `--check` is cwd-independent. Readers still
+#: accept the bare string of an older report; `klayout-runset` keeps strings.
+SCHEMA_VERSION = 3
 
 #: ``klayout`` (in-process ``NetlistComparer``) is the primary engine;
 #: ``netgen`` (issue #343) is a second, independent comparator wrapped as a
@@ -1503,14 +1505,15 @@ def run_lvs(
         layout_netlist, layout_spec, finfet_layout, finfet_bulk
     )
     if flatten_layout:
-        layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
-        if layout_flatten_warning is not None:
-            flatten_warnings.append(layout_flatten_warning)
+        flatten_layout_netlist(layout_netlist, finfet_layout, flatten_warnings)
 
     reference_netlist_path = _require_path(
         reference_spec, "netlist", "reference", request_dir
     )
-    reference_echo = reference_spec["netlist"]
+    reference_echo = env_provenance.repo_relative_path(
+        reference_netlist_path,
+        repo_root=env_provenance.repo_root_for(reference_netlist_path),
+    )
     reference_form = reference_spec.get("form", "plain-element")
     if reference_form not in _REFERENCE_FORMS:
         raise LvsError(
@@ -2883,7 +2886,8 @@ def run_lvs(
         # *resolved* layout path (`layout_hash_source` -- the file
         # `provenance.input.content_hash` below actually hashes), never the
         # request's own cwd-dependent echo. See `env_provenance.repo_relative_path`.
-        # `reference` stays the verbatim echo, pinned by `environment.reference_sha256`.
+        # Issue #4984: `reference` takes the same shape, built from the
+        # resolved path `environment.reference_sha256` hashes.
         "layout": env_provenance.repo_relative_path(
             layout_hash_source,
             repo_root=env_provenance.repo_root_for(layout_hash_source),
@@ -3180,8 +3184,8 @@ def _input_hash_check(
     ``{path, scope}`` object ``layout`` carries today is joined to the repo
     root of the committed report's own directory -- which is precisely the
     case the "known limitation" above describes, now *resolved* for the
-    layout side rather than merely diagnosed. ``reference`` still echoes the
-    request verbatim and keeps the cwd anchoring (and the diagnostic). An
+    layout side rather than merely diagnosed; ``reference`` too since #4984
+    (only a bare-string one keeps the cwd anchoring). An
     entry naming no path at all (``scope: "external"``/``"absent"``, or a
     report with no such field) resolves to ``None`` and renders exactly as
     an absent one always has.
@@ -3220,27 +3224,10 @@ def check_lvs_report(
     compares against ``provenance.deck.content_hash``. Each mismatch names
     which of the (up to three) inputs moved -- never a single pass/fail bit.
 
-    **Known limitation, now only for the reference side**:
-    ``committed["reference"]`` is echoed *exactly as given* in the original
-    request document (see :func:`run_lvs`'s docstring on
-    ``reference_echo``), which may have been relative to that request
-    *file's own directory* -- not necessarily the current working directory.
-    This re-hashes it relative to the current working directory (the same
-    convention ``klt drc --check``'s own pre-#2659 ``file`` field used); if
-    the original request used request-file-relative paths, invoke
-    ``--check`` from that same directory, or commit reports whose
-    ``reference`` is already an absolute path. Issue #2595: that anchoring
-    is unchanged, but hitting it no longer renders as a bare ``actual:
-    null`` -- an echoed path that names no existing file gets an
-    ``input_not_found`` block on its ``checks[]`` entry saying where it was
-    looked for, and where it *was* found relative to the report's own
-    directory when it is there. See :func:`_input_hash_check`.
-    ``committed["layout"]`` no longer has this limitation at all: since
-    issue #2659 it is the ``{path, scope}`` object, resolved against the
-    repo root of the committed report's own directory, so it re-hashes
-    correctly from any clone and from any working directory. A pre-#2659
-    report whose ``layout`` is a bare string keeps the old anchoring, and
-    the diagnostic above with it.
+    Since #2659 / #4984 ``layout`` and ``reference`` are ``{path, scope}``
+    objects resolved against the report's own repo root (cwd-independent).
+    Only a pre-#4984 or ``klayout-runset`` report's bare ``reference`` string
+    stays cwd-anchored (issue #2595's ``input_not_found`` diagnostic).
 
     ``layout_path`` (issue #2699, ``klt lvs --layout``) is an explicit layout
     that overrides the report's recorded ``layout`` unconditionally (see
@@ -3285,7 +3272,7 @@ def check_lvs_report(
             hash_check(
                 "provenance.deck.content_hash",
                 deck.get("content_hash"),
-                _content_hash(deck_source_path(deck["name"])),
+                content_hash(deck_source_path(deck["name"])),
             )
         )
     runset_hash = get_path(committed, ("provenance", "runset", "content_hash"))
@@ -3296,7 +3283,7 @@ def check_lvs_report(
             hash_check(
                 "provenance.runset.content_hash",
                 runset_hash,
-                _content_hash(committed.get("deck_file")),
+                content_hash(committed.get("deck_file")),
             )
         )
     result = build_check_result(report_path=report_path, checks=checks)
@@ -3456,7 +3443,11 @@ def _reconstruct_lvs_request(
     else:
         layout_spec["netlist"] = layout
 
-    reference_spec: dict[str, Any] = {"netlist": committed.get("reference")}
+    reference_spec: dict[str, Any] = {
+        "netlist": resolve_committed_path(
+            committed.get("reference"), report_path=report_path
+        )
+    }
     if reference_top:
         reference_spec["top"] = reference_top
     reference_spec.update(_reference_conversion_replay(committed))
@@ -3803,6 +3794,12 @@ def rerun_lvs_report(
     )
     fresh = _run_reconstructed_lvs(request)
     exclude = set(_LVS_RERUN_EXCLUDE_PATHS)
+    if isinstance(committed.get("reference"), str) and not isinstance(
+        fresh.get("reference"), str
+    ):
+        # Issue #4984: pre-v3 bare string vs fresh `{path, scope}` is a shape
+        # change, not drift (content stays diffed via reference_sha256).
+        exclude.update({("reference",), ("schema_version",)})
     exclude.update(
         (field,)
         for field in (

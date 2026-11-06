@@ -284,6 +284,10 @@ both, or neither, is a request error (exit 1).
 | `testbench.pass_marker` | Optional substring that must appear in the transcript. |
 | `testbench.fail_marker` | Optional substring that must **not** appear in the transcript. |
 | `testbench.dut_instance` | Hierarchical path of the DUT inside the bench (e.g. `tb_and2.dut`). Required with `options.sdf` (it is the `$sdf_annotate` scope), rejected without it. |
+| `testbench.plusargs` | Optional array of non-empty strings, each starting with `+` (default `[]`); appended verbatim after the `.vvp` path (`vvp sim.vvp +bin=/abs/f ...`) so a bench can read them with `$value$plusargs` / `$test$plusargs`. One argv element per entry (no shell, so values may contain `=` or spaces). Entries are **not** path-rewritten: `vvp` runs with `cwd=<build dir>`, so file arguments must be absolute (or relative to the build dir). Echoed verbatim as `environment.plusargs` (`[]` when absent), so **never put credentials in it**. Not valid with `testbench.module`. |
+
+`options.defines` and `options.build_args` apply to the `iverilog` build on
+this path exactly as on the cocotb path.
 
 **Verdict — never trust an exit code alone.** The run passes only when `vvp`
 exits 0, no `fail_marker` line appears, and (when declared) the `pass_marker`
@@ -755,6 +759,20 @@ as `Could not find handles for both ports!`, which the diagnostic gate
 already surfaces. The check is skipped when the top module's instance list
 cannot be derived (ANSI header, RTL top) and does not inspect hierarchy
 below a top-level instance.
+
+**A `CELL` scoped to an instance the netlist does not have is rejected up
+front** (issue #5002). The same `vvp` abort (`NULL handle passed to
+vpi_scan.`, return code -6, at the start of the first test) occurs when a
+`CELL` that carries `INTERCONNECT` entries is spelled `(INSTANCE <name>)` and
+`<name>` is not an instance of the annotation scope — most often the design's
+own root cell written as `(INSTANCE top)` instead of an empty `(INSTANCE)`.
+Reproduced on a flat netlist with `(DIVIDER /)`, scalar and bus top-level
+ports and entirely resolvable endpoints: `(INSTANCE)` annotates and passes,
+`(INSTANCE top)` aborts. `klt` fails before launching `vvp` with a
+`FunctionalVerificationError` naming the SDF line and instance. Supported:
+the root cell as an empty `(INSTANCE)`, and sub-instance cells whose first
+path component is an instance of the scope's module. Same skip conditions as
+the endpoint check above.
 
 **A zero-delay `INTERCONNECT` onto an `assign`-aliased top-level port bit is
 dropped before annotation, and counted** (issue #2285). A P&R backend drives

@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>|all]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--timeout-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>|all]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -29,7 +29,9 @@ this document (and the code) win.
 - `--max-units-per-job` — backend `batch`, `remote.hosts: 1` only: split the
   expanded unit list into batch jobs of at most this many units so no job
   outruns the fleet's whole-job ceiling; overrides `batch.max_units_per_job`
-  (see "Three budgets, and the fleet's whole-job ceiling").
+  (see "Three budgets, and the fleet's whole-job ceiling"). An explicit cap
+  is honored even when a shard's serial upper bound exceeds the ceiling (a
+  stderr warning says so).
 - `--max-concurrent-jobs` — backend `batch`, sharded runs (`remote.hosts > 1`
   or a split): keep at most this many shard jobs in flight at once and start
   the rest as earlier ones finish; overrides `batch.max_concurrent_jobs`.
@@ -43,6 +45,12 @@ this document (and the code) win.
   overriding the request's own `options.wall_clock_budget_s` when given.
   Defaults to unbounded (today's behaviour). See "Wall-clock budget, orphan
   safety, and resume" below.
+- `--timeout-s` — per-corner timeout in seconds, overriding the request's own
+  `options.timeout_s` when given (issue #5036; must be `> 0`; corner requests
+  only, rejected with `--batch-set`). Applied before the `batch` pre-submit
+  job-ceiling assessment (`timeout_s` x units + 120 s vs. `max_job_seconds`),
+  so lowering it legitimately silences the warning; the warning still fires
+  whenever the bound truly exceeds the ceiling. No JSON field changes.
 - `--resume` — resume from a matching on-disk checkpoint, skipping corners a
   prior interrupted run of this same request already completed, overriding
   the request's own `options.resume` when given. See "Wall-clock budget,
@@ -52,6 +60,11 @@ this document (and the code) win.
   Waits for it, bounded by `batch.poll_timeout_s`, and reports it without
   uploading or launching anything. See "Waiting, job id, and re-attaching"
   below.
+- `--collect-partial` — with `--attach <batch-shards.json>`: read each shard's
+  `status.json` once instead of waiting. Finished shards merge as in a plain
+  attach; every other shard's units come back `lost_shard` and are listed in
+  `environment.remote.unfinished_shards[]`. Refused without `--attach <shard
+  map>` (except with `--batch-set`, where it applies per member). See "Collecting a partial result" below.
 - `--fail-fast-probe` — before dispatching any real corner, run a short
   bounded `tran` calibration slice on the grid's first corner and abort the
   whole grid up front if the measured rate implies `options.timeout_s`
@@ -908,12 +921,12 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
 | `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
 | `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
-| `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
+| `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). The diagnostic `message` names the recovery command (re-run with the same `-o` and `--resume`; for a shard map, `--attach <batch-shards.json> --collect-partial`, then `--resume`); the run exits 4 when every unit ended this way. A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit (each holds at most `max_units_per_job = floor((max_job_seconds - 120) / options.timeout_s)` units). Any other value is rejected before any S3 write. |
-| `batch.max_units_per_job` | integer ≥ 1 | Opt-in cap on the units of one job ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)); `--max-units-per-job` overrides it. With `remote.hosts: 1` the request is split into `ceil(units / N)` balanced jobs, even when it would have fit one. The largest valid cap is `floor((max_job_seconds - 120) / options.timeout_s)` (`max_job_seconds` defaults to `3600`), so a fixed cap is only valid up to a given `options.timeout_s`; a request that must be valid across clients or timeouts should omit it and use `job_ceiling_check: "split"`. Rejected before any S3 write with `error.code: "batch_max_units_per_job_invalid"` when not a positive integer, when combined with `job_ceiling_check: "enforce"`, or when the resulting jobs would still exceed the ceiling. |
+| `batch.max_units_per_job` | integer ≥ 1 | Opt-in cap on the units of one job ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)); `--max-units-per-job` overrides it. With `remote.hosts: 1` the request is split into `ceil(units / N)` balanced jobs, even when it would have fit one. The ceiling bound is a fully-serial upper bound, not a runtime estimate, so an explicit cap is honored even when `timeout_s x shard units + 120` exceeds `max_job_seconds` ([#4982](https://github.com/2AMLogic/klayout-tools/issues/4982)); a stderr warning states the bound is a serial upper bound, and the harness still kills a job that actually runs past the ceiling. A request that should be sized automatically should omit the cap and use `job_ceiling_check: "split"` (largest shard `floor((max_job_seconds - 120) / options.timeout_s)`). Rejected before any S3 write with `error.code: "batch_max_units_per_job_invalid"` when not a positive integer, or when combined with `job_ceiling_check: "enforce"`. |
 | `batch.max_concurrent_jobs` | integer ≥ 1 | Opt-in bound on the shard jobs in flight at once for a sharded run (`remote.hosts > 1`, or a split) ([#3914](https://github.com/2AMLogic/klayout-tools/issues/3914)); `--max-concurrent-jobs` overrides it. Unset submits every shard at once, as before. With a cap of K, at most K jobs sit between submit and collected; the remaining shards start as earlier ones finish, and the merge order, `fleet[]`, `batch-shards.json` and `--resume` are unchanged. The effective value is echoed as `environment.remote.max_concurrent_jobs` only when set. Use it to stay under the fleet's instance cap (`BATCH_MAX_CONCURRENT_INSTANCES`) instead of letting refused shards come back as `lost_shard`; it composes with `capacity_wait_s` (a retry of a refused launch, drawing on the run-wide budget) and with `--resume`, which re-submits only the `lost_shard` / failed units. Rejected before any S3 write with `error.code: "batch_max_concurrent_jobs_invalid"` when not a positive integer. |
 
 ### Asynchronous submit and status (`--submit-only`, `--job-status`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073))
@@ -982,11 +995,49 @@ Use the same request file, overrides (`--max-units-per-job`, `--budget-s`,
 `--pdk-root`) and environment at `--attach`; on a `request_sha256` mismatch
 the error names the differing request field(s).
 
+*Attaching from another host.* The shard map records the jobs prefix, region,
+profile and every shard's `job_id` (never the bucket), and `--attach` reads
+only that map plus the request, so no other local state is needed: copy
+`batch-shards.json` into an empty `-o` directory on the other host, use the
+same request file and overrides, and the same bucket environment, then run
+the `--attach` command above. A test attaches from a copied map in an
+otherwise empty directory.
+
+*Collecting a partial result.* When a long sharded run is still going (or
+Spot interruptions keep restarting shards), `--attach <map> --collect-partial`
+returns at once with what has finished:
+
+```bash
+klt sim grid.json --backend batch --attach out/batch-shards.json --collect-partial -o out --format json
+```
+
+Shards in a terminal state (`done`, `failed`, `timeout`) are collected as in
+a plain attach. Any other shard (`running`, `interrupted`, unreadable status,
+or one the map records as submitted but never launched, reported `unlaunched`)
+is not waited on and never launched: each of its units is `lost_shard`, and
+`environment.remote` carries `unfinished_shards[]` (`index`, `job_id`, last
+observed `state`), `resumable: true` and `shard_map`. The exit code is `4`
+(incomplete). With every shard `done` the report equals a plain `--attach`;
+with none done every unit is lost. The map is changed only by collected state,
+so a later plain `--attach` (or `--resume`) still finishes the remaining
+shards. Without `--attach <shard map>` the flag is refused
+(`error.code: "collect_partial_requires_attach"`).
+
+Interrupted-shard retry stays with 2am's `reconcile`; the client never
+re-launches an `interrupted` job. To lose less work per reclaim, use smaller
+shards (`--max-units-per-job`) and `--collect-partial` plus `--resume`.
+
 *Interrupted submit.* If `--submit-only` is killed (for example during a long
 `--wait-for-capacity`), the shards not yet reached stay `pending` in
 `batch-shards.json`. Re-run the **same** `--submit-only` command: it reuses the
 map and submits only the `pending` shards (launched shards are never
 resubmitted).
+
+*Sibling requests need distinct `-o` directories.* A directory holds one
+`batch-shards.json`, so each sharded request needs its own `-o` directory. A
+second, different `--submit-only` request into an occupied directory is
+refused (`resume_fingerprint_mismatch`, the first map is left untouched);
+give it a distinct `-o`, or finish or attach the first request first.
 
 *Attaching one shard.* `--attach <shard job_id>` with the same request and
 `-o` dir collects only that shard (found via the `batch-shards.json` there)
@@ -1011,6 +1062,7 @@ the exit code describes the read, `state` describes the job:
 | `stale`, `stale_seconds` | Derived by `klt`, present only when a non-terminal job's `updated_at` is more than 900 s old (`STALE_AFTER_S`, three heartbeat periods): `stale: true` and the age of `updated_at` in seconds. A job that old is far likelier lost with its instance (e.g. a Spot reclaim) than slow. `state` is never rewritten — it stays the runner's own value. Absent for terminal and `pending` jobs and when `updated_at` is missing or unparseable; additive, so callers must treat both as optional ([#4616](https://github.com/2AMLogic/klayout-tools/issues/4616)) |
 | `progress` | Optional object the runner publishes into `status.json` while a job runs, e.g. `{"sim_time_s": 1.5e-6, "stop_time_s": 1e-5}` (simulated time reached, and the target stop time when known). Passed through verbatim and additive: omitted when the runner publishes none, so callers must treat it as optional ([#4291](https://github.com/2AMLogic/klayout-tools/issues/4291)) |
 | `instance` | `instance_id`, `instance_type`, `availability_zone`, `lifecycle`, `spot`, ... when published |
+| `exit_reason` | Additive (#4964). Present only when the job ended with a `klt sim` verdict exit (3 or 4) and its `report.json` was collected (on `--attach`/blocking runs, and on `--job-status` via one bounded read of `outputs/report.json`; skipped for non-terminal jobs and when the report is unreadable): `{exit_code, report_status, nothing_checked, nothing_checked_reasons, message, units}`. `units` (#5019) is `{total, by_status, first_not_passed}` — counts by unit status and the first 5 non-passing units with their first diagnostic `code`/`message`. `message` states the cause was the `klt sim` verdict, not the whole-job ceiling (a ceiling kill reports `state: timeout`, exit 124). Explains e.g. an op-only request (no measurements) whose corners pass but whose job state is `failed` / `job command exited 4`. |
 
 An unknown job id (no `job.json` under the prefix) is an error envelope with
 `error.code: "batch_job_not_found"`; a malformed id is
@@ -1037,6 +1089,13 @@ id survives the caller. Collecting a finished `--submit-only` job's report is
 `--attach <job_id>`, and an `interrupted` job is reported, never re-launched.
 
 ### Waiting, job id, and re-attaching ([#2978](https://github.com/2AMLogic/klayout-tools/issues/2978))
+
+Unsharded `--attach <job_id>` checks the supplied request against the
+`request_sha256` in `<artifacts_dir>/batch-receipt.json` when that receipt is
+for the same job id, and refuses a different request with
+`error.code: "resume_fingerprint_mismatch"` (the message names the receipt's
+hash). No receipt, or a receipt for another job id, proceeds unchanged
+([#4971](https://github.com/2AMLogic/klayout-tools/issues/4971)).
 
 The wait for a batch job is bounded by **`batch.poll_timeout_s`** (table
 above). Its default is the fully-serial worst case, so a many-unit request
@@ -1206,6 +1265,21 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   re-submits such a request up to `N` more times with doubling backoff
   (5s, 10s, ...). Only those two codes are retried -- never another failure,
   and never on local ngspice.
+- **All-or-nothing preflight** ([#4972](https://github.com/2AMLogic/klayout-tools/issues/4972)).
+  Before anything is submitted, every member is resolved (with
+  `--max-units-per-job` / `--max-concurrent-jobs` applied) and run through the
+  same whole-job ceiling / split check a real submit does
+  (`batch_job_ceiling_exceeded`, `batch_max_units_per_job_invalid`). If any
+  member fails, nothing is submitted, no `set-manifest.json` is written, and the
+  command exits `1` with error code `batch_set_preflight_failed` naming every
+  failing member (path and code). Capacity refusals (`--capacity-retries`) can
+  still fail mid-set.
+- **`--dry-run`** ([#5012](https://github.com/2AMLogic/klayout-tools/issues/5012)).
+  `klt sim --batch-set ... --dry-run` runs only the all-or-nothing preflight
+  above and exits `0` with `dry_run: true`, `submitted: 0` and one
+  `status: "dry_run"` entry per member. It never contacts the fleet and writes
+  no `set-manifest.json` or output directory. A failing member exits `1` with
+  `batch_set_preflight_failed`, as without the flag.
 - **Per-member sharding and capacity wait.** `--max-units-per-job`,
   `--max-concurrent-jobs` and `--wait-for-capacity` are forwarded to every
   member request and behave exactly as on a single `klt sim <request>`: each
@@ -1216,13 +1290,38 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   `.klt/sim/` directory next to the first request) is written when the set
   starts and atomically rewritten on every transition. It lists, per request,
   `index`, `request`, `dir`, `status` (`pending`/`running`/final), `attempts`,
-  and `job_id`/`job_ids` once the request finished, so a client interrupted
-  mid-set can re-associate the surviving directories. The aggregate envelope is
+  and `job_id`/`job_ids`, recorded the moment each batch job is submitted
+  (status `running`) rather than when the request finishes, so a client
+  interrupted mid-poll still leaves the request -> job id mapping on disk.
+  Member progress lines on stderr name the request:
+  `klt sim: batch job <id> (<request>): submitted`. The aggregate envelope is
   unchanged.
+- **After a killed client.** If the client is killed mid-wait (for example by
+  a caller timeout), the manifest keeps the last state it wrote: the request
+  stays `running`, and `job_id` is `null` for a request with more than one
+  shard job (the ids are in `job_ids`). The manifest is not rewritten on
+  resume-time inspection; `--resume` ignores the manifest status and
+  re-derives each request's state from its own `batch-shards.json`.
 - **Batch only, never local.** The backend is forced to `batch` (`--backend`
   other than `batch` is a usage error, exit `2`); a refused or failed request is
   reported, never re-run on local ngspice. `--plot` and `--op-lint` cannot be
   combined with it.
+- **Partial collection (`--collect-partial`,
+  [#5014](https://github.com/2AMLogic/klayout-tools/issues/5014)).** Allowed
+  with `--batch-set`. Each member whose directory (`<outdir>/<request-stem>/`)
+  holds a `batch-shards.json` is collected through the single-request
+  `--attach <map> --collect-partial` path: every shard is read once, nothing is
+  relaunched, finished shards are merged and the rest come back `lost_shard`
+  (listed in that member's `environment.remote.unfinished_shards[]`; no value is
+  fabricated). Such a member has a non-pass status, so the set exits non-zero
+  (the worst member code). Members with no shard map run as usual. Without the
+  flag nothing changes.
+- **Per-shard summary.** Each `requests[]` entry carries an additive `shards[]`:
+  `job_id`, `last_state` (last state this client observed, or the one a
+  `--collect-partial` read found) and `interrupted_observations` (how many times
+  this client saw the job enter `interrupted`; observed only -- fleet relaunches
+  are never inferred). Empty when this client observed no job. The text output
+  prints one `shard ...` line per row.
 - **Resuming a set (`--resume`).** `--resume` is forwarded to every request and
   each one resumes from its own directory, `<outdir>/<request-stem>/`. Re-run
   the same set with the same `-o`: a sharded request re-attaches to the shard
@@ -1237,6 +1336,17 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   still `interrupted` is re-polled first, so resuming it can wait up to another
   `batch.interrupted_grace_s` (default 1800 s) before its replacement is
   submitted. The aggregate envelope is unchanged.
+- **An interrupted (Spot-reclaimed) shard.** Polling is bounded: a shard that
+  stays `interrupted` is waited on for at most `batch.interrupted_grace_s`
+  (default 1800 s, settable only in the request's `batch` block), and while it
+  is polled it holds a `--max-in-flight` slot, so lowering the grace in the
+  request frees the slot sooner. The client never re-submits it itself.
+  To re-run only the units with no result, re-run the same set with the same
+  `-o` and `--resume` (or `--attach <batch-shards.json> --collect-partial`,
+  then `--resume`). A request the *client* stopped (Ctrl-C/SIGTERM) carries
+  `interrupted: true` in its `requests[]` entry (additive; present only when
+  true), distinguishing it from a shard that really failed; its unfinished
+  shards are `lost_shard` units.
 - **Per-request reports.** Each request writes its full single-request report
   to `report.json` in its own directory, `<outdir>/<request-stem>/` (without
   `-o`: `.klt/sim/<request-stem>/` next to the request file).
@@ -2263,6 +2373,19 @@ too (issue #4079: canary repos commit them), while the
 `--submit-only` / `--status` stdout outputs still carry `bucket` (operational, not
 committed evidence). Report-bound text (poll-timeout and interrupt messages,
 `harness_log`) shows `s3://<bucket>/...` literally in place of the name.
+
+### Keeping only the report, deck and measurements from a batch run
+
+The batch job always writes its artifacts under `$EDA_OUTPUT_DIR/artifacts`
+on the fleet, but they are only **installed into your `--outdir`** when the run
+keeps artifacts: `options.keep_artifacts: true`, or something that forces it
+(`options.waveforms`, `--plot`, declared complex vectors, a two-port analysis).
+With none of these set, no raw waveform files are installed locally
+(`_install_batch_artifacts` is gated on `keep_artifacts`); the report, deck and
+measurements come back in the report itself. There is no separate
+`--artifacts` switch: leave `keep_artifacts`/`waveforms` unset (and drop
+`--plot`) to keep the local tree small (issue #5036). Collecting fewer files
+on the fleet side is out of scope.
 
 ### Post-processing waveforms from a batch run locally
 
@@ -3651,6 +3774,51 @@ every backend (remote/batch workers re-read it from the request document).
 `tstart` delays data recording and `tmax` caps the internal timestep (a
 smaller `tmax` makes the rawfile larger; a larger `tstep` makes it smaller).
 There is no separate `analysis.tmax` field.
+
+**What bounds the internal step.** ngspice's `.tran` card is `tstep tstop
+tstart tmax`: `tstep` is the printing/suggested increment, and when `tmax` is
+omitted ngspice derives its default from `tstep` and `tstop`, so the solver's
+internal step (and therefore a self-timed oscillator's *measured period*)
+depends on the chosen window. Set `tmax` explicitly (e.g. `"1n 5u 0 1n"`)
+whenever a period or edge time is measured from a `crossings` or `.meas`.
+*Not yet verified against the real engine:* the exact default `tmax` formula
+and the reported 4.54e-7 s (100 ns step) vs 4.91e-7 s (2 ns step) period
+spread on one cell (#4970).
+
+### Per-corner analysis windows: `analysis_overrides` (issue #4970)
+
+One `analysis.args` cannot serve a grid whose time scales span orders of
+magnitude (e.g. a leakage-limited oscillator across process x supply x
+temperature). `analysis_overrides` replaces `analysis.args` for the corner
+points a rule matches:
+
+```json
+"analysis": {"kind": "tran", "args": "100n 50u 0 100n"},
+"analysis_overrides": [
+  {"match": {"temperature_c": 125}, "args": "1n 2u 0 1n"}
+]
+```
+
+- `match` takes the same keys and equality semantics as an `options.nodeset`
+  rule (`process`, `temperature_c`, `supply_v`, `params`; keys AND together;
+  `{}` matches every point). Rules resolve once after corner expansion and
+  `exclude`, before Monte Carlo cloning (samples inherit their base point's
+  window).
+- Two rules matching one point, a rule matching no retained point, an unknown
+  key, an empty/non-string `args`, or a `{...}` brace in `args` (ngspice) are
+  application errors (exit 1) naming `analysis_overrides[i]`, before any run.
+  A point no rule matches uses `analysis.args` unchanged.
+- Only `args` is replaced, never `kind`. Refused with `analysis_steps` and for
+  requests with no scalar `analysis` (deck-list / `commands[]`).
+- A corner whose window was overridden reports the additive field
+  `analysis_args` (the effective args); corners on the base window omit it.
+- Honored on every backend (the selected window travels with each point to
+  fleet/remote/batch workers); a worker that does not echo it fails with
+  `analysis_overrides_unsupported_worker`. A changed override invalidates a
+  `--resume` checkpoint.
+- Early-stop after N crossings is deliberately not offered: `stop when` is
+  unreliable in ngspice batch mode (see "Simulated-time-reached on timeout is
+  not available").
 
 **Diagnosing a still-missing measurement.** When a `.meas`/rawfile signal
 still comes back empty after this fix, ngspice's log gives the same `Error:
@@ -6294,7 +6462,9 @@ a corner grid. A stock ngspice without the module still produces the
 - **`corners.supply_waveforms`** (`array<string>`, optional; issue #2902) —
   names of `corners.supply_v` keys whose top-level **`PWL(...)`/`PULSE(...)`**
   source is *rescaled* per corner instead of `alter`ed. Every entry must also
-  be a `corners.supply_v` key; no `alter` is emitted for it. The corner runs
+  be a `corners.supply_v` key (with `corners.units`, a `supply_v` key of
+  **every** unit, see [Explicit unit list](#explicit-unit-list-cornersunits));
+  no `alter` is emitted for it. The corner runs
   against a per-corner copy of the netlist (`netlist.supply_waveforms.cir`
   in the corner directory; relative `.include` targets are made absolute) in
   which the source's voltage levels are multiplied by `supply / peak`, where
@@ -6518,6 +6688,12 @@ executed exactly as given with no crossing
   key, an array-valued `supply_v`, or two records with the same `corner_id`
   (supply is formatted to 3 decimals, so 0.1004 V and 0.1001 V collide) is a
   `SimError`.
+- `corners.supply_waveforms` (#2902) may accompany `corners.units`
+  (issue #4981): the top-level array applies to every unit, and each name
+  must be a `supply_v` key of every unit, whose value is the supply the
+  PWL/PULSE source is rescaled to (no `alter` is emitted). A unit missing the
+  rail is a `SimError` naming the unit index. Per-unit waveform lists are not
+  supported.
 - Works on every backend, including `remote`/batch (the worker re-expands the
   same list).
 
@@ -6991,8 +7167,9 @@ every request and report unchanged. Object keys: `max_attempts` (integer >= 1),
 a bad value is refused with an application error before any unit runs.
 
 - **Trigger.** Only a unit whose first attempt is `status: "error"` *because of* a
-  `nonconvergence` diagnostic (plus the missing-measurement / missing-vector
-  errors that follow from it). `singular_matrix`, `netlist`, `timeout`,
+  `nonconvergence` diagnostic (plus the errors that follow from it: the
+  missing-measurement / missing-vector errors, `timestep_too_small` and
+  `analysis_aborted`). `singular_matrix`, `netlist`, `timeout`,
   `engine_killed` and every other error class are never retried, and a
   `nonconvergence` ngspice recovered from by itself (a `pass`) is not either.
 - **Same draw.** The retry re-runs the same unit, so `sample_index` and
@@ -7002,7 +7179,10 @@ a bad value is refused with an application error before any unit runs.
   diagnostic naming the card and whether the retry recovered; its `runtime_s` is
   the total across attempts. A recovered unit contributes to the Monte Carlo
   statistics and `coverage` like any other sample; one that still fails stays
-  `error`.
+  `error`. With the option set, an `error` unit that is *not* retried carries an
+  `info` `convergence_retry` diagnostic (`not retried: error classes <codes> are
+  not a nonconvergence failure`), so "not triggered" is distinguishable from
+  "ignored"; it never changes the unit's status.
 - **Echo.** The resolved policy is reported as
   `environment.retry_on_convergence_error` (only when set).
 - **Backends.** `local`/`local-parallel` apply it directly. `remote`/`batch`
@@ -7408,7 +7588,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `nonconvergence`   | Iteration-limit / gmin-stepping / source-stepping / time-step-too-small text (Xyce's `Time step too small`; ngspice's own `Timestep too small` abort is `timestep_too_small` above). |
 | `missing_include`  | ngspice's own `Error: Could not find include file ...` — a `.include`/`.inc` target that did not resolve. Everything downstream of it (missing devices, then `.meas` cards finding no vector) reads like a broken circuit, so it gets its own code rather than surfacing only as measurement failures ([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)). For an off-host backend this is now unreachable by construction — the include closure is staged, or the submit is refused (see "Off-host backends stage the netlist's `.include` closure" above). |
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
-| `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w`, or `w * nf` when fingered, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
+| `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w` as written, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
 | `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
 | `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
@@ -7437,7 +7617,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `batch_job_interrupted` | The corner's result was never observed: the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than `batch.interrupted_grace_s`, so polling stopped before `poll_timeout_s`. Distinct from `batch_poll_timeout`; the job may still be recoverable on the fleet and the client does not re-launch it. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
-| `convergence_retry` | The record of an opt-in retry (`options.retry_on_convergence_error`, issue #2973): the unit's first attempt ended in a `nonconvergence` error, so it was re-run with tighter solver options. The message names the `.options` card used and whether the retry recovered. `severity: "warning"`; informational, it never changes the unit's status. See "Retrying a non-converged unit" below. |
+| `convergence_retry` | The record of an opt-in retry (`options.retry_on_convergence_error`, issue #2973): the unit's first attempt ended in a `nonconvergence` error, so it was re-run with tighter solver options. The message names the `.options` card used and whether the retry recovered. `severity: "warning"` for a retry; `severity: "info"` (`not retried: ...`) when the option was set but the unit's error class is not a nonconvergence failure. Informational, it never changes the unit's status. See "Retrying a non-converged unit" below. |
 | `inconclusive` | **Emitted, never selectable.** The marker this command attaches to a corner it graded `status: "inconclusive"` because `options.fail_on_diagnostic` named a code the corner emitted (issue #2492) — the message names those code(s), so the report says *why* a corner whose numbers look fine is not being reported as a pass. `severity: "warning"`. See "Grading a recovered diagnostic as inconclusive" below. |
 | `implausible_solution` | **Emitted, never selectable.** The marker for the *other* route to `status: "inconclusive"`: a measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. `severity: "warning"`, never `"error"`. |
 | `margin_ambiguous` | **Emitted, never selectable.** A third route to `status: "inconclusive"` (issue #3088): a `measurements[].transfer` margin metric met its limit but the AC band cannot support a pass (`ambiguity[]` in the entry's `transfer.margins`); see "Margins at every crossing". `severity: "warning"`, never `"error"`. |
@@ -7646,26 +7826,38 @@ Some PDKs' BSIM model cards enforce an undocumented per-instance width *bin
 range* — a device sized past it fails ngspice with a generic
 `Error: could not find a valid modelname`, which says nothing about width
 and reads like the device name is wrong or the model library never loaded.
-gf180mcu's `nfet_06v0`/`pfet_06v0` hit this at roughly 100–110 µm of total
-instance width, and the failure is identical whether the width comes from a
-single large `w=` or from fingering it via `nf=` — `nf=` parallels *inside*
-the same model-card instance the width check applies to, so it trips the
-same ceiling `w=` alone does. Only `m=` (the parallel-*instance* multiplier,
-applied outside that check, with each instance's own `w=` kept under the
-ceiling) reliably works around it (issue #1214).
+gf180mcu's `nfet_06v0`/`pfet_06v0` hit this at roughly 100–110 µm of
+instance `w`. Selection keys on `w` **as written**, not on `w * nf`
+(issue #4976): observed on ngspice 42/46, `w=2u nf=64` passes while
+`w=128u nf=1` and `w=128u nf=64` both abort. (An earlier observation,
+`w=50u nf=450` aborting, is consistent with neither reading and remains
+unexplained.) **ngspice 47 is unverified.** Only `m=` (the
+parallel-*instance* multiplier, applied outside that check, with each
+instance's own `w=` kept under the ceiling) reliably works around it
+(issue #1214).
+
+`klt sim` scans the netlist text the same way (it never needs ngspice's log for
+this) and, when an instance's `w` is at/above the ceiling, adds a
+**non-fatal** top-level `diagnostics[]` entry. `klt sim --dry-run` computes it
+without running anything; on a normal run the report carries the same
+preflight warning, attached at report assembly (after the corners finish), so
+it is present even when every corner passed. The entry has `severity: "warning"`,
+`code: "model_bin_range_preflight"`, and `instance`, `model`, `w_um`, `nf`
+fields. It never rejects the run; a `w` given as an expression is skipped.
 
 When ngspice's log matches this failure, `klt sim` re-scans the corner's own
 netlist for MOS-shaped instances (`M`/`X` cards) and picks out the one with
-the largest total width (`w`, or `w * nf` when fingered) that does not
+the largest `w` as written (`nf` is not multiplied in) that does not
 already use `m=` — the most likely culprit — and reports it by name in the
 `model_bin_range` diagnostic's `message`, e.g.:
 
 ```
 ngspice reported "could not find a valid modelname" -- likely cause:
-instance 'X5' (nfet_06v0) with w=50u nf=450 (22500 um effective width)
-exceeds the model card's per-instance width bin range (undocumented,
-~100 um on gf180mcu); use m= to parallel multiple smaller-width instances
-instead of a single large w= or nf= (see issue #1214)
+instance 'X5' (nfet_06v0) with w=128u nf=64 exceeds the model card's
+per-instance width bin range (undocumented, ~100 um on gf180mcu, keyed on w
+as written; nf= does not widen it); use m= to parallel multiple
+smaller-width instances instead of a single large w= (see issues #1214,
+#4976)
 ```
 
 This is a heuristic over the netlist text, not a validated PDK limit: the

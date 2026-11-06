@@ -66,7 +66,7 @@ from ._paths import _tcl_net_list as _tcl_net_list
 # Same intent -- and same redundant `X as X` alias form -- as the
 # `place_and_route_sta` re-export block below.
 from ._power_activity import power_basis_block, validate_power_activity
-from ._provenance import INPUT_ROLE_NETLIST, _content_hash, build_provenance
+from ._provenance import INPUT_ROLE_NETLIST, build_provenance, content_hash
 from ._report_verify import (
     VOLATILE_FLOW_PATHS,
     build_check_result,
@@ -149,18 +149,6 @@ from .place_and_route_reports import (
 from .place_and_route_reports import (
     count_route_drc_violations as _count_route_drc_violations,
 )
-from .place_and_route_request import (
-    _BLOCK_COMMENT_RE as _BLOCK_COMMENT_RE,
-)
-from .place_and_route_request import (
-    _FLOORPLAN_METHOD_FIELDS as _FLOORPLAN_METHOD_FIELDS,
-)
-from .place_and_route_request import (
-    _LINE_COMMENT_RE as _LINE_COMMENT_RE,
-)
-from .place_and_route_request import (
-    _MACRO_INSTANCE_RE_TEMPLATE as _MACRO_INSTANCE_RE_TEMPLATE,
-)
 
 # The request-validation subsystem (issue #3699 split) lives in
 # `place_and_route_request.py`: the pure validators/resolvers that take a request
@@ -170,22 +158,7 @@ from .place_and_route_request import (
 # `klayout_tools.place_and_route.<name>` keeps resolving for the CLI, `eval`, the
 # batch backend and the test suite.
 from .place_and_route_request import (
-    _MACRO_ORIENTATIONS as _MACRO_ORIENTATIONS,
-)
-from .place_and_route_request import (
-    _MAX_ANTENNA_REPAIR_ITERATIONS_CAP as _MAX_ANTENNA_REPAIR_ITERATIONS_CAP,
-)
-from .place_and_route_request import (
-    _NETLIST_SIGNED_DECL_RE as _NETLIST_SIGNED_DECL_RE,
-)
-from .place_and_route_request import (
-    _NETLIST_X_CONSTANT_RE as _NETLIST_X_CONSTANT_RE,
-)
-from .place_and_route_request import (
     _PDN_PRESETS as _PDN_PRESETS,
-)
-from .place_and_route_request import (
-    _PORT_CONNECTION_RE as _PORT_CONNECTION_RE,
 )
 from .place_and_route_request import (
     PlaceAndRouteError as PlaceAndRouteError,
@@ -203,9 +176,6 @@ from .place_and_route_request import (
     _reject_unsupported_netlist_constructs as _reject_unsupported_netlist_constructs,
 )
 from .place_and_route_request import (
-    _reject_wired_port_less_pins as _reject_wired_port_less_pins,
-)
-from .place_and_route_request import (
     _resolve_gds_view as _resolve_gds_view,
 )
 from .place_and_route_request import (
@@ -221,9 +191,6 @@ from .place_and_route_request import (
     _resolve_pdn_preset as _resolve_pdn_preset,
 )
 from .place_and_route_request import (
-    _strip_verilog_comments as _strip_verilog_comments,
-)
-from .place_and_route_request import (
     _validate_constraints as _validate_constraints,
 )
 from .place_and_route_request import (
@@ -234,9 +201,6 @@ from .place_and_route_request import (
 )
 from .place_and_route_request import (
     _validate_io as _validate_io,
-)
-from .place_and_route_request import (
-    _validate_io_delay as _validate_io_delay,
 )
 from .place_and_route_request import (
     _validate_library as _validate_library,
@@ -279,9 +243,6 @@ from .place_and_route_request import (
 )
 from .place_and_route_request import (
     _validate_sweep_corners as _validate_sweep_corners,
-)
-from .place_and_route_request import (
-    _validate_tapcell as _validate_tapcell,
 )
 from .place_and_route_request import (
     _validate_target_stage as _validate_target_stage,
@@ -2688,7 +2649,7 @@ def _run_rebuild_corners(
     """
     request_dir = os.path.dirname(os.path.abspath(request_path))
     netlist_path = _resolve_netlist(request["netlist"], request_dir)
-    input_hash = _content_hash(netlist_path)
+    input_hash = content_hash(netlist_path)
     cell_library = request["pdk"].get("cell_library")
     if not isinstance(cell_library, str) or not cell_library:
         raise PlaceAndRouteError("request.pdk.cell_library is required")
@@ -2698,7 +2659,7 @@ def _run_rebuild_corners(
         liberty_path, _corner, _info = _resolve_liberty(
             cell_library, name, variant=pdk_variant, root=pdk_root
         )
-        deck_hashes[name] = _content_hash(liberty_path)
+        deck_hashes[name] = content_hash(liberty_path)
 
     stage_root = _stage_root(request_dir, request)
     corner_runs: list[dict[str, Any]] = []
@@ -3273,7 +3234,7 @@ def _place_and_route_provenance_hashes(
         variant=pdk_variant,
         root=pdk_root,
     )
-    return _content_hash(netlist_path), _content_hash(liberty_path)
+    return content_hash(netlist_path), content_hash(liberty_path)
 
 
 def check_place_and_route_report(

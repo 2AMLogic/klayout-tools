@@ -1028,7 +1028,7 @@ device additionally requires; sg13g2's `PolyRes.drawing` `(128, 0)`, plus
 the `EXTBlock`/`Res` layers its own `rsil` device additionally requires — see
 below), so `klt gen res_array`'s output is directly recognised as a resistor
 device by `klt extract --deck <pdk>` rather than being absorbed into ordinary
-poly interconnect as a short (issue #369). On sg13g2 (issue #2679) the
+poly interconnect as a short (issue #369). On sg13g2 (issue #2679) and sg13cmos5l (issue #3094) the
 poly layer (`GatPoly`) is drawn as only the two end heads, abutting the
 `PolyRes` body with zero overlap, matching IHP's own `rsil`/`rppd`/`rhigh`
 PCells (where `PolyRes` is the resistive body itself) rather than one

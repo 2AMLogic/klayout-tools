@@ -14,6 +14,37 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract` docs: `devices[]` is the device contract, the written deck's
+  card form is not** (issue #5050): `docs/cli/extract.md` now states that
+  consumers should read devices from the JSON `devices[]` (class,
+  `params.r_ohm` / `params.c_f`) rather than card-matching `-o out.spice`, and
+  lists the resistor (`R` → `X` subcircuit, 0.7.0, #1157) and capacitor
+  (dropped trailing model name, 0.5.0, #1558) card-form changes as examples.
+  Convention from here on: any release that changes a written card form gets
+  a changelog line naming the device class and the old and new form. Docs
+  only; no JSON field, schema or `schema_version` change.
+
+- **sky130 `npc` now encloses each poly-contact licon by 0.1 µm** (issue
+  #2934): `klt gen` generators with `gate_contact` grew `npc` 0.095 µm around
+  the licon, short of `licon.15` (0.1 µm, `sky130A.lydrc`). Geometry-only
+  change; no JSON field or deck change.
+
+- **sg13cmos5l poly resistors from PDK PCells** (issue #3094): `klt extract
+  --deck sg13cmos5l` now recognises `rsil`/`rppd`/`rhigh` drawn the IHP PCell
+  way (`PolyRes` body, two abutting `GatPoly` heads) by declaring
+  `topology="abutting_heads"`, as sg13g2 did in #2679; a missing head or a gap
+  is not recognised, and the legacy continuous-bar shape still extracts.
+  `klt gen res_array` on sg13cmos5l now draws the same convention.
+
+## 0.9.1 (2026-11-05)
+
+- **`klt sim` `corners.supply_waveforms` with `corners.units`** (issue #4981):
+  a PWL/PULSE supply source can now be rescaled per unit in an explicit
+  `corners.units` request (each name must be a `supply_v` key of every unit).
+  Previously the option was silently ignored with `units`. Requests without
+  the option are unchanged.
+
+- **`klt sim` honors an explicit `--max-units-per-job` over the ceiling bound** (issue #4982): the whole-job ceiling bound (`timeout_s x units + 120`) is a serial upper bound, so a cap whose shards exceed it is no longer rejected with `batch_max_units_per_job_invalid`; it is honored with a stderr warning. Non-positive caps, `enforce` combos and a single unit over the ceiling still fail as before.
 - **Automated releases** (issue #4920, design in
   [`RELEASING.md`](RELEASING.md) "Automated release"): `release.yml` opens a
   weekly `chore(release)` PR when `main` is over the commit backstop, tags the
