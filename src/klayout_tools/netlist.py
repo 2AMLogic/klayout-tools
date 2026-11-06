@@ -961,10 +961,6 @@ def run_netlist(
     ``relative_paths=True`` (issue #5046) writes ``** sch_path:`` / ``** sym_path:``
     comments relative to the schematic's git toplevel (checkout-independent).
 
-    ``provenance_header=False`` (issue #5085) omits the ``** klt-netlist-inputs:``
-    line from the written netlist, so it is byte-identical to the raw xschem
-    export; ``--check`` is unaffected (it already compares on the fresh bytes).
-
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
     missing/unlaunchable xschem, the timeout (after SIGTERM->SIGKILL
@@ -1055,9 +1051,7 @@ def run_netlist(
             payload["warnings"] = warnings
 
         inputs = generation_inputs(version, rcfile, pdk_block)
-        written_data = (
-            inputs_record_line(inputs) + fresh_data if provenance_header else fresh_data
-        )
+        written_data = inputs_record_line(inputs, provenance_header) + fresh_data
         if check:
             status, drift = _check_result(
                 output,
@@ -1066,15 +1060,13 @@ def run_netlist(
                 xschem_version=version,
                 inputs=inputs,
             )
-            payload["status"] = status
-            payload["netlist"] = _netlist_block(None, written_data)
-            payload["drift"] = drift
+            nb = _netlist_block(None, written_data)
+            payload.update(status=status, netlist=nb, drift=drift)
             return payload
 
         _write_output(output, written_data)
-        payload["status"] = STATUS_GENERATED
+        payload.update(status=STATUS_GENERATED, provenance_header=provenance_header)
         payload["netlist"] = _netlist_block(output, written_data)
-        payload["provenance_header"] = provenance_header
         return payload
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

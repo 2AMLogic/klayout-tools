@@ -34,7 +34,10 @@ def generation_inputs(
     }
 
 
-def inputs_record_line(inputs: dict[str, str | None]) -> bytes:
+def inputs_record_line(inputs: dict[str, str | None], enabled: bool = True) -> bytes:
+    """The record line, or ``b""`` when ``enabled`` is false (issue #5085)."""
+    if not enabled:
+        return b""
     return INPUTS_RECORD_PREFIX + json.dumps(inputs, sort_keys=True).encode() + b"\n"
 
 
