@@ -687,6 +687,17 @@ fail on an empty run. An older gf180mcu layout (fragments under
 returns nothing and you pass a `run_drc.py --macro_gen` output via
 `--deck-file`.
 
+**Known limitation: 3LM gf180mcu variants.** As reported in issue #5091 (not
+re-verified by klt), the native deck's `rule_decks/mslot.rb` uses
+`metal4_drawn` unguarded, so on a 3-metal-layer stack the deck aborts after
+`Executing deck mslot1 ...` with `undefined local variable or method
+'metal4_drawn'`, and `--deck-var metal_level=3LM --deck-var metal_top=30K`
+does not help. The run ends as an error (`klayout_deck_aborted`; the structured
+`error.abort` names the deck and symbol) and any partial report is never
+`clean` (`--allow-deck-errors` only records it under `engine_deck_errors`).
+Not yet reported upstream to gf180mcu-pdk. A per-deck subset runner is not
+provided.
+
 A flat, single-PDK install (IHP-Open-PDK's SG13G2/SG13CMOS5L, see
 [`docs/cli/pdk.md`](pdk.md)'s "Scope") nests its native deck one directory
 deeper than open_pdks does — `libs.tech/klayout/tech/drc/<variant>.drc`,
@@ -4157,6 +4168,7 @@ carries `error.code` (exit stays `1`, so no contract break):
 | `klayout_unavailable` | the standalone `klayout` binary is missing or could not be launched |
 | `klayout_version_too_old` | the detected version is below `--min-klayout-version` |
 | `negative_control_failed` | see "Negative control" |
+| `klayout_deck_aborted` | the native deck aborted part-way (issue #5091). `error.abort` names the failing deck (`deck`, `deck_file`, from the last `Executing deck <name> from <path>` line), the Ruby `message`, the offending `symbol` and `location` (`file:line`) when klayout printed them; `error.decks_executed` lists decks klayout logged as started, the last being the one that aborted. Fields are omitted when the output has none to parse. |
 
 Any other failure carries no code. Exit `1` is deliberate: an exit-0 "could
 not run" is what a CI script could mistake for clean.
