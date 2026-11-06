@@ -41,7 +41,9 @@
         "klayout_tools.characterize_sequential",
         "klayout_tools.cli.characterize_cmd",
         "klayout_tools.liberty_compare",
+        "klayout_tools.liberty_leakage",
         "klayout_tools.liberty_render_pin",
+        "klayout_tools.liberty_units",
         "klayout_tools.liberty_writer"
       ]
     },
