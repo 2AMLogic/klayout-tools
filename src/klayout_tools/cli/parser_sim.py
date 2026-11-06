@@ -249,6 +249,20 @@ def add_sim_parser(
         ),
     )
     sim_parser.add_argument(
+        "--timeout-s",
+        dest="timeout_s",
+        type=float,
+        default=None,
+        help=(
+            "per-corner timeout in seconds (default: the request's "
+            "`options.timeout_s`); overrides the request field when given. "
+            "On backend `batch`, lowering it lowers the pre-submit job-ceiling "
+            "bound (timeout_s x units + 120 s); the warning still fires when "
+            "the bound truly exceeds the ceiling. Must be > 0; corner "
+            "requests only. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--resume",
         dest="resume",
         action="store_true",

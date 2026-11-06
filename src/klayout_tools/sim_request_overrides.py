@@ -84,3 +84,21 @@ def _with_capacity_wait_override(
         **request,
         "batch": {**(request.get("batch") or {}), "capacity_wait_s": value},
     }
+
+
+def _with_timeout_override(
+    request: dict[str, Any], timeout_s: float | None
+) -> dict[str, Any]:
+    """Fold the ``--timeout-s`` CLI override into ``request.options.timeout_s``
+    (issue #5036), leaving the loaded request untouched. The flag wins over the
+    request field; it must be a positive number. Applied before the batch
+    job-ceiling assessment, so a lowered bound legitimately silences the
+    warning while a bound that still exceeds the ceiling warns as before."""
+    if timeout_s is None:
+        return request
+    if isinstance(timeout_s, bool) or not timeout_s > 0:
+        raise SimError("--timeout-s must be a positive number of seconds")
+    return {
+        **request,
+        "options": {**(request.get("options") or {}), "timeout_s": timeout_s},
+    }

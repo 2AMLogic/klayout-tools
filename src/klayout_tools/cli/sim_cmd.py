@@ -145,6 +145,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             command_approvals=getattr(args, "command_approvals", None),
             pdk_root=getattr(args, "pdk_root", None),
             collect_partial=getattr(args, "collect_partial", False),
+            timeout_s=getattr(args, "timeout_s", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -288,6 +289,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--submit-only", getattr(args, "submit_only", False)),
             ("--job-status", getattr(args, "job_status", None)),
             ("--pdk-root", getattr(args, "pdk_root", None)),
+            ("--timeout-s", getattr(args, "timeout_s", None)),
         )
         if value is not None and value is not False and value != ""
     ]
