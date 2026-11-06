@@ -439,8 +439,8 @@ than only in a PR description:
   rejection other than reordering rows. Each entry must set at least one
   key; a net name matching no derived entry (unmapped, fewer than 2 pins,
   or nonexistent) adds a `warnings[]` entry and is otherwise ignored; unlisted
-  nets are unchanged. An unrecognised `request.routing` key is a usage error, mirroring
-  `request.pdk`/`request.netlist`'s own unknown-key rejection.
+  nets are unchanged. An unrecognised `request.routing` key is a usage error,
+  mirroring `request.pdk`/`request.netlist`'s own unknown-key rejection.
 - **Resolved-generator-vs-declared-`device_class` consistency (issue
   #1731).** Phase B only checks a `device_groups[].devices[].device_class`
   against what the netlist digest itself declares for that device name — it
