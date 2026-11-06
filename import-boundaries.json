@@ -238,9 +238,13 @@
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.functional_verification",
         "klayout_tools.functional_verification_initial_state",
+        "klayout_tools.functional_verification_mutation",
+        "klayout_tools.functional_verification_mutation_proposals",
+        "klayout_tools.functional_verification_mutation_variant",
         "klayout_tools.functional_verification_sdf",
         "klayout_tools.functional_verification_sdf_instance",
-        "klayout_tools.functional_verification_sdf_rename"
+        "klayout_tools.functional_verification_sdf_rename",
+        "klayout_tools.functional_verification_verilog_top"
       ]
     },
     "fill": {

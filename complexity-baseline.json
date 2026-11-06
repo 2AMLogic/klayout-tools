@@ -274,7 +274,7 @@
       "complexity": 12
     },
     {
-      "file": "src/klayout_tools/functional_verification.py",
+      "file": "src/klayout_tools/functional_verification_mutation_proposals.py",
       "function": "load_mutation_proposals",
       "complexity": 17
     },
@@ -284,7 +284,7 @@
       "complexity": 20
     },
     {
-      "file": "src/klayout_tools/functional_verification.py",
+      "file": "src/klayout_tools/functional_verification_mutation.py",
       "function": "run_functional_verification_with_mutations",
       "complexity": 16
     },
