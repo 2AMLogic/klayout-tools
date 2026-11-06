@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract` docs: `devices[]` is the device contract, the written deck's
+  card form is not** (issue #5050): `docs/cli/extract.md` now states that
+  consumers should read devices from the JSON `devices[]` (class,
+  `params.r_ohm` / `params.c_f`) rather than card-matching `-o out.spice`, and
+  lists the resistor (`R` → `X` subcircuit, 0.7.0, #1157) and capacitor
+  (dropped trailing model name, 0.5.0, #1558) card-form changes as examples.
+  Convention from here on: any release that changes a written card form gets
+  a changelog line naming the device class and the old and new form. Docs
+  only; no JSON field, schema or `schema_version` change.
+
 - **sky130 `npc` now encloses each poly-contact licon by 0.1 µm** (issue
   #2934): `klt gen` generators with `gate_contact` grew `npc` 0.095 µm around
   the licon, short of `licon.15` (0.1 µm, `sky130A.lydrc`). Geometry-only

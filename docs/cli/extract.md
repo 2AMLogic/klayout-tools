@@ -7983,6 +7983,39 @@ unknown fields. See [`docs/json-contract.md`](../json-contract.md) for the
 envelope shared across all `klt` commands (`schema_version`, error shape,
 exit codes).
 
+### `devices[]` is the device contract; the written deck's card form is not
+
+The stable device contract is `devices[]` in this JSON envelope: each device's
+class plus its `params` (e.g. `params.r_ohm`, `params.c_f`). The SPICE deck
+written by `-o out.spice` is a *simulation artifact*, and its **card form can
+change in any release, with or without `--pdk`** — the card prefix
+(`R` vs an `X` subcircuit call), a trailing model name, and how parameters are
+spelled (`r=` / `L=` / `W=`) are all outside the contract. No JSON field
+describes the card form, deliberately: it varies per device class and per
+`--pdk` binding, so one scalar could not.
+
+Consumers should read device class and value from `devices[]`. A consumer that
+matches cards in the written deck with a prefix regex will not error when the
+form changes; it silently matches nothing and reports zero devices. If you
+must parse the deck, expect to adapt per release and pin `klt --version` (or
+`provenance`) alongside it. Examples of card-form changes, each recorded in
+[`CHANGELOG.md`](../../CHANGELOG.md):
+
+- **Resistors, 0.7.0** (#1157): a bulk-bearing drawn resistor (e.g. sky130
+  `res_xhigh_po`) written without `--pdk` changed from a 3-net
+  `R$1 A B W 12000 res_xhigh_po` card to a subcircuit call
+  `X$1 A B W res_xhigh_po r=12000 L=6U W=1U`. Two-terminal classes keep the
+  `R` card.
+- **Capacitors, 0.5.0** (#1558): the `C` card stopped carrying the device
+  class's name as a trailing 4th token
+  (`C$1 a b 1.119e-13 cap_mim_1f0_m4m5_noshield` → `C$1 a b 1.119e-13`),
+  because ngspice reads that token as a `.model` reference.
+
+Card-form changes get a `CHANGELOG.md` line naming the device class and the
+old and new form. This is the same kind of non-contract as the anonymous-net
+numbering described in
+[Anonymous net numbering (`$N`)](#anonymous-net-numbering-n-is-not-a-stable-cross-platform-contract-issue-1063).
+
 ```json
 {
   "schema_version": 4,
