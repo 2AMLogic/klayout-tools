@@ -40,9 +40,6 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#4763**: Live-verify gf180mcu tran run with models.param_file (follow-up to #4759)
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1
 - **#4891**: batch fleet runner's ngspice cannot evaluate sky130A model-library expr() parameters (runner image gap), engine_version still null
-- **#5014**: feat: partial collection and per-shard interruption summary for klt sim --batch-set --resume
-- **#5018**: klt yield: klt_yield_native not installable from a release or the installed tool (recurrence of #1061, #2466, #2531, #2900, #4671)
-- **#5019**: klt sim batch: job fails with 'job command exited 4' and no per-unit diagnostics recoverable
 
 ## In Progress
 
@@ -53,6 +50,8 @@ Issues currently being built (`loom:building`).
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
 - **#4966**: layout-plan execute: places sky130 5V-class blocks but routes none of the nets (exit 3), no pin labels for LVS
+- **#5018**: klt yield: klt_yield_native not installable from a release or the installed tool (recurrence of #1061, #2466, #2531, #2900, #4671)
+- **#5025**: klt sim --attach/--resume wait loop never exits on a shard stuck in terminal 'interrupted' (spot reclaim)
 
 ## PRs Awaiting Review
 
@@ -62,6 +61,8 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 - **#4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
 - **#4772**: fix: honor --dry-run and --wait-for-capacity under klt sim --batch-set
+- **#5022**: feat: yield install hint names [yield] extra; report records native build
+- **#5026**: feat: name the recovery command in batch_job_interrupted message
 
 ## Approved (Awaiting Merge)
 
@@ -102,9 +103,8 @@ Issues carrying `loom:curated`.
 - **#4845**: ring-check --pdk sg13g2: cross-check re-implemented Seal.* rules against the real Ruby deck *(curated)*
 - **#4902**: klt sim batch backend: derived measurements referencing other measurements (m_<name>) produce no value *(curated)*
 - **#4966**: layout-plan execute: places sky130 5V-class blocks but routes none of the nets (exit 3), no pin labels for LVS *(curated)*
-- **#5014**: feat: partial collection and per-shard interruption summary for klt sim --batch-set --resume *(curated)*
 - **#5018**: klt yield: klt_yield_native not installable from a release or the installed tool (recurrence of #1061, #2466, #2531, #2900, #4671) *(curated)*
-- **#5019**: klt sim batch: job fails with 'job command exited 4' and no per-unit diagnostics recoverable *(curated)*
+- **#5025**: klt sim --attach/--resume wait loop never exits on a shard stuck in terminal 'interrupted' (spot reclaim) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -131,11 +131,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 1 |
-| Ready (`loom:issue`) | 18 |
-| In Progress (`loom:building`) | 5 |
-| PRs awaiting review | 4 |
+| Ready (`loom:issue`) | 15 |
+| In Progress (`loom:building`) | 7 |
+| PRs awaiting review | 6 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 32 |
+| Curated | 31 |
 | Architect / Hermit proposals | 11 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
