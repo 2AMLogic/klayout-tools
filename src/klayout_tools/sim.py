@@ -4875,6 +4875,31 @@ _KNOWN_REQUEST_KEYS = frozenset(
     }
 )
 
+#: Keys ``klt sim`` reads from the ``corners`` object. A dry run reports
+#: anything else as a warning (issue #5060) -- never an error.
+_KNOWN_CORNER_KEYS = frozenset(
+    {
+        "options",
+        "params",
+        "process",
+        "supply_v",
+        "supply_waveforms",
+        "temperature_c",
+        "temperature_param",
+        "units",
+        "variants",
+    }
+)
+
+
+def _unknown_corner_key_warning(key: str) -> str:
+    if key == "exclude":
+        return (
+            "unknown key 'exclude' under corners (ignored by klt sim); "
+            "'exclude' belongs at the top level of the request"
+        )
+    return f"unknown key '{key}' under corners (ignored by klt sim)"
+
 
 def _build_dry_run_report(
     request: dict[str, Any],
@@ -4917,6 +4942,12 @@ def _build_dry_run_report(
         f"unknown top-level request key '{key}' (ignored by klt sim)"
         for key in sorted(set(request) - _KNOWN_REQUEST_KEYS)
     ]
+    corners_obj = request.get("corners")
+    if isinstance(corners_obj, dict):
+        warnings.extend(
+            _unknown_corner_key_warning(str(key))
+            for key in sorted(set(corners_obj) - _KNOWN_CORNER_KEYS, key=str)
+        )
     report: dict[str, Any] = {
         "dry_run": True,
         "status": "valid",

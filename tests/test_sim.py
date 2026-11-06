@@ -14673,6 +14673,33 @@ def test_run_sim_dry_run_warns_on_unknown_key(tmp_path):
     assert "monte_carol_typo" in report["warnings"][0]
 
 
+def test_run_sim_dry_run_warns_on_misplaced_exclude_under_corners(tmp_path):
+    request = _dry_run_mc_request(
+        tmp_path,
+        corners={
+            "temperature_c": [27, 85],
+            "exclude": [{"temperature_c": 85}],
+            "zzz": 1,
+        },
+        monte_carlo={"n": 1, "seed": 7, "vary": "both"},
+    )
+    report = sim.run_sim(str(request), dry_run=True)
+    assert report["status"] == "valid"
+    assert report["unit_count"] == 2
+    assert len(report["warnings"]) == 2
+    assert "'exclude' under corners" in report["warnings"][0]
+    assert "top level" in report["warnings"][0]
+    assert "'zzz' under corners" in report["warnings"][1]
+
+
+def test_run_sim_dry_run_known_corner_keys_do_not_warn(tmp_path):
+    request = _dry_run_mc_request(
+        tmp_path,
+        corners={"temperature_c": [27]},
+    )
+    assert sim.run_sim(str(request), dry_run=True)["warnings"] == []
+
+
 def test_run_sim_dry_run_reports_same_error_as_real_run(tmp_path):
     request = _dry_run_mc_request(tmp_path)
     bad = _write_request(
