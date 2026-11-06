@@ -1979,6 +1979,13 @@ class CapacitorDevice:
     bottom_plate: tuple[int, int]
     area_cap_f_um2: float
     top_plate_requires: tuple[tuple[int, int], ...] = ()
+    #: When true, ``top_plate_requires`` is a whole-polygon selection
+    #: (``top_plate.interacting(marker)``) instead of a boolean AND that clips
+    #: the plate to the marker. gf180mcu's ``mimcap_derivations.lvs`` uses
+    #: ``interacting`` and the PDK's ``draw_cap_mim`` PCell draws ``MIM_L_MK``
+    #: as a thin strip along one plate edge, so an AND shrinks the plate to
+    #: that strip (issue #3440).
+    top_plate_requires_interacting: bool = False
     top_plate_excludes: tuple[tuple[int, int], ...] = ()
     bottom_plate_requires: tuple[tuple[int, int], ...] = ()
     bottom_plate_excludes: tuple[tuple[int, int], ...] = ()

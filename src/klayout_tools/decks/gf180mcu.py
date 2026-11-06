@@ -3543,6 +3543,7 @@ EXTRACTION_DECK = ExtractionDeck(
                 (117, 5),  # CAP_MK
                 (117, 10),  # MIM_L_MK
             ),
+            top_plate_requires_interacting=True,  # runset: .interacting (#3440)
             top_plate_excludes=(
                 (80, 5),  # efuse_mk
                 (125, 5),  # plfuse
@@ -3902,6 +3903,7 @@ _MIM_OPTION_A_CAPACITORS = (
             (117, 5),  # CAP_MK
             (117, 10),  # MIM_L_MK
         ),
+        top_plate_requires_interacting=True,  # runset: .interacting (#3440)
         top_plate_excludes=(
             (80, 5),  # efuse_mk
             (125, 5),  # plfuse

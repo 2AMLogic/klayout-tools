@@ -310,7 +310,11 @@ def _capacitor_plate_regions(
     """
     top_region = _region(layout, top_cell, capacitor.top_plate)
     for layer in capacitor.top_plate_requires:
-        top_region = top_region & _region(layout, top_cell, layer)
+        marker = _region(layout, top_cell, layer)
+        if capacitor.top_plate_requires_interacting:
+            top_region = top_region.interacting(marker)
+        else:
+            top_region = top_region & marker
     for layer in capacitor.top_plate_excludes:
         top_region = top_region - _region(layout, top_cell, layer)
 

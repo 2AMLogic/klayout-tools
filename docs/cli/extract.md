@@ -2214,6 +2214,17 @@ klt extract cell.gds --deck gf180mcu --deck-option mim_option=A -o cell.spice --
 - Top-plate vias inside `FuseTop` connect the top plate to the strap metal
   only (the runset's `via2_n_cap`/`via2_cap` split); vias outside `FuseTop`
   remain ordinary routing.
+- Verified against the PDK pcell and runset (issue #3440, gf180mcuA @
+  `c6d73a35f524070e85faff4a6a9eef49553ebc2b`; `gf180mcuF` not installed on the
+  verifying host, so A only): the `draw_cap_mim.py` `MIM-A` cap (10x10 um,
+  `MIM_L_MK` a thin edge strip) extracts to one `cap_mim_2f0_m2m3_noshield`,
+  `area=100`/`perimeter=40`, two distinct plate nets -- the same device, nets
+  and `A=100P P=40U` as `gf180mcu.lvs` with `mim_option=A`. A `FuseTop` under
+  `efuse_mk` is excluded by both. `CAP_MK`/`MIM_L_MK` select the whole
+  `FuseTop` polygon (the runset's `.interacting`), they do not clip it. The
+  extracted `C` card uses the deck's nominal area+perimeter value (about
+  208 fF here) while the runset reports its nominal `2e-13`; that pre-existing
+  difference is untouched.
 - If a layout draws an option-A cap but the run uses `B` (or vice versa),
   nothing would claim the cap and its top-plate vias would short the plates, so
   a `warnings[]` entry names the `--deck-option mim_option=<X>` to re-run with.
