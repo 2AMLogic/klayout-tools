@@ -2175,6 +2175,17 @@ checkout anywhere on disk. Only an override (1 or 2) changes `source_doc` in
 the report; the shipped doc always reports as
 `"docs/design-evidence-tiers.md"` regardless of install layout.
 
+**Fleet convention (issue #5041).** Chip repos should not vendor
+`design-evidence-tiers.md`: rely on the bundled copy and record the
+exact-pinned `klt` version as the source of the doc. Vendor a copy (and pass
+`--tiers-doc`) only to deliberately grade against a *different* doc. A
+byte-identical override and the bundled copy produce the same report in both
+`--manifest` and `--fleet` modes, differing only in `source_doc` (pinned by
+`test_cli_bundled_doc_and_identical_override_differ_only_in_source_doc`), so
+dropping a vendored copy does not change any verdict. Committed sign-off
+records are append-only and unaffected: a record graded with an override keeps
+its original `source_doc`.
+
 Both override forms expand a leading `~`, so a quoted
 `--tiers-doc '~/vendored-tiers.md'` (which the shell leaves unexpanded)
 resolves the same way `KLT_TIERS_DOC=~/vendored-tiers.md` does.
