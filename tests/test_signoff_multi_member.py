@@ -92,3 +92,43 @@ def test_single_entry_output_has_no_member_fields(tmp_path):
         assert "members_total" not in item
         assert "members_covered" not in item
         assert "citations_graded" not in item
+
+
+def test_layout_item2_list_all_pass_is_met_with_coverage(tmp_path):
+    """Issue #5044: item 2 accepts a list of native envelopes."""
+    a = _write(tmp_path, "a.json", DRC_CLEAN_ENVELOPE)
+    b = _write(tmp_path, "b.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    item = _item(2, [a, b])
+    assert item["status"] == "met"
+    assert (item["members_covered"], item["members_total"]) == (2, 2)
+    assert len(item["citations"]) == 2
+
+
+def test_layout_item2_failing_member_is_unmet_and_named(tmp_path):
+    a = _write(tmp_path, "a.json", DRC_CLEAN_ENVELOPE)
+    b = _write(tmp_path, "b.json", DRC_VIOLATIONS_ENVELOPE)
+    item = _item(2, [a, b])
+    assert item["status"] == "unmet"
+    assert item["detail"]["failed_citations"] == [b]
+    assert (item["members_covered"], item["members_total"]) == (1, 2)
+
+
+def test_layout_item2_edge_cases(tmp_path):
+    a = _write(tmp_path, "a.json", DRC_CLEAN_ENVELOPE)
+    assert _item(2, [])["reason"] == "invalid_evidence"
+    bad = _item(2, [a, 42])
+    assert bad["reason"] == "invalid_evidence"
+    assert (bad["members_covered"], bad["members_total"]) == (0, 2)
+    dup = _item(2, [a, a])
+    assert dup["status"] == "met"
+    assert dup["members_total"] == 2
+    single = _item(2, [a])
+    assert single["status"] == "met"
+    assert single["members_total"] == 1
+
+
+def test_layout_item2_single_entry_unchanged(tmp_path):
+    item = _item(2, _write(tmp_path, "a.json", DRC_CLEAN_ENVELOPE))
+    assert item["status"] == "met"
+    assert "members_total" not in item
+    assert "citations_graded" not in item

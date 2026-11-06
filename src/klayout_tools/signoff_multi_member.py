@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
-#: T1 items whose list form is a per-cell report list: DRC and LVS.
-MEMBER_COUNT_ITEMS: frozenset[int] = frozenset({3, 4})
+#: T1 items whose list form is a per-cell report list: layout, DRC and LVS.
+MEMBER_COUNT_ITEMS: frozenset[int] = frozenset({2, 3, 4})
 
 
 def member_coverage(raw_entry: Any, extra: dict[str, Any]) -> dict[str, int]:
