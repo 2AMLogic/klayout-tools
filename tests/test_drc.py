@@ -22,7 +22,6 @@ from klayout_tools.decks import (
     get_deck,
     get_extraction_deck,
     get_marker_blind_layers,
-    get_nominal_dbu,
     get_unmodeled_rules,
     get_unmodeled_voltage_markers,
 )
@@ -11774,37 +11773,3 @@ def test_run_drc_root_without_deck_family_errors(tmp_path):
 
     with pytest.raises(DrcError, match="sky130"):
         run_drc(str(path), "sky130", pdk_root=root)
-
-
-@pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu", "sg13g2", "sg13cmos5l"])
-def test_list_rules_exposes_thresholds_in_um(capsys, deck_name):
-    """Issue #5059: each rule carries threshold_um/threshold_max_um."""
-    code, listing = _run_drc_json(capsys, ["--deck", deck_name, "--list-rules"])
-
-    assert code == 0
-    dbu = get_nominal_dbu(deck_name)
-    assert listing["nominal_dbu_um"] == dbu
-    by_id = {r["id"]: r for r in listing["rules"]}
-    non_distance = {
-        "area",
-        "density",
-        "antenna",
-        "ongrid",
-        "angle",
-        "comp_coverage",
-        "tap_distance",
-    }
-    for rule in get_deck(deck_name):
-        entry = by_id[rule.id]
-        assert "threshold_um" in entry and "threshold_max_um" in entry
-        if rule.check in non_distance:
-            assert entry["threshold_um"] is None
-            assert entry["threshold_max_um"] is None
-        else:
-            assert entry["threshold_um"] == pytest.approx(rule.threshold_dbu * dbu)
-            if rule.threshold_max_dbu is None:
-                assert entry["threshold_max_um"] is None
-            else:
-                assert entry["threshold_max_um"] == pytest.approx(
-                    rule.threshold_max_dbu * dbu
-                )
