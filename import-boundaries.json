@@ -567,6 +567,7 @@
         "klayout_tools._openroad_engine",
         "klayout_tools._paths",
         "klayout_tools._power_activity",
+        "klayout_tools._request_fields",
         "klayout_tools._provenance",
         "klayout_tools._report_verify",
         "klayout_tools._report_verify_hints",
@@ -734,6 +735,7 @@
       "description": "`klt sta` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.sta_cmd",
+        "klayout_tools._sta_request_diag",
         "klayout_tools.post_route_sta"
       ]
     },
