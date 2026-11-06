@@ -41,7 +41,9 @@
         "klayout_tools.characterize_sequential",
         "klayout_tools.cli.characterize_cmd",
         "klayout_tools.liberty_compare",
+        "klayout_tools.liberty_leakage",
         "klayout_tools.liberty_render_pin",
+        "klayout_tools.liberty_units",
         "klayout_tools.liberty_writer"
       ]
     },
@@ -650,6 +652,7 @@
         "klayout_tools.sim_cause",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_convergence_retry",
+        "klayout_tools.sim_corner_keys",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_crossings_reduce",
         "klayout_tools.sim_cycle_mean",
@@ -666,6 +669,7 @@
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_noise",
+        "klayout_tools.sim_op_args",
         "klayout_tools.sim_param_file",
         "klayout_tools.sim_passes",
         "klayout_tools.sim_op_check",

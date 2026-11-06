@@ -108,6 +108,7 @@ from . import (
     sim_injected,
     sim_mismatch_gate,
     sim_noise,
+    sim_op_args,
     sim_passes,
     sim_portable,
     sim_search,
@@ -186,6 +187,7 @@ from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_batch_features import pop_remote_diagnostics
 from .sim_cause import _with_fatal_error_cause
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
+from .sim_corner_keys import unknown_key_warnings
 from .sim_decks import run_deck_request
 from .sim_echo_messages import echo_unsupported_message, zipped_length_message
 
@@ -1675,9 +1677,8 @@ def _resolve_analysis_and_measurements(
         sim_op_check.reject_in_steps(request)  # issue #5077
         return sim_steps.resolve_analysis_steps(request)
     analysis = request.get("analysis") or {}
-    # Issue #3338: `kind: "twoport"` compiles to an `ac` analysis; resolved
-    # (every structural error raised) before the `kind`/`args` check.
-    analysis = sim_twoport.resolve_analysis(analysis)
+    # #3338: `twoport` compiles to `ac`; #5078: `op` defaults `args` to "".
+    analysis = sim_op_args.default_op_args(sim_twoport.resolve_analysis(analysis))
     if "kind" not in analysis or "args" not in analysis:
         raise SimError("request.analysis requires 'kind' and 'args'")
     reject_unsupported_analysis(analysis["kind"])
@@ -4919,10 +4920,7 @@ def _build_dry_run_report(
             for key in ("rndseed", "process_seed", "mismatch_seed"):
                 unit[key] = point.mc_seed[key]
         units.append(unit)
-    warnings = [
-        f"unknown top-level request key '{key}' (ignored by klt sim)"
-        for key in sorted(set(request) - _KNOWN_REQUEST_KEYS)
-    ]
+    warnings = unknown_key_warnings(request, _KNOWN_REQUEST_KEYS)
     report: dict[str, Any] = {
         "dry_run": True,
         "status": "valid",

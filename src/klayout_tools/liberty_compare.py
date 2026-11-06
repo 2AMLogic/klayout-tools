@@ -51,13 +51,13 @@ chosen.
 from __future__ import annotations
 
 import functools
-import itertools
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .characterize_arcs import FunctionError, parse_function
+from .liberty_leakage import match_leakage_states
+from .liberty_units import Units, library_units
 
 #: Version of the ``comparison`` block's shape.
 SCHEMA_VERSION = 1
@@ -320,20 +320,35 @@ def load_cells(
     path: str, names: list[str] | tuple[str, ...] | None = None
 ) -> dict[str, CellData]:
     """Parse ``path`` and return comparable data for each cell in ``names``
-    (every cell when ``None``) that the file defines, by name. Cells not
+    (every cell when ``None``) that the file defines, by name, with every
+    table and leakage value converted to ns / pF / pJ / pW from the
+    library's declared units. Cells not
     asked for are never interpreted, so a vendor file's sequential cells
     (scalar/1D power tables, ``ff`` groups) cannot fail a combinational
     comparison."""
+    return _load(path, names)[0]
+
+
+def _load(
+    path: str, names: list[str] | tuple[str, ...] | None = None
+) -> tuple[dict[str, CellData], Units]:
     library = parse_liberty(path)
+    try:
+        units = library_units(library)
+    except ValueError as exc:
+        raise LibertyCompareError(
+            f"'{path}': {exc} -- cannot normalise table units"
+        ) from exc
     wanted = set(names) if names is not None else None
-    return {
-        cell.args[0]: _cell_data(cell, path)
+    cells = {
+        cell.args[0]: _cell_data(cell, path, units)
         for cell in library.children("cell")
         if cell.args and (wanted is None or cell.args[0] in wanted)
     }
+    return cells, units
 
 
-def _cell_data(cell: Group, path: str) -> CellData:
+def _cell_data(cell: Group, path: str, units: Units) -> CellData:
     name = cell.args[0]
     inputs: list[str] = []
     outputs: list[str] = []
@@ -373,14 +388,16 @@ def _cell_data(cell: Group, path: str) -> CellData:
                 tables: dict[str, Table] = {}
                 for table_group in group.groups:
                     if table_group.kind in fields:
-                        tables[table_group.kind] = _table(table_group, path, name)
+                        tables[table_group.kind] = _table(
+                            table_group, path, name, units
+                        )
                 target[key] = tables
     leakage = []
     for group in cell.children("leakage_power"):
         value = group.attributes.get("value")
         if value is None:
             continue
-        leakage.append((group.attributes.get("when", ""), float(value)))
+        leakage.append((group.attributes.get("when", ""), float(value) * units.leakage))
     cell_leakage = cell.attributes.get("cell_leakage_power")
     return CellData(
         name=name,
@@ -390,7 +407,9 @@ def _cell_data(cell: Group, path: str) -> CellData:
         timing=timing,
         power=power,
         leakage=leakage,
-        cell_leakage_power=float(cell_leakage) if cell_leakage is not None else None,
+        cell_leakage_power=(
+            float(cell_leakage) * units.leakage if cell_leakage is not None else None
+        ),
         notes=notes,
     )
 
@@ -399,7 +418,7 @@ def _numbers(text: str) -> tuple[float, ...]:
     return tuple(float(item) for item in text.replace(",", " ").split())
 
 
-def _table(group: Group, path: str, cell: str) -> Table:
+def _table(group: Group, path: str, cell: str, units: Units) -> Table:
     try:
         index_1 = _numbers(" ".join(group.complex_attributes.get("index_1", [])))
         index_2 = _numbers(" ".join(group.complex_attributes.get("index_2", [])))
@@ -422,7 +441,14 @@ def _table(group: Group, path: str, cell: str) -> Table:
             raise LibertyCompareError(
                 f"'{path}' cell '{cell}' {group.kind}: ragged values row"
             )
-    return Table(index_1=index_1, index_2=index_2, values=rows)
+    # index_1 is the input slew (time), index_2 the output load
+    # (capacitance); values are time for timing tables, energy for power.
+    scale = units.energy if group.kind in POWER_FIELDS else units.time
+    return Table(
+        index_1=tuple(v * units.time for v in index_1),
+        index_2=tuple(v * units.capacitance for v in index_2),
+        values=tuple(tuple(v * scale for v in row) for row in rows),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -442,9 +468,9 @@ def compare_libraries(
     compared and how; the returned ``dict`` is the documented
     ``comparison`` block."""
     tolerances = {**DEFAULT_TOLERANCES, **(tolerances or {})}
-    ours = load_cells(ours_path, cells)
+    ours, ours_units = _load(ours_path, cells)
     names = list(cells) if cells is not None else sorted(ours)
-    reference = load_cells(reference_path, names)
+    reference, reference_units = _load(reference_path, names)
     absent = [name for name in names if name not in ours]
     if absent:
         raise LibertyCompareError(
@@ -477,6 +503,12 @@ def compare_libraries(
         "schema_version": SCHEMA_VERSION,
         "ours": os.path.abspath(ours_path),
         "reference": os.path.abspath(reference_path),
+        # Declared units of each file; every compared value is normalised to
+        # ns / pF / pJ / pW first.
+        "units": {
+            "ours": dict(ours_units.declared),
+            "reference": dict(reference_units.declared),
+        },
         "tolerances": {name: dict(tolerances[name]) for name in FIELDS},
         "cells": cell_reports,
         "summary": {
@@ -694,59 +726,9 @@ def _compare_leakage(
     missing: list[str],
 ) -> dict[str, Any]:
     states = []
-    ref_conditions = []
-    names = frozenset(reference.inputs) | frozenset(reference.outputs)
-    for when, value in reference.leakage:
-        try:
-            expr = parse_function(when, allowed_pins=names) if when else None
-        except FunctionError:
-            expr = None
-            missing.append(
-                f'leakage_power when "{when}": reference condition unparseable'
-            )
-        ref_conditions.append((when, value, expr))
-    output_exprs = {}
-    for pin in reference.outputs:
-        function = reference.functions.get(pin)
-        if function is None:
-            continue
-        try:
-            output_exprs[pin] = parse_function(
-                function, allowed_pins=frozenset(reference.inputs)
-            )
-        except FunctionError:
-            continue
-
-    for when, value in ours.leakage:
-        try:
-            ours_expr = parse_function(when, allowed_pins=frozenset(ours.inputs))
-        except FunctionError:
-            missing.append(f'leakage_power when "{when}": our condition unparseable')
-            continue
-        matches: set[int] = set()
-        covered = 0
-        for bits in itertools.product((False, True), repeat=len(ours.inputs)):
-            assignment = dict(zip(ours.inputs, bits, strict=True))
-            if not ours_expr.evaluate(assignment):
-                continue
-            covered += 1
-            full = dict(assignment)
-            for pin, expr in output_exprs.items():
-                full[pin] = expr.evaluate(assignment)
-            for index, (_, _, expr) in enumerate(ref_conditions):
-                if expr is not None and _safe_eval(expr, full):
-                    matches.add(index)
-        if covered == 0 or len(matches) != 1:
-            missing.append(
-                f'leakage_power when "{when}": '
-                + (
-                    "no reference leakage_power group covers this state"
-                    if not matches
-                    else "matches more than one reference leakage_power group"
-                )
-            )
-            continue
-        ref_when, ref_value, _ = ref_conditions[matches.pop()]
+    for when, value, ref_when, ref_value in match_leakage_states(
+        ours, reference, missing
+    ):
         entry = _point(value, ref_value, tolerances["leakage_power"])
         accumulators["leakage_power"].add(
             {"when": when, **entry}, f"{ours.name} leakage_power {when}"
@@ -771,10 +753,3 @@ def _compare_leakage(
     if not ours.leakage and reference.leakage:
         missing.append("leakage_power: in the reference but not in ours")
     return {"states": states, "cell_leakage_power": total}
-
-
-def _safe_eval(expr: Any, state: dict[str, bool]) -> bool:
-    try:
-        return bool(expr.evaluate(state))
-    except KeyError:
-        return False

@@ -425,7 +425,7 @@
     },
     {
       "path": "src/klayout_tools/liberty_compare.py",
-      "lines": 780
+      "lines": 755
     },
     {
       "path": "src/klayout_tools/liberty_writer.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 13930
+      "lines": 13928
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -641,7 +641,7 @@
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
-      "lines": 1323
+      "lines": 1320
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
@@ -777,7 +777,7 @@
     },
     {
       "path": "tests/test_characterize_vendor_comparison.py",
-      "lines": 654
+      "lines": 653
     },
     {
       "path": "tests/test_check_file_size_baseline.py",

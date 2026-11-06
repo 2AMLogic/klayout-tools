@@ -91,7 +91,10 @@ this document (and the code) win.
   `mismatch_seed` -- the values the real run derives), `monte_carlo`,
   `staged_files[]` (the staged model inputs, as in
   `environment.staged_model_inputs`), and `warnings[]` (unknown top-level
-  request keys; a warning only, never an error).
+  request keys and unknown keys under `corners`; a warning only, never an
+  error). `exclude` is a top-level request key, not a `corners` key: nested
+  under `corners` it is ignored (and warned about), so the full crossed
+  matrix runs.
 - `--fail-on-diagnostic` — grade any corner that emitted this diagnostic
   `code` as `status: "inconclusive"` rather than `pass`/`fail` ("the solve
   did not convincingly converge", reported as a distinct claim from "the
