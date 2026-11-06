@@ -846,7 +846,7 @@ v9.not_inside(m9 & pad)
   .output("V9.AUX.1", "Table 3.19.1: V9 must be inside M9 and PAD")
 
 # --------------------------------------------------------------------------
-# Opt-in absolute grid origin (#4082) -- NOT part of the 263 default ids
+# Opt-in absolute grid origin (#4082) -- NOT part of the default rule ids
 # --------------------------------------------------------------------------
 # FIN.S.1 / GATE.S.1 above only look at neighbour spacing, so a whole cell
 # moved off the grid still passes. When the caller declares an origin with
