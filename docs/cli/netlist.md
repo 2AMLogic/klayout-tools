@@ -280,7 +280,7 @@ When the files match only because of this, `drift.layout_differs` is `true`. Thi
 real `.subckt`, pass `--block`, which `--check` applies before comparing
 ([Block mode](#block-mode-an-includable-subckt)).
 
-**Generation inputs are recorded** (issue #4945). A written netlist starts with
+**Generation inputs are recorded** (issue #4945). The line is a stable, strippable contract; pass `--no-provenance-header` (issue #5085) to omit it, so the written netlist is byte-identical to xschem's own export (for projects that hash-pin committed netlists). The payload reports `provenance_header` (`true` by default), and `netlist.content_hash` and `netlist.bytes` describe the bytes actually written. `--check` is unaffected, and a headerless committed netlist still checks cleanly. Not supported with `--backend batch`. A written netlist starts with
 one comment line, `** klt-netlist-inputs: {"pdk_variant": ..., "rcfile": ...,
 "xschem_version": ...}`: the xschem version, the `--rcfile` *basename* (its
 directory is checkout-specific) and the PDK variant that produced it. xschem's
