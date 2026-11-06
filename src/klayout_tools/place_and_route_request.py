@@ -1563,10 +1563,10 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
                 "OpenSTA reads it as a constant and builds an empty "
                 "GROUND-typed net from it, which TritonRoute then refuses "
                 "with DRT-0305 (after floorplan, placement and CTS have all "
-                "already succeeded). Re-synthesize with `klt synthesize`, "
-                "which resolves x bits to concrete tie-cell-driven constants "
-                "(`setundef -zero` ahead of `hilomap`); a Verilog `function` "
-                "with a dangling argument is the usual source in RTL."
+                "already succeeded). `klt synthesize` resolves most x bits to tie "
+                "cells; if it already produced this netlist, its report "
+                "`warnings.netlist_x_constants` names these lines -- drive or "
+                "remove the undriven source signal in the RTL."
             )
 
 
