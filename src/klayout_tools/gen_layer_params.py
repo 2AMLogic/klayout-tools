@@ -338,11 +338,10 @@ _DISTINCT_TAP_IMPLANT_FAMILIES = frozenset({"sky130"})
 
 
 #: Margin (um) the ``npc`` box grows beyond each poly-contact licon (issue
-#: #2934): 0.095um, the amount ``sky130A.tech``'s own ``cifoutput`` grows NPC
-#: around ``xpc`` (the same figure :data:`_PDK_RES_FLAVOR_MASK_ENCLOSURE_UM`
-#: uses for resistor heads). The official ``sky130A_mr.drc`` carries no
-#: npc-enclosure-of-licon rule. A family absent here draws no ``npc``.
-_PDK_NPC_MARGIN_UM: dict[str, float] = {"sky130": 0.095}
+#: #2934): 0.1um, sky130 rule ``licon.15`` from the PDK's ``sky130A.lydrc``
+#: (``sky130A.tech``'s cifoutput grows only 0.095um; ``sky130A_mr.drc`` has
+#: no such rule). A family absent here draws no ``npc``.
+_PDK_NPC_MARGIN_UM: dict[str, float] = {"sky130": 0.1}
 
 #: ``npc.2`` same-layer spacing (um); closer ``npc`` shapes are merged
 #: (``sky130A_mr.drc`` marks it "should be manually merged").
