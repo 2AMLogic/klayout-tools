@@ -231,6 +231,9 @@ from .sim_remote import (
 from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
+    _refuse_corner_only_flags as _refuse_corner_only_flags,
+)
+from .sim_request_overrides import (
     _with_capacity_wait_override as _with_capacity_wait_override,
 )
 from .sim_request_overrides import (
@@ -2364,8 +2367,6 @@ def run_sim(
     ``command_approvals`` is the trusted approvals file (else
     ``$KLT_SIM_COMMAND_APPROVALS``). ``pdk_root`` (issue #4758) pins the PDK
     install root like ``models.pdk_root`` and wins over it; corner requests only.
-    ``timeout_s`` (``--timeout-s``, issue #5036) overrides ``options.timeout_s``
-    (the per-corner bound); corner requests only.
 
     ``run_sim`` dispatches over two request kinds (docs/cli/sim.md):
 
@@ -2614,21 +2615,7 @@ def run_sim(
     # corner dir and ngspice would never find its deck. Absolutise once here.
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
-    if pdk_root is not None and (
-        sim_commands.COMMANDS_FIELD in request or sim_decks.DECKS_FIELD in request
-    ):
-        raise SimError("--pdk-root only applies to corner requests (with `models`)")
-    if timeout_s is not None and (
-        sim_commands.COMMANDS_FIELD in request or sim_decks.DECKS_FIELD in request
-    ):
-        raise SimError("--timeout-s only applies to corner requests (with `models`)")
-    if collect_partial and (
-        sim_commands.COMMANDS_FIELD in request or sim_decks.DECKS_FIELD in request
-    ):
-        raise SimError(
-            "--collect-partial only applies to corner requests (with `models`)",
-            code="collect_partial_requires_attach",
-        )
+    _refuse_corner_only_flags(request, pdk_root, timeout_s, collect_partial)
     if sim_commands.COMMANDS_FIELD in request:
         return _dispatch_command_request(
             request,

@@ -102,3 +102,24 @@ def _with_timeout_override(
         **request,
         "options": {**(request.get("options") or {}), "timeout_s": timeout_s},
     }
+
+
+def _refuse_corner_only_flags(
+    request: dict[str, Any],
+    pdk_root: str | None,
+    timeout_s: float | None,
+    collect_partial: bool,
+) -> None:
+    """Refuse the corner-request-only flags on a command-list or deck-list
+    request (``--pdk-root`` #4758, ``--timeout-s`` #5036, ``--collect-partial``)."""
+    if "commands" not in request and "decks" not in request:
+        return
+    if pdk_root is not None:
+        raise SimError("--pdk-root only applies to corner requests (with `models`)")
+    if timeout_s is not None:
+        raise SimError("--timeout-s only applies to corner requests (with `models`)")
+    if collect_partial:
+        raise SimError(
+            "--collect-partial only applies to corner requests (with `models`)",
+            code="collect_partial_requires_attach",
+        )
