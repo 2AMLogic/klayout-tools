@@ -14,6 +14,11 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **sky130 `npc` now encloses each poly-contact licon by 0.1 µm** (issue
+  #2934): `klt gen` generators with `gate_contact` grew `npc` 0.095 µm around
+  the licon, short of `licon.15` (0.1 µm, `sky130A.lydrc`). Geometry-only
+  change; no JSON field or deck change.
+
 ## 0.9.1 (2026-11-05)
 
 - **`klt sim` `corners.supply_waveforms` with `corners.units`** (issue #4981):
