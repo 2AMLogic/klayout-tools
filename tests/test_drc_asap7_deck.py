@@ -234,6 +234,22 @@ def test_docs_list_every_rule_and_gap():
     assert f"--expect-rule-categories {len(RULE_IDS)}" in _deck_text()
 
 
+def test_deck_comments_carry_no_stale_rule_count():
+    """Any ``<N> default ids`` / ``<N> rule categories`` count phrase in the
+    deck's comments must equal ``len(RULE_IDS)`` so it cannot drift (#5073)."""
+    pattern = re.compile(
+        r"\b(\d{3})\s+(?:default\s+(?:rule\s+)?ids|rule\s+categories)\b", re.I
+    )
+    counts = [
+        (n, int(m.group(1)))
+        for n, line in enumerate(_deck_text().splitlines(), 1)
+        if line.lstrip().startswith("#")
+        for m in pattern.finditer(line)
+    ]
+    stale = [(n, c) for n, c in counts if c != len(RULE_IDS)]
+    assert not stale, f"stale rule-count comments (line, count): {stale}"
+
+
 def test_shipped_cell_deviations_are_exact_and_documented():
     """Each retained deviation is one ``(cell, rule)`` pair on an implemented
     rule, with a DRM citation, a rationale and a handling decision, and
