@@ -218,9 +218,17 @@ class DrcError(Exception):
     (``docs/json-contract.md``); ``None`` for every error that has none.
     """
 
-    def __init__(self, message: str = "", code: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str = "",
+        code: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        #: Optional extra structured fields merged into ``error`` in the JSON
+        #: envelope (issue #5091); ``None`` for every error that has none.
+        self.details = details
 
 
 #: Error codes for a ``--engine klayout`` second opinion that could not run
@@ -230,6 +238,9 @@ CODE_KLAYOUT_UNAVAILABLE = "klayout_unavailable"
 CODE_KLAYOUT_VERSION_TOO_OLD = "klayout_version_too_old"
 CODE_NEGATIVE_CONTROL_FAILED = "negative_control_failed"
 CODE_MULTIPLE_TOP_CELLS = "multiple_top_cells"
+#: A native-deck run aborted part-way (issue #5091); ``error.abort`` and
+#: ``error.decks_executed`` carry the structured cause.
+CODE_KLAYOUT_DECK_ABORTED = "klayout_deck_aborted"
 
 
 #: The one top-level field a ``klt drc`` request document must carry (issue

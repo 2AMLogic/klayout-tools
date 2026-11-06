@@ -112,7 +112,9 @@ def run(args: argparse.Namespace) -> int:
             args = _apply_request(args)
         report = _run(args)
     except DrcError as exc:
-        return emit_error("drc", str(exc), args.format, code=exc.code)
+        return emit_error(
+            "drc", str(exc), args.format, code=exc.code, details=exc.details
+        )
     except pdk_module.PdkNotFoundError as exc:
         return emit_error("drc", str(exc), args.format)
 
