@@ -217,7 +217,7 @@
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 582
+      "lines": 573
     },
     {
       "path": "src/klayout_tools/components.py",
@@ -241,7 +241,7 @@
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
-      "lines": 4100
+      "lines": 4096
     },
     {
       "path": "src/klayout_tools/decks/history.py",
@@ -337,7 +337,7 @@
     },
     {
       "path": "src/klayout_tools/extract_passive_regions.py",
-      "lines": 1176
+      "lines": 1173
     },
     {
       "path": "src/klayout_tools/extract_report.py",
