@@ -117,3 +117,24 @@ def test_cli_accepts_collect_partial_with_batch_set(tmp_path, monkeypatch):
     monkeypatch.setattr(sim_cmd, "run_sim_set", fake_set)
     code = main(["sim", "--batch-set", *paths, "--collect-partial", "--resume"])
     assert code == 0 and seen["collect_partial"] is True
+
+
+def test_all_shards_interrupted_every_member_non_pass(tmp_path):
+    paths = _write_set(tmp_path, 2)
+    outdir = tmp_path / "out"
+    _shard_map(outdir, "req0")
+    _shard_map(outdir, "req1")
+
+    def fake_run(path, **kwargs):
+        assert kwargs["collect_partial"] is True
+        return _partial_report([("j1", "interrupted"), ("j2", "interrupted")])
+
+    report = sim_set.run_sim_set(
+        paths, outdir=str(outdir), run=fake_run, collect_partial=True
+    )
+    assert [r["exit_code"] for r in report["requests"]] == [4, 4]
+    assert report["status"] == "error"
+    assert [s["last_state"] for s in report["requests"][1]["shards"]] == [
+        "interrupted",
+        "interrupted",
+    ]
