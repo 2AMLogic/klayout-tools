@@ -3234,14 +3234,14 @@ additive and also parsed for item 5 rows, where it likewise blocks `met`.
 `schema_version`: no bump; `detail.unratified_rows` is a new optional field
 and `partial_coverage` is an existing reason.
 
-#### Item 6's evidence needs a from-source toolchain (issue #2466)
+#### Item 6's evidence needs the `[yield]` extra (issue #2466)
 
 Item 6 accepts only a `yield` envelope, and `klt yield` requires the
-`klt_yield_native` Rust extension. Today that means a full repo checkout
-with a Rust toolchain: the prebuilt `klt-yield-native` wheel behind
-`pip install 'klayout-tools[yield]'` is not yet on PyPI, so the extra does
-not resolve for any release to date (0.6.0 and 0.7.0 included) and will only
-resolve for releases published after the wheel is. A bare
+`klt_yield_native` Rust extension. Install it with
+`pip install 'klayout-tools[yield]'`: as of 2026-11-06 the prebuilt
+`klt-yield-native` 0.1.0 wheel (Linux x86_64, macOS arm64) is on PyPI and the
+extra resolves for klayout-tools 0.9.1 and later; other platforms need a repo
+checkout with a Rust toolchain. A bare
 `pip install klayout-tools` and the git-pinned (`@git+…`) form do not
 include it either (see
 [`yield.md`](yield.md)'s "What the extra does and does not reach"

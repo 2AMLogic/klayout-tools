@@ -48,7 +48,7 @@ import math
 import os
 from typing import Any
 
-from ._native import _load_native_extension
+from ._native import _load_native_extension, native_provenance
 from .yield_provenance import (
     _attach_spec_rows,
     _provenance_from,
@@ -98,6 +98,7 @@ def _load_native() -> Any:
         "native/yield/",
         "uv sync --group yield",
         docs_link="docs/cli/yield.md#building-the-native-extension",
+        extra="yield",
     )
 
 
@@ -772,13 +773,12 @@ def run_yield(
             **source,
             "kind": kind,
             "sample_count": sum(len(m["samples"]) for m in request_measurements),
+            "native": native_provenance("klt_yield_native", "klt-yield-native"),
         },
     }
     payload.update(response)
     _attach_spec_rows(payload, row_by_name)
-    # The native core owns the payload's shape version; this module's
-    # constant mirrors it (and is asserted against it below) so a crate-side
-    # bump that Python never noticed cannot ship silently.
+    # The native core owns the shape version; assert our mirror of it matches.
     if response.get("schema_version") != SCHEMA_VERSION:
         raise YieldError(
             "klt_yield_native reports schema_version "
