@@ -508,6 +508,34 @@ past where it is informative.
 
 All are `null` when the sample spread is zero (the fit is degenerate), using the same relative floor (`stddev <= 1e-12 * max(abs(mean), tiny)`) as the `degenerate` normality verdict.
 
+### Degenerate (zero-spread) input
+
+The threshold is defined once, in the `degenerate` row of the normality table
+above: a bit-identical sample set, or a rounding-residue spread, counts as
+zero spread. When it applies, the outcomes are:
+
+| Field | Value |
+| --- | --- |
+| `distribution.stddev` | `0.0` |
+| `distribution.normality.verdict` | `"degenerate"` |
+| `distribution.normality.statistic` | `null` |
+| `yield.normal` | `null` |
+| `capability.*` (`cp`, `cpk`, their intervals, `sigma_to_spec`, `limiting_side`) | `null`; a `target_sigma` check reports `met: null` with `reason: "degenerate_fit"` |
+| `yield.empirical` | Unaffected — still computed (Clopper-Pearson) from the samples |
+
+The exit code and `status` are unchanged, and `schema_version` stays `1`:
+`yield.normal` was already permitted to be `null`, so these are values the
+existing contract allows, covered by the no-bump policy in
+[`docs/json-contract.md`](../json-contract.md).
+
+**Before 0.8.0** (#2909) a zero-spread sample set was reported differently:
+`yield.normal` was a block (estimate `1.0`, interval `[1, 1]`), `stddev` was a
+rounding residue such as `8.9e-16`, and the normality verdict was `rejected`.
+A CI job that diffs committed reports across that boundary will see this as a
+change in `yield.normal`, `stddev` and `normality`; it is the intended
+classification change, not drift. Compare reports with `provenance` and the
+`klt` package version pinned (see [`CHANGELOG.md`](../../CHANGELOG.md)).
+
 ### Sample-size verdict
 
 Two different questions, answered separately, because they have different
