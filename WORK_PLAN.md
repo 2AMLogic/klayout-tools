@@ -29,8 +29,6 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#2727**: Friction: klt sim's batch/remote backends refuse ihp-sg13cmos5l, so no SG13CMOS5L corner grid can run on a batch-only host
 - **#2912**: Friction: sky130 native-Vt NMOS (nfet_05v0_nvt) cannot be drawn by klt gen or compared by klt lvs
 - **#3057**: klt sim --backend batch: -o FILE not written when --format json (report goes to stdout)
-- **#3094**: decks/sg13cmos5l: poly resistors assume coincident GatPoly/PolyRes, same as sg13g2 before #2679
-- **#3440**: gf180mcu MIM option A: live verification against PDK pcell and runset (follow-up to #2920 / PR #3358)
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin
 - **#3516**: klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249)
 - **#3522**: Verify OMP_NUM_THREADS pinning on the batch fleet (follow-up to #3502)
@@ -50,8 +48,6 @@ Issues currently being built (`loom:building`).
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
 - **#4966**: layout-plan execute: places sky130 5V-class blocks but routes none of the nets (exit 3), no pin labels for LVS
-- **#5031**: signoff --manifest: no way to cite per-cell DRC/LVS evidence for a multi-cell library
-- **#5033**: Remove 13 dead re-exports from place_and_route.py compat shim
 
 ## PRs Awaiting Review
 
@@ -61,7 +57,7 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 - **#4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
 - **#4772**: fix: honor --dry-run and --wait-for-capacity under klt sim --batch-set
-- **#5032**: feat(signoff): accept per-cell DRC report lists and report member coverage
+- **#4967**: feat: label netlist ports and report unrouted reasons in layout-plan execute
 
 ## Approved (Awaiting Merge)
 
@@ -73,6 +69,7 @@ _None._
 
 Issues carrying `loom:curated`.
 
+- **#520**: Epic: the Tiny Tapeout corpus as a regression and optimization benchmark *(curated)*
 - **#2340**: signoff: input_verified is always null for drc/extract envelopes that recorded an absolute host path *(curated)*
 - **#2574**: Build + publish the ihp-sg13g2 remote-sim AMI (operator-only; gated on #2573) *(curated)*
 - **#2727**: Friction: klt sim's batch/remote backends refuse ihp-sg13cmos5l, so no SG13CMOS5L corner grid can run on a batch-only host *(curated)*
@@ -102,7 +99,6 @@ Issues carrying `loom:curated`.
 - **#4845**: ring-check --pdk sg13g2: cross-check re-implemented Seal.* rules against the real Ruby deck *(curated)*
 - **#4902**: klt sim batch backend: derived measurements referencing other measurements (m_<name>) produce no value *(curated)*
 - **#4966**: layout-plan execute: places sky130 5V-class blocks but routes none of the nets (exit 3), no pin labels for LVS *(curated)*
-- **#5031**: signoff --manifest: no way to cite per-cell DRC/LVS evidence for a multi-cell library *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -115,8 +111,6 @@ Issues carrying `loom:curated`.
 - **#4126**: Simplify run_lvs: split the 2,047-line orchestrator in lvs.py into stage helpers *(hermit)*
 - **#4233**: Remove 8 passthrough _report_path wrappers over env_provenance.repo_relative_path *(hermit)*
 - **#4693**: Remove routing_pitch.py: library-only helper with no callers *(hermit)*
-- **#4900**: digital_fleet.py (944 lines) has no runtime caller: wire into klt or remove *(hermit)*
-- **#4969**: Remove congestion.py and native/congestion: research spike with no runtime caller *(hermit)*
 
 ## Epics
 
@@ -129,11 +123,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 1 |
-| Ready (`loom:issue`) | 15 |
-| In Progress (`loom:building`) | 7 |
+| Ready (`loom:issue`) | 13 |
+| In Progress (`loom:building`) | 5 |
 | PRs awaiting review | 5 |
 | Approved PRs awaiting merge | 0 |
 | Curated | 30 |
-| Architect / Hermit proposals | 11 |
+| Architect / Hermit proposals | 9 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
