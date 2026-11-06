@@ -1785,7 +1785,11 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rsil",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # PolyRes.drawing
+            marker=(128, 0),  # PolyRes.drawing -- the resistive body itself
+            # Issue #3094 (same as sg13g2, #2679): cmos5l's symlinked IHP
+            # PCells draw PolyRes as the whole body and GatPoly only as the
+            # two abutting heads, so `body & marker` would be empty.
+            topology="abutting_heads",
             # `rsilG2_rspec` in cmos5l's own sg13cmos5l_tech.json (7.0;
             # `rsil_code.py` reads the `G2` key unconditionally, and the
             # non-G2 `rsil_rspec` carries the same 7.0 value, so this one
@@ -1824,7 +1828,11 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rppd",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # PolyRes.drawing
+            marker=(128, 0),  # PolyRes.drawing -- the resistive body itself
+            # Issue #3094 (same as sg13g2, #2679): cmos5l's symlinked IHP
+            # PCells draw PolyRes as the whole body and GatPoly only as the
+            # two abutting heads, so `body & marker` would be empty.
+            topology="abutting_heads",
             # `rppdG2_rspec` in cmos5l's own sg13cmos5l_tech.json (260.0,
             # vs the non-G2 `rppd_rspec`'s 250.0 for the older SG13
             # flavour) -- selected because cmos5l's own `techName`,
@@ -1862,7 +1870,11 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rhigh",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # PolyRes.drawing
+            marker=(128, 0),  # PolyRes.drawing -- the resistive body itself
+            # Issue #3094 (same as sg13g2, #2679): cmos5l's symlinked IHP
+            # PCells draw PolyRes as the whole body and GatPoly only as the
+            # two abutting heads, so `body & marker` would be empty.
+            topology="abutting_heads",
             # cmos5l's own sg13cmos5l_tech.json reproduces sg13g2's own
             # `rhigh` self-contradiction exactly: `rhigh_rspec` is 1300.0
             # while `rhighG2_rspec` is 1360.0, and the two PyCell readers
