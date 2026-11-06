@@ -182,6 +182,7 @@ from .sim_batch import (
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE, shard_scoped_points
 from .sim_batch_async import submit_only as _submit_batch_only
+from .sim_batch_features import pop_remote_diagnostics
 from .sim_cause import _with_fatal_error_cause
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 from .sim_decks import run_deck_request
@@ -392,6 +393,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # Report-level (top-level `diagnostics[]`, issue #2901): batch runner
         # predates request fields, under `runner_version_check: "warn"`.
         "batch_runner_request_feature_predated",
+        "batch_runner_version_mismatch",
         # Report-level (top-level `diagnostics[]`, issue #4097): an off-host
         # `measurements[].expr` produced no value; the runner may predate it.
         "expr_runner_may_predate",
@@ -4526,10 +4528,8 @@ def _run_sim_corners(
 
     _attach_timeout_budget_hint(environment, corners, timeout_s)
 
-    # Issue #2901: lifted out of `environment.remote` to the top level.
-    request_feature_diagnostic = (environment.get("remote") or {}).pop(
-        "request_feature_diagnostic", None
-    )
+    # Issues #2901, #5061: lifted out of `environment.remote` to the top level.
+    remote_diagnostics = pop_remote_diagnostics(environment.get("remote"))
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -4580,7 +4580,7 @@ def _run_sim_corners(
     if top_diags := [
         d
         for d in (
-            request_feature_diagnostic,
+            *remote_diagnostics,
             _width_ceiling_preflight_diagnostic(netlist_path),
         )
         if d
