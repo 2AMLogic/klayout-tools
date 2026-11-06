@@ -277,7 +277,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1735
+      "lines": 1730
     },
     {
       "path": "src/klayout_tools/economy.py",
