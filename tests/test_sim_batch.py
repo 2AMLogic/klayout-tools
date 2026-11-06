@@ -3068,7 +3068,7 @@ def test_interrupted_grace_reports_distinct_unrun_corners(tmp_path, monkeypatch)
     for corner in corners:
         assert corner["status"] == "error"
         assert corner["diagnostics"][0]["code"] == "batch_job_interrupted"
-        assert "--resume" in corner["diagnostics"][0]["message"]
+        assert "job-1" in (m := corner["diagnostics"][0]["message"]) and "--resume" in m
     assert environment["job_id"] == "job-1"
     assert environment["state"] == "interrupted"
     assert environment["interrupted_s"] >= 0.0
