@@ -756,7 +756,8 @@
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
         "klayout_tools.synthesize_memory",
-        "klayout_tools.synthesize_netlist_normalize"
+        "klayout_tools.synthesize_netlist_normalize",
+        "klayout_tools.synthesize_x_scan"
       ]
     },
     "techmap": {
@@ -1452,6 +1453,11 @@
     },
     {
       "consumer": "synthesize",
+      "exporter": "place_and_route",
+      "reason": "Issue #5074: synthesize_x_scan reuses the netlist x-constant scanner (the same regex and comment blanker klt place_and_route's pre-flight rejects on) so the synthesize warning and the P&R rejection cannot disagree; promote to a shared module when either is next reworked."
+    },
+    {
+      "consumer": "synthesize",
       "exporter": "env_provenance",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
@@ -1577,6 +1583,18 @@
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.synthesize_x_scan",
+      "exporter": "klayout_tools.place_and_route_request",
+      "symbol": "_NETLIST_X_CONSTANT_RE",
+      "reason": "Issue #5074: reuses the exact scanner place_and_route's netlist pre-flight uses, so the synthesize-time warning and the P&R rejection cannot drift; promote to a shared module when either is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.synthesize_x_scan",
+      "exporter": "klayout_tools.place_and_route_request",
+      "symbol": "_blank_verilog_comments",
+      "reason": "Issue #5074: reuses the exact scanner place_and_route's netlist pre-flight uses, so the synthesize-time warning and the P&R rejection cannot drift; promote to a shared module when either is next reworked."
+    },
     {
       "consumer": "klayout_tools.characterize_osdi",
       "exporter": "klayout_tools.sim",
