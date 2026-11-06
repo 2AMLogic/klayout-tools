@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **sg13cmos5l poly resistors from PDK PCells** (issue #3094): `klt extract
+  --deck sg13cmos5l` now recognises `rsil`/`rppd`/`rhigh` drawn the IHP PCell
+  way (`PolyRes` body, two abutting `GatPoly` heads) by declaring
+  `topology="abutting_heads"`, as sg13g2 did in #2679; a missing head or a gap
+  is not recognised, and the legacy continuous-bar shape still extracts.
+  `klt gen res_array` on sg13cmos5l now draws the same convention.
+
 ## 0.9.1 (2026-11-05)
 
 - **`klt sim` `corners.supply_waveforms` with `corners.units`** (issue #4981):

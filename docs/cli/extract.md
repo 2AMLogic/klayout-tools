@@ -1919,7 +1919,8 @@ sg13g2's poly resistors `rsil`/`rppd`/`rhigh` are not
 drawn as a marked segment of a poly bar: IHP's own `SG13_dev` PCells draw
 `PolyRes` (128/0) as the **whole resistive body** and `GatPoly` (5/0) only
 as the two contact heads, which *abut* the body with zero overlap area
-(issue #2679). Their deck entries therefore declare
+(issue #2679; sg13cmos5l's identical, symlinked-PCell resistors follow
+suit, issue #3094). Their deck entries therefore declare
 `ResistorDevice.topology="abutting_heads"`: the recognised segment is the
 `PolyRes` region narrowed by each flavour's `requires`/`excludes` masks
 (upstream `res_derivations.lvs`'s `polyres_mk` core), kept only where it

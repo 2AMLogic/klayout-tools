@@ -609,9 +609,9 @@ field by field, which two separate passes on a real design had to do
   of them fails identically and silently.
 - `topology` — `resistor` entries only (issue #2679): how the `body`
   terminal's layer relates to the `marker`. `"overlap"` (the default, and
-  every resistor class except sg13g2's poly resistors) means the marker is drawn *on* the
+  every resistor class except the sg13g2/sg13cmos5l poly resistors) means the marker is drawn *on* the
   body conductor and the resistor is their overlap, narrowed by `requires`/
-  `excludes`. `"abutting_heads"` (sg13g2's `rsil`/`rppd`/`rhigh`) means the
+  `excludes`. `"abutting_heads"` (sg13g2's and sg13cmos5l's `rsil`/`rppd`/`rhigh`) means the
   marker layer *is* the resistive body — `requires`/`excludes` narrow the
   marker region — and the `body` layer is only the contact heads: it must
   touch that body in two separate head regions (abutting with zero overlap,

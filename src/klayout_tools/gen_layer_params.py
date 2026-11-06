@@ -959,7 +959,7 @@ def _res_sab_geometry_um(
 #: is only the two abutting contact heads. Must match the families whose
 #: extraction-deck poly ``ResistorDevice`` entries declare
 #: ``topology="abutting_heads"`` (asserted in ``tests/test_sg13g2_deck.py``).
-_PDK_RES_POLY_HEADS_ONLY: frozenset[str] = frozenset({"sg13g2"})
+_PDK_RES_POLY_HEADS_ONLY: frozenset[str] = frozenset({"sg13g2", "sg13cmos5l"})
 
 
 def _res_end_contact_um(
