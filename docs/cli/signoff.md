@@ -2419,6 +2419,14 @@ and the byte-canonical *provisioning route* for reproducing the rest is a
 only route that records the commit at all. Removing `build` removes the
 evidence #2176 exists to carry, so prefer `--check`, which keeps it.
 
+The same `git+…@<sha>` pin can also differ by installer cache state (a dev
+`0.8.0.devN+g<sha>`, `is_release: false` build from one cache, the release
+`0.8.0`, `is_release: true` from another — see
+[`version.md`](version.md)), so a raw byte diff of a regenerated report can
+fail in CI with no evidence change. Verify with `klt signoff --check`; if a
+raw diff is unavoidable, the `build` block is the field to normalise (as of
+2026-11-06).
+
 ### Verifying a committed report: `--check` (issue #2249)
 
 `klt signoff --manifest M --check REPORT` (and the `--fleet` form) answers
@@ -3041,6 +3049,20 @@ that row id it suppresses only the *string-value* pattern hits, in the
 statement `class` and in the matching spec row's values. It never suppresses
 a statistical *key* or a truthy `statistical` key. The flag is echoed on the
 granted statement row, so the waiver is auditable.
+
+**What the scan flags (issue #5057).** Every string value of a spec row --
+the `id` value included -- is matched case-insensitively against:
+`σ`, `sigma`, `cpk`, `ppk`, `yield`, `monte-carlo` (also `monte carlo` /
+`monte_carlo`), `mismatch`, `matching`, `offset`, `accuracy` (whole words,
+except `σ`). Keys are matched against `sigma`, `σ`, `yield`, `cpk`, `ppk`,
+`offset`, `mismatch`, `monte-carlo`, `std-dev` (hit on any non-empty value),
+and a truthy `statistical` key always hits. So a row whose `id` is
+`monte-carlo` (meant to say "there is no statistical row") is refused with
+`detail: {"row": "monte-carlo", "field": "id", "document": "spec"}` plus a
+`detail.hint`. Fix it by renaming the id, or by adding
+`"reviewed_not_statistical": true` to that row's statement row (the waiver
+above); a key hit such as `offset_mv_3sigma` is never waived. `detail.hint`
+is present only for text-pattern hits.
 
 A granted item renders `status: "not_applicable"`, `reason: null`,
 `citation: null`, and a `not_applicable` object
@@ -4070,7 +4092,7 @@ actually ran and failed):
 | `"wrong_item"`            | yes | **(issue #2718)** The evidence resolved to a *passing* `generic` envelope whose declared `t1_item` names a different item than the one it is cited for: an attestation replayed across items. Rendered for every item that accepts `generic` (1, 2, 8, 9, 10). An item-8 envelope with no `t1_item` is unaffected. Cite the attestation made for this item. |
 | `"not_applicable_wrong_partition"` | yes | **(issue #2865)** **Item 6 only.** The `not_applicable` form was used on an analog partition (or a pure `analog` block); only a digital partition may. |
 | `"not_applicable_spec_unratified"` | yes | **(issue #2865)** The cited spec's `status` is not `"ratified"`. `detail.spec_status` echoes it. |
-| `"not_applicable_statistical_row"` | yes | **(issue #2865)** The cited spec (or the statement's own `class`) carries a row marked `statistical`, or one with a sigma/yield/Cpk/offset/mismatch/Monte Carlo key or a `3σ`/accuracy/matching/offset-style value. `detail.row` names the row, `detail.field` the offending key path. The scan is a conservative backstop: a false positive refuses; a statement row's `reviewed_not_statistical: true` waives the string-value hits (not key hits) for that row (issue #4793). |
+| `"not_applicable_statistical_row"` | yes | **(issue #2865)** The cited spec (or the statement's own `class`) carries a row marked `statistical`, or one with a sigma/yield/Cpk/offset/mismatch/Monte Carlo key or a `3σ`/accuracy/matching/offset-style value. `detail.row` names the row, `detail.field` the offending key path (`id` when the row id itself matched); `detail.hint` (text-pattern hits only) names the waiver; the full token lists are in the item-6 section. The scan is a conservative backstop: a false positive refuses; a statement row's `reviewed_not_statistical: true` waives the string-value hits (not key hits) for that row (issue #4793). |
 | `"not_applicable_statement_incomplete"` | yes | **(issue #2865)** The statement does not account for exactly the spec's rows: `detail.uncovered_row_ids` (spec rows with no statement row), `detail.unknown_row_ids` (statement rows naming no spec row), a row missing `class`/`reason`, or a spec with no rows at all. |
 | `"no_pdn"`                | no  | **Item 11 only** (issue #2025). The cited `klt place-and-route` response says no power grid was built at all: `power.pdn` is not `true`. Re-run P&R with a `request.power` block. |
 | `"no_tapcell_master"`     | no  | **Item 11 only** (issue #4199). The grid was built (`power.pdn: true`) but `power.tapcell_master` is null and the response does not state `power.tapless: true` (a tapped library whose tap step did not run, or a pre-#4199 envelope). Re-run P&R; a library documented tapless (`sg13g2_stdcell`) states `tapless: true` and grades. |

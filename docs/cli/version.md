@@ -219,6 +219,20 @@ clone carries no tags (see the route table under "These fields describe the
 install" below). The release identity is `klayout-tools==X.Y.Z` from PyPI;
 use the git pin only to reproduce an exact commit.
 
+**The same `git+…@<sha>` pin can report different `build` blocks depending on
+the installer's cache state.** Whether the scratch checkout carries tags
+depends on how the package manager obtained it, so one pin has been observed
+to yield a dev identity (`0.8.0.devN+g<sha>`, `is_release: false`) from one
+cache and the release identity (`0.8.0`, `is_release: true`) from another. Do
+not depend on either. For the release identity use the PyPI pin
+`klayout-tools==X.Y.Z`, or force a fresh checkout with `uvx --no-cache`
+(worded as observed behaviour, not a guarantee). If you commit a `klt signoff`
+report generated under such a pin, verify it with `klt signoff --check`,
+which excludes the `build` block (see
+[`signoff.md`](signoff.md#verifying-a-committed-report---check-issue-2249) and
+[`json-contract.md`](../json-contract.md)), not a raw byte diff. Behaviour as
+of 2026-11-06; editable installs and PyPI wheels are unaffected.
+
 ## How the identity is determined
 
 Two sources, in priority order:
