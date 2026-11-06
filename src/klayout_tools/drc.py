@@ -1045,6 +1045,24 @@ def _fmt_layer(layer_tuple: tuple[int, int] | None) -> str | None:
     return f"{layer_tuple[0]}/{layer_tuple[1]}"
 
 
+# Check kinds that do not read ``DrcRule.threshold_dbu`` as a distance (issue
+# #5059): ``--list-rules`` reports ``threshold_um: null`` for these rather than
+# the placeholder value the field may carry.
+_NON_DISTANCE_CHECKS = (
+    _AREA_CHECKS
+    | _DENSITY_CHECKS
+    | _ANTENNA_CHECKS
+    | _VERTEX_CHECKS
+    | _COMP_COVERAGE_CHECKS
+    | _TAP_DISTANCE_CHECKS
+)
+
+
+def _dbu_to_um(value_dbu: int | None, dbu_um: float) -> float | None:
+    """Convert a dbu count to um, rounded to avoid float noise."""
+    return None if value_dbu is None else round(value_dbu * dbu_um, 9)
+
+
 def list_deck_rules(deck_name: str) -> dict[str, Any]:
     """``klt drc --deck <name> --list-rules`` (issue #2768): enumerate a
     curated deck's registered rules without reading any layout.
@@ -1062,6 +1080,7 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
     except UnknownDeckError as exc:
         raise DrcError(str(exc)) from exc
     layer_names = get_layer_names(deck_name)
+    nominal_dbu_um = get_nominal_dbu(deck_name)
 
     def _name(layer_tuple: tuple[int, int] | None) -> str | None:
         return None if layer_tuple is None else layer_names.get(layer_tuple)
@@ -1111,6 +1130,12 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
                     ),
                 },
                 "scope": rule.scope or None,
+                "threshold_um": None
+                if rule.check in _NON_DISTANCE_CHECKS
+                else _dbu_to_um(rule.threshold_dbu, nominal_dbu_um),
+                "threshold_max_um": None
+                if rule.check in _NON_DISTANCE_CHECKS
+                else _dbu_to_um(rule.threshold_max_dbu, nominal_dbu_um),
             }
         )
         if rule.scope:
@@ -1121,6 +1146,7 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
         "mode": "list_rules",
         "deck": deck_name,
         "engine": "curated",
+        "nominal_dbu_um": nominal_dbu_um,
         "rule_count": len(rules),
         "groups": {
             "check": dict(sorted(check_counts.items())),

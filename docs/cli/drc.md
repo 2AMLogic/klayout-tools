@@ -274,6 +274,7 @@ also the order a `--rules` subset executes in.
   "mode": "list_rules",
   "deck": "sky130",
   "engine": "curated",
+  "nominal_dbu_um": 0.001,
   "rule_count": 150,
   "groups": {
     "check": { "angle": 37, "area": 10, "enclosing": 17, "...": 0 },
@@ -289,7 +290,9 @@ also the order a `--rules` subset executes in.
       "other_layer": null,
       "other_layer_name": null,
       "derived_layer": null,
-      "scope": "poly"
+      "scope": "poly",
+      "threshold_um": 0.15,
+      "threshold_max_um": null
     }
   ],
   "provenance": { "deck": { "name": "sky130", "content_hash": "sha256:..." } }
@@ -299,9 +302,10 @@ also the order a `--rules` subset executes in.
 | Field | Meaning |
 | ----- | ------- |
 | `mode` | Always `"list_rules"` — this payload is a listing, not a report. |
+| `nominal_dbu_um` | The deck's nominal database unit in um; `threshold_dbu = threshold_um / nominal_dbu_um`. |
 | `rule_count` | Total registered rules in the deck. |
 | `groups.check` / `groups.scope` | Rule counts per check kind and per non-empty `scope` (the existing `DrcRule.scope` metadata `coverage.deck_scope` is built from), sorted by key. |
-| `rules[]` | One entry per registered rule: `id`, `description`, `check`, `layer` (`"<layer>/<datatype>"`), `layer_name`, `other_layer`/`other_layer_name` (two-layer checks), `derived_layer` (`{mode, base, intersect_with, sized_by_um}` or `null`), `scope` (`null` when unset). |
+| `rules[]` | One entry per registered rule: `id`, `description`, `check`, `layer` (`"<layer>/<datatype>"`), `layer_name`, `other_layer`/`other_layer_name` (two-layer checks), `derived_layer` (`{mode, base, intersect_with, sized_by_um}` or `null`), `scope` (`null` when unset), `threshold_um` / `threshold_max_um` (the rule's distance threshold and optional upper bound in um; `null` for check kinds without a single distance threshold — `area`, `density`, `antenna`, `ongrid`, `angle`, `comp_coverage`, `tap_distance` — and `threshold_max_um` is `null` unless the rule has an upper bound). Pin a threshold to a deck via `provenance.deck.content_hash`. |
 | `provenance` | The shared block, pinning the deck's content hash; no `input`, since no layout was read. |
 
 A listing **is not a DRC verdict**: it carries no `status`, `violations` or
