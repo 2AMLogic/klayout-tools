@@ -3155,6 +3155,15 @@ non-`lvs` member is `wrong_kind`, and a malformed member or empty list is
 item 4. The manifest is the record of which cells were cited; `klt signoff`
 does not check they cover the partition.
 
+Item 3 (DRC clean) accepts a list the same way (issue #5031): one `klt drc`
+report per cell of a multi-cell library, graded exactly like item 4's list
+(every member must pass; `detail.failed_citations` names failing members). For
+items 3 and 4, a list-form entry also carries `members_total` (members cited)
+and `members_covered` (members that individually graded `met`); both are
+additive and absent for a single-entry citation, whose output is unchanged.
+The manifest author enumerates the cells; `klt signoff` does not check the
+list is the library's complete cell set.
+
 Item 7 (post-layout verification) accepts a list the same way (issue #4562):
 one `klt pex` report per cell of a hierarchical design (objects or bare
 paths). It grades `met` only if every member is `pass`, of an accepted kind
