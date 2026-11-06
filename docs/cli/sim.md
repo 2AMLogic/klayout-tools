@@ -1895,6 +1895,18 @@ report a pass. Policy: **reject before simulating**.
   client recovers it through the normal failed-job path, so every unit gets a
   `batch_job_failed` diagnostic with `runner_code` set to the code above, the
   runner's message, and `runner_klt_version` / `client_klt_version`.
+- When the preflight actually refused the job (exit `87`) and the post-run
+  identity is a `mismatch`, the report's top-level `diagnostics[]` also
+  carries exactly one `batch_runner_version_mismatch` entry (severity
+  `error`) with `runner_klt_version`, `client_klt_version`,
+  `accepted_client_release` (the runner's major.minor) and a `message` stating
+  the remedy: submit from a client of that major.minor, or update the runner
+  image to the client's. It is additive (the per-unit diagnostics and
+  `environment.remote` fields above are unchanged), appears once even for
+  `hosts > 1`, and is not emitted for `match` / `unknown`, nor under
+  `runner_version_check: "warn"` when the run proceeded (that skew stays in
+  `environment.remote` only). It covers the case the pre-launch manifest check
+  cannot see (no manifest, or an entry without `klt_version`).
 - `environment.remote` (and each `environment.remote.fleet[]` entry for
   `hosts > 1`, so mixed-version shards stay distinguishable) always carries
   `runner_klt_version` (the runner's own version, or `null` when it could not

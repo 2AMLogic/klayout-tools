@@ -127,7 +127,12 @@ from .remote_launcher import (
     _signal_handlers_restore,
     published_runner_identities,
 )
-from .sim_batch_features import annotate_gap, gap_note
+from .sim_batch_features import (
+    annotate_gap,
+    annotate_unrecovered_failure,
+    gap_note,
+    refusal_diagnostic,
+)
 from .sim_batch_hints import hint_existing_fatal, with_runner_hints
 from .sim_batch_warn import warn_over_serial_bound_once
 from .sim_exit_reason import exit_reason_env
@@ -4125,6 +4130,14 @@ def _recover_failed_job_corners(
     _annotate_preflight_rejection(corners, runner_error, identity)
     if runner_error is None:
         _annotate_unrecovered_preflight_reject(corners, status, identity)
+    if (runner_error or {}).get("code") == BATCH_RUNNER_MISMATCH_CODE or (
+        runner_error is None
+        and _status_exit_code(status) == _BATCH_PREFLIGHT_REJECT_EXIT
+    ):
+        d = refusal_diagnostic(
+            identity, _runner_gate_release, BATCH_RUNNER_MISMATCH_CODE
+        )
+        identity = {**identity, "runner_version_diagnostic": d} if d else identity
     return corners, identity
 
 
@@ -4161,12 +4174,12 @@ def _annotate_unrecovered_preflight_reject(
     shows a major.minor mismatch, classify the failure as a version mismatch
     (``runner_code`` :data:`BATCH_RUNNER_MISMATCH_CODE` plus both klt
     identities). Any other non-zero exit code gets the generic
-    :func:`_annotate_unrecovered_failure` wording (issue #4217)."""
+    :func:`.sim_batch_features.annotate_unrecovered_failure` wording (issue #4217)."""
     exit_code = _status_exit_code(status)
     if exit_code is None or exit_code == 0:
         return
     if exit_code != _BATCH_PREFLIGHT_REJECT_EXIT:
-        _annotate_unrecovered_failure(corners, exit_code)
+        annotate_unrecovered_failure(corners, exit_code)
         return
     note = (
         f"exit {_BATCH_PREFLIGHT_REJECT_EXIT} is the runner preflight reject "
@@ -4189,27 +4202,6 @@ def _annotate_unrecovered_preflight_reject(
             annotate_gap(diagnostic, identity, versions=mismatch)
             if mismatch:
                 diagnostic["runner_code"] = BATCH_RUNNER_MISMATCH_CODE
-
-
-def _annotate_unrecovered_failure(
-    corners: list[dict[str, Any]], exit_code: int
-) -> None:
-    """Issue #4217: a job that exited non-zero (other than the preflight
-    reject) with nothing recovered -- no ``report.json``, no klt envelope in
-    ``stderr.log`` -- would otherwise read as the bare ``job command exited
-    N``. Name the exit code, say what did not come back, and point at the
-    places the cause can still be found. Additive: only the
-    ``batch_job_failed`` message is extended."""
-    note = (
-        f"the runner exited {exit_code} and no report.json, stderr.log "
-        "envelope or engine log came back; read harness.log under the job's "
-        "S3 prefix, or bisect the request (fewer corners/measurements, one "
-        "feature at a time) to find the cause"
-    )
-    for corner in corners:
-        for diagnostic in corner.get("diagnostics") or []:
-            if diagnostic.get("code") == "batch_job_failed":
-                diagnostic["message"] = f"{diagnostic['message']} [{note}]"
 
 
 def _poll_timeout_corners(
