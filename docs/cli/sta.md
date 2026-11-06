@@ -115,6 +115,9 @@ A request naming both, or neither, is a request error.
 
 ## Request
 
+Unknown top-level keys are rejected (exit 1, naming the key and listing the
+known fields), matching `klt extract`; only `schema` is always allowed.
+
 ```json
 {
   "schema": "klt.sta.request/1",
@@ -923,7 +926,9 @@ except that `unannotated_driver_count` now gates net of the floating drivers.
   name-correlation gate still applies.
 - `annotation_warning` — `null` when complete, otherwise a sentence naming
   every failing check and stating that `worst_slack_ns`/etc. are not a
-  real-parasitics measurement to the extent annotation is missing.
+  real-parasitics measurement to the extent annotation is missing. When the
+  name-correlation check fails, the sentence also hints at re-running `klt
+  extract` with `--def-net-names` and `--def-pins <routed.def>`.
 
 > **Historical note (issue #1624).** Before this evidence was added,
 > `annotation_complete` attested *name correlation only*. A SPEF whose

@@ -297,6 +297,7 @@ from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_
 # `synthesize_memory.py` imports this module's helpers at call time only.
 from .synthesize_memory import collect_memory_evidence
 from .synthesize_netlist_normalize import rewrite_netlist
+from .synthesize_x_scan import netlist_x_constant_warning
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1386,12 +1387,9 @@ def run_synthesize(
     # is never the one executed.
     yosys_log = _run_yosys(executed_script_path, cwd=repo_root)
 
-    # Issue #1973 Failure 1: strip any `signed` port/wire declaration Yosys's
-    # `write_verilog` left in place -- see `_strip_signed_qualifiers`'s own
-    # docstring for why this is a post-write text rewrite rather than a
-    # Yosys pass. Rewritten in place only when something actually changed,
-    # so a netlist with no `signed` declaration at all (the common case) is
-    # never touched -- not even its mtime.
+    # Issue #1973 Failure 1: strip any `signed` declaration `write_verilog`
+    # left in place (see `_strip_signed_qualifiers`); rewritten only when
+    # something changed, so a clean netlist's mtime is never touched.
     netlist_text = _read_produced_netlist(netlist_path)
     rewrite_netlist(  # issue #4872: also drops host source dirs
         netlist_path, netlist_text, _strip_signed_qualifiers(netlist_text), elab_sources
@@ -1429,6 +1427,7 @@ def run_synthesize(
         capability_warnings={
             **_library_capability_warnings(cell_library, constr_inputs is not None),
             **_missing_timing_warning(abc_log_path, timing),
+            **netlist_x_constant_warning(_read_produced_netlist(netlist_path)),
             **_dont_use_unsupported_warning(cell_exclusions),
             **_macro_area_warning(
                 cells_without_area,

@@ -273,7 +273,7 @@
     },
     {
       "path": "src/klayout_tools/drc.py",
-      "lines": 3818
+      "lines": 3791
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
@@ -557,7 +557,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4882
+      "lines": 4869
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -597,7 +597,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 8294
+      "lines": 8293
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -617,7 +617,7 @@
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 5927
+      "lines": 5919
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
@@ -685,7 +685,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4679
+      "lines": 4678
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
