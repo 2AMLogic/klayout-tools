@@ -140,6 +140,7 @@ from . import remote_fleet as remote_fleet
 from . import remote_transport as remote_transport
 from . import sim_analysis_overrides as _sao
 from . import sim_bin_range as sim_bin_range
+from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_staging as sim_staging
 from ._jsonnum import is_number
@@ -367,6 +368,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # An `optional` measurement with no value (issue #2925); info severity.
         "measurement_absent",
         "unknown",
+        "op_metastable",  # `analysis.op_check` (issue #5077); a warning
         # Opt-in convergence retry record (`options.retry_on_convergence_error`,
         # issue #2973), attached by `_run_corner_with_retry` after the retry ran.
         "convergence_retry",
@@ -1672,6 +1674,7 @@ def _resolve_analysis_and_measurements(
     """
     if request.get("analysis_steps") is not None:
         _reject_linearize_in_steps(request)
+        sim_op_check.reject_in_steps(request)  # issue #5077
         return sim_steps.resolve_analysis_steps(request)
     analysis = request.get("analysis") or {}
     # #3338: `twoport` compiles to `ac`; #5078: `op` defaults `args` to "".
@@ -1683,6 +1686,7 @@ def _resolve_analysis_and_measurements(
     # here, before any engine launch; absent `passes` returns `analysis` as is.
     analysis = sim_passes.resolve_analysis(analysis)
     _validate_linearize(analysis)
+    sim_op_check.validate(analysis)  # issue #5077
     measurements_spec = request.get("measurements", [])
     # Issue #2533: `spice` (a verbatim top-level `.meas` card) and `expr` (an
     # expression evaluated after the analysis, inside the generated
@@ -3477,6 +3481,7 @@ def _prepare_sim_request(
         initial_conditions_declared=bool(ic_rules),
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
         linearize_declared=analysis.get("linearize") is True,
+        op_check_declared=sim_op_check.is_declared(analysis),
         crossings_declared=bool(
             sim_crossings.crossings_measurements(measurements_spec)
         ),
@@ -4197,6 +4202,7 @@ def _run_sim_corners(
         code=IC_UNSUPPORTED_WORKER_CODE,
     )
     _sao.require_echo(dispatch_points, corners_new, backend)
+    sim_op_check.require_echo(analysis, corners_new, backend, _OFFHOST_BACKENDS)
     _require_options_echo(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
@@ -7935,39 +7941,6 @@ def _refuse_xyce_alter_corner_axes(corners_spec: dict[str, Any]) -> None:
         )
 
 
-def _refuse_xyce_nodeset(declared: bool) -> None:
-    """Issue #3036: the hints are rendered as ngspice `.nodeset v(node)=`
-    cards; the Xyce deck is not given an equivalent."""
-    if declared:
-        raise SimError(
-            "options.nodeset is not supported for engine 'xyce': initial "
-            "guesses are applied as ngspice `.nodeset` cards; use engine "
-            "'ngspice' or omit options.nodeset"
-        )
-
-
-def _refuse_xyce_linearize(declared: bool) -> None:
-    """Issue #4014: `linearize` is an ngspice control command; the Xyce deck
-    has no `.control` block to carry it."""
-    if declared:
-        raise SimError(
-            "analysis.linearize is not supported for engine 'xyce': it is an "
-            "ngspice `.control` command, which the Xyce deck does not have; "
-            "use engine 'ngspice' or drop the field"
-        )
-
-
-def _refuse_xyce_options_axis(corners_spec: dict[str, Any]) -> None:
-    """The ``engine: "xyce"`` refusal for ``corners.options`` (issue #3125):
-    the axis is a generated ngspice ``.options`` card."""
-    if corners_spec.get("options"):
-        raise SimError(
-            "engine 'xyce' does not support corners.options: the axis is "
-            "emitted as ngspice solver `.options` cards, whose names Xyce "
-            "does not share -- use engine 'ngspice'"
-        )
-
-
 def _enforce_xyce_support_boundary(
     *,
     engine: str,
@@ -7984,6 +7957,7 @@ def _enforce_xyce_support_boundary(
     initial_conditions_declared: bool = False,
     analysis_steps_declared: bool = False,
     linearize_declared: bool = False,
+    op_check_declared: bool = False,
     crossings_declared: bool = False,
     cycle_mean_declared: bool = False,
     energy_declared: bool = False,
@@ -8006,7 +7980,8 @@ def _enforce_xyce_support_boundary(
     """
     if engine != "xyce":
         return
-    _refuse_xyce_linearize(linearize_declared)
+    sim_xyce_refusals.refuse_linearize(linearize_declared)
+    sim_op_check.refuse_xyce(op_check_declared)  # issue #5077
     if analysis_steps_declared:
         # Issue #2482: an ordered step sequence is `alter`/analysis/`let`
         # commands inside one ngspice `.control` block. The Xyce deck has no
@@ -8029,7 +8004,7 @@ def _enforce_xyce_support_boundary(
         )
     _refuse_xyce_alter_corner_axes(corners_spec)
     _refuse_xyce_params_axis(corners_spec)
-    _refuse_xyce_options_axis(corners_spec)
+    sim_xyce_refusals.refuse_options_axis(corners_spec)
     if monte_carlo_declared:
         raise SimError(
             "engine 'xyce' does not implement monte_carlo sampling -- "
@@ -8100,7 +8075,7 @@ def _enforce_xyce_support_boundary(
     ):
         if declared:
             raise SimError(message)
-    _refuse_xyce_nodeset(nodeset_declared)
+    sim_xyce_refusals.refuse_nodeset(nodeset_declared)
     if initial_conditions_declared:
         raise SimError(
             "options.initial_conditions is not supported for engine 'xyce': "
@@ -10032,6 +10007,14 @@ def _run_corner(
     # or non-finite rawfile is an error diagnostic, so it cannot grade `pass`.
     twoport_outcome = sim_twoport.extract_corner(analysis, corner_dir)
     diagnostics.extend(twoport_outcome.diagnostics)
+    # Issue #5077: metastable-op detection, before `disqualifying` is sampled.
+    op_check_field, op_check_diagnostics = sim_op_check.evaluate(
+        analysis,
+        point.supply_v,
+        log_text + "\n" + stdout_text,
+        skip=timed_out or engine_aborted or analysis_never_started,
+    )
+    diagnostics.extend(op_check_diagnostics)
 
     # Issue #3016: the engine ran (any exit status, including 0) yet left no
     # log text and not a single requested measurement has a value -- the
@@ -10196,6 +10179,7 @@ def _run_corner(
         **_ic_report_field(point),
         **_ao_report_field(point),
         **_options_report_field(point),
+        **op_check_field,
         "status": status,
         "runtime_s": runtime_s,
         **started.report_field(),  # issue #4867: best-effort, may be absent
@@ -11270,12 +11254,14 @@ def _save_control_lines(
     raw_path: str | None,
     save_mode: str,
     save_vectors: tuple[str, ...],
+    force: bool = False,
 ) -> list[str]:
     """The ``save`` card :func:`_corner_deck_control_lines` emits (step 2 of
     its ordering contract), or no lines when the corner has nothing to save
-    or ``save_mode`` opts out."""
+    or ``save_mode`` opts out. ``force`` (``analysis.op_check``, issue #5077)
+    counts as something to save."""
     if save_mode != DEFAULT_SAVE_MODE or not (
-        measurements_spec or raw_path is not None
+        measurements_spec or raw_path is not None or force
     ):
         return []
     if save_vectors:
@@ -11413,7 +11399,13 @@ def _corner_deck_control_lines(
     # circuit, so everything after it (save/alter/analysis) re-applies on top.
     prefix: list[str] = _param_reset_lines(point)
     prefix.extend(
-        _save_control_lines(measurements_spec, raw_path, save_mode, save_vectors)
+        _save_control_lines(
+            measurements_spec,
+            raw_path,
+            save_mode,
+            save_vectors,
+            force=sim_op_check.is_declared(analysis),
+        )
     )
     prefix.extend(_supply_alter_lines(point))
     lines.extend(prefix)
@@ -11486,6 +11478,7 @@ def _corner_deck_control_lines(
         lines.extend(spec.get("expr_prelude", ()))
         lines.append(f"let {spec['name']} = {spec['expr']}")
         lines.append(f"print {spec['name']}")
+    lines.extend(sim_op_check.control_lines(analysis))  # issue #5077
     lines.extend(crossings_lines)
     lines.extend(energy_lines)
     lines.extend(stress_lines)
