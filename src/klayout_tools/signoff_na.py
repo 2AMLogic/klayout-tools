@@ -17,6 +17,26 @@ _NA_STATISTICAL_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_NA_TEXT_HIT_HINT = (
+    "a string value (the row id included) matches the statistical text "
+    "pattern (sigma, yield, cpk, ppk, monte-carlo, mismatch, matching, offset, "
+    "accuracy); rename it, or set 'reviewed_not_statistical': true on this "
+    "row's statement row to waive text hits (key hits are never waived)"
+)
+
+
+def _na_statistical_detail(row: dict[str, Any], hit: str) -> dict[str, Any]:
+    """Refusal detail for a statistical spec-row hit; a text-only hit (the
+    waiver applies) also carries the ``hint``."""
+    detail: dict[str, Any] = {
+        "row": row["id"],
+        "field": hit or "id",
+        "document": "spec",
+    }
+    if _na_scan_statistical(row, "", False) is None:
+        detail["hint"] = _NA_TEXT_HIT_HINT
+    return detail
+
 
 def _na_scan_dict(value: dict[str, Any], path: str, text: bool) -> str | None:
     """:func:`_na_scan_statistical` for a JSON object."""

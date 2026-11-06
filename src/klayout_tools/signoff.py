@@ -152,6 +152,7 @@ from .signoff_na import (
     _na_reviewed_ids,
     _na_scan_statistical,
     _na_spec_format,
+    _na_statistical_detail,
 )
 
 # T1 item 11's ("Power delivery (structural)") grading subsystem lives in its
@@ -1422,10 +1423,8 @@ def _na_spec_refusal(
     for row in cast("list[dict[str, Any]]", spec_rows):
         hit = _na_scan_statistical(row, "", row["id"] not in reviewed)
         if hit is not None:
-            return _na_refusal(
-                _REASON_NOT_APPLICABLE_STATISTICAL_ROW,
-                {"row": row["id"], "field": hit or "id", "document": "spec"},
-            )
+            detail = _na_statistical_detail(row, hit)
+            return _na_refusal(_REASON_NOT_APPLICABLE_STATISTICAL_ROW, detail)
     return None
 
 
