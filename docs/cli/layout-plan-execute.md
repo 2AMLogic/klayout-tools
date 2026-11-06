@@ -432,8 +432,15 @@ than only in a PR description:
   the full mechanics. This module only validates its shape (a positive
   number); `gen-compose.compose()` re-validates it against the cross-block
   layer's own deck minimum and defaults it to that layer's own minimum when
-  omitted. An unrecognised `request.routing` key is a usage error, mirroring
-  `request.pdk`/`request.netlist`'s own unknown-key rejection.
+  omitted. `nets` (issue #5094) is a further optional field: an object
+  `{net_name: {layer_role?, width_um?}}` copied onto the matching derived
+  `connectivity[]` entry (`gen-compose`'s per-net override, issue #1655), the
+  one lever on a "pin reached from behind" / "crosses already-routed net"
+  rejection other than reordering rows. Each entry must set at least one
+  key; a net name matching no derived entry (unmapped, fewer than 2 pins,
+  or nonexistent) adds a `warnings[]` entry and is otherwise ignored; unlisted
+  nets are unchanged. An unrecognised `request.routing` key is a usage error,
+  mirroring `request.pdk`/`request.netlist`'s own unknown-key rejection.
 - **Resolved-generator-vs-declared-`device_class` consistency (issue
   #1731).** Phase B only checks a `device_groups[].devices[].device_class`
   against what the netlist digest itself declares for that device name — it
