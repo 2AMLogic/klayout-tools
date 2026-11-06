@@ -361,7 +361,8 @@
         "klayout_tools.layout_plan_check",
         "klayout_tools.layout_plan_execute",
         "klayout_tools.layout_plan_fields",
-        "klayout_tools.layout_plan_ports"
+        "klayout_tools.layout_plan_ports",
+        "klayout_tools.layout_plan_routing"
       ]
     },
     "lef_abstract": {
