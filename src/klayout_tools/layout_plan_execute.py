@@ -704,6 +704,35 @@ def _build_connectivity(
                     {"block": group["id"], "port": port_name}
                 )
 
+    # Group-level tap/ring nets (#5095): a guard_ring group declaring ``net``
+    # binds its ring to that digest net. The ring is one closed conductor, so
+    # its first generated port stands for it (routing all four TAP_* ports
+    # would only wire the ring to itself).
+    for group in device_groups:
+        ring_net = group.get("net")
+        if ring_net is None:
+            continue
+        ring_ports = generated[group["id"]].get("ports") or []
+        ring_port_names = [
+            p["name"]
+            for p in ring_ports
+            if isinstance(p, dict) and isinstance(p.get("name"), str)
+        ]
+        if not ring_port_names:
+            warnings.append(
+                f"device_groups (id '{group['id']}'): generator "
+                f"'{group['generator']}' reported no ports, so net "
+                f"'{ring_net}' cannot be bound to the ring"
+            )
+            continue
+        seen = net_pin_seen.setdefault(ring_net, set())
+        pin_key = (group["id"], ring_port_names[0])
+        if pin_key not in seen:
+            seen.add(pin_key)
+            net_pins.setdefault(ring_net, []).append(
+                {"block": group["id"], "port": ring_port_names[0]}
+            )
+
     connectivity: list[dict[str, Any]] = []
     for net in digest["nets"]:
         pins = net_pins.get(net["name"], [])

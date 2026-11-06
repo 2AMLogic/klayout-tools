@@ -145,6 +145,10 @@
             "default": "none",
             "description": "This group's own mirror/rotation (issue #1166), applied about its local origin before placement -- the same blocks[].orientation klt gen-compose accepts, so a group compiles down to one gen-compose blocks[] entry with this value carried through unchanged. \"mirror_x\" mirrors left-right (negates local x -- e.g. a right-edge port moves to the left edge), \"mirror_y\" mirrors top-bottom (negates local y), \"rotate_180\" negates both. This is what lets two groups placed side by side with same-facing ports (e.g. a CMOS inverter's nfet/pfet pair sharing a drain net) be mirrored to face each other so the shared net can route. Defaults to \"none\" (today's translation-only placement, unchanged). An unrecognised value is a usage error, exit code 2 -- checkable by reading the request document alone, exactly like topology/rows[].align/abutment[].edge."
           },
+          "net": {
+            "type": "string",
+            "description": "Optional digest net (e.g. \"VSS\") this group's ring is tied to (#5095). Accepted only when generator is guard_ring (any other generator is an application error, exit code 1); a net absent from the netlist digest is also exit 1. The ring's first generated port joins that net's connectivity[] pin set, so a bulk/supply net no longer lands in unmapped_netlist_nets[]. MOS bulk (B) stays deliberately unmapped."
+          },
           "dummy": {
             "type": "object",
             "description": "Leading/trailing or row/col dummy-element counts -- routed to the named generator's own dummy_rows/dummy_cols-style param at execution time (Phase C). Not deeply validated at Phase B."
