@@ -22,6 +22,7 @@ batch transport, so tests never touch ``aws``.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import datetime, timezone
@@ -344,6 +345,33 @@ def _stale_seconds(state: str, updated_at: Any, now: datetime | None) -> float |
     return round(age, 1) if age > STALE_AFTER_S else None
 
 
+def _failed_job_exit_reason(
+    config: BatchConfig,
+    job_id: str,
+    status: dict[str, Any],
+    run: remote_transport.CommandRunner,
+) -> dict[str, Any]:
+    """``{"exit_reason": ...}`` for a terminal ``failed`` job with a verdict
+    exit (3/4), from one bounded read of ``outputs/report.json``. Any read or
+    parse failure yields ``{}`` -- never turns a good status read into an
+    error (issue #5019)."""
+    from .sim_exit_reason import exit_reason_env, status_exit_code
+
+    if status_exit_code(status) not in (3, 4):
+        return {}
+    argv = _aws_argv(
+        config, "s3", "cp", f"{job_uri(config, job_id)}/outputs/report.json", "-"
+    )
+    try:
+        result = run(argv, 60.0)
+        if result.returncode != 0:
+            return {}
+        report = json.loads(result.stdout or "")
+    except Exception:  # noqa: BLE001 - best-effort enrichment
+        return {}
+    return exit_reason_env(status, report) if isinstance(report, dict) else {}
+
+
 def read_job_status(
     request: dict[str, Any],
     job_id: str,
@@ -406,6 +434,8 @@ def read_job_status(
     for key in _STATUS_PASSTHROUGH:
         if key in document:
             payload[key] = document[key]
+    if state == "failed":
+        payload.update(_failed_job_exit_reason(config, job_id, document, run))
     stale_seconds = _stale_seconds(state, document.get("updated_at"), now)
     if stale_seconds is not None:
         payload["stale"] = True
