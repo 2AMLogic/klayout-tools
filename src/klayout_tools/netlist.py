@@ -917,6 +917,20 @@ def _resolve_symbol_path(symbol_path: Sequence[str]) -> list[str]:
     return resolved
 
 
+def _postprocess_netlist(
+    data: bytes, *, block: bool, relative_paths: bool, schematic: str
+) -> tuple[bytes, dict[str, Any] | None]:
+    """Apply the post-xschem netlist rewrites (block mode, port spacing,
+    ``--relative-paths``); returns ``(data, block_info)``."""
+    block_info: dict[str, Any] | None = None
+    if block:
+        data, block_info = apply_block_mode(data)
+    data = space_separate_subckt_ports(data)
+    if relative_paths:
+        data = relativize_schematic_paths(data, schematic)
+    return data, block_info
+
+
 def run_netlist(
     schematic: str,
     output: str,
@@ -1013,12 +1027,9 @@ def run_netlist(
         with open(produced, "rb") as handle:
             fresh_data = handle.read()
 
-        block_info: dict[str, Any] | None = None
-        if block:
-            fresh_data, block_info = apply_block_mode(fresh_data)
-        fresh_data = space_separate_subckt_ports(fresh_data)
-        if relative_paths:
-            fresh_data = relativize_schematic_paths(fresh_data, schematic)
+        fresh_data, block_info = _postprocess_netlist(
+            fresh_data, block=block, relative_paths=relative_paths, schematic=schematic
+        )
 
         version = _probe_xschem_version(xschem_binary)
         warnings = _unevaluated_expr_warnings(
