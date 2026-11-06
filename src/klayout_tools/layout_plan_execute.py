@@ -185,10 +185,9 @@ from ._paths import _resolve_relative
 from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
 from .gen_compose import GenComposeError, _translate_bbox, compose
 from .layout_plan_ports import (
-    derive_gate_contact,
+    apply_gate_contact,
     device_owned_port_names,
     extract_raw_params_by_id,
-    gate_contact_warning,
     port_pins,
     unrouted_reasons,
 )
@@ -425,10 +424,9 @@ def _resolve_group_params(
 
     resolved: dict[str, Any] = dict(derived)
     # gate_contact (#5093): derived from gate-net fan-out; overrides win below.
-    if digest is not None and derive_gate_contact(group, digest, digest_devices_by_key):
-        resolved["gate_contact"] = True
-        if "gate_contact" not in overrides:
-            warnings.append(gate_contact_warning(group["id"]))
+    warnings.extend(
+        apply_gate_contact(resolved, group, digest, digest_devices_by_key, overrides)
+    )
     # `device_groups[].topology` is a top-level plan field (Phase B's own
     # matching-pattern concept, already validated against the named
     # generator's own support table) but only `mos_array`/`bjt_array` accept

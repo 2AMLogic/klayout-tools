@@ -58,6 +58,23 @@ def derive_gate_contact(
     return False
 
 
+def apply_gate_contact(
+    resolved: dict[str, Any],
+    group: dict[str, Any],
+    digest: dict[str, Any] | None,
+    digest_devices_by_key: dict[tuple[str, str], dict[str, Any]],
+    overrides: dict[str, Any],
+) -> list[str]:
+    """Set ``resolved["gate_contact"]`` when derived (#5093); return any
+    warning. Explicit ``overrides`` still win when layered on afterwards."""
+    if digest is None or not derive_gate_contact(group, digest, digest_devices_by_key):
+        return []
+    resolved["gate_contact"] = True
+    if "gate_contact" in overrides:
+        return []
+    return [gate_contact_warning(group["id"])]
+
+
 def extract_raw_params_by_id(request: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """``{device_groups[].id: device_groups[].params}`` read from the
     **original** request, not the validated response.
