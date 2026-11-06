@@ -8,6 +8,31 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-06
 
+- **PR #5080**: feat(sim): add analysis.op_check to flag metastable op solutions
+- **PR #5079**: fix(sim): default analysis args to empty string for op analyses
+- **PR #5076**: feat: warn when synthesized netlist still has x-valued constant assigns
+- **PR #5075**: fix: drop stale rule count from asap7 deck comment and guard it
+- **PR #5072**: fix: reject unknown klt sta request keys and hint on SPEF name mismatch
+- **PR #5071**: docs: note installer-cache dependence of git-pin build identity
+- **PR #5070**: feat: normalise Liberty units in characterize --compare-to
+- **PR #5069**: feat(sim): warn in dry-run on unknown keys under corners
+- **PR #5068**: feat(sim): lift refused batch runner version mismatch to top-level diagnostics
+- **PR #5067**: feat: expose rule thresholds in um in klt drc --list-rules
+- **PR #5066**: docs(yield): document degenerate zero-spread contract and 0.8.0 change
+- **PR #5064**: feat(signoff): document item 6 scan tokens and add waiver hint
+- **PR #4967**: feat: label netlist ports and report unrouted reasons in layout-plan execute
+- **Issue #5078** (closed): klt sim: analysis.kind "op" requires an empty "args" key
+- **Issue #5077** (closed): klt sim: an op of a bistable circuit can silently converge to the unstable mid-rail solution; no way to pin or detect node states
+- **Issue #5073** (closed): Bundled DRC deck header comment states a stale rule-category count
+- **Issue #5065** (closed): klt sta/extract: unknown request keys accepted silently; SPEF net-name flags need three opt-ins to annotate
+- **Issue #5063** (closed): klt characterize --compare-to does not normalise Liberty time/capacitance units
+- **Issue #5062** (closed): klt build block depends on installer git cache: same pinned ref yields dev vs release version
+- **Issue #5061** (closed): klt sim batch: client/runner version mismatch fails the whole job with only per-corner diagnostics
+- **Issue #5060** (closed): klt sim: misplaced 'exclude' under 'corners' is silently ignored
+- **Issue #5059** (closed): klt drc --list-rules: expose each rule's numeric threshold and the deck content hash
+- **Issue #5058** (closed): klt yield: zero-spread sample sets report differently across releases (normal block null, verdict 'degenerate')
+- **Issue #5057** (closed): signoff item 6: not_applicable grading rejects spec-row ids by keyword (e.g. 'monte-carlo')
+- **Issue #4966** (closed): layout-plan execute: places sky130 5V-class blocks but routes none of the nets (exit 3), no pin labels for LVS
 - **PR #5052**: refactor: drop 13 unused re-exports from place_and_route compat shim
 - **PR #5051**: docs(extract): state devices[] is the stable contract, deck card form is not
 - **PR #5049**: feat: add klt netlist --relative-paths for checkout-independent path comments
