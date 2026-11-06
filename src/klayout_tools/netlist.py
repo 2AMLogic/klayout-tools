@@ -932,6 +932,7 @@ def run_netlist(
     erc: bool = False,
     symbol_path: Sequence[str] = (),
     relative_paths: bool = False,
+    provenance_header: bool = True,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -959,6 +960,10 @@ def run_netlist(
 
     ``relative_paths=True`` (issue #5046) writes ``** sch_path:`` / ``** sym_path:``
     comments relative to the schematic's git toplevel (checkout-independent).
+
+    ``provenance_header=False`` (issue #5085) omits the ``** klt-netlist-inputs:``
+    line from the written netlist, so it is byte-identical to the raw xschem
+    export; ``--check`` is unaffected (it already compares on the fresh bytes).
 
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
@@ -1050,7 +1055,9 @@ def run_netlist(
             payload["warnings"] = warnings
 
         inputs = generation_inputs(version, rcfile, pdk_block)
-        written_data = inputs_record_line(inputs) + fresh_data
+        written_data = (
+            inputs_record_line(inputs) + fresh_data if provenance_header else fresh_data
+        )
         if check:
             status, drift = _check_result(
                 output,
@@ -1067,6 +1074,7 @@ def run_netlist(
         _write_output(output, written_data)
         payload["status"] = STATUS_GENERATED
         payload["netlist"] = _netlist_block(output, written_data)
+        payload["provenance_header"] = provenance_header
         return payload
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

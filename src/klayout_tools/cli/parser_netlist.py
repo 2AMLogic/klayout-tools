@@ -146,6 +146,18 @@ def add_netlist_parser(
         ),
     )
     netlist_parser.add_argument(
+        "--no-provenance-header",
+        dest="no_provenance_header",
+        action="store_true",
+        default=False,
+        help=(
+            "generate mode: omit the '** klt-netlist-inputs:' comment line, so "
+            "the written netlist is byte-identical to xschem's own export "
+            "(for projects that hash-pin committed netlists). Off by default "
+            "(issue #5085)"
+        ),
+    )
+    netlist_parser.add_argument(
         "--allow-unevaluated-expr",
         action="store_true",
         default=False,
