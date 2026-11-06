@@ -14,6 +14,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt yield` 0.8.0 retrospective: zero-spread sample sets are now
+  `degenerate`** (#2909, documented via #5058, 2026-11-06): in releases before
+  0.8.0, a bit-identical sample set (or one with only a rounding-residue
+  spread, sample stddev <= `1e-12 * max(abs(mean), tiny)`) produced a
+  `yield.normal` block (estimate `1.0`, interval `[1, 1]`, `stddev` ~`8.9e-16`)
+  with normality `rejected`. From 0.8.0 it produces `yield.normal: null`,
+  `stddev: 0.0` and normality `degenerate`. Exit code and `schema_version` are
+  unchanged (`normal: null` was already a permitted shape). See "Degenerate
+  (zero-spread) input" in `docs/cli/yield.md`. Docs only; no code, JSON field
+  or `schema_version` change.
+
 - **`klt extract` docs: `devices[]` is the device contract, the written deck's
   card form is not** (issue #5050): `docs/cli/extract.md` now states that
   consumers should read devices from the JSON `devices[]` (class,
