@@ -34,7 +34,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .._paths import _resolve_relative, check_known_fields  # noqa: F401 (re-exported as reqdoc.check_known_fields)
+from .._paths import _resolve_relative
+from .._request_fields import check_known_fields  # noqa: F401 (re-exported as reqdoc.check_known_fields)
 
 ErrorFactory = type[Exception]
 

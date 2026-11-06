@@ -382,30 +382,6 @@ def fold_spice_continuations(lines: list[str]) -> list[str]:
     return folded
 
 
-def check_known_fields(
-    request: dict[str, Any],
-    known: tuple[str, ...],
-    *,
-    verb: str,
-    error_cls: type[Exception],
-) -> None:
-    """Reject unknown top-level fields.
-
-    A request document mirrors the command's flag surface one-for-one, so an
-    unrecognised key is almost always a typo or a field from a newer build --
-    either way, silently ignoring it would drop an input the caller believed
-    was applied, which is precisely what the hashable-request contract exists
-    to prevent.
-    """
-    unknown = sorted(key for key in request if key != "schema" and key not in known)
-    if unknown:
-        raise error_cls(
-            f"unknown field(s) in `klt {verb}` request document: "
-            f"{', '.join(unknown)} -- known fields: schema, "
-            f"{', '.join(sorted(known))}"
-        )
-
-
 def validate_request_shape(
     data: Any,
     source: str,

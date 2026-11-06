@@ -271,7 +271,6 @@ from ._paths import (
     _count_spef_nets_annotated,
     _load_request_json,
     _tcl_net_list,
-    check_known_fields,
     validate_request_shape,
 )
 from ._power_activity import power_activity_lines as _power_activity_lines
@@ -284,6 +283,7 @@ from ._provenance import (
     build_provenance,
     sha256_file,
 )
+from ._request_fields import check_known_fields
 from ._sta_request_diag import (
     KNOWN_REQUEST_FIELDS,
     SPEF_NAME_MISMATCH_HINT,
