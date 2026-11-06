@@ -250,8 +250,19 @@ committed from one checkout (a developer's home directory, a CI workspace, a
 worktree, the batch runner) still reports `"match"` from any other, while a
 change to any other line, or a subcircuit taken from a different file, still
 reports `"drifted"`. When the two files differ *only* in those comment
-directories, `drift.path_comments_differ` is `true`. Generation is unchanged:
-the written netlist carries xschem's paths as xschem wrote them.
+directories, `drift.path_comments_differ` is `true`. By default generation is
+unchanged: the written netlist carries xschem's paths as xschem wrote them.
+
+**`--relative-paths` (issue #5046)** makes the *written* netlist
+checkout-independent too. Each `** sch_path:` / `** sym_path:` comment is
+rewritten relative to the schematic's git toplevel (fallback: the schematic's
+parent directory); paths outside that root, such as PDK symbols, are reduced to
+their basename. Regenerating the same sources from two checkouts or worktrees
+is then byte-identical, so a one-device edit shows up as a one-device diff.
+It works with `--block` and `--backend batch` (applied after the runner's paths
+are mapped back to the local checkout), and `--check` reports `match` against a
+committed netlist written either way. `netlist.content_hash` / `netlist.bytes`
+describe the rewritten text; no JSON field is added or changed.
 
 **The comparison is also independent of `+` continuation layout** (issue
 #3324). Before comparing, each `+` continuation line is joined onto its
