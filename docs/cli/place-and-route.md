@@ -3537,6 +3537,8 @@ by
 
 ## Fleet evaluation of digital candidates (Epic #391 Phase 6)
 
+> **Experimental library, not a shipped fleet path.** `klayout_tools.digital_fleet` (and the congestion pre-check chain it was built to host: `congestion.py`, `native/congestion/`) is kept as an experimental library. No `klt` verb calls it and nothing in the shipped `klt synthesize` / `klt place-and-route` flow depends on it. Its planned consumer is live digital fleet validation, tracked in [#485](https://github.com/2AMLogic/klayout-tools/issues/485); until that lands, treat the API below as unstable and unvalidated against a live fleet.
+
 `klt sim`'s `remote`/fleet-sharding backend (see [`docs/cli/sim.md`](sim.md)'s
 "Remote backend"/"Fleet sharding" sections, Epic #375) provisions and
 schedules a **corner-shaped** unit of work — many lightweight ngspice runs
