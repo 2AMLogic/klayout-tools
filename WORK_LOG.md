@@ -8,6 +8,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-06
 
+- **PR #5022**: feat: yield install hint names [yield] extra; report records native build
+- **PR #5023**: test(sim): cover all-shards-interrupted case for batch-set partial collect
+- **Issue #5018** (closed): klt yield: klt_yield_native not installable from a release or the installed tool (recurrence of #1061, #2466, #2531, #2900, #4671)
+- **Issue #5014** (closed): feat: partial collection and per-shard interruption summary for klt sim --batch-set --resume
 - **PR #5021**: feat(sim): add per-unit summary to exit_reason and surface it in --job-status
 - **PR #5015**: fix: make klt sim --batch-set --dry-run preflight only
 - **Issue #5019** (closed): klt sim batch: job fails with 'job command exited 4' and no per-unit diagnostics recoverable
