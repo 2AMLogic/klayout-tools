@@ -3091,7 +3091,10 @@ def _check_interrupted_grace(
         f"{config.interrupted_grace_s:g}s, with no re-launch observed; "
         "it may still be recoverable on the fleet (check "
         f"{report_job_uri(config, job_id)}/status.json) -- the client does "
-        "not re-launch it itself",
+        "not re-launch it itself. To re-run only the units with no result, "
+        "re-run the same request or set with the same -o and --resume (for "
+        "a shard map: --attach <batch-shards.json> --collect-partial, then "
+        "--resume)",
         interrupted_s=interrupted_s,
     )
 

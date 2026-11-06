@@ -1216,6 +1216,9 @@ def test_poll_fails_fast_on_a_job_stuck_interrupted(tmp_path):
     assert excinfo.value.last_state == "interrupted"
     assert excinfo.value.interrupted_s >= 100.0
     assert "job-1" in str(excinfo.value)
+    # The message names the recovery command (#5025).
+    assert "--resume" in str(excinfo.value)
+    assert "--collect-partial" in str(excinfo.value)
     # Failed fast: nowhere near the 5400s poll budget.
     assert len(runner.argvs_matching("status.json")) < 20
 
@@ -3069,9 +3072,32 @@ def test_interrupted_grace_reports_distinct_unrun_corners(tmp_path, monkeypatch)
         assert corner["status"] == "error"
         assert corner["diagnostics"][0]["code"] == "batch_job_interrupted"
         assert "job-1" in corner["diagnostics"][0]["message"]
+        assert "--resume" in corner["diagnostics"][0]["message"]
     assert environment["job_id"] == "job-1"
     assert environment["state"] == "interrupted"
     assert environment["interrupted_s"] >= 0.0
+
+
+def test_cli_all_interrupted_exits_nonzero_with_recovery_message(
+    tmp_path, monkeypatch, capsys
+):
+    from klayout_tools.cli import main
+
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("interrupted"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path)
+    request["batch"] = {**request.get("batch", {}), "interrupted_grace_s": 1e-9}
+    path = _write_request(tmp_path, request)
+
+    code = main(["sim", str(path), "--format", "json"])
+
+    assert code == 4
+    report = json.loads(capsys.readouterr().out)
+    codes = [d["code"] for c in report["corners"] for d in c["diagnostics"]]
+    assert codes and set(codes) == {"batch_job_interrupted"}
+    assert "--resume" in report["corners"][0]["diagnostics"][0]["message"]
 
 
 def test_transport_failure_is_a_sim_error(tmp_path, monkeypatch):
