@@ -133,6 +133,19 @@ def add_netlist_parser(
         ),
     )
     netlist_parser.add_argument(
+        "--relative-paths",
+        dest="relative_paths",
+        action="store_true",
+        default=False,
+        help=(
+            "generate mode: write xschem's '** sch_path:' / '** sym_path:' "
+            "comments relative to the schematic's git toplevel (else its "
+            "parent directory); paths outside that root are reduced to their "
+            "basename. Regenerating the same sources from any checkout is "
+            "then byte-identical. Off by default (issue #5046)"
+        ),
+    )
+    netlist_parser.add_argument(
         "--allow-unevaluated-expr",
         action="store_true",
         default=False,

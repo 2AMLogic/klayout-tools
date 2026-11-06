@@ -481,11 +481,11 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1079
+      "lines": 1072
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
-      "lines": 903
+      "lines": 887
     },
     {
       "path": "src/klayout_tools/netlist_capacitor_recovery.py",

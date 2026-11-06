@@ -76,7 +76,6 @@ from typing import Any
 
 from . import pdk as pdk_module
 from ._provenance import content_hash_bytes
-from .netlist_block import apply_block_mode, space_separate_subckt_ports
 from .netlist_diagnostics import diagnostics_block
 from .netlist_inputs import (
     generation_inputs,
@@ -84,6 +83,7 @@ from .netlist_inputs import (
     inputs_record_line,
     split_inputs_record,
 )
+from .netlist_paths import _PATH_COMMENT_RE, postprocess_netlist
 from .netlist_pdk import _pdk_root_consistent, _rcfile_pdk_root, _with_symbol_path_env
 
 #: Payload schema version (``docs/json-contract.md``; versioned per command).
@@ -450,16 +450,6 @@ def _unified_diff(
     if len(lines) > MAX_DIFF_LINES:
         return lines[:MAX_DIFF_LINES], True
     return lines, False
-
-
-#: xschem writes the absolute path of every schematic and symbol it expands
-#: into a SPICE export as a comment line (``** sch_path: /abs/x.sch``,
-#: ``** sym_path: /abs/x.sym``). Those lines name the *checkout*, not the
-#: circuit, so they differ between any two checkouts of the same schematic
-#: (issue #3010). Group 1 is the line up to the path, group 2 the path.
-_PATH_COMMENT_RE = re.compile(
-    rb"^(\*\*[ \t]*(?:sch_path|sym_path):[ \t]*)(.*?)[ \t]*\r?$", re.MULTILINE
-)
 
 
 def _normalize_path_comments(data: bytes) -> bytes:
@@ -941,6 +931,7 @@ def run_netlist(
     ignore_comments: bool = False,
     erc: bool = False,
     symbol_path: Sequence[str] = (),
+    relative_paths: bool = False,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -965,6 +956,9 @@ def run_netlist(
     ``symbol_path`` (issue #4952) is a list of extra symbol directories,
     exported to xschem as ``XSCHEM_USER_LIBRARY_PATH`` (prepended to any
     value already in the environment). Each must be an existing directory.
+
+    ``relative_paths=True`` (issue #5046) writes ``** sch_path:`` / ``** sym_path:``
+    comments relative to the schematic's git toplevel (checkout-independent).
 
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
@@ -1018,10 +1012,9 @@ def run_netlist(
         with open(produced, "rb") as handle:
             fresh_data = handle.read()
 
-        block_info: dict[str, Any] | None = None
-        if block:
-            fresh_data, block_info = apply_block_mode(fresh_data)
-        fresh_data = space_separate_subckt_ports(fresh_data)
+        fresh_data, block_info = postprocess_netlist(
+            fresh_data, block=block, relative_paths=relative_paths, schematic=schematic
+        )
 
         version = _probe_xschem_version(xschem_binary)
         warnings = _unevaluated_expr_warnings(
