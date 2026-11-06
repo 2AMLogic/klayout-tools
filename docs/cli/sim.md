@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>|all]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--timeout-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>|all]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -45,6 +45,12 @@ this document (and the code) win.
   overriding the request's own `options.wall_clock_budget_s` when given.
   Defaults to unbounded (today's behaviour). See "Wall-clock budget, orphan
   safety, and resume" below.
+- `--timeout-s` — per-corner timeout in seconds, overriding the request's own
+  `options.timeout_s` when given (issue #5036; must be `> 0`; corner requests
+  only, rejected with `--batch-set`). Applied before the `batch` pre-submit
+  job-ceiling assessment (`timeout_s` x units + 120 s vs. `max_job_seconds`),
+  so lowering it legitimately silences the warning; the warning still fires
+  whenever the bound truly exceeds the ceiling. No JSON field changes.
 - `--resume` — resume from a matching on-disk checkpoint, skipping corners a
   prior interrupted run of this same request already completed, overriding
   the request's own `options.resume` when given. See "Wall-clock budget,
@@ -2367,6 +2373,19 @@ too (issue #4079: canary repos commit them), while the
 `--submit-only` / `--status` stdout outputs still carry `bucket` (operational, not
 committed evidence). Report-bound text (poll-timeout and interrupt messages,
 `harness_log`) shows `s3://<bucket>/...` literally in place of the name.
+
+### Keeping only the report, deck and measurements from a batch run
+
+The batch job always writes its artifacts under `$EDA_OUTPUT_DIR/artifacts`
+on the fleet, but they are only **installed into your `--outdir`** when the run
+keeps artifacts: `options.keep_artifacts: true`, or something that forces it
+(`options.waveforms`, `--plot`, declared complex vectors, a two-port analysis).
+With none of these set, no raw waveform files are installed locally
+(`_install_batch_artifacts` is gated on `keep_artifacts`); the report, deck and
+measurements come back in the report itself. There is no separate
+`--artifacts` switch: leave `keep_artifacts`/`waveforms` unset (and drop
+`--plot`) to keep the local tree small (issue #5036). Collecting fewer files
+on the fleet side is out of scope.
 
 ### Post-processing waveforms from a batch run locally
 

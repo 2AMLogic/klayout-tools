@@ -50,6 +50,7 @@ from ..sim import SimError, load_request, run_sim
 from ..sim_batch_async import read_job_status
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
+from .sim_job_text import _print_job_status_text as _print_job_status_text
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
 
@@ -145,6 +146,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             command_approvals=getattr(args, "command_approvals", None),
             pdk_root=getattr(args, "pdk_root", None),
             collect_partial=getattr(args, "collect_partial", False),
+            timeout_s=getattr(args, "timeout_s", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -257,18 +259,6 @@ def _print_submitted_text(report: dict) -> None:
     print(f"poll with: klt sim <request> --job-status {report['job_id']}")
 
 
-def _print_job_status_text(status: dict) -> None:
-    print(f"job: {status['job_id']}  state: {status['state']}")
-    for key in ("detail", "elapsed_seconds", "updated_at"):
-        if key in status:
-            print(f"{key}: {status[key]}")
-    instance = status.get("instance") or {}
-    if instance:
-        kind = instance.get("instance_type", "-")
-        where = instance.get("availability_zone", "-")
-        print(f"instance: {kind} ({instance.get('lifecycle', '-')}, {where})")
-
-
 def _run_batch_set(args: argparse.Namespace) -> int:
     """``klt sim --batch-set``: submit a set of requests (issue #2869).
 
@@ -288,6 +278,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--submit-only", getattr(args, "submit_only", False)),
             ("--job-status", getattr(args, "job_status", None)),
             ("--pdk-root", getattr(args, "pdk_root", None)),
+            ("--timeout-s", getattr(args, "timeout_s", None)),
         )
         if value is not None and value is not False and value != ""
     ]
