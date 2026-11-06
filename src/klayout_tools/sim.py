@@ -4531,6 +4531,10 @@ def _run_sim_corners(
         "request_feature_diagnostic", None
     )
 
+    runner_version_diagnostic = _pop_runner_version_diagnostic(
+        environment.get("remote")
+    )
+
     report = {
         "schema_version": SCHEMA_VERSION,
         "netlist": env_provenance.repo_relative_path(netlist_path, repo_root=repo_root),
@@ -4581,6 +4585,7 @@ def _run_sim_corners(
         d
         for d in (
             request_feature_diagnostic,
+            runner_version_diagnostic,
             _width_ceiling_preflight_diagnostic(netlist_path),
         )
         if d
@@ -12529,6 +12534,22 @@ def _diagnose_modelname_error(netlist_path: str) -> str | None:
     if culprit is None:
         return None
     return sim_bin_range.message(culprit, _MODEL_WIDTH_CEILING_UM)
+
+
+def _pop_runner_version_diagnostic(remote: Any) -> dict[str, Any] | None:
+    """Lift ``runner_version_diagnostic`` (issue #5061) out of
+    ``environment.remote`` and every ``remote.fleet[]`` member, returning the
+    first one so a sharded run reports a single entry, not one per shard."""
+    if not isinstance(remote, dict):
+        return None
+    members = remote.get("fleet")
+    blocks = [remote, *(members if isinstance(members, list) else [])]
+    found = [
+        block.pop("runner_version_diagnostic", None)
+        for block in blocks
+        if isinstance(block, dict)
+    ]
+    return next((d for d in found if d), None)
 
 
 def _width_ceiling_preflight_diagnostic(netlist_path: str) -> dict[str, Any] | None:

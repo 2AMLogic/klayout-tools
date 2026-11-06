@@ -4125,7 +4125,42 @@ def _recover_failed_job_corners(
     _annotate_preflight_rejection(corners, runner_error, identity)
     if runner_error is None:
         _annotate_unrecovered_preflight_reject(corners, status, identity)
+    refused = (
+        runner_error.get("code") == BATCH_RUNNER_MISMATCH_CODE
+        if runner_error is not None
+        else _status_exit_code(status) == _BATCH_PREFLIGHT_REJECT_EXIT
+    )
+    if refused and (diagnostic := _runner_version_diagnostic(identity)):
+        identity = {**identity, "runner_version_diagnostic": diagnostic}
     return corners, identity
+
+
+def _runner_version_diagnostic(identity: dict[str, Any]) -> dict[str, Any] | None:
+    """The top-level report diagnostic for a refused major.minor mismatch
+    (issue #5061), or ``None`` unless ``identity`` is a ``mismatch``. Only
+    called when the runner preflight actually rejected the job, so it is
+    never emitted for a ``runner_version_check: "warn"`` run that proceeded.
+    The remedy names the runner's accepted client major.minor."""
+    if identity.get("runner_compatibility") != "mismatch":
+        return None
+    runner = identity.get("runner_klt_version")
+    client = identity.get("client_klt_version")
+    accepted = _runner_gate_release(str(runner))
+    client_release = _runner_gate_release(str(client))
+    if accepted is None or client_release is None:
+        return None
+    return {
+        "code": BATCH_RUNNER_MISMATCH_CODE,
+        "severity": "error",
+        "message": (
+            f"the fleet runner (klt {runner}) refused the job: the submitting "
+            f"client is klt {client}; submit from a client of klt {accepted}.x, "
+            f"or update the runner image to klt {client_release}"
+        ),
+        "runner_klt_version": runner,
+        "client_klt_version": client,
+        "accepted_client_release": accepted,
+    }
 
 
 def _annotate_preflight_rejection(
