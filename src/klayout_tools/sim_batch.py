@@ -3076,8 +3076,7 @@ def _check_interrupted_grace(
     interrupted_since: float | None,
     now: float,
 ) -> None:
-    """Raise :class:`BatchJobInterrupted` once the job has been continuously
-    ``interrupted`` for ``config.interrupted_grace_s`` (``0`` = unbounded)."""
+    """Raise :class:`BatchJobInterrupted` after ``interrupted_grace_s`` (0 = off)."""
     if (
         interrupted_since is None
         or config.interrupted_grace_s <= 0
@@ -3086,12 +3085,13 @@ def _check_interrupted_grace(
         return
     interrupted_s = now - interrupted_since
     raise BatchJobInterrupted(
-        f"job {job_id} stayed 'interrupted' (Spot reclaimed) for "
-        f"{interrupted_s:.0f}s, past batch.interrupted_grace_s="
-        f"{config.interrupted_grace_s:g}s, with no re-launch observed; "
-        "it may still be recoverable on the fleet (check "
-        f"{report_job_uri(config, job_id)}/status.json) -- the client does "
-        "not re-launch it itself",
+        f"job {job_id} stayed 'interrupted' (Spot reclaimed) for {interrupted_s:.0f}s, "
+        f"past batch.interrupted_grace_s={config.interrupted_grace_s:g}s, with no "
+        "re-launch observed; it may still be recoverable on the fleet (check "
+        f"{report_job_uri(config, job_id)}/status.json) -- the client does not "
+        "re-launch it itself; to recover, re-run the same request/set with the same "
+        "-o and --resume (shard map: --attach <batch-shards.json> --collect-partial, "
+        "then --resume)",
         interrupted_s=interrupted_s,
     )
 

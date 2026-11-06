@@ -963,7 +963,7 @@ def _add_yield_parser(subparsers: argparse._SubParsersAction) -> None:
         "yield",
         help=(
             "Monte Carlo sample set + spec limits -> yield estimate with CIs "
-            "(needs a separately built Rust extension)"
+            "(needs the klt-yield-native extension)"
         ),
         description=(
             "Turn a Monte Carlo sample set and its spec limits into a yield "
@@ -975,13 +975,10 @@ def _add_yield_parser(subparsers: argparse._SubParsersAction) -> None:
             "could only produce one -- a single sample, a confidence level "
             "of 0 or 1, a measurement with no limits -- is an error, not a "
             "warning. Statistics run in the klt_yield_native Rust "
-            "extension (native/yield/). Supported install today: a full "
-            "repo checkout plus a Rust toolchain. The prebuilt "
-            "`klt-yield-native` wheel behind `pip install "
-            "'klayout-tools[yield]'` is not yet on PyPI, so that extra "
-            "does not resolve for any release to date (0.6.0 and 0.7.0 "
-            "included); it will only resolve for releases published "
-            "after the wheel is. See "
+            "extension (native/yield/). Install it with the extra: "
+            "`pip install 'klayout-tools[yield]'` pulls the prebuilt "
+            "`klt-yield-native` wheel (Linux x86_64, macOS arm64); other "
+            "platforms need a repo checkout plus a Rust toolchain. See "
             "docs/cli/yield.md#building-the-native-extension for the "
             "input/output schema and install/build options."
         ),
@@ -1278,7 +1275,7 @@ def _add_yield_campaign_parser(subparsers: argparse._SubParsersAction) -> None:
         "yield-campaign",
         help=(
             "launch + analyse a Monte Carlo yield campaign from a spec "
-            "(needs a separately built Rust extension)"
+            "(needs the klt-yield-native extension)"
         ),
         description=(
             "Launch and manage a Monte Carlo yield campaign directly, "
@@ -1293,7 +1290,8 @@ def _add_yield_campaign_parser(subparsers: argparse._SubParsersAction) -> None:
             "is analysed by `klt yield`'s own unmodified Phase 1 pipeline -- "
             "see docs/cli/yield.md's 'Campaign orchestration' section. "
             "That pipeline requires the klt_yield_native Rust extension "
-            "(same gap, same fix, as `klt yield`) -- see "
+            "(install it with `pip install 'klayout-tools[yield]'`, as for "
+            "`klt yield`) -- see "
             "docs/cli/yield.md#building-the-native-extension."
         ),
     )
@@ -1397,7 +1395,7 @@ def _add_yield_sensitivity_parser(subparsers: argparse._SubParsersAction) -> Non
         "yield-sensitivity",
         help=(
             "campaign parameter draws + output values -> ranked "
-            "contribution to the spread (needs a separately built Rust "
+            "contribution to the spread (needs the klt-yield-native "
             "extension)"
         ),
         description=(
@@ -1416,9 +1414,9 @@ def _add_yield_sensitivity_parser(subparsers: argparse._SubParsersAction) -> Non
             "yield-campaign`/`klt gen-compose`'s own precedent for a "
             "second analysis mode of existing data. Statistics run in the "
             "klt_yield_native Rust extension (native/yield/, the same "
-            "crate `klt yield` uses, installed the same way: build from a "
-            "checkout today; the `klayout-tools[yield]` prebuilt wheel is "
-            "not yet on PyPI -- see "
+            "crate `klt yield` uses, installed the same way: `pip install "
+            "'klayout-tools[yield]'` for the prebuilt wheel on Linux "
+            "x86_64 / macOS arm64, else build from a checkout -- see "
             "docs/cli/yield.md#building-the-native-extension)."
         ),
     )
