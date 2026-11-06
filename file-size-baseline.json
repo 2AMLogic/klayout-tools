@@ -417,7 +417,7 @@
     },
     {
       "path": "src/klayout_tools/layout_plan_execute.py",
-      "lines": 1239
+      "lines": 1237
     },
     {
       "path": "src/klayout_tools/lef_abstract.py",
