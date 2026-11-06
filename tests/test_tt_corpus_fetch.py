@@ -132,9 +132,8 @@ def test_pacing_floor_and_user_agent():
     sleeps: list[float] = []
     t = [0.0]
     transport = tt.PacedHttpTransport(2.0, clock=lambda: t[0], sleep=sleeps.append)
-    assert (
-        "klayout-tools" in transport.user_agent and "github.com" in transport.user_agent
-    )
+    assert transport.user_agent == tt.USER_AGENT
+    assert transport.user_agent.startswith("klayout-tools")
     transport._last = 0.0
     t[0] = 0.5
     with pytest.raises(tt.FetchError):
