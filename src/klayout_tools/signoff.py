@@ -141,7 +141,7 @@ from .signoff_generator_batch import (
 
 # Per-cell DRC/LVS member-coverage counts (issue #5031); kept out of this file
 # for its size-ratchet ceiling.
-from .signoff_multi_member import MEMBER_COUNT_ITEMS, _entry_problem, member_coverage
+from .signoff_multi_member import _entry_problem, with_member_coverage
 
 # The item-6 `not_applicable` form's pure helpers (statistical scan, markdown
 # spec parser; issue #4793) live in `signoff_na`, keeping this file under its
@@ -6918,8 +6918,7 @@ def _build_tier_item(
             required_kind_pair=required_kind_pair,
         )
         # Issue #5031: per-cell DRC/LVS lists state how many members counted.
-        if report_list and item_id in MEMBER_COUNT_ITEMS:
-            extra = {**extra, **member_coverage(raw_entry, extra)}
+        extra = with_member_coverage(item_id, report_list, raw_entry, extra)
     elif raw_entry is not None:
         spec = _normalize_evidence_entry(raw_entry)
         if spec is None:

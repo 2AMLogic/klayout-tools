@@ -33,6 +33,16 @@ def member_coverage(raw_entry: Any, extra: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def with_member_coverage(
+    item_id: int, report_list: bool, raw_entry: Any, extra: dict[str, Any]
+) -> dict[str, Any]:
+    """``extra`` plus the member-coverage fields when this is a per-cell list
+    entry for a DRC/LVS item; otherwise ``extra`` unchanged."""
+    if report_list and item_id in MEMBER_COUNT_ITEMS:
+        return {**extra, **member_coverage(raw_entry, extra)}
+    return extra
+
+
 def _entry_problem(raw: Any) -> str:
     """Human-readable cause for an evidence entry
     :func:`_normalize_evidence_entry` rejects (issue #4562)."""
