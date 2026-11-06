@@ -271,6 +271,7 @@ from ._paths import (
     _count_spef_nets_annotated,
     _load_request_json,
     _tcl_net_list,
+    check_known_fields,
     validate_request_shape,
 )
 from ._power_activity import power_activity_lines as _power_activity_lines
@@ -553,6 +554,21 @@ class PostRouteStaError(Exception):
     """
 
 
+# Top-level keys ``run_sta`` reads (``schema`` is always allowed). Anything
+# else is rejected (issue #5065) rather than silently dropped.
+_KNOWN_REQUEST_FIELDS = (
+    "def",
+    "verilog",
+    "hdl_toplevel",
+    "pdk",
+    "constraints",
+    "spef",
+    "sdf",
+    "geometry_source",
+    "macros",
+)
+
+
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt sta`` request JSON file.
 
@@ -607,6 +623,9 @@ def run_sta(
     as debuggable artifacts, never deleted.
     """
     request = load_request(request_path)
+    check_known_fields(
+        request, _KNOWN_REQUEST_FIELDS, verb="sta", error_cls=PostRouteStaError
+    )
     request_dir = os.path.dirname(os.path.abspath(request_path))
 
     # Issue #1825: `def`/`verilog` are mutually exclusive alternate geometry
@@ -1733,6 +1752,11 @@ def _spef_annotation_block(
         reasons.append(
             f"only {design_nets_annotated} of {design_nets_total} nets in "
             "the linked design are named by this SPEF"
+        )
+        reasons[-1] += (
+            " (if this SPEF came from `klt extract`, re-run it with "
+            "`--def-net-names` and `--def-pins <routed.def>` so net names "
+            "match the linked design)"
         )
         design_nets_missing_sample = _parse_spef_missing_nets(stdout)
     if reader_warning_count:

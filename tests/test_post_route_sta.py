@@ -206,6 +206,25 @@ def test_run_def_not_found(tmp_path):
         run_sta(request_path)
 
 
+def test_run_rejects_unknown_top_level_key(tmp_path):
+    _write(tmp_path / "top.def", "# def\n")
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(netlist="top.v")
+    )
+    with pytest.raises(PostRouteStaError, match="unknown field.*netlist.*known fields"):
+        run_sta(request_path)
+
+
+def test_run_accepts_schema_key(tmp_path):
+    _write(tmp_path / "top.def", "# def\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(schema="klt.sta.request/1", pdk={"corner": "tt_025C_1v80"}),
+    )
+    with pytest.raises(PostRouteStaError, match="pdk.cell_library is required"):
+        run_sta(request_path)
+
+
 def test_run_cell_library_required(tmp_path):
     _write(tmp_path / "top.def", "# def\n")
     request_path = _write_request(
@@ -2346,6 +2365,8 @@ def test_run_sta_with_spef_incomplete_annotation_warns(tmp_path, monkeypatch):
     annotation = report["spef_annotation"]
     assert annotation["annotation_complete"] is False
     assert "only 3 of 10 nets" in annotation["annotation_warning"]
+    assert "--def-net-names" in annotation["annotation_warning"]
+    assert "--def-pins" in annotation["annotation_warning"]
     assert annotation["design_nets_missing_sample"] == ["a[10]", "u_sub/net"]
 
 
