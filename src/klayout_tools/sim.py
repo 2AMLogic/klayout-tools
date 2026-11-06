@@ -139,6 +139,7 @@ from . import remote_fleet as remote_fleet
 from . import remote_transport as remote_transport
 from . import sim_analysis_overrides as _sao
 from . import sim_bin_range as sim_bin_range
+from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_staging as sim_staging
 from ._jsonnum import is_number
@@ -212,6 +213,7 @@ from .sim_measurement_results import _corner_measurement_results
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
+from .sim_remote import _UNRUN_MESSAGES as _UNRUN_MESSAGES
 
 #: The remaining names below are not called directly from this module -- they
 #: are re-exported (self-aliased so linters recognise the re-export as
@@ -364,6 +366,10 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # An `optional` measurement with no value (issue #2925); info severity.
         "measurement_absent",
         "unknown",
+        # `analysis.op_check` (issue #5077): a declared node sits near mid-rail;
+        # a warning, so it grades `inconclusive` only if listed in
+        # `options.fail_on_diagnostic`.
+        "op_metastable",
         # Opt-in convergence retry record (`options.retry_on_convergence_error`,
         # issue #2973), attached by `_run_corner_with_retry` after the retry ran.
         "convergence_retry",
@@ -1668,6 +1674,14 @@ def _resolve_analysis_and_measurements(
     """
     if request.get("analysis_steps") is not None:
         _reject_linearize_in_steps(request)
+        if (
+            isinstance(request.get("analysis"), dict)
+            and "op_check" in request["analysis"]
+        ):
+            raise SimError(
+                "analysis.op_check is not supported with analysis_steps[]: it "
+                "is only available on a scalar `op` analysis"
+            )
         return sim_steps.resolve_analysis_steps(request)
     analysis = request.get("analysis") or {}
     # Issue #3338: `kind: "twoport"` compiles to an `ac` analysis; resolved
@@ -1680,6 +1694,7 @@ def _resolve_analysis_and_measurements(
     # here, before any engine launch; absent `passes` returns `analysis` as is.
     analysis = sim_passes.resolve_analysis(analysis)
     _validate_linearize(analysis)
+    sim_op_check.validate(analysis)  # issue #5077
     measurements_spec = request.get("measurements", [])
     # Issue #2533: `spice` (a verbatim top-level `.meas` card) and `expr` (an
     # expression evaluated after the analysis, inside the generated
@@ -3474,6 +3489,7 @@ def _prepare_sim_request(
         initial_conditions_declared=bool(ic_rules),
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
         linearize_declared=analysis.get("linearize") is True,
+        op_check_declared=sim_op_check.is_declared(analysis),
         crossings_declared=bool(
             sim_crossings.crossings_measurements(measurements_spec)
         ),
@@ -4194,6 +4210,7 @@ def _run_sim_corners(
         code=IC_UNSUPPORTED_WORKER_CODE,
     )
     _sao.require_echo(dispatch_points, corners_new, backend)
+    _require_op_check_echo(analysis, corners_new, backend=backend)
     _require_options_echo(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
@@ -6771,6 +6788,32 @@ def _require_nodeset_echo(
         )
 
 
+def _require_op_check_echo(
+    analysis: dict[str, Any], corners: list[dict[str, Any]], *, backend: str
+) -> None:
+    """Fail when an off-host worker silently dropped ``analysis.op_check``
+    (issue #5077). A worker that supports it adds ``op_check`` to every corner
+    it ran; one built before the field returns none, and its corners would be
+    graded without the check. Corners that never ran are exempt."""
+    if backend not in _OFFHOST_BACKENDS or not sim_op_check.is_declared(analysis):
+        return
+    unrun = set(_UNRUN_MESSAGES)
+    for corner in corners:
+        if "op_check" in corner:
+            continue
+        if any(d.get("code") in unrun for d in corner.get("diagnostics") or []):
+            continue
+        raise SimError(
+            "the remote/batch worker did not honor analysis.op_check -- "
+            f"corner {corner.get('corner_id')!r} came back without an "
+            "`op_check` field. A worker built before the field would grade "
+            "the corner without the metastability check; update the runner "
+            "image to this klt release, or use a local backend. No result "
+            "was reported",
+            code=sim_op_check.OP_CHECK_UNSUPPORTED_WORKER_CODE,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Transient start states: `options.initial_conditions` (issue #3881)
 # --------------------------------------------------------------------------- #
@@ -7986,6 +8029,7 @@ def _enforce_xyce_support_boundary(
     initial_conditions_declared: bool = False,
     analysis_steps_declared: bool = False,
     linearize_declared: bool = False,
+    op_check_declared: bool = False,
     crossings_declared: bool = False,
     cycle_mean_declared: bool = False,
     energy_declared: bool = False,
@@ -8009,6 +8053,12 @@ def _enforce_xyce_support_boundary(
     if engine != "xyce":
         return
     _refuse_xyce_linearize(linearize_declared)
+    if op_check_declared:
+        raise SimError(
+            "analysis.op_check is not supported for engine 'xyce': it reads "
+            "node voltages through an ngspice `.control` block, which the Xyce "
+            "deck does not have; use engine 'ngspice' or drop the field"
+        )
     if analysis_steps_declared:
         # Issue #2482: an ordered step sequence is `alter`/analysis/`let`
         # commands inside one ngspice `.control` block. The Xyce deck has no
@@ -10034,6 +10084,13 @@ def _run_corner(
     # or non-finite rawfile is an error diagnostic, so it cannot grade `pass`.
     twoport_outcome = sim_twoport.extract_corner(analysis, corner_dir)
     diagnostics.extend(twoport_outcome.diagnostics)
+    # Issue #5077: metastable-op detection, before `disqualifying` is sampled.
+    op_check_field: dict[str, Any] = {}
+    if not (timed_out or engine_aborted or analysis_never_started):
+        op_check_field, op_check_diagnostics = sim_op_check.evaluate(
+            analysis, point.supply_v, log_text + "\n" + stdout_text
+        )
+        diagnostics.extend(op_check_diagnostics)
 
     # Issue #3016: the engine ran (any exit status, including 0) yet left no
     # log text and not a single requested measurement has a value -- the
@@ -10198,6 +10255,7 @@ def _run_corner(
         **_ic_report_field(point),
         **_ao_report_field(point),
         **_options_report_field(point),
+        **op_check_field,
         "status": status,
         "runtime_s": runtime_s,
         **started.report_field(),  # issue #4867: best-effort, may be absent
@@ -11272,12 +11330,14 @@ def _save_control_lines(
     raw_path: str | None,
     save_mode: str,
     save_vectors: tuple[str, ...],
+    force: bool = False,
 ) -> list[str]:
     """The ``save`` card :func:`_corner_deck_control_lines` emits (step 2 of
     its ordering contract), or no lines when the corner has nothing to save
-    or ``save_mode`` opts out."""
+    or ``save_mode`` opts out. ``force`` (``analysis.op_check``, issue #5077)
+    counts as something to save."""
     if save_mode != DEFAULT_SAVE_MODE or not (
-        measurements_spec or raw_path is not None
+        measurements_spec or raw_path is not None or force
     ):
         return []
     if save_vectors:
@@ -11415,7 +11475,13 @@ def _corner_deck_control_lines(
     # circuit, so everything after it (save/alter/analysis) re-applies on top.
     prefix: list[str] = _param_reset_lines(point)
     prefix.extend(
-        _save_control_lines(measurements_spec, raw_path, save_mode, save_vectors)
+        _save_control_lines(
+            measurements_spec,
+            raw_path,
+            save_mode,
+            save_vectors,
+            force=sim_op_check.is_declared(analysis),
+        )
     )
     prefix.extend(_supply_alter_lines(point))
     lines.extend(prefix)
@@ -11488,6 +11554,7 @@ def _corner_deck_control_lines(
         lines.extend(spec.get("expr_prelude", ()))
         lines.append(f"let {spec['name']} = {spec['expr']}")
         lines.append(f"print {spec['name']}")
+    lines.extend(sim_op_check.control_lines(analysis))  # issue #5077
     lines.extend(crossings_lines)
     lines.extend(energy_lines)
     lines.extend(stress_lines)

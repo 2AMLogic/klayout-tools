@@ -3379,6 +3379,11 @@ against the real engine). For a multi-equilibrium circuit the hint biases which
 equilibrium is found; klt does not promise any particular one, so check the
 measurement, not the hint.
 
+To make a wrong equilibrium visible instead of silent, declare
+[`analysis.op_check`](#detecting-a-metastable-operating-point-analysisop_check)
+on the `op`, and see its "Pinning a node" note for the deterministic
+workaround.
+
 **Rules.** Each rule has exactly `match` and `values`.
 
 - `match` accepts only `process`, `temperature_c`, `supply_v` and `params`,
@@ -3455,6 +3460,70 @@ spot `m6i.4xlarge`). Both reports are `pass`:
 
 This supersedes the 2026-10-16 measurement (job `klt-sim-38dbf707a38d`, runner
 0.7.0), which the client refused with `params_unsupported_worker`.
+
+### Detecting a metastable operating point: `analysis.op_check` (issue #5077)
+
+A DC `op` of a circuit with a bistable element (cross-coupled latch, SRAM bit,
+a flip-flop with its clock parked) is under-determined: besides the two stable
+states it has an unstable mid-rail solution, and ngspice can converge onto it.
+The corner then grades `pass` with a supply current wrong by orders of
+magnitude, and which corner lands there is sensitive to temperature, supply,
+`.nodeset` and solver options. `analysis.op_check` is an opt-in **detection**
+(it never forces a state):
+
+```json
+{"analysis": {"kind": "op", "args": "",
+              "op_check": {"nodes": ["x1.q", "x1.qb"], "band": 0.15}}}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `nodes` | Required non-empty array of node names (same grammar as `options.nodeset`; no repeats). |
+| `band` | Fraction of the supply, in `(0, 0.5]`, around mid-rail. Default `0.15`. |
+| `rail` | Optional `corners.supply_v` rail whose value is the supply. Default: the corner's only rail, or the largest of several. |
+| `supply` | Optional fixed supply in volts (positive); for a deck with no `corners.supply_v`. Exclusive with `rail`. |
+
+After the `op`, klt reads `v(<node>)` for each node. A node within
+`band * supply` of `supply / 2` makes the corner carry an `op_metastable`
+diagnostic at `severity: "warning"` (naming the node, its voltage and the
+rail), so **the grade is unchanged** — list `op_metastable` in
+`options.fail_on_diagnostic` to grade such a corner `inconclusive`. The band
+is recomputed from each corner's own supply. Every corner of a request that
+declares `op_check` carries an additive field:
+
+```json
+"op_check": {"supply_v": 1.0, "band": 0.15,
+             "nodes": {"x1.q": 0.5, "x1.qb": 0.5}, "metastable": ["x1.q", "x1.qb"]}
+```
+
+A node that does not exist (or an `op` that did not complete) is an `error`
+diagnostic (`no_such_vector`), and a corner with no supply to locate mid-rail
+from is an `error` too — the check never silently skips. Validation is up
+front: unknown keys, bad or repeated node names, a non-finite or out-of-range
+`band`, and any `analysis.kind` other than `op` (or `analysis_steps[]`) are
+application errors (exit 1). `engine: "ngspice"` only.
+
+**Identity and workers.** `op_check` lives inside `analysis`, so it is part of
+the `options.resume` fingerprint (changing it invalidates a stored result) and
+is forwarded to `remote`/`batch` workers; omitting it leaves decks, corner IDs
+and fingerprints byte-identical. A worker built before the field would drop it,
+so the client requires `op_check` on every corner that ran and otherwise fails
+with `error.code: "op_check_unsupported_worker"`.
+
+**Pinning a node (the deterministic workaround).** `op_check` only detects.
+To make the solution deterministic, hold the latch node with an ideal source at
+its intended rail in the deck and measure the source's branch current as a
+check — it supplies ~0 current if the node already sits there:
+
+```spice
+Vhold_q x1.q 0 {vdd}
+```
+
+```json
+{"measurements": [{"name": "i_hold_q", "expr": "i(vhold_q)", "unit": "A"}]}
+```
+
+A large `i_hold_q` means the circuit did not want to be in that state.
 
 ### Transient start states: `options.initial_conditions` (issue #3881)
 
@@ -7605,6 +7674,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `derived_input_unavailable` | A measurement computed from other results (a derived measurement, or a step `expr` reading an earlier step) was **not graded** because at least one of its inputs produced no value in this corner (issue #2482). Distinguishes "an input was missing" from a derived expression that itself failed, which is an ordinary `measurement` diagnostic. |
 | `waveform_too_large` | `waveform.raw` exceeded `options.waveform_max_bytes`, so the `waveform.raw.json` conversion was skipped (issue #3211). Always `severity: "warning"`; measurements and `status` are unaffected. See "Waveform size guard" above. |
 | `pass_failed` | An `analysis.passes` pass left no AC-analysis rawfile (the solve failed or never ran); the corner grades `error` (issue #3159). See "Multi-pass AC acquisition" above. A `tian` measurement naming that pass reports `[tian_pass_missing]` (issue #3160). |
+| `op_metastable` | `analysis.op_check` (issue #5077): a declared node of an `op` solution sits within `band * supply` of mid-rail, so the engine may have converged onto the unstable solution of a bistable circuit. `severity: "warning"` — grade unchanged unless listed in `options.fail_on_diagnostic`. See "Detecting a metastable operating point" above. |
 | `unknown`          | Anything else that prevented a trustworthy result (e.g. ngspice not installed/spawnable). |
 | `budget_exceeded`  | The corner never started: the sweep's own `options.wall_clock_budget_s` was exceeded first. See "Wall-clock budget, orphan safety, and resume" above. |
 | `orphaned`         | The corner never started: the launching process exited before its turn. See "Wall-clock budget, orphan safety, and resume" above. |
