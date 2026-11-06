@@ -921,6 +921,19 @@ was compared at least once, every point is inside its bound, and `missing`
 is empty — "never compared" is not "within tolerance". The text report prints
 `NOT COMPARED` for a field with no compared points.
 
+### Units
+
+Each library's own `time_unit`, `capacitive_load_unit`, `voltage_unit` and
+`leakage_power_unit` are read and every table axis, table value and leakage
+number is converted to **ns / pF / pJ / pW** before comparison (energy unit =
+`voltage_unit² × capacitive_load_unit`), so a reference in `1ps` / `(1, ff)`
+compares correctly against klt's `1ns` / `(1, pf)` output. The tolerances'
+`abs` floors are in those canonical units. A missing or unparseable unit
+declaration in either file is an error naming the file and attribute — units
+are never guessed. The declared units of both files are echoed in the
+additive `units` object (`ours` / `reference`) of the `comparison` block;
+no `schema_version` bump.
+
 ### The `comparison` block
 
 ```json
@@ -928,6 +941,10 @@ is empty — "never compared" is not "within tolerance". The text report prints
   "schema_version": 1,
   "ours": "/abs/out/klt_characterize_typ_1p20V_25C.lib",
   "reference": "/abs/.../sg13g2_stdcell_typ_1p20V_25C.lib",
+  "units": {
+    "ours":      { "time_unit": "1ns", "capacitive_load_unit": "1, pf", "voltage_unit": "1V", "leakage_power_unit": "1pW" },
+    "reference": { "time_unit": "1ns", "capacitive_load_unit": "1, pf", "voltage_unit": "1V", "leakage_power_unit": "1pW" }
+  },
   "tolerances": { "cell_rise": { "rel": 0.15, "abs": 0.005 }, "...": {} },
   "cells": [
     {

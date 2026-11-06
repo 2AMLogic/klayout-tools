@@ -316,24 +316,137 @@ class CellData:
     notes: list[str]
 
 
+@dataclass(frozen=True)
+class Units:
+    """A library's declared units, as multipliers into the canonical units
+    the comparison works in: time -> ns, capacitance -> pF, energy -> pJ,
+    leakage power -> pW. ``declared`` echoes the raw declarations."""
+
+    time: float
+    capacitance: float
+    energy: float
+    leakage: float
+    declared: dict[str, str]
+
+
+_UNIT_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*([A-Za-z]+)\s*$")
+_SI_PREFIX = {"f": 1e-15, "p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3, "": 1.0}
+
+
+def _magnitude(
+    magnitude: str, suffix: str, base: str, canonical: float
+) -> float | None:
+    """``magnitude`` x ``suffix`` (e.g. ``1``, ``ps``) in ``canonical``
+    base-units of ``base`` (``s``/``F``/``V``/``W``), else ``None``."""
+    suffix = suffix.strip()
+    if not suffix.lower().endswith(base.lower()):
+        return None
+    prefix = suffix[: -len(base)].lower()
+    if prefix not in _SI_PREFIX:
+        return None
+    return float(magnitude) * _SI_PREFIX[prefix] / canonical
+
+
+def _simple_unit(
+    library: Group, attribute: str, base: str, canonical: float, path: str
+) -> tuple[float, str]:
+    text = library.attributes.get(attribute)
+    match = _UNIT_RE.match(text) if text is not None else None
+    value = (
+        _magnitude(match.group(1), match.group(2), base, canonical) if match else None
+    )
+    if text is None or value is None or value <= 0:
+        raise LibertyCompareError(
+            f"'{path}': "
+            + (
+                f"library has no {attribute} declaration"
+                if text is None
+                else f"unparseable {attribute} '{text}'"
+            )
+            + " -- cannot normalise table units"
+        )
+    return value, text.strip()
+
+
+def library_units(library: Group, path: str) -> Units:
+    """Read ``library``'s unit declarations (never defaulted: a missing or
+    unparseable one raises :class:`LibertyCompareError` naming ``path``)."""
+    time, time_text = _simple_unit(library, "time_unit", "s", 1e-9, path)
+    voltage, voltage_text = _simple_unit(library, "voltage_unit", "V", 1.0, path)
+    leakage, leakage_text = _simple_unit(
+        library, "leakage_power_unit", "W", 1e-12, path
+    )
+    args = library.complex_attributes.get("capacitive_load_unit")
+    cap = None
+    cap_text = ""
+    if args is not None:
+        cap_text = ", ".join(args)
+        parts = args if len(args) == 2 else " ".join(args).replace(",", " ").split()
+        if len(parts) == 2:
+            try:
+                cap = _magnitude(parts[0], parts[1], "F", 1e-12)
+            except ValueError:
+                cap = None
+        elif len(parts) == 1:
+            match = _UNIT_RE.match(parts[0])
+            cap = (
+                _magnitude(match.group(1), match.group(2), "F", 1e-12)
+                if match
+                else None
+            )
+    if args is None or cap is None or cap <= 0:
+        raise LibertyCompareError(
+            f"'{path}': "
+            + (
+                "library has no capacitive_load_unit declaration"
+                if args is None
+                else f"unparseable capacitive_load_unit ({cap_text})"
+            )
+            + " -- cannot normalise table units"
+        )
+    return Units(
+        time=time,
+        capacitance=cap,
+        # voltage_unit^2 x capacitive_load_unit, in pJ (1 V^2 x 1 pF = 1 pJ).
+        energy=voltage * voltage * cap,
+        leakage=leakage,
+        declared={
+            "time_unit": time_text,
+            "capacitive_load_unit": cap_text,
+            "voltage_unit": voltage_text,
+            "leakage_power_unit": leakage_text,
+        },
+    )
+
+
 def load_cells(
     path: str, names: list[str] | tuple[str, ...] | None = None
 ) -> dict[str, CellData]:
     """Parse ``path`` and return comparable data for each cell in ``names``
-    (every cell when ``None``) that the file defines, by name. Cells not
+    (every cell when ``None``) that the file defines, by name, with every
+    table and leakage value converted to ns / pF / pJ / pW from the
+    library's declared units. Cells not
     asked for are never interpreted, so a vendor file's sequential cells
     (scalar/1D power tables, ``ff`` groups) cannot fail a combinational
     comparison."""
+    return _load(path, names)[0]
+
+
+def _load(
+    path: str, names: list[str] | tuple[str, ...] | None = None
+) -> tuple[dict[str, CellData], Units]:
     library = parse_liberty(path)
+    units = library_units(library, path)
     wanted = set(names) if names is not None else None
-    return {
-        cell.args[0]: _cell_data(cell, path)
+    cells = {
+        cell.args[0]: _cell_data(cell, path, units)
         for cell in library.children("cell")
         if cell.args and (wanted is None or cell.args[0] in wanted)
     }
+    return cells, units
 
 
-def _cell_data(cell: Group, path: str) -> CellData:
+def _cell_data(cell: Group, path: str, units: Units) -> CellData:
     name = cell.args[0]
     inputs: list[str] = []
     outputs: list[str] = []
@@ -373,14 +486,16 @@ def _cell_data(cell: Group, path: str) -> CellData:
                 tables: dict[str, Table] = {}
                 for table_group in group.groups:
                     if table_group.kind in fields:
-                        tables[table_group.kind] = _table(table_group, path, name)
+                        tables[table_group.kind] = _table(
+                            table_group, path, name, units
+                        )
                 target[key] = tables
     leakage = []
     for group in cell.children("leakage_power"):
         value = group.attributes.get("value")
         if value is None:
             continue
-        leakage.append((group.attributes.get("when", ""), float(value)))
+        leakage.append((group.attributes.get("when", ""), float(value) * units.leakage))
     cell_leakage = cell.attributes.get("cell_leakage_power")
     return CellData(
         name=name,
@@ -390,7 +505,9 @@ def _cell_data(cell: Group, path: str) -> CellData:
         timing=timing,
         power=power,
         leakage=leakage,
-        cell_leakage_power=float(cell_leakage) if cell_leakage is not None else None,
+        cell_leakage_power=(
+            float(cell_leakage) * units.leakage if cell_leakage is not None else None
+        ),
         notes=notes,
     )
 
@@ -399,7 +516,7 @@ def _numbers(text: str) -> tuple[float, ...]:
     return tuple(float(item) for item in text.replace(",", " ").split())
 
 
-def _table(group: Group, path: str, cell: str) -> Table:
+def _table(group: Group, path: str, cell: str, units: Units) -> Table:
     try:
         index_1 = _numbers(" ".join(group.complex_attributes.get("index_1", [])))
         index_2 = _numbers(" ".join(group.complex_attributes.get("index_2", [])))
@@ -422,7 +539,14 @@ def _table(group: Group, path: str, cell: str) -> Table:
             raise LibertyCompareError(
                 f"'{path}' cell '{cell}' {group.kind}: ragged values row"
             )
-    return Table(index_1=index_1, index_2=index_2, values=rows)
+    # index_1 is the input slew (time), index_2 the output load
+    # (capacitance); values are time for timing tables, energy for power.
+    scale = units.energy if group.kind in POWER_FIELDS else units.time
+    return Table(
+        index_1=tuple(v * units.time for v in index_1),
+        index_2=tuple(v * units.capacitance for v in index_2),
+        values=tuple(tuple(v * scale for v in row) for row in rows),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -442,9 +566,9 @@ def compare_libraries(
     compared and how; the returned ``dict`` is the documented
     ``comparison`` block."""
     tolerances = {**DEFAULT_TOLERANCES, **(tolerances or {})}
-    ours = load_cells(ours_path, cells)
+    ours, ours_units = _load(ours_path, cells)
     names = list(cells) if cells is not None else sorted(ours)
-    reference = load_cells(reference_path, names)
+    reference, reference_units = _load(reference_path, names)
     absent = [name for name in names if name not in ours]
     if absent:
         raise LibertyCompareError(
@@ -477,6 +601,12 @@ def compare_libraries(
         "schema_version": SCHEMA_VERSION,
         "ours": os.path.abspath(ours_path),
         "reference": os.path.abspath(reference_path),
+        # Declared units of each file; every compared value is normalised to
+        # ns / pF / pJ / pW first.
+        "units": {
+            "ours": dict(ours_units.declared),
+            "reference": dict(reference_units.declared),
+        },
         "tolerances": {name: dict(tolerances[name]) for name in FIELDS},
         "cells": cell_reports,
         "summary": {
