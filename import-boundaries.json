@@ -620,6 +620,7 @@
         "klayout_tools.asap7_bsimcmg",
         "klayout_tools.cli.parser_sim",
         "klayout_tools.cli.sim_cmd",
+        "klayout_tools.cli.sim_job_text",
         "klayout_tools.cli.sim_merge_cmd",
         "klayout_tools.cli.sim_pdk_text",
         "klayout_tools.cli.sim_plan_cmd",
