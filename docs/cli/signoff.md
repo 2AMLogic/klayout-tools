@@ -2419,6 +2419,14 @@ and the byte-canonical *provisioning route* for reproducing the rest is a
 only route that records the commit at all. Removing `build` removes the
 evidence #2176 exists to carry, so prefer `--check`, which keeps it.
 
+The same `git+…@<sha>` pin can also differ by installer cache state (a dev
+`0.8.0.devN+g<sha>`, `is_release: false` build from one cache, the release
+`0.8.0`, `is_release: true` from another — see
+[`version.md`](version.md)), so a raw byte diff of a regenerated report can
+fail in CI with no evidence change. Verify with `klt signoff --check`; if a
+raw diff is unavoidable, the `build` block is the field to normalise (as of
+2026-11-06).
+
 ### Verifying a committed report: `--check` (issue #2249)
 
 `klt signoff --manifest M --check REPORT` (and the `--fleet` form) answers
