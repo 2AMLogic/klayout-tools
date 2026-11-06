@@ -284,6 +284,13 @@ from ._provenance import (
     build_provenance,
     sha256_file,
 )
+from ._sta_request_diag import (
+    KNOWN_REQUEST_FIELDS,
+    SPEF_NAME_MISMATCH_HINT,
+)
+from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEGIN
+from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
+from ._sta_request_diag import parse_spef_missing_nets as _parse_spef_missing_nets
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 
@@ -324,11 +331,6 @@ _LIBERTY_IDENT_RE = re.compile(r"[A-Za-z0-9_$.]+")
 _SPEF_NAME_MAP_ENTRY_RE = re.compile(r"^(\*\d+)\s+(\S+)", re.MULTILINE)
 _SPEF_HEADER_DIVIDER_RE = re.compile(r"^\*DIVIDER\s+(\S)", re.MULTILINE)
 
-#: Delimits the (capped) sample of design-side net names that failed to
-#: correlate against the SPEF's own declared name set -- see
-#: :func:`_spef_net_check_lines` and :func:`_parse_spef_missing_nets`.
-_SPEF_MISSING_NETS_BEGIN = "===KLT_STA_SPEF_MISSING_NETS_BEGIN==="
-_SPEF_MISSING_NETS_END = "===KLT_STA_SPEF_MISSING_NETS_END==="
 #: Upper bound on how many uncorrelated design-side net names
 #: :func:`_spef_net_check_lines` collects into ``klt_design_missing`` -- a
 #: diagnostic sample, not an exhaustive list, so a design with thousands of
@@ -554,21 +556,6 @@ class PostRouteStaError(Exception):
     """
 
 
-# Top-level keys ``run_sta`` reads (``schema`` is always allowed). Anything
-# else is rejected (issue #5065) rather than silently dropped.
-_KNOWN_REQUEST_FIELDS = (
-    "def",
-    "verilog",
-    "hdl_toplevel",
-    "pdk",
-    "constraints",
-    "spef",
-    "sdf",
-    "geometry_source",
-    "macros",
-)
-
-
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt sta`` request JSON file.
 
@@ -624,7 +611,7 @@ def run_sta(
     """
     request = load_request(request_path)
     check_known_fields(
-        request, _KNOWN_REQUEST_FIELDS, verb="sta", error_cls=PostRouteStaError
+        request, KNOWN_REQUEST_FIELDS, verb="sta", error_cls=PostRouteStaError
     )
     request_dir = os.path.dirname(os.path.abspath(request_path))
 
@@ -1753,11 +1740,7 @@ def _spef_annotation_block(
             f"only {design_nets_annotated} of {design_nets_total} nets in "
             "the linked design are named by this SPEF"
         )
-        reasons[-1] += (
-            " (if this SPEF came from `klt extract`, re-run it with "
-            "`--def-net-names` and `--def-pins <routed.def>` so net names "
-            "match the linked design)"
-        )
+        reasons[-1] += SPEF_NAME_MISMATCH_HINT
         design_nets_missing_sample = _parse_spef_missing_nets(stdout)
     if reader_warning_count:
         reasons.append(
@@ -4113,26 +4096,6 @@ def _read_metrics(metrics_path: str) -> dict[str, Any]:
             f"sta metrics '{metrics_path}' must contain a JSON object"
         )
     return data
-
-
-def _parse_spef_missing_nets(stdout: str) -> list[str]:
-    """A capped sample of design-side net names that failed to correlate
-    against the SPEF's own declared name set, parsed from
-    :func:`_spef_net_check_lines`'s own
-    ``===KLT_STA_SPEF_MISSING_NETS_BEGIN===``/``===END===``-delimited stdout
-    block (one net name per line, already the design's real spelling --
-    ``get_full_name``'s own output). Returns ``[]`` when the markers aren't
-    found (defensive; should not happen for a successful run) or the block
-    is empty (nothing missing)."""
-    try:
-        start_idx = stdout.index(_SPEF_MISSING_NETS_BEGIN) + len(
-            _SPEF_MISSING_NETS_BEGIN
-        )
-        stop_idx = stdout.index(_SPEF_MISSING_NETS_END, start_idx)
-    except ValueError:
-        return []
-    block = stdout[start_idx:stop_idx]
-    return [line.strip() for line in block.splitlines() if line.strip()]
 
 
 def _extract_block(text: str, begin: str, end: str) -> str | None:
