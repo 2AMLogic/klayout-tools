@@ -4,6 +4,8 @@ Split out of sim.py to keep it under its file-size ceiling."""
 
 from __future__ import annotations
 
+from typing import Any
+
 from .sim_errors import SimError
 
 
@@ -130,3 +132,36 @@ def refuse_control_block_measurements(
     ):
         if declared:
             raise SimError(message)
+
+
+def refuse_nodeset(declared: bool) -> None:
+    """Issue #3036: the hints are rendered as ngspice `.nodeset v(node)=`
+    cards; the Xyce deck is not given an equivalent."""
+    if declared:
+        raise SimError(
+            "options.nodeset is not supported for engine 'xyce': initial "
+            "guesses are applied as ngspice `.nodeset` cards; use engine "
+            "'ngspice' or omit options.nodeset"
+        )
+
+
+def refuse_linearize(declared: bool) -> None:
+    """Issue #4014: `linearize` is an ngspice control command; the Xyce deck
+    has no `.control` block to carry it."""
+    if declared:
+        raise SimError(
+            "analysis.linearize is not supported for engine 'xyce': it is an "
+            "ngspice `.control` command, which the Xyce deck does not have; "
+            "use engine 'ngspice' or drop the field"
+        )
+
+
+def refuse_options_axis(corners_spec: dict[str, Any]) -> None:
+    """The ``engine: "xyce"`` refusal for ``corners.options`` (issue #3125):
+    the axis is a generated ngspice ``.options`` card."""
+    if corners_spec.get("options"):
+        raise SimError(
+            "engine 'xyce' does not support corners.options: the axis is "
+            "emitted as ngspice solver `.options` cards, whose names Xyce "
+            "does not share -- use engine 'ngspice'"
+        )

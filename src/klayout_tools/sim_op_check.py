@@ -39,6 +39,7 @@ import re
 from typing import Any
 
 from .sim_errors import SimError
+from .sim_remote import _UNRUN_MESSAGES
 
 #: Fraction of the supply used when ``op_check.band`` is omitted.
 DEFAULT_BAND = 0.15
@@ -91,7 +92,11 @@ def validate(analysis: dict[str, Any]) -> None:
             f"analysis.op_check has unknown key(s) {unknown}; "
             f"allowed: {list(OP_CHECK_KEYS)}"
         )
-    nodes = spec.get("nodes")
+    _validate_nodes(spec.get("nodes"))
+    _validate_levels(spec)
+
+
+def _validate_nodes(nodes: Any) -> None:
     if not isinstance(nodes, list) or not nodes:
         raise SimError(
             "analysis.op_check.nodes must be a non-empty array of node names"
@@ -107,6 +112,9 @@ def validate(analysis: dict[str, Any]) -> None:
         if node.lower() in seen:
             raise SimError(f"{where} repeats node {node!r}")
         seen.add(node.lower())
+
+
+def _validate_levels(spec: dict[str, Any]) -> None:
     if "band" in spec:
         band = _number(spec["band"], "analysis.op_check.band")
         if not 0 < band <= 0.5:
@@ -151,10 +159,16 @@ def _supply(analysis: dict[str, Any], supply_v: dict[str, float]) -> float | Non
 
 
 def evaluate(
-    analysis: dict[str, Any], supply_v: dict[str, float], log_text: str
+    analysis: dict[str, Any],
+    supply_v: dict[str, float],
+    log_text: str,
+    *,
+    skip: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    """The corner's ``op_check`` report field and its diagnostics."""
-    if not is_declared(analysis):
+    """The corner's ``op_check`` report field and its diagnostics. ``skip``
+    (the corner timed out or the engine never ran the analysis) reports
+    neither."""
+    if skip or not is_declared(analysis):
         return {}, []
     spec = analysis["op_check"]
     band = float(spec.get("band", DEFAULT_BAND))
@@ -220,3 +234,53 @@ def evaluate(
         "metastable": metastable,
     }
     return {"op_check": field}, diagnostics
+
+
+def reject_in_steps(request: dict[str, Any]) -> None:
+    """``op_check`` is only available on a scalar ``op`` analysis."""
+    analysis = request.get("analysis")
+    if isinstance(analysis, dict) and "op_check" in analysis:
+        raise SimError(
+            "analysis.op_check is not supported with analysis_steps[]: it "
+            "is only available on a scalar `op` analysis"
+        )
+
+
+def refuse_xyce(declared: bool) -> None:
+    """``op_check`` reads node voltages through an ngspice ``.control``
+    block, which the Xyce deck does not have."""
+    if declared:
+        raise SimError(
+            "analysis.op_check is not supported for engine 'xyce': it reads "
+            "node voltages through an ngspice `.control` block, which the Xyce "
+            "deck does not have; use engine 'ngspice' or drop the field"
+        )
+
+
+def require_echo(
+    analysis: dict[str, Any],
+    corners: list[dict[str, Any]],
+    backend: str,
+    offhost: tuple[str, ...],
+) -> None:
+    """Fail when an off-host worker silently dropped ``analysis.op_check``.
+    A worker that supports it adds ``op_check`` to every corner it ran; one
+    built before the field returns none, and its corners would be graded
+    without the check. Corners that never ran are exempt."""
+    if backend not in offhost or not is_declared(analysis):
+        return
+    unrun = set(_UNRUN_MESSAGES)
+    for corner in corners:
+        if "op_check" in corner:
+            continue
+        if any(d.get("code") in unrun for d in corner.get("diagnostics") or []):
+            continue
+        raise SimError(
+            "the remote/batch worker did not honor analysis.op_check -- "
+            f"corner {corner.get('corner_id')!r} came back without an "
+            "`op_check` field. A worker built before the field would grade "
+            "the corner without the metastability check; update the runner "
+            "image to this klt release, or use a local backend. No result "
+            "was reported",
+            code=OP_CHECK_UNSUPPORTED_WORKER_CODE,
+        )

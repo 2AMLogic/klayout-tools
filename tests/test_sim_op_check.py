@@ -16,6 +16,8 @@ import pytest
 from klayout_tools import sim, sim_op_check
 from klayout_tools.sim_errors import SimError
 
+OFFHOST = ("remote", "batch")
+
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
 HAVE_NGSPICE = shutil.which("ngspice") is not None and (
@@ -158,15 +160,15 @@ def test_fingerprint_changes_with_op_check():
 def test_offhost_worker_dropping_op_check_is_refused():
     analysis = _analysis(nodes=["a"])
     ok = [{"corner_id": "c0", "op_check": {}, "diagnostics": []}]
-    sim._require_op_check_echo(analysis, ok, backend="batch")
+    sim_op_check.require_echo(analysis, ok, "batch", OFFHOST)
     with pytest.raises(SimError) as err:
-        sim._require_op_check_echo(
-            analysis, [{"corner_id": "c0", "diagnostics": []}], backend="batch"
+        sim_op_check.require_echo(
+            analysis, [{"corner_id": "c0", "diagnostics": []}], "batch", OFFHOST
         )
     assert err.value.code == "op_check_unsupported_worker"
     # Not declared, or a local backend: nothing to enforce.
-    sim._require_op_check_echo({"kind": "op", "args": ""}, [{}], backend="batch")
-    sim._require_op_check_echo(analysis, [{}], backend="local")
+    sim_op_check.require_echo({"kind": "op", "args": ""}, [{}], "batch", OFFHOST)
+    sim_op_check.require_echo(analysis, [{}], "local", OFFHOST)
 
 
 # ---- real engine -----------------------------------------------------------

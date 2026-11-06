@@ -213,7 +213,6 @@ from .sim_measurement_results import _corner_measurement_results
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
-from .sim_remote import _UNRUN_MESSAGES as _UNRUN_MESSAGES
 
 #: The remaining names below are not called directly from this module -- they
 #: are re-exported (self-aliased so linters recognise the re-export as
@@ -366,10 +365,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # An `optional` measurement with no value (issue #2925); info severity.
         "measurement_absent",
         "unknown",
-        # `analysis.op_check` (issue #5077): a declared node sits near mid-rail;
-        # a warning, so it grades `inconclusive` only if listed in
-        # `options.fail_on_diagnostic`.
-        "op_metastable",
+        "op_metastable",  # `analysis.op_check` (issue #5077); a warning
         # Opt-in convergence retry record (`options.retry_on_convergence_error`,
         # issue #2973), attached by `_run_corner_with_retry` after the retry ran.
         "convergence_retry",
@@ -1674,14 +1670,7 @@ def _resolve_analysis_and_measurements(
     """
     if request.get("analysis_steps") is not None:
         _reject_linearize_in_steps(request)
-        if (
-            isinstance(request.get("analysis"), dict)
-            and "op_check" in request["analysis"]
-        ):
-            raise SimError(
-                "analysis.op_check is not supported with analysis_steps[]: it "
-                "is only available on a scalar `op` analysis"
-            )
+        sim_op_check.reject_in_steps(request)  # issue #5077
         return sim_steps.resolve_analysis_steps(request)
     analysis = request.get("analysis") or {}
     # Issue #3338: `kind: "twoport"` compiles to an `ac` analysis; resolved
@@ -4210,7 +4199,7 @@ def _run_sim_corners(
         code=IC_UNSUPPORTED_WORKER_CODE,
     )
     _sao.require_echo(dispatch_points, corners_new, backend)
-    _require_op_check_echo(analysis, corners_new, backend=backend)
+    sim_op_check.require_echo(analysis, corners_new, backend, _OFFHOST_BACKENDS)
     _require_options_echo(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
@@ -6788,32 +6777,6 @@ def _require_nodeset_echo(
         )
 
 
-def _require_op_check_echo(
-    analysis: dict[str, Any], corners: list[dict[str, Any]], *, backend: str
-) -> None:
-    """Fail when an off-host worker silently dropped ``analysis.op_check``
-    (issue #5077). A worker that supports it adds ``op_check`` to every corner
-    it ran; one built before the field returns none, and its corners would be
-    graded without the check. Corners that never ran are exempt."""
-    if backend not in _OFFHOST_BACKENDS or not sim_op_check.is_declared(analysis):
-        return
-    unrun = set(_UNRUN_MESSAGES)
-    for corner in corners:
-        if "op_check" in corner:
-            continue
-        if any(d.get("code") in unrun for d in corner.get("diagnostics") or []):
-            continue
-        raise SimError(
-            "the remote/batch worker did not honor analysis.op_check -- "
-            f"corner {corner.get('corner_id')!r} came back without an "
-            "`op_check` field. A worker built before the field would grade "
-            "the corner without the metastability check; update the runner "
-            "image to this klt release, or use a local backend. No result "
-            "was reported",
-            code=sim_op_check.OP_CHECK_UNSUPPORTED_WORKER_CODE,
-        )
-
-
 # --------------------------------------------------------------------------- #
 # Transient start states: `options.initial_conditions` (issue #3881)
 # --------------------------------------------------------------------------- #
@@ -7980,39 +7943,6 @@ def _refuse_xyce_alter_corner_axes(corners_spec: dict[str, Any]) -> None:
         )
 
 
-def _refuse_xyce_nodeset(declared: bool) -> None:
-    """Issue #3036: the hints are rendered as ngspice `.nodeset v(node)=`
-    cards; the Xyce deck is not given an equivalent."""
-    if declared:
-        raise SimError(
-            "options.nodeset is not supported for engine 'xyce': initial "
-            "guesses are applied as ngspice `.nodeset` cards; use engine "
-            "'ngspice' or omit options.nodeset"
-        )
-
-
-def _refuse_xyce_linearize(declared: bool) -> None:
-    """Issue #4014: `linearize` is an ngspice control command; the Xyce deck
-    has no `.control` block to carry it."""
-    if declared:
-        raise SimError(
-            "analysis.linearize is not supported for engine 'xyce': it is an "
-            "ngspice `.control` command, which the Xyce deck does not have; "
-            "use engine 'ngspice' or drop the field"
-        )
-
-
-def _refuse_xyce_options_axis(corners_spec: dict[str, Any]) -> None:
-    """The ``engine: "xyce"`` refusal for ``corners.options`` (issue #3125):
-    the axis is a generated ngspice ``.options`` card."""
-    if corners_spec.get("options"):
-        raise SimError(
-            "engine 'xyce' does not support corners.options: the axis is "
-            "emitted as ngspice solver `.options` cards, whose names Xyce "
-            "does not share -- use engine 'ngspice'"
-        )
-
-
 def _enforce_xyce_support_boundary(
     *,
     engine: str,
@@ -8052,13 +7982,8 @@ def _enforce_xyce_support_boundary(
     """
     if engine != "xyce":
         return
-    _refuse_xyce_linearize(linearize_declared)
-    if op_check_declared:
-        raise SimError(
-            "analysis.op_check is not supported for engine 'xyce': it reads "
-            "node voltages through an ngspice `.control` block, which the Xyce "
-            "deck does not have; use engine 'ngspice' or drop the field"
-        )
+    sim_xyce_refusals.refuse_linearize(linearize_declared)
+    sim_op_check.refuse_xyce(op_check_declared)  # issue #5077
     if analysis_steps_declared:
         # Issue #2482: an ordered step sequence is `alter`/analysis/`let`
         # commands inside one ngspice `.control` block. The Xyce deck has no
@@ -8081,7 +8006,7 @@ def _enforce_xyce_support_boundary(
         )
     _refuse_xyce_alter_corner_axes(corners_spec)
     _refuse_xyce_params_axis(corners_spec)
-    _refuse_xyce_options_axis(corners_spec)
+    sim_xyce_refusals.refuse_options_axis(corners_spec)
     if monte_carlo_declared:
         raise SimError(
             "engine 'xyce' does not implement monte_carlo sampling -- "
@@ -8152,7 +8077,7 @@ def _enforce_xyce_support_boundary(
     ):
         if declared:
             raise SimError(message)
-    _refuse_xyce_nodeset(nodeset_declared)
+    sim_xyce_refusals.refuse_nodeset(nodeset_declared)
     if initial_conditions_declared:
         raise SimError(
             "options.initial_conditions is not supported for engine 'xyce': "
@@ -10085,12 +10010,13 @@ def _run_corner(
     twoport_outcome = sim_twoport.extract_corner(analysis, corner_dir)
     diagnostics.extend(twoport_outcome.diagnostics)
     # Issue #5077: metastable-op detection, before `disqualifying` is sampled.
-    op_check_field: dict[str, Any] = {}
-    if not (timed_out or engine_aborted or analysis_never_started):
-        op_check_field, op_check_diagnostics = sim_op_check.evaluate(
-            analysis, point.supply_v, log_text + "\n" + stdout_text
-        )
-        diagnostics.extend(op_check_diagnostics)
+    op_check_field, op_check_diagnostics = sim_op_check.evaluate(
+        analysis,
+        point.supply_v,
+        log_text + "\n" + stdout_text,
+        skip=timed_out or engine_aborted or analysis_never_started,
+    )
+    diagnostics.extend(op_check_diagnostics)
 
     # Issue #3016: the engine ran (any exit status, including 0) yet left no
     # log text and not a single requested measurement has a value -- the
