@@ -362,6 +362,10 @@ def _resolve_arg_refs(
 
 
 def _resolve_step_analysis(analysis: Any, step: str) -> tuple[str, str]:
+    from .sim import _op_without_args
+
+    if _op_without_args(analysis):  # issue #5078: `op` takes no arguments
+        analysis = {**analysis, "args": ""}
     if (
         not isinstance(analysis, dict)
         or "kind" not in analysis

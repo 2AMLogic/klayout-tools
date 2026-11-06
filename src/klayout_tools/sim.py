@@ -1655,6 +1655,12 @@ def _validate_search_targets(
     )
 
 
+def _op_without_args(analysis: Any) -> bool:
+    """True for an ``op`` analysis dict that omitted ``args`` (issue #5078)."""
+    kind = analysis.get("kind") if isinstance(analysis, dict) else None
+    return isinstance(kind, str) and kind.lower() == "op" and "args" not in analysis
+
+
 def _resolve_analysis_and_measurements(
     request: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -1673,6 +1679,10 @@ def _resolve_analysis_and_measurements(
     # Issue #3338: `kind: "twoport"` compiles to an `ac` analysis; resolved
     # (every structural error raised) before the `kind`/`args` check.
     analysis = sim_twoport.resolve_analysis(analysis)
+    # Issue #5078: `op` takes no arguments, so `args` defaults to "" (on a
+    # copy; a request that supplies `args` keeps its own object).
+    if _op_without_args(analysis):
+        analysis = {**analysis, "args": ""}
     if "kind" not in analysis or "args" not in analysis:
         raise SimError("request.analysis requires 'kind' and 'args'")
     reject_unsupported_analysis(analysis["kind"])
