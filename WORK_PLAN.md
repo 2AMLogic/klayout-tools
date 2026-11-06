@@ -50,8 +50,8 @@ Issues currently being built (`loom:building`).
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
 - **#4966**: layout-plan execute: places sky130 5V-class blocks but routes none of the nets (exit 3), no pin labels for LVS
-- **#5018**: klt yield: klt_yield_native not installable from a release or the installed tool (recurrence of #1061, #2466, #2531, #2900, #4671)
-- **#5025**: klt sim --attach/--resume wait loop never exits on a shard stuck in terminal 'interrupted' (spot reclaim)
+- **#5031**: signoff --manifest: no way to cite per-cell DRC/LVS evidence for a multi-cell library
+- **#5033**: Remove 13 dead re-exports from place_and_route.py compat shim
 
 ## PRs Awaiting Review
 
@@ -61,8 +61,7 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 - **#4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
 - **#4772**: fix: honor --dry-run and --wait-for-capacity under klt sim --batch-set
-- **#5022**: feat: yield install hint names [yield] extra; report records native build
-- **#5026**: feat: name the recovery command in batch_job_interrupted message
+- **#5032**: feat(signoff): accept per-cell DRC report lists and report member coverage
 
 ## Approved (Awaiting Merge)
 
@@ -103,8 +102,7 @@ Issues carrying `loom:curated`.
 - **#4845**: ring-check --pdk sg13g2: cross-check re-implemented Seal.* rules against the real Ruby deck *(curated)*
 - **#4902**: klt sim batch backend: derived measurements referencing other measurements (m_<name>) produce no value *(curated)*
 - **#4966**: layout-plan execute: places sky130 5V-class blocks but routes none of the nets (exit 3), no pin labels for LVS *(curated)*
-- **#5018**: klt yield: klt_yield_native not installable from a release or the installed tool (recurrence of #1061, #2466, #2531, #2900, #4671) *(curated)*
-- **#5025**: klt sim --attach/--resume wait loop never exits on a shard stuck in terminal 'interrupted' (spot reclaim) *(curated)*
+- **#5031**: signoff --manifest: no way to cite per-cell DRC/LVS evidence for a multi-cell library *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -133,9 +131,9 @@ Issues carrying `loom:curated`.
 | Important | 1 |
 | Ready (`loom:issue`) | 15 |
 | In Progress (`loom:building`) | 7 |
-| PRs awaiting review | 6 |
+| PRs awaiting review | 5 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 31 |
+| Curated | 30 |
 | Architect / Hermit proposals | 11 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->

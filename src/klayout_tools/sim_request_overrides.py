@@ -84,3 +84,42 @@ def _with_capacity_wait_override(
         **request,
         "batch": {**(request.get("batch") or {}), "capacity_wait_s": value},
     }
+
+
+def _with_timeout_override(
+    request: dict[str, Any], timeout_s: float | None
+) -> dict[str, Any]:
+    """Fold the ``--timeout-s`` CLI override into ``request.options.timeout_s``
+    (issue #5036), leaving the loaded request untouched. The flag wins over the
+    request field; it must be a positive number. Applied before the batch
+    job-ceiling assessment, so a lowered bound legitimately silences the
+    warning while a bound that still exceeds the ceiling warns as before."""
+    if timeout_s is None:
+        return request
+    if isinstance(timeout_s, bool) or not timeout_s > 0:
+        raise SimError("--timeout-s must be a positive number of seconds")
+    return {
+        **request,
+        "options": {**(request.get("options") or {}), "timeout_s": timeout_s},
+    }
+
+
+def _refuse_corner_only_flags(
+    request: dict[str, Any],
+    pdk_root: str | None,
+    timeout_s: float | None,
+    collect_partial: bool,
+) -> None:
+    """Refuse the corner-request-only flags on a command-list or deck-list
+    request (``--pdk-root`` #4758, ``--timeout-s`` #5036, ``--collect-partial``)."""
+    if "commands" not in request and "decks" not in request:
+        return
+    if pdk_root is not None:
+        raise SimError("--pdk-root only applies to corner requests (with `models`)")
+    if timeout_s is not None:
+        raise SimError("--timeout-s only applies to corner requests (with `models`)")
+    if collect_partial:
+        raise SimError(
+            "--collect-partial only applies to corner requests (with `models`)",
+            code="collect_partial_requires_attach",
+        )

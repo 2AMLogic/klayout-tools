@@ -2256,10 +2256,13 @@ the RTL `$readmemh`s its ROM tables relative to the synthesis cwd, which
   request to that exact directory. Its first eval gate completes synthesis;
   the metrics stage reuses the same cached result. A directory collision
   refuses the run before P&R can consume previous evidence.
-- **Fleet-scale evaluation of many design-space candidates.** See
-  [`docs/cli/place-and-route.md`](place-and-route.md)'s "Fleet evaluation of
-  digital candidates" section (Epic #391 Phase 6) — `klayout_tools.digital_fleet`
-  composes this command with `klt place-and-route`/`klt eval` into one
+- **Fleet-scale evaluation of many design-space candidates (experimental).**
+  See [`docs/cli/place-and-route.md`](place-and-route.md)'s "Fleet evaluation
+  of digital candidates" section (Epic #391 Phase 6). `klayout_tools.digital_fleet`
+  is an **experimental library**, not a shipped fleet path: no `klt` verb
+  drives it, and its planned consumer is live digital fleet validation
+  ([#485](https://github.com/2AMLogic/klayout-tools/issues/485)). It would
+  compose this command with `klt place-and-route`/`klt eval` into one
   fleet-scheduled candidate job; this command itself takes no `--backend`/
   `--hosts` flag.
 - **Observability stripping and negative controls.** This command has no

@@ -94,6 +94,7 @@ def run(args: argparse.Namespace) -> int:
                 xschem_binary=args.xschem_binary,
                 ignore_comments=ignore_comments,
                 symbol_path=getattr(args, "symbol_path", None) or (),
+                relative_paths=args.relative_paths,
                 warn=_warn,
             )
         else:
@@ -111,6 +112,7 @@ def run(args: argparse.Namespace) -> int:
                 ignore_comments=ignore_comments,
                 symbol_path=getattr(args, "symbol_path", None) or (),
                 erc=erc,
+                relative_paths=args.relative_paths,
             )
     except NetlistError as exc:
         return emit_error(

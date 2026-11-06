@@ -231,6 +231,9 @@ from .sim_remote import (
 from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
+    _refuse_corner_only_flags as _refuse_corner_only_flags,
+)
+from .sim_request_overrides import (
     _with_capacity_wait_override as _with_capacity_wait_override,
 )
 from .sim_request_overrides import (
@@ -238,6 +241,7 @@ from .sim_request_overrides import (
 )
 from .sim_request_overrides import _with_max_units_override as _with_max_units_override
 from .sim_request_overrides import _with_pdk_root_override as _with_pdk_root_override
+from .sim_request_overrides import _with_timeout_override as _with_timeout_override
 from .sim_slug import _NON_FILENAME_CHARS_RE as _NON_FILENAME_CHARS_RE
 from .sim_slug import _PARAMS_ID_RE as _PARAMS_ID_RE
 from .sim_slug import _SLUG_HASH_CHARS as _SLUG_HASH_CHARS
@@ -2352,6 +2356,7 @@ def run_sim(
     command_approvals: str | None = None,
     pdk_root: str | None = None,
     collect_partial: bool = False,
+    timeout_s: float | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the request at ``request_path`` and return its report.
@@ -2610,17 +2615,7 @@ def run_sim(
     # corner dir and ngspice would never find its deck. Absolutise once here.
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
-    if pdk_root is not None and (
-        sim_commands.COMMANDS_FIELD in request or sim_decks.DECKS_FIELD in request
-    ):
-        raise SimError("--pdk-root only applies to corner requests (with `models`)")
-    if collect_partial and (
-        sim_commands.COMMANDS_FIELD in request or sim_decks.DECKS_FIELD in request
-    ):
-        raise SimError(
-            "--collect-partial only applies to corner requests (with `models`)",
-            code="collect_partial_requires_attach",
-        )
+    _refuse_corner_only_flags(request, pdk_root, timeout_s, collect_partial)
     if sim_commands.COMMANDS_FIELD in request:
         return _dispatch_command_request(
             request,
@@ -2683,6 +2678,7 @@ def run_sim(
         capacity_wait_s=capacity_wait_s,
         pdk_root=pdk_root,
         collect_partial=collect_partial,
+        timeout_s=timeout_s,
         _ownership=_ownership,
     )
 
@@ -3120,6 +3116,7 @@ def _prepare_sim_request(
     capacity_wait_s: float | None,
     dry_run: bool,
     pdk_root: str | None = None,
+    timeout_s: float | None = None,
 ) -> _ResolvedSimRequest:
     """The up-front validate-and-resolve phase of :func:`_run_sim_corners`.
 
@@ -3130,6 +3127,7 @@ def _prepare_sim_request(
     request = _with_max_concurrent_override(request, max_concurrent_jobs)
     request = _with_capacity_wait_override(request, capacity_wait_s)
     request = _with_pdk_root_override(request, pdk_root)
+    request = _with_timeout_override(request, timeout_s)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
     # field this run's own JSON response echoes (`netlist`,
@@ -3749,6 +3747,7 @@ def _run_sim_corners(
     capacity_wait_s: float | None = None,
     pdk_root: str | None = None,
     collect_partial: bool = False,
+    timeout_s: float | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
@@ -3771,6 +3770,7 @@ def _run_sim_corners(
         capacity_wait_s=capacity_wait_s,
         dry_run=dry_run,
         pdk_root=pdk_root,
+        timeout_s=timeout_s,
     )
     analysis = resolved.analysis
     artifacts_dir = resolved.artifacts_dir

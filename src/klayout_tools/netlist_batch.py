@@ -62,7 +62,6 @@ from typing import Any
 
 from . import _batch_common, _provenance, remote_transport, sim_batch
 from .netlist import (
-    _PATH_COMMENT_RE,
     DEFAULT_XSCHEM_BINARY,
     SCHEMA_VERSION,
     STATUS_GENERATED,
@@ -75,6 +74,10 @@ from .netlist import (
     _write_output,
 )
 from .netlist_batch_select import _relative_symbol_dirs, _select_files
+from .netlist_paths import (
+    _rewrite_runner_paths,
+    relativize_schematic_paths,
+)
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -568,28 +571,6 @@ def _job_failure(
 # --------------------------------------------------------------------------- #
 
 
-def _rewrite_runner_paths(
-    data: bytes, runner_roots: list[str], local_root: str
-) -> bytes:
-    """Rewrite xschem's ``** sch_path:`` / ``** sym_path:`` comments that
-    point into the runner's scratch tree so they point into ``local_root``
-    -- the paths a local export from this checkout would have written.
-    Paths outside the tree (the runner's PDK symbols) are left alone."""
-    if not runner_roots:
-        return data
-    targets = [root.encode("utf-8", errors="surrogateescape") for root in runner_roots]
-    local = local_root.rstrip("/").encode("utf-8", errors="surrogateescape")
-
-    def _rewrite(match: Any) -> bytes:
-        path = match.group(2)
-        for target in targets:
-            if path == target or path.startswith(target + b"/"):
-                return match.group(1) + local + path[len(target) :]
-        return match.group(0)
-
-    return _PATH_COMMENT_RE.sub(_rewrite, data)
-
-
 def _read_runner_report(collected: str, job_id: str) -> dict[str, Any]:
     try:
         report = sim_batch.read_collected_report(collected)
@@ -810,6 +791,7 @@ def run_netlist_batch(
     xschem_binary: str = DEFAULT_XSCHEM_BINARY,
     ignore_comments: bool = False,
     symbol_path: Sequence[str] = (),
+    relative_paths: bool = False,
     runner: remote_transport.CommandRunner | None = None,
     sleep: Callable[[float], None] = time.sleep,
     warn: Callable[[str], None] | None = None,
@@ -864,6 +846,8 @@ def run_netlist_batch(
         data = _rewrite_runner_paths(
             data, _batch_common.read_runner_roots(collected), tree.root
         )
+        if relative_paths:
+            data = relativize_schematic_paths(data, schematic)
         # The runner's klt gates too; this keeps the guarantee client-side.
         _check_no_unevaluated_expr(data, report["xschem"].get("version"))
         _check_no_unresolved_symbol(data)

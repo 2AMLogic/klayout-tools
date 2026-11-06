@@ -207,6 +207,7 @@
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_netselect",
         "klayout_tools.extract_orient",
+        "klayout_tools.extract_cap_top_plate",
         "klayout_tools.extract_passive_regions",
         "klayout_tools.extract_progress",
         "klayout_tools.extract_report",
@@ -420,6 +421,7 @@
         "klayout_tools.netlist_inputs",
         "klayout_tools.netlist_normalize",
         "klayout_tools.netlist_normalize_scan",
+        "klayout_tools.netlist_paths",
         "klayout_tools.netlist_pdk"
       ]
     },
@@ -607,6 +609,7 @@
         "klayout_tools.signoff_evidence_pin",
         "klayout_tools.signoff_foundry_cell",
         "klayout_tools.signoff_generator_batch",
+        "klayout_tools.signoff_multi_member",
         "klayout_tools.signoff_na",
         "klayout_tools.signoff_power_delivery",
         "klayout_tools.signoff_runset"
@@ -619,6 +622,7 @@
         "klayout_tools.asap7_bsimcmg",
         "klayout_tools.cli.parser_sim",
         "klayout_tools.cli.sim_cmd",
+        "klayout_tools.cli.sim_job_text",
         "klayout_tools.cli.sim_merge_cmd",
         "klayout_tools.cli.sim_pdk_text",
         "klayout_tools.cli.sim_plan_cmd",

@@ -217,7 +217,7 @@
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 582
+      "lines": 573
     },
     {
       "path": "src/klayout_tools/components.py",
@@ -241,7 +241,7 @@
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
-      "lines": 4100
+      "lines": 4096
     },
     {
       "path": "src/klayout_tools/decks/history.py",
@@ -337,7 +337,7 @@
     },
     {
       "path": "src/klayout_tools/extract_passive_regions.py",
-      "lines": 1176
+      "lines": 1173
     },
     {
       "path": "src/klayout_tools/extract_report.py",
@@ -389,7 +389,7 @@
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
-      "lines": 2880
+      "lines": 2879
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
@@ -481,11 +481,11 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1079
+      "lines": 1072
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
-      "lines": 903
+      "lines": 887
     },
     {
       "path": "src/klayout_tools/netlist_capacitor_recovery.py",
@@ -597,7 +597,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 8298
+      "lines": 8294
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",

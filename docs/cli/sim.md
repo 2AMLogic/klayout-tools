@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>|all]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--timeout-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>|all]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -45,6 +45,12 @@ this document (and the code) win.
   overriding the request's own `options.wall_clock_budget_s` when given.
   Defaults to unbounded (today's behaviour). See "Wall-clock budget, orphan
   safety, and resume" below.
+- `--timeout-s` — per-corner timeout in seconds, overriding the request's own
+  `options.timeout_s` when given (issue #5036; must be `> 0`; corner requests
+  only, rejected with `--batch-set`). Applied before the `batch` pre-submit
+  job-ceiling assessment (`timeout_s` x units + 120 s vs. `max_job_seconds`),
+  so lowering it legitimately silences the warning; the warning still fires
+  whenever the bound truly exceeds the ceiling. No JSON field changes.
 - `--resume` — resume from a matching on-disk checkpoint, skipping corners a
   prior interrupted run of this same request already completed, overriding
   the request's own `options.resume` when given. See "Wall-clock budget,
@@ -915,7 +921,7 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
 | `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
 | `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
-| `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
+| `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). The diagnostic `message` names the recovery command (re-run with the same `-o` and `--resume`; for a shard map, `--attach <batch-shards.json> --collect-partial`, then `--resume`); the run exits 4 when every unit ended this way. A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
@@ -2367,6 +2373,19 @@ too (issue #4079: canary repos commit them), while the
 `--submit-only` / `--status` stdout outputs still carry `bucket` (operational, not
 committed evidence). Report-bound text (poll-timeout and interrupt messages,
 `harness_log`) shows `s3://<bucket>/...` literally in place of the name.
+
+### Keeping only the report, deck and measurements from a batch run
+
+The batch job always writes its artifacts under `$EDA_OUTPUT_DIR/artifacts`
+on the fleet, but they are only **installed into your `--outdir`** when the run
+keeps artifacts: `options.keep_artifacts: true`, or something that forces it
+(`options.waveforms`, `--plot`, declared complex vectors, a two-port analysis).
+With none of these set, no raw waveform files are installed locally
+(`_install_batch_artifacts` is gated on `keep_artifacts`); the report, deck and
+measurements come back in the report itself. There is no separate
+`--artifacts` switch: leave `keep_artifacts`/`waveforms` unset (and drop
+`--plot`) to keep the local tree small (issue #5036). Collecting fewer files
+on the fleet side is out of scope.
 
 ### Post-processing waveforms from a batch run locally
 

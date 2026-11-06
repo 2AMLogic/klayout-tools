@@ -2175,6 +2175,17 @@ checkout anywhere on disk. Only an override (1 or 2) changes `source_doc` in
 the report; the shipped doc always reports as
 `"docs/design-evidence-tiers.md"` regardless of install layout.
 
+**Fleet convention (issue #5041).** Chip repos should not vendor
+`design-evidence-tiers.md`: rely on the bundled copy and record the
+exact-pinned `klt` version as the source of the doc. Vendor a copy (and pass
+`--tiers-doc`) only to deliberately grade against a *different* doc. A
+byte-identical override and the bundled copy produce the same report in both
+`--manifest` and `--fleet` modes, differing only in `source_doc` (pinned by
+`test_cli_bundled_doc_and_identical_override_differ_only_in_source_doc`), so
+dropping a vendored copy does not change any verdict. Committed sign-off
+records are append-only and unaffected: a record graded with an override keeps
+its original `source_doc`.
+
 Both override forms expand a leading `~`, so a quoted
 `--tiers-doc '~/vendored-tiers.md'` (which the shell leaves unexpanded)
 resolves the same way `KLT_TIERS_DOC=~/vendored-tiers.md` does.
@@ -3154,6 +3165,21 @@ non-`lvs` member is `wrong_kind`, and a malformed member or empty list is
 `invalid_evidence`. `spec_rows` has no meaning for LVS and is ignored for
 item 4. The manifest is the record of which cells were cited; `klt signoff`
 does not check they cover the partition.
+
+Item 3 (DRC clean) accepts a list the same way (issue #5031): one `klt drc`
+report per cell of a multi-cell library, graded exactly like item 4's list
+(every member must pass; `detail.failed_citations` names failing members). For
+items 2, 3 and 4, a list-form entry also carries `members_total` (members cited)
+and `members_covered` (members that individually graded `met`); both are
+additive and absent for a single-entry citation, whose output is unchanged.
+The manifest author enumerates the cells; `klt signoff` does not check the
+list is the library's complete cell set.
+
+Item 2 (Layout) accepts a list of native envelopes the same way (issue #5044):
+one per independently laid-out cell. It grades `met` only if every member is a
+recognised, passing native envelope; a failing or unrecognised member makes it
+`unmet` and is named in `detail.failed_citations`, and a malformed member or
+empty list is `invalid_evidence`. A single-envelope item 2 entry is unchanged.
 
 Item 7 (post-layout verification) accepts a list the same way (issue #4562):
 one `klt pex` report per cell of a hierarchical design (objects or bare
