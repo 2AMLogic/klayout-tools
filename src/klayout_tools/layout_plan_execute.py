@@ -126,7 +126,10 @@ description alone):
    number, mirroring ``width_um``'s own check); :func:`gen_compose.compose`
    re-validates it against the cross-block layer's own deck minimum, and
    defaults it to that layer's own minimum when omitted. These four are the
-   only keys :data:`_ALLOWED_ROUTING_KEYS` recognises; an unrecognised
+   keys, plus ``nets`` (issue #5094: ``{net: {layer_role?, width_um?}}``,
+   copied onto the matching derived ``connectivity[]`` entry and never
+   forwarded inside ``compose_request["routing"]``; an unmatched net name
+   is a ``warnings[]`` entry), :data:`_ALLOWED_ROUTING_KEYS` recognises; an unrecognised
    ``request.routing`` key is a usage error, mirroring
    ``layout_plan._ALLOWED_PDK_KEYS``/``_ALLOWED_NETLIST_KEYS``. Every other
    request field is untouched -- Phase B's validator already ignores
@@ -209,7 +212,13 @@ _ALLOWED_ROUTING_KEYS = {
     "width_um",
     "cross_block_layer_role",
     "cross_block_width_um",
+    "nets",
 }
+
+#: Allowed keys in one ``request.routing.nets[<net>]`` entry (issue #5094):
+#: the per-net overrides ``gen_compose`` already reads off a
+#: ``connectivity[]`` entry (issue #1655).
+_ALLOWED_NET_ROUTING_KEYS = {"layer_role", "width_um"}
 
 #: Which digest terminal names map onto which generated-port suffix, per
 #: generator -- see the module docstring's scope decision 3. A generator
@@ -350,7 +359,77 @@ def _resolve_routing_spec(raw: Any) -> dict[str, Any]:
             )
         resolved["cross_block_width_um"] = float(cross_block_width_um)
 
+    # nets (#5094): per-net layer_role/width_um, applied onto the derived
+    # connectivity[] entries by _apply_net_routing(). Not a gen_compose
+    # routing key, so execute() pops it before building compose_request.
+    if "nets" in raw:
+        resolved["nets"] = _resolve_net_routing(raw["nets"])
+
     return resolved
+
+
+def _resolve_net_routing(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, dict):
+        raise LayoutPlanExecuteError(
+            "request.routing.nets must be a JSON object mapping net name to "
+            "{layer_role?, width_um?}"
+        )
+    allowed = ", ".join(sorted(_ALLOWED_NET_ROUTING_KEYS))
+    nets: dict[str, dict[str, Any]] = {}
+    for net, entry in raw.items():
+        where = f"request.routing.nets[{net!r}]"
+        if not isinstance(entry, dict):
+            raise LayoutPlanExecuteError(f"{where} must be a JSON object")
+        unknown = set(entry) - _ALLOWED_NET_ROUTING_KEYS
+        if unknown:
+            raise LayoutPlanExecuteError(
+                f"{where} has unknown field(s): {', '.join(sorted(unknown))}"
+                f" -- allowed: {allowed}"
+            )
+        if not entry:
+            raise LayoutPlanExecuteError(f"{where} must set at least one of: {allowed}")
+        resolved: dict[str, Any] = {}
+        if "layer_role" in entry:
+            layer_role = entry["layer_role"]
+            if not isinstance(layer_role, str) or not layer_role:
+                raise LayoutPlanExecuteError(
+                    f"{where}.layer_role must be a non-empty string when given"
+                )
+            resolved["layer_role"] = layer_role
+        if "width_um" in entry:
+            width_um = entry["width_um"]
+            if (
+                isinstance(width_um, bool)
+                or not isinstance(width_um, (int, float))
+                or width_um <= 0
+            ):
+                raise LayoutPlanExecuteError(
+                    f"{where}.width_um must be a positive number when given"
+                )
+            resolved["width_um"] = float(width_um)
+        nets[net] = resolved
+    return nets
+
+
+def _apply_net_routing(
+    connectivity: list[dict[str, Any]], nets: dict[str, dict[str, Any]]
+) -> list[str]:
+    """Copy per-net overrides onto the matching derived ``connectivity[]``
+    entries in place; one ``warnings[]`` entry per net name that matched
+    none (issue #5094)."""
+    by_net = {entry["net"]: entry for entry in connectivity}
+    warnings: list[str] = []
+    for net, override in nets.items():
+        entry = by_net.get(net)
+        if entry is None:
+            warnings.append(
+                f"request.routing.nets[{net!r}] matches no derived "
+                "connectivity entry (net is unmapped, has fewer than 2 pins, "
+                "or does not exist); override ignored"
+            )
+            continue
+        entry.update(override)
+    return warnings
 
 
 def _netlist_derived_size_params(
@@ -1133,6 +1212,9 @@ def execute_layout_plan(
             _build_connectivity(device_groups, digest, generated)
         )
         warnings.extend(connectivity_warnings)
+        net_routing = routing_spec.pop("nets", None)
+        if net_routing:
+            warnings.extend(_apply_net_routing(connectivity, net_routing))
 
         order = [group["id"] for group in device_groups]
         compose_request: dict[str, Any] = {
