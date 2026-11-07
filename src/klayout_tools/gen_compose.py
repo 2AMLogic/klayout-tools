@@ -1932,7 +1932,7 @@ def _validate_block_port(
     return block
 
 
-def _parse_waypoints_um(
+def parse_waypoints_um(
     raw_waypoints: Any,
     *,
     net: str,
@@ -2166,7 +2166,7 @@ def _parse_legs(
                 f"{where}[{leg_index}].from_pin and .to_pin must name different pins"
             )
         leg_waypoint_roles: list[str | None] = []
-        leg_waypoints = _parse_waypoints_um(
+        leg_waypoints = parse_waypoints_um(
             raw_leg.get("waypoints_um"),
             net=net,
             index=index,
@@ -2344,7 +2344,7 @@ def _parse_connectivity(
             parsed_pins.append({"block": block_id, "port": port})
 
         net_waypoint_roles: list[str | None] = []
-        waypoints_um = _parse_waypoints_um(
+        waypoints_um = parse_waypoints_um(
             entry.get("waypoints_um"),
             net=net,
             index=index,
