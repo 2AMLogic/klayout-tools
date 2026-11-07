@@ -174,7 +174,13 @@ def resolve_layout(
     blob = cache_dir / "blobs" / gds["sha256"]
     if not blob.is_file():
         return None, "gds_blob_missing_from_cache"
-    suffix = ".gds.gz" if blob.read_bytes()[:2] == b"\x1f\x8b" else ".gds"
+    head = blob.read_bytes()[:13]
+    if head[:2] == b"\x1f\x8b":
+        suffix = ".gds.gz"
+    elif head == b"%SEMI-OASIS\r\n":
+        suffix = ".oas"
+    else:
+        suffix = ".gds"
     link = work_dir / f"{manifest['macro']}{suffix}"
     work_dir.mkdir(parents=True, exist_ok=True)
     if link.is_symlink() or link.exists():
@@ -205,11 +211,17 @@ def run(
     klt: str = "klt",
     retry: bool = False,
     force: bool = False,
+    shard: tuple[int, int] | None = None,
     runner: Runner = subprocess_runner,
 ) -> dict[str, Any]:
     manifest_paths = sorted((cache_dir / "manifests" / shuttle).glob("*.json"))
     if limit is not None:
         manifest_paths = manifest_paths[:limit]
+    if shard is not None:
+        # Round-robin over the sorted list: disjoint, exhaustive, and stable
+        # across hosts that share the same manifest set.
+        index, count = shard
+        manifest_paths = manifest_paths[index::count]
     version = tool_version(klt, runner)
     out_root = results_dir / shuttle
     records: list[dict[str, Any]] = []
@@ -306,7 +318,26 @@ def main(argv: list[str] | None = None, runner: Runner = subprocess_runner) -> i
     parser.add_argument("--klt", default="klt")
     parser.add_argument("--retry", action="store_true", help="redo non-pass/findings")
     parser.add_argument("--force", action="store_true", help="redo every pair")
+    parser.add_argument(
+        "--shard",
+        help="run only shard I of N (0-based, e.g. 0/4) of the sorted designs",
+    )
     args = parser.parse_args(argv)
+
+    shard = None
+    if args.shard:
+        m = re.fullmatch(r"(\d+)/(\d+)", args.shard)
+        if not m or int(m[2]) < 1 or int(m[1]) >= int(m[2]):
+            print(
+                json.dumps(
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "error": f"bad --shard {args.shard!r}: want I/N, 0 <= I < N",
+                    }
+                )
+            )
+            return 2
+        shard = (int(m[1]), int(m[2]))
 
     stages = tuple(s for s in re.split(r"[,\s]+", args.stages) if s)
     bad = [s for s in stages if s not in STAGES]
@@ -339,6 +370,7 @@ def main(argv: list[str] | None = None, runner: Runner = subprocess_runner) -> i
         klt=args.klt,
         retry=args.retry,
         force=args.force,
+        shard=shard,
         runner=runner,
     )
     json.dump(summary, sys.stdout, indent=2, sort_keys=True)

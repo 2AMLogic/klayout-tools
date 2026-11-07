@@ -207,3 +207,37 @@ def test_cli_with_index_file(tmp_path, capsys):
     )
     assert rc == 0
     assert json.loads(capsys.readouterr().out)["included"] == 2
+
+
+def test_shuttle_level_template_uses_index_repo_and_commit(tmp_path):
+    routes = _routes()
+    url = "https://raw/TinyTapeout/tt06-verilog-demo/abc123/projects/tt_um_LFSR_shivam.oas"
+    routes[url] = b"OAS"
+    index = {
+        **INDEX,
+        "repo": "https://github.com/TinyTapeout/tt06-verilog-demo",
+        "commit": "abc123",
+    }
+    out = tt.run(
+        index,
+        tt.BlobCache(tmp_path, FakeTransport(routes)),
+        shuttle="tt06",
+        pdk="sky130A",
+        limit=1,
+        gds_url_template="https://raw/{shuttle_repo}/{shuttle_commit}/projects/{macro}.oas",
+    )
+    assert out["designs"][0]["artifacts"]["gds"]["url"] == url
+
+
+def test_shuttle_template_without_shuttle_info_excludes_with_reason(tmp_path):
+    index = {k: v for k, v in INDEX.items() if k not in ("repo", "commit")}
+    out = tt.run(
+        index,
+        tt.BlobCache(tmp_path, FakeTransport(_routes())),
+        shuttle="tt06",
+        pdk="sky130A",
+        limit=1,
+        gds_url_template="https://raw/{shuttle_repo}/{shuttle_commit}/{macro}.oas",
+    )
+    d = out["designs"][0]
+    assert d["excluded"] and "shuttle repo/commit" in d["exclusion_reason"]
