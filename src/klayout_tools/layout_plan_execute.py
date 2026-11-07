@@ -125,8 +125,9 @@ description alone):
    primary-plane net too. This module only validates its shape (a positive
    number, mirroring ``width_um``'s own check); :func:`gen_compose.compose`
    re-validates it against the cross-block layer's own deck minimum, and
-   defaults it to that layer's own minimum when omitted. These four are the
-   only keys :data:`_ALLOWED_ROUTING_KEYS` recognises; an unrecognised
+   defaults it to that layer's own minimum when omitted. These four plus
+   ``nets`` (#5094, :mod:`layout_plan_routing`) are the only keys
+   :data:`_ALLOWED_ROUTING_KEYS` recognises; an unrecognised
    ``request.routing`` key is a usage error, mirroring
    ``layout_plan._ALLOWED_PDK_KEYS``/``_ALLOWED_NETLIST_KEYS``. Every other
    request field is untouched -- Phase B's validator already ignores
@@ -180,6 +181,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import layout_plan
+from . import layout_plan_routing as nr
 from ._jsonnum import is_number
 from ._paths import _resolve_relative
 from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
@@ -215,6 +217,7 @@ _ALLOWED_ROUTING_KEYS = {
     "width_um",
     "cross_block_layer_role",
     "cross_block_width_um",
+    "nets",
 }
 
 #: Which digest terminal names map onto which generated-port suffix, per
@@ -313,16 +316,12 @@ def _resolve_routing_spec(raw: Any) -> dict[str, Any]:
         raise LayoutPlanExecuteError(
             "request.routing.layer_role must be a non-empty string when given"
         )
-    width_um = raw.get("width_um", _DEFAULT_ROUTING["width_um"])
-    if (
-        isinstance(width_um, bool)
-        or not isinstance(width_um, (int, float))
-        or width_um <= 0
-    ):
-        raise LayoutPlanExecuteError(
-            "request.routing.width_um must be a positive number when given"
-        )
-    resolved = {"layer_role": layer_role, "width_um": float(width_um)}
+    width_um = nr.require_positive_number(
+        raw.get("width_um", _DEFAULT_ROUTING["width_um"]),
+        "request.routing.width_um",
+        LayoutPlanExecuteError,
+    )
+    resolved = {"layer_role": layer_role, "width_um": width_um}
 
     # cross_block_layer_role (#1502): forwarded through unchanged --
     # gen_compose.compose() re-validates its type/non-emptiness itself
@@ -344,17 +343,14 @@ def _resolve_routing_spec(raw: Any) -> dict[str, Any]:
     # own deck minimum and defaults it to that layer's own minimum when
     # omitted, so it need not be given at all to get correct behavior.
     if "cross_block_width_um" in raw:
-        cross_block_width_um = raw["cross_block_width_um"]
-        if (
-            isinstance(cross_block_width_um, bool)
-            or not isinstance(cross_block_width_um, (int, float))
-            or cross_block_width_um <= 0
-        ):
-            raise LayoutPlanExecuteError(
-                "request.routing.cross_block_width_um must be a positive "
-                "number when given"
-            )
-        resolved["cross_block_width_um"] = float(cross_block_width_um)
+        resolved["cross_block_width_um"] = nr.require_positive_number(
+            raw["cross_block_width_um"],
+            "request.routing.cross_block_width_um",
+            LayoutPlanExecuteError,
+        )
+
+    if "nets" in raw:
+        resolved["nets"] = nr.resolve_net_routing(raw["nets"], LayoutPlanExecuteError)
 
     return resolved
 
@@ -1121,6 +1117,9 @@ def execute_layout_plan(
             _build_connectivity(device_groups, digest, generated)
         )
         warnings.extend(connectivity_warnings)
+        warnings.extend(
+            nr.apply_net_routing(connectivity, routing_spec.pop("nets", {}))
+        )
 
         order = [group["id"] for group in device_groups]
         compose_request: dict[str, Any] = {
