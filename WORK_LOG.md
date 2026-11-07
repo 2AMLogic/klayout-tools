@@ -8,6 +8,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-07
 
+- **Issue #3516** (closed): klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249)
+
 - **PR #5118**: test: add live ngspice check of waveform_decimate thinning
 - **PR #5116**: feat: shuttle-level layout URL template and --shard for tt corpus tools
 - **PR #5113**: feat: add options.waveform_decimate to thin waveform.raw.json
