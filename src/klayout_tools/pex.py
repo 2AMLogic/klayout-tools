@@ -230,6 +230,11 @@ from .coverage import (
 )
 from .extract import ExtractError, run_extract
 from .op_sanity import INCLUDE_CARD_RE, IncludeState, expand_includes
+from .pex_asap7 import (
+    DEVICE_MODEL_CARD_PREFIXES,
+    adapt_leg_netlists,
+    netlist_adaptation_for_deck,
+)
 from .sim import SimError, load_request, run_sim
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
@@ -1071,15 +1076,6 @@ def _flat_dut_mismatch(
     }
 
 
-#: Device-instance card prefixes whose trailing (non-node) token names a
-#: model or `.subckt` -- see :func:`_device_model_counts`. Deliberately
-#: excludes passive cards (`R`/`C`/`L`) and sources (`V`/`I`): those are out
-#: of :func:`_model_mismatch`'s scope (issue #2402's own Acceptance
-#: Criteria -- "device-instance-based ... on `M`/`X` cards or equivalent",
-#: not every card that happens to carry a trailing token).
-_DEVICE_MODEL_CARD_PREFIXES = "MXQDN"
-
-
 def _split_spice_tokens(line: str) -> list[str]:
     """Split a SPICE card on whitespace, keeping a quoted ``'...'``/``"..."``
     or braced ``{...}`` expression (which may contain spaces, e.g.
@@ -1139,7 +1135,7 @@ def _device_model_counts(netlist_text: str) -> dict[str, tuple[str, int]]:
     counts: dict[str, tuple[str, int]] = {}
     for line in _logical_lines(netlist_text):
         stripped = line.strip()
-        if not stripped or stripped[0].upper() not in _DEVICE_MODEL_CARD_PREFIXES:
+        if not stripped or stripped[0].upper() not in DEVICE_MODEL_CARD_PREFIXES:
             continue
         parts = [token for token in _split_spice_tokens(stripped) if "=" not in token]
         if len(parts) < 2:
@@ -2419,62 +2415,18 @@ def _stderr_tail(stderr: str | None, *, lines: int = 10) -> str:
     return " -- stderr tail:\n" + "\n".join(tail)
 
 
-#: ``extraction.netlist_adaptation`` value for the asap7 deck (issue #5128).
-ASAP7_NETLIST_ADAPTATION = "asap7_bsimcmg.adapt_extracted_netlist"
-
-
-def netlist_adaptation_for_deck(deck_name: str) -> str | None:
-    """Name of the simulator adaptation applied to the extracted legs' DUT
-    netlist for ``deck_name``, or ``None`` (no adaptation, sky130 etc.)."""
-    return ASAP7_NETLIST_ADAPTATION if deck_name == "asap7" else None
-
-
-def _adapted_dut_netlist(
-    deck_name: str | None, netlist_path: str, *, work_dir: str, label: str, side: str
-) -> str:
-    """The netlist a leg's DUT `.include` should name: ``netlist_path``
-    itself, except for asap7 where the raw `M` cards are rewritten to OSDI
-    BSIM-CMG `N` cards in a copy under ``work_dir`` (issue #5128). The raw
-    extraction file is never modified."""
-    if deck_name is None or netlist_adaptation_for_deck(deck_name) is None:
-        return netlist_path
-    from .asap7_bsimcmg import adapt_extracted_netlist
-
-    with open(netlist_path, encoding="utf-8") as handle:
-        text = handle.read()
-    try:
-        adapted = adapt_extracted_netlist(text)
-    except ValueError as exc:
-        raise PexError(
-            f"cannot adapt the {side} netlist {netlist_path} for ngspice's "
-            f"BSIM-CMG (OSDI) flow: {exc}"
-        ) from exc
-    adapted_path = os.path.join(work_dir, f"{label}.{side}-dut.asap7-osdi.spice")
-    with open(adapted_path, "w", encoding="utf-8") as handle:
-        handle.write(adapted)
-    return adapted_path
-
-
 def _prepare_extracted_request(
     *,
     testbench_path: str,
     extracted_netlist_path: str,
     work_dir: str,
     label: str,
-    deck_name: str | None = None,
 ) -> str:
     """The extracted-side DUT-swapped request copy -- see
-    :func:`_prepare_dut_swapped_request`. For the asap7 deck the DUT is the
-    BSIM-CMG-adapted copy (issue #5128)."""
+    :func:`_prepare_dut_swapped_request`."""
     return _prepare_dut_swapped_request(
         testbench_path=testbench_path,
-        dut_netlist_path=_adapted_dut_netlist(
-            deck_name,
-            extracted_netlist_path,
-            work_dir=work_dir,
-            label=label,
-            side="extracted",
-        ),
+        dut_netlist_path=extracted_netlist_path,
         work_dir=work_dir,
         label=label,
         side="extracted",
@@ -2847,7 +2799,6 @@ def _run_device_only_sim(
     label: str,
     backend: Any,
     batch_shard: Mapping[str, int | bool | None] | None = None,
-    deck_name: str | None = None,
 ) -> dict[str, Any] | None:
     """One testbench re-run against the parasitic-free netlist (issue #3298),
     or ``None`` without the leg. A failure here costs only the device-only
@@ -2859,13 +2810,7 @@ def _run_device_only_sim(
         return run_sim(
             _prepare_dut_swapped_request(
                 testbench_path=testbench_path,
-                dut_netlist_path=_adapted_dut_netlist(
-                    deck_name,
-                    device_only_netlist_path,
-                    work_dir=work_dir,
-                    label=label,
-                    side="device-only",
-                ),
+                dut_netlist_path=device_only_netlist_path,
                 work_dir=work_dir,
                 label=label,
                 side="device-only",
@@ -3345,6 +3290,9 @@ def run_pex(
         else os.path.join(os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex")
     )
     os.makedirs(work_dir, exist_ok=True)
+    leg_extracted, leg_device_only = adapt_leg_netlists(
+        deck_name, extracted_netlist_path, device_only_netlist_path, work_dir
+    )
     # Issue #4619: routes each `run_sim` leg (blocking / submit / attach).
     legs = pex_async.AsyncLegs(
         submit_only=submit_only,
@@ -3676,10 +3624,9 @@ def run_pex(
             try:
                 extracted_request_path = _prepare_extracted_request(
                     testbench_path=testbench_path,
-                    extracted_netlist_path=extracted_netlist_path,
+                    extracted_netlist_path=leg_extracted,
                     work_dir=work_dir,
                     label=label,
-                    deck_name=deck_name,
                 )
                 extracted_report = legs.run(
                     run_sim,
@@ -3772,13 +3719,12 @@ def run_pex(
             )
 
         device_only_report = _run_device_only_sim(
-            device_only_netlist_path,
+            leg_device_only,
             testbench_path=testbench_path,
             work_dir=work_dir,
             label=label,
             backend=backend,
             batch_shard=batch_shard,
-            deck_name=deck_name,
         )
 
         rows = _build_delta_rows(
@@ -3847,9 +3793,6 @@ def run_pex(
         "reference_netlist_sha256": reference_netlist_sha256,
         "extraction": {
             "deck": deck_name,
-            # Additive field (issue #5128): the simulator adaptation applied
-            # to the extracted legs' DUT netlist; `None` for decks that need
-            # none. The raw extracted netlist (and its sha) are unadapted.
             "netlist_adaptation": netlist_adaptation_for_deck(deck_name),
             "device_count": extract_report["device_count"],
             "net_count": extract_report["net_count"],
