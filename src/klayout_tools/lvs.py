@@ -167,7 +167,6 @@ from .lvs_combine import (
     _correct_combine_parameters,
     _flatten_netlist_safely,
     _hierarchy_mismatch_warnings,
-    _net_for_terminal_or_none,
     _parse_combine_devices,
     _parse_combine_devices_max_attempts,
     _parse_combine_devices_per_circuit,
@@ -233,6 +232,11 @@ from .lvs_mismatch import (
 )
 from .lvs_mismatch import _classify_net_mismatches as _classify_net_mismatches
 from .lvs_mismatch import _net_mismatch_pools as _net_mismatch_pools
+from .lvs_mos_options import (
+    apply_ignore_mos_bulk,
+    parse_ignore_mos_bulk,
+    split_layout_mos_flavours,
+)
 from .lvs_netgen import (
     _NETGEN_DEFAULT_TIMEOUT_S,
     _resolve_netgen_binary,
@@ -270,7 +274,6 @@ from .netlist_capacitor_recovery import (
     resistor_classes_for_deck,
 )
 from .pdk import PdkNotFoundError, find_pdk, list_pdks
-from .pdk_models import MOS_FLAVOUR_PROPERTY, flavoured_mos_class_name
 from .place_and_route_portable import portable_response
 from .verilog_module_names import reference_module_names
 from .verilog_netlist import (
@@ -361,11 +364,6 @@ CATEGORY_DEVICE_BULK_RECONCILED = "device.bulk_reconciled"
 #: Issue #2813: `options.finfet_bulk` tied a FinFET layout's bulk net to a named
 #: net before comparing (always a warning; see `lvs_finfet.apply_finfet_bulk`).
 CATEGORY_DEVICE_FINFET_BULK_TIED = "device.finfet_bulk_tied"
-
-#: Issue #5125: `options.ignore_mos_bulk` disconnected every MOS device's bulk
-#: terminal on both netlists before comparing (always a warning; one entry per
-#: device class and side).
-CATEGORY_DEVICE_BULK_IGNORED = "device.bulk_ignored"
 #: Issue #1907: `reference.form: "subckt-call"` converted a resistor/capacitor
 #: class whose plain-element value token is the literal `0` *placeholder*
 #: (`netlist_normalize.py` has no PDK sheet-resistance/capacitance-per-area
@@ -1342,7 +1340,7 @@ def run_lvs(
     compare_mos_flavour = _parse_compare_mos_flavour(
         options, engine, layout_spec, reference_spec
     )
-    ignore_mos_bulk = _parse_ignore_mos_bulk(options, engine)
+    ignore_mos_bulk = parse_ignore_mos_bulk(options, engine)
     supply_nets = parse_supply_nets(options)
     # Issue #1085: opt-in, per-side structural flatten -- see
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
@@ -1403,7 +1401,7 @@ def run_lvs(
         layout_net_label_positions,
     )
 
-    _split_layout_mos_flavours(layout_netlist, compare_mos_flavour)
+    split_layout_mos_flavours(layout_netlist, compare_mos_flavour)
 
     # Issue #2027: which *kind* of artifact `layout_hash_source` is, for
     # `provenance.input.role`. `_resolve_layout` returns the original
@@ -2193,9 +2191,7 @@ def run_lvs(
             compare_scoped_narrowed,
         )
 
-        # Issue #5125: after `combine_devices()` (combining still sees each
-        # side's unmodified bulk terminals), before the comparer is built.
-        ignore_mos_bulk_warnings = _apply_ignore_mos_bulk(
+        ignore_mos_bulk_warnings = apply_ignore_mos_bulk(
             ignore_mos_bulk, layout_netlist, reference_netlist
         )
 
@@ -2662,9 +2658,7 @@ def run_lvs(
     mismatches.extend(
         bulk_disclosures(finfet_bulk_records, CATEGORY_DEVICE_FINFET_BULK_TIED)
     )
-
-    # Issue #5125: `options.ignore_mos_bulk` disclosure (empty list is a no-op).
-    mismatches.extend(ignore_mos_bulk_warnings)
+    mismatches.extend(ignore_mos_bulk_warnings)  # Issue #5125
 
     if bulk_warnings:
         # Issue #506: same rationale again -- a `reference.device_bulk`
@@ -3012,7 +3006,6 @@ def run_lvs(
             "strict_top_level_pin_count": strict_top_level_pin_count,
             # Issue #3650: the effective boolean (`false` when omitted).
             "compare_mos_flavour": compare_mos_flavour,
-            # Issue #5125: the effective boolean (`false` when omitted).
             "ignore_mos_bulk": ignore_mos_bulk,
             "supply_nets": supply_nets,
             # Issue #2813: `null` when omitted, else the resolved
@@ -3315,16 +3308,9 @@ def _strict_top_level_pin_count_replay_options(
     """Issue #2845: re-assert ``strict_top_level_pin_count`` only when it was
     on (``false`` is the default). A helper keeps
     :func:`_reconstruct_lvs_request` within its complexity baseline."""
-    replay: dict[str, Any] = {}
-    if echoed.get("strict_top_level_pin_count") is True:
-        replay["strict_top_level_pin_count"] = True
-    # Issue #3650: same rule for `compare_mos_flavour`.
-    if echoed.get("compare_mos_flavour") is True:
-        replay["compare_mos_flavour"] = True
-    # Issue #5125: same rule for `ignore_mos_bulk`.
-    if echoed.get("ignore_mos_bulk") is True:
-        replay["ignore_mos_bulk"] = True
-    return replay
+    # Issues #2845/#3650/#5125: each is re-asserted only when it was on.
+    keys = ("strict_top_level_pin_count", "compare_mos_flavour", "ignore_mos_bulk")
+    return {key: True for key in keys if echoed.get(key) is True}
 
 
 def _reconstruct_runset_request(
@@ -5749,104 +5735,6 @@ def _parse_compare_mos_flavour(
             "of each X card, which the other reference forms do not carry"
         )
     return True
-
-
-def _parse_ignore_mos_bulk(options: Mapping[str, Any], engine: str) -> bool:
-    """Resolve ``options.ignore_mos_bulk`` (issue #5125); default ``False``.
-
-    ``true`` disconnects the bulk terminal of every MOS device on both
-    netlists before comparing, so a tap-less planar layout (whose inline
-    extraction leaves bulks on deck-synthesized or anonymous nets) can still
-    have its gate/drain/source topology graded. A non-boolean, or ``true``
-    with an engine other than ``klayout``, is a request error.
-    """
-    value = options.get("ignore_mos_bulk", False)
-    if not isinstance(value, bool):
-        raise LvsError(
-            "options.ignore_mos_bulk must be a boolean -- true to disconnect "
-            "every MOS device's bulk terminal on both sides before comparing, "
-            "false (the default) to compare bulk connectivity"
-        )
-    if value and engine != "klayout":
-        raise LvsError("options.ignore_mos_bulk is only supported for engine 'klayout'")
-    return value
-
-
-def _apply_ignore_mos_bulk(
-    enabled: bool, layout_netlist: kdb.Netlist, reference_netlist: kdb.Netlist
-) -> list[dict[str, Any]]:
-    """Issue #5125: when ``enabled``, disconnect the ``B`` terminal of every
-    MOS device on both netlists and return one ``severity: "warning"``
-    ``device.bulk_ignored`` entry per device class and side."""
-    if not enabled:
-        return []
-    from .lvs_mismatch import _mismatch
-
-    entries: list[dict[str, Any]] = []
-    for side, netlist in (("layout", layout_netlist), ("reference", reference_netlist)):
-        counts: dict[str, int] = {}
-        for circuit in netlist.each_circuit():
-            for device in circuit.each_device():
-                device_class = device.device_class()
-                names = {
-                    t.name.upper(): t.name for t in device_class.terminal_definitions()
-                }
-                if not {"S", "G", "D", "B"} <= names.keys():
-                    continue
-                device.connect_terminal(names["B"], None)
-                counts[device_class.name] = counts.get(device_class.name, 0) + 1
-        for class_name, count in sorted(counts.items()):
-            entries.append(
-                _mismatch(
-                    CATEGORY_DEVICE_BULK_IGNORED,
-                    "warning",
-                    f"options.ignore_mos_bulk disconnected the bulk terminal "
-                    f"of {count} '{class_name}' device(s) on the {side} "
-                    "before comparing -- bulk connectivity was not verified",
-                    side,
-                    details={"device_class": class_name, "device_count": count},
-                )
-            )
-    return entries
-
-
-def _split_layout_mos_flavours(netlist: kdb.Netlist, enabled: bool) -> None:
-    """Issue #3650: when ``enabled`` (``options.compare_mos_flavour``), move
-    every layout MOS device that inline extraction tagged with
-    ``pdk_models.MOS_FLAVOUR_PROPERTY`` onto a flavour-specific device
-    class (``nfet`` -> ``nfet__nvt``), the same names the reference conversion
-    uses, so ``NetlistComparer`` pairs flavours only with their own kind. A new
-    class is built per (base class, flavour) the way
-    :func:`_renew_conflicting_device_classes` builds them, and each device is
-    re-created on it with the same circuit, name, parameters and nets.
-    """
-    if not enabled:
-        return
-    classes: dict[str, Any] = {}
-    for circuit in netlist.each_circuit():
-        for device in list(circuit.each_device()):
-            flavour = device.property(MOS_FLAVOUR_PROPERTY)
-            if flavour is None:
-                continue
-            old_class = device.device_class()
-            name = flavoured_mos_class_name(old_class.name, str(flavour))
-            new_class = classes.get(name)
-            if new_class is None:
-                new_class = type(old_class)()
-                new_class.name = name
-                new_class.description = old_class.description
-                netlist.add(new_class)
-                classes[name] = new_class
-            replacement = circuit.create_device(new_class, device.name)
-            for terminal in old_class.terminal_definitions():
-                net = _net_for_terminal_or_none(device, terminal.name)
-                if net is not None:
-                    replacement.connect_terminal(terminal.name, net)
-            for parameter in old_class.parameter_definitions():
-                replacement.set_parameter(
-                    parameter.name, device.parameter(parameter.name)
-                )
-            circuit.remove_device(device)
 
 
 def _strict_pin_count_check(

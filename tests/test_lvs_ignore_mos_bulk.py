@@ -73,13 +73,13 @@ def test_ignore_mos_bulk_still_catches_topology_error(tmp_path):
 
 def test_non_boolean_is_request_error():
     with pytest.raises(LvsError, match="must be a boolean"):
-        lvs._parse_ignore_mos_bulk({"ignore_mos_bulk": "yes"}, "klayout")
+        lvs.parse_ignore_mos_bulk({"ignore_mos_bulk": "yes"}, "klayout")
 
 
 def test_netgen_engine_is_request_error():
     with pytest.raises(LvsError, match="engine 'klayout'"):
-        lvs._parse_ignore_mos_bulk({"ignore_mos_bulk": True}, "netgen")
-    assert lvs._parse_ignore_mos_bulk({"ignore_mos_bulk": False}, "netgen") is False
+        lvs.parse_ignore_mos_bulk({"ignore_mos_bulk": True}, "netgen")
+    assert lvs.parse_ignore_mos_bulk({"ignore_mos_bulk": False}, "netgen") is False
 
 
 def test_rerun_reconstructs_ignore_mos_bulk():
