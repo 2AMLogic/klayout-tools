@@ -3480,6 +3480,8 @@ offending net and the fix instead (issue #854):
 openroad 'route' stage failed: [ERROR DRT-0305] Net zero_ of signal type GROUND is not routable by TritonRoute. -- net 'zero_' is a constant tie, not a real signal: … Re-synthesize the netlist so its constants are driven by real tie cells …
 ```
 
+A route-stage `GRT-0116` failure (issue #5122) likewise appends a `-- global-route congestion: total overflow N (max H … / max V …); worst layer <layer> with overflow M` clause scraped from the `GRT-0096` table; if no table was captured the clause points at `route_allow_congestion: true` instead.
+
 Netlists produced by `klt synthesize` no longer hit this: it maps constants
 onto the resolved library's own tie cells via Yosys's `setundef -zero` +
 `hilomap` passes — see [`docs/cli/synthesize.md`](synthesize.md)'s "Constant
