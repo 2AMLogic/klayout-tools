@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import sim, sim_remote
+from klayout_tools import sim, sim_remote, sim_waveform_opts
 from test_sim_save_mode import (
     _capture_decks,
     _write_body,
@@ -77,13 +77,13 @@ def test_run_sim_xyce_refuses_save_vectors(tmp_path, monkeypatch):
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "10", []])
 def test_validate_waveform_max_bytes_rejects(value):
     with pytest.raises(sim.SimError, match="waveform_max_bytes"):
-        sim._validate_waveform_max_bytes({"waveform_max_bytes": value})
+        sim_waveform_opts.validate_max_bytes({"waveform_max_bytes": value})
 
 
 def test_validate_waveform_max_bytes_default_value_and_null():
-    assert sim._validate_waveform_max_bytes({}) == sim.DEFAULT_WAVEFORM_MAX_BYTES
-    assert sim._validate_waveform_max_bytes({"waveform_max_bytes": 5}) == 5
-    assert sim._validate_waveform_max_bytes({"waveform_max_bytes": None}) is None
+    assert sim_waveform_opts.validate_max_bytes({}) == sim.DEFAULT_WAVEFORM_MAX_BYTES
+    assert sim_waveform_opts.validate_max_bytes({"waveform_max_bytes": 5}) == 5
+    assert sim_waveform_opts.validate_max_bytes({"waveform_max_bytes": None}) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -297,14 +297,14 @@ def _points(path: str) -> list:
 
 
 def test_validate_waveform_decimate_absent_and_valid():
-    assert sim._validate_waveform_decimate({}) is None
-    assert sim._validate_waveform_decimate({"waveform_decimate": 10}) == 10
+    assert sim_waveform_opts.validate_decimate({}) is None
+    assert sim_waveform_opts.validate_decimate({"waveform_decimate": 10}) == 10
 
 
 @pytest.mark.parametrize("value", [0, -1, True, "2", 1.5, None])
 def test_validate_waveform_decimate_rejects_malformed(value):
     with pytest.raises(sim.SimError, match="waveform_decimate"):
-        sim._validate_waveform_decimate({"waveform_decimate": value})
+        sim_waveform_opts.validate_decimate({"waveform_decimate": value})
 
 
 def test_decimate_stride_keeps_first_and_last(tmp_path):
