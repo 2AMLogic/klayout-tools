@@ -8,6 +8,12 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-07
 
+- **PR #5109**: feat: accept per-net waypoints_um in layout-plan routing.nets
+- **PR #5107**: feat: add corpus defect triage report clustering failures by signature
+- **PR #5106**: chore(loom): resync installed Loom to v0.19.1273
+- **Issue #5108** (closed): layout-plan execute: mixed-device block still unrouted; no port-side hint, no bulk tap path to LVS
+- **Issue #5083** (closed): [Epic #520] Defect triage and filing pipeline
+- **Issue #4763** (closed): Live-verify gf180mcu tran run with models.param_file (follow-up to #4759)
 - **PR #5104**: docs: cite gate-contact test file for shared-gate-rail claim
 - **PR #5102**: feat: add Tiny Tapeout corpus regression runner for drc/lvs/extract
 - **PR #5101**: chore(loom): resync installed Loom to v0.19.1272
