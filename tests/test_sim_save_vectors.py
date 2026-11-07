@@ -266,3 +266,70 @@ def test_null_cap_disables_the_guard(tmp_path, monkeypatch):
     report = _run_with_fake_raw(tmp_path, monkeypatch, {"waveform_max_bytes": None})
     (corner,) = report["corners"]
     assert corner["artifacts"]["waveform"] is not None
+
+
+# --------------------------------------------------------------------------- #
+# waveform_decimate (issue #5112)
+# --------------------------------------------------------------------------- #
+
+
+def _synthetic_raw(path: Path, n: int) -> None:
+    lines = [
+        "Title: t",
+        "Date: x",
+        "Plotname: Transient Analysis",
+        "Flags: real",
+        "No. Variables: 2",
+        f"No. Points: {n}",
+        "Variables:",
+        "\t0\ttime\ttime",
+        "\t1\tv(out)\tvoltage",
+        "Values:",
+    ]
+    for i in range(n):
+        lines.append(f" {i}\t{i}.0e-9")
+        lines.append(f"\t{i}.5")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _points(path: str) -> list:
+    return json.loads(Path(path).read_text(encoding="utf-8"))["points"]
+
+
+def test_validate_waveform_decimate_absent_and_valid():
+    assert sim._validate_waveform_decimate({}) is None
+    assert sim._validate_waveform_decimate({"waveform_decimate": 10}) == 10
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "2", 1.5, None])
+def test_validate_waveform_decimate_rejects_malformed(value):
+    with pytest.raises(sim.SimError, match="waveform_decimate"):
+        sim._validate_waveform_decimate({"waveform_decimate": value})
+
+
+def test_decimate_stride_keeps_first_and_last(tmp_path):
+    raw = tmp_path / "w.raw"
+    _synthetic_raw(raw, 11)
+    full = _points(sim._parse_and_persist_waveform(str(raw)))
+    assert len(full) == 11
+    out = _points(sim._parse_and_persist_waveform(str(raw), 3))
+    assert out == [full[0], full[3], full[6], full[9], full[10]]
+
+
+def test_decimate_exact_multiple_does_not_duplicate_last(tmp_path):
+    raw = tmp_path / "w.raw"
+    _synthetic_raw(raw, 10)
+    full = _points(sim._parse_and_persist_waveform(str(raw)))
+    out = _points(sim._parse_and_persist_waveform(str(raw), 9))
+    assert out == [full[0], full[9]]
+
+
+def test_decimate_one_is_byte_identical_and_large_stride_is_endpoints(tmp_path):
+    raw = tmp_path / "w.raw"
+    _synthetic_raw(raw, 7)
+    base = Path(sim._parse_and_persist_waveform(str(raw))).read_bytes()
+    one = Path(sim._parse_and_persist_waveform(str(raw), 1)).read_bytes()
+    assert one == base
+    full = json.loads(base)["points"]
+    out = _points(sim._parse_and_persist_waveform(str(raw), 1000))
+    assert out == [full[0], full[-1]]
