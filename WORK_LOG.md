@@ -8,6 +8,14 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-07
 
+- **PR #5104**: docs: cite gate-contact test file for shared-gate-rail claim
+- **PR #5102**: feat: add Tiny Tapeout corpus regression runner for drc/lvs/extract
+- **PR #5101**: chore(loom): resync installed Loom to v0.19.1272
+- **PR #5100**: Bump Repo Skills 0.25.1 -> 0.25.10
+- **PR #5097**: feat: derive gate_contact from gate-net fan-out in layout-plan execute
+- **Issue #5099** (closed): docs: layout-plan-execute.md cites _GATE_RAIL_NETLIST in the wrong test file
+- **Issue #5093** (closed): layout-plan execute: mixed-device sky130 block still fully unrouted after #4966; no per-net routing hint, gate_contact not derived
+- **Issue #5082** (closed): [Epic #520] Regression runner (drc / lvs / extract) with structured failure capture
 - **PR #5098**: feat: tie guard_ring groups to a netlist net for tap connectivity
 - **Issue #5095** (closed): layout-plan execute: plan-level well/substrate tap tied to a named net (split from #5093)
 
