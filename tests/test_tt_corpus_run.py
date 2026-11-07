@@ -180,3 +180,38 @@ def test_main_requires_manifests(tmp_path, capsys):
     code = rr.main(["--shuttle", "nope", "--cache-dir", str(tmp_path)])
     assert code == 2
     assert "tt_corpus_fetch" in capsys.readouterr().out
+
+
+def test_shards_are_disjoint_and_exhaustive(tmp_path, cache):
+    seen: list[str] = []
+    for i in range(3):
+        out = _run(tmp_path, FakeKlt(), shard=(i, 3))
+        seen += sorted({r["macro"] for r in out["records"]})
+    assert sorted(seen) == sorted(set(seen))
+    assert len(seen) == 6
+
+
+def test_bad_shard_is_rejected(tmp_path, cache, capsys):
+    for bad in ("3/3", "x", "0/0"):
+        code = rr.main(
+            [
+                "--shuttle",
+                SHUTTLE,
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--shard",
+                bad,
+            ]
+        )
+        assert code == 2
+    assert "bad --shard" in capsys.readouterr().out
+
+
+def test_oasis_blob_gets_oas_suffix(tmp_path):
+    cache = tmp_path / "cache"
+    (cache / "blobs").mkdir(parents=True)
+    (cache / "blobs" / "x").write_bytes(b"%SEMI-OASIS\r\n" + b"\x01")
+    link, skip = rr.resolve_layout(
+        {"macro": "m", "artifacts": {"gds": {"sha256": "x"}}}, cache, tmp_path / "w"
+    )
+    assert skip is None and link.suffix == ".oas"
