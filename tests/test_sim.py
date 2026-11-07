@@ -14673,6 +14673,24 @@ def test_run_sim_dry_run_warns_on_unknown_key(tmp_path):
     assert "monte_carol_typo" in report["warnings"][0]
 
 
+def test_run_sim_dry_run_does_not_warn_on_stimulus_key(tmp_path):
+    stimulus = {
+        "signals": [
+            {
+                "source": "vclk",
+                "node": "clk",
+                "events": [{"t_s": 1e-9, "level": 1.8}],
+            }
+        ]
+    }
+    request = _dry_run_mc_request(tmp_path, stimulus=stimulus)
+    report = sim.run_sim(str(request), dry_run=True)
+    assert not any("stimulus" in w for w in report["warnings"])
+    typo = _dry_run_mc_request(tmp_path, stimulus_=stimulus)
+    report = sim.run_sim(str(typo), dry_run=True)
+    assert any("stimulus_" in w for w in report["warnings"])
+
+
 def test_run_sim_dry_run_reports_same_error_as_real_run(tmp_path):
     request = _dry_run_mc_request(tmp_path)
     bad = _write_request(

@@ -4847,7 +4847,10 @@ _KNOWN_REQUEST_KEYS = frozenset(
         "corners",
         "decks",
         "engine",
+        "engine_version",
         "exclude",
+        "expect_netlist_identity",
+        "analysis_overrides",
         "measurements",
         "models",
         "monte_carlo",
@@ -4861,6 +4864,7 @@ _KNOWN_REQUEST_KEYS = frozenset(
         "target_ci_halfwidth",
         "_explicit_points",
         sim_staging.STAGED_MODEL_INPUTS_FIELD,
+        sim_stimulus.REQUEST_KEY,
     }
 )
 
