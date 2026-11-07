@@ -99,7 +99,7 @@ from .place_and_route_gds_merge import (
     _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
-from .place_and_route_hints import null_unconstrained_fmax, outside_cwd_note
+from .place_and_route_hints import grt_hint, null_unconstrained_fmax, outside_cwd_note
 from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
 from .place_and_route_layers import _signal_layer_range
 from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
@@ -2783,10 +2783,9 @@ def _engine_error_message(
         message = f"openroad '{stage}' stage failed: {bare_error_lines[-1]}"
     else:
         tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
-        snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
+        tail = " ".join(tail_source[-3:]) if tail_source else "no output captured"
         message = (
-            f"openroad '{stage}' stage exited with code "
-            f"{completed.returncode}: {snippet}"
+            f"openroad '{stage}' stage exited with code {completed.returncode}: {tail}"
         )
 
     # Each recognized-hint helper appends a further `--` clause. Issue
@@ -2799,38 +2798,10 @@ def _engine_error_message(
         container_runtime_hint(completed),
         macro_spec.missing_lef_master_hint(streams),
         slot_shortage_hint(streams, pin_constraints, top_ports),
-        _global_route_congestion_hint(stage, completed),
+        grt_hint(stage, streams, completed.stdout or ""),
     )
     message += "".join(f" -- {hint}" for hint in hints if hint is not None)
     return message
-
-
-def _global_route_congestion_hint(stage: str, completed: _OpenRoadResult) -> str | None:
-    """``None``, or a congestion summary for a ``GRT-0116`` route failure
-    (issue #5122).
-
-    Names the worst-overflow layer and the total overflow from the
-    ``GRT-0096`` table when it is in the captured stdout; otherwise points
-    at ``route_allow_congestion`` so the caller can get the per-layer table.
-    """
-    if stage != "route":
-        return None
-    if "GRT-0116" not in f"{completed.stdout or ''}\n{completed.stderr or ''}":
-        return None
-    congestion = parse_global_route_congestion(completed.stdout or "")
-    if congestion is None:
-        return (
-            "no per-layer congestion table was captured; retry with "
-            "`route_allow_congestion: true` to get the per-layer overflow table"
-        )
-    layers = congestion["overflow_per_layer"]
-    worst = max(layers, key=lambda name: layers[name]["total_overflow"])
-    return (
-        f"global-route congestion: total overflow {congestion['total_overflow']} "
-        f"(max H {congestion['max_horizontal_overflow']} / "
-        f"max V {congestion['max_vertical_overflow']}); worst layer {worst} "
-        f"with overflow {layers[worst]['total_overflow']}"
-    )
 
 
 def _mount_namespace_hint(
