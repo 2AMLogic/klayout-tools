@@ -389,7 +389,7 @@ single-device `mos_array`/`res_array`/`cap_array` group is one unit.
 
 *Largest block known to route end to end* (recorded 2026-11-06, base commit
 `3d2c74e`): the three-NFET shared-gate rail in
-`tests/test_layout_plan_execute.py` (`_GATE_RAIL_NETLIST`, three one-unit
+`tests/test_layout_plan_gate_contact.py` (`_GATE_RAIL_NETLIST`, three one-unit
 `mos_array` groups in one row, shared gate net `VBIAS`) routes every net with
 the derived `gate_contact`; with `gate_contact: false` forced, `VBIAS` stays
 unrouted ("bare-poly gate"). No mixed-device sky130 block (`hvi` FETs plus
