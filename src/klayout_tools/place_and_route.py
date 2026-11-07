@@ -2799,9 +2799,38 @@ def _engine_error_message(
         container_runtime_hint(completed),
         macro_spec.missing_lef_master_hint(streams),
         slot_shortage_hint(streams, pin_constraints, top_ports),
+        _global_route_congestion_hint(stage, completed),
     )
     message += "".join(f" -- {hint}" for hint in hints if hint is not None)
     return message
+
+
+def _global_route_congestion_hint(stage: str, completed: _OpenRoadResult) -> str | None:
+    """``None``, or a congestion summary for a ``GRT-0116`` route failure
+    (issue #5122).
+
+    Names the worst-overflow layer and the total overflow from the
+    ``GRT-0096`` table when it is in the captured stdout; otherwise points
+    at ``route_allow_congestion`` so the caller can get the per-layer table.
+    """
+    if stage != "route":
+        return None
+    if "GRT-0116" not in f"{completed.stdout or ''}\n{completed.stderr or ''}":
+        return None
+    congestion = parse_global_route_congestion(completed.stdout or "")
+    if congestion is None:
+        return (
+            "no per-layer congestion table was captured; retry with "
+            "`route_allow_congestion: true` to get the per-layer overflow table"
+        )
+    layers = congestion["overflow_per_layer"]
+    worst = max(layers, key=lambda name: layers[name]["total_overflow"])
+    return (
+        f"global-route congestion: total overflow {congestion['total_overflow']} "
+        f"(max H {congestion['max_horizontal_overflow']} / "
+        f"max V {congestion['max_vertical_overflow']}); worst layer {worst} "
+        f"with overflow {layers[worst]['total_overflow']}"
+    )
 
 
 def _mount_namespace_hint(
