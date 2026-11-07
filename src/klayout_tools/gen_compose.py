@@ -1957,7 +1957,7 @@ def parse_waypoints_um(
     a triple is then an application error rather than a silently ignored role.
 
     ``field`` (#1529) overrides the field name in error messages -- used by
-    :func:`_parse_legs` so a malformed per-leg waypoint path is reported as
+    :func:`parse_legs` so a malformed per-leg waypoint path is reported as
     ``legs[<i>].waypoints_um``, not the bare top-level field name shared by
     every leg.
     """
@@ -2060,7 +2060,7 @@ _LEG_ENTRY_KEYS = {"from_pin", "to_pin", "waypoints_um", "layer_role", "width_um
 _ENDPOINT_KEYS = {"block", "port"}
 
 
-def _parse_legs(
+def parse_legs(
     raw_legs: Any,
     *,
     net: str,
@@ -2366,7 +2366,7 @@ def _parse_connectivity(
                 "legs by name instead"
             )
 
-        legs = _parse_legs(
+        legs = parse_legs(
             entry.get("legs"), net=net, index=index, parsed_pins=parsed_pins
         )
         if legs is not None and waypoints_um is not None:

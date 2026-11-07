@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .gen_compose import GenComposeError, _parse_legs, parse_waypoints_um
+from .gen_compose import GenComposeError, parse_legs, parse_waypoints_um
 
 #: Allowed keys in one ``request.routing.nets[<net>]`` entry.
 ALLOWED_NET_ROUTING_KEYS = {"layer_role", "width_um", "waypoints_um", "legs"}
@@ -56,17 +56,23 @@ def _resolve_net_entry(
             entry["waypoints_um"], where, error
         )
     if "legs" in entry:
-        if "waypoints_um" in entry:
-            raise error(
-                f"{where} cannot set both 'waypoints_um' and 'legs' -- "
-                "'waypoints_um' steers a 2-pin net's single path, 'legs' "
-                "steers individual legs of a net by pin name"
-            )
-        legs = entry["legs"]
-        if not isinstance(legs, list) or not legs:
-            raise error(f"{where}.legs must be a non-empty array of leg objects")
-        resolved["legs"] = legs
+        resolved["legs"] = _resolve_legs(entry, where, error)
     return resolved
+
+
+def _resolve_legs(
+    entry: dict[str, Any], where: str, error: type[Exception]
+) -> list[Any]:
+    if "waypoints_um" in entry:
+        raise error(
+            f"{where} cannot set both 'waypoints_um' and 'legs' -- "
+            "'waypoints_um' steers a 2-pin net's single path, 'legs' "
+            "steers individual legs of a net by pin name"
+        )
+    legs = entry["legs"]
+    if not isinstance(legs, list) or not legs:
+        raise error(f"{where}.legs must be a non-empty array of leg objects")
+    return legs
 
 
 def _resolve_waypoints(raw: Any, where: str, error: type[Exception]) -> Any:
@@ -106,11 +112,11 @@ def _validate_legs(
     error: type[Exception],
 ) -> None:
     """Validate ``legs`` against the derived entry's own pins with
-    ``gen_compose``'s ``_parse_legs`` (unknown pin, same pin twice, unknown
+    ``gen_compose``'s ``parse_legs`` (unknown pin, same pin twice, unknown
     key, bad waypoints) and re-point its messages at the request field."""
     pins = [pin for pin in entry.get("pins", []) if isinstance(pin, dict)]
     try:
-        _parse_legs(legs, net=net, index=index, parsed_pins=pins)
+        parse_legs(legs, net=net, index=index, parsed_pins=pins)
     except GenComposeError as exc:
         prefix = f"request.connectivity[{index}] (net '{net}').legs"
         message = str(exc)
