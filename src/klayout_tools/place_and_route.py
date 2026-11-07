@@ -99,7 +99,7 @@ from .place_and_route_gds_merge import (
     _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
-from .place_and_route_hints import null_unconstrained_fmax, outside_cwd_note
+from .place_and_route_hints import grt_hint, null_unconstrained_fmax, outside_cwd_note
 from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
 from .place_and_route_layers import _signal_layer_range
 from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
@@ -2783,10 +2783,9 @@ def _engine_error_message(
         message = f"openroad '{stage}' stage failed: {bare_error_lines[-1]}"
     else:
         tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
-        snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
+        tail = " ".join(tail_source[-3:]) if tail_source else "no output captured"
         message = (
-            f"openroad '{stage}' stage exited with code "
-            f"{completed.returncode}: {snippet}"
+            f"openroad '{stage}' stage exited with code {completed.returncode}: {tail}"
         )
 
     # Each recognized-hint helper appends a further `--` clause. Issue
@@ -2799,6 +2798,7 @@ def _engine_error_message(
         container_runtime_hint(completed),
         macro_spec.missing_lef_master_hint(streams),
         slot_shortage_hint(streams, pin_constraints, top_ports),
+        grt_hint(stage, streams, completed.stdout or ""),
     )
     message += "".join(f" -- {hint}" for hint in hints if hint is not None)
     return message
