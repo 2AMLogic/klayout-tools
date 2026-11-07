@@ -459,10 +459,16 @@ than only in a PR description:
   number); `gen-compose.compose()` re-validates it against the cross-block
   layer's own deck minimum and defaults it to that layer's own minimum when
   omitted. `nets` (issue #5094) is a further optional field: an object
-  `{net_name: {layer_role?, width_um?}}` copied onto the matching derived
+  `{net_name: {layer_role?, width_um?, waypoints_um?}}` copied onto the matching derived
   `connectivity[]` entry (`gen-compose`'s per-net override, issue #1655), the
   one lever on a "pin reached from behind" / "crosses already-routed net"
-  rejection other than reordering rows. Each entry must set at least one
+  rejection other than reordering rows. `waypoints_um` (issue #5108) takes the
+  same shape as `gen-compose`'s `connectivity[].waypoints_um` (`[x_um, y_um]`
+  pairs, or `[x_um, y_um, "layer_role"]` to change routing plane at that
+  point), is validated by the same parser and is forwarded unchanged; it is
+  only valid for a 2-pin net. Still not available: a per-group port-side
+  hint, a MOS bulk tap path to LVS, and a mixed-device row topology (one
+  group per device is the workaround). Each entry must set at least one
   key; a net name matching no derived entry (unmapped, fewer than 2 pins,
   or nonexistent) adds a `warnings[]` entry and is otherwise ignored; unlisted
   nets are unchanged. An unrecognised `request.routing` key is a usage error,

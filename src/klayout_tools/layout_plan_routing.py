@@ -2,8 +2,8 @@
 
 Split out of :mod:`klayout_tools.layout_plan_execute` to keep that module
 under its file-size ratchet. ``request.routing.nets`` maps a net name to
-``{layer_role?, width_um?}``; :func:`apply_net_routing` copies each entry onto
-the matching derived ``connectivity[]`` entry (``gen_compose``'s per-net
+``{layer_role?, width_um?, waypoints_um?}``; :func:`apply_net_routing`
+copies each entry onto the matching derived ``connectivity[]`` entry (``gen_compose``'s per-net
 override, issue #1655). Validation errors are raised as the ``error`` class the
 caller passes in, so the caller keeps its own exception type.
 """
@@ -12,8 +12,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from .gen_compose import GenComposeError, _parse_waypoints_um
+
 #: Allowed keys in one ``request.routing.nets[<net>]`` entry.
-ALLOWED_NET_ROUTING_KEYS = {"layer_role", "width_um"}
+ALLOWED_NET_ROUTING_KEYS = {"layer_role", "width_um", "waypoints_um"}
 
 
 def require_positive_number(value: Any, name: str, error: type[Exception]) -> float:
@@ -48,7 +50,27 @@ def _resolve_net_entry(
         resolved["width_um"] = require_positive_number(
             entry["width_um"], f"{where}.width_um", error
         )
+    if "waypoints_um" in entry:
+        resolved["waypoints_um"] = _resolve_waypoints(
+            entry["waypoints_um"], where, error
+        )
     return resolved
+
+
+def _resolve_waypoints(raw: Any, where: str, error: type[Exception]) -> Any:
+    """Validate with ``gen_compose``'s own parser (plane-bearing triples
+    included) and return the raw value so it is forwarded unchanged."""
+    if raw is None:
+        raise error(f"{where}.waypoints_um must be a non-empty array when given")
+    try:
+        _parse_waypoints_um(raw, net="", index=0, roles_out=[])
+    except GenComposeError as exc:
+        prefix = "request.connectivity[0] (net '').waypoints_um"
+        message = str(exc)
+        if message.startswith(prefix):
+            message = f"{where}.waypoints_um" + message[len(prefix) :]
+        raise error(message) from exc
+    return raw
 
 
 def resolve_net_routing(raw: Any, error: type[Exception]) -> dict[str, dict[str, Any]]:
@@ -56,7 +78,7 @@ def resolve_net_routing(raw: Any, error: type[Exception]) -> dict[str, dict[str,
     if not isinstance(raw, dict):
         raise error(
             "request.routing.nets must be a JSON object mapping net name to "
-            "{layer_role?, width_um?}"
+            "{layer_role?, width_um?, waypoints_um?}"
         )
     return {
         net: _resolve_net_entry(entry, f"request.routing.nets[{net!r}]", error)

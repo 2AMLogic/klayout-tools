@@ -90,3 +90,40 @@ def test_execute_routing_nets_forwarded_and_not_in_compose_routing(
     for net, entry in by_net.items():
         if net != "EBUS":
             assert "width_um" not in entry and "layer_role" not in entry
+
+
+def test_resolve_net_routing_accepts_waypoints_incl_plane_bearing():
+    from klayout_tools.layout_plan_routing import resolve_net_routing
+
+    wps = [[1, 2], [3.5, 4, "metal3"]]
+    out = resolve_net_routing({"A": {"waypoints_um": wps}}, ValueError)
+    assert out == {"A": {"waypoints_um": wps}}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [[], "x", [[1]], [[1, "a"]], [[1, 2, ""]], None],
+)
+def test_resolve_net_routing_rejects_bad_waypoints(bad):
+    from klayout_tools.layout_plan_routing import resolve_net_routing
+
+    with pytest.raises(
+        ValueError, match=r"request\.routing\.nets\['A'\]\.waypoints_um"
+    ):
+        resolve_net_routing({"A": {"waypoints_um": bad}}, ValueError)
+
+
+def test_empty_net_entry_message_lists_waypoints():
+    from klayout_tools.layout_plan_routing import resolve_net_routing
+
+    with pytest.raises(ValueError, match="waypoints_um"):
+        resolve_net_routing({"A": {}}, ValueError)
+
+
+def test_apply_net_routing_forwards_waypoints():
+    from klayout_tools.layout_plan_routing import apply_net_routing
+
+    connectivity = [{"net": "A", "pins": ["x", "y"]}]
+    wps = [[1, 2]]
+    apply_net_routing(connectivity, {"A": {"waypoints_um": wps}})
+    assert connectivity[0]["waypoints_um"] == wps
