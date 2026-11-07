@@ -8,6 +8,14 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-07
 
+- **PR #5118**: test: add live ngspice check of waveform_decimate thinning
+- **PR #5116**: feat: shuttle-level layout URL template and --shard for tt corpus tools
+- **PR #5113**: feat: add options.waveform_decimate to thin waveform.raw.json
+- **PR #5111**: feat: accept per-net legs in layout-plan routing.nets
+- **Issue #5114** (closed): Live-verify options.waveform_decimate with a real ngspice tran run (follow-up to #5113)
+- **Issue #5112** (closed): klt sim: batch version lock, capacity wait, AC waveform export, waveform-only exit code
+- **Issue #5110** (closed): layout-plan execute: small mixed-device block still unrouted (pin reached from behind); waypoints 2-pin only, no port-side hint
+- **Issue #5084** (closed): [Epic #520] Sharded gf180mcuD run and CI sample
 - **PR #5109**: feat: accept per-net waypoints_um in layout-plan routing.nets
 - **PR #5107**: feat: add corpus defect triage report clustering failures by signature
 - **PR #5106**: chore(loom): resync installed Loom to v0.19.1273
