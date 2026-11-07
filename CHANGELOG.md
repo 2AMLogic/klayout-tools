@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt layout-plan-execute`: `request.routing.nets[<net>].legs` steers
+  nets with three or more pins** (#5110, 2026-11-07): `legs` takes
+  `gen-compose`'s `connectivity[].legs[]` shape (`from_pin`/`to_pin`
+  `{block, port}`, optional per-leg `waypoints_um`/`layer_role`/`width_um`),
+  is validated against the net's derived pins and forwarded unchanged.
+  `legs` together with `waypoints_um` on one net is an application error.
+  Additive; no existing request changes behavior. See
+  `docs/cli/layout-plan-execute.md`.
 - **`klt yield` 0.8.0 retrospective: zero-spread sample sets are now
   `degenerate`** (#2909, documented via #5058, 2026-11-06): in releases before
   0.8.0, a bit-identical sample set (or one with only a rounding-residue

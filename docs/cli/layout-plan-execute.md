@@ -459,16 +459,34 @@ than only in a PR description:
   number); `gen-compose.compose()` re-validates it against the cross-block
   layer's own deck minimum and defaults it to that layer's own minimum when
   omitted. `nets` (issue #5094) is a further optional field: an object
-  `{net_name: {layer_role?, width_um?, waypoints_um?}}` copied onto the matching derived
+  `{net_name: {layer_role?, width_um?, waypoints_um?, legs?}}` copied onto the matching derived
   `connectivity[]` entry (`gen-compose`'s per-net override, issue #1655), the
   one lever on a "pin reached from behind" / "crosses already-routed net"
   rejection other than reordering rows. `waypoints_um` (issue #5108) takes the
   same shape as `gen-compose`'s `connectivity[].waypoints_um` (`[x_um, y_um]`
   pairs, or `[x_um, y_um, "layer_role"]` to change routing plane at that
   point), is validated by the same parser and is forwarded unchanged; it is
-  only valid for a 2-pin net. Still not available: a per-group port-side
-  hint, a MOS bulk tap path to LVS, and a mixed-device row topology (one
-  group per device is the workaround). Each entry must set at least one
+  only valid for a 2-pin net. `legs` (issue #5110) is the lever for a net
+  with three or more pins: an array of
+  `{from_pin: {block, port}, to_pin: {block, port}, waypoints_um?,
+  layer_role?, width_um?}` forwarded unchanged onto the derived
+  `connectivity[].legs` (`gen-compose`'s per-leg steering, issue #1529) and
+  validated by the same parser against that net's own derived pins. A pin is
+  `{"block": <device_groups[].id>, "port": <generated port name>}`; the port
+  name is the generator's (`<unit>_S/_D/_G` for `mos_array`, `_A/_B` for
+  `res_array`, `_BOT/_TOP` for `cap_array`; e.g. `U0_G`). Unknown pins, the
+  same pin twice, or unknown keys are an error naming
+  `request.routing.nets['<net>'].legs`. `legs` is also valid on a 2-pin
+  net, and `legs` together with `waypoints_um` on one net is an error. A leg
+  without `waypoints_um` only forces that pin pair into the net's spanning
+  tree; supply waypoints that approach each pin from its facing side to get
+  past a "reaches the pin from behind" rejection. MOS bulk reaches LVS through a
+  `guard_ring` group's `net` (issue #5095): add a tap-ring group, set its
+  `net` to the digest net the bulk ties to, and that ring's port joins the
+  net in a mixed-device block; the MOS `B` port itself stays unmapped, and
+  the bulk-compare limit above still applies. Still not available: a
+  per-group port-side hint and a mixed-device row topology (one group per
+  device is the workaround). Each entry must set at least one
   key; a net name matching no derived entry (unmapped, fewer than 2 pins,
   or nonexistent) adds a `warnings[]` entry and is otherwise ignored; unlisted
   nets are unchanged. An unrecognised `request.routing` key is a usage error,

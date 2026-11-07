@@ -1118,7 +1118,9 @@ def execute_layout_plan(
         )
         warnings.extend(connectivity_warnings)
         warnings.extend(
-            nr.apply_net_routing(connectivity, routing_spec.pop("nets", {}))
+            nr.apply_net_routing(
+                connectivity, routing_spec.pop("nets", {}), LayoutPlanExecuteError
+            )
         )
 
         order = [group["id"] for group in device_groups]
