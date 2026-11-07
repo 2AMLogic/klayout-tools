@@ -4824,7 +4824,7 @@ def route_bundle(
     ``explicit_legs`` (issue #1529) is the bundle-net counterpart:
     ``[{"from_pin": {block, port}, "to_pin": {block, port}, "waypoints_um":
     [...] | None}, ...]``, each pair already validated (by
-    :func:`_parse_connectivity`/:func:`_parse_legs`) to be members of this
+    :func:`_parse_connectivity`/:func:`parse_legs`) to be members of this
     net's own ``pins``. Every explicit leg is routed and unioned into the
     spanning tree **before** the automatic nearest-first search runs (seeded
     first, not merely preferred) -- so a caller can hand-route one or more
@@ -5084,7 +5084,7 @@ def route_bundle(
     # Explicit legs (#1529): caller-steered pin pairs, routed and seeded into
     # the spanning tree *before* the automatic nearest-first search below.
     # Each is resolved to its pin indices via `first_seen` -- from_pin/to_pin
-    # were already validated (at request-parse time, see _parse_legs) to be
+    # were already validated (at request-parse time, see parse_legs) to be
     # members of this net's own pins[], so every (block, port) key here is
     # guaranteed present when route_bundle() is reached through compose()'s
     # normal request path; the lookup is still defensive (a direct caller of

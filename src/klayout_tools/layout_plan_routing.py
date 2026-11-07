@@ -2,7 +2,7 @@
 
 Split out of :mod:`klayout_tools.layout_plan_execute` to keep that module
 under its file-size ratchet. ``request.routing.nets`` maps a net name to
-``{layer_role?, width_um?, waypoints_um?}``; :func:`apply_net_routing`
+``{layer_role?, width_um?, waypoints_um?, legs?}``; :func:`apply_net_routing`
 copies each entry onto the matching derived ``connectivity[]`` entry
 (``gen_compose``'s per-net override, issue #1655). Validation errors are
 raised as the ``error`` class the caller passes in, so the caller keeps its
@@ -13,10 +13,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from .gen_compose import GenComposeError, parse_waypoints_um
+from .gen_compose import GenComposeError, parse_legs, parse_waypoints_um
 
 #: Allowed keys in one ``request.routing.nets[<net>]`` entry.
-ALLOWED_NET_ROUTING_KEYS = {"layer_role", "width_um", "waypoints_um"}
+ALLOWED_NET_ROUTING_KEYS = {"layer_role", "width_um", "waypoints_um", "legs"}
 
 
 def require_positive_number(value: Any, name: str, error: type[Exception]) -> float:
@@ -55,7 +55,24 @@ def _resolve_net_entry(
         resolved["waypoints_um"] = _resolve_waypoints(
             entry["waypoints_um"], where, error
         )
+    if "legs" in entry:
+        resolved["legs"] = _resolve_legs(entry, where, error)
     return resolved
+
+
+def _resolve_legs(
+    entry: dict[str, Any], where: str, error: type[Exception]
+) -> list[Any]:
+    if "waypoints_um" in entry:
+        raise error(
+            f"{where} cannot set both 'waypoints_um' and 'legs' -- "
+            "'waypoints_um' steers a 2-pin net's single path, 'legs' "
+            "steers individual legs of a net by pin name"
+        )
+    legs = entry["legs"]
+    if not isinstance(legs, list) or not legs:
+        raise error(f"{where}.legs must be a non-empty array of leg objects")
+    return legs
 
 
 def _resolve_waypoints(raw: Any, where: str, error: type[Exception]) -> Any:
@@ -79,7 +96,7 @@ def resolve_net_routing(raw: Any, error: type[Exception]) -> dict[str, dict[str,
     if not isinstance(raw, dict):
         raise error(
             "request.routing.nets must be a JSON object mapping net name to "
-            "{layer_role?, width_um?, waypoints_um?}"
+            "{layer_role?, width_um?, waypoints_um?, legs?}"
         )
     return {
         net: _resolve_net_entry(entry, f"request.routing.nets[{net!r}]", error)
@@ -87,13 +104,38 @@ def resolve_net_routing(raw: Any, error: type[Exception]) -> dict[str, dict[str,
     }
 
 
+def _validate_legs(
+    legs: Any,
+    entry: dict[str, Any],
+    net: str,
+    index: int,
+    error: type[Exception],
+) -> None:
+    """Validate ``legs`` against the derived entry's own pins with
+    ``gen_compose``'s ``parse_legs`` (unknown pin, same pin twice, unknown
+    key, bad waypoints) and re-point its messages at the request field."""
+    pins = [pin for pin in entry.get("pins", []) if isinstance(pin, dict)]
+    try:
+        parse_legs(legs, net=net, index=index, parsed_pins=pins)
+    except GenComposeError as exc:
+        prefix = f"request.connectivity[{index}] (net '{net}').legs"
+        message = str(exc)
+        if message.startswith(prefix):
+            message = f"request.routing.nets[{net!r}].legs" + message[len(prefix) :]
+        raise error(message) from exc
+
+
 def apply_net_routing(
-    connectivity: list[dict[str, Any]], nets: dict[str, dict[str, Any]]
+    connectivity: list[dict[str, Any]],
+    nets: dict[str, dict[str, Any]],
+    error: type[Exception] = ValueError,
 ) -> list[str]:
     """Copy per-net overrides onto the matching derived ``connectivity[]``
     entries in place; one ``warnings[]`` entry per net name that matched
-    none."""
+    none. ``legs`` is validated here, not in :func:`resolve_net_routing`,
+    because it can only be checked against the derived entry's own pins."""
     by_net = {entry["net"]: entry for entry in connectivity}
+    index_of = {entry["net"]: i for i, entry in enumerate(connectivity)}
     warnings: list[str] = []
     for net, override in nets.items():
         entry = by_net.get(net)
@@ -104,5 +146,7 @@ def apply_net_routing(
                 "or does not exist); override ignored"
             )
             continue
+        if "legs" in override:
+            _validate_legs(override["legs"], entry, net, index_of[net], error)
         entry.update(override)
     return warnings
