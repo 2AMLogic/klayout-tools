@@ -3851,6 +3851,22 @@ remedies. The raw file stays at `artifacts.raw`, `artifacts.waveform` is
 `tmax`, a shorter `tstop`. Validated before any corner launches; honored by
 every backend (remote/batch workers re-read it from the request document).
 
+### Waveform decimation: `options.waveform_decimate` (issue #5112)
+
+`options.waveform_decimate` (a positive integer stride `k`; default absent =
+every point) keeps every k-th point of `waveform.raw.json`, always including
+the first and the last point, so long transients ship small artifacts without
+dropping signals or re-simulating at a coarser step. Absent or `1` is
+byte-identical to an undecimated run. `0`, negatives, booleans and non-integers
+are a request error. The corner report carries `waveform_decimate: k`
+whenever `artifacts.waveform` was written decimated, so a thinned artifact is
+never mistaken for a full one. Only the JSON is thinned: the raw
+`waveform.raw` file, measurements and `crossings` keep full resolution. (`--plot`
+renders read the decimated JSON.) A stride larger than the point count keeps
+just the first and last points. Compare with `options.save_vectors` and
+`options.waveform_max_bytes` above. An off-host runner older than this client
+ignores the option; the absent `waveform_decimate` field in its report shows it.
+
 ### `tran` timing arguments (`tstep tstop tstart tmax`)
 
 `analysis.args` is passed to ngspice verbatim, so the full four-token form

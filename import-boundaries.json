@@ -706,6 +706,7 @@
         "klayout_tools.sim_transfer_meas",
         "klayout_tools.sim_twoport",
         "klayout_tools.sim_validate",
+        "klayout_tools.sim_waveform_opts",
         "klayout_tools.sim_xyce_refusals"
       ]
     },

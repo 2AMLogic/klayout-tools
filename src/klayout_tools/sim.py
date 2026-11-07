@@ -123,6 +123,7 @@ from . import (
     sim_tian,
     sim_transfer_meas,
     sim_twoport,
+    sim_waveform_opts,
     sim_xyce_refusals,
 )
 
@@ -2107,31 +2108,7 @@ def _validate_save_mode(options: dict[str, Any]) -> tuple[str, bool]:
     return value, True
 
 
-#: Default for ``options.waveform_max_bytes`` (issue #3211): the largest
-#: ``waveform.raw`` klt will convert to the ``waveform.raw.json`` artifact.
-#: The conversion materializes the whole ASCII rawfile in memory, so an
-#: unbounded transient can be OOM-killed with no diagnostic; above this size
-#: the corner keeps its measurements and gets a ``waveform_too_large`` warning.
-DEFAULT_WAVEFORM_MAX_BYTES = 1024**3
-
-
-def _validate_waveform_max_bytes(options: dict[str, Any]) -> int | None:
-    """Validate ``options.waveform_max_bytes`` (issue #3211).
-
-    Returns the cap in bytes (:data:`DEFAULT_WAVEFORM_MAX_BYTES` when the key
-    is omitted); an explicit ``null`` disables the guard and returns ``None``.
-    """
-    if "waveform_max_bytes" not in options:
-        return DEFAULT_WAVEFORM_MAX_BYTES
-    value = options["waveform_max_bytes"]
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise SimError(
-            "options.waveform_max_bytes must be a positive integer byte count "
-            f"or null to disable the guard (got {json.dumps(value, default=repr)})"
-        )
-    return value
+DEFAULT_WAVEFORM_MAX_BYTES = sim_waveform_opts.DEFAULT_WAVEFORM_MAX_BYTES
 
 
 def _validate_save_vectors(
@@ -3104,6 +3081,7 @@ class _ResolvedSimRequest:
     timeout_s: Any
     want_waveforms: Any
     waveform_max_bytes: Any
+    waveform_decimate: Any
 
 
 def _prepare_sim_request(
@@ -3418,7 +3396,8 @@ def _prepare_sim_request(
     # from the forwarded request document.
     save_vectors, save_vectors_declared = _validate_save_vectors(options, save_mode)
     complex_vectors = sim_complex_vectors.validate(options, analysis, save_mode, engine)
-    waveform_max_bytes = _validate_waveform_max_bytes(options)
+    waveform_max_bytes = sim_waveform_opts.validate_max_bytes(options)
+    waveform_decimate = sim_waveform_opts.validate_decimate(options)
     # Issue #3111: same up-front validation; off-host workers re-read it from
     # the forwarded request document, and the echo check below verifies it.
     ngspice_options = _validate_ngspice_options(options.get("ngspice_options"))
@@ -3732,6 +3711,7 @@ def _prepare_sim_request(
         timeout_s=timeout_s,
         want_waveforms=want_waveforms,
         waveform_max_bytes=waveform_max_bytes,
+        waveform_decimate=waveform_decimate,
     )
 
 
@@ -3835,6 +3815,7 @@ def _run_sim_corners(
     timeout_s = resolved.timeout_s
     want_waveforms = resolved.want_waveforms
     waveform_max_bytes = resolved.waveform_max_bytes
+    waveform_decimate = resolved.waveform_decimate
 
     # `pre_completed` holds corner reports already recorded by a prior,
     # interrupted run of this *same* request (fingerprint-matched); those
@@ -4018,6 +3999,7 @@ def _run_sim_corners(
             "save_vectors": save_vectors,
             "complex_vectors": complex_vectors,
             "waveform_max_bytes": waveform_max_bytes,
+            "waveform_decimate": waveform_decimate,
             "ngspice_options": ngspice_options,
             "stimulus_lines": stimulus_lines,
             "convergence_retry": convergence_retry,
@@ -8110,6 +8092,7 @@ def _run_local(
     save_vectors: tuple[str, ...] = (),
     complex_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
+    waveform_decimate: int | None = None,
     ngspice_options: dict[str, Any] | None = None,
     convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
@@ -8199,6 +8182,7 @@ def _run_local(
             save_vectors=save_vectors,
             complex_vectors=complex_vectors,
             waveform_max_bytes=waveform_max_bytes,
+            waveform_decimate=waveform_decimate,
             ngspice_options=ngspice_options,
             convergence_retry=convergence_retry,
             portable_roots=portable_roots,
@@ -8350,6 +8334,7 @@ def _run_local_parallel(
     save_vectors: tuple[str, ...] = (),
     complex_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
+    waveform_decimate: int | None = None,
     ngspice_options: dict[str, Any] | None = None,
     convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
@@ -8468,6 +8453,7 @@ def _run_local_parallel(
                     save_vectors=save_vectors,
                     complex_vectors=complex_vectors,
                     waveform_max_bytes=waveform_max_bytes,
+                    waveform_decimate=waveform_decimate,
                     ngspice_options=ngspice_options,
                     convergence_retry=convergence_retry,
                     portable_roots=portable_roots,
@@ -9590,6 +9576,7 @@ def _persist_waveform_artifact(
     analysis: dict[str, Any],
     diagnostics: list[dict[str, Any]],
     noise_fields: dict[str, str],
+    waveform_decimate: int | None = None,
 ) -> str | None:
     """Convert ``raw_path`` to its ``waveform.raw.json`` artifact and return
     that path, or ``None`` when ``raw_size`` is over ``waveform_max_bytes``
@@ -9618,7 +9605,7 @@ def _persist_waveform_artifact(
             }
         )
         return None
-    waveform_path = _parse_and_persist_waveform(raw_path)
+    waveform_path = _parse_and_persist_waveform(raw_path, waveform_decimate)
     if analysis.get("kind") == "noise":
         with open(waveform_path, encoding="utf-8") as fh:
             noise_fields["noise_representation"] = noise_representation(json.load(fh))
@@ -9735,6 +9722,7 @@ def _run_corner(
     save_vectors: tuple[str, ...] = (),
     complex_vectors: tuple[str, ...] = (),
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
+    waveform_decimate: int | None = None,
     ngspice_options: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
     stimulus_lines: tuple[str, ...] = (),
@@ -10114,6 +10102,7 @@ def _run_corner(
                     analysis,
                     diagnostics,
                     noise_fields,
+                    waveform_decimate,
                 )
                 if waveform_path is not None:
                     artifacts["waveform"] = waveform_path
@@ -10192,6 +10181,7 @@ def _run_corner(
         "diagnostics": diagnostics,
         "artifacts": artifacts,
         **noise_fields,
+        **sim_waveform_opts.report_field(waveform_decimate, artifacts),
         "monte_carlo": monte_carlo,
         # Additive/optional (issue #3252): the `corners.variants[]` name,
         # present only for a variant-axis request.
@@ -13712,7 +13702,7 @@ def noise_representation(waveform: dict[str, Any]) -> str:
     return "amplitude"
 
 
-def _parse_and_persist_waveform(raw_path: str) -> str:
+def _parse_and_persist_waveform(raw_path: str, decimate: int | None = None) -> str:
     """Parse the rawfile at ``raw_path`` to the waveform JSON shape and write
     it alongside as ``<raw_path>.json``, returning that path.
 
@@ -13731,8 +13721,7 @@ def _parse_and_persist_waveform(raw_path: str) -> str:
                 handle.write('{"plotname": ' + json.dumps(plotname))
                 handle.write(', "variables": ' + json.dumps(variables))
                 handle.write(', "points": [')
-                for index, point in enumerate(points):
-                    handle.write((", " if index else "") + json.dumps(point))
+                sim_waveform_opts.write_points(handle, points, decimate)
                 handle.write("]}")
     except (SimError, ValueError):
         # Do not leave a truncated artifact behind a failed parse.
