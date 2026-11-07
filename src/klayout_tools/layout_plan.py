@@ -865,7 +865,14 @@ def validate_layout_plan_document(
             device_map=netlist_spec["device_map"],
         )
     except LvsError as exc:
-        raise LayoutPlanError(f"request.netlist could not be ingested: {exc}") from exc
+        # The shared reader's hints name `klt lvs`'s `reference.*` keys; a
+        # plan author spells the same options `netlist.*` (issue #5135).
+        detail = str(exc).replace("request.reference.form", "request.netlist.form")
+        detail = detail.replace("reference.form", "netlist.form")
+        detail = detail.replace("reference.deck", "netlist.deck")
+        raise LayoutPlanError(
+            f"request.netlist could not be ingested: {detail}"
+        ) from exc
 
     return validate_layout_plan(request, digest)
 

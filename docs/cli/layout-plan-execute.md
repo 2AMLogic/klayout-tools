@@ -97,6 +97,12 @@ except LayoutPlanExecuteError as exc:  # Phase C execution failure
 raise SystemExit(exit_code_for(response))
 ```
 
+A schematic-flow (simulation-form, `X`-card) netlist needs the conversion
+options on the request's `netlist` object — `netlist.form: "subckt-call"`,
+`netlist.deck` (`"sky130"`/`"gf180mcu"`) and optionally `netlist.device_map` —
+not `klt lvs`'s `reference.*` keys. See the `netlist.*` rows of the
+[request table](layout-plan.md#request).
+
 - `execute_layout_plan(request, digest, *, request_dir=None, work_dir=None)`
   — the pure-ish function: `digest` is a
   [`build_netlist_digest()`](../../src/klayout_tools/netlist_digest.py)
