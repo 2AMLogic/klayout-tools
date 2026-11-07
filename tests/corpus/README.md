@@ -448,3 +448,17 @@ referenced, not migrated, and this tool does not rewrite their records.
 Offline tests: `tests/test_tt_corpus_fetch.py`, against
 `tests/fixtures/tt_corpus/tt06_index_captured.json` (a captured slice of the
 real index; hand-written cases are marked `"_synthetic": true`).
+
+## Tiny Tapeout corpus regression runner (Epic #520 Phase 1.B, #5082)
+
+`scripts/tt_corpus_run.py --shuttle <id> --cache-dir <dir>` runs `klt drc`,
+`klt lvs` and `klt extract` over the designs `tt_corpus_fetch.py` cached and
+writes one JSON record per (design, stage) at
+`<cache-dir>/runs/<shuttle>/<macro>/<stage>.json`: `outcome`
+(`pass`/`findings`/`error`/`timeout`/`crash`/`skipped`), `exit_code`,
+`duration_s`, `stderr_tail`, `tool_version`. A crash or timeout in one design
+never stops the run, and nothing is dropped: excluded designs, designs with no
+GDS, and LVS without a reference netlist (`--reference-dir`, `<macro>.spice`)
+get `skipped` records with a `reason`. A rerun skips pairs that already have a
+record (`--retry` redoes errors/timeouts/crashes, `--force` redoes all).
+Offline tests: `tests/test_tt_corpus_run.py` (injected runner, 6-design fixture).
