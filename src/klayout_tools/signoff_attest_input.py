@@ -59,11 +59,32 @@ def input_binding(
 
 
 def input_line(result: Mapping[str, Any], stream_item: int) -> str:
-    """The one-line text summary of an attestation's bound input."""
+    """The text summary of an attestation's bound input, plus -- for a live
+    result carrying one (:func:`with_entry`) -- the manifest entry to cite."""
     binding = result["provenance"]["input"]
     digest = f"({binding['content_hash']})"
     if "paths" in binding:
         # Item 1 binds its whole input set (#4764): name the set, not one file.
-        return f"input set: {len(binding['paths'])} files {digest}"
-    label = "stream" if result["t1_item"] == stream_item else "inventory"
-    return f"{label}: {binding['path']['path']} {digest}"
+        line = f"input set: {len(binding['paths'])} files {digest}"
+    else:
+        label = "stream" if result["t1_item"] == stream_item else "inventory"
+        line = f"{label}: {binding['path']['path']} {digest}"
+    entry = result.get("manifest_entry")
+    if entry:
+        file = entry["file"] or "<envelope path>"
+        line += (
+            f"\nmanifest entry: {{file: {file}, content_hash: {entry['content_hash']}}}"
+        )
+    return line
+
+
+def with_entry(result: dict[str, Any], output: str | None) -> dict[str, Any]:
+    """``result`` plus the ``manifest_entry`` to cite for the envelope at
+    ``output`` (issue #5124). Call after the envelope is written, so its
+    committed bytes are unchanged; live results only."""
+    binding = result["provenance"]["input"]
+    result["manifest_entry"] = {
+        "file": output,
+        "content_hash": binding["content_hash"],
+    }
+    return result

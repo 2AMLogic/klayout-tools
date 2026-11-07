@@ -136,7 +136,7 @@ from ..signoff_attest import (
     check_attestation,
     write_attestation,
 )
-from ..signoff_attest_input import input_line
+from ..signoff_attest_input import input_line, with_entry
 from ..signoff_attest_stream import (
     build_stream_attestation,
     check_stream_attestation,
@@ -417,13 +417,7 @@ def _run_attest(
                 "signoff", f"could not write --output '{output}': {exc}", args.format
             )
     attach_output_tails(result)
-    # Issue #5124: the manifest entry to cite (added after the write, so the
-    # committed envelope's bytes are unchanged).
-    result["manifest_entry"] = {
-        "file": output,
-        "content_hash": result["provenance"]["input"]["content_hash"],
-    }
-    emit_success(result, args.format, _print_attestation_text)
+    emit_success(with_entry(result, output), args.format, _print_attestation_text)
     return EXIT_PASS if result["status"] == "pass" else EXIT_FAIL
 
 
@@ -432,12 +426,6 @@ def _print_attestation_text(result: dict) -> None:
     attestation = result["attestation"]
     print(f"checks: {attestation['passed_count']}/{attestation['check_count']} passed")
     print(input_line(result, STREAM_ATTESTABLE_ITEM))
-    entry = result.get("manifest_entry")
-    if entry:
-        print(
-            f"manifest entry: {{file: {entry['file'] or '<envelope path>'}, "
-            f"content_hash: {entry['content_hash']}}}"
-        )
     print()
     for check in attestation["checks"]:
         print(_attestation_check_line(check))

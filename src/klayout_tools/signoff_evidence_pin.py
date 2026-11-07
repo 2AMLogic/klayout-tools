@@ -92,37 +92,43 @@ MISSING_INPUT_PATH = "provenance.input.path"
 MISSING_CONTENT_HASH = "manifest content_hash"
 
 
-def unanchored_missing_fields(
-    *,
+def generic_binding_check(
+    item_id: int | None,
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
     anchored: bool,
-    declared: Any,
     binding_present: bool,
-    pinned: bool,
-) -> list[str]:
-    """The fields a generic citation lacks to bind to its T1 item (issue
-    #5124): ``t1_item`` absent (anchored item only) or not an integer,
-    ``provenance.input.path`` unusable, and the manifest entry carrying no
-    ``content_hash`` pin. The one source of truth for the conditions, shared
-    by the refusal and its ``detail.missing``."""
+) -> tuple[str | None, list[str]]:
+    """``(refusal, missing)`` for a generic citation bound to T1 ``item_id``
+    (issues #2718, #5124). ``refusal`` is ``"wrong_item"`` for a declared
+    ``t1_item`` naming another item, ``"unanchored_evidence"`` when a field
+    is missing, else ``None``. ``missing`` names the absent fields: a
+    ``t1_item`` absent (anchored item only) or not an integer,
+    ``provenance.input.path`` unusable, and no manifest ``content_hash``."""
+    declared = envelope.get("t1_item")
+    is_int = isinstance(declared, int) and not isinstance(declared, bool)
+    if is_int and declared != item_id:
+        return "wrong_item", []
     missing: list[str] = []
-    if (declared is None and anchored) or (
-        declared is not None
-        and (isinstance(declared, bool) or not isinstance(declared, int))
-    ):
+    if (declared is None and anchored) or (declared is not None and not is_int):
         missing.append(MISSING_T1_ITEM)
     if anchored and not binding_present:
         missing.append(MISSING_INPUT_PATH)
-    if anchored and not pinned:
+    if anchored and not isinstance(spec.get("content_hash"), str):
         missing.append(MISSING_CONTENT_HASH)
-    return missing
+    return ("unanchored_evidence" if missing else None), missing
 
 
 def unanchored_detail(
-    missing: list[str], spec: Mapping[str, Any], live_hash: str | None
+    missing: list[str], spec: Mapping[str, Any], resolution: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """``detail`` for an ``unanchored_evidence`` refusal: ``missing`` plus,
-    when the pin is what is missing, the manifest entry shape to cite."""
+    """``detail`` for a binding refusal: ``{}`` when nothing is missing, else
+    ``missing`` plus, when the pin is what is missing, the manifest entry
+    shape to cite."""
+    if not missing:
+        return {}
     detail: dict[str, Any] = {"missing": list(missing)}
+    live_hash = resolution["content_hash"]
     if MISSING_CONTENT_HASH in missing and live_hash is not None:
         detail["manifest_entry"] = {
             "file": spec.get("file"),
