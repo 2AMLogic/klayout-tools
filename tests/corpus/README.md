@@ -462,3 +462,14 @@ GDS, and LVS without a reference netlist (`--reference-dir`, `<macro>.spice`)
 get `skipped` records with a `reason`. A rerun skips pairs that already have a
 record (`--retry` redoes errors/timeouts/crashes, `--force` redoes all).
 Offline tests: `tests/test_tt_corpus_run.py` (injected runner, 6-design fixture).
+
+## Tiny Tapeout corpus defect triage (Epic #520 Phase 1.C, #5083)
+
+`scripts/tt_corpus_triage.py --shuttle <id> --cache-dir <dir> [--markdown]`
+clusters the non-passing records from `tt_corpus_run.py` by signature
+(`stage|outcome|normalized error`; for `findings`, the sorted DRC rule ids or
+LVS mismatch categories, not counts). Each cluster carries a count, up to 3
+cheapest-to-reproduce exemplars with attribution (repo, pinned commit, SPDX
+license from the 1.A manifest), the exact `klt` reproducer, and a drafted issue
+body. It never files issues: drafts are for human/Curator confirmation.
+Offline tests: `tests/test_tt_corpus_triage.py`.
