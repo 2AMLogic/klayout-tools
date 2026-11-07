@@ -130,7 +130,9 @@ from .signoff_evidence_pin import (
     PIN_STALE,
     PIN_UNVERIFIABLE,
     content_hash_pin_state,
+    generic_binding_check,
     rehash_evidence_file,
+    unanchored_detail,
     unverifiable_pin_note,
 )
 from .signoff_generator_batch import (
@@ -5642,9 +5644,9 @@ def _grade_evidence(
     # Issue #2718: a generic citation's declared item identity and, for the
     # artifact-anchored items, its artifact binding -- checked only for items
     # accepting "generic", so items 3-7/11 keep rendering `wrong_kind` as before.
-    binding_refusal = _generic_item_binding_refusal(check_kind, item_id, envelope, spec)
-    if binding_refusal is not None:
-        return "unmet", binding_refusal, None, {}
+    refusal, missing = _binding_check(check_kind, item_id, envelope, spec)
+    if refusal is not None:
+        return "unmet", refusal, None, unanchored_detail(missing, spec, resolution)
 
     pin_state = content_hash_pin_state(
         spec.get("content_hash"), resolution["content_hash"]
@@ -6279,23 +6281,21 @@ def _generic_item_binding_refusal(
     - An anchored item additionally needs ``provenance.input.path`` and a
       manifest-pinned ``content_hash``.
     """
+    return _binding_check(check_kind, item_id, envelope, spec)[0]
+
+
+def _binding_check(
+    check_kind: str,
+    item_id: int | None,
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+) -> tuple[str | None, list[str]]:
+    """The refusal plus the ``detail.missing`` fields (issue #5124)."""
     if check_kind != "generic" or item_id not in _ITEMS_ACCEPTING_GENERIC_EVIDENCE:
-        return None
+        return None, []
     anchored = item_id in _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE
-    declared = envelope.get("t1_item")
-    if declared is None:
-        if anchored:
-            return _REASON_UNANCHORED_EVIDENCE
-    elif isinstance(declared, bool) or not isinstance(declared, int):
-        return _REASON_UNANCHORED_EVIDENCE
-    elif declared != item_id:
-        return _REASON_WRONG_ITEM
-    if anchored and (
-        not _generic_binding_present(envelope)
-        or not isinstance(spec.get("content_hash"), str)
-    ):
-        return _REASON_UNANCHORED_EVIDENCE
-    return None
+    present = _generic_binding_present(envelope)
+    return generic_binding_check(item_id, envelope, spec, anchored, present)
 
 
 #: T1 item 8 (Characterization report): the one item that accepts a bare

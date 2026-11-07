@@ -1272,6 +1272,20 @@ or item-2 attestation that makes a regeneration claim:
 | The named artifact re-hashes to that value from the grading context (`input_verified: true`) | filesystem | changed since the envelope was written: `stale_evidence`; not found or not readable here: `unverifiable_provenance` — including a `scope: "repo"` path over a `.git`-less copy of the tree, which [`--repo-root`](#grading-outside-a-git-checkout---repo-root) exists to name a root for |
 | **Items 1 and 2, only when claimed** (issue #2887): `provenance.regeneration.regenerated_hash` equals the hash the artifact re-hashed to | envelope | differs: `stale_artifact`; malformed block: `unanchored_evidence`. See "Items 1 and 2: attesting that the artifact was regenerated" below |
 
+**Which condition failed** (issue #5124). An `unanchored_evidence` binding
+refusal carries `detail.missing`, a list drawn from the fixed vocabulary
+`t1_item`, `provenance.input.path`, `manifest content_hash` (every missing
+field, in that order). When `manifest content_hash` is listed, `detail` also
+carries `manifest_entry` — `{"file": "<path>", "content_hash": "sha256:<hex>"}`,
+the entry shape to cite, using the hash of the resolved artifact. Additive:
+`wrong_item` and every other reason keep their detail shape, and a `met` item
+gains no `detail`.
+
+`klt signoff --attest` (both `--inventory` and `--input`) adds a top-level
+`manifest_entry` (`{"file": <--output or null>, "content_hash": "sha256:<hex>"}`)
+to its JSON result and prints it in text mode; it is not written into the
+`--output` envelope. Paste it into the manifest to pin the attestation.
+
 What each item binds:
 
 | Item | Bind to (the artifact `provenance.input.path` names) |

@@ -136,7 +136,7 @@ from ..signoff_attest import (
     check_attestation,
     write_attestation,
 )
-from ..signoff_attest_input import input_line
+from ..signoff_attest_input import input_line, with_entry
 from ..signoff_attest_stream import (
     build_stream_attestation,
     check_stream_attestation,
@@ -417,7 +417,7 @@ def _run_attest(
                 "signoff", f"could not write --output '{output}': {exc}", args.format
             )
     attach_output_tails(result)
-    emit_success(result, args.format, _print_attestation_text)
+    emit_success(with_entry(result, output), args.format, _print_attestation_text)
     return EXIT_PASS if result["status"] == "pass" else EXIT_FAIL
 
 
