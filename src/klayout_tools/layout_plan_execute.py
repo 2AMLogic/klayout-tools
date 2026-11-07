@@ -1117,9 +1117,9 @@ def execute_layout_plan(
             _build_connectivity(device_groups, digest, generated)
         )
         warnings.extend(connectivity_warnings)
-        warnings.extend(
-            nr.apply_net_routing(connectivity, routing_spec.pop("nets", {}))
-        )
+        nets = routing_spec.pop("nets", {})
+        net_warnings = nr.apply_net_routing(connectivity, nets, LayoutPlanExecuteError)
+        warnings.extend(net_warnings)
 
         order = [group["id"] for group in device_groups]
         compose_request: dict[str, Any] = {

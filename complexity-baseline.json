@@ -335,7 +335,7 @@
     },
     {
       "file": "src/klayout_tools/gen_compose.py",
-      "function": "_parse_legs",
+      "function": "parse_legs",
       "complexity": 12
     },
     {
