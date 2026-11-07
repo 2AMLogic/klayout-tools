@@ -19,7 +19,7 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-- **#3516**: klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249)
+_None._
 
 ## Ready
 
@@ -30,12 +30,12 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#2912**: Friction: sky130 native-Vt NMOS (nfet_05v0_nvt) cannot be drawn by klt gen or compared by klt lvs
 - **#3057**: klt sim --backend batch: -o FILE not written when --format json (report goes to stdout)
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin
-- **#3516**: klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249)
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s)
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1
 - **#4891**: batch fleet runner's ngspice cannot evaluate sky130A model-library expr() parameters (runner image gap), engine_version still null
+- **#5084**: [Epic #520] Sharded gf180mcuD run and CI sample
 
 ## In Progress
 
@@ -45,7 +45,6 @@ Issues currently being built (`loom:building`).
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
-- **#5084**: [Epic #520] Sharded gf180mcuD run and CI sample
 - **#5112**: klt sim: batch version lock, capacity wait, AC waveform export, waveform-only exit code
 
 ## PRs Awaiting Review
@@ -78,7 +77,6 @@ Issues carrying `loom:curated`.
 - **#3312**: ci: add ratcheting per-module coverage floor once report-only data exists *(curated)*
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3 *(curated)*
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin *(curated)*
-- **#3516**: klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249) *(curated)*
 - **#3522**: Verify OMP_NUM_THREADS pinning on the batch fleet (follow-up to #3502) *(curated)*
 - **#4075**: test flake: Install the klayout binary fails on ASAP7 DRC deck fixtures (PR #4074, recurrence of #4059) *(curated)*
 - **#4277**: Live-verify klt synthesize sv_frontend=sv2v against a real sv2v (follow-up to #4228) *(curated)*
@@ -120,12 +118,12 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
-| Important | 1 |
+| Important | 0 |
 | Ready (`loom:issue`) | 11 |
-| In Progress (`loom:building`) | 6 |
+| In Progress (`loom:building`) | 5 |
 | PRs awaiting review | 6 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 27 |
+| Curated | 26 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 2 |
 <!-- guide:plan-body:end -->
