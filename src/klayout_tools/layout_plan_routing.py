@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .gen_compose import GenComposeError, _parse_waypoints_um
+from .gen_compose import GenComposeError, parse_waypoints_um
 
 #: Allowed keys in one ``request.routing.nets[<net>]`` entry.
 ALLOWED_NET_ROUTING_KEYS = {"layer_role", "width_um", "waypoints_um"}
@@ -64,7 +64,7 @@ def _resolve_waypoints(raw: Any, where: str, error: type[Exception]) -> Any:
     if raw is None:
         raise error(f"{where}.waypoints_um must be a non-empty array when given")
     try:
-        _parse_waypoints_um(raw, net="", index=0, roles_out=[])
+        parse_waypoints_um(raw, net="", index=0, roles_out=[])
     except GenComposeError as exc:
         prefix = "request.connectivity[0] (net '').waypoints_um"
         message = str(exc)
