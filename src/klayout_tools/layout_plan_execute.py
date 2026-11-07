@@ -180,7 +180,7 @@ import tempfile
 from collections.abc import Callable
 from typing import Any
 
-from . import layout_plan
+from . import layout_plan, layout_plan_ports
 from . import layout_plan_routing as nr
 from ._jsonnum import is_number
 from ._paths import _resolve_relative
@@ -637,7 +637,6 @@ def _build_connectivity(
         (d["name"], d["device_class"]): d for d in digest["devices"]
     }
     warnings: list[str] = []
-
     # Per group, per terminal suffix: the ordered candidate port names
     # (see device_owned_port_names). Built once per group up front.
     candidates_by_group: dict[str, dict[str, list[str]]] = {}
@@ -700,6 +699,7 @@ def _build_connectivity(
                     {"block": group["id"], "port": port_name}
                 )
 
+    layout_plan_ports.bind_ring_nets(device_groups, generated, net_pins, warnings)
     connectivity: list[dict[str, Any]] = []
     for net in digest["nets"]:
         pins = net_pins.get(net["name"], [])

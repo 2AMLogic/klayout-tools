@@ -220,6 +220,15 @@ terminals' suffixes.
 | `res_array` | `A`, `B` | `_A`, `_B` |
 | `cap_array` | `A`, `B` | `_BOT`, `_TOP` |
 
+**Tap/ring nets (`device_groups[].net`, #5095).** A `guard_ring` group may
+declare an optional `net` naming a digest net (e.g. `"VSS"`). The ring's
+first generated port (`TAP_N`; the four `TAP_*` ports sit on one closed ring,
+so one stands for the conductor) joins that net's pin set exactly like a
+device terminal would, so the net gets a `connectivity[]` entry (when it has
+two or more pins) and is no longer reported in `unmapped_netlist_nets[]`. `net`
+on any other generator, or a net absent from the netlist digest, is an
+application error (exit 1). Plans without `net` are unchanged.
+
 A terminal absent from a generator's own row above (MOS `B`/bulk, BJT
 `C`/collector) is **deliberately** unmapped — both conventionally tie to a
 shared substrate/well tap a `guard_ring`/collector ring already owns, not

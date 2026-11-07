@@ -174,6 +174,12 @@ from typing import Any
 from ._paths import _resolve_relative
 from .gen import _GENERATOR_SPECS
 from .gen_compose import _ORIENTATIONS
+from .layout_plan_fields import (
+    net_echo,
+    parse_group_net,
+    parse_options,
+    validate_group_nets,
+)
 from .netlist_digest import build_netlist_digest
 
 #: Contract identifier for the request envelope (spike section 2).
@@ -481,6 +487,7 @@ def _parse_device_groups_shape(raw: Any) -> list[dict[str, Any]]:
                 "dummy": dummy,
                 "params": params,
                 "orientation": orientation,
+                **parse_group_net(raw_group, entry_where),
             }
         )
 
@@ -715,26 +722,6 @@ def _parse_abutment(raw: Any, group_ids: set[str]) -> list[dict[str, Any]]:
     return abutment
 
 
-def _parse_options(raw: Any) -> dict[str, Any]:
-    if raw is None:
-        return {"cell_name": None, "output": None}
-    if not isinstance(raw, dict):
-        raise LayoutPlanUsageError("request.options must be a JSON object")
-
-    cell_name = raw.get("cell_name")
-    if cell_name is not None and (not isinstance(cell_name, str) or not cell_name):
-        raise LayoutPlanUsageError(
-            "request.options.cell_name must be a non-empty string when given"
-        )
-    output = raw.get("output")
-    if output is not None and (not isinstance(output, str) or not output):
-        raise LayoutPlanUsageError(
-            "request.options.output must be a non-empty string when given"
-        )
-
-    return {"cell_name": cell_name, "output": output}
-
-
 def validate_layout_plan(request: Any, digest: dict[str, Any]) -> dict[str, Any]:
     """Pure validation pass over a ``klt.layout_plan.request/1`` document --
     no generation, no file I/O beyond what the caller already did to build
@@ -789,10 +776,11 @@ def validate_layout_plan(request: Any, digest: dict[str, Any]) -> dict[str, Any]
     circuit_name = digest.get("circuit") if isinstance(digest, dict) else None
 
     _validate_device_group_references(raw_groups, group_ids, classes_by_name)
+    validate_group_nets(raw_groups, digest_nets)
 
     rows = _parse_rows(request.get("rows"), group_ids)
     abutment = _parse_abutment(request.get("abutment"), group_ids)
-    options = _parse_options(request.get("options"))
+    options = parse_options(request.get("options"))
 
     referenced_devices = {
         (d["name"], d["device_class"]) for g in raw_groups for d in g["devices"]
@@ -827,6 +815,7 @@ def validate_layout_plan(request: Any, digest: dict[str, Any]) -> dict[str, Any]
                 "devices": g["devices"],
                 "encloses": g["encloses"],
                 "orientation": g["orientation"],
+                **net_echo(g),
             }
             for g in raw_groups
         ],
