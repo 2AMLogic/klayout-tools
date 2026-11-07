@@ -4,8 +4,9 @@ Split out of :mod:`klayout_tools.layout_plan_execute` to keep that module
 under its file-size ratchet. ``request.routing.nets`` maps a net name to
 ``{layer_role?, width_um?, waypoints_um?}``; :func:`apply_net_routing`
 copies each entry onto the matching derived ``connectivity[]`` entry
-(``gen_compose``'s per-net override, issue #1655). Validation errors are raised as the ``error`` class the
-caller passes in, so the caller keeps its own exception type.
+(``gen_compose``'s per-net override, issue #1655). Validation errors are
+raised as the ``error`` class the caller passes in, so the caller keeps its
+own exception type.
 """
 
 from __future__ import annotations
