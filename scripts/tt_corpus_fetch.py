@@ -216,12 +216,6 @@ def _owner_repo(repo_url: str) -> tuple[str, str] | None:
     return (match.group(1), match.group(2)) if match else None
 
 
-def _shuttle_repo_path(index: dict[str, Any]) -> str | None:
-    """``owner/repo`` of the shuttle repo the index document names, if any."""
-    parsed = _owner_repo(index.get("repo") or "")
-    return f"{parsed[0]}/{parsed[1]}" if parsed else None
-
-
 def walk_index(
     index: dict[str, Any], *, shuttle: str, pdk: str | None = None
 ) -> list[dict[str, Any]]:
@@ -309,8 +303,7 @@ def ingest_design(
     cache: BlobCache,
     *,
     gds_url_template: str | None = None,
-    shuttle_repo: str | None = None,
-    shuttle_commit: str | None = None,
+    shuttle_vars: dict[str, str] | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> dict[str, Any]:
     """Fetch one design's artifacts and return its manifest."""
@@ -355,21 +348,21 @@ def ingest_design(
 
     gds_url = record["gds_url"]
     if not gds_url and gds_url_template:
+        shuttle = shuttle_vars or {}
+        if not all(
+            shuttle.get(k) for k in re.findall(r"{(shuttle_\w+)}", gds_url_template)
+        ):
+            return exclude("template needs shuttle repo/commit; index names none")
         try:
             gds_url = gds_url_template.format(
                 owner=owner,
                 repo=repo,
                 commit=record["commit"],
                 macro=record["macro"],
-                shuttle_repo=shuttle_repo or "",
-                shuttle_commit=shuttle_commit or "",
+                **shuttle,
             )
         except (KeyError, IndexError) as exc:
             return exclude(f"bad --gds-url-template placeholder: {exc}")
-        if ("{shuttle_repo}" in gds_url_template and not shuttle_repo) or (
-            "{shuttle_commit}" in gds_url_template and not shuttle_commit
-        ):
-            return exclude("template needs shuttle repo/commit; index names none")
     if gds_url:
         try:
             gds, gds_digest, gds_cached = cache.fetch(gds_url)
@@ -395,8 +388,9 @@ def run(
     limit: int | None = None,
     gds_url_template: str | None = None,
 ) -> dict[str, Any]:
-    shuttle_repo = _shuttle_repo_path(index)
-    shuttle_commit = index.get("commit") or None
+    repo_path = "/".join(p) if (p := _owner_repo(index.get("repo") or "")) else ""
+    commit = index.get("commit") or ""
+    shuttle_vars = {"shuttle_repo": repo_path, "shuttle_commit": commit}
     records = walk_index(index, shuttle=shuttle, pdk=pdk)
     if pdk is not None and not records and index.get("projects"):
         raise PdkFilterError(
@@ -420,8 +414,7 @@ def run(
                 record,
                 cache,
                 gds_url_template=gds_url_template,
-                shuttle_repo=shuttle_repo,
-                shuttle_commit=shuttle_commit,
+                shuttle_vars=shuttle_vars,
             )
         path = cache.root / "manifests" / shuttle / f"{macro}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
