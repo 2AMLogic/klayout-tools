@@ -6,8 +6,24 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+### 2026-11-07
+
+- **PR #5098**: feat: tie guard_ring groups to a netlist net for tap connectivity
+- **Issue #5095** (closed): layout-plan execute: plan-level well/substrate tap tied to a named net (split from #5093)
+
 ### 2026-11-06
 
+- **PR #5096**: feat(layout-plan): per-net routing hint via request.routing.nets
+- **PR #5092**: feat(drc): structured abort cause and decks_executed for native-deck failures
+- **PR #5089**: refactor: split mutation and verilog_top out of functional_verification
+- **PR #5088**: feat: add Tiny Tapeout index walker and pinned-SHA fetch cache
+- **PR #5086**: feat(netlist): add --no-provenance-header flag
+- **PR #5056**: chore(loom): resync installed Loom to v0.19.1270
+- **Issue #5094** (closed): layout-plan execute: per-net routing layer hint via request.routing (split from #5093)
+- **Issue #5091** (closed): klt drc --engine klayout: native gf180mcu deck aborts in mslot on 3LM variant (metal4_drawn undefined); no per-deck subset or structured abort cause
+- **Issue #5087** (closed): Split functional_verification.py: move mutation and verilog_top subsystems to sibling modules
+- **Issue #5085** (closed): klt netlist: unconditional '** klt-netlist-inputs:' header line has no opt-out, breaking byte-identical regeneration of committed netlists
+- **Issue #5081** (closed): [Epic #520] Index walker and pinned-SHA fetch cache
 - **PR #5080**: feat(sim): add analysis.op_check to flag metastable op solutions
 - **PR #5079**: fix(sim): default analysis args to empty string for op analyses
 - **PR #5076**: feat: warn when synthesized netlist still has x-valued constant assigns
