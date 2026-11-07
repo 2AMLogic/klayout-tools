@@ -31,11 +31,9 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#3057**: klt sim --backend batch: -o FILE not written when --format json (report goes to stdout)
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin
 - **#3516**: klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249)
-- **#3522**: Verify OMP_NUM_THREADS pinning on the batch fleet (follow-up to #3502)
 - **#4308**: Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
 - **#4372**: test flake: CI wall-clock budget breach on ASAP7 DRC deck fixtures (PR #4331, 405s vs 252s)
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported
-- **#4763**: Live-verify gf180mcu tran run with models.param_file (follow-up to #4759)
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1
 - **#4891**: batch fleet runner's ngspice cannot evaluate sky130A model-library expr() parameters (runner image gap), engine_version still null
 
@@ -47,7 +45,8 @@ Issues currently being built (`loom:building`).
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
-- **#4966**: layout-plan execute: places sky130 5V-class blocks but routes none of the nets (exit 3), no pin labels for LVS
+- **#5084**: [Epic #520] Sharded gf180mcuD run and CI sample
+- **#5112**: klt sim: batch version lock, capacity wait, AC waveform export, waveform-only exit code
 
 ## PRs Awaiting Review
 
@@ -57,7 +56,8 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 - **#4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
 - **#4772**: fix: honor --dry-run and --wait-for-capacity under klt sim --batch-set
-- **#4967**: feat: label netlist ports and report unrouted reasons in layout-plan execute
+- **#5113**: feat: add options.waveform_decimate to thin waveform.raw.json
+- **#5116**: feat: shuttle-level layout URL template and --shard for tt corpus tools
 
 ## Approved (Awaiting Merge)
 
@@ -69,9 +69,7 @@ _None._
 
 Issues carrying `loom:curated`.
 
-- **#520**: Epic: the Tiny Tapeout corpus as a regression and optimization benchmark *(curated)*
 - **#2340**: signoff: input_verified is always null for drc/extract envelopes that recorded an absolute host path *(curated)*
-- **#2574**: Build + publish the ihp-sg13g2 remote-sim AMI (operator-only; gated on #2573) *(curated)*
 - **#2727**: Friction: klt sim's batch/remote backends refuse ihp-sg13cmos5l, so no SG13CMOS5L corner grid can run on a batch-only host *(curated)*
 - **#2835**: sky130 DRC: enforce licon1/mcon maximum size without rejecting compound-layer exceptions *(curated)*
 - **#2912**: Friction: sky130 native-Vt NMOS (nfet_05v0_nvt) cannot be drawn by klt gen or compared by klt lvs *(curated)*
@@ -93,12 +91,11 @@ Issues carrying `loom:curated`.
 - **#4424**: klt lvs: custom-class cap_cmomi/resistor LVS regresses from match to mismatch between daf06a51afaf and 0.8.0 (sg13cmos5l) *(curated)*
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported *(curated)*
 - **#4508**: ASAP7: trim protruding VIA_* M1 pad tips to clear M1.S.2-5 (follow-up to #4495) *(curated)*
-- **#4763**: Live-verify gf180mcu tran run with models.param_file (follow-up to #4759) *(curated)*
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set *(curated)*
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1 *(curated)*
 - **#4845**: ring-check --pdk sg13g2: cross-check re-implemented Seal.* rules against the real Ruby deck *(curated)*
 - **#4902**: klt sim batch backend: derived measurements referencing other measurements (m_<name>) produce no value *(curated)*
-- **#4966**: layout-plan execute: places sky130 5V-class blocks but routes none of the nets (exit 3), no pin labels for LVS *(curated)*
+- **#5112**: klt sim: batch version lock, capacity wait, AC waveform export, waveform-only exit code *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -114,6 +111,7 @@ Issues carrying `loom:curated`.
 
 ## Epics
 
+- **#520**: Epic: the Tiny Tapeout corpus as a regression and optimization benchmark
 - **#2570**: Friction: no ihp-sg13g2 remote-sim AMI, so klt sim's batch backend cannot run a PDK klt fully supports locally
 
 ## Backlog Balance
@@ -123,11 +121,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 1 |
-| Ready (`loom:issue`) | 13 |
-| In Progress (`loom:building`) | 5 |
-| PRs awaiting review | 5 |
+| Ready (`loom:issue`) | 11 |
+| In Progress (`loom:building`) | 6 |
+| PRs awaiting review | 6 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 30 |
+| Curated | 27 |
 | Architect / Hermit proposals | 9 |
-| Active epics | 1 |
+| Active epics | 2 |
 <!-- guide:plan-body:end -->
