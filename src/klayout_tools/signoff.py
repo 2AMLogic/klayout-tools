@@ -131,6 +131,8 @@ from .signoff_evidence_pin import (
     PIN_UNVERIFIABLE,
     content_hash_pin_state,
     rehash_evidence_file,
+    unanchored_detail,
+    unanchored_missing_fields,
     unverifiable_pin_note,
 )
 from .signoff_generator_batch import (
@@ -5644,7 +5646,14 @@ def _grade_evidence(
     # accepting "generic", so items 3-7/11 keep rendering `wrong_kind` as before.
     binding_refusal = _generic_item_binding_refusal(check_kind, item_id, envelope, spec)
     if binding_refusal is not None:
-        return "unmet", binding_refusal, None, {}
+        binding_detail: dict[str, Any] = {}
+        if binding_refusal == _REASON_UNANCHORED_EVIDENCE:
+            binding_detail = unanchored_detail(
+                _generic_item_binding_missing(item_id, envelope, spec),
+                spec,
+                resolution["content_hash"],
+            )
+        return "unmet", binding_refusal, None, binding_detail
 
     pin_state = content_hash_pin_state(
         spec.get("content_hash"), resolution["content_hash"]
@@ -6252,6 +6261,19 @@ def _input_members_detail(resolution: Mapping[str, Any]) -> dict[str, Any]:
     return {"artifact_binding": {"members": members}} if members else {}
 
 
+def _generic_item_binding_missing(
+    item_id: int | None, envelope: Mapping[str, Any], spec: Mapping[str, Any]
+) -> list[str]:
+    """The ``detail.missing`` list behind :func:`_generic_item_binding_refusal`'s
+    ``unanchored_evidence`` (issue #5124)."""
+    return unanchored_missing_fields(
+        anchored=item_id in _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
+        declared=envelope.get("t1_item"),
+        binding_present=_generic_binding_present(envelope),
+        pinned=isinstance(spec.get("content_hash"), str),
+    )
+
+
 def _generic_item_binding_refusal(
     check_kind: str,
     item_id: int | None,
@@ -6281,19 +6303,14 @@ def _generic_item_binding_refusal(
     """
     if check_kind != "generic" or item_id not in _ITEMS_ACCEPTING_GENERIC_EVIDENCE:
         return None
-    anchored = item_id in _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE
     declared = envelope.get("t1_item")
-    if declared is None:
-        if anchored:
-            return _REASON_UNANCHORED_EVIDENCE
-    elif isinstance(declared, bool) or not isinstance(declared, int):
-        return _REASON_UNANCHORED_EVIDENCE
-    elif declared != item_id:
-        return _REASON_WRONG_ITEM
-    if anchored and (
-        not _generic_binding_present(envelope)
-        or not isinstance(spec.get("content_hash"), str)
+    if (
+        isinstance(declared, int)
+        and not isinstance(declared, bool)
+        and declared != item_id
     ):
+        return _REASON_WRONG_ITEM
+    if _generic_item_binding_missing(item_id, envelope, spec):
         return _REASON_UNANCHORED_EVIDENCE
     return None
 
