@@ -492,6 +492,17 @@ def _walk_string_fields(value: Any, path: str) -> Iterable[tuple[str, str]]:
         yield (path or "<root>"), value
 
 
+# Fields under ``environment.remote.worker_environment`` (or, for a sharded run,
+# ``environment.remote.fleet.<i>.worker_environment``) are observations of the
+# *remote worker host* (its PDK root, simulator path, banner), not paths of the
+# author's checkout, so a committer cannot make them non-reproducible (#5133).
+# Anchored at the envelope root so a ``worker_environment`` key elsewhere is
+# still linted.
+_REMOTE_WORKER_ENV_FIELD_RE = re.compile(
+    r"^environment\.remote\.(?:fleet\.\d+\.)?worker_environment(?:\.|$)"
+)
+
+
 def find_absolute_path_fields(
     payload: Any, *, allow_prefixes: Iterable[str] = ()
 ) -> list[dict[str, Any]]:
@@ -515,10 +526,16 @@ def find_absolute_path_fields(
 
     ``field`` is a dotted path (``provenance.input.path``,
     ``macros.0.lef``); a top-level bare string payload reports ``<root>``.
+
+    Fields beneath ``environment.remote.worker_environment`` (and
+    ``environment.remote.fleet.<i>.worker_environment``) are skipped: they
+    record the remote worker's own install paths (issue #5133).
     """
     prefixes = tuple(allow_prefixes)
     findings: list[dict[str, Any]] = []
     for field, text in _walk_string_fields(payload, ""):
+        if _REMOTE_WORKER_ENV_FIELD_RE.match(field):
+            continue
         for match in _absolute_paths_in(text, prefixes):
             findings.append({"field": field, "match": match})
     return findings
