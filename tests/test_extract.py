@@ -19086,10 +19086,12 @@ def test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer():
         deck, dummy=None
     ).connectivity_layers
     assert deck.dummy not in layers_read_for_other_roles
-    # ...and the marker is the *only* layer-100 member of the full set: this
-    # deck reads nothing else on that number at all.
-    assert [layer for layer in deck.connectivity_layers if layer[0] == 100] == [
-        (100, 50)
+    # ...and the marker is the only layer-100 member other than the eFuse
+    # anode marker `lvs_source` (100/8, issue #4312): this deck reads nothing
+    # else on that number.
+    assert sorted(layer for layer in deck.connectivity_layers if layer[0] == 100) == [
+        (100, 8),
+        (100, 50),
     ]
     # No DRC rule in this family's curated deck references layer 100 either,
     # so `klt drc --deck gf180mcu` never checks the convention layer.

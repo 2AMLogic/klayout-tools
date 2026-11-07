@@ -212,6 +212,7 @@ def test_gf180mcu_resistor_provenance_cites_lvs_deck():
         "rm2",
         "rm3",
         "tm9k",
+        "efuse",
     }
 
     for resistor in GF180MCU_DECK.resistors:
@@ -220,11 +221,16 @@ def test_gf180mcu_resistor_provenance_cites_lvs_deck():
             resistor.provenance.source_repo
             == "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
         )
-        assert (
-            resistor.provenance.source_path
-            == "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs"
+        assert resistor.provenance.source_path == (
+            "libs.tech/klayout/tech/lvs/rule_decks/"
+            + (
+                "efuse_extraction.lvs"
+                if resistor.name == "efuse"
+                else "res_extraction.lvs"
+            )
         )
 
+    assert by_name["efuse"].provenance.rule_id == "gf180mcu_fd_pr__efuse"
     assert by_name["ppolyf_u"].provenance.rule_id == "gf180mcu_fd_pr__ppolyf_u"
     assert by_name["ppolyf_u_1k"].provenance.rule_id == "gf180mcu_fd_pr__ppolyf_u_1k"
     assert by_name["rm1"].provenance.rule_id == "gf180mcu_fd_pr__rm1"
@@ -1367,6 +1373,7 @@ _GOLDEN_PAIR_TESTED_RULE_IDS: dict[str, frozenset[str]] = {
             "gf180mcu_fd_pr__rm2",
             "gf180mcu_fd_pr__rm3",
             "gf180mcu_fd_pr__tm9k",
+            "gf180mcu_fd_pr__efuse",  # golden pair: test_lvs_gf180mcu_efuse.py
             "cap_mim_2f0fF",
             "BJT.3",
             "gf180mcu_fd_pr__diode_nd2ps_06v0",
