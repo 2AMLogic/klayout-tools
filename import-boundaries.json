@@ -387,6 +387,7 @@
         "klayout_tools.lvs_known_limits",
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_mismatch_tolerance",
+        "klayout_tools.lvs_mos_options",
         "klayout_tools.lvs_netgen",
         "klayout_tools.lvs_pin_anchors",
         "klayout_tools.lvs_power",
@@ -473,6 +474,7 @@
         "klayout_tools.cli.pex_cmd",
         "klayout_tools.pex",
         "klayout_tools.pex_async",
+        "klayout_tools.pex_asap7",
         "klayout_tools.spice_flatten"
       ]
     },

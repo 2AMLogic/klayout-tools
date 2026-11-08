@@ -16412,12 +16412,12 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         "compare_parameters": None,
         # Issue #1952: `null` when the option was omitted.
         "power_connectivity": None,
-        # Issue #2692: `null` when the option was omitted -- the
-        # form-dependent default applies (off for this `plain-element`
-        # reference, on for `gate-level-verilog`).
+        # Issue #2692: `null` when omitted -- the form-dependent default applies
+        # (off for this `plain-element` reference, on for `gate-level-verilog`).
         "anchor_top_level_pins": None,
         "strict_top_level_pin_count": False,
         "compare_mos_flavour": False,
+        "ignore_mos_bulk": False,
         "supply_nets": ["GND", "VCC", "VDD", "VGND", "VPWR", "VSS"],
         "finfet_bulk": None,
     }

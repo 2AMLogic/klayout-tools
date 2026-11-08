@@ -433,7 +433,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 7298
+      "lines": 7267
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 13917
+      "lines": 13900
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
