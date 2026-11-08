@@ -8,6 +8,9 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-08
 
+- **PR #5140**: fix(pex): skip asap7 leg-netlist adaptation in extract-only and measure-command modes
+- **PR #5139**: feat(sim): bin-aware model-bin preflight from library bin cards
+- **Issue #5137** (closed): pex: asap7 N-card adaptation runs eagerly even for --extract-only / --measure-command
 - **PR #5136**: fix: name netlist.form/deck in layout-plan ingestion hints
 - **PR #5134**: fix(env-provenance): exempt remote worker_environment from absolute-path lint
 - **PR #5132**: fix(sim): allow-list stimulus and other runner-read keys in dry-run
