@@ -6,8 +6,27 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+### 2026-11-08
+
+- **PR #5136**: fix: name netlist.form/deck in layout-plan ingestion hints
+- **PR #5134**: fix(env-provenance): exempt remote worker_environment from absolute-path lint
+- **PR #5132**: fix(sim): allow-list stimulus and other runner-read keys in dry-run
+- **PR #5127**: feat(lvs): add options.ignore_mos_bulk for tap-less layout topology checks
+- **Issue #5135** (closed): layout-plan execute: sim-form (X-card) netlist rejected with a hint to a request.reference.form key the layout-plan request does not accept
+- **Issue #5133** (closed): env-provenance lint-envelope rejects the batch worker's recorded PDK root in remote envelopes
+- **Issue #5130** (closed): klt sim --dry-run warns that the documented 'stimulus' key is unknown
+- **Issue #5125** (closed): klt lvs: no way to isolate bulk-terminal mismatch from signal topology on tap-less layouts
+
 ### 2026-11-07
 
+- **PR #5129**: feat(pex): adapt asap7 extracted legs to BSIM-CMG N cards
+- **PR #5126**: feat(signoff): name missing fields on unanchored_evidence and print attest manifest entry
+- **PR #5123**: feat: add congestion summary to GRT-0116 route failure message
+- **PR #5121**: chore(loom): resync installed Loom to v0.19.1275
+- **Issue #5131** (closed): klt sim: no explicit list of PVT corner points; paired corners need many exclude rules
+- **Issue #5128** (closed): klt pex (asap7): extracted leg is raw M cards, not simulable through the OSDI BSIM-CMG flow
+- **Issue #5124** (closed): signoff: unanchored_evidence for item 2 gives no hint that the manifest entry needs a pinned content_hash
+- **Issue #5122** (closed): place-and-route: macros[].instance with escaped bracket names needs 6 backslashes in JSON
 - **Issue #3516** (closed): klt sim batch: runner reported as 'match' still rejects analysis_steps[] requests (recurrence of #3249)
 
 - **PR #5118**: test: add live ngspice check of waveform_decimate thinning
