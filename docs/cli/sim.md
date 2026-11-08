@@ -2453,6 +2453,20 @@ equivalent.
    device at `W=300u L=6u nf=12` vs `W=10u L=1u`, to see which bin the
    model selection depends on.
 
+6. Read the `model_bin_range_preflight` diagnostic (in `--dry-run` and in
+   the run report's top-level `diagnostics`). Since #5138 it reads the
+   `lmin`/`lmax`/`wmin`/`wmax` of the `.model <name>.<n>` bin cards in the
+   resolved model library (following `.include`/`.lib` file references) and,
+   for the first MOS instance whose `w`/`l` lies in no bin, names the
+   instance, model, `w_um`/`l_um` and the `nearest_bin` (additive fields;
+   `source: "model_library_bins"`). It checks sub-100u and `m>1` instances
+   too, ignores `nf`, and skips expression-valued `w`/`l`. When the library
+   is unreadable, the model is unbinned, or no miss is found, it falls back
+   to the older 100u width heuristic (#4976). It is advisory: it never
+   rejects a netlist, and a clean preflight does **not** prove the fleet's
+   ngspice resolves the same bins as your local one. It reads only the
+   library on the submitting host, not the fleet's copy.
+
 Only a reproducible difference from these steps justifies a simulator or
 model change; none is made on the strength of the original report.
 
