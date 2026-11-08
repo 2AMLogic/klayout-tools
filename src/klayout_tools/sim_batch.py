@@ -133,11 +133,7 @@ from .sim_batch_features import (
     gap_note,
     refusal_diagnostic,
 )
-from .sim_batch_hints import (
-    attribute_modelname,
-    hint_existing_fatal,
-    with_runner_hints,
-)
+from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
 from .sim_batch_warn import warn_over_serial_bound_once
 from .sim_exit_reason import exit_reason_env
 from .sim_exit_reason import status_exit_code as _status_exit_code
