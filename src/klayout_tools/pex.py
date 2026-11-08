@@ -3273,9 +3273,8 @@ def run_pex(
     # schematic nets in the netlist every simulated leg below reads. Checked
     # against the extraction first, applied before any simulation; `None`
     # leaves the netlist (and the whole report) untouched.
-    _tie_nets_in_legs(
-        tie_nets, extract_report, extracted_netlist_path, device_only_netlist_path
-    )
+    ext_path, dev_path = extracted_netlist_path, device_only_netlist_path
+    _tie_nets_in_legs(tie_nets, extract_report, ext_path, dev_path)
     # The tie rewrites `extracted_netlist_path` in place, so the extract-time
     # hash no longer identifies the file the report points at: re-hash it.
     extracted_netlist_sha256 = (
@@ -3291,7 +3290,7 @@ def run_pex(
     )
     os.makedirs(work_dir, exist_ok=True)
     leg_extracted, leg_device_only = adapt_leg_netlists(
-        deck_name, extracted_netlist_path, device_only_netlist_path, work_dir
+        deck_name, ext_path, dev_path, work_dir, skip=extract_only or command_mode
     )
     # Issue #4619: routes each `run_sim` leg (blocking / submit / attach).
     legs = pex_async.AsyncLegs(
