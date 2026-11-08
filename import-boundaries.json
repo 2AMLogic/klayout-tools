@@ -650,6 +650,7 @@
         "klayout_tools.sim_attach",
         "klayout_tools.sim_batch",
         "klayout_tools.sim_bin_range",
+        "klayout_tools.sim_model_bins",
         "klayout_tools.sim_batch_async",
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_features",

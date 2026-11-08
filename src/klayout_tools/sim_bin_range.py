@@ -12,6 +12,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from . import sim_model_bins
+
 #: ``(instance, model, w_um, nf)`` as returned by the culprit search.
 Culprit = tuple[str, str, float, float]
 
@@ -68,3 +70,46 @@ def preflight_for_path(
     except OSError:
         return None
     return None if culprit is None else preflight_diagnostic(culprit, ceiling_um)
+
+
+def bin_miss_diagnostic(miss: dict[str, Any]) -> dict[str, Any]:
+    """Non-fatal ``model_bin_range_preflight`` entry from a library bin miss."""
+    nb = miss["nearest_bin"]
+    wmax = "inf" if nb["wmax_um"] is None else f"{nb['wmax_um']:g}"
+    lmax = "inf" if nb["lmax_um"] is None else f"{nb['lmax_um']:g}"
+    return {
+        "severity": "warning",
+        "code": "model_bin_range_preflight",
+        "message": (
+            f"preflight: instance '{miss['instance']}' ({miss['model']}) with "
+            f"w={miss['w_um']:g}u l={miss['l_um']:g}u falls inside no bin of "
+            "the model library; nearest bin is "
+            f"w {nb['wmin_um']:g}..{wmax} um, l {nb['lmin_um']:g}..{lmax} um. "
+            'ngspice may abort with "could not find a valid modelname" '
+            "(advisory; does not prove a local run would differ, see issue #5138)"
+        ),
+        "instance": miss["instance"],
+        "model": miss["model"],
+        "w_um": miss["w_um"],
+        "l_um": miss["l_um"],
+        "nearest_bin": nb,
+        "source": "model_library_bins",
+    }
+
+
+def preflight_with_bins(
+    netlist_path: str,
+    models_lib: str | None,
+    find_culprit: Callable[[str], Culprit | None],
+    ceiling_um: float,
+) -> dict[str, Any] | None:
+    """Bin-aware preflight; falls back to the width heuristic. Never raises."""
+    try:
+        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+        miss = sim_model_bins.find_miss(text, sim_model_bins.parse_bins(models_lib))
+    except Exception:  # advisory only
+        miss = None
+    if miss is not None:
+        return bin_miss_diagnostic(miss)
+    return preflight_for_path(netlist_path, find_culprit, ceiling_um)
