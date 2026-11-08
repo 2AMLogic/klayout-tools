@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools import sim
+from klayout_tools import sim, sim_batch_contract_preflight, sim_batch_contract_worker
 from klayout_tools import sim_batch as sb
 from klayout_tools import sim_decks as sd
 from klayout_tools.sim import SimError
@@ -2067,7 +2067,10 @@ def _publish_runner(monkeypatch, *versions):
         }
         for index, version in enumerate(versions)
     ]
-    monkeypatch.setattr(sb, "published_runner_identities", lambda pdk, region: images)
+    for module in (sb, sim_batch_contract_preflight, sim_batch_contract_worker):
+        monkeypatch.setattr(
+            module, "published_runner_identities", lambda pdk, region, *a: images
+        )
 
 
 class TestRunnerDecksGate:

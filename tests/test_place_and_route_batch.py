@@ -21,7 +21,13 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import _provenance, place_and_route, sim_batch
+from klayout_tools import (
+    _provenance,
+    place_and_route,
+    sim_batch,
+    sim_batch_contract_preflight,
+    sim_batch_contract_worker,
+)
 from klayout_tools import place_and_route_batch as par_batch
 from klayout_tools.cli import main
 from klayout_tools.place_and_route import PlaceAndRouteError, run_place_and_route
@@ -440,14 +446,16 @@ def _image(version: str | None) -> dict:
     }
 
 
+def _publish(monkeypatch, images_fn):
+    """Patch the manifest lookup everywhere sim_batch's contract now calls it."""
+    for module in (sim_batch, sim_batch_contract_preflight, sim_batch_contract_worker):
+        monkeypatch.setattr(module, "published_runner_identities", images_fn)
+
+
 def test_manifest_with_only_a_pre_backend_runner_refuses_before_any_cloud_call(
     fake, monkeypatch
 ):
-    monkeypatch.setattr(
-        sim_batch,
-        "published_runner_identities",
-        lambda *a, **k: [_image("0.7.1.dev1000")],
-    )
+    _publish(monkeypatch, lambda *a, **k: [_image("0.7.1.dev1000")])
 
     with pytest.raises(PlaceAndRouteError, match="0.7.1.dev1091") as ei:
         _run(fake)
@@ -460,9 +468,7 @@ def test_manifest_with_only_a_pre_backend_runner_refuses_before_any_cloud_call(
 def test_manifest_runner_at_or_after_the_floor_or_unreadable_proceeds(
     fake, monkeypatch, version
 ):
-    monkeypatch.setattr(
-        sim_batch, "published_runner_identities", lambda *a, **k: [_image(version)]
-    )
+    _publish(monkeypatch, lambda *a, **k: [_image(version)])
 
     report = _run(fake)
 
@@ -471,10 +477,8 @@ def test_manifest_runner_at_or_after_the_floor_or_unreadable_proceeds(
 
 
 def test_mixed_manifest_falls_through_to_the_runner_side_check(fake, monkeypatch):
-    monkeypatch.setattr(
-        sim_batch,
-        "published_runner_identities",
-        lambda *a, **k: [_image("0.7.1.dev1000"), _image("0.7.1.dev1200")],
+    _publish(
+        monkeypatch, lambda *a, **k: [_image("0.7.1.dev1000"), _image("0.7.1.dev1200")]
     )
 
     _run(fake)
