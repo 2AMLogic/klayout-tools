@@ -43,9 +43,8 @@ Issues currently being built (`loom:building`).
 - **#2835**: sky130 DRC: enforce licon1/mcon maximum size without rejecting compound-layer exceptions
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
+- **#4693**: Remove routing_pitch.py: library-only helper with no callers
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
-- **#5137**: pex: asap7 N-card adaptation runs eagerly even for --extract-only / --measure-command
-- **#5138**: klt sim --backend batch: gf180mcu deck that passes locally aborts on the fleet with 'could not find a valid modelname' despite the #4976 preflight
 
 ## PRs Awaiting Review
 
@@ -55,8 +54,6 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 - **#4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
 - **#4772**: fix: honor --dry-run and --wait-for-capacity under klt sim --batch-set
-- **#5139**: feat(sim): bin-aware model-bin preflight from library bin cards
-- **#5140**: fix(pex): skip asap7 leg-netlist adaptation in extract-only and measure-command modes
 
 ## Approved (Awaiting Merge)
 
@@ -93,20 +90,12 @@ Issues carrying `loom:curated`.
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1 *(curated)*
 - **#4845**: ring-check --pdk sg13g2: cross-check re-implemented Seal.* rules against the real Ruby deck *(curated)*
 - **#4902**: klt sim batch backend: derived measurements referencing other measurements (m_<name>) produce no value *(curated)*
-- **#5137**: pex: asap7 N-card adaptation runs eagerly even for --extract-only / --measure-command *(curated)*
-- **#5138**: klt sim --backend batch: gf180mcu deck that passes locally aborts on the fleet with 'could not find a valid modelname' despite the #4976 preflight *(curated)*
 
 ## Proposed (Architect / Hermit)
 
 - **#485**: Live digital fleet validation — measure T_o/t, derive the K-selection rule *(architect)*
 - **#520**: Epic: the Tiny Tapeout corpus as a regression and optimization benchmark *(architect)*
 - **#708**: Epic: finite-element full-field solver for klt (Rust) — volumetric fields, electrothermal, MoM cross-validation *(architect)*
-- **#3873**: asap7_bsimcmg adapters have no runtime caller: wire into klt sim or demote to test helper *(hermit)*
-- **#3962**: Split cli/parser.py: move per-verb parser registration into verb modules (190 commits / 20 conflict merges in 5 weeks) *(hermit)*
-- **#4065**: Split sim_batch.py (5232 lines, 117 commits / 44 merges in 5 weeks) along its existing section seams *(hermit)*
-- **#4126**: Simplify run_lvs: split the 2,047-line orchestrator in lvs.py into stage helpers *(hermit)*
-- **#4233**: Remove 8 passthrough _report_path wrappers over env_provenance.repo_relative_path *(hermit)*
-- **#4693**: Remove routing_pitch.py: library-only helper with no callers *(hermit)*
 
 ## Epics
 
@@ -121,10 +110,10 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 1 |
 | Ready (`loom:issue`) | 10 |
-| In Progress (`loom:building`) | 6 |
-| PRs awaiting review | 6 |
+| In Progress (`loom:building`) | 5 |
+| PRs awaiting review | 4 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 27 |
-| Architect / Hermit proposals | 9 |
+| Curated | 25 |
+| Architect / Hermit proposals | 3 |
 | Active epics | 2 |
 <!-- guide:plan-body:end -->

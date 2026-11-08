@@ -8,6 +8,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-08
 
+- **PR #5142**: feat(sim): attribute batch modelname abort to the logged instance/model
+- **Issue #5138** (closed): klt sim --backend batch: gf180mcu deck that passes locally aborts on the fleet with 'could not find a valid modelname' despite the #4976 preflight
 - **PR #5140**: fix(pex): skip asap7 leg-netlist adaptation in extract-only and measure-command modes
 - **PR #5139**: feat(sim): bin-aware model-bin preflight from library bin cards
 - **Issue #5137** (closed): pex: asap7 N-card adaptation runs eagerly even for --extract-only / --measure-command
