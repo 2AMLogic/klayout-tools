@@ -2625,7 +2625,7 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/sim_batch.py",
+      "file": "src/klayout_tools/sim_batch_contract_spec.py",
       "code": "union-attr",
       "message": "Item \"None\" of \"Match[str] | None\" has no attribute \"group\"",
       "count": 1
