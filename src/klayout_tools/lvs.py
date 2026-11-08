@@ -167,7 +167,6 @@ from .lvs_combine import (
     _correct_combine_parameters,
     _flatten_netlist_safely,
     _hierarchy_mismatch_warnings,
-    _net_for_terminal_or_none,
     _parse_combine_devices,
     _parse_combine_devices_max_attempts,
     _parse_combine_devices_per_circuit,
@@ -233,6 +232,11 @@ from .lvs_mismatch import (
 )
 from .lvs_mismatch import _classify_net_mismatches as _classify_net_mismatches
 from .lvs_mismatch import _net_mismatch_pools as _net_mismatch_pools
+from .lvs_mos_options import (
+    apply_ignore_mos_bulk,
+    parse_ignore_mos_bulk,
+    split_layout_mos_flavours,
+)
 from .lvs_netgen import (
     _NETGEN_DEFAULT_TIMEOUT_S,
     _resolve_netgen_binary,
@@ -270,7 +274,6 @@ from .netlist_capacitor_recovery import (
     resistor_classes_for_deck,
 )
 from .pdk import PdkNotFoundError, find_pdk, list_pdks
-from .pdk_models import MOS_FLAVOUR_PROPERTY, flavoured_mos_class_name
 from .place_and_route_portable import portable_response
 from .verilog_module_names import reference_module_names
 from .verilog_netlist import (
@@ -1337,6 +1340,7 @@ def run_lvs(
     compare_mos_flavour = _parse_compare_mos_flavour(
         options, engine, layout_spec, reference_spec
     )
+    ignore_mos_bulk = parse_ignore_mos_bulk(options, engine)
     supply_nets = parse_supply_nets(options)
     # Issue #1085: opt-in, per-side structural flatten -- see
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
@@ -1397,7 +1401,7 @@ def run_lvs(
         layout_net_label_positions,
     )
 
-    _split_layout_mos_flavours(layout_netlist, compare_mos_flavour)
+    split_layout_mos_flavours(layout_netlist, compare_mos_flavour)
 
     # Issue #2027: which *kind* of artifact `layout_hash_source` is, for
     # `provenance.input.role`. `_resolve_layout` returns the original
@@ -2083,6 +2087,7 @@ def run_lvs(
     placeholder_warnings: list[dict[str, Any]] = []
     tolerance_warnings: list[dict[str, Any]] = []
     compare_parameter_warnings: list[dict[str, Any]] = []
+    ignore_mos_bulk_warnings: list[dict[str, Any]] = []
     geometry_warnings: list[dict[str, Any]] = []
     # Issue #2461: `null` for `engine: "netgen"` (KLayout device-class state
     # is what this block reports, and that engine never builds one) -- the
@@ -2184,6 +2189,10 @@ def run_lvs(
             reference_netlist,
             compare_scoped_excluded,
             compare_scoped_narrowed,
+        )
+
+        ignore_mos_bulk_warnings = apply_ignore_mos_bulk(
+            ignore_mos_bulk, layout_netlist, reference_netlist
         )
 
         # Issue #2461: read the two netlists' device-class state *after* every
@@ -2649,6 +2658,7 @@ def run_lvs(
     mismatches.extend(
         bulk_disclosures(finfet_bulk_records, CATEGORY_DEVICE_FINFET_BULK_TIED)
     )
+    mismatches.extend(ignore_mos_bulk_warnings)  # Issue #5125
 
     if bulk_warnings:
         # Issue #506: same rationale again -- a `reference.device_bulk`
@@ -2996,6 +3006,7 @@ def run_lvs(
             "strict_top_level_pin_count": strict_top_level_pin_count,
             # Issue #3650: the effective boolean (`false` when omitted).
             "compare_mos_flavour": compare_mos_flavour,
+            "ignore_mos_bulk": ignore_mos_bulk,
             "supply_nets": supply_nets,
             # Issue #2813: `null` when omitted, else the resolved
             # `{"nmos": <net>, "pmos": <net>}` bulk-tie policy (opt-in; the
@@ -3297,13 +3308,9 @@ def _strict_top_level_pin_count_replay_options(
     """Issue #2845: re-assert ``strict_top_level_pin_count`` only when it was
     on (``false`` is the default). A helper keeps
     :func:`_reconstruct_lvs_request` within its complexity baseline."""
-    replay: dict[str, Any] = {}
-    if echoed.get("strict_top_level_pin_count") is True:
-        replay["strict_top_level_pin_count"] = True
-    # Issue #3650: same rule for `compare_mos_flavour`.
-    if echoed.get("compare_mos_flavour") is True:
-        replay["compare_mos_flavour"] = True
-    return replay
+    # Issues #2845/#3650/#5125: each is re-asserted only when it was on.
+    keys = ("strict_top_level_pin_count", "compare_mos_flavour", "ignore_mos_bulk")
+    return {key: True for key in keys if echoed.get(key) is True}
 
 
 def _reconstruct_runset_request(
@@ -3826,6 +3833,7 @@ def rerun_lvs_report(
         "anchor_top_level_pins",
         "strict_top_level_pin_count",  # Issue #2845
         "compare_mos_flavour",  # Issue #3650
+        "ignore_mos_bulk",  # Issue #5125
         "combine_devices_max_attempts",  # Issue #2682
     ):
         if not isinstance(committed_options, dict) or option not in committed_options:
@@ -5727,45 +5735,6 @@ def _parse_compare_mos_flavour(
             "of each X card, which the other reference forms do not carry"
         )
     return True
-
-
-def _split_layout_mos_flavours(netlist: kdb.Netlist, enabled: bool) -> None:
-    """Issue #3650: when ``enabled`` (``options.compare_mos_flavour``), move
-    every layout MOS device that inline extraction tagged with
-    ``pdk_models.MOS_FLAVOUR_PROPERTY`` onto a flavour-specific device
-    class (``nfet`` -> ``nfet__nvt``), the same names the reference conversion
-    uses, so ``NetlistComparer`` pairs flavours only with their own kind. A new
-    class is built per (base class, flavour) the way
-    :func:`_renew_conflicting_device_classes` builds them, and each device is
-    re-created on it with the same circuit, name, parameters and nets.
-    """
-    if not enabled:
-        return
-    classes: dict[str, Any] = {}
-    for circuit in netlist.each_circuit():
-        for device in list(circuit.each_device()):
-            flavour = device.property(MOS_FLAVOUR_PROPERTY)
-            if flavour is None:
-                continue
-            old_class = device.device_class()
-            name = flavoured_mos_class_name(old_class.name, str(flavour))
-            new_class = classes.get(name)
-            if new_class is None:
-                new_class = type(old_class)()
-                new_class.name = name
-                new_class.description = old_class.description
-                netlist.add(new_class)
-                classes[name] = new_class
-            replacement = circuit.create_device(new_class, device.name)
-            for terminal in old_class.terminal_definitions():
-                net = _net_for_terminal_or_none(device, terminal.name)
-                if net is not None:
-                    replacement.connect_terminal(terminal.name, net)
-            for parameter in old_class.parameter_definitions():
-                replacement.set_parameter(
-                    parameter.name, device.parameter(parameter.name)
-                )
-            circuit.remove_device(device)
 
 
 def _strict_pin_count_check(
