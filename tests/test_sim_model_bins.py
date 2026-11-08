@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from klayout_tools import sim, sim_model_bins
+from klayout_tools import sim, sim_bin_range, sim_model_bins
+
+
+def _preflight(path, lib=None):
+    return sim_bin_range.preflight_with_bins(
+        path, lib, sim._find_width_ceiling_culprit, sim._MODEL_WIDTH_CEILING_UM
+    )
+
 
 LIB = """\
 .model nfet_03v3.0 nmos (
@@ -56,7 +63,7 @@ def test_preflight_names_instance_and_nearest_bin(tmp_path):
     netlist.write_text(
         "X1 d g s b nfet_03v3 w=10u l=1u\nXC d g s b nfet_03v3 w=80u l=1u m=2\n"
     )
-    diag = sim._width_ceiling_preflight_diagnostic(str(netlist), _lib(tmp_path))
+    diag = _preflight(str(netlist), _lib(tmp_path))
     assert diag is not None
     assert diag["code"] == "model_bin_range_preflight"
     assert diag["instance"] == "XC"
@@ -67,6 +74,6 @@ def test_preflight_names_instance_and_nearest_bin(tmp_path):
 def test_preflight_falls_back_to_heuristic_without_bins(tmp_path):
     netlist = tmp_path / "n.spice"
     netlist.write_text("X1 d g s b other_model w=128u l=1u\n")
-    diag = sim._width_ceiling_preflight_diagnostic(str(netlist), _lib(tmp_path))
+    diag = _preflight(str(netlist), _lib(tmp_path))
     assert diag is not None and diag["instance"] == "X1" and "nearest_bin" not in diag
-    assert sim._width_ceiling_preflight_diagnostic(str(netlist), None) is not None
+    assert _preflight(str(netlist), None) is not None

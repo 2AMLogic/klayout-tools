@@ -4032,6 +4032,9 @@ def _run_sim_corners(
         dry_run=dry_run,
     )
 
+    bin_diagnostic = sim_bin_range.preflight_with_bins(
+        netlist_path, models_lib, _find_width_ceiling_culprit, _MODEL_WIDTH_CEILING_UM
+    )
     if dry_run:
         published_runner: dict[str, Any] = {}
         feature_diagnostic = (
@@ -4047,9 +4050,7 @@ def _run_sim_corners(
         return _build_dry_run_report(
             request,
             feature_diagnostic=feature_diagnostic,
-            bin_range_diagnostic=_width_ceiling_preflight_diagnostic(
-                netlist_path, models_lib
-            ),
+            bin_range_diagnostic=bin_diagnostic,
             published_runner=published_runner or None,
             engine=engine,
             backend=backend,
@@ -4572,7 +4573,7 @@ def _run_sim_corners(
         d
         for d in (
             *remote_diagnostics,
-            _width_ceiling_preflight_diagnostic(netlist_path, models_lib),
+            bin_diagnostic,
         )
         if d
     ]:
@@ -12495,19 +12496,6 @@ def _diagnose_modelname_error(netlist_path: str) -> str | None:
     if culprit is None:
         return None
     return sim_bin_range.message(culprit, _MODEL_WIDTH_CEILING_UM)
-
-
-def _width_ceiling_preflight_diagnostic(
-    netlist_path: str, models_lib: str | None = None
-) -> dict[str, Any] | None:
-    """Non-fatal pre-run bin-range warning (issues #4976, #5138), or ``None``.
-
-    With ``models_lib`` the library's bin cards are checked first; otherwise
-    (or when nothing is found) the 100u width heuristic applies.
-    """
-    return sim_bin_range.preflight_with_bins(
-        netlist_path, models_lib, _find_width_ceiling_culprit, _MODEL_WIDTH_CEILING_UM
-    )
 
 
 #: ngspice's own terminal trailer when an analysis never actually completed
