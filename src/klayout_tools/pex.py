@@ -3290,9 +3290,18 @@ def run_pex(
         else os.path.join(os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex")
     )
     os.makedirs(work_dir, exist_ok=True)
-    leg_extracted, leg_device_only = adapt_leg_netlists(
-        deck_name, extracted_netlist_path, device_only_netlist_path, work_dir
-    )
+    # Issue #5137: only the testbench sim legs consume the adapted copies;
+    # `--extract-only` and `--measure-command` never reach them, so they
+    # neither pay for the adaptation nor can fail on a card it refuses.
+    if extract_only or command_mode:
+        leg_extracted, leg_device_only = (
+            extracted_netlist_path,
+            device_only_netlist_path,
+        )
+    else:
+        leg_extracted, leg_device_only = adapt_leg_netlists(
+            deck_name, extracted_netlist_path, device_only_netlist_path, work_dir
+        )
     # Issue #4619: routes each `run_sim` leg (blocking / submit / attach).
     legs = pex_async.AsyncLegs(
         submit_only=submit_only,
