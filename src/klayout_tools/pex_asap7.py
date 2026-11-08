@@ -55,11 +55,20 @@ DEVICE_MODEL_CARD_PREFIXES = "MXQDN"
 
 
 def adapt_leg_netlists(
-    deck_name: str | None, extracted: str, device_only: str | None, work_dir: str
+    deck_name: str | None,
+    extracted: str,
+    device_only: str | None,
+    work_dir: str,
+    *,
+    skip: bool = False,
 ) -> tuple[str, str | None]:
     """The (extracted, device-only) netlists the simulated legs should
     include: the inputs themselves unless the deck needs adapting. Call after
-    ``--tie-net`` rewrites so the copies carry the ties."""
+    ``--tie-net`` rewrites so the copies carry the ties. ``skip`` (issue
+    #5137: ``--extract-only`` / ``--measure-command`` never reach a sim leg)
+    returns the inputs untouched without adapting."""
+    if skip:
+        return extracted, device_only
     return (
         adapted_dut_netlist(
             deck_name, extracted, work_dir=work_dir, label="dut", side="extracted"

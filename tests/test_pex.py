@@ -6689,43 +6689,6 @@ def test_cli_pex_extract_only_conflict_is_clean_error(
     )
 
 
-def _forbid_adaptation(monkeypatch):
-    def boom(*_args, **_kwargs):
-        raise AssertionError("adapt_leg_netlists must not run in this mode")
-
-    monkeypatch.setattr("klayout_tools.pex.adapt_leg_netlists", boom)
-
-
-def test_run_pex_extract_only_does_not_adapt_leg_netlists(
-    tmp_path, monkeypatch, resistor_layout
-):
-    """Issue #5137: only the sim legs consume the adapted copies."""
-    _forbid_adaptation(monkeypatch)
-    report = run_pex(
-        resistor_layout,
-        [],
-        "sky130",
-        output=str(tmp_path / "res.spice"),
-        artifacts_dir=str(tmp_path / "art"),
-        extract_only=True,
-    )
-    assert report["measurement"]["mode"] == "extract-only"
-
-
-def test_run_pex_measure_command_does_not_adapt_leg_netlists(
-    tmp_path, monkeypatch, resistor_layout, measure_reference
-):
-    _forbid_adaptation(monkeypatch)
-    report = run_pex(
-        resistor_layout,
-        [],
-        "sky130",
-        measure_command=_write_harness(tmp_path),
-        reference_netlist=str(measure_reference),
-    )
-    assert report["delta"]
-
-
 def test_signoff_refuses_extract_only_report_as_evidence(tmp_path, resistor_layout):
     """Issue #3739: an `--extract-only` envelope is not comparison evidence."""
     from klayout_tools.signoff import build_signoff

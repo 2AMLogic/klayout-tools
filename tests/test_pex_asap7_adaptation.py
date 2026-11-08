@@ -74,3 +74,20 @@ def test_adapt_leg_netlists_covers_both_legs(tmp_path):
 def test_device_model_counts_include_osdi_n_cards():
     counts = _device_model_counts("N0 d g s b nmos_rvt L=20n NFIN=2\n")
     assert counts == {"nmos_rvt": ("nmos_rvt", 1)}
+
+
+def test_adapt_leg_netlists_skip_returns_inputs_without_adapting(tmp_path):
+    """Issue #5137: `--extract-only` / `--measure-command` never reach a sim
+    leg, so they must not adapt (or fail on) the asap7 cards."""
+    ext, dev = _raw(tmp_path), tmp_path / "dev.spice"
+    dev.write_text(_RAW)
+    assert adapt_leg_netlists(
+        "asap7", str(ext), str(dev), str(tmp_path), skip=True
+    ) == (str(ext), str(dev))
+    assert sorted(p.name for p in tmp_path.glob("*.asap7-osdi.spice")) == []
+    bad = tmp_path / "bad.spice"
+    bad.write_text("garbage\n")
+    assert adapt_leg_netlists("asap7", str(bad), None, str(tmp_path), skip=True) == (
+        str(bad),
+        None,
+    )

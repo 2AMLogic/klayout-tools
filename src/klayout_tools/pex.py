@@ -3273,9 +3273,8 @@ def run_pex(
     # schematic nets in the netlist every simulated leg below reads. Checked
     # against the extraction first, applied before any simulation; `None`
     # leaves the netlist (and the whole report) untouched.
-    _tie_nets_in_legs(
-        tie_nets, extract_report, extracted_netlist_path, device_only_netlist_path
-    )
+    ext_path, dev_path = extracted_netlist_path, device_only_netlist_path
+    _tie_nets_in_legs(tie_nets, extract_report, ext_path, dev_path)
     # The tie rewrites `extracted_netlist_path` in place, so the extract-time
     # hash no longer identifies the file the report points at: re-hash it.
     extracted_netlist_sha256 = (
@@ -3290,18 +3289,9 @@ def run_pex(
         else os.path.join(os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex")
     )
     os.makedirs(work_dir, exist_ok=True)
-    # Issue #5137: only the testbench sim legs consume the adapted copies;
-    # `--extract-only` and `--measure-command` never reach them, so they
-    # neither pay for the adaptation nor can fail on a card it refuses.
-    if extract_only or command_mode:
-        leg_extracted, leg_device_only = (
-            extracted_netlist_path,
-            device_only_netlist_path,
-        )
-    else:
-        leg_extracted, leg_device_only = adapt_leg_netlists(
-            deck_name, extracted_netlist_path, device_only_netlist_path, work_dir
-        )
+    leg_extracted, leg_device_only = adapt_leg_netlists(
+        deck_name, ext_path, dev_path, work_dir, skip=extract_only or command_mode
+    )
     # Issue #4619: routes each `run_sim` leg (blocking / submit / attach).
     legs = pex_async.AsyncLegs(
         submit_only=submit_only,
