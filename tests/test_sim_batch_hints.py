@@ -71,3 +71,43 @@ def test_unrelated_fatal_gets_no_pdk_hint():
     diags = [{"code": "ngspice_fatal", "message": "Undefined parameter [w]"}]
     assert hint_existing_fatal(diags) is True
     assert "stage_model_inputs" not in diags[0]["message"]
+
+
+_MODELNAME_LOG = (
+    "Circuit: * deck\n"
+    "Error on line 570 : m.x1.m0 d g s b nfet_03v3 w=1.28e-4 l=2.8e-7\n"
+    "Error: could not find a valid modelname\n"
+)
+
+
+def test_modelname_fatal_names_instance_and_model_from_logged_card(tmp_path):
+    (tmp_path / "ngspice.log").write_text(_MODELNAME_LOG)
+    _, found = sb._engine_log_note(str(tmp_path))
+    msg = found["message"]
+    assert "instance 'm.x1.m0' model 'nfet_03v3'" in msg
+    assert "w=1.28e-4" in msg and "expanded deck" in msg
+
+
+def test_modelname_attribution_is_idempotent_and_never_raises():
+    from klayout_tools.sim_batch_hints import attribute_modelname
+
+    diag = {
+        "code": "model_bin_range",
+        "message": "Error: could not find a valid modelname",
+    }
+    attribute_modelname(diag, _MODELNAME_LOG)
+    once = diag["message"]
+    attribute_modelname(diag, _MODELNAME_LOG)
+    assert diag["message"] == once
+
+
+def test_modelname_without_quoted_card_falls_back_unchanged():
+    from klayout_tools.sim_batch_hints import attribute_modelname
+
+    raw = "Error: could not find a valid modelname"
+    diag = {"code": "model_bin_range", "message": raw}
+    attribute_modelname(diag, raw + "\n")
+    assert diag["message"] == raw
+    # Line N present but not a card we can read (out of range / odd text).
+    attribute_modelname(diag, "Error on line 99999 : \n" + raw)
+    assert diag["message"] == raw
