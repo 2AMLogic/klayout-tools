@@ -228,6 +228,15 @@ number is not actionable on a one-line JSON document.
   the document side of the `#` is still a finding.
 - **Mapping keys are scanned too.** A dict *keyed* by an absolute path leaks
   exactly as thoroughly as one valued by it.
+- **Remote worker observations are not flagged** (issue #5133). Everything
+  under `environment.remote.worker_environment` (and, for a sharded run,
+  `environment.remote.fleet.<i>.worker_environment`) — the worker's PDK root,
+  `simulator.selected_path`, version banner, diagnostics — describes the
+  remote host, not the author's checkout, so a batch-sim report lints clean
+  without `--allow-prefix`. The exemption is path-scoped: a
+  `worker_environment` key anywhere other than directly under
+  `environment.remote`, and every other field in the same envelope, is still
+  linted.
 - **`--allow-prefix` is explicit, never inferred from the environment.** Pass
   `--allow-prefix /usr/share/pdk` for a genuinely machine-wide install root.
   Reading `$PDK_ROOT` instead would make the verdict depend on the linting

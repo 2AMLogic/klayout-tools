@@ -156,7 +156,8 @@
       "description": "`klt env_provenance` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.env_provenance_cmd",
-        "klayout_tools.env_provenance"
+        "klayout_tools.env_provenance",
+        "klayout_tools.env_provenance_walk"
       ]
     },
     "equiv": {
