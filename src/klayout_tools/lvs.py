@@ -123,6 +123,7 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import env_provenance
@@ -283,6 +284,8 @@ from .verilog_netlist import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import klayout.db as kdb
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -918,6 +921,233 @@ def _merge_deck_flags(
         request["deck_vars"] = dict(deck_vars)
 
 
+@dataclass(frozen=True)
+class _LvsRunOptions:
+    """Request options parsed by `_parse_lvs_run_options` (issue #4126).
+
+    Every field is a resolved value `run_lvs` reads later; the fields keep
+    the names the former inline locals had.
+    """
+
+    deck_options: Any
+    label_layers: Any
+    layout_abstraction: Any
+    def_net_names: Any
+    def_pins: Any
+    def_pins_echo: Any
+    options: Any
+    finfet_layout: Any
+    finfet_bulk: Any
+    keep_extracted: Any
+    combine_devices: Any
+    combine_device_classes: Any
+    combine_devices_enabled: Any
+    combine_devices_max_attempts: Any
+    combine_devices_per_circuit: Any
+    parameter_tolerance: Any
+    compare_parameters: Any
+    power_connectivity_enabled: Any
+    power_connectivity_expected_nets: Any
+    power_connectivity_echo: Any
+    anchor_top_level_pins_requested: Any
+    anchor_top_level_pins_echo: Any
+    strict_top_level_pin_count: Any
+    compare_mos_flavour: Any
+    ignore_mos_bulk: Any
+    supply_nets: Any
+    flatten_reference: Any
+    compare_timeout_s: Any
+    flatten_layout: Any
+    netgen_setup_echo: Any
+
+
+def _parse_lvs_run_options(
+    request: dict[str, Any],
+    request_dir: Path,
+    engine: str,
+    layout_spec: dict[str, Any],
+    reference_spec: dict[str, Any],
+) -> _LvsRunOptions:
+    """Parse and validate the request-option block of `run_lvs`.
+
+    Pure parsing: no file IO and no netlist access. Evaluation order and every
+    `LvsError` message are unchanged from when this was inline in `run_lvs`.
+    """
+    deck_options = layout_spec.get("deck_options")
+    if deck_options is not None:
+        if not isinstance(deck_options, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in deck_options.items()
+        ):
+            raise LvsError(
+                "request.layout.deck_options must be a JSON object mapping "
+                "string keys to string values"
+            )
+        if deck_options and not layout_spec.get("deck"):
+            # Meaningless without a deck to resolve against -- mirrors how
+            # `top_cell_pins`/`declared_pins` are only honored alongside
+            # inline extraction, except `deck_options` is also honored for
+            # the pre-extracted `layout.netlist` + `layout.deck` shape
+            # (issue #585), so the real requirement is `layout.deck`, not
+            # `layout.file` specifically.
+            raise LvsError("request.layout.deck_options requires request.layout.deck")
+
+    # Issue #2686: `layout.label_layers` mirrors `klt extract --label-layer`
+    # (request field `label_layers`, issue #2656) for inline extraction only
+    # -- see `_parse_layout_label_layers` for the shape and the
+    # extraction-only rule. `None` when omitted/`null`.
+    label_layers = _parse_layout_label_layers(layout_spec)
+    # Issue #2853: `layout.abstract_cells`/`abstract_cell_lef` mirror `klt
+    # extract --abstract-cells`/`--abstract-cell-lef` for inline extraction
+    # only -- see `_parse_layout_abstract_cells` for the shape and the
+    # extraction-only rule.
+    layout_abstraction = _parse_layout_abstract_cells(layout_spec, request_dir)
+    # Issue #4347: `layout.def_net_names`/`def_pins` mirror `klt extract
+    # --def-net-names`/`--def-pins` for inline extraction only.
+    def_net_names = _parse_layout_def_net_names(layout_spec)
+    def_pins, def_pins_echo = _parse_layout_def_pins(layout_spec, request_dir)
+
+    options = request.get("options") or {}
+    # Issue #2813: a FinFET extraction deck's devices are only correct with
+    # their geometry-counted `nfin` compared exactly -- every request shape or
+    # option that would drop or relax it is refused up front, and the
+    # nfin-preserving reference reader is selected below.
+    finfet_layout, finfet_bulk = prepare_finfet_request(
+        layout_spec, reference_spec, options, engine
+    )
+    keep_extracted = bool(options.get("keep_extracted", False))
+    # Issue #1370: `true`/`false` (the original shape) or a list of
+    # device-class names restricting which classes are combined at all --
+    # see `_parse_combine_devices`. `combine_devices` below is the resolved
+    # value (echoed back verbatim in the response's `options` block);
+    # `combine_device_classes` is the restriction (`None` for the bool
+    # shape), and `combine_devices_enabled` is the plain "does combining run
+    # at all" predicate every downstream branch already keyed on.
+    combine_devices = _parse_combine_devices(options)
+    combine_device_classes = (
+        combine_devices if isinstance(combine_devices, list) else None
+    )
+    combine_devices_enabled = bool(combine_devices)
+    # Issue #1412: caller-configurable retry budget for
+    # `_combine_devices_safely`'s bounded-retry mitigation (issue #1185) --
+    # previously a private `_COMBINE_DEVICES_MAX_ATTEMPTS` module constant
+    # tuned against one small fixture, with no way for a caller working
+    # against a much larger/complex netlist to raise it, or a caller
+    # iterating on a small one to lower it. Parsed unconditionally (like
+    # `flatten_layout`/`flatten_reference` above) so a malformed value is a
+    # clean request error even when `combine_devices` is off, but only
+    # consulted below when combining actually runs.
+    combine_devices_max_attempts = _parse_combine_devices_max_attempts(options)
+    # Issue #1552: per-subcircuit override of the whole-request
+    # `combine_devices` boolean above -- lets a composed design give each of
+    # its own macros its own combine_devices choice, honored simultaneously.
+    # Mutually exclusive with a truthy `combine_devices` (bool `true` or a
+    # non-empty device-class list): `combine_devices_per_circuit` already
+    # lets an unmatched circuit fall back to a chosen default (name it with a
+    # catch-all glob, e.g. `"*"`), so there is no combination of the two
+    # options that is not ambiguous about which setting wins for a matched
+    # circuit. An explicit `combine_devices: false` alongside it is a
+    # harmless no-op (that is already every unmatched circuit's default), so
+    # only a truthy value raises.
+    combine_devices_per_circuit = _parse_combine_devices_per_circuit(options)
+    if combine_devices_per_circuit is not None and combine_devices_enabled:
+        raise LvsError(
+            "request.options.combine_devices and "
+            "request.options.combine_devices_per_circuit are mutually "
+            "exclusive when combine_devices is truthy -- name every circuit "
+            "combine_devices_per_circuit should combine explicitly (a "
+            'catch-all `"*": true` glob included, if that is the intent) '
+            "instead of also setting the whole-request combine_devices"
+        )
+    parameter_tolerance = _parse_parameter_tolerance(options)
+    # Issue #1928: the resolved `{<device-class>: [<parameter>, ...]}`
+    # mapping, or `None` when the option was omitted -- see
+    # `_parse_compare_parameters`. Class/parameter names are validated once
+    # each netlist is resolved (`_apply_compare_parameters`, further down),
+    # the same two-stage split `options.combine_devices`'s list shape uses.
+    compare_parameters = _parse_compare_parameters(options)
+    # Issue #1952: the per-cell-instance power/ground pin-to-net check that
+    # pairs with a signal-only `reference.form: "gate-level-verilog"`
+    # compare -- see `_power_connectivity_report`. Parsed unconditionally
+    # (like `combine_devices_max_attempts` above) so a malformed value is a
+    # clean request error for every reference form, but only consulted for
+    # `gate-level-verilog`, the one form whose reference structurally cannot
+    # carry power connectivity of its own.
+    (
+        power_connectivity_enabled,
+        power_connectivity_expected_nets,
+        power_connectivity_echo,
+    ) = _parse_power_connectivity(options)
+    # Issue #2692: top-level pin anchoring -- parsed unconditionally here (the
+    # same discipline `power_connectivity` above follows) so a malformed value
+    # is a clean request error for every reference form, with the
+    # form-dependent default resolved below once `reference_form` is known.
+    # See `_apply_top_level_pin_anchors` for the soundness gap it closes.
+    (
+        anchor_top_level_pins_requested,
+        anchor_top_level_pins_echo,
+    ) = _parse_anchor_top_level_pins(options, engine)
+    strict_top_level_pin_count = _parse_strict_top_level_pin_count(options, engine)
+    compare_mos_flavour = _parse_compare_mos_flavour(
+        options, engine, layout_spec, reference_spec
+    )
+    ignore_mos_bulk = parse_ignore_mos_bulk(options, engine)
+    supply_nets = parse_supply_nets(options)
+    # Issue #1085: opt-in, per-side structural flatten -- see
+    # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
+    # extract` is always flat, so a hierarchical reference/pre-extracted
+    # layout netlist otherwise can never structurally match it).
+    # Issue #4462: a FinFET layout is extracted flat at the transistor level,
+    # so a gate-level reference (expanded to cell bodies) defaults to flat too.
+    flatten_reference = bool(
+        options.get(
+            "flatten_reference",
+            finfet_layout and reference_spec.get("form") == "gate-level-verilog",
+        )
+    )
+    # Issue #4165: opt-in deadline for the `klayout` engine's compare.
+    compare_timeout_s = parse_compare_timeout(options, engine)
+    flatten_layout = bool(options.get("flatten_layout", False))
+    # Issue #1205: echoed verbatim (not resolved against `request_dir`), the
+    # same convention `layout`/`reference` are echoed under -- so the
+    # response's `options` block round-trips back into a request document
+    # exactly as it was given. `null` for every `"klayout"`-engine run (and
+    # for a netgen run that let netgen use its own trivial default setup).
+    netgen_setup_echo = options.get("netgen_setup")
+    return _LvsRunOptions(
+        deck_options=deck_options,
+        label_layers=label_layers,
+        layout_abstraction=layout_abstraction,
+        def_net_names=def_net_names,
+        def_pins=def_pins,
+        def_pins_echo=def_pins_echo,
+        options=options,
+        finfet_layout=finfet_layout,
+        finfet_bulk=finfet_bulk,
+        keep_extracted=keep_extracted,
+        combine_devices=combine_devices,
+        combine_device_classes=combine_device_classes,
+        combine_devices_enabled=combine_devices_enabled,
+        combine_devices_max_attempts=combine_devices_max_attempts,
+        combine_devices_per_circuit=combine_devices_per_circuit,
+        parameter_tolerance=parameter_tolerance,
+        compare_parameters=compare_parameters,
+        power_connectivity_enabled=power_connectivity_enabled,
+        power_connectivity_expected_nets=power_connectivity_expected_nets,
+        power_connectivity_echo=power_connectivity_echo,
+        anchor_top_level_pins_requested=anchor_top_level_pins_requested,
+        anchor_top_level_pins_echo=anchor_top_level_pins_echo,
+        strict_top_level_pin_count=strict_top_level_pin_count,
+        compare_mos_flavour=compare_mos_flavour,
+        ignore_mos_bulk=ignore_mos_bulk,
+        supply_nets=supply_nets,
+        flatten_reference=flatten_reference,
+        compare_timeout_s=compare_timeout_s,
+        flatten_layout=flatten_layout,
+        netgen_setup_echo=netgen_setup_echo,
+    )
+
+
 def run_lvs(
     request: str,
     *,
@@ -1222,147 +1452,9 @@ def run_lvs(
     # `declared_pins` is validated as a list -- a wrong-shaped value is a
     # clean request error, not a silent no-op or a traceback further down in
     # `get_extraction_deck`/`extract_netlist_from_layout`.
-    deck_options = layout_spec.get("deck_options")
-    if deck_options is not None:
-        if not isinstance(deck_options, dict) or not all(
-            isinstance(key, str) and isinstance(value, str)
-            for key, value in deck_options.items()
-        ):
-            raise LvsError(
-                "request.layout.deck_options must be a JSON object mapping "
-                "string keys to string values"
-            )
-        if deck_options and not layout_spec.get("deck"):
-            # Meaningless without a deck to resolve against -- mirrors how
-            # `top_cell_pins`/`declared_pins` are only honored alongside
-            # inline extraction, except `deck_options` is also honored for
-            # the pre-extracted `layout.netlist` + `layout.deck` shape
-            # (issue #585), so the real requirement is `layout.deck`, not
-            # `layout.file` specifically.
-            raise LvsError("request.layout.deck_options requires request.layout.deck")
-
-    # Issue #2686: `layout.label_layers` mirrors `klt extract --label-layer`
-    # (request field `label_layers`, issue #2656) for inline extraction only
-    # -- see `_parse_layout_label_layers` for the shape and the
-    # extraction-only rule. `None` when omitted/`null`.
-    label_layers = _parse_layout_label_layers(layout_spec)
-    # Issue #2853: `layout.abstract_cells`/`abstract_cell_lef` mirror `klt
-    # extract --abstract-cells`/`--abstract-cell-lef` for inline extraction
-    # only -- see `_parse_layout_abstract_cells` for the shape and the
-    # extraction-only rule.
-    layout_abstraction = _parse_layout_abstract_cells(layout_spec, request_dir)
-    # Issue #4347: `layout.def_net_names`/`def_pins` mirror `klt extract
-    # --def-net-names`/`--def-pins` for inline extraction only.
-    def_net_names = _parse_layout_def_net_names(layout_spec)
-    def_pins, def_pins_echo = _parse_layout_def_pins(layout_spec, request_dir)
-
-    options = request.get("options") or {}
-    # Issue #2813: a FinFET extraction deck's devices are only correct with
-    # their geometry-counted `nfin` compared exactly -- every request shape or
-    # option that would drop or relax it is refused up front, and the
-    # nfin-preserving reference reader is selected below.
-    finfet_layout, finfet_bulk = prepare_finfet_request(
-        layout_spec, reference_spec, options, engine
+    opts = _parse_lvs_run_options(
+        request, request_dir, engine, layout_spec, reference_spec
     )
-    keep_extracted = bool(options.get("keep_extracted", False))
-    # Issue #1370: `true`/`false` (the original shape) or a list of
-    # device-class names restricting which classes are combined at all --
-    # see `_parse_combine_devices`. `combine_devices` below is the resolved
-    # value (echoed back verbatim in the response's `options` block);
-    # `combine_device_classes` is the restriction (`None` for the bool
-    # shape), and `combine_devices_enabled` is the plain "does combining run
-    # at all" predicate every downstream branch already keyed on.
-    combine_devices = _parse_combine_devices(options)
-    combine_device_classes = (
-        combine_devices if isinstance(combine_devices, list) else None
-    )
-    combine_devices_enabled = bool(combine_devices)
-    # Issue #1412: caller-configurable retry budget for
-    # `_combine_devices_safely`'s bounded-retry mitigation (issue #1185) --
-    # previously a private `_COMBINE_DEVICES_MAX_ATTEMPTS` module constant
-    # tuned against one small fixture, with no way for a caller working
-    # against a much larger/complex netlist to raise it, or a caller
-    # iterating on a small one to lower it. Parsed unconditionally (like
-    # `flatten_layout`/`flatten_reference` above) so a malformed value is a
-    # clean request error even when `combine_devices` is off, but only
-    # consulted below when combining actually runs.
-    combine_devices_max_attempts = _parse_combine_devices_max_attempts(options)
-    # Issue #1552: per-subcircuit override of the whole-request
-    # `combine_devices` boolean above -- lets a composed design give each of
-    # its own macros its own combine_devices choice, honored simultaneously.
-    # Mutually exclusive with a truthy `combine_devices` (bool `true` or a
-    # non-empty device-class list): `combine_devices_per_circuit` already
-    # lets an unmatched circuit fall back to a chosen default (name it with a
-    # catch-all glob, e.g. `"*"`), so there is no combination of the two
-    # options that is not ambiguous about which setting wins for a matched
-    # circuit. An explicit `combine_devices: false` alongside it is a
-    # harmless no-op (that is already every unmatched circuit's default), so
-    # only a truthy value raises.
-    combine_devices_per_circuit = _parse_combine_devices_per_circuit(options)
-    if combine_devices_per_circuit is not None and combine_devices_enabled:
-        raise LvsError(
-            "request.options.combine_devices and "
-            "request.options.combine_devices_per_circuit are mutually "
-            "exclusive when combine_devices is truthy -- name every circuit "
-            "combine_devices_per_circuit should combine explicitly (a "
-            'catch-all `"*": true` glob included, if that is the intent) '
-            "instead of also setting the whole-request combine_devices"
-        )
-    parameter_tolerance = _parse_parameter_tolerance(options)
-    # Issue #1928: the resolved `{<device-class>: [<parameter>, ...]}`
-    # mapping, or `None` when the option was omitted -- see
-    # `_parse_compare_parameters`. Class/parameter names are validated once
-    # each netlist is resolved (`_apply_compare_parameters`, further down),
-    # the same two-stage split `options.combine_devices`'s list shape uses.
-    compare_parameters = _parse_compare_parameters(options)
-    # Issue #1952: the per-cell-instance power/ground pin-to-net check that
-    # pairs with a signal-only `reference.form: "gate-level-verilog"`
-    # compare -- see `_power_connectivity_report`. Parsed unconditionally
-    # (like `combine_devices_max_attempts` above) so a malformed value is a
-    # clean request error for every reference form, but only consulted for
-    # `gate-level-verilog`, the one form whose reference structurally cannot
-    # carry power connectivity of its own.
-    (
-        power_connectivity_enabled,
-        power_connectivity_expected_nets,
-        power_connectivity_echo,
-    ) = _parse_power_connectivity(options)
-    # Issue #2692: top-level pin anchoring -- parsed unconditionally here (the
-    # same discipline `power_connectivity` above follows) so a malformed value
-    # is a clean request error for every reference form, with the
-    # form-dependent default resolved below once `reference_form` is known.
-    # See `_apply_top_level_pin_anchors` for the soundness gap it closes.
-    (
-        anchor_top_level_pins_requested,
-        anchor_top_level_pins_echo,
-    ) = _parse_anchor_top_level_pins(options, engine)
-    strict_top_level_pin_count = _parse_strict_top_level_pin_count(options, engine)
-    compare_mos_flavour = _parse_compare_mos_flavour(
-        options, engine, layout_spec, reference_spec
-    )
-    ignore_mos_bulk = parse_ignore_mos_bulk(options, engine)
-    supply_nets = parse_supply_nets(options)
-    # Issue #1085: opt-in, per-side structural flatten -- see
-    # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
-    # extract` is always flat, so a hierarchical reference/pre-extracted
-    # layout netlist otherwise can never structurally match it).
-    # Issue #4462: a FinFET layout is extracted flat at the transistor level,
-    # so a gate-level reference (expanded to cell bodies) defaults to flat too.
-    flatten_reference = bool(
-        options.get(
-            "flatten_reference",
-            finfet_layout and reference_spec.get("form") == "gate-level-verilog",
-        )
-    )
-    # Issue #4165: opt-in deadline for the `klayout` engine's compare.
-    compare_timeout_s = parse_compare_timeout(options, engine)
-    flatten_layout = bool(options.get("flatten_layout", False))
-    # Issue #1205: echoed verbatim (not resolved against `request_dir`), the
-    # same convention `layout`/`reference` are echoed under -- so the
-    # response's `options` block round-trips back into a request document
-    # exactly as it was given. `null` for every `"klayout"`-engine run (and
-    # for a netgen run that let netgen use its own trivial default setup).
-    netgen_setup_echo = options.get("netgen_setup")
 
     import klayout.db as kdb
 
@@ -1383,25 +1475,25 @@ def run_lvs(
     ) = _resolve_layout(
         layout_spec,
         request_dir,
-        keep_extracted,
-        combine_devices_enabled,
-        deck_options,
-        label_layers,
+        opts.keep_extracted,
+        opts.combine_devices_enabled,
+        opts.deck_options,
+        opts.label_layers,
         reference_spec.get("deck"),
-        layout_abstraction,
-        def_net_names,
-        def_pins,
+        opts.layout_abstraction,
+        opts.def_net_names,
+        opts.def_pins,
         progress,
     )
     # Inspect original scoped nets before any transform can discard a power
     # island or flatten independent child definitions into a shared scope.
     supply_findings = supply_fragmentation_findings(
         _select_circuit(layout_netlist, layout_spec.get("top"), "layout"),
-        supply_nets,
+        opts.supply_nets,
         layout_net_label_positions,
     )
 
-    split_layout_mos_flavours(layout_netlist, compare_mos_flavour)
+    split_layout_mos_flavours(layout_netlist, opts.compare_mos_flavour)
 
     # Issue #2027: which *kind* of artifact `layout_hash_source` is, for
     # `provenance.input.role`. `_resolve_layout` returns the original
@@ -1451,16 +1543,16 @@ def run_lvs(
     # deferred resistor `fixed_offset_ohm` correction, issue #559/#585).
     layout_pre_combine_snapshot: kdb.Netlist | None = None
     layout_combined_circuits: list[str] = []
-    if combine_devices_per_circuit is not None:
+    if opts.combine_devices_per_circuit is not None:
         layout_targets, layout_unmatched = _resolve_combine_devices_per_circuit_targets(
-            combine_devices_per_circuit, layout_netlist
+            opts.combine_devices_per_circuit, layout_netlist
         )
         layout_pre_combine_snapshot = layout_netlist.dup()
         layout_warnings, layout_combined_circuits = _combine_circuit_devices_safely(
             layout_netlist,
             "layout",
             layout_targets,
-            combine_devices_max_attempts,
+            opts.combine_devices_max_attempts,
         )
         combine_per_circuit_warnings.extend(layout_warnings)
         combine_per_circuit_warnings.extend(
@@ -1506,10 +1598,10 @@ def run_lvs(
     # Issue #4514: the FinFET bulk policy runs per circuit *before* the layout
     # flatten, so rail labels drawn in sub-cells resolve inside their own cell.
     finfet_bulk_records = _apply_finfet_bulk_policy(
-        layout_netlist, layout_spec, finfet_layout, finfet_bulk
+        layout_netlist, layout_spec, opts.finfet_layout, opts.finfet_bulk
     )
-    if flatten_layout:
-        flatten_layout_netlist(layout_netlist, finfet_layout, flatten_warnings)
+    if opts.flatten_layout:
+        flatten_layout_netlist(layout_netlist, opts.finfet_layout, flatten_warnings)
 
     reference_netlist_path = _require_path(
         reference_spec, "netlist", "reference", request_dir
@@ -1530,7 +1622,7 @@ def run_lvs(
     # depends on are known -- see `_anchor_top_level_pins_enabled` for why the
     # default is form-dependent (on for `gate-level-verilog`, off elsewhere).
     anchor_top_level_pins = _anchor_top_level_pins_enabled(
-        anchor_top_level_pins_requested, reference_form
+        opts.anchor_top_level_pins_requested, reference_form
     )
     # Issue #1952: the `power_connectivity` report block, replaced below for
     # a `gate-level-verilog` reference. Every other form's reference is
@@ -1629,17 +1721,17 @@ def run_lvs(
         pdk_root=reference_spec.get("pdk_root"),
         pin_orders=reference_pin_orders,
         placeholder_value_classes=reference_placeholder_classes,
-        resistor_value_classes=_resistor_value_classes(compare_parameters),
+        resistor_value_classes=_resistor_value_classes(opts.compare_parameters),
         deck_options=(
-            deck_options
+            opts.deck_options
             if layout_spec.get("deck") == reference_spec.get("deck")
             else None
         ),
         gate_level_port_aliases=reference_gate_level_port_aliases,
         gate_level_port_case_folds=reference_gate_level_case_folds,
-        finfet=finfet_layout,
+        finfet=opts.finfet_layout,
         finfet_top=reference_spec.get("top"),
-        mos_flavour_classes=compare_mos_flavour,
+        mos_flavour_classes=opts.compare_mos_flavour,
     )
     # Issue #2952: scanned now, before any flatten/prune below erases the
     # hierarchy that names each offending instance. Appended to
@@ -1652,7 +1744,7 @@ def run_lvs(
         reference_path=reference_netlist_path,
     )
 
-    if reference_form == "gate-level-verilog" and finfet_layout:
+    if reference_form == "gate-level-verilog" and opts.finfet_layout:
         # Issue #4462: the expanded reference carries the cells' own rails, so
         # only the port-alias join applies (no stub power report / prune).
         gate_level_port_alias_warnings.extend(
@@ -1668,7 +1760,7 @@ def run_lvs(
             "stub-form power-pin check does not apply"
         )
 
-    if reference_form == "gate-level-verilog" and not finfet_layout:
+    if reference_form == "gate-level-verilog" and not opts.finfet_layout:
         # Issue #2021: joins every `assign`-aliased reference port's net onto
         # its canonical target's net -- run first, before anything else below
         # reads `reference_netlist`'s topology (the power connectivity report,
@@ -1695,12 +1787,12 @@ def run_lvs(
         # exactly the filler/tap instances whose power connectivity is the
         # only thing about them any check could verify).
         power_connectivity = _stub_gate_level_power_connectivity(
-            power_connectivity_enabled,
+            opts.power_connectivity_enabled,
             layout_netlist,
             reference_netlist,
             reference_pin_orders,
-            expected_nets=power_connectivity_expected_nets,
-            layout_abstraction=layout_abstraction,
+            expected_nets=opts.power_connectivity_expected_nets,
+            layout_abstraction=opts.layout_abstraction,
         )
         # Issue #1622 (layout side) / #2244 (reference side, symmetric): a
         # `klt place-and-route` `verilog_path` reference never instantiates a
@@ -1725,10 +1817,10 @@ def run_lvs(
         if power_only_pruning_warning is not None:
             power_only_pruning_warnings.append(power_only_pruning_warning)
 
-    if combine_devices_per_circuit is not None:
+    if opts.combine_devices_per_circuit is not None:
         reference_targets, reference_unmatched = (
             _resolve_combine_devices_per_circuit_targets(
-                combine_devices_per_circuit, reference_netlist
+                opts.combine_devices_per_circuit, reference_netlist
             )
         )
         # Issue #1557: mirrors `layout_pre_combine_snapshot`/
@@ -1744,7 +1836,7 @@ def run_lvs(
             reference_netlist,
             "reference",
             reference_targets,
-            combine_devices_max_attempts,
+            opts.combine_devices_max_attempts,
         )
         combine_per_circuit_warnings.extend(reference_warnings)
         combine_per_circuit_warnings.extend(
@@ -1779,7 +1871,7 @@ def run_lvs(
             if reference_parameter_correction is not None:
                 combine_per_circuit_warnings.append(reference_parameter_correction)
 
-    if flatten_reference:
+    if opts.flatten_reference:
         reference_flatten_warning = _flatten_netlist_safely(
             reference_netlist, "reference"
         )
@@ -1795,14 +1887,14 @@ def run_lvs(
     _prune_extra_top_circuits(reference_netlist, reference_circuit)
     flatten_warnings.extend(
         _hierarchy_mismatch_warnings(
-            layout_netlist, reference_netlist, flatten_reference
+            layout_netlist, reference_netlist, opts.flatten_reference
         )
     )
 
     # Issue #2813: FinFET comparison setup -- reference fingers merged with the
     # extractor's combiner, the opt-in bulk policy applied (and disclosed),
     # NFIN compared exactly on both sides.
-    prepare_finfet_comparison(finfet_layout, layout_netlist, reference_netlist)
+    prepare_finfet_comparison(opts.finfet_layout, layout_netlist, reference_netlist)
 
     # Issue #2853 (option (b)): resolved here, after both sides' optional
     # flatten, because a flattened side no longer carries the stub instances
@@ -1834,7 +1926,7 @@ def run_lvs(
     layout_deck_name = layout_spec.get("deck")
     try:
         layout_deck = (
-            get_extraction_deck(layout_deck_name, deck_options)
+            get_extraction_deck(layout_deck_name, opts.deck_options)
             if layout_deck_name
             else None
         )
@@ -1855,7 +1947,7 @@ def run_lvs(
     family_findings = _device_class_family_findings(reference_netlist, layout_deck)
     family_findings.extend(_flavour_selection_warnings(reference_netlist, layout_deck))
 
-    if combine_devices_per_circuit is not None and layout_deck is not None:
+    if opts.combine_devices_per_circuit is not None and layout_deck is not None:
         # Issue #559/#585/#1557: the same deferred resistor
         # `fixed_offset_ohm` correction the whole-netlist `combine_devices`
         # block below applies (mutually exclusive with
@@ -1879,7 +1971,7 @@ def run_lvs(
 
     combine_warnings: list[dict[str, Any]] = []
     combine_incomplete = False
-    if combine_devices_enabled:
+    if opts.combine_devices_enabled:
         # Opt-in (issue #261): `Netlist.combine_devices()` merges devices
         # that a device class's own `combine_devices` logic recognises as
         # combinable (e.g. parallel/series MOSFETs with matching gate/S/D/B
@@ -1930,9 +2022,9 @@ def run_lvs(
         # netlists' actual device classes first, so naming a class that
         # exists on neither side is a clean request error rather than a
         # silent no-op that looks like "combining ran and found nothing".
-        if combine_device_classes is not None:
+        if opts.combine_device_classes is not None:
             _validate_combine_device_classes(
-                combine_device_classes,
+                opts.combine_device_classes,
                 {"layout": layout_netlist, "reference": reference_netlist},
             )
 
@@ -1954,16 +2046,16 @@ def run_lvs(
         layout_warning = _combine_devices_safely(
             layout_netlist,
             "layout",
-            combine_devices_max_attempts,
-            device_classes=combine_device_classes,
+            opts.combine_devices_max_attempts,
+            device_classes=opts.combine_device_classes,
         )
         if layout_warning is not None:
             combine_warnings.append(layout_warning)
         reference_warning = _combine_devices_safely(
             reference_netlist,
             "reference",
-            combine_devices_max_attempts,
-            device_classes=combine_device_classes,
+            opts.combine_devices_max_attempts,
+            device_classes=opts.combine_device_classes,
         )
         if reference_warning is not None:
             combine_warnings.append(reference_warning)
@@ -2184,7 +2276,7 @@ def run_lvs(
         # so combining still sees each side's unmodified classes. Returns
         # the `severity: "warning"` disclosure entries appended further down.
         compare_parameter_warnings = _apply_compare_parameters(
-            compare_parameters,
+            opts.compare_parameters,
             layout_netlist,
             reference_netlist,
             compare_scoped_excluded,
@@ -2192,7 +2284,7 @@ def run_lvs(
         )
 
         ignore_mos_bulk_warnings = apply_ignore_mos_bulk(
-            ignore_mos_bulk, layout_netlist, reference_netlist
+            opts.ignore_mos_bulk, layout_netlist, reference_netlist
         )
 
         # Issue #2461: read the two netlists' device-class state *after* every
@@ -2256,11 +2348,11 @@ def run_lvs(
             comparer,
             layout_netlist,
             reference_netlist,
-            compare_timeout_s,
+            opts.compare_timeout_s,
             compare_context,
         )
 
-        if not compare_result and parameter_tolerance is not None:
+        if not compare_result and opts.parameter_tolerance is not None:
             # Issue #589: `options.parameter_tolerance` is opted in and the
             # engine said "mismatch". Snap every reference-side parameter whose
             # difference from its layout-side counterpart is within the
@@ -2272,13 +2364,14 @@ def run_lvs(
             # byte-identical to before.
             for _pass in range(_MAX_TOLERANCE_PASSES):
                 snaps = _collect_tolerance_snaps(
-                    logger, parameter_tolerance, excluded_parameters
+                    logger, opts.parameter_tolerance, excluded_parameters
                 )
                 if not snaps:
                     break
                 _apply_tolerance_snaps(reference_netlist, snaps)
                 tolerance_warnings.extend(
-                    _tolerance_disclosure(snap, parameter_tolerance) for snap in snaps
+                    _tolerance_disclosure(snap, opts.parameter_tolerance)
+                    for snap in snaps
                 )
                 logger = _make_compare_logger(layout_circuit, reference_circuit)
                 comparer = kdb.NetlistComparer(logger)
@@ -2322,7 +2415,7 @@ def run_lvs(
                     comparer,
                     layout_netlist,
                     reference_netlist,
-                    compare_timeout_s,
+                    opts.compare_timeout_s,
                     compare_context,
                 )
                 if compare_result or compare_timeout:
@@ -2358,7 +2451,7 @@ def run_lvs(
             ),
             first_pass_timeout=compare_timeout,
             anchor_top_level_pins=anchor_top_level_pins,
-            compare_timeout_s=compare_timeout_s,
+            compare_timeout_s=opts.compare_timeout_s,
             compare_context=compare_context,
         )
 
@@ -2458,7 +2551,7 @@ def run_lvs(
                 "its own device model and has no equivalent hook (see "
                 'docs/cli/lvs.md, "Engine")'
             )
-        if parameter_tolerance is not None:
+        if opts.parameter_tolerance is not None:
             # Issue #589: same boundary, for a concrete reason rather than an
             # arbitrary one. netgen's own per-property tolerances are declared
             # in its setup file as *absolute* per-device-class values
@@ -2477,7 +2570,7 @@ def run_lvs(
                 "'property ... tolerance' entries are absolute per-device-class "
                 'values, not a single relative one; see docs/cli/lvs.md, "Engine")'
             )
-        if compare_parameters:
+        if opts.compare_parameters:
             # Issue #1928: same boundary again -- `DeviceClass.enable_parameter`
             # is a `klayout.db`-side hook this module applies to the in-process
             # `NetlistComparer`'s own device classes, and netgen has no
@@ -2488,7 +2581,7 @@ def run_lvs(
                 "per-parameter compare-scoping hook (see docs/cli/lvs.md, "
                 '"Engine")'
             )
-        setup_file = _resolve_netgen_setup(options, request_dir)
+        setup_file = _resolve_netgen_setup(opts.options, request_dir)
         # Issue #2673: the same conversion-provenance + all-reference-
         # instances-zero proof the klayout branch applies, but with the
         # exclusion carried into netgen's own setup (`property ... delete`)
@@ -2501,13 +2594,15 @@ def run_lvs(
             mutate_classes=False,
             netgen_exclusions=netgen_exclusions,
         )
-        timeout_s = float(options.get("netgen_timeout_s", _NETGEN_DEFAULT_TIMEOUT_S))
+        timeout_s = float(
+            opts.options.get("netgen_timeout_s", _NETGEN_DEFAULT_TIMEOUT_S)
+        )
         # Issue #2373: resolve *which* netgen binary to run before launching
         # it (`options.netgen_binary` > `$KLT_NETGEN_BINARY` > `netgen` >
         # `netgen-lvs`), rather than hardcoding the name `netgen` -- the
         # resolved path is both what gets spawned and what
         # `environment.netgen_binary` records below.
-        netgen_binary = _resolve_netgen_binary(options, request_dir)
+        netgen_binary = _resolve_netgen_binary(opts.options, request_dir)
         status, mismatches, engine_version = _run_netgen_lvs(
             layout_netlist=layout_netlist,
             layout_circuit=layout_circuit,
@@ -2563,7 +2658,11 @@ def run_lvs(
     # engines converge, on the circuits actually compared (after any
     # flatten/prune) -- the same counts reported as `counts.pins`.
     status, strict_pin_findings = _strict_pin_count_check(
-        strict_top_level_pin_count, status, counts, layout_circuit, reference_circuit
+        opts.strict_top_level_pin_count,
+        status,
+        counts,
+        layout_circuit,
+        reference_circuit,
     )
     mismatches.extend(strict_pin_findings)
 
@@ -2807,7 +2906,9 @@ def run_lvs(
         # not apply.
         status = STATUS_INCONCLUSIVE
     status = _force_mismatch_on(status, unresolved_subckt_call_findings)
-    note_known_limit(mismatches, finfet_layout, status, reference_spec, layout_spec)
+    note_known_limit(
+        mismatches, opts.finfet_layout, status, reference_spec, layout_spec
+    )
 
     category_counts: dict[str, int] = {}
     # Issue #1132: `category_counts` alone collapses `error`/`warning`
@@ -2868,7 +2969,7 @@ def run_lvs(
         # under `provenance.deck.options`, matching `klt extract`'s
         # shape exactly (`_deck_block` omits the key entirely when
         # `deck_options` is `None`/empty).
-        deck_options=deck_options,
+        deck_options=opts.deck_options,
         # Issue #2394: ...and, identically to `klt extract`, record the
         # *fully resolved* option set (the deck's own defaults for every
         # key `layout.deck_options` did not pin) plus `options_explicit`/
@@ -2906,16 +3007,16 @@ def run_lvs(
         # purpose inline extraction read net/pin names from, per role) --
         # see `_label_layers_echo`. Absent when no override was applied, so
         # those reports stay byte-identical to before.
-        **_label_layers_echo(label_layers),
+        **_label_layers_echo(opts.label_layers),
         # Issue #4347: the applied `layout.def_net_names`/`def_pins` DEF-name
         # options. Absent when not requested (byte-identical reports).
-        **({"def_net_names": True} if def_net_names else {}),
-        **({"def_pins": def_pins_echo} if def_pins_echo is not None else {}),
+        **({"def_net_names": True} if opts.def_net_names else {}),
+        **({"def_pins": opts.def_pins_echo} if opts.def_pins_echo is not None else {}),
         # Issue #2853: the applied `layout.abstract_cells`/
         # `abstract_cell_lef` black-box abstraction and its per-cell report
         # -- see `_layout_abstraction_echo`. Absent when no abstraction was
         # requested, so those reports stay byte-identical to before.
-        **_layout_abstraction_echo(layout_abstraction, layout_abstracted_cells),
+        **_layout_abstraction_echo(opts.layout_abstraction, layout_abstracted_cells),
         "reference": reference_echo,
         "top": layout_circuit.name,
         # Issue #1205: the *reference* side's resolved top circuit name,
@@ -2939,7 +3040,7 @@ def run_lvs(
         # consumer reading only the response can tell whether a `"match"` was
         # reached under a caller-supplied design tolerance at all. `null` when
         # the option was omitted (today's exact-compare behaviour).
-        "parameter_tolerance": parameter_tolerance,
+        "parameter_tolerance": opts.parameter_tolerance,
         # Issue #1205: every request option that shapes *what was compared*,
         # echoed as resolved, so a committed report round-trips back into the
         # request it came from (`_reconstruct_lvs_request`) instead of being
@@ -2961,30 +3062,32 @@ def run_lvs(
         # names for issue #1370's list shape -- the same round-trip discipline
         # every other key here follows.
         "options": {
-            "combine_devices": combine_devices,
+            "combine_devices": opts.combine_devices,
             # Issue #1552: `null` when the option was omitted, else the
             # resolved `{<circuit-name-glob>: <bool>}` mapping -- the same
             # always-present-but-nullable convention `netgen_setup` already
             # follows, since (unlike `combine_devices`) there is no
             # meaningful default value to echo instead of the option being
             # absent.
-            "combine_devices_per_circuit": combine_devices_per_circuit,
+            "combine_devices_per_circuit": opts.combine_devices_per_circuit,
             # Issue #2682: the resolved retry budget (the parser's default
             # when omitted), echoed even when combining is off -- it
             # describes the configured budget, not retries consumed.
-            "combine_devices_max_attempts": combine_devices_max_attempts,
-            "flatten_layout": flatten_layout,
-            "flatten_reference": flatten_reference,
+            "combine_devices_max_attempts": opts.combine_devices_max_attempts,
+            "flatten_layout": opts.flatten_layout,
+            "flatten_reference": opts.flatten_reference,
             # Issue #4165: present only when the caller set it, so a request
             # without the option produces a byte-identical report.
-            **_compare_timeout_replay_options({"compare_timeout_s": compare_timeout_s}),
-            "netgen_setup": netgen_setup_echo,
-            "parameter_tolerance": parameter_tolerance,
+            **_compare_timeout_replay_options(
+                {"compare_timeout_s": opts.compare_timeout_s}
+            ),
+            "netgen_setup": opts.netgen_setup_echo,
+            "parameter_tolerance": opts.parameter_tolerance,
             # Issue #1928: `null` when the option was omitted, else the
             # resolved `{<device-class>: [<parameter>, ...]}` mapping -- the
             # same always-present-but-nullable convention
             # `combine_devices_per_circuit`/`netgen_setup` already follow.
-            "compare_parameters": compare_parameters,
+            "compare_parameters": opts.compare_parameters,
             # Issue #1952: `null` when the option was omitted (the check
             # still runs -- omitting it is the default-on case), else the
             # caller's own `true`/`false`/`{"expected_nets": {...}}` value
@@ -2992,7 +3095,7 @@ def run_lvs(
             # `combine_devices_per_circuit`/`netgen_setup` follow; echoed
             # unresolved so a committed report round-trips back into the
             # request document it came from.
-            "power_connectivity": power_connectivity_echo,
+            "power_connectivity": opts.power_connectivity_echo,
             # Issue #2692: `null` when the option was omitted (the
             # form-dependent default applies -- on for
             # `reference.form: "gate-level-verilog"`, off elsewhere), else the
@@ -3001,17 +3104,17 @@ def run_lvs(
             # so a committed report round-trips back into the request document
             # it came from; what this run actually *did* is reported as the
             # `topology.top_level_pins_anchored` disclosure in `mismatches[]`.
-            "anchor_top_level_pins": anchor_top_level_pins_echo,
+            "anchor_top_level_pins": opts.anchor_top_level_pins_echo,
             # Issue #2845: the effective boolean (`false` when omitted).
-            "strict_top_level_pin_count": strict_top_level_pin_count,
+            "strict_top_level_pin_count": opts.strict_top_level_pin_count,
             # Issue #3650: the effective boolean (`false` when omitted).
-            "compare_mos_flavour": compare_mos_flavour,
-            "ignore_mos_bulk": ignore_mos_bulk,
-            "supply_nets": supply_nets,
+            "compare_mos_flavour": opts.compare_mos_flavour,
+            "ignore_mos_bulk": opts.ignore_mos_bulk,
+            "supply_nets": opts.supply_nets,
             # Issue #2813: `null` when omitted, else the resolved
             # `{"nmos": <net>, "pmos": <net>}` bulk-tie policy (opt-in; the
             # applied ties are disclosed in `mismatches[]`).
-            "finfet_bulk": finfet_bulk,
+            "finfet_bulk": opts.finfet_bulk,
         },
         # Issue #1998: every `hints.equivalent_pins` grouping actually passed
         # to `NetlistComparer.equivalent_pins()` for this run, keyed by
