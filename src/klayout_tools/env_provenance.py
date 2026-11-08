@@ -74,6 +74,8 @@ import socket
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .env_provenance_walk import walk_lintable_string_fields
+
 __all__ = [
     "DEFAULT_HOST_ID_SALT",
     "ENVELOPE_LINT_RECOMMENDATION",
@@ -467,31 +469,6 @@ def _absolute_paths_in(text: str, allow_prefixes: tuple[str, ...]) -> list[str]:
     return found
 
 
-def _walk_string_fields(value: Any, path: str) -> Iterable[tuple[str, str]]:
-    """Every string in a JSON-decoded ``value`` as ``(dotted_field, text)``.
-
-    Mapping *keys* are yielded too (a dict keyed by an absolute path leaks
-    just as thoroughly as one valued by it), and list elements are addressed
-    by index -- the same dotted-path convention ``_report_verify
-    .diff_verdict_fields`` reports drift under, so a field named by one tool
-    is findable with the other.
-    """
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            child = f"{path}.{key}" if path else str(key)
-            if isinstance(key, str):
-                yield child, key
-            yield from _walk_string_fields(item, child)
-        return
-    if isinstance(value, (list, tuple)):
-        for index, item in enumerate(value):
-            child = f"{path}.{index}" if path else str(index)
-            yield from _walk_string_fields(item, child)
-        return
-    if isinstance(value, str):
-        yield (path or "<root>"), value
-
-
 def find_absolute_path_fields(
     payload: Any, *, allow_prefixes: Iterable[str] = ()
 ) -> list[dict[str, Any]]:
@@ -515,10 +492,13 @@ def find_absolute_path_fields(
 
     ``field`` is a dotted path (``provenance.input.path``,
     ``macros.0.lef``); a top-level bare string payload reports ``<root>``.
+
+    Remote-worker observations are skipped (issue #5133); see
+    :mod:`klayout_tools.env_provenance_walk`.
     """
     prefixes = tuple(allow_prefixes)
     findings: list[dict[str, Any]] = []
-    for field, text in _walk_string_fields(payload, ""):
+    for field, text in walk_lintable_string_fields(payload):
         for match in _absolute_paths_in(text, prefixes):
             findings.append({"field": field, "match": match})
     return findings
