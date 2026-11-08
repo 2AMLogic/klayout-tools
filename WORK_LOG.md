@@ -8,6 +8,11 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-08
 
+- **PR #5150**: feat: add opt-in request.adapt to klt sim for ASAP7 BSIM-CMG
+- **PR #5148**: chore: remove unused routing_pitch helper
+- **Issue #4693** (closed): Remove routing_pitch.py: library-only helper with no callers
+- **Issue #4233** (closed): Remove 8 passthrough _report_path wrappers over env_provenance.repo_relative_path
+- **Issue #3873** (closed): asap7_bsimcmg adapters have no runtime caller: wire into klt sim or demote to test helper
 - **PR #5142**: feat(sim): attribute batch modelname abort to the logged instance/model
 - **Issue #5138** (closed): klt sim --backend batch: gf180mcu deck that passes locally aborts on the fleet with 'could not find a valid modelname' despite the #4976 preflight
 - **PR #5140**: fix(pex): skip asap7 leg-netlist adaptation in extract-only and measure-command modes
