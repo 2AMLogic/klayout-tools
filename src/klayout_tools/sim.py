@@ -4837,31 +4837,14 @@ def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
 #: reports anything else as a warning (issue #3064) -- never an error, so no
 #: existing request starts failing.
 _KNOWN_REQUEST_KEYS = frozenset(
-    {
-        "analysis",
-        "analysis_steps",
-        "backend",
-        "batch",
-        "confidence",
-        "commands",
-        "corners",
-        "decks",
-        "engine",
-        "exclude",
-        "measurements",
-        "models",
-        "monte_carlo",
-        "netlist",
-        "netlist_overrides",
-        "netlist_source",
-        "options",
-        "remote",
-        "schema",
-        "schema_version",
-        "target_ci_halfwidth",
-        "_explicit_points",
-        sim_staging.STAGED_MODEL_INPUTS_FIELD,
-    }
+    (
+        "analysis analysis_steps analysis_overrides backend batch commands"
+        " confidence corners decks engine engine_version exclude"
+        " expect_netlist_identity measurements models monte_carlo netlist"
+        " netlist_overrides netlist_source options remote schema"
+        " schema_version target_ci_halfwidth _explicit_points"
+    ).split()
+    + [sim_staging.STAGED_MODEL_INPUTS_FIELD, sim_stimulus.REQUEST_KEY]
 )
 
 
