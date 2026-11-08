@@ -652,6 +652,7 @@
         "klayout_tools.sim_bin_range",
         "klayout_tools.sim_model_bins",
         "klayout_tools.sim_batch_async",
+        "klayout_tools.sim_batch_contract",
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_features",
         "klayout_tools.sim_batch_hints",
@@ -1827,6 +1828,12 @@
     },
     {
       "consumer": "klayout_tools.sim_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.sim_batch_contract",
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
