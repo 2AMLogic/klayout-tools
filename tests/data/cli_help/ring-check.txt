@@ -5,38 +5,14 @@ gap that connectivity and width/spacing rules pass. No extraction needed;
 headless. See docs/cli/ring-check.md.
 
 positional arguments:
-  file                  path to a GDSII or OASIS layout file
+  file path to a GDSII or OASIS layout file
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             check against a PDK's seal-ring rules (sg13g2, sky130,
-                        gf180mcu); exclusive with --layers; no published rules
-                        -> 'not_checked' (exit 4). Unknown PDK exits 1. See
-                        docs/cli/ring-check.md.
-  --layers LAYERS       ring layer set: a JSON file path, or an inline JSON
-                        array of [layer, datatype] pairs (e.g. '[[33, 0], [66,
-                        44]]'); their union must form the annulus. Required
-                        unless --pdk is given. Not validated by argparse -- an
-                        empty/malformed value exits 1 (docs/cli/ring-
-                        check.md), not usage-error exit 2.
-  --region REGION       optional clip window as an inline JSON array of four
-                        micrometre coordinates [left, bottom, right, top]
-                        (e.g. '[0, 0, 100, 100]') used to isolate one ring in
-                        a stream with other geometry on the same layers; omit
-                        to check every shape on the layer set
-  --top TOP             top cell to check when the stream has more than one;
-                        omit to check every top cell
-  --ignore-enclosed     ignore polygons enclosed in the ring's own hole (e.g.
-                        a guard ring around a device), which otherwise trip a
-                        spurious 'fragmented' violation; a real break in the
-                        perimeter still fails. Off by default (backward
-                        compatible).
-  --cells CELL          repeatable exact cell name; restrict the ring geometry
-                        to the subtrees of the named cells (every occurrence
-                        under each checked root, with placement transforms,
-                        plus all their descendants), excluding other shapes
-                        such as core routing on a shared layer. Unknown or
-                        empty names exit 1. Omit for no scope (backward
-                        compatible). Selection is coarse and does not imply
-                        electrical connectivity. See docs/cli/ring-check.md.
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk PDK check against a PDK's seal-ring rules (sg13g2, sky130, gf180mcu); exclusive with --layers; no published rules -> 'not_checked' (exit 4). Unknown PDK exits 1. See docs/cli/ring-check.md.
+  --layers LAYERS ring layer set: a JSON file path, or an inline JSON array of [layer, datatype] pairs (e.g. '[[33, 0], [66, 44]]'); their union must form the annulus. Required unless --pdk is given. Not validated by argparse -- an empty/malformed value exits 1 (docs/cli/ring- check.md), not usage-error exit 2.
+  --region REGION optional clip window as an inline JSON array of four micrometre coordinates [left, bottom, right, top] (e.g. '[0, 0, 100, 100]') used to isolate one ring in a stream with other geometry on the same layers; omit to check every shape on the layer set
+  --top TOP top cell to check when the stream has more than one; omit to check every top cell
+  --ignore-enclosed ignore polygons enclosed in the ring's own hole (e.g. a guard ring around a device), which otherwise trip a spurious 'fragmented' violation; a real break in the perimeter still fails. Off by default (backward compatible).
+  --cells CELL repeatable exact cell name; restrict the ring geometry to the subtrees of the named cells (every occurrence under each checked root, with placement transforms, plus all their descendants), excluding other shapes such as core routing on a shared layer. Unknown or empty names exit 1. Omit for no scope (backward compatible). Selection is coarse and does not imply electrical connectivity. See docs/cli/ring-check.md.
+  --format {text,json} output format (default: text)

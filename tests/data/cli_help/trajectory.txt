@@ -8,17 +8,10 @@ file: no live optimizer required, so a hand-written or human-curated log
 renders identically. See docs/cli/trajectory.md.
 
 positional arguments:
-  log                   path to a JSONL trajectory log (one record per line)
+  log path to a JSONL trajectory log (one record per line)
 
 options:
-  -h, --help            show this help message and exit
-  --threshold THRESHOLD
-                        objective-unit improvement a record must beat the
-                        best-prior record by (strictly) to count as a
-                        milestone (default: 0.0, so any strict improvement is
-                        a milestone)
-  --plot PLOT           also write the objective-vs-turn plot as a standalone
-                        SVG file to this path (for embedding in a README);
-                        omit to only emit it inline in the --format json
-                        payload
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --threshold THRESHOLD objective-unit improvement a record must beat the best-prior record by (strictly) to count as a milestone (default: 0.0, so any strict improvement is a milestone)
+  --plot PLOT also write the objective-vs-turn plot as a standalone SVG file to this path (for embedding in a README); omit to only emit it inline in the --format json payload
+  --format {text,json} output format (default: text)

@@ -5,15 +5,10 @@ identifies the caller by its network identity. Presigned URLs stay in-process
 and are never printed.
 
 positional arguments:
-  <subcommand>
-    put         store files and emit (or merge) manifest entries
-    get         fetch one object, writing it only if its sha256 verifies
-    verify      check every manifest entry's size and sha256 against the store
-    delete      delete stored objects through the broker (dry run unless
-                --yes)
+  <subcommand> put store files and emit (or merge) manifest entries get fetch one object, writing it only if its sha256 verifies verify check every manifest entry's size and sha256 against the store delete delete stored objects through the broker (dry run unless --yes)
 
 options:
-  -h, --help    show this help message and exit
+  -h, --help show this help message and exit
 
 --- klt artifact put ---
 
@@ -22,28 +17,20 @@ headers it returned, and emit one manifest entry per file. An object already
 stored is not re-sent and still succeeds.
 
 positional arguments:
-  FILE                  file(s) to store
+  FILE file(s) to store
 
 options:
-  -h, --help            show this help message and exit
-  --manifest PATH       merge the entries into this manifest JSON (created if
-                        absent)
+  -h, --help show this help message and exit
+  --manifest PATH merge the entries into this manifest JSON (created if absent)
   --kind {evidence}
-  --name NAME           entry name (single file only; default: the path
-                        relative to its git checkout)
-  --media-type MEDIA_TYPE
-                        entry media_type
-  --producer-tool PRODUCER_TOOL
-                        producer.tool (default: klt)
-  --producer-version PRODUCER_VERSION
-                        producer.version (default: this klt's version)
-  --commit COMMIT       producer.commit (default: git HEAD of the current
-                        directory)
-  --broker URL          artifact broker base URL (default:
-                        $KLT_ARTIFACT_BROKER)
-  --repo OWNER/NAME     repo the objects are stored under (default:
-                        $KLT_ARTIFACT_REPO, else the git origin remote)
-  --format {text,json}  output format (default: text)
+  --name NAME entry name (single file only; default: the path relative to its git checkout)
+  --media-type MEDIA_TYPE entry media_type
+  --producer-tool PRODUCER_TOOL producer.tool (default: klt)
+  --producer-version PRODUCER_VERSION producer.version (default: this klt's version)
+  --commit COMMIT producer.commit (default: git HEAD of the current directory)
+  --broker URL artifact broker base URL (default: $KLT_ARTIFACT_BROKER)
+  --repo OWNER/NAME repo the objects are stored under (default: $KLT_ARTIFACT_REPO, else the git origin remote)
+  --format {text,json} output format (default: text)
 
 --- klt artifact get ---
 
@@ -53,17 +40,15 @@ and the key's. `-o -` writes the verified bytes to stdout instead of a JSON
 envelope.
 
 positional arguments:
-  REF                   sha256 or MANIFEST[#SELECTOR]
+  REF sha256 or MANIFEST[#SELECTOR]
 
 options:
-  -h, --help            show this help message and exit
-  -o, --output OUTPUT   destination file, or - for stdout
-  --force               replace an existing output file
-  --broker URL          artifact broker base URL (default:
-                        $KLT_ARTIFACT_BROKER)
-  --repo OWNER/NAME     repo the objects are stored under (default:
-                        $KLT_ARTIFACT_REPO, else the git origin remote)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  -o, --output OUTPUT destination file, or - for stdout
+  --force replace an existing output file
+  --broker URL artifact broker base URL (default: $KLT_ARTIFACT_BROKER)
+  --repo OWNER/NAME repo the objects are stored under (default: $KLT_ARTIFACT_REPO, else the git origin remote)
+  --format {text,json} output format (default: text)
 
 --- klt artifact verify ---
 
@@ -74,10 +59,9 @@ positional arguments:
   MANIFEST
 
 options:
-  -h, --help            show this help message and exit
-  --broker URL          artifact broker base URL (default:
-                        $KLT_ARTIFACT_BROKER)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --broker URL artifact broker base URL (default: $KLT_ARTIFACT_BROKER)
+  --format {text,json} output format (default: text)
 
 --- klt artifact delete ---
 
@@ -88,16 +72,13 @@ unless --force-referenced. An absent object is success. The broker decides
 whether the caller may delete.
 
 positional arguments:
-  REF                   sha256 or MANIFEST[#SELECTOR]
+  REF sha256 or MANIFEST[#SELECTOR]
 
 options:
-  -h, --help            show this help message and exit
-  --keep MANIFEST       manifest whose objects must not be deleted
-                        (repeatable)
-  --yes                 actually delete (default: dry run)
-  --force-referenced    delete even objects a --keep manifest names
-  --broker URL          artifact broker base URL (default:
-                        $KLT_ARTIFACT_BROKER)
-  --repo OWNER/NAME     repo the objects are stored under (default:
-                        $KLT_ARTIFACT_REPO, else the git origin remote)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --keep MANIFEST manifest whose objects must not be deleted (repeatable)
+  --yes actually delete (default: dry run)
+  --force-referenced delete even objects a --keep manifest names
+  --broker URL artifact broker base URL (default: $KLT_ARTIFACT_BROKER)
+  --repo OWNER/NAME repo the objects are stored under (default: $KLT_ARTIFACT_REPO, else the git origin remote)
+  --format {text,json} output format (default: text)

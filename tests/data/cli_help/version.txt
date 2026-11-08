@@ -8,5 +8,5 @@ an unrecoverable identity is reported as `X.Y.Z.dev0+unknown` with
 `is_release: null`, not as an error.
 
 options:
-  -h, --help            show this help message and exit
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --format {text,json} output format (default: text)

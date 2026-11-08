@@ -10,26 +10,12 @@ check.md for the CLI surface. Runs fully headless via KLayout's native batch
 database API -- no GUI, no Qt.
 
 positional arguments:
-  file                  path to a GDSII or OASIS layout file
+  file path to a GDSII or OASIS layout file
 
 options:
-  -h, --help            show this help message and exit
-  --socket SOCKET       path to a socket descriptor JSON file (see
-                        docs/schemas/socket.schema.json). Not validated by
-                        argparse -- a missing/malformed descriptor exits 1
-                        with a clean error, per docs/cli/socket-check.md's
-                        exit-code contract, rather than argparse's usage-error
-                        exit 2.
-  --top TOP             top cell to check when the stream has more than one;
-                        omit to check every top cell
-  --require-power-ports
-                        run the power_ports check (issue #2839) even when the
-                        descriptor declares no 'power_ports' object: every
-                        POWER/GROUND pin name needs an edge-accessible port,
-                        and at least one POWER and one GROUND pin must be
-                        declared. See docs/cli/socket-check.md.
-  --edge-band-um UM     power_ports edge band in micrometres, overriding the
-                        descriptor's power_ports.edge_band_um (default 0: the
-                        port must touch the outline; provisional, see
-                        docs/cli/socket-check.md)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --socket SOCKET path to a socket descriptor JSON file (see docs/schemas/socket.schema.json). Not validated by argparse -- a missing/malformed descriptor exits 1 with a clean error, per docs/cli/socket-check.md's exit-code contract, rather than argparse's usage-error exit 2.
+  --top TOP top cell to check when the stream has more than one; omit to check every top cell
+  --require-power-ports run the power_ports check (issue #2839) even when the descriptor declares no 'power_ports' object: every POWER/GROUND pin name needs an edge-accessible port, and at least one POWER and one GROUND pin must be declared. See docs/cli/socket-check.md.
+  --edge-band-um UM power_ports edge band in micrometres, overriding the descriptor's power_ports.edge_band_um (default 0: the port must touch the outline; provisional, see docs/cli/socket-check.md)
+  --format {text,json} output format (default: text)

@@ -4,20 +4,12 @@ recomputes metrics ad hoc -- it calls the same library functions that back klt
 layers/klt cells/klt drc.
 
 positional arguments:
-  block                 path to a block directory (e.g. blocks/example-block)
+  block path to a block directory (e.g. blocks/example-block)
 
 options:
-  -h, --help            show this help message and exit
-  --deck DECK           DRC deck to run for the drc.violation_count field
-                        (currently: gf180mcu, sg13cmos5l, sg13g2, sky130).
-                        Omit to skip DRC entirely.
-  --pdk PDK             PDK family this block targets, recorded verbatim as
-                        the pdk field (currently: asap7, gf180mcu, sg13cmos5l,
-                        sg13g2, sky130). Omit to leave the field out --
-                        nothing in a block directory identifies its PDK, so it
-                        is never inferred. Unlike --deck, an unknown name
-                        exits 1 rather than being silently dropped.
-  --output, -o OUTPUT   override the output path (default:
-                        <block>/output/layout.json)
-  --dry-run             print layout.json without writing any file
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --deck DECK DRC deck to run for the drc.violation_count field (currently: gf180mcu, sg13cmos5l, sg13g2, sky130). Omit to skip DRC entirely.
+  --pdk PDK PDK family this block targets, recorded verbatim as the pdk field (currently: asap7, gf180mcu, sg13cmos5l, sg13g2, sky130). Omit to leave the field out -- nothing in a block directory identifies its PDK, so it is never inferred. Unlike --deck, an unknown name exits 1 rather than being silently dropped.
+  --output, -o OUTPUT override the output path (default: <block>/output/layout.json)
+  --dry-run print layout.json without writing any file
+  --format {text,json} output format (default: text)

@@ -11,25 +11,10 @@ cocotb (`pip install cocotb`) plus an `iverilog` or `verilator` binary on
 document (like `klt lvs`/`klt sim`), not positional RTL file args.
 
 positional arguments:
-  request               klt functional-verification request: a path to a JSON
-                        file, '-' to read the request from stdin, or an inline
-                        JSON object string
+  request klt functional-verification request: a path to a JSON file, '-' to read the request from stdin, or an inline JSON object string
 
 options:
-  -h, --help            show this help message and exit
-  --mutations PROPOSALS_PATH
-                        run mutation testing (issue #1592): a path to a
-                        <proposals> JSON document (schema
-                        klt.functional_verification.mutation_proposals/1)
-                        naming byte-exact source mutations to apply, one at a
-                        time, to an isolated build+test of the same <request>.
-                        Aborts with exit 1 if the request's own baseline run
-                        fails first -- see docs/cli/functional-
-                        verification.md, '--mutations'
-  -o, --outdir OUTDIR   write run artifacts (results XML, logs, simulator
-                        build directory, coverage, trace, mutants/) here
-                        instead of `.klt/functional-verification/` next to the
-                        request file; created if missing, relative paths
-                        resolve against the cwd. Request-relative source paths
-                        still resolve against the request's own directory
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --mutations PROPOSALS_PATH run mutation testing (issue #1592): a path to a <proposals> JSON document (schema klt.functional_verification.mutation_proposals/1) naming byte-exact source mutations to apply, one at a time, to an isolated build+test of the same <request>. Aborts with exit 1 if the request's own baseline run fails first -- see docs/cli/functional- verification.md, '--mutations'
+  -o, --outdir OUTDIR write run artifacts (results XML, logs, simulator build directory, coverage, trace, mutants/) here instead of `.klt/functional-verification/` next to the request file; created if missing, relative paths resolve against the cwd. Request-relative source paths still resolve against the request's own directory
+  --format {text,json} output format (default: text)

@@ -5,16 +5,10 @@ models with ngspice -- never a closed-form surrogate as the final word. Phase
 request/response contract.
 
 positional arguments:
-  request               path to a klt size request JSON file
+  request path to a klt size request JSON file
 
 options:
-  -h, --help            show this help message and exit
-  -o, --outdir OUTDIR   override where the generated decks/logs are written
-                        when the request sets options.keep_artifacts (default:
-                        a `.klt/size/` directory next to the request file)
-  --timeout-s TIMEOUT_S
-                        wall-clock budget in seconds for each ngspice
-                        invocation (default: 180, or the request's
-                        `options.timeout_s`); overrides the request field when
-                        given. See docs/cli/size.md.
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  -o, --outdir OUTDIR override where the generated decks/logs are written when the request sets options.keep_artifacts (default: a `.klt/size/` directory next to the request file)
+  --timeout-s TIMEOUT_S wall-clock budget in seconds for each ngspice invocation (default: 180, or the request's `options.timeout_s`); overrides the request field when given. See docs/cli/size.md.
+  --format {text,json} output format (default: text)

@@ -7,13 +7,8 @@ emits GitHub Flavored Markdown suitable for `$GITHUB_STEP_SUMMARY`. See
 docs/cli/report.md.
 
 positional arguments:
-  files                 path(s) to klt JSON envelope files, or '-' to read one
-                        from stdin
+  files path(s) to klt JSON envelope files, or '-' to read one from stdin
 
 options:
-  -h, --help            show this help message and exit
-  --format {text,json,github-summary}
-                        output format (default: text). github-summary emits
-                        GitHub Flavored Markdown; json emits this command's
-                        own JSON envelope (including the rendered markdown),
-                        per docs/json-contract.md.
+  -h, --help show this help message and exit
+  --format {text,json,github-summary} output format (default: text). github-summary emits GitHub Flavored Markdown; json emits this command's own JSON envelope (including the rendered markdown), per docs/json-contract.md.

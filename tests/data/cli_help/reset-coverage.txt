@@ -6,17 +6,13 @@ naming no unreset element fails (exit 3). Read-only, headless. See
 docs/cli/reset-coverage.md.
 
 positional arguments:
-  netlist               path to a flat gate-level Verilog netlist
+  netlist path to a flat gate-level Verilog netlist
 
 options:
-  -h, --help            show this help message and exit
-  --cell-models FILE    PDK functional Verilog cell-model file (repeatable)
-  --reset-port RESET_PORT
-                        name of the reset port of the top module
-  --reset-polarity {low,high}
-                        level at which the reset port is asserted (default:
-                        low)
-  --top TOP             top module (required when the netlist has several)
-  --waivers FILE        JSON waiver file: {"waivers": [{"instance",
-                        "justification", "reason"?}]}
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --cell-models FILE PDK functional Verilog cell-model file (repeatable)
+  --reset-port RESET_PORT name of the reset port of the top module
+  --reset-polarity {low,high} level at which the reset port is asserted (default: low)
+  --top TOP top module (required when the netlist has several)
+  --waivers FILE JSON waiver file: {"waivers": [{"instance", "justification", "reason"?}]}
+  --format {text,json} output format (default: text)

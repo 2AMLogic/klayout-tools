@@ -4,9 +4,9 @@ the same expansion `klt sim` runs. Monte Carlo and deck-list requests are
 refused. See docs/cli/sim.md 'Planning shards'.
 
 positional arguments:
-  request               klt sim request JSON to split
+  request klt sim request JSON to split
 
 options:
-  -h, --help            show this help message and exit
-  --axis {process}      axis to shard by (default: process)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --axis {process} axis to shard by (default: process)
+  --format {text,json} output format (default: text)

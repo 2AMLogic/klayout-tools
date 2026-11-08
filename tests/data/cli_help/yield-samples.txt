@@ -10,20 +10,11 @@ not run simulations or grade yield. See docs/cli/yield.md's 'Deriving a sample
 set from two `klt sim` reports'.
 
 positional arguments:
-  nominal               path to the nominal campaign's `klt sim --format json`
-                        Monte Carlo report
+  nominal path to the nominal campaign's `klt sim --format json` Monte Carlo report
 
 options:
-  -h, --help            show this help message and exit
-  --negative-control REPORT
-                        path to the seeded known-bad variant's own `klt sim
-                        --format json` Monte Carlo report; its draw becomes
-                        each matched measurement's negative_control
-  --description DESCRIPTION
-                        optional description of the deliberate defect,
-                        recorded as every derived negative_control's
-                        description
-  --measurement NAME    derive only this nominal measurement; repeatable, and
-                        comma-separated names are accepted (default: every
-                        measurement in the nominal report's rollup)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --negative-control REPORT path to the seeded known-bad variant's own `klt sim --format json` Monte Carlo report; its draw becomes each matched measurement's negative_control
+  --description DESCRIPTION optional description of the deliberate defect, recorded as every derived negative_control's description
+  --measurement NAME derive only this nominal measurement; repeatable, and comma-separated names are accepted (default: every measurement in the nominal report's rollup)
+  --format {text,json} output format (default: text)

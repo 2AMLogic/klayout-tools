@@ -12,37 +12,16 @@ tools[yield]'`, as for `klt yield`) -- see docs/cli/yield.md#building-the-
 native-extension.
 
 positional arguments:
-  spec                  path to a campaign spec JSON file; see
-                        docs/cli/yield.md
+  spec path to a campaign spec JSON file; see docs/cli/yield.md
 
 options:
-  -h, --help            show this help message and exit
-  -o, --out-dir OUT_DIR
-                        directory to write the dispatched `klt sim` request,
-                        its report, and artifacts into (default: a
-                        `.klt/yield-campaign/` directory next to the spec
-                        file)
-  --backend BACKEND     execution backend for the campaign's `klt sim`
-                        dispatch (default: local, or the spec's own `backend`
-                        field); see docs/cli/sim.md
-  --hosts HOSTS         shard the campaign's corner/Monte-Carlo-sample grid
-                        across this many hosts (default: 1, or the spec's own
-                        `remote.hosts` field); see docs/cli/sim.md's 'Fleet
-                        sharding' section
-  --seed SEED           override the campaign's Monte Carlo seed (default: the
-                        spec's own `monte_carlo.seed`, or one derived
-                        deterministically from the spec's own content)
-  --confidence CONFIDENCE
-                        two-sided confidence level for every reported
-                        interval, strictly between 0 and 1 (default: 0.95, or
-                        the spec's own 'confidence' field)
-  --target-ci-halfwidth TARGET_CI_HALFWIDTH
-                        half-width, in absolute yield, the sample-size verdict
-                        is measured against (default: 0.01, or the spec's own
-                        'target_ci_halfwidth' field)
-  --min-samples MIN_SAMPLES
-                        minimum usable samples per measurement (default: 2, or
-                        the spec's own 'min_samples' field)
-  --measurement NAME    restrict the analysis to this measurement; repeatable,
-                        and comma-separated names are accepted
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  -o, --out-dir OUT_DIR directory to write the dispatched `klt sim` request, its report, and artifacts into (default: a `.klt/yield-campaign/` directory next to the spec file)
+  --backend BACKEND execution backend for the campaign's `klt sim` dispatch (default: local, or the spec's own `backend` field); see docs/cli/sim.md
+  --hosts HOSTS shard the campaign's corner/Monte-Carlo-sample grid across this many hosts (default: 1, or the spec's own `remote.hosts` field); see docs/cli/sim.md's 'Fleet sharding' section
+  --seed SEED override the campaign's Monte Carlo seed (default: the spec's own `monte_carlo.seed`, or one derived deterministically from the spec's own content)
+  --confidence CONFIDENCE two-sided confidence level for every reported interval, strictly between 0 and 1 (default: 0.95, or the spec's own 'confidence' field)
+  --target-ci-halfwidth TARGET_CI_HALFWIDTH half-width, in absolute yield, the sample-size verdict is measured against (default: 0.01, or the spec's own 'target_ci_halfwidth' field)
+  --min-samples MIN_SAMPLES minimum usable samples per measurement (default: 2, or the spec's own 'min_samples' field)
+  --measurement NAME restrict the analysis to this measurement; repeatable, and comma-separated names are accepted
+  --format {text,json} output format (default: text)

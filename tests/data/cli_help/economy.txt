@@ -4,52 +4,20 @@ margins, and optional area-budget/reference-area and AREA-EFF (issue #1086)
 bounds checks for one top cell of a GDSII or OASIS layout stream.
 
 positional arguments:
-  file                  path to a GDSII or OASIS layout file
+  file path to a GDSII or OASIS layout file
 
 options:
-  -h, --help            show this help message and exit
-  --top TOP             top cell to report on when the stream has more than
-                        one (required in that case; optional otherwise)
-  --grid-cols GRID_COLS
-                        whitespace-grid column count (default: 4)
-  --grid-rows GRID_ROWS
-                        whitespace-grid row count (default: 4)
-  --max-empty-regions MAX_EMPTY_REGIONS
-                        cap on how many largest empty regions to report
-                        (default: 10)
-  --budget-um2 BUDGET_UM2
-                        area budget in square micrometres; when given, reports
-                        a PASS/FAIL 'budget' block against the top cell's bbox
-                        area
-  --reference-area-um2 REFERENCE_AREA_UM2
-                        a comparable hand-designed reference's area in square
-                        micrometres; when given, reports a 'reference' block
-                        with the ratio to the top cell's bbox area
-  --area-eff-max-dead-margin-um AREA_EFF_MAX_DEAD_MARGIN_UM
-                        AREA-EFF hard bound (issue #1086): cap in micrometres
-                        on any single edge of dead_margins_um; when given,
-                        adds an 'area_eff' block with a 'dead_margins'
-                        PASS/FAIL check
-  --area-eff-min-utilization AREA_EFF_MIN_UTILIZATION
-                        AREA-EFF calibrated bound (issue #1086): per-block-
-                        kind utilization floor (see the economy-review skill's
-                        rubric table); when given, adds an 'area_eff' block
-                        with a 'utilization' PASS/FAIL check
-  --area-eff-max-empty-region-fraction AREA_EFF_MAX_EMPTY_REGION_FRACTION
-                        AREA-EFF hard bound (issue #1086): cap on the largest
-                        single empty region's area as a fraction of the top
-                        cell's bbox area; when given, adds an 'area_eff' block
-                        with a 'largest_empty_region_fraction' PASS/FAIL check
-  --area-eff-require-bbox-tightness
-                        AREA-EFF hard bound (issue #1086): require
-                        bbox_tightness == 1.0; when given, adds an 'area_eff'
-                        block with a 'bbox_tightness' PASS/FAIL check
-  --what-if MOVES_JSON  what-if floorplan estimate (issue #4661): apply
-                        instance moves and cell reshapes from MOVES_JSON to an
-                        in-memory copy and report the same figures plus a
-                        'what_if' block (overlaps, broken contacts); writes
-                        nothing, runs no DRC, legality is never checked
-  --attribute           add an 'attribution' block partitioning the top cell's
-                        bbox into direct child instance bboxes and labelled
-                        gap components (issue #4660)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --top TOP top cell to report on when the stream has more than one (required in that case; optional otherwise)
+  --grid-cols GRID_COLS whitespace-grid column count (default: 4)
+  --grid-rows GRID_ROWS whitespace-grid row count (default: 4)
+  --max-empty-regions MAX_EMPTY_REGIONS cap on how many largest empty regions to report (default: 10)
+  --budget-um2 BUDGET_UM2 area budget in square micrometres; when given, reports a PASS/FAIL 'budget' block against the top cell's bbox area
+  --reference-area-um2 REFERENCE_AREA_UM2 a comparable hand-designed reference's area in square micrometres; when given, reports a 'reference' block with the ratio to the top cell's bbox area
+  --area-eff-max-dead-margin-um AREA_EFF_MAX_DEAD_MARGIN_UM AREA-EFF hard bound (issue #1086): cap in micrometres on any single edge of dead_margins_um; when given, adds an 'area_eff' block with a 'dead_margins' PASS/FAIL check
+  --area-eff-min-utilization AREA_EFF_MIN_UTILIZATION AREA-EFF calibrated bound (issue #1086): per-block- kind utilization floor (see the economy-review skill's rubric table); when given, adds an 'area_eff' block with a 'utilization' PASS/FAIL check
+  --area-eff-max-empty-region-fraction AREA_EFF_MAX_EMPTY_REGION_FRACTION AREA-EFF hard bound (issue #1086): cap on the largest single empty region's area as a fraction of the top cell's bbox area; when given, adds an 'area_eff' block with a 'largest_empty_region_fraction' PASS/FAIL check
+  --area-eff-require-bbox-tightness AREA-EFF hard bound (issue #1086): require bbox_tightness == 1.0; when given, adds an 'area_eff' block with a 'bbox_tightness' PASS/FAIL check
+  --what-if MOVES_JSON what-if floorplan estimate (issue #4661): apply instance moves and cell reshapes from MOVES_JSON to an in-memory copy and report the same figures plus a 'what_if' block (overlaps, broken contacts); writes nothing, runs no DRC, legality is never checked
+  --attribute add an 'attribution' block partitioning the top cell's bbox into direct child instance bboxes and labelled gap components (issue #4660)
+  --format {text,json} output format (default: text)

@@ -12,19 +12,10 @@ before returning -- a hard failure on a non-equivalent verdict, never a silent
 warning (#704 Phase 2c, issue #875).
 
 positional arguments:
-  request               path to a klt.synth.techmap.request/1 JSON file
+  request path to a klt.synth.techmap.request/1 JSON file
 
 options:
-  -h, --help            show this help message and exit
-  --verify-equivalence  gate the mapped netlist through `klt equiv` against
-                        the pre-mapping generic netlist before returning -- a
-                        non-equivalent or inconclusive verdict is a hard
-                        failure (exit 1), never a silent warning.
-                        Combinational designs only (klt equiv's own Phase 0
-                        scope, #707); off by default.
-  --equiv-timeout-s EQUIV_TIMEOUT_S
-                        overall wall-clock timeout in seconds for the
-                        `--verify-equivalence` proof (default: klt equiv's own
-                        60s default); has no effect unless `--verify-
-                        equivalence` is given.
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --verify-equivalence gate the mapped netlist through `klt equiv` against the pre-mapping generic netlist before returning -- a non-equivalent or inconclusive verdict is a hard failure (exit 1), never a silent warning. Combinational designs only (klt equiv's own Phase 0 scope, #707); off by default.
+  --equiv-timeout-s EQUIV_TIMEOUT_S overall wall-clock timeout in seconds for the `--verify-equivalence` proof (default: klt equiv's own 60s default); has no effect unless `--verify- equivalence` is given.
+  --format {text,json} output format (default: text)

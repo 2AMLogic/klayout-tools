@@ -6,11 +6,11 @@ control-event sequence is correctly ordered. Any violation fails (exit 3).
 Read-only, headless. See docs/cli/power-intent.md.
 
 positional arguments:
-  netlist               path to a flat gate-level Verilog netlist
+  netlist path to a flat gate-level Verilog netlist
 
 options:
-  -h, --help            show this help message and exit
-  --intent FILE         JSON power-intent file
-  --cell-models FILE    PDK functional Verilog cell-model file (repeatable)
-  --top TOP             top module (required when the netlist has several)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --intent FILE JSON power-intent file
+  --cell-models FILE PDK functional Verilog cell-model file (repeatable)
+  --top TOP top module (required when the netlist has several)
+  --format {text,json} output format (default: text)

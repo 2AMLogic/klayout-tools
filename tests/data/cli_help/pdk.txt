@@ -5,27 +5,10 @@ tool imports instead of re-implementing the lookup. Fully headless; safe in
 CI.
 
 positional arguments:
-  <subcommand>
-    find         resolve one PDK install/variant and report its paths
-    list         enumerate every PDK install and variant discovered
-    env          emit the resolved paths as eval-able shell exports
-    check        resolve one PDK install/variant and flag dangling symlinks
-    cells        report standard-cell library device flavor(s) / nominal
-                 supply
-    macros       report hard-macro IP libraries (`*_fd_ip_*` or lef+lib) and
-                 their views
-    decks        list the KLayout DRC decks a PDK ships and the -rd globals
-                 each reads
-    corners      report SPICE process corners and which device families they
-                 skew
-    em-limits    report per-layer electromigration current-density limits
-    pcell-check  probe whether the resolved variant's own KLayout PCell
-                 packages are importable here
-    stackup      report the variant's process cross-section (elevation,
-                 thickness, permittivity, conductivity)
+  <subcommand> find resolve one PDK install/variant and report its paths list enumerate every PDK install and variant discovered env emit the resolved paths as eval-able shell exports check resolve one PDK install/variant and flag dangling symlinks cells report standard-cell library device flavor(s) / nominal supply macros report hard-macro IP libraries (`*_fd_ip_*` or lef+lib) and their views decks list the KLayout DRC decks a PDK ships and the -rd globals each reads corners report SPICE process corners and which device families they skew em-limits report per-layer electromigration current-density limits pcell-check probe whether the resolved variant's own KLayout PCell packages are importable here stackup report the variant's process cross-section (elevation, thickness, permittivity, conductivity)
 
 options:
-  -h, --help     show this help message and exit
+  -h, --help show this help message and exit
 
 --- klt pdk find ---
 
@@ -34,16 +17,11 @@ and emit its root, variant, version, how it was resolved, and its per-tool
 asset directories.
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             variant to resolve (e.g. sky130A); overrides $PDK
-  --pdk-root PDK_ROOT   explicit install root; overrides $PDK_ROOT and the
-                        search order
-  --expect-version STAMP_OR_SHA
-                        assert the installed PDK identity: an open_pdks commit
-                        SHA (>= 7 hex) or SOURCES stamp, or a fetched-version
-                        string. Exit 6 (payload still emitted) on mismatch or
-                        unknown identity
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT explicit install root; overrides $PDK_ROOT and the search order
+  --expect-version STAMP_OR_SHA assert the installed PDK identity: an open_pdks commit SHA (>= 7 hex) or SOURCES stamp, or a fetched-version string. Exit 6 (payload still emitted) on mismatch or unknown identity
+  --format {text,json} output format (default: text)
 
 --- klt pdk list ---
 
@@ -51,9 +29,9 @@ Enumerate every install and variant found across the full search order. An
 empty result is success (exit 0), not an error.
 
 options:
-  -h, --help            show this help message and exit
-  --pdk-root PDK_ROOT   restrict the scan to this install root
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk-root PDK_ROOT restrict the scan to this install root
+  --format {text,json} output format (default: text)
 
 --- klt pdk env ---
 
@@ -62,12 +40,10 @@ an interactive simulator or schematic-editor session uses the same install the
 automated tooling picked. --format json emits the same payload as `find`.
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             variant to resolve (e.g. sky130A); overrides $PDK
-  --pdk-root PDK_ROOT   explicit install root; overrides $PDK_ROOT and the
-                        search order
-  --format {text,json}  output format (default: text; text emits shell
-                        exports)
+  -h, --help show this help message and exit
+  --pdk PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT explicit install root; overrides $PDK_ROOT and the search order
+  --format {text,json} output format (default: text; text emits shell exports)
 
 --- klt pdk check ---
 
@@ -80,16 +56,11 @@ into a sibling `ihp-sg13g2` checkout the install does not contain.
 `check` is the scriptable CI gate that catches part of it being unusable.
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             variant to resolve (e.g. sky130A); overrides $PDK
-  --pdk-root PDK_ROOT   explicit install root; overrides $PDK_ROOT and the
-                        search order
-  --expect-version STAMP_OR_SHA
-                        assert the installed PDK identity: an open_pdks commit
-                        SHA (>= 7 hex) or SOURCES stamp, or a fetched-version
-                        string. Exit 6 (payload still emitted) on mismatch or
-                        unknown identity
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT explicit install root; overrides $PDK_ROOT and the search order
+  --expect-version STAMP_OR_SHA assert the installed PDK identity: an open_pdks commit SHA (>= 7 hex) or SOURCES stamp, or a fetched-version string. Exit 6 (payload still emitted) on mismatch or unknown identity
+  --format {text,json} output format (default: text)
 
 --- klt pdk cells ---
 
@@ -101,14 +72,11 @@ compatibility verdict and exits non-zero (3) when no library matches, so this
 can gate CI.
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             variant to resolve (e.g. sky130A); overrides $PDK
-  --pdk-root PDK_ROOT   explicit install root; overrides $PDK_ROOT and the
-                        search order
-  --supply SUPPLY       caller-stated supply in volts; adds a compatibility
-                        verdict per library and exits 3 when no library is
-                        compatible
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT explicit install root; overrides $PDK_ROOT and the search order
+  --supply SUPPLY caller-stated supply in volts; adds a compatibility verdict per library and exits 3 when no library is compatible
+  --format {text,json} output format (default: text)
 
 --- klt pdk macros ---
 
@@ -120,11 +88,10 @@ to `klt pdk cells`, which deliberately excludes these libraries -- see `klt
 pdk cells --help`.
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             variant to resolve (e.g. sky130A); overrides $PDK
-  --pdk-root PDK_ROOT   explicit install root; overrides $PDK_ROOT and the
-                        search order
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT explicit install root; overrides $PDK_ROOT and the search order
+  --format {text,json} output format (default: text)
 
 --- klt pdk decks ---
 
@@ -135,11 +102,10 @@ best-effort static scan of the `-rd` globals each consumes
 --deck-file` and the `--deck-var` flags it needs.
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             variant to resolve (e.g. sky130A); overrides $PDK
-  --pdk-root PDK_ROOT   explicit install root; overrides $PDK_ROOT and the
-                        search order
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT explicit install root; overrides $PDK_ROOT and the search order
+  --format {text,json} output format (default: text)
 
 --- klt pdk corners ---
 
@@ -152,11 +118,10 @@ leaves one or more families at typical -- the silent-typical bug this command
 exists to surface.
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             variant to resolve (e.g. gf180mcuD); overrides $PDK
-  --pdk-root PDK_ROOT   explicit install root; overrides $PDK_ROOT and the
-                        search order
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk PDK variant to resolve (e.g. gf180mcuD); overrides $PDK
+  --pdk-root PDK_ROOT explicit install root; overrides $PDK_ROOT and the search order
+  --format {text,json} output format (default: text)
 
 --- klt pdk em-limits ---
 
@@ -170,11 +135,10 @@ diffusion/poly contact layer) is reported with an explicit 'not shipped'
 result rather than being silently omitted.
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             variant to resolve (e.g. gf180mcuD); overrides $PDK
-  --pdk-root PDK_ROOT   explicit install root; overrides $PDK_ROOT and the
-                        search order
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk PDK variant to resolve (e.g. gf180mcuD); overrides $PDK
+  --pdk-root PDK_ROOT explicit install root; overrides $PDK_ROOT and the search order
+  --format {text,json} output format (default: text)
 
 --- klt pdk pcell-check ---
 
@@ -190,11 +154,10 @@ invoke `klt gen` at all. A PDK shipping no PyCell library at all is still exit
 0 -- there is nothing to import.
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             variant to resolve (e.g. ihp-sg13g2); overrides $PDK
-  --pdk-root PDK_ROOT   explicit install root; overrides $PDK_ROOT and the
-                        search order
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk PDK variant to resolve (e.g. ihp-sg13g2); overrides $PDK
+  --pdk-root PDK_ROOT explicit install root; overrides $PDK_ROOT and the search order
+  --format {text,json} output format (default: text)
 
 --- klt pdk stackup ---
 
@@ -210,21 +173,9 @@ family table whose published, open sources each entry cites (see
 an explicit error, not a partial stack.
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             variant to resolve (e.g. sky130A); overrides $PDK
-  --pdk-root PDK_ROOT   explicit install root; overrides $PDK_ROOT and the
-                        search order
-  --corner CORNER       tech-LEF parasitic corner to read thickness/resistance
-                        from (default: nom); real sky130 installs ship
-                        min/nom/max and their sheet resistances differ by
-                        corner
-  --thickness {curated,tech-lef}
-                        which published film thickness drives the emitted
-                        geometry (default: curated). `curated` keeps the stack
-                        gap-free (each level's z1 is exactly the next level's
-                        z0); `tech-lef` uses the install's own declared
-                        THICKNESS, which in real sky130 installs is ~10 nm
-                        thinner and so leaves each metal short of the via
-                        above it. Both readings are reported either way
-                        (curated_thickness_um / lef_thickness_um)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT explicit install root; overrides $PDK_ROOT and the search order
+  --corner CORNER tech-LEF parasitic corner to read thickness/resistance from (default: nom); real sky130 installs ship min/nom/max and their sheet resistances differ by corner
+  --thickness {curated,tech-lef} which published film thickness drives the emitted geometry (default: curated). `curated` keeps the stack gap-free (each level's z1 is exactly the next level's z0); `tech-lef` uses the install's own declared THICKNESS, which in real sky130 installs is ~10 nm thinner and so leaves each metal short of the via above it. Both readings are reported either way (curated_thickness_um / lef_thickness_um)
+  --format {text,json} output format (default: text)

@@ -32,11 +32,10 @@ request/response contract. Runs `openroad` as a subprocess -- requires an
 and-route`/`klt synthesize`), not positional file args.
 
 positional arguments:
-  request               path to a klt sta request JSON file
+  request path to a klt sta request JSON file
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             PDK variant to resolve (e.g. sky130A); overrides $PDK
-  --pdk-root PDK_ROOT   explicit PDK install root; overrides $PDK_ROOT and the
-                        search order
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk PDK PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT explicit PDK install root; overrides $PDK_ROOT and the search order
+  --format {text,json} output format (default: text)

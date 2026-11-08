@@ -15,15 +15,9 @@ arm64, else build from a checkout -- see docs/cli/yield.md#building-the-
 native-extension).
 
 positional arguments:
-  samples               path to a sensitivity sample document
-                        ({'measurements': [{'name', 'samples': [{'parameters':
-                        {name: value, ...}, 'output': value}, ...]}, ...]}) --
-                        see docs/cli/yield-sensitivity.md
+  samples path to a sensitivity sample document ({'measurements': [{'name', 'samples': [{'parameters': {name: value, ...}, 'output': value}, ...]}, ...]}) -- see docs/cli/yield-sensitivity.md
 
 options:
-  -h, --help            show this help message and exit
-  --measurement NAME    restrict the analysis to this measurement; repeatable,
-                        and comma-separated names are accepted. A named
-                        measurement absent from the document is an error
-                        rather than a silent skip
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --measurement NAME restrict the analysis to this measurement; repeatable, and comma-separated names are accepted. A named measurement absent from the document is an error rather than a silent skip
+  --format {text,json} output format (default: text)

@@ -14,12 +14,9 @@ yield-sensitivity` already reserves for it (docs/cli/yield-sensitivity.md's
 see docs/cli/design-centering.md.
 
 positional arguments:
-  request               path to a klt design-centering request JSON file
+  request path to a klt design-centering request JSON file
 
 options:
-  -h, --help            show this help message and exit
-  --measurement MEASUREMENT
-                        select which measurement's ranking to use when
-                        request.sensitivity has more than one; overrides
-                        request.measurement when given
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --measurement MEASUREMENT select which measurement's ranking to use when request.sensitivity has more than one; overrides request.measurement when given
+  --format {text,json} output format (default: text)

@@ -17,78 +17,19 @@ hard failure on a non-equivalent verdict, never a silent warning (#704 Phase
 1).
 
 positional arguments:
-  request               path to a klt synthesize request JSON file
+  request path to a klt synthesize request JSON file
 
 options:
-  -h, --help            show this help message and exit
-  --pdk PDK             PDK variant to resolve (e.g. sky130A); overrides $PDK
-  --pdk-root PDK_ROOT   explicit PDK install root; overrides $PDK_ROOT and the
-                        search order
-  --verify-equivalence  gate the produced netlist through `klt equiv` against
-                        its own source RTL before returning -- a non-
-                        equivalent or inconclusive verdict is a hard failure
-                        (exit 1), never a silent warning. Combinational
-                        designs only (klt equiv's own Phase 0 scope, #707);
-                        off by default. See docs/cli/synthesize.md's
-                        'Equivalence gate' section.
-  --equiv-timeout-s EQUIV_TIMEOUT_S
-                        overall wall-clock timeout in seconds for the
-                        `--verify-equivalence` proof (default: klt equiv's own
-                        60s default); has no effect unless `--verify-
-                        equivalence` is given. Also bounds the `klt equiv`
-                        check `--restructure-timing` runs.
-  --equiv-engine {yosys,yosys-sequential}
-                        `klt equiv` proof engine for the `--verify-
-                        equivalence` gate (default: klt equiv's own default,
-                        `yosys`, combinational only); pass `yosys-sequential`
-                        for designs with flip-flops. Has no effect unless
-                        `--verify-equivalence` is given. Must be re-passed
-                        with `--check --rerun`, like `--equiv-timeout-s`.
-  --restructure-timing  close (or reduce) a setup violation on the native
-                        `sta` critical path via a bounded cell-resizing loop,
-                        when it exceeds `constraints.clock_period_ns`.
-                        Requires `constraints.clock_period_ns` and a working
-                        `sta` stage (the optional `klt_statime_native`
-                        extension) -- either missing is a hard failure. Any
-                        applied resize is validated by `klt equiv` before
-                        returning (combinational designs only, same scope as
-                        `--verify-equivalence`); off by default (#926, Epic
-                        #704 Phase 3). See docs/cli/synthesize.md's 'Timing-
-                        driven restructuring' section.
-  --restructure-max-iterations RESTRUCTURE_MAX_ITERATIONS
-                        cap on the number of resize attempts `--restructure-
-                        timing` makes (default: klayout_tools.restructure's
-                        own DEFAULT_MAX_ITERATIONS); has no effect unless
-                        `--restructure-timing` is given.
-  --check REPORT        verify a previously committed 'klt synthesize --format
-                        json' report (REPORT) instead of running a fresh flow,
-                        against the request given positionally (issue #2224).
-                        Cheap mode (default): re-resolve and re-hash the
-                        request's RTL sources and standard-cell liberty and
-                        compare against REPORT's recorded provenance.input.con
-                        tent_hash/provenance.deck.content_hash -- no Yosys
-                        run. Combine with --rerun for full mode. Exits 0 if
-                        still consistent, 3 if drifted -- see
-                        docs/cli/synthesize.md, '--check'
-  --rerun               full mode for --check (issue #2224): re-run the
-                        synthesize flow the positional request declares and
-                        diff verdict-bearing fields against the committed
-                        report, excluding
-                        provenance.klt_version/klayout_version/pdk.version,
-                        engine_version, and run-scoped bookkeeping (see
-                        docs/cli/synthesize.md). Requires --check; a clean
-                        error (exit 1) otherwise
-  --netlist FILE        with --check (cheap mode): the committed gate-level
-                        netlist to re-hash against the report's recorded
-                        `netlist_sha256`. Always wins over the report's own
-                        `netlist_path`; without it that path is used when it
-                        is repo-scoped. See docs/cli/synthesize.md.
-  --skip-deck           with --check (cheap mode only): do not resolve the
-                        standard-cell liberty, so the check runs on a host
-                        with no PDK install. The
-                        `provenance.deck.content_hash` check is omitted and
-                        listed in the response's `skipped[]`; a `match` then
-                        proves RTL, parameters, defines and netlist bytes, NOT
-                        the deck. Not valid with --rerun. See
-                        docs/cli/synthesize.md.
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --pdk PDK PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT explicit PDK install root; overrides $PDK_ROOT and the search order
+  --verify-equivalence gate the produced netlist through `klt equiv` against its own source RTL before returning -- a non- equivalent or inconclusive verdict is a hard failure (exit 1), never a silent warning. Combinational designs only (klt equiv's own Phase 0 scope, #707); off by default. See docs/cli/synthesize.md's 'Equivalence gate' section.
+  --equiv-timeout-s EQUIV_TIMEOUT_S overall wall-clock timeout in seconds for the `--verify-equivalence` proof (default: klt equiv's own 60s default); has no effect unless `--verify- equivalence` is given. Also bounds the `klt equiv` check `--restructure-timing` runs.
+  --equiv-engine {yosys,yosys-sequential} `klt equiv` proof engine for the `--verify- equivalence` gate (default: klt equiv's own default, `yosys`, combinational only); pass `yosys-sequential` for designs with flip-flops. Has no effect unless `--verify-equivalence` is given. Must be re-passed with `--check --rerun`, like `--equiv-timeout-s`.
+  --restructure-timing close (or reduce) a setup violation on the native `sta` critical path via a bounded cell-resizing loop, when it exceeds `constraints.clock_period_ns`. Requires `constraints.clock_period_ns` and a working `sta` stage (the optional `klt_statime_native` extension) -- either missing is a hard failure. Any applied resize is validated by `klt equiv` before returning (combinational designs only, same scope as `--verify-equivalence`); off by default (#926, Epic #704 Phase 3). See docs/cli/synthesize.md's 'Timing- driven restructuring' section.
+  --restructure-max-iterations RESTRUCTURE_MAX_ITERATIONS cap on the number of resize attempts `--restructure- timing` makes (default: klayout_tools.restructure's own DEFAULT_MAX_ITERATIONS); has no effect unless `--restructure-timing` is given.
+  --check REPORT verify a previously committed 'klt synthesize --format json' report (REPORT) instead of running a fresh flow, against the request given positionally (issue #2224). Cheap mode (default): re-resolve and re-hash the request's RTL sources and standard-cell liberty and compare against REPORT's recorded provenance.input.con tent_hash/provenance.deck.content_hash -- no Yosys run. Combine with --rerun for full mode. Exits 0 if still consistent, 3 if drifted -- see docs/cli/synthesize.md, '--check'
+  --rerun full mode for --check (issue #2224): re-run the synthesize flow the positional request declares and diff verdict-bearing fields against the committed report, excluding provenance.klt_version/klayout_version/pdk.version, engine_version, and run-scoped bookkeeping (see docs/cli/synthesize.md). Requires --check; a clean error (exit 1) otherwise
+  --netlist FILE with --check (cheap mode): the committed gate-level netlist to re-hash against the report's recorded `netlist_sha256`. Always wins over the report's own `netlist_path`; without it that path is used when it is repo-scoped. See docs/cli/synthesize.md.
+  --skip-deck with --check (cheap mode only): do not resolve the standard-cell liberty, so the check runs on a host with no PDK install. The `provenance.deck.content_hash` check is omitted and listed in the response's `skipped[]`; a `match` then proves RTL, parameters, defines and netlist bytes, NOT the deck. Not valid with --rerun. See docs/cli/synthesize.md.
+  --format {text,json} output format (default: text)

@@ -8,29 +8,16 @@ Runs fully headless via KLayout's native batch database API. See docs/cli/tap-
 distance.md.
 
 positional arguments:
-  file                  path to a GDSII or OASIS layout file
+  file path to a GDSII or OASIS layout file
 
 options:
-  -h, --help            show this help message and exit
-  --subject SUBJECT     subject layer expression: '<layer>/<datatype>' terms
-                        joined by '+' (union), '&' (intersection), '-'
-                        (difference), left to right (e.g. '65/20 & 125/44')
-  --taps TAPS           tap layer expression (same syntax as --subject)
-  --max-distance-um MAX_DISTANCE_UM
-                        maximum allowed Euclidean subject-to-tap distance in
-                        micrometres
-  --island ISLAND       optional island-partition layer expression (e.g. a
-                        well layer): each merged polygon is checked on its
-                        own, counting only taps that touch it; an island with
-                        subject but no tap fails
-  --tap-net NET         repeatable net name; count only taps wired to one of
-                        these nets (needs --net-spec)
-  --net-spec NET_SPEC   path to a JSON connectivity spec for --tap-net:
-                        {'stackup': [{'name', 'layer', 'label_layer'}],
-                        'vias': [{'name', 'layer', 'between': [a, b]}],
-                        'tap_connect_to': <stackup name>}
-  --region REGION       optional subject clip window as an inline JSON array
-                        of four micrometre coordinates [left, bottom, right,
-                        top]
-  --top TOP             top cell to check when the stream has more than one
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --subject SUBJECT subject layer expression: '<layer>/<datatype>' terms joined by '+' (union), '&' (intersection), '-' (difference), left to right (e.g. '65/20 & 125/44')
+  --taps TAPS tap layer expression (same syntax as --subject)
+  --max-distance-um MAX_DISTANCE_UM maximum allowed Euclidean subject-to-tap distance in micrometres
+  --island ISLAND optional island-partition layer expression (e.g. a well layer): each merged polygon is checked on its own, counting only taps that touch it; an island with subject but no tap fails
+  --tap-net NET repeatable net name; count only taps wired to one of these nets (needs --net-spec)
+  --net-spec NET_SPEC path to a JSON connectivity spec for --tap-net: {'stackup': [{'name', 'layer', 'label_layer'}], 'vias': [{'name', 'layer', 'between': [a, b]}], 'tap_connect_to': <stackup name>}
+  --region REGION optional subject clip window as an inline JSON array of four micrometre coordinates [left, bottom, right, top]
+  --top TOP top cell to check when the stream has more than one
+  --format {text,json} output format (default: text)

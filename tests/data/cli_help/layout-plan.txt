@@ -3,12 +3,10 @@ gen-compose`, producing a generated/placed/routed GDS. Takes a request-
 document path. See docs/cli/layout-plan-execute.md.
 
 positional arguments:
-  <subcommand>
-    execute     execute a layout-plan request into a composed GDS
-    check       verify a finished layout against its layout-plan request
+  <subcommand> execute execute a layout-plan request into a composed GDS check verify a finished layout against its layout-plan request
 
 options:
-  -h, --help    show this help message and exit
+  -h, --help show this help message and exit
 
 --- klt layout-plan execute ---
 
@@ -17,11 +15,11 @@ netlist, place, route and write the GDS. Exit 3 when placed but some nets are
 unrouted or unmapped.
 
 positional arguments:
-  request               path to a klt.layout_plan.request/1 JSON file
+  request path to a klt.layout_plan.request/1 JSON file
 
 options:
-  -h, --help            show this help message and exit
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --format {text,json} output format (default: text)
 
 --- klt layout-plan check ---
 
@@ -31,12 +29,11 @@ JSON output is a `kind: generic` evidence envelope `klt signoff` accepts. See
 docs/cli/layout-plan-check.md.
 
 positional arguments:
-  request               path to a klt.layout_plan.request/1 JSON file
+  request path to a klt.layout_plan.request/1 JSON file
 
 options:
-  -h, --help            show this help message and exit
-  --layout LAYOUT       path to the finished GDS/OASIS layout
-  --cell CELL           top cell name (default: the layout's only top cell)
-  --tolerance-um TOLERANCE_UM
-                        compliance tolerance in um (default: 0.01)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --layout LAYOUT path to the finished GDS/OASIS layout
+  --cell CELL top cell name (default: the layout's only top cell)
+  --tolerance-um TOLERANCE_UM compliance tolerance in um (default: 0.01)
+  --format {text,json} output format (default: text)

@@ -15,7 +15,8 @@ Regenerate the snapshots after an intentional help-text change with::
     KLT_UPDATE_HELP_SNAPSHOTS=1 KLT_TESTS_ALLOW_DIRTY_TREE=1 \
         uv run pytest tests/test_cli_help_snapshot.py
 
-The ``usage:`` line is omitted because its wrapping varies by Python version.
+Help is normalized (see ``_help``) because argparse's rendering varies by
+Python version.
 The terminal width is pinned to 80 columns (argparse reads ``COLUMNS`` when
 it builds a formatter), so output does not depend on the invoking terminal.
 """
@@ -25,6 +26,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -64,17 +66,42 @@ def _unique_choices(
     return out
 
 
-def _help(parser: argparse.ArgumentParser) -> str:
-    """``format_help()`` minus the ``usage:`` block.
+_OPTION_METAVAR = re.compile(r"(?<=[ ,])(-{1,2}[\w-]+) [^\s,]+(?=, -)")
 
-    argparse wraps the usage line differently across Python versions when a
-    parser has mutually exclusive groups (e.g. ``klt drc --check | --list-rules``),
-    so pinning it would make the snapshot depend on the interpreter. Every flag,
-    default and choice is still pinned by the options sections that follow.
+
+def _help(parser: argparse.ArgumentParser) -> str:
+    """``format_help()`` normalized to be independent of the Python version.
+
+    argparse varies across versions in two ways that would make a raw snapshot
+    depend on the interpreter:
+
+    * the ``usage:`` line wraps differently when a parser has mutually
+      exclusive groups (e.g. ``klt drc --check | --list-rules``), so the block
+      is dropped;
+    * since 3.13 an option with both forms renders ``-o, --outdir OUTDIR``
+      instead of ``-o OUTDIR, --outdir OUTDIR``, which also changes where the
+      description wraps. Metavars on all but the last option string are
+      dropped and each option entry is joined onto one line with single
+      spaces.
+
+    Every flag, default and choice is still pinned by the options sections.
     """
     text = parser.format_help()
     head, sep, rest = text.partition("\n\n")
-    return rest if sep and head.startswith("usage:") else text
+    if sep and head.startswith("usage:"):
+        text = rest
+    text = _OPTION_METAVAR.sub(r"\1", text)
+    out: list[str] = []
+    for line in text.splitlines():
+        if out and re.match(r"^\s{3,}\S", line):
+            out[-1] = f"{out[-1].rstrip()} {line.strip()}"
+        else:
+            out.append(line)
+    out = [
+        re.sub(r"(?<=\S) {2,}(?=\S)", " ", ln) if ln.startswith("  ") else ln
+        for ln in out
+    ]
+    return "\n".join(out) + "\n"
 
 
 def _render_tree(parser: argparse.ArgumentParser, path: str) -> str:

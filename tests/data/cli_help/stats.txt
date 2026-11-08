@@ -7,18 +7,12 @@ counterparts, weighted by CellInstArray multiplicity like area_um2, matching
 double-counted); merged_area_um2 is the unioned area.
 
 positional arguments:
-  file                  path to a GDSII or OASIS layout file
+  file path to a GDSII or OASIS layout file
 
 options:
-  -h, --help            show this help message and exit
-  --per-layer           also report the same statistics broken down per layer
-  --top TOP             top cell to report on when the stream has more than
-                        one (required in that case; optional otherwise)
-  --density-window UM   also report per-layer drawn-area fraction (merged
-                        geometry) over square windows of this size in um tiled
-                        over the top-cell bbox; edge windows are clipped and
-                        judged against their clipped area
-  --window-layer L/D    restrict --density-window to this layer/datatype
-                        (repeatable); default: every non-annotation layer with
-                        geometry
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --per-layer also report the same statistics broken down per layer
+  --top TOP top cell to report on when the stream has more than one (required in that case; optional otherwise)
+  --density-window UM also report per-layer drawn-area fraction (merged geometry) over square windows of this size in um tiled over the top-cell bbox; edge windows are clipped and judged against their clipped area
+  --window-layer L/D restrict --density-window to this layer/datatype (repeatable); default: every non-annotation layer with geometry
+  --format {text,json} output format (default: text)

@@ -12,26 +12,11 @@ gen ...`: `klt gen` is the layout/PCell generator family, and this emits RTL.
 See docs/cli/arith-gen.md.
 
 options:
-  -h, --help            show this help message and exit
-  --width WIDTH         adder width in bits (required with --arch; with
-                        --cell-map the width comes from the matrix and this
-                        flag, if given, must match)
-  --arch {ripple,brent-kung,han-carlson,sklansky,kogge-stone}
-                        prefix-adder architecture to build the cell map from.
-                        Mutually exclusive with --cell-map.
-  --cell-map CELL_MAP   path to a JSON file holding the N x N cell map --
-                        either a bare matrix of 0/1 entries or an object with
-                        a `cell_map` key (the shape `--format json --include-
-                        cell-map` emits, so a payload round-trips). Mutually
-                        exclusive with --arch.
-  --module-name MODULE_NAME
-                        Verilog module name for the generated adder (default:
-                        klt_add_<architecture>_<width>)
-  --output-dir OUTPUT_DIR
-                        directory to write the generated files into (default:
-                        cwd)
-  --include-cell-map    include the full N x N cell map in the output (the
-                        `cell_map` field under --format json, an ASCII matrix
-                        under --format text); omitted by default because it is
-                        O(N^2)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --width WIDTH adder width in bits (required with --arch; with --cell-map the width comes from the matrix and this flag, if given, must match)
+  --arch {ripple,brent-kung,han-carlson,sklansky,kogge-stone} prefix-adder architecture to build the cell map from. Mutually exclusive with --cell-map.
+  --cell-map CELL_MAP path to a JSON file holding the N x N cell map -- either a bare matrix of 0/1 entries or an object with a `cell_map` key (the shape `--format json --include- cell-map` emits, so a payload round-trips). Mutually exclusive with --arch.
+  --module-name MODULE_NAME Verilog module name for the generated adder (default: klt_add_<architecture>_<width>)
+  --output-dir OUTPUT_DIR directory to write the generated files into (default: cwd)
+  --include-cell-map include the full N x N cell map in the output (the `cell_map` field under --format json, an ASCII matrix under --format text); omitted by default because it is O(N^2)
+  --format {text,json} output format (default: text)

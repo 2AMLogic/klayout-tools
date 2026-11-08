@@ -8,14 +8,10 @@ Python harness can import klayout_tools.env_provenance directly for the same
 payload with no subprocess.
 
 positional arguments:
-  <subcommand>
-    emit           emit the environment-provenance block for an evidence
-                   record
-    scan           scan files for home-directory-shaped absolute paths
-    lint-envelope  lint committed JSON envelopes for absolute host paths
+  <subcommand> emit emit the environment-provenance block for an evidence record scan scan files for home-directory-shaped absolute paths lint-envelope lint committed JSON envelopes for absolute host paths
 
 options:
-  -h, --help       show this help message and exit
+  -h, --help show this help message and exit
 
 --- klt env-provenance emit ---
 
@@ -27,11 +23,9 @@ pin such an input by identity (name/version/content hash) instead. Refuses to
 emit (exit 1) if any collected value would carry a local identifier.
 
 options:
-  -h, --help            show this help message and exit
-  --path LABEL=PATH     a path to record under LABEL, normalised repo-relative
-                        (e.g. --path netlist=sim/bandgap/bandgap.spice).
-                        Repeatable.
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --path LABEL=PATH a path to record under LABEL, normalised repo-relative (e.g. --path netlist=sim/bandgap/bandgap.spice). Repeatable.
+  --format {text,json} output format (default: text)
 
 --- klt env-provenance scan ---
 
@@ -43,11 +37,11 @@ read. Findings quote the leaking text, so scan output should not itself be
 committed to the repo it scanned.
 
 positional arguments:
-  FILE                  files to scan
+  FILE files to scan
 
 options:
-  -h, --help            show this help message and exit
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --format {text,json} output format (default: text)
 
 --- klt env-provenance lint-envelope ---
 
@@ -65,14 +59,9 @@ trusted in CI). Exits 3 when findings exist, 0 when clean, 1 if a file cannot
 be read or is not valid JSON.
 
 positional arguments:
-  FILE                  JSON envelope files to lint
+  FILE JSON envelope files to lint
 
 options:
-  -h, --help            show this help message and exit
-  --allow-prefix PREFIX
-                        an absolute install prefix that may legitimately
-                        appear (e.g. --allow-prefix /usr/share/pdk). Matched
-                        on a path-component boundary, so /opt/pdk admits
-                        /opt/pdk/sky130A/... but not /opt/pdk-scratch/...
-                        Repeatable.
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --allow-prefix PREFIX an absolute install prefix that may legitimately appear (e.g. --allow-prefix /usr/share/pdk). Matched on a path-component boundary, so /opt/pdk admits /opt/pdk/sky130A/... but not /opt/pdk-scratch/... Repeatable.
+  --format {text,json} output format (default: text)

@@ -6,21 +6,20 @@ not judge: the repo owns which matrix is full and any subset_reason policy.
 See docs/cli/corner-matrix.md.
 
 positional arguments:
-  {check}
-    check     diff a declared matrix against a request or a report
+  {check} check diff a declared matrix against a request or a report
 
 options:
-  -h, --help  show this help message and exit
+  -h, --help show this help message and exit
 
 --- klt corner-matrix check ---
 
 Diff a declared corner matrix against a request or a report.
 
 positional arguments:
-  matrix                path to the matrix JSON file
+  matrix path to the matrix JSON file
 
 options:
-  -h, --help            show this help message and exit
-  --request REQUEST     klt sim request JSON to check for conformance
-  --report REPORT       klt sim report JSON to check for completeness
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --request REQUEST klt sim request JSON to check for conformance
+  --report REPORT klt sim report JSON to check for completeness
+  --format {text,json} output format (default: text)

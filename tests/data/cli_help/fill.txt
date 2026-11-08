@@ -5,29 +5,20 @@ a sign-off density check: sign-off is the PDK's own density deck. See
 docs/cli/fill.md.
 
 positional arguments:
-  file                  path to a GDSII or OASIS layout file
+  file path to a GDSII or OASIS layout file
 
 options:
-  -h, --help            show this help message and exit
+  -h, --help show this help message and exit
   --pdk {sky130,gf180mcu}
-  --layers LAYERS       drawing layers to fill: JSON file or inline [[layer,
-                        datatype], ...]
-  --boundary {prBoundary}
-                        fill inside the drawn prBoundary (235/4) of the top
-                        cell
-  --extent EXTENT       explicit fill extent 'x0,y0,x1,y1' (or JSON array) in
-                        micrometres
-  --exclude EXCLUDE     exclusion boxes: JSON file or inline [[x0,y0,x1,y1],
-                        ...] (um)
-  --spacing SPACING     fill-to-drawing spacing in um (required; no cited PDK
-                        default)
-  --target-density TARGET_DENSITY
-                        stop filling each window at this density (0-1);
-                        default fill all
-  --window WINDOW       density window in um (default 100)
-  --fill-size FILL_SIZE
-                        fill square edge in um (default 1)
-  --fill-gap FILL_GAP   gap between fill squares in um (default: --spacing)
-  --top TOP             top cell when the stream has several
-  -o, --output OUTPUT   output layout path
-  --format {text,json}  output format (default: text)
+  --layers LAYERS drawing layers to fill: JSON file or inline [[layer, datatype], ...]
+  --boundary {prBoundary} fill inside the drawn prBoundary (235/4) of the top cell
+  --extent EXTENT explicit fill extent 'x0,y0,x1,y1' (or JSON array) in micrometres
+  --exclude EXCLUDE exclusion boxes: JSON file or inline [[x0,y0,x1,y1], ...] (um)
+  --spacing SPACING fill-to-drawing spacing in um (required; no cited PDK default)
+  --target-density TARGET_DENSITY stop filling each window at this density (0-1); default fill all
+  --window WINDOW density window in um (default 100)
+  --fill-size FILL_SIZE fill square edge in um (default 1)
+  --fill-gap FILL_GAP gap between fill squares in um (default: --spacing)
+  --top TOP top cell when the stream has several
+  -o, --output OUTPUT output layout path
+  --format {text,json} output format (default: text)

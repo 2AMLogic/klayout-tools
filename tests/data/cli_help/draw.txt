@@ -9,11 +9,8 @@ design-legal warning. See docs/cli/draw.md for the request/response contract.
 Runs fully headless via klayout.db -- no GUI, no Qt.
 
 options:
-  -h, --help            show this help message and exit
-  --params PARAMS       shape/label description as a path to a JSON file, or
-                        an inline JSON object (e.g. '{"shapes": [{"layer":
-                        [66, 20], "rect_um": [0, 0, 1, 0.15]}]}'); required
-  --cell-name CELL_NAME
-                        name for the written top cell (default: TOP)
-  -o, --output OUTPUT   output GDS/OASIS path (default: <cell_name>.gds)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --params PARAMS shape/label description as a path to a JSON file, or an inline JSON object (e.g. '{"shapes": [{"layer": [66, 20], "rect_um": [0, 0, 1, 0.15]}]}'); required
+  --cell-name CELL_NAME name for the written top cell (default: TOP)
+  -o, --output OUTPUT output GDS/OASIS path (default: <cell_name>.gds)
+  --format {text,json} output format (default: text)

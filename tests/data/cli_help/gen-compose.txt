@@ -23,8 +23,8 @@ the composed output before treating it as sign-off ready, see docs/cli/gen-
 compose.md's 'Geometry is advisory' note.
 
 positional arguments:
-  request               path to a klt gen-compose request JSON file
+  request path to a klt gen-compose request JSON file
 
 options:
-  -h, --help            show this help message and exit
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --format {text,json} output format (default: text)

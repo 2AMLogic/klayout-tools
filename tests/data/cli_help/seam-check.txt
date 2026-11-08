@@ -6,16 +6,12 @@ never a vacuous pass. Loop closure is `klt ring-check`'s job. Headless, purely
 geometric. See docs/cli/seam-check.md.
 
 positional arguments:
-  file                  path to a GDSII or OASIS layout file
+  file path to a GDSII or OASIS layout file
 
 options:
-  -h, --help            show this help message and exit
-  --tiling CELL         repeatable exact child-cell name whose placements must
-                        tile with no gap or overlap
-  --layer L/D           conductor layer/datatype to check inside each --band
-                        (e.g. 68/20)
-  --band x0,y0,x1,y1    repeatable band in micrometres that --layer must cover
-                        completely as one connected piece; requires --layer
-  --top TOP             top cell to check when the stream has more than one;
-                        omit for all
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --tiling CELL repeatable exact child-cell name whose placements must tile with no gap or overlap
+  --layer L/D conductor layer/datatype to check inside each --band (e.g. 68/20)
+  --band x0,y0,x1,y1 repeatable band in micrometres that --layer must cover completely as one connected piece; requires --layer
+  --top TOP top cell to check when the stream has more than one; omit for all
+  --format {text,json} output format (default: text)

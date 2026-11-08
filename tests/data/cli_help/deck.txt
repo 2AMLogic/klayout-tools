@@ -16,20 +16,10 @@ historical revision -- install the reported version yourself to reproduce
 against it.
 
 positional arguments:
-  <subcommand>
-    resolve     resolve a deck's content hash or (name, version) to a release
-    hash        report the content hash this build resolves for a deck
-    path        print the installed path of a deck's standalone DRC script
-    info        report the installed build's own deck content hash, device
-                coverage, and release status
-    rules       list the rule values a built-in deck enforces (id,
-                description, threshold in um), with no layout needed
-    devices     list the drawn-layer predicate set (marker + per-terminal
-                requires/excludes) each of a deck's device classes is
-                recognised by
+  <subcommand> resolve resolve a deck's content hash or (name, version) to a release hash report the content hash this build resolves for a deck path print the installed path of a deck's standalone DRC script info report the installed build's own deck content hash, device coverage, and release status rules list the rule values a built-in deck enforces (id, description, threshold in um), with no layout needed devices list the drawn-layer predicate set (marker + per-terminal requires/excludes) each of a deck's device classes is recognised by
 
 options:
-  -h, --help    show this help message and exit
+  -h, --help show this help message and exit
 
 --- klt deck resolve ---
 
@@ -38,17 +28,11 @@ table. Give either --content-hash (optionally narrowed with --deck), or both
 --deck and --version together.
 
 options:
-  -h, --help            show this help message and exit
-  --content-hash CONTENT_HASH
-                        sha256:<hex> deck content hash to resolve, e.g. as
-                        reported by `klt drc --deck sky130`'s
-                        provenance.deck.content_hash
-  --deck DECK           deck name (e.g. sky130, gf180mcu); narrows a
-                        --content-hash query, or combines with --version for
-                        an exact lookup
-  --version VERSION     klayout-tools package version to look up (requires
-                        --deck)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --content-hash CONTENT_HASH sha256:<hex> deck content hash to resolve, e.g. as reported by `klt drc --deck sky130`'s provenance.deck.content_hash
+  --deck DECK deck name (e.g. sky130, gf180mcu); narrows a --content-hash query, or combines with --version for an exact lookup
+  --version VERSION klayout-tools package version to look up (requires --deck)
+  --format {text,json} output format (default: text)
 
 --- klt deck hash ---
 
@@ -62,10 +46,9 @@ about to use before doing any work. Pair with `klt deck resolve --content-hash
 <hash>` to turn the answer into the release that shipped it.
 
 options:
-  -h, --help            show this help message and exit
-  --deck DECK           built-in deck name to identify (e.g. asap7, gf180mcu,
-                        sg13cmos5l, sg13g2, sky130)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --deck DECK built-in deck name to identify (e.g. asap7, gf180mcu, sg13cmos5l, sg13g2, sky130)
+  --format {text,json} output format (default: text)
 
 --- klt deck path ---
 
@@ -76,9 +59,9 @@ does not exist. Only asap7 ships such a script; the Python rule-table decks
 exit 1.
 
 options:
-  -h, --help            show this help message and exit
-  --deck DECK           built-in deck name whose script path to print (asap7)
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --deck DECK built-in deck name whose script path to print (asap7)
+  --format {text,json} output format (default: text)
 
 --- klt deck info ---
 
@@ -91,10 +74,9 @@ first running an extraction (issue #1209 -- two installs can report the
 identical `klt --version` string while shipping different deck content).
 
 options:
-  -h, --help            show this help message and exit
-  --deck DECK           deck name (e.g. sky130, gf180mcu) to report; omit to
-                        report every registered deck
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --deck DECK deck name (e.g. sky130, gf180mcu) to report; omit to report every registered deck
+  --format {text,json} output format (default: text)
 
 --- klt deck rules ---
 
@@ -110,13 +92,10 @@ the reported `content_hash` with a cited constant to make the citation re-
 checkable against the installed deck on the next PDK bump.
 
 options:
-  -h, --help            show this help message and exit
-  --deck DECK           built-in curated-DRC deck name whose rules to list
-                        (e.g. gf180mcu, sg13cmos5l, sg13g2, sky130)
-  --rule RULE           narrow to a single rule by exact id (e.g.
-                        poly.width.1); an id the deck does not carry is a
-                        clean error, not an empty list
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --deck DECK built-in curated-DRC deck name whose rules to list (e.g. gf180mcu, sg13cmos5l, sg13g2, sky130)
+  --rule RULE narrow to a single rule by exact id (e.g. poly.width.1); an id the deck does not carry is a clean error, not an empty list
+  --format {text,json} output format (default: text)
 
 --- klt deck devices ---
 
@@ -135,11 +114,7 @@ contains none of that device'. `klt extract` names the missing layer in
 ahead of time, for every class.
 
 options:
-  -h, --help            show this help message and exit
-  --deck DECK           built-in extraction deck name whose device classes to
-                        list (e.g. asap7, gf180mcu, sg13cmos5l, sg13g2,
-                        sky130)
-  --class DEVICE_CLASS  narrow to a single device class by exact name (e.g.
-                        diode_pd2nw_06v0); a name the deck does not declare is
-                        a clean error, not an empty list
-  --format {text,json}  output format (default: text)
+  -h, --help show this help message and exit
+  --deck DECK built-in extraction deck name whose device classes to list (e.g. asap7, gf180mcu, sg13cmos5l, sg13g2, sky130)
+  --class DEVICE_CLASS narrow to a single device class by exact name (e.g. diode_pd2nw_06v0); a name the deck does not declare is a clean error, not an empty list
+  --format {text,json} output format (default: text)
