@@ -139,6 +139,7 @@ from . import (
 #: `sim_remote._run_remote` for exactly this reason).
 from . import remote_fleet as remote_fleet
 from . import remote_transport as remote_transport
+from . import sim_adapt as sim_adapt
 from . import sim_analysis_overrides as _sao
 from . import sim_bin_range as sim_bin_range
 from . import sim_op_check as sim_op_check
@@ -3052,6 +3053,7 @@ class _ResolvedSimRequest:
     monte_carlo_stats: Any
     netlist_identity: Any
     netlist_identity_error: Any
+    adapt_environment: Any
     netlist_overrides_report: Any
     netlist_path: Any
     netlist_source: Any
@@ -3151,6 +3153,16 @@ def _prepare_sim_request(
     )
     if not isinstance(hosts, int) or isinstance(hosts, bool) or hosts < 1:
         raise SimError("remote.hosts must be a positive integer")
+
+    # Issue #3873: opt-in `request.adapt` (private adapted copies, host-local).
+    request, adapt_env, backend = sim_adapt.prepare(
+        request,
+        request_dir,
+        engine,
+        backend,
+        backend_from_host_default,
+        _resolve_relative,
+    )
 
     netlist_ref = request["netlist"]
     netlist_path = _resolve_relative(netlist_ref, request_dir)
@@ -3682,6 +3694,7 @@ def _prepare_sim_request(
         monte_carlo_stats=monte_carlo_stats,
         netlist_identity=netlist_identity,
         netlist_identity_error=netlist_identity_error,
+        adapt_environment=adapt_env,
         netlist_overrides_report=netlist_overrides_report,
         netlist_path=netlist_path,
         netlist_source=netlist_source,
@@ -3860,8 +3873,9 @@ def _run_sim_corners(
         if resume
         else corner_points
     )
-    _refuse_override_on_host_default(
+    sim_subckt_override.refuse_on_host_default(
         netlist_overrides_report,
+        backend_is_offhost=backend in _OFFHOST_BACKENDS,
         backend=backend,
         backend_from_host_default=backend_from_host_default,
         n_points=len(dispatch_points),
@@ -4461,6 +4475,7 @@ def _run_sim_corners(
     # Additive/optional (issue #3919): only present when the request declares
     # `netlist_overrides` -- see docs/cli/sim.md.
     environment.update(_netlist_overrides_environment(netlist_overrides_report))
+    environment.update(resolved.adapt_environment)
     if monte_carlo_info is not None:
         # Additive/optional: only present when the request declares
         # `monte_carlo` -- the seed contract's request-level echo, per
@@ -4841,7 +4856,7 @@ def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
 #: existing request starts failing.
 _KNOWN_REQUEST_KEYS = frozenset(
     (
-        "analysis analysis_steps analysis_overrides backend batch commands"
+        "adapt analysis analysis_steps analysis_overrides backend batch commands"
         " confidence corners decks engine engine_version exclude"
         " expect_netlist_identity measurements models monte_carlo netlist"
         " netlist_overrides netlist_source options remote schema"
@@ -6874,30 +6889,6 @@ def _apply_mismatch_instance_gating(
 
 def _netlist_overrides_environment(report: Any) -> dict[str, Any]:
     return {} if report is None else {"netlist_overrides": report}
-
-
-def _refuse_override_on_host_default(
-    report: Any,
-    *,
-    backend: str,
-    backend_from_host_default: bool,
-    n_points: int,
-) -> None:
-    """Issue #3919: a multi-corner request with ``netlist_overrides`` cannot
-    follow a host-default off-host backend (the rewritten closure stays here)."""
-    if (
-        report is not None
-        and backend_from_host_default
-        and backend in _OFFHOST_BACKENDS
-        and n_points > 1
-    ):
-        raise SimError(
-            "request.netlist_overrides cannot run on the host-default "
-            f"{backend!r} backend (the rewritten include closure is not "
-            "forwarded to remote/batch workers) and this request has "
-            f"{n_points} corners; run a single corner, or pass "
-            "--backend local explicitly"
-        )
 
 
 def _maybe_override_subckts(
